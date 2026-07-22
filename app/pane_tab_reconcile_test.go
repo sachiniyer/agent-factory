@@ -3,6 +3,7 @@ package app
 import (
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 
@@ -28,7 +29,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
@@ -43,7 +44,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 
 	// Kill tab 1: its pane hides; the slot-2 pane re-binds to slot 1.
 	h.store.SetActiveTab(1)
-	restoreClose := SetTabCloserForTest(func(title, repoID, tabName string) error { return nil })
+	restoreClose := SetTabCloserForTest(func(daemon.CloseTabRequest) error { return nil })
 	defer restoreClose()
 	_, _ = h.handleCloseTab()
 
@@ -68,7 +69,7 @@ func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
@@ -105,7 +106,7 @@ func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()

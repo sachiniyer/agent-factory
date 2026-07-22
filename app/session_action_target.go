@@ -70,3 +70,25 @@ func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessio
 func (target sessionActionTarget) resumeFromLimitRequest() daemon.ResumeFromLimitRequest {
 	return daemon.ResumeFromLimitRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
+
+func (target sessionActionTarget) createTabRequest(kind session.TabKind) (daemon.CreateTabRequest, bool) {
+	switch kind {
+	case session.TabKindShell:
+		return daemon.CreateTabRequest{
+			ID: target.id, Title: target.title, RepoID: target.repoID, Shell: true,
+		}, true
+	case session.TabKindVSCode:
+		return daemon.CreateTabRequest{
+			ID: target.id, Title: target.title, RepoID: target.repoID, Kind: "vscode",
+		}, true
+	default:
+		return daemon.CreateTabRequest{}, false
+	}
+}
+
+func (target sessionActionTarget) closeTabRequest(tabID, tabName string) daemon.CloseTabRequest {
+	return daemon.CloseTabRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID,
+		TabID: tabID, TabName: tabName,
+	}
+}

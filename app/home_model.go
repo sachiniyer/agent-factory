@@ -381,10 +381,10 @@ type home struct {
 	// selectionOverlay handles short enum choices: program selection during
 	// new-instance naming and tab-kind selection from the new-tab action.
 	selectionOverlay *overlay.SelectionOverlay
-	// tabCreateTitle identifies the session that opened the tab-kind picker.
-	// Background snapshots may move the sidebar selection or replace an instance
-	// pointer while the modal is open, so submit re-resolves this stable title.
-	tabCreateTitle string
+	// tabCreateTarget identifies the session that opened the tab-kind picker.
+	// Background snapshots may move the sidebar selection, replace its pointer,
+	// or reuse its display title while the modal is open (#2358).
+	tabCreateTarget sessionActionTarget
 	// searchOverlay handles session search
 	searchOverlay *overlay.SearchOverlay
 	// projectPickerOverlay handles switching the active project (#1461)

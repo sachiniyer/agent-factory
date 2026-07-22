@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -29,7 +30,7 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	require.NotNil(t, cmd, "quit must still proceed")
 
 	// new shell tab: routed through the daemon (stubbed), reflected locally only.
-	createRestore := SetTabCreatorForTest(func(title, repoID string) (string, string, error) {
+	createRestore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer createRestore()

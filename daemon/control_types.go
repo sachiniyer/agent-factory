@@ -247,9 +247,9 @@ type CreateTabRequest struct {
 	// becomes http://localhost:<port>.
 	Port int `json:"port,omitempty"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
-	// the daemon resolves the target session by id first, so a web tab-create
-	// can't hit the wrong session under a cross-repo title collision (#1592
-	// Phase 5 PR7). TUI/CLI callers omit it and resolve by {Title, RepoID}.
+	// the daemon resolves the target session by id first, so web and retained TUI
+	// tab-create actions cannot hit a same-title replacement (#1592 Phase 5 PR7,
+	// #2358). One-shot CLI callers resolve by {Title, RepoID}.
 	ID string `json:"id"`
 }
 
@@ -272,8 +272,9 @@ type CreateTabResponse struct {
 // CloseTabRequest asks the daemon to close a non-agent tab of a session and
 // persist the shrunk tab list (#960 PR 1). Title selects the session; RepoID
 // scopes the lookup like the other sessions verbs (empty = all-repo). The tab
-// is identified by TabName (preferred); when TabName is empty TabIndex selects
-// the tab by its 0-based position. The agent tab (index 0) cannot be closed —
+// is identified by stable TabID when supplied, then TabName; when both are empty
+// TabIndex selects the tab by its 0-based position. The agent tab (index 0)
+// cannot be closed —
 // use KillSession to tear down the whole session — and remote sessions' tabs
 // are fixed by their hook config, so closing them is refused. This mirrors the
 // TUI's `w` rule (handleCloseTab) and #930 PR 4/PR 6 semantics.
@@ -283,9 +284,9 @@ type CloseTabRequest struct {
 	TabName  string `json:"tab_name"`
 	TabIndex int    `json:"tab_index"`
 	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
-	// the daemon resolves the target session by id first, so a web tab-close
-	// can't hit the wrong session under a cross-repo title collision (#1592
-	// Phase 5 PR7). TUI/CLI callers omit it and resolve by {Title, RepoID}.
+	// the daemon resolves the target session by id first, so web and retained TUI
+	// tab-close actions cannot hit a same-title replacement (#1592 Phase 5 PR7,
+	// #2358). One-shot CLI callers resolve by {Title, RepoID}.
 	ID string `json:"id"`
 	// TabID is the TAB's stable id; see RenameTabRequest.TabID for the full
 	// argument. Close is the verb that needs it MOST, because it is the only
@@ -301,8 +302,9 @@ type CloseTabRequest struct {
 	//
 	// Same contract as the siblings: non-empty WINS over TabName/TabIndex, an
 	// unresolvable id is REFUSED rather than fallen back to the name (#1779), and
-	// empty means "no id supplied" — the CLI/TUI path, resolved by TabName/TabIndex
-	// exactly as before.
+	// empty means "no id supplied" — the CLI and a freshly-created/legacy TUI tab
+	// whose projection has not adopted its daemon ID yet fall back to
+	// TabName/TabIndex exactly as before.
 	TabID string `json:"tab_id"`
 }
 

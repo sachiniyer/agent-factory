@@ -423,7 +423,7 @@
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "partial",
-        "pointer": "app/session_action_target.go captures stable identity; handle_actions.go sends it for kill/archive/limit retry and handle_handoff.go sends it for handoff"
+        "pointer": "app/session_action_target.go captures stable identity and constructs kill/archive/limit/handoff/tab requests; handle_tabs.go retains it across the tab picker and sends session/tab IDs"
       },
       "web": {
         "status": "yes",
@@ -435,7 +435,7 @@
       },
       "verdict": "real-gap",
       "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, and usage-limit retry now carry one captured identity through daemon dispatch and completion. The remaining TUI mutations are still title-addressed and need an action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, usage-limit retry, and tab create/close now carry captured identity through their retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
     },
     {
       "id": "session.watch",
@@ -1673,9 +1673,6 @@
           }
         },
         "tui": {
-          "id": {
-            "gap": "wire.id-addressing"
-          },
           "command": {
             "gap": "session.tab.create.options"
           },
@@ -1699,18 +1696,12 @@
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon only consults when TabName is empty (daemon/control_types.go:248)."
           },
           "tab_id": {
-            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
+            "ok": "The CLI addresses the tab by --name, the handle a person has; the web and TUI use stable TabID from their live projections. Adding a CLI-side tab_id would be a niche convenience, not a surface gap."
           }
         },
         "tui": {
-          "id": {
-            "gap": "wire.id-addressing"
-          },
           "tab_index": {
-            "ok": "Same as the CLI: the TUI passes TabName, which is the daemon's preferred lookup key."
-          },
-          "tab_id": {
-            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
+            "ok": "The TUI passes stable TabID when available and TabName as the explicit compatibility fallback; it never needs the shifting ordinal fallback."
           }
         }
       },

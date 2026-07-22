@@ -27,8 +27,9 @@ var newTabChoices = []newTabChoice{
 // showNewTabPicker opens the TUI's existing enum-selection overlay for `t`.
 // Terminal and VS Code both need no further input, so they fit this small picker;
 // process and web tabs still need a command or URL and remain on tab-create. The
-// target title is captured now because a background snapshot can arrive while
-// the modal owns the keyboard and may replace the instance pointer.
+// target identity is captured now because a background snapshot can arrive
+// while the modal owns the keyboard and may replace the instance pointer or
+// reuse its display title.
 func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil || selected.HasInFlightOp() {
@@ -42,7 +43,7 @@ func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 	for idx, choice := range newTabChoices {
 		items[idx] = choice.label
 	}
-	m.tabCreateTitle = selected.Title
+	m.tabCreateTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("New tab", items)
 	m.selectionOverlay.SetWidth(40)
 	m.layoutSelectionOverlay()
@@ -55,7 +56,7 @@ func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 // mistaken for form input or silently create a different kind.
 func (m *home) handleStateSelectTabKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.selectionOverlay == nil {
-		m.tabCreateTitle = ""
+		m.tabCreateTarget = sessionActionTarget{}
 		m.state = stateDefault
 		return m, nil
 	}
@@ -65,14 +66,14 @@ func (m *home) handleStateSelectTabKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	submitted := m.selectionOverlay.IsSubmitted()
 	idx := m.selectionOverlay.GetSelectedIndex()
-	title := m.tabCreateTitle
+	target := m.tabCreateTarget
 	m.selectionOverlay = nil
-	m.tabCreateTitle = ""
+	m.tabCreateTarget = sessionActionTarget{}
 	m.state = stateDefault
-	if !submitted || title == "" || idx < 0 || idx >= len(newTabChoices) {
+	if !submitted || target.title == "" || idx < 0 || idx >= len(newTabChoices) {
 		return m, nil
 	}
-	selected := m.store.GetInstanceByTitle(title)
+	selected := m.resolveSessionActionTarget(target)
 	if selected == nil {
 		return m, nil
 	}
@@ -107,16 +108,12 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 		return m, m.handleError(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
-	var name, tmuxName string
-	var err error
-	switch kind {
-	case session.TabKindShell:
-		name, tmuxName, err = createShellTabThroughDaemon(selected.Title, m.repoID)
-	case session.TabKindVSCode:
-		name, tmuxName, err = createVSCodeTabThroughDaemon(selected.Title, m.repoID)
-	default:
+	target := captureSessionActionTarget(selected, m.repoID)
+	request, ok := target.createTabRequest(kind)
+	if !ok {
 		return m, m.handleError(fmt.Errorf("tab kind %d is not available from the TUI", kind))
 	}
+	name, tmuxName, err := createTabThroughDaemon(request)
 	if err != nil {
 		return m, m.handleError(err)
 	}
@@ -207,7 +204,8 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	if idx >= len(tabs) {
 		return m, m.handleError(fmt.Errorf("tab cannot be closed"))
 	}
-	tabName := tabs[idx].Name
+	tab := tabs[idx]
+	tabName := tab.Name
 	// Capture the slot→identity list before the drop: reconcilePanesForTabs maps
 	// the open panes' bindings across the change by stable tab id (#1088/#1886).
 	oldKeys := paneTabKeys(inst)
@@ -236,7 +234,8 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if err := closeTabThroughDaemon(inst.Title, m.repoID, tabName); err != nil {
+	target := captureSessionActionTarget(inst, m.repoID)
+	if err := closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName)); err != nil {
 		return m, m.handleError(err)
 	}
 	// The daemon killed the tmux and persisted the shrunk list; drop the
