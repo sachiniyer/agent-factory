@@ -6009,18 +6009,47 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     const input = win.locator(".af-tabbar .af-tab-edit");
     await expect(input, "a double-click on a renameable tab must open an inline edit").toBeVisible();
     await input.fill(TYPED);
+    const editedPane = win.locator(".af-term-host .af-pane");
+    await expect(editedPane, "the edited tab must own the one visible pane").toHaveCount(1);
+    const editedPaneID = await editedPane.getAttribute("data-tab-id");
+    expect(editedPaneID, "the edited pane must expose the tab's stable id").toMatch(/\S/);
 
     // The gap: retries are refused, then the live socket is dropped. Neither the close
     // nor the recreate below is delivered as an event — delivered live they would each
     // repaint the bar and settle the edit early, which is the (already-covered) path
     // above, not this one.
     await cdp.send("Network.setBlockedURLs", { urls: ["*/v1/events*"] });
-    await win.evaluate(() => {
+    const eventSocketClose = await win.evaluate(async () => {
       const w = window as unknown as { __afEventSockets: WebSocket[] };
-      for (const ws of w.__afEventSockets) {
-        ws.close();
-      }
+      await Promise.all(
+        w.__afEventSockets.map(
+          (ws) =>
+            new Promise<void>((resolve) => {
+              if (ws.readyState === WebSocket.CLOSED) {
+                resolve();
+                return;
+              }
+              ws.addEventListener("close", () => resolve(), { once: true });
+              if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+                ws.close();
+              }
+            }),
+        ),
+      );
+      return {
+        closed: WebSocket.CLOSED,
+        states: w.__afEventSockets.map((ws) => ws.readyState),
+      };
     });
+    expect(eventSocketClose.states, "the test must capture the live event socket").not.toHaveLength(0);
+    expect(
+      eventSocketClose.states.every((state) => state === eventSocketClose.closed),
+      `the event gap must exist before daemon mutations; socket states=${JSON.stringify(eventSocketClose.states)}`,
+    ).toBe(true);
+    await expect(
+      win.locator(".af-live-pip"),
+      "the client must enter reconnecting state while the events endpoint stays blocked",
+    ).toHaveClass(/af-live-reconnecting/);
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
 
@@ -6034,9 +6063,22 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     });
     await cdp.send("Network.setBlockedURLs", { urls: [] });
     await resync;
-    // ...and the fetch's own promise chain (body read → store.set → update) has run, so
-    // the identity cache really does hold the replacement by the time Enter commits.
-    await win.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null)))));
+    // waitForResponse resolves at the response headers, before the app necessarily
+    // reads the body and applies it. Poll the pane's production identity instead: it
+    // changes only when the reconnect Snapshot has reached store.set → split reconcile,
+    // so Enter below cannot race a stale client cache under a loaded test box (#2387).
+    await expect
+      .poll(
+        async () => {
+          const id = await editedPane.getAttribute("data-tab-id");
+          return id !== null && id !== "" && id !== editedPaneID;
+        },
+        {
+          message: "the reconnect Snapshot must bind the pane to the replacement tab id",
+          timeout: 15_000,
+        },
+      )
+      .toBe(true);
 
     // The bar held still across all of it — the precondition the bug needs, asserted
     // rather than assumed: had the roster change repainted, the input would be gone and
