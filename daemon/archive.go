@@ -313,7 +313,9 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 // back to where session creation would place it under the configured
 // worktree_root (a free sibling path, or under $AF_HOME/worktrees for
 // subdirectory users — #1540), re-registers it, re-spawns the agent, and marks
-// the instance Running. The agent session is brought back, as are any web tabs
+// the instance Running. It returns both the worktree path and the canonical
+// stable identity it actually restored, so lifecycle events cannot be rebuilt
+// from stale request display fields. The agent session is brought back, as are any web tabs
 // (pure metadata: they were never torn down, so their URLs ride back on the
 // record and render again, #1809); shell/process tabs were dropped at archive
 // time. Returns the restored worktree path.
@@ -322,14 +324,24 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 // repo-gone failure the archive is left intact with an actionable error; on a
 // re-spawn failure the worktree is already back in place and the instance is
 // left Lost so the #1108 restore loop heals it.
-func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, error) {
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.InstanceData, error) {
+	instance, repoID, title, resolvedID, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return "", err
+		return "", session.InstanceData{}, err
 	}
+	resolved := session.InstanceData{ID: resolvedID, Title: title}
 	if instance == nil {
-		return "", fmt.Errorf("cannot restore session %q: no such session", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("cannot restore session %q: no such session", title)
 	}
+	path, restoreErr := m.restoreArchivedInstance(instance, repoID, title)
+	return path, resolved, restoreErr
+}
+
+// restoreArchivedInstance performs the restore for an identity already resolved
+// by either RestoreArchived or the liveness-agnostic RestoreSession route. Keeping
+// one body avoids a second title lookup between those sibling paths.
+func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, title string) (string, error) {
+	req := RestoreArchivedRequest{ID: instance.ID, Title: title, RepoID: repoID}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}

@@ -124,7 +124,7 @@ func TestRestoreSession_RecoversLostInstanceOnDemand(t *testing.T) {
 	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 3}
 	manager.mu.Unlock()
 
-	_, err := manager.RestoreSession(RestoreSessionRequest{Title: "stranded", RepoID: repoID})
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "stranded", RepoID: repoID})
 	if err != nil {
 		t.Fatalf("RestoreSession returned error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRestoreSession_RecoversDeadInstanceOnDemand(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "dead", backend, true, session.Ready)
 	_ = inst.Transition(session.ObserveLiveness(session.LiveDead))
 
-	_, err := manager.RestoreSession(RestoreSessionRequest{Title: "dead", RepoID: repoID})
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "dead", RepoID: repoID})
 	if err != nil {
 		t.Fatalf("RestoreSession returned error: %v", err)
 	}

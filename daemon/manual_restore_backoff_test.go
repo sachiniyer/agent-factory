@@ -47,7 +47,7 @@ func TestRestoreSession_ImmediateReLossAfterManualRestore_EscalatesNotResets(t *
 
 	// The user restores by hand. The spawn succeeds (Recover returns nil) but the
 	// agent immediately exits, so the row is Lost again by the time the poll looks.
-	if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "flapper", RepoID: repoID}); err != nil {
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "flapper", RepoID: repoID}); err != nil {
 		t.Fatalf("RestoreSession: %v", err)
 	}
 	if got := backend.recoverCount(); got != 1 {
@@ -97,7 +97,7 @@ func TestRestoreSession_LongLivedThenDied_ResetsBackoff(t *testing.T) {
 	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 3}
 	manager.mu.Unlock()
 
-	if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "long-lived", RepoID: repoID}); err != nil {
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "long-lived", RepoID: repoID}); err != nil {
 		t.Fatalf("RestoreSession: %v", err)
 	}
 
@@ -160,7 +160,7 @@ func TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff(t *testin
 	})
 
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual-failure", RepoID: repoID}); !errors.Is(err, os.ErrNotExist) {
+		if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual-failure", RepoID: repoID}); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("manual restore %d error = %v, want missing-worktree cause", attempt+1, err)
 		}
 	}

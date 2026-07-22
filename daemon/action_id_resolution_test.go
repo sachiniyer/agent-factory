@@ -205,6 +205,51 @@ func TestArchiveSessionByIDTargetsRightSession(t *testing.T) {
 	}
 }
 
+// TestRestoreSessionByIDTargetsRightSession pins the return leg of the retained
+// lifecycle identity: RestoreSession resolves the stable id once, restores that
+// archived instance, and publishes the same canonical identity. The deliberately
+// stale request title proves neither the operation body nor the event re-resolves
+// by display text after the id match.
+func TestRestoreSessionByIDTargetsRightSession(t *testing.T) {
+	manager, repoA, dataA, repoB, dataB := createDuplicateTitleSessions(t, "feature")
+	cs := &controlServer{manager: manager}
+
+	_, ch := manager.events.subscribe()
+	var archiveResp ArchiveSessionResponse
+	if err := cs.ArchiveSession(ArchiveSessionRequest{ID: dataB.ID, Title: "feature"}, &archiveResp); err != nil {
+		t.Fatalf("ArchiveSession by id B: %v", err)
+	}
+	_ = drainNextSessionEvent(t, ch, agentproto.EventSessionArchived)
+
+	var restoreResp RestoreSessionResponse
+	if err := cs.RestoreSession(RestoreSessionRequest{ID: dataB.ID, Title: "stale-display-title"}, &restoreResp); err != nil {
+		t.Fatalf("RestoreSession by id B: %v", err)
+	}
+	if !restoreResp.OK {
+		t.Fatalf("RestoreSession resp not OK")
+	}
+	restored := drainNextSessionEvent(t, ch, agentproto.EventSessionRestored)
+	if restored.ID != dataB.ID || restored.Title != "feature" {
+		t.Fatalf("restored event = {ID:%q Title:%q}, want B {%q %q}", restored.ID, restored.Title, dataB.ID, "feature")
+	}
+
+	// Both same-title rows survive, and B — not A — made the archived→running
+	// transition. This also proves the canonical repo came from the ID resolver.
+	assertTracked(t, manager, repoA.ID, "feature", dataA.ID)
+	assertTracked(t, manager, repoB.ID, "feature", dataB.ID)
+	instA, _, _, err := manager.findSession("feature", repoA.ID)
+	if err != nil {
+		t.Fatalf("findSession A after restoring B: %v", err)
+	}
+	instB, _, _, err := manager.findSession("feature", repoB.ID)
+	if err != nil {
+		t.Fatalf("findSession B after restore: %v", err)
+	}
+	if instA.GetLiveness() == session.LiveArchived || instB.GetLiveness() == session.LiveArchived {
+		t.Fatalf("liveness after B restore = A:%v B:%v, want both live", instA.GetLiveness(), instB.GetLiveness())
+	}
+}
+
 // TestSendPromptByIDTargetsRightSession pins that a send-prompt addressed by id
 // (empty repo) resolves to the addressed session and delivers — where a title-only
 // request could resolve to either same-title session.

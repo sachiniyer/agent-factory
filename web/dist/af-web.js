@@ -6283,8 +6283,8 @@ async function killSession(id, title, token2) {
 async function archiveSession(id, title, token2) {
   await af("ArchiveSession", { id, title, repo_id: "" }, token2);
 }
-async function restoreSession(title, token2) {
-  await af("RestoreSession", { title, repo_id: "" }, token2);
+async function restoreSession(id, title, token2) {
+  await af("RestoreSession", { id, title, repo_id: "" }, token2);
 }
 async function resumeFromLimit(id, title, token2) {
   const result = await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);
@@ -12536,7 +12536,7 @@ function openConfirm(action, session) {
         }
         const m = modal;
         m.setBusy(true);
-        const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.title, tok);
+        const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.id, target.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));

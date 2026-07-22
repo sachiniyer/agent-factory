@@ -571,16 +571,16 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	worktreePath, err := s.manager.RestoreArchived(req)
+	worktreePath, restored, err := s.manager.RestoreArchived(req)
 	if err != nil {
 		return err
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
-	// Resolve the id AFTER the restore re-registers the session in memory, so the
-	// event carries the id clients key their rail by (#1592 Phase 5 PR5).
-	id := s.manager.stableIDFor(req.RepoID, req.Title)
-	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{ID: id, Title: req.Title})
+	// Publish the identity the manager actually resolved, not the request's
+	// potentially stale title/repo pair. This is the same one-shot resolution the
+	// restore body used, so the event cannot name a same-title sibling.
+	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
 	return nil
 }
 
@@ -591,16 +591,13 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	worktreePath, err := s.manager.RestoreSession(req)
+	worktreePath, restored, err := s.manager.RestoreSession(req)
 	if err != nil {
 		return err
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
-	// Resolve the id AFTER the restore re-registers the session in memory (#1592
-	// Phase 5 PR5) so the event carries the stable id clients key their rail by.
-	id := s.manager.stableIDFor(req.RepoID, req.Title)
-	s.manager.publishEvent(agentproto.EventSessionRestored, session.InstanceData{ID: id, Title: req.Title})
+	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
 	return nil
 }
 

@@ -88,7 +88,7 @@ func TestDeleteProject_ArchivesAllSessionsRestorableRepoUntouched(t *testing.T) 
 	assert.True(t, exists(filepath.Join(repoPath, ".git")), "the real repo's .git must be untouched")
 
 	// Reversible: restoring one archived session brings the project back.
-	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "alpha", RepoID: repoID})
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "alpha", RepoID: repoID})
 	require.NoError(t, err)
 	assert.Equal(t, session.Running, inst1.GetStatus(), "the restored session is live again")
 	assert.True(t, liveProjectRoots(manager.Snapshot(repoID))[repoPath], "restoring an archived session reconstitutes the project")
@@ -135,7 +135,7 @@ func TestDeleteProject_RemovesRootAgentsOptInAndSuppressesRespawn(t *testing.T) 
 	assert.True(t, suppressed, "the ensure loop must be suppressed for the deleted repo")
 
 	// Reversible: restore reconstitutes the project in the active list.
-	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	assert.True(t, liveProjectRoots(manager.Snapshot(repoID))[repoPath], "restore reconstitutes the project")
 }

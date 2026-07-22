@@ -638,14 +638,12 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
         }
         const m = modal;
         m.setBusy(true);
-        // Restore resolves the target by TITLE only — its daemon request has no id
-        // field (see restoreSession), unlike kill/archive which key by target.id.
         const run =
           action === "kill"
             ? killSession(target.id, target.title, tok)
             : action === "archive"
               ? archiveSession(target.id, target.title, tok)
-              : restoreSession(target.title, tok);
+              : restoreSession(target.id, target.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
           m.setError(describeError(e));

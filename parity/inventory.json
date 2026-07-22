@@ -270,7 +270,7 @@
         "pointer": "api/sessions.go:823 sessionsRestoreCmd"
       },
       "verdict": "parity",
-      "notes": "Reachable everywhere as of #1932, which closed the archive-only one-way door: the web POSTs RestoreSession by title (no id field on the request, unlike archive/kill) and already handled the session.restored resync (web/src/sessions.ts:85). Since RestoreSession also recovers Lost/Dead rows, this gave the web its Lost-recovery off-ramp too."
+      "notes": "Reachable everywhere as of #1932, which closed the archive-only one-way door. The retained TUI and web actions send RestoreSession's stable id so a confirmation/background command cannot retarget a same-title replacement; the one-shot CLI deliberately keeps its repo-scoped title contract. RestoreSession also recovers Lost/Dead rows, giving every surface the same recovery off-ramp."
     },
     {
       "id": "session.limit-retry",
@@ -423,7 +423,7 @@
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "partial",
-        "pointer": "app/session_action_target.go captures stable identity and constructs kill/archive/limit/handoff/tab requests; handle_tabs.go retains it across the tab picker and sends session/tab IDs"
+        "pointer": "app/session_action_target.go captures stable identity and constructs kill/archive/restore/limit/handoff/tab requests; retained handlers resolve completions by that identity"
       },
       "web": {
         "status": "yes",
@@ -435,7 +435,7 @@
       },
       "verdict": "real-gap",
       "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, usage-limit retry, and tab create/close now carry captured identity through their retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
     },
     {
       "id": "session.watch",
@@ -1716,6 +1716,13 @@
         "cli": {
           "id": {
             "gap": "wire.id-addressing"
+          }
+        }
+      },
+      "RestoreSessionRequest": {
+        "cli": {
+          "id": {
+            "ok": "The CLI resolves and dispatches one restore by title under explicit --repo scoping; stable ID protects retained TUI/web intent that can outlive the selected row."
           }
         }
       },

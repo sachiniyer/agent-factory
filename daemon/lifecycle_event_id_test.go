@@ -83,11 +83,14 @@ func TestArchiveAndRestoreEventsCarryStableID(t *testing.T) {
 	}
 
 	var rResp RestoreArchivedResponse
-	if err := cs.RestoreArchived(RestoreArchivedRequest{Title: "arch-id-evt", RepoID: repo.ID}, &rResp); err != nil {
+	if err := cs.RestoreArchived(RestoreArchivedRequest{ID: data.ID, Title: "stale-display-title", RepoID: repo.ID}, &rResp); err != nil {
 		t.Fatalf("RestoreArchived: %v", err)
 	}
 	restored := drainNextSessionEvent(t, ch, agentproto.EventSessionRestored)
 	if restored.ID != data.ID {
 		t.Fatalf("restored event ID = %q, want %q", restored.ID, data.ID)
+	}
+	if restored.Title != "arch-id-evt" {
+		t.Fatalf("restored event Title = %q, want canonical %q", restored.Title, "arch-id-evt")
 	}
 }

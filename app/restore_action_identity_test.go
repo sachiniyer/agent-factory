@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -18,10 +19,17 @@ func TestHandleRestore_DoesNotTargetSameTitleReplacement(t *testing.T) {
 	h.store.AddInstance(original)
 	h.sidebar.SetSelectedInstance(0)
 
+	var gotRequest daemon.RestoreSessionRequest
 	var restored *session.Instance
 	previous := restoreSessionThroughDaemon
-	restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
-		restored = h.store.GetInstanceByTitle(title)
+	restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {
+		gotRequest = request
+		for _, inst := range h.store.GetInstances() {
+			if inst.ID == request.ID {
+				restored = inst
+				break
+			}
+		}
 		return "/restored", nil
 	}
 	t.Cleanup(func() { restoreSessionThroughDaemon = previous })
@@ -34,7 +42,9 @@ func TestHandleRestore_DoesNotTargetSameTitleReplacement(t *testing.T) {
 	require.True(t, h.store.ReplaceInstance(original, replacement))
 
 	_ = cmd()
-	require.NotSame(t, replacement, restored,
+	require.Equal(t, original.ID, gotRequest.ID)
+	require.Equal(t, original.Title, gotRequest.Title)
+	require.Nil(t, restored,
 		"a queued restore must not resurrect a different same-title session")
 }
 
@@ -70,6 +80,7 @@ func TestHandleInstanceRestored_DoesNotMutateSameTitleReplacement(t *testing.T) 
 			h := newTestHome(t)
 			original := archiveActionInstance(t, "worker", session.Lost)
 			h.store.AddInstance(original)
+			target := captureSessionActionTarget(original, h.repoID)
 
 			replacement := archiveActionInstance(t, original.Title, session.Lost)
 			require.NotEqual(t, original.ID, replacement.ID)
@@ -78,7 +89,7 @@ func TestHandleInstanceRestored_DoesNotMutateSameTitleReplacement(t *testing.T) 
 			}
 			require.True(t, h.store.ReplaceInstance(original, replacement))
 
-			_, _ = h.handleInstanceRestored(instanceRestoredMsg{title: original.Title, err: tc.err})
+			_, _ = h.handleInstanceRestored(instanceRestoredMsg{target: target, err: tc.err})
 			tc.assert(t, replacement)
 		})
 	}

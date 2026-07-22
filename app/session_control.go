@@ -162,11 +162,11 @@ var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (st
 	return path, err
 }
 
-var restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
+var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {
 	var path string
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		path, e = c.RestoreSession(daemon.RestoreSessionRequest{Title: title, RepoID: repoID})
+		path, e = c.RestoreSession(request)
 		return e
 	})
 	return path, err

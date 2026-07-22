@@ -397,18 +397,14 @@ export async function archiveSession(id: string, title: string, token: string): 
 
 /** Restores an archived, Lost, or Dead session (mirrors `af sessions restore`) —
  *  the reverse of archive: the daemon moves the worktree back next to the repo and
- *  re-spawns the agent (#1932). RestoreSession, unlike Archive/Kill, resolves the
- *  target by TITLE alone: its request struct (daemon/control_types.go
- *  RestoreSessionRequest) has no `id` field, exactly as `af sessions restore
- *  <title>` sends only {Title, RepoID}. So — unlike archiveSession — this MUST NOT
- *  send `id`: a web request carries no X-AF-Client-Version header, so the daemon
- *  decodes it with DisallowUnknownFields (daemon/httpserver.go) and a stray `id`
- *  would be rejected as a 400 "unknown field". repo_id stays empty, matching the
- *  other all-repos web callers; a duplicate title across repos surfaces the
- *  daemon's ambiguous-title error rather than restoring the wrong one. The
+ *  re-spawns the agent (#1932). Like archive/kill, it sends the rail row's
+ *  stable id as the primary key. A confirmation can outlive its row, and title
+ *  reuse must not redirect the retained restore to a replacement session.
+ *  repo_id stays empty because the web is an all-project client; the daemon's
+ *  id-first resolver supplies the canonical repo and title. The
  *  session.restored event triggers a rail resync. */
-export async function restoreSession(title: string, token: string): Promise<void> {
-  await af("RestoreSession", { title, repo_id: "" }, token);
+export async function restoreSession(id: string, title: string, token: string): Promise<void> {
+  await af("RestoreSession", { id, title, repo_id: "" }, token);
 }
 
 /** Resumes a session blocked at a usage-limit wall (#1934) — the web half of the

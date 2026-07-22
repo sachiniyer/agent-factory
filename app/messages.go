@@ -67,8 +67,8 @@ type instanceArchivedMsg struct {
 }
 
 type instanceRestoredMsg struct {
-	title string
-	err   error
+	target sessionActionTarget
+	err    error
 }
 
 // runOnEventLoopMsg is a test-only primitive: when received by Update, it

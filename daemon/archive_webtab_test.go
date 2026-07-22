@@ -63,7 +63,7 @@ func TestRestoreArchived_BringsBackWebTabs(t *testing.T) {
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 
-	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	require.Equal(t, session.Running, inst.GetStatus(), "a restored session is Running")
 
@@ -96,7 +96,7 @@ func TestArchiveSession_MultipleWebTabsKeepOrder(t *testing.T) {
 
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
-	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 
 	tabs := inst.GetTabs()

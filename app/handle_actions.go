@@ -386,6 +386,7 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
 	title := selected.Title
+	target := captureSessionActionTarget(selected, m.repoID)
 
 	// Only a resting (Archived/Lost/Dead) row can be restored; on a live row `r`
 	// does nothing (archive is on `a`).
@@ -396,7 +397,7 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("session '%s' is already being restored", title))
 	}
 	_ = selected.Transition(session.MarkRestoring())
-	return m, m.restoreInstanceCmd(title)
+	return m, m.restoreInstanceCmd(target)
 }
 
 // archiveInstanceCmd runs the daemon archive (tmux teardown + worktree move) off
@@ -414,15 +415,14 @@ func (m *home) archiveInstanceCmd(target sessionActionTarget) tea.Cmd {
 }
 
 // restoreInstanceCmd runs the daemon restore/recovery off the event loop.
-func (m *home) restoreInstanceCmd(title string) tea.Cmd {
-	repoID := m.repoID
+func (m *home) restoreInstanceCmd(target sessionActionTarget) tea.Cmd {
 	restore := restoreSessionThroughDaemon
 	return func() tea.Msg {
-		if _, err := restore(title, repoID); err != nil {
-			log.ErrorLog.Printf("could not restore instance %q: %v", title, err)
-			return instanceRestoredMsg{title: title, err: err}
+		if _, err := restore(target.restoreRequest()); err != nil {
+			log.ErrorLog.Printf("could not restore instance %q: %v", target.title, err)
+			return instanceRestoredMsg{target: target, err: err}
 		}
-		return instanceRestoredMsg{title: title}
+		return instanceRestoredMsg{target: target}
 	}
 }
 
@@ -534,23 +534,15 @@ func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
 // row drops back into the Archived section — its worktree is still shelved — and
 // surface the error.
 func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.Cmd) {
+	inst := m.resolveSessionActionTarget(msg.target)
 	if msg.err != nil {
-		for _, inst := range m.store.GetInstances() {
-			if inst.Title == msg.title && inst.GetInFlightOp() == session.OpRestoring {
-				_ = inst.Transition(session.ClearOp())
-				break
-			}
+		if inst != nil && inst.GetInFlightOp() == session.OpRestoring {
+			_ = inst.Transition(session.ClearOp())
 		}
-		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.title, msg.err))
+		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.target.title, msg.err))
 	}
-	for _, inst := range m.store.GetInstances() {
-		switch {
-		case inst.Title != msg.title:
-			continue
-		case inst.GetLiveness() == session.LiveLost || inst.GetLiveness() == session.LiveDead:
-			_ = inst.Transition(session.ConfirmLive())
-		}
-		break
+	if inst != nil && (inst.GetLiveness() == session.LiveLost || inst.GetLiveness() == session.LiveDead) {
+		_ = inst.Transition(session.ConfirmLive())
 	}
 	return m, m.selectionChanged()
 }
