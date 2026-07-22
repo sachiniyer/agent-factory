@@ -111,9 +111,10 @@ func (s Schedule) Describe() string {
 }
 
 // ParseCron best-effort maps a 5-field cron expression back to a structured
-// Schedule. It recognizes exactly the shapes Cron emits — so a task saved by
-// the picker re-opens as its matching preset — plus a Sunday day-of-week alias
-// (7). Anything else (ranges, multi-value minute/hour fields, month
+// Schedule. It recognizes the shapes Cron emits — so a task saved by the
+// picker re-opens as its matching preset — plus equivalent zero-padded numeric
+// fields and a Sunday day-of-week alias (7). Anything else (ranges,
+// multi-value minute/hour fields, month
 // restrictions, step forms we don't emit, or a malformed expression) returns
 // {Type: Custom, Raw: expr} with ok=false, signalling the UI to fall back to
 // the raw-cron editor. It deliberately does NOT parse arbitrary cron.
@@ -133,9 +134,12 @@ func ParseCron(expr string) (Schedule, bool) {
 	if n, ok := stepOfStar(minute, 59); ok && hour == "*" && dom == "*" && dow == "*" {
 		return Schedule{Type: EveryNMinutes, Interval: n}, true
 	}
-	// every N hours: 0 */N * * * (N in 1-23)
-	if n, ok := stepOfStar(hour, 23); ok && minute == "0" && dom == "*" && dow == "*" {
-		return Schedule{Type: EveryNHours, Interval: n}, true
+	// every N hours: 0 */N * * * (N in 1-23). Parse the minute
+	// numerically so an equivalent zero-padded field selects the same preset.
+	if n, ok := stepOfStar(hour, 23); ok && dom == "*" && dow == "*" {
+		if m, ok := singleInt(minute, 0, 59); ok && m == 0 {
+			return Schedule{Type: EveryNHours, Interval: n}, true
+		}
 	}
 	// hourly: M * * * *
 	if m, ok := singleInt(minute, 0, 59); ok && hour == "*" && dom == "*" && dow == "*" {
