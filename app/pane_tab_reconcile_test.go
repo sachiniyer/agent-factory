@@ -29,7 +29,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
@@ -69,7 +69,7 @@ func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
@@ -106,7 +106,7 @@ func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()

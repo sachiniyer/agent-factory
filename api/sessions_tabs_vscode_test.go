@@ -27,9 +27,9 @@ func withTabCreateFlags(t *testing.T, kind, url, command string, port int) *daem
 
 	var got *daemon.CreateTabRequest
 	prevCreate := createTabViaDaemon
-	createTabViaDaemon = func(req daemon.CreateTabRequest) (string, error) {
+	createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		got = &req
-		return "vscode", nil
+		return daemon.CreateTabResponse{ID: "daemon-vscode-id", Name: "vscode"}, nil
 	}
 	t.Cleanup(func() { createTabViaDaemon = prevCreate })
 
@@ -55,9 +55,9 @@ func TestSessionsTabCreate_VSCodeNeedsNoTarget(t *testing.T) {
 
 	var got *daemon.CreateTabRequest
 	prevCreate := createTabViaDaemon
-	createTabViaDaemon = func(req daemon.CreateTabRequest) (string, error) {
+	createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		got = &req
-		return "vscode", nil
+		return daemon.CreateTabResponse{ID: "daemon-vscode-id", Name: "vscode"}, nil
 	}
 	defer func() { createTabViaDaemon = prevCreate }()
 

@@ -20,7 +20,7 @@ func TestHandleNewTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	selectInstance(h, inst)
 
 	var gotRequest daemon.CreateTabRequest
-	restore := SetTabCreatorForTest(func(request daemon.CreateTabRequest) (string, string, error) {
+	restore := SetTabCreatorForTest(func(request daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		gotRequest = request
 		return spawnDaemonTab(inst)
 	})
@@ -47,7 +47,7 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	selectInstance(h, inst)
 
 	var gotRequest daemon.CloseTabRequest
-	createRestore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	createRestore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer createRestore()
@@ -59,15 +59,63 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 
 	_, _ = h.handleNewTab() // agent + shell + shell-2, active = 2
 	require.Equal(t, 3, inst.TabCount())
+	createdTab := inst.GetTabs()[2]
+	require.NotEmpty(t, createdTab.ID)
 
 	_, _ = h.handleCloseTab()
 
 	require.Equal(t, daemon.CloseTabRequest{
-		ID: inst.ID, Title: inst.Title, RepoID: h.repoID, TabName: "shell-2",
+		ID: inst.ID, Title: inst.Title, RepoID: h.repoID,
+		TabID: createdTab.ID, TabName: "shell-2",
 	}, gotRequest, "CloseTab must carry the selected session identity and active tab name")
 	require.Equal(t, 2, inst.TabCount(), "the closed tab must be dropped locally")
 
 	requireTUIInstancesEmpty(t, h)
+}
+
+// The daemon response is the only authoritative source for a new tab's ID in
+// the interval before the next snapshot. Preserve it into the local projection
+// so an immediate destructive action cannot be redirected by name reuse.
+func TestHandleCloseTabImmediatelyUsesCreateResponseID(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "route-create-close-id")
+	selectInstance(h, inst)
+	const createdID = "daemon-created-tab-id"
+	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+		return daemon.CreateTabResponse{ID: createdID, Name: "vscode"}, nil
+	}))
+
+	const replacementID = "same-name-replacement-id"
+	resolvedID := ""
+	t.Cleanup(SetTabCloserForTest(func(request daemon.CloseTabRequest) error {
+		resolvedID = request.TabID
+		if resolvedID == "" {
+			resolvedID = replacementID
+		}
+		return nil
+	}))
+
+	_, _ = h.createNewTab(inst, session.TabKindVSCode)
+	require.Equal(t, createdID, inst.GetTabs()[1].ID,
+		"the local projection must carry the response ID before any snapshot")
+	_, _ = h.handleCloseTab()
+
+	require.Equal(t, createdID, resolvedID)
+	require.NotEqual(t, replacementID, resolvedID,
+		"an immediate close must not fall back to the reused display name")
+}
+
+func TestCreateTabFromOlderDaemonKeepsExplicitIDLessFallback(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "route-create-legacy")
+	selectInstance(h, inst)
+	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+		return daemon.CreateTabResponse{Name: "vscode"}, nil
+	}))
+
+	_, _ = h.createNewTab(inst, session.TabKindVSCode)
+	require.Empty(t, inst.GetTabs()[1].ID,
+		"an older daemon's omitted additive field must remain a compatible name-keyed projection")
 }
 
 // A tab name is reusable. If another client closes the intended tab and creates
