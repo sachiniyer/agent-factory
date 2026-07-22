@@ -405,6 +405,24 @@ async function setCustomCron(modal: Locator, expr: string): Promise<void> {
   await modal.locator('input[aria-label="Cron expression"]').fill(expr);
 }
 
+/** Schedule used by the task CRUD case before it manually fires TriggerTask.
+ *  Keep the minute user-visible, but place the next matching hour far beyond this
+ *  two-minute suite so the real scheduler cannot race the manual RPC under test. */
+function manualTriggerFixtureCron(now: Date): string {
+  return `${now.getMinutes()} ${(now.getHours() + 12) % 24} * * *`;
+}
+
+/** Minimal matcher for the minute/hour fields the fixture helper emits. */
+function cronMatchesMinute(cron: string, when: Date): boolean {
+  const [minuteField, hourField] = cron.split(" ");
+  const matches = (field: string, value: number): boolean => {
+    if (field === "*") return true;
+    const every = /^\*\/(\d+)$/.exec(field);
+    return every ? value % Number(every[1]) === 0 : Number(field) === value;
+  };
+  return matches(minuteField, when.getMinutes()) && matches(hourField, when.getHours());
+}
+
 /** Opens the app on the loopback daemon and asserts the tokenless auto-connect
  *  (#1696): the SPA learns via /v1/auth-info that this loopback client needs no
  *  token, skips the paste-token login entirely, and renders the authed shell with
@@ -2490,6 +2508,16 @@ test("task-only project (redesign PR2, follow-on): add-task targets ITS repo, an
   await expect(row(page, SESSION_A)).toBeVisible();
 });
 
+test("#2381: the manual-trigger fixture cannot also fire from its cron during the test window", () => {
+  const boundary = new Date(2026, 6, 22, 9, 10, 0);
+  const cron = manualTriggerFixtureCron(boundary);
+
+  for (let offset = 0; offset <= 10; offset += 1) {
+    const duringTest = new Date(boundary.getTime() + offset * 60_000);
+    expect(cronMatchesMinute(cron, duringTest), `schedule ${cron} fires at +${offset} minutes`).toBe(false);
+  }
+});
+
 test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round-trips", REAL_FIXTURE, async () => {
   // Capture the task-mutation request bodies so we can prove every mutation carries
   // the STABLE task id — the add mints it client-side, and trigger/remove must send
@@ -2528,7 +2556,7 @@ test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round
   const modal = page.locator(".af-modal-card");
   await expect(modal).toBeVisible();
   await modal.locator('input[aria-label="Task name"]').fill(added);
-  await setEveryNMinutes(modal, 5);
+  await setCustomCron(modal, manualTriggerFixtureCron(new Date()));
   await modal.locator('textarea[aria-label="Prompt"]').fill("echo scheduled-web");
   await modal.locator("button.af-primary").click();
 
