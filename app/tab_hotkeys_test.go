@@ -155,13 +155,13 @@ func registerDaemonSpawn(t *testing.T, inst *session.Instance, spawn func(string
 // the TUI to attach to — both, as the real RPC does since #1957, so the stub
 // can't quietly re-establish the name-derives-the-session assumption the fix
 // removed.
-func spawnDaemonTab(inst *session.Instance) (string, string, error) {
+func spawnDaemonTab(inst *session.Instance) (daemon.CreateTabResponse, error) {
 	name := nextShellTabName(inst.GetTabs())
 	tmuxName := inst.TabTmuxName(0) + "__" + name
 	if spawn := daemonSpawnHooks[inst]; spawn != nil {
 		spawn(tmuxName)
 	}
-	return name, tmuxName, nil
+	return daemon.CreateTabResponse{ID: "test-id-" + tmuxName, Name: name, TmuxName: tmuxName}, nil
 }
 
 // startedLocalInstance is freshLocalInstance plus one on-demand shell tab
@@ -215,7 +215,7 @@ func nextShellTabName(tabs []*session.Tab) string {
 func stubTabDaemonSeams(t *testing.T, inst *session.Instance) (created, closed *int) {
 	t.Helper()
 	var c, d int
-	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		c++
 		return spawnDaemonTab(inst)
 	}))
@@ -253,13 +253,13 @@ func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
 	selectInstance(h, inst)
 
 	called := 0
-	t.Cleanup(SetTabCreatorForTest(func(request daemon.CreateTabRequest) (string, string, error) {
+	t.Cleanup(SetTabCreatorForTest(func(request daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		called++
 		require.Equal(t, inst.ID, request.ID)
 		require.Equal(t, inst.Title, request.Title)
 		require.Equal(t, h.repoID, request.RepoID)
 		require.Equal(t, "vscode", request.Kind)
-		return "vscode", "", nil
+		return daemon.CreateTabResponse{ID: "daemon-vscode-id", Name: "vscode"}, nil
 	}))
 
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}}, keys.KeyNewTab)
@@ -280,7 +280,8 @@ func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
 	require.Equal(t, 2, inst.TabCount())
 	tabs := inst.GetTabs()
 	require.Equal(t, session.TabKindVSCode, tabs[1].Kind)
-	require.Empty(t, tabs[1].ID, "the projection waits for the daemon's authoritative tab id")
+	require.Equal(t, "daemon-vscode-id", tabs[1].ID,
+		"the projection must adopt the create response identity before the next snapshot")
 	require.Equal(t, 1, h.store.ActiveTab(), "the fresh VS Code tab must be selected")
 	require.Equal(t, []string{"◆ Agent", "◱ vscode"}, tree.TabLabels(inst),
 		"the resolved daemon name is the tab's addressable label, matching CLI creation")
@@ -299,9 +300,9 @@ func TestNewTabPickerDoesNotTargetSameTitleReplacement(t *testing.T) {
 	require.NotEqual(t, stale.ID, replacement.ID)
 	require.True(t, h.store.ReplaceInstanceByTitle(stale.Title, replacement))
 	called := false
-	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		called = true
-		return "vscode", "", nil
+		return daemon.CreateTabResponse{ID: "unused", Name: "vscode"}, nil
 	}))
 
 	h.selectionOverlay.SetSelectedIndex(1)
@@ -323,9 +324,9 @@ func TestNewTabPickerFollowsSameIdentitySnapshotRebuild(t *testing.T) {
 	rebuilt.CreatedAt = stale.CreatedAt
 	require.True(t, h.store.ReplaceInstanceByTitle(stale.Title, rebuilt))
 	var gotRequest daemon.CreateTabRequest
-	t.Cleanup(SetTabCreatorForTest(func(request daemon.CreateTabRequest) (string, string, error) {
+	t.Cleanup(SetTabCreatorForTest(func(request daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		gotRequest = request
-		return "vscode", "", nil
+		return daemon.CreateTabResponse{ID: "rebuilt-vscode-id", Name: "vscode"}, nil
 	}))
 
 	h.selectionOverlay.SetSelectedIndex(1)

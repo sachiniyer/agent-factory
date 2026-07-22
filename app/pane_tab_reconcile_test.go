@@ -29,7 +29,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
@@ -69,7 +69,7 @@ func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
@@ -106,7 +106,7 @@ func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
 	selectInstance(h, inst)
 	resizeHome(h, 200, 40)
 
-	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	restore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
@@ -193,10 +193,10 @@ func TestPane_SnapshotTabReorderFollowsPaneToNewSlot(t *testing.T) {
 	assert.Equal(t, "a", inst.GetTabs()[p.Tab()].Name, "the pane still shows the SAME tab it was showing")
 }
 
-// TestPane_SnapshotTabIDAdoptionKeepsPaneOpen guards the id-less rollforward at
-// the pane level. A tab can be live locally with NO id — AttachShellTab leaves an
-// optimistic tab's id empty on purpose, and its pane is opened on it immediately
-// — and the next snapshot then ADOPTS the daemon's id for it. Adoption changes
+// TestPane_SnapshotTabIDAdoptionKeepsPaneOpen guards the legacy id-less
+// rollforward at the pane level. An older daemon can omit the additive ID in its
+// create response, so a pane may open on an ID-less local projection before the
+// next snapshot ADOPTS the daemon's id. Adoption changes
 // the tab's identity from "no id" to a real one while the tab itself does not
 // change at all, so a binding resolved by id ALONE reads it as a vanished tab and
 // closes a pane the user is looking at. Only the name carries the binding across
@@ -205,8 +205,8 @@ func TestPane_SnapshotTabReorderFollowsPaneToNewSlot(t *testing.T) {
 // The adoption must land in the same snapshot as an unrelated change — here, a
 // second tab appearing — because id adoption on its own is deliberately not a
 // visible change (ReconcileTabsFromData), so it never reaches this reconcile by
-// itself. Co-occurring is the common case, not a contrived one: the snapshot that
-// first carries a new tab's id is routinely the one carrying the next tab too.
+// itself. Co-occurring remains possible when an older daemon's response omits the
+// ID and a later snapshot also carries another tab.
 func TestPane_SnapshotTabIDAdoptionKeepsPaneOpen(t *testing.T) {
 	h := newTestHome(t)
 	inst := freshLocalInstance(t, "snapadopt")

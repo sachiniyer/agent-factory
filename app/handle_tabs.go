@@ -94,9 +94,10 @@ func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
 // The spawn+persist is routed through the daemon's CreateTab RPC (#960): the
 // daemon — the single writer — owns the new tab so its authoritative view holds
 // it and the TUI no longer originates a persisted tab write at all (#959). The
-// local projection is reflected immediately for both kinds; the next snapshot
-// adopts the daemon-minted stable id. The daemon's soft cap error is surfaced
-// verbatim.
+// local projection is reflected immediately for both kinds with the exact
+// daemon-minted identity. An older daemon can omit the additive ID field; that
+// mixed-version case remains name-keyed until the next snapshot. The daemon's
+// soft cap error is surfaced verbatim.
 func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
@@ -113,7 +114,7 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	if !ok {
 		return m, m.handleError(fmt.Errorf("tab kind %d is not available from the TUI", kind))
 	}
-	name, tmuxName, err := createTabThroughDaemon(request)
+	response, err := createTabThroughDaemon(request)
 	if err != nil {
 		return m, m.handleError(err)
 	}
@@ -123,9 +124,9 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	// second tab.
 	var attachErr error
 	if kind == session.TabKindVSCode {
-		_, attachErr = selected.AttachVSCodeTab(name)
+		_, attachErr = selected.AttachVSCodeTab(response.Name, response.ID)
 	} else {
-		_, attachErr = selected.AttachShellTab(name, tmuxName)
+		_, attachErr = selected.AttachShellTab(response.Name, response.TmuxName, response.ID)
 	}
 	if attachErr != nil {
 		return m, m.handleError(attachErr)
@@ -213,10 +214,9 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 	// remove a tab that is NOT the tree's active tab, and the tree must keep
 	// pointing at its own tab across the shift (#1884 follow-up) — resolving it by
 	// id afterwards is what keeps the arithmetic from guessing.
-	// The ordinal rides along with the id: a freshly-created tab is ID-LESS by
-	// design (AttachShellTab leaves Tab.ID empty until the next snapshot backfills
-	// the daemon's), so there is a real window where the tree's tab cannot be found
-	// by id at all and the ordinal is the only key it has.
+	// The ordinal rides along with the id for mixed-version compatibility: an
+	// older daemon omits CreateTabResponse.ID, so that projection remains ID-less
+	// until the next snapshot and the ordinal is the only key it has.
 	treeActiveID := ""
 	treeActiveIdx := -1
 	// Whose tab is store.ActiveTab()? The STORE's selected instance's — so that is

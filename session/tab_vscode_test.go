@@ -59,7 +59,7 @@ func TestAttachVSCodeTabReflectsDaemonOwnedTab(t *testing.T) {
 	defer log.Close()
 
 	inst := startedMockInstance(t, "af_vscode_attach")
-	tab, err := inst.AttachVSCodeTab("editor")
+	tab, err := inst.AttachVSCodeTab("editor", "")
 	require.NoError(t, err)
 	assert.Equal(t, TabKindVSCode, tab.Kind)
 	assert.Equal(t, "editor", tab.Name)
@@ -67,7 +67,7 @@ func TestAttachVSCodeTabReflectsDaemonOwnedTab(t *testing.T) {
 	assert.Nil(t, tab.tmux, "reflecting a VS Code tab must not spawn or attach a tmux session")
 	assert.Equal(t, 2, inst.TabCount())
 
-	again, err := inst.AttachVSCodeTab("editor")
+	again, err := inst.AttachVSCodeTab("editor", "")
 	require.NoError(t, err)
 	assert.Same(t, tab, again, "a snapshot that won the race must not duplicate the tab")
 	assert.Equal(t, 2, inst.TabCount())

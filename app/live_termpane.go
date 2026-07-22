@@ -344,12 +344,12 @@ func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID, tabID s
 	}
 	inst := p.Instance()
 	// Address the stream by the tab's STABLE id (#1738) so a reorder/close can't
-	// misroute it; empty (a just-created tab whose daemon id hasn't synced yet)
+	// misroute it; empty (a legacy tab or an older daemon's create response)
 	// falls back to the ordinal in DialStream.
 	tabID, _ = inst.TabIDAt(tab)
 	// The id is part of the bind key, not just the stream coordinates (#1779).
-	// AttachShellTab opens a pane BEFORE the daemon id exists, so that pane connects
-	// positionally; when the next snapshot adopts the real id, nothing else in the
+	// An older daemon can omit the create-response ID, so that pane connects
+	// positionally; when a later snapshot adopts the real id, nothing else in the
 	// key changes, so without the id here the pane would keep its old ORDINAL
 	// connection forever and could send keystrokes to a different tab after another
 	// client reorders/closes a lower one. Keying on the id makes id adoption itself

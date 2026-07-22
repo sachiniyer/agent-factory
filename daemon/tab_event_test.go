@@ -73,7 +73,7 @@ func TestCreateTab_WebPublishesSessionUpdated(t *testing.T) {
 	manager, repo := tabEventSession(t, title)
 
 	_, ch := manager.events.subscribe()
-	name, _, err := manager.CreateTab(CreateTabRequest{
+	created, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "livepreview",
 	})
 	if err != nil {
@@ -84,11 +84,11 @@ func TestCreateTab_WebPublishesSessionUpdated(t *testing.T) {
 	if got.Title != title {
 		t.Fatalf("event Title = %q, want %q", got.Title, title)
 	}
-	if !tabNamed(got, name) {
-		t.Fatalf("session.updated roster %v is missing the new web tab %q", got.Tabs, name)
+	if !tabNamed(got, created.Name) {
+		t.Fatalf("session.updated roster %v is missing the new web tab %q", got.Tabs, created.Name)
 	}
-	if !tabNamed(snapshotTabs(t, manager, repo.ID, title), name) {
-		t.Fatalf("a fresh Snapshot is missing the new web tab %q", name)
+	if !tabNamed(snapshotTabs(t, manager, repo.ID, title), created.Name) {
+		t.Fatalf("a fresh Snapshot is missing the new web tab %q", created.Name)
 	}
 }
 
@@ -99,7 +99,7 @@ func TestCreateTab_ProcessPublishesSessionUpdated(t *testing.T) {
 	manager, repo := tabEventSession(t, title)
 
 	_, ch := manager.events.subscribe()
-	name, _, err := manager.CreateTab(CreateTabRequest{
+	created, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Command: "sleep 600", Name: "worker",
 	})
 	if err != nil {
@@ -107,11 +107,11 @@ func TestCreateTab_ProcessPublishesSessionUpdated(t *testing.T) {
 	}
 
 	got := drainNextSessionEvent(t, ch, agentproto.EventSessionUpdated)
-	if !tabNamed(got, name) {
-		t.Fatalf("session.updated roster %v is missing the new process tab %q", got.Tabs, name)
+	if !tabNamed(got, created.Name) {
+		t.Fatalf("session.updated roster %v is missing the new process tab %q", got.Tabs, created.Name)
 	}
-	if !tabNamed(snapshotTabs(t, manager, repo.ID, title), name) {
-		t.Fatalf("a fresh Snapshot is missing the new process tab %q", name)
+	if !tabNamed(snapshotTabs(t, manager, repo.ID, title), created.Name) {
+		t.Fatalf("a fresh Snapshot is missing the new process tab %q", created.Name)
 	}
 }
 
@@ -122,7 +122,7 @@ func TestCloseTab_PublishesSessionUpdated(t *testing.T) {
 	const title = "closeevt"
 	manager, repo := tabEventSession(t, title)
 
-	name, _, err := manager.CreateTab(CreateTabRequest{
+	created, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "doomed",
 	})
 	if err != nil {
@@ -131,22 +131,22 @@ func TestCloseTab_PublishesSessionUpdated(t *testing.T) {
 
 	// Subscribe only after the create so the close's event is unambiguous.
 	_, ch := manager.events.subscribe()
-	closed, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: name})
+	closed, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: created.Name})
 	if err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
-	if closed != name {
-		t.Fatalf("CloseTab returned %q, want %q", closed, name)
+	if closed != created.Name {
+		t.Fatalf("CloseTab returned %q, want %q", closed, created.Name)
 	}
 
 	got := drainNextSessionEvent(t, ch, agentproto.EventSessionUpdated)
-	if tabNamed(got, name) {
-		t.Fatalf("session.updated roster %v still contains the closed tab %q", got.Tabs, name)
+	if tabNamed(got, created.Name) {
+		t.Fatalf("session.updated roster %v still contains the closed tab %q", got.Tabs, created.Name)
 	}
 	if len(got.Tabs) != 1 {
 		t.Fatalf("roster after close = %v, want just the agent tab", got.Tabs)
 	}
-	if tabNamed(snapshotTabs(t, manager, repo.ID, title), name) {
-		t.Fatalf("a fresh Snapshot still contains the closed tab %q", name)
+	if tabNamed(snapshotTabs(t, manager, repo.ID, title), created.Name) {
+		t.Fatalf("a fresh Snapshot still contains the closed tab %q", created.Name)
 	}
 }

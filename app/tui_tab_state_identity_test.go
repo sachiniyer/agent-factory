@@ -62,10 +62,9 @@ func TestPanePreviewSuppressionFollowsTabIdentityAcrossReorder(t *testing.T) {
 }
 
 // TestPanePreviewSuppressionDoesNotTransferAcrossStableIDReuse covers the
-// close/recreate window after a stable target was dismissed. AttachShellTab
-// leaves the replacement locally ID-less until the daemon snapshot arrives;
-// reusing the old name must not make that distinct tab inherit the old tab's
-// suppression.
+// close/recreate window after a stable target was dismissed. A legacy or
+// older-daemon replacement can remain locally ID-less until a snapshot arrives;
+// reusing the old name must not make it inherit the old tab's suppression.
 func TestPanePreviewSuppressionDoesNotTransferAcrossStableIDReuse(t *testing.T) {
 	h, alpha := multiTabHome(t)
 	pane := openTestPane(t, h, alpha, 1)
@@ -83,7 +82,7 @@ func TestPanePreviewSuppressionDoesNotTransferAcrossStableIDReuse(t *testing.T) 
 	alpha.AddTabForTest(targetName, session.TabKindShell)
 	replacement := len(alpha.GetTabs()) - 1
 	require.Empty(t, alpha.GetTabs()[replacement].ID,
-		"precondition: the locally attached replacement is awaiting ID backfill")
+		"precondition: the modeled legacy replacement is awaiting ID backfill")
 
 	_ = h.updatePanePreview(alpha, replacement, true, false)
 

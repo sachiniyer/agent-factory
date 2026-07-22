@@ -223,15 +223,15 @@ func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	return &resp.Instance, nil
 }
 
-// CreateTab asks the daemon to spawn, persist, and report a new process tab on
-// an existing session. It returns the resolved (collision-suffixed) tab name so
-// scripts/agents can address the tab.
-func CreateTab(req CreateTabRequest) (string, error) {
+// CreateTab asks the daemon to spawn, persist, and report a new tab on an
+// existing session. Returning the response object keeps the daemon-minted ID
+// together with its resolved and tmux names across the gob transport.
+func CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	var resp CreateTabResponse
 	if err := callDaemon("CreateTab", req, &resp); err != nil {
-		return "", err
+		return CreateTabResponse{}, err
 	}
-	return resp.Name, nil
+	return resp, nil
 }
 
 // CloseTab asks the daemon to close a non-agent tab on an existing session and

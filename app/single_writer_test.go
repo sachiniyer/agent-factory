@@ -30,7 +30,7 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	require.NotNil(t, cmd, "quit must still proceed")
 
 	// new shell tab: routed through the daemon (stubbed), reflected locally only.
-	createRestore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (string, string, error) {
+	createRestore := SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return spawnDaemonTab(inst)
 	})
 	defer createRestore()

@@ -304,16 +304,17 @@ func resumeStatusPollThroughDaemon(title, repoID string) error {
 
 // createTabThroughDaemon is the TUI's single CreateTab RPC path. Both picker
 // choices use it, so VS Code creation sends the same Kind:"vscode" request the
-// CLI does rather than growing a TUI-only implementation. It returns the resolved
-// tab name and, for a shell/process tab, the exact tmux session the daemon spawned.
-var createTabThroughDaemon = func(req daemon.CreateTabRequest) (string, string, error) {
-	var name, tmuxName string
+// CLI does rather than growing a TUI-only implementation. It preserves the
+// response as a struct so identity and future additive fields cannot be dropped
+// between the transport and the local projection.
+var createTabThroughDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+	var response daemon.CreateTabResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		name, tmuxName, e = c.CreateTab(req)
+		response, e = c.CreateTab(req)
 		return e
 	})
-	return name, tmuxName, err
+	return response, err
 }
 
 // closeTabThroughDaemon routes the TUI's `w` (close tab) mutation to the daemon,
@@ -452,7 +453,7 @@ func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) error) func() 
 	return func() { resumeFromLimitThroughDaemon = prev }
 }
 
-func SetTabCreatorForTest(f func(daemon.CreateTabRequest) (string, string, error)) func() {
+func SetTabCreatorForTest(f func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error)) func() {
 	prev := createTabThroughDaemon
 	createTabThroughDaemon = f
 	return func() { createTabThroughDaemon = prev }

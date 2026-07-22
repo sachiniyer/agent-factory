@@ -94,17 +94,15 @@ func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.Handof
 	return resp, nil
 }
 
-// CreateTab asks the daemon to spawn, persist, and report a new process/shell
-// tab on an existing session, returning the resolved (collision-suffixed) name
-// and the tmux session it was spawned under. Callers need BOTH: the two names
-// are independent namespaces that diverge after a rename (#1957), so the tmux
-// session cannot be re-derived from the tab name. See CreateTabResponse.TmuxName.
-func (c *Client) CreateTab(req daemon.CreateTabRequest) (string, string, error) {
+// CreateTab asks the daemon to spawn, persist, and report a new tab. The
+// response object keeps its stable ID with the two independent names, so a
+// caller cannot accidentally discard the destructive-addressing handle.
+func (c *Client) CreateTab(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 	var resp daemon.CreateTabResponse
 	if err := c.call("CreateTab", req, &resp); err != nil {
-		return "", "", err
+		return daemon.CreateTabResponse{}, err
 	}
-	return resp.Name, resp.TmuxName, nil
+	return resp, nil
 }
 
 // CloseTab asks the daemon to close a non-agent tab and returns the resolved

@@ -189,7 +189,7 @@ func TestAttachShellTab_ReconnectsExistingSessionNoSpawn(t *testing.T) {
 	// The daemon already spawned the sibling shell session.
 	inst := startedMockInstance(t, agentName, agentName+"__shell")
 
-	tab, err := inst.AttachShellTab("shell", "")
+	tab, err := inst.AttachShellTab("shell", "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "shell", tab.Name)
 	assert.Equal(t, TabKindShell, tab.Kind)
@@ -200,7 +200,7 @@ func TestAttachShellTab_ReconnectsExistingSessionNoSpawn(t *testing.T) {
 
 	// A second call for the same name is a no-op returning the existing tab —
 	// guards against a refresh racing ahead of the reconnect.
-	again, err := inst.AttachShellTab("shell", "")
+	again, err := inst.AttachShellTab("shell", "", "")
 	require.NoError(t, err)
 	assert.Same(t, tab, again, "a duplicate attach must return the existing tab")
 	assert.Equal(t, 2, inst.TabCount(), "a duplicate attach must not append again")
@@ -214,7 +214,7 @@ func TestAttachShellTab_RejectedForUnstarted(t *testing.T) {
 
 	inst, err := NewInstance(InstanceOptions{Title: "unstarted", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
-	_, err = inst.AttachShellTab("shell", "")
+	_, err = inst.AttachShellTab("shell", "", "")
 	require.Error(t, err)
 	require.Equal(t, 0, inst.TabCount())
 }

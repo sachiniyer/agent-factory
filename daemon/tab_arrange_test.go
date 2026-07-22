@@ -34,7 +34,7 @@ func TestRenameTab_PublishesSessionUpdated(t *testing.T) {
 	const title = "renameevt"
 	manager, repo := tabEventSession(t, title)
 
-	if _, _, err := manager.CreateTab(CreateTabRequest{
+	if _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "preview",
 	}); err != nil {
 		t.Fatalf("CreateTab(web): %v", err)
@@ -68,7 +68,7 @@ func TestRenameTab_ReturnsResolvedName(t *testing.T) {
 	manager, repo := tabEventSession(t, title)
 
 	for _, n := range []string{"dup", "victim"} {
-		if _, _, err := manager.CreateTab(CreateTabRequest{
+		if _, err := manager.CreateTab(CreateTabRequest{
 			Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: n,
 		}); err != nil {
 			t.Fatalf("CreateTab(%s): %v", n, err)
@@ -102,7 +102,7 @@ func TestRenameTab_RejectsSanitizeToEmpty(t *testing.T) {
 	const title = "emptyname"
 	manager, repo := tabEventSession(t, title)
 
-	if _, _, err := manager.CreateTab(CreateTabRequest{
+	if _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "preview",
 	}); err != nil {
 		t.Fatalf("CreateTab(web): %v", err)
@@ -128,7 +128,7 @@ func TestRenameTab_RejectsUndisplayedKinds(t *testing.T) {
 	const title = "kindguard"
 	manager, repo := tabEventSession(t, title)
 
-	if _, _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true}); err != nil {
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true}); err != nil {
 		t.Fatalf("CreateTab(shell): %v", err)
 	}
 
@@ -155,7 +155,7 @@ func TestReorderTab_PersistsAndPublishes(t *testing.T) {
 	manager, repo := tabEventSession(t, title)
 
 	for _, n := range []string{"a", "b", "c"} {
-		if _, _, err := manager.CreateTab(CreateTabRequest{
+		if _, err := manager.CreateTab(CreateTabRequest{
 			Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: n,
 		}); err != nil {
 			t.Fatalf("CreateTab(%s): %v", n, err)
@@ -192,7 +192,7 @@ func TestReorderTab_PinsAgentSlot(t *testing.T) {
 	manager, repo := tabEventSession(t, title)
 
 	for _, n := range []string{"a", "b"} {
-		if _, _, err := manager.CreateTab(CreateTabRequest{
+		if _, err := manager.CreateTab(CreateTabRequest{
 			Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: n,
 		}); err != nil {
 			t.Fatalf("CreateTab(%s): %v", n, err)
@@ -238,7 +238,7 @@ func TestArrangeTab_RejectsArchivedSession(t *testing.T) {
 	const title = "archarrange"
 	manager, repo := tabEventSession(t, title)
 
-	if _, _, err := manager.CreateTab(CreateTabRequest{
+	if _, err := manager.CreateTab(CreateTabRequest{
 		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:5173", Name: "preview",
 	}); err != nil {
 		t.Fatalf("CreateTab(web): %v", err)

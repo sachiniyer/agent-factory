@@ -78,16 +78,36 @@ func TestControlRoundTrips(t *testing.T) {
 	// session it was spawned under are independent namespaces post-#1957, so a
 	// client that dropped the second and re-derived it from the first would bind
 	// the TUI's instant-display projection to a different tab's live session.
-	t.Run("CreateTab returns resolved name and tmux name", func(t *testing.T) {
+	t.Run("CreateTab returns stable id, resolved name, and tmux name", func(t *testing.T) {
 		c := routeServer(t, "CreateTab", func([]byte) apiproto.Envelope {
-			return apiproto.Success(daemon.CreateTabResponse{Name: "shell", TmuxName: "af_x_alpha__shell-2"})
+			return apiproto.Success(daemon.CreateTabResponse{
+				ID: "daemon-tab-id", Name: "shell", TmuxName: "af_x_alpha__shell-2",
+			})
 		})
-		name, tmuxName, err := c.CreateTab(daemon.CreateTabRequest{Title: "alpha", Shell: true})
-		if err != nil || name != "shell" {
-			t.Fatalf("CreateTab name = %q, %v; want shell", name, err)
+		resp, err := c.CreateTab(daemon.CreateTabRequest{Title: "alpha", Shell: true})
+		if err != nil || resp.Name != "shell" {
+			t.Fatalf("CreateTab response = %+v, %v; want shell", resp, err)
 		}
-		if tmuxName != "af_x_alpha__shell-2" {
-			t.Fatalf("CreateTab tmux name = %q; want af_x_alpha__shell-2", tmuxName)
+		if resp.ID != "daemon-tab-id" {
+			t.Fatalf("CreateTab id = %q; want daemon-tab-id", resp.ID)
+		}
+		if resp.TmuxName != "af_x_alpha__shell-2" {
+			t.Fatalf("CreateTab tmux name = %q; want af_x_alpha__shell-2", resp.TmuxName)
+		}
+	})
+
+	t.Run("CreateTab accepts an older daemon response without id", func(t *testing.T) {
+		c := routeServer(t, "CreateTab", func([]byte) apiproto.Envelope {
+			return apiproto.Success(map[string]string{
+				"name": "shell", "tmux_name": "af_x_alpha__shell",
+			})
+		})
+		resp, err := c.CreateTab(daemon.CreateTabRequest{Title: "alpha", Shell: true})
+		if err != nil {
+			t.Fatalf("CreateTab from older daemon: %v", err)
+		}
+		if resp.ID != "" || resp.Name != "shell" || resp.TmuxName != "af_x_alpha__shell" {
+			t.Fatalf("older CreateTab response = %+v; want explicit empty-id compatibility", resp)
 		}
 	})
 

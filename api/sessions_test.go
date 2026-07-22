@@ -543,9 +543,9 @@ func TestSessionsTabCreate_RequiresCommand(t *testing.T) {
 
 	called := false
 	prevCreate := createTabViaDaemon
-	createTabViaDaemon = func(req daemon.CreateTabRequest) (string, error) {
+	createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		called = true
-		return "", nil
+		return daemon.CreateTabResponse{}, nil
 	}
 	defer func() { createTabViaDaemon = prevCreate }()
 
@@ -599,12 +599,12 @@ func TestSessionsTabCreate_HonorsRepoScopingAndReturnsName(t *testing.T) {
 
 	var gotReq daemon.CreateTabRequest
 	prevCreate := createTabViaDaemon
-	createTabViaDaemon = func(req daemon.CreateTabRequest) (string, error) {
+	createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		gotReq = req
 		if req.RepoID == "" {
-			return "", errors.New("RepoID empty: --repo scoping was dropped")
+			return daemon.CreateTabResponse{}, errors.New("RepoID empty: --repo scoping was dropped")
 		}
-		return "btop-2", nil // the resolved (collision-suffixed) name
+		return daemon.CreateTabResponse{ID: "daemon-btop-id", Name: "btop-2"}, nil
 	}
 	defer func() { createTabViaDaemon = prevCreate }()
 

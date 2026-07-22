@@ -71,9 +71,9 @@ func paneBindingIdentityOf(binding paneBinding) paneBindingIdentity {
 	if tab.Kind != session.TabKindAgent {
 		identity.tabID = tab.ID
 	}
-	// Keep the name even when an ID is present. A freshly-created tab is locally
-	// ID-less until the daemon snapshot backfills it; a suppression captured on
-	// one side of that transition needs the name as its shared identity bridge.
+	// Keep the name even when an ID is present. A legacy tab or a tab created
+	// through an older daemon can be locally ID-less until snapshot backfill; a
+	// suppression captured across that transition needs the name as its bridge.
 	identity.tabName = tab.Name
 	return identity
 }
@@ -82,7 +82,7 @@ func paneBindingIdentityOf(binding paneBinding) paneBindingIdentity {
 // dismissed with its current binding. The direction matters: an ID-less saved
 // identity may match a later ID-bearing snapshot by name (daemon backfill), but
 // a saved stable ID must never fall back to name when a different, newly
-// attached tab is still locally ID-less.
+// legacy/older-daemon tab is still locally ID-less.
 func suppressionIdentityMatches(saved, current paneBindingIdentity) bool {
 	if saved.instance != current.instance {
 		return false

@@ -27,6 +27,56 @@ import (
 // would skip tabMutationTarget entirely and pass against a daemon that ignored the
 // id.
 
+// TestCreateTabResponseCarriesStableIDIntoReusedNameRefusal covers the identity
+// gap between a successful create and the next snapshot. The create response is
+// the only authoritative handle available in that window; after another client
+// closes the created tab and reuses its name, a close carrying that returned ID
+// must refuse the replacement rather than destroy it.
+func TestCreateTabResponseCarriesStableIDIntoReusedNameRefusal(t *testing.T) {
+	const title = "create-close-id"
+	manager, repo := tabEventSession(t, title)
+	cs := &controlServer{manager: manager}
+
+	var created CreateTabResponse
+	if err := cs.CreateTab(CreateTabRequest{
+		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:3000", Name: "preview",
+	}, &created); err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("CreateTab response omitted the daemon-minted stable tab ID")
+	}
+
+	if _, err := manager.CloseTab(CloseTabRequest{
+		Title: title, RepoID: repo.ID, TabName: created.Name,
+	}); err != nil {
+		t.Fatalf("stage concurrent close: %v", err)
+	}
+	var replacement CreateTabResponse
+	if err := cs.CreateTab(CreateTabRequest{
+		Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:3001", Name: created.Name,
+	}, &replacement); err != nil {
+		t.Fatalf("create same-name replacement: %v", err)
+	}
+	if replacement.Name != created.Name {
+		t.Fatalf("replacement name = %q, want reused %q", replacement.Name, created.Name)
+	}
+	if replacement.ID == "" || replacement.ID == created.ID {
+		t.Fatalf("replacement ID = %q, want a new stable identity distinct from %q", replacement.ID, created.ID)
+	}
+
+	var closed CloseTabResponse
+	err := cs.CloseTab(CloseTabRequest{
+		Title: title, RepoID: repo.ID, TabName: created.Name, TabID: created.ID,
+	}, &closed)
+	if err == nil {
+		t.Fatalf("stale create-response ID closed %q; it retargeted the same-name replacement", closed.Name)
+	}
+	if got := tabNameByID(snapshotTabs(t, manager, repo.ID, title), replacement.ID); got != created.Name {
+		t.Fatalf("replacement tab is %q, want surviving %q", got, created.Name)
+	}
+}
+
 // TestCloseTab_RefusesUnresolvableTabID is the headline #1971 case: the addressed
 // tab is CLOSED, and uniqueTabName has already reissued its freed name to a NEW,
 // live tab. The close must report the miss and leave the new tab alone.
