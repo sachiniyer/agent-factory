@@ -8249,6 +8249,37 @@ function decode(raw) {
   }
 }
 
+// src/terminal-geometry.ts
+function hasVisibleTerminalGeometry(host, proposed) {
+  return host.width > 0 && host.height > 0 && !!proposed && proposed.rows > 0 && proposed.cols > 0;
+}
+function shouldRefitVisibleTerminal(host, current, proposed) {
+  if (!hasVisibleTerminalGeometry(host, proposed)) {
+    return false;
+  }
+  return proposed.rows !== current.rows || proposed.cols !== current.cols;
+}
+function viewportMarkerOffset(position) {
+  return position.viewportY - (position.baseY + position.cursorY);
+}
+function viewportAnchorLine(anchor, baseY) {
+  if (anchor.atBottom) {
+    return baseY;
+  }
+  return anchor.markerLine !== null && anchor.markerLine >= 0 ? anchor.markerLine : anchor.fallbackLine;
+}
+function shouldRestoreViewport(intent) {
+  return intent.scheduledUserScroll === intent.currentUserScroll;
+}
+function terminalUserScrollPlan(source, hasScheduledVisibleFit) {
+  switch (source) {
+    case "wheel":
+    case "touch":
+    case "scrollbar":
+      return { cancelScheduledVisibleFit: hasScheduledVisibleFit };
+  }
+}
+
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
 var STORAGE_KEY = "af-theme";
@@ -8377,6 +8408,7 @@ function wsScheme2() {
 }
 var AttachTerminal = class {
   constructor(container, sessionId, token2, tabId, tab, cb) {
+    this.container = container;
     this.sessionId = sessionId;
     this.token = token2;
     this.tabId = tabId;
@@ -8397,7 +8429,6 @@ var AttachTerminal = class {
     this.fit = new import_addon_fit.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
-    this.fit.fit();
     const textarea = this.term.textarea;
     if (textarea) {
       textarea.addEventListener("focus", () => {
@@ -8423,18 +8454,38 @@ var AttachTerminal = class {
     );
     this.ro = new ResizeObserver(() => this.scheduleFit());
     this.ro.observe(container);
-    this.connect();
+    this.io = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.scheduleVisibleFit();
+      }
+    });
+    this.io.observe(container);
+    window.addEventListener("focus", this.onWindowFocus);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    container.addEventListener("pointerenter", this.onPointerEnter);
+    container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
+    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: true });
+    container.addEventListener("pointerdown", this.onPointerDown, true);
+    this.scheduleVisibleFit();
   }
   term;
   fit;
   enc = new TextEncoder();
   ro;
+  io;
   ws = null;
   stopped = false;
   everOpened = false;
   retry = 0;
+  initialConnectStarted = false;
   reconnectTimer = null;
   resizeTimer = null;
+  visibleFitFrame = null;
+  viewportRestoreFrame = null;
+  // Incremented only by an actual user scroll input while a peer-owned anchor is
+  // pending. Output and resize reflows can move viewportY too, so position deltas
+  // alone do not prove that a user intended to override the saved reading line.
+  userScrollRevision = 0;
   // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
   // counts (never by OpRepaint). `seeded` gates whether a reconnect can pass a
   // real ?since; the first connect omits it (live tail + a fresh-screen repaint).
@@ -8444,7 +8495,48 @@ var AttachTerminal = class {
   // an authoritative echo that matches is a no-op.
   lastRows = 0;
   lastCols = 0;
+  // A peer resize can temporarily collapse this client's scrollback (for example,
+  // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
+  // not a one-time distance from the bottom: output can keep arriving while this
+  // client is inactive. Null means no peer-owned grid is pending reconciliation.
+  pendingViewport = null;
   exited = false;
+  // A peer is allowed to resize the one shared PTY and every client obeys that
+  // authoritative echo. When this window becomes active again, its visible host
+  // becomes the local writer: refit once instead of leaving a peer-sized emulator in
+  // an unchanged container until the user physically resizes the window (#2347).
+  onWindowFocus = () => this.scheduleVisibleFit();
+  onVisibilityChange = () => {
+    if (document.visibilityState === "visible") {
+      this.scheduleVisibleFit();
+    }
+  };
+  // Entering a pane is the earliest reliable activation signal for side-by-side
+  // clients: reconcile before the wheel gesture arrives so xterm can consume that
+  // first gesture rather than making the user scroll twice.
+  onPointerEnter = () => this.fitVisibleHost();
+  // A scroll can target an already-focused window after another client resized the
+  // PTY without the pointer ever leaving this pane. Capture repairs that less-common
+  // path; pointer entry above handles the ordinary first gesture. The pending-peer
+  // gate makes every ordinary input a no-op before even measuring layout.
+  onWheel = () => this.handleUserScroll("wheel");
+  onTouchMove = () => this.handleUserScroll("touch");
+  onPointerDown = (event) => {
+    if (event.target === this.container.querySelector(".xterm-viewport")) {
+      this.handleUserScroll("scrollbar");
+    }
+  };
+  handleUserScroll(source) {
+    if (this.pendingViewport === null) {
+      return;
+    }
+    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    if (plan.cancelScheduledVisibleFit) {
+      this.cancelVisibleFitFrame();
+    }
+    this.fitVisibleHost();
+    this.userScrollRevision += 1;
+  }
   /** Permanently closes the terminal: stops the reconnect loop, drops the socket,
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose() {
@@ -8457,13 +8549,23 @@ var AttachTerminal = class {
       window.clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
+    this.cancelVisibleFitFrame();
+    this.clearPendingViewport();
     this.ro.disconnect();
+    this.io.disconnect();
+    window.removeEventListener("focus", this.onWindowFocus);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.container.removeEventListener("pointerenter", this.onPointerEnter);
+    this.container.removeEventListener("wheel", this.onWheel, true);
+    this.container.removeEventListener("touchmove", this.onTouchMove, true);
+    this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.closeSocket();
     this.term.dispose();
   }
   /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
    *  keys reach the agent — the attach half of the #1693 nav/attach model. */
   focus() {
+    this.fitVisibleHost();
     this.term.focus();
   }
   /** Takes the keyboard away from the terminal (blurs it) so document-level rail
@@ -8518,6 +8620,15 @@ var AttachTerminal = class {
       } catch {
       }
     };
+  }
+  /** Starts the first connection only after a real visible-host fit. Reconnects
+   * continue through connect() directly once this boundary has been crossed. */
+  connectAfterInitialFit() {
+    if (this.initialConnectStarted || this.stopped) {
+      return;
+    }
+    this.initialConnectStarted = true;
+    this.connect();
   }
   onMessage(data) {
     if (typeof data === "string") {
@@ -8598,6 +8709,109 @@ var AttachTerminal = class {
     this.ws = null;
   }
   // --- resize ----------------------------------------------------------------
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
+   *  this is not a time guess and never repeats on its own. */
+  scheduleVisibleFit() {
+    if (this.stopped || this.visibleFitFrame !== null) {
+      return;
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => {
+      this.visibleFitFrame = null;
+      this.fitVisibleHost();
+    });
+  }
+  /** Drops activation work queued before a direct user scroll. Leaving that frame
+   * alive lets it run after the input fit and rebase the restore onto the new user
+   * revision, which makes the first gesture appear inert. */
+  cancelVisibleFitFrame() {
+    if (this.visibleFitFrame === null) {
+      return;
+    }
+    window.cancelAnimationFrame(this.visibleFitFrame);
+    this.visibleFitFrame = null;
+  }
+  /** Reconciles xterm's grid with this host only when the host is measurable and the
+   *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
+   *  while this client is inactive; activation/wheel makes this client the newest
+   *  writer once, without a resize-echo ping-pong between visible clients. */
+  fitVisibleHost() {
+    if (this.stopped) {
+      return;
+    }
+    let proposed;
+    try {
+      proposed = this.fit.proposeDimensions();
+    } catch {
+      return;
+    }
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (!hasVisibleTerminalGeometry(host, proposed)) {
+      return;
+    }
+    const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
+    if (needsFit) {
+      try {
+        this.fit.fit();
+      } catch {
+        return;
+      }
+      this.sendResize(this.term.rows, this.term.cols, false);
+    }
+    this.scheduleViewportRestore(this.term.rows, this.term.cols);
+    this.connectAfterInitialFit();
+  }
+  /** Restores the pre-peer reading position after xterm has rendered its new grid.
+   *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
+   *  still see the peer-collapsed zero. The next painted frame is the first settled
+   *  value. A newer peer grid cancels this frame and leaves the anchor pending for
+   *  the next local activation. */
+  scheduleViewportRestore(rows, cols) {
+    if (this.pendingViewport === null) {
+      return;
+    }
+    this.cancelViewportRestoreFrame();
+    const scheduledUserScroll = this.userScrollRevision;
+    this.viewportRestoreFrame = window.requestAnimationFrame(() => {
+      this.viewportRestoreFrame = null;
+      if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
+        return;
+      }
+      const anchor = this.pendingViewport;
+      if (anchor === null) {
+        return;
+      }
+      const buffer = this.term.buffer.active;
+      if (!shouldRestoreViewport({
+        scheduledUserScroll,
+        currentUserScroll: this.userScrollRevision
+      })) {
+        this.clearPendingViewport();
+        return;
+      }
+      const target = viewportAnchorLine(
+        {
+          atBottom: anchor.atBottom,
+          markerLine: anchor.marker?.line ?? null,
+          fallbackLine: anchor.line
+        },
+        buffer.baseY
+      );
+      this.clearPendingViewport();
+      this.term.scrollToLine(Math.max(0, target));
+    });
+  }
+  cancelViewportRestoreFrame() {
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+      this.viewportRestoreFrame = null;
+    }
+  }
+  clearPendingViewport() {
+    this.cancelViewportRestoreFrame();
+    this.pendingViewport?.marker?.dispose();
+    this.pendingViewport = null;
+  }
   scheduleFit() {
     if (this.resizeTimer !== null) {
       window.clearTimeout(this.resizeTimer);
@@ -8607,12 +8821,7 @@ var AttachTerminal = class {
       if (this.stopped) {
         return;
       }
-      try {
-        this.fit.fit();
-      } catch {
-        return;
-      }
-      this.sendResize(this.term.rows, this.term.cols, false);
+      this.fitVisibleHost();
     }, RESIZE_DEBOUNCE_MS);
   }
   /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
@@ -8635,6 +8844,19 @@ var AttachTerminal = class {
     this.lastRows = rows;
     this.lastCols = cols;
     if (rows !== this.term.rows || cols !== this.term.cols) {
+      if (this.pendingViewport === null) {
+        const buffer = this.term.buffer.active;
+        const atBottom = buffer.viewportY >= buffer.baseY;
+        let marker = null;
+        if (!atBottom) {
+          try {
+            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
+          } catch {
+          }
+        }
+        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
+      }
+      this.cancelViewportRestoreFrame();
       try {
         this.term.resize(cols, rows);
       } catch {
