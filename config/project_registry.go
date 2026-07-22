@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -27,7 +29,7 @@ const (
 	projectRegistrySchemaVersion = 1
 	projectMetadataFileName      = "project.json"
 	checkoutMarkerDirName        = "agent-factory"
-	checkoutMarkerFileName       = "checkout-id"
+	checkoutMarkerFilePrefix     = "checkout-id-"
 	projectIDPrefix              = "prj_"
 	checkoutIDPrefix             = "chk_"
 	opaqueIDBytes                = 16
@@ -40,9 +42,9 @@ var (
 
 // Project is a durable machine-local project binding. ID is stable across an
 // explicit rebind; Root is only the last-known path. CheckoutID distinguishes
-// two clones, and RelativeRoot reserves the checkout-relative identity axis for
-// a later monorepo slice (repo-root registrations use "."). No session or task
-// is required for a Project to exist.
+// two clones within this AF home, and RelativeRoot reserves the checkout-relative
+// identity axis for a later monorepo slice (repo-root registrations use "."). No
+// session or task is required for a Project to exist.
 type Project struct {
 	ID           string `json:"id"`
 	CheckoutID   string `json:"checkout_id"`
@@ -100,11 +102,12 @@ func ListProjects() ([]Project, error) {
 	return projects, nil
 }
 
-// ResetProjectRegistry removes durable project records and the checkout
-// markers they own. It validates every record and marker before deleting
-// anything, then removes only the unmistakably AF-owned registry directory.
-// Callers must run this before deleting registered worktrees so their Git
-// common directories are still resolvable.
+// ResetProjectRegistry removes durable project records and this AF home's
+// checkout markers. Markers are home-scoped so resetting one home cannot break
+// another home's registry for the same checkout. It validates every record and
+// marker before deleting anything, then removes only the unmistakably AF-owned
+// registry directory. Callers must run this before deleting registered
+// worktrees so their Git common directories are still resolvable.
 func ResetProjectRegistry() error {
 	dir, err := projectRegistryDir()
 	if err != nil {
@@ -470,6 +473,10 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	if bare != "true" && bare != "false" {
 		return projectBinding{}, fmt.Errorf("inspect git common directory: unexpected git output %q", bare)
 	}
+	markerName, err := checkoutMarkerName()
+	if err != nil {
+		return projectBinding{}, err
+	}
 	checkoutRoot := worktreeRoot
 	if bare == "false" {
 		checkoutRoot, err = resolveMainRepoRoot("-C", resolved)
@@ -486,8 +493,25 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 		checkoutRoot:       filepath.Clean(checkoutRoot),
 		relativeRoot:       ".",
 		gitCommonDir:       filepath.Clean(commonDir),
-		checkoutMarkerPath: filepath.Join(commonDir, checkoutMarkerDirName, checkoutMarkerFileName),
+		checkoutMarkerPath: filepath.Join(commonDir, checkoutMarkerDirName, markerName),
 	}, nil
+}
+
+// checkoutMarkerName scopes a checkout identity to one canonical AF home. The
+// marker still moves with the Git common directory, while a factory reset of a
+// different home has a different file to remove. Hashing keeps an absolute
+// home path out of the repository's machine-local metadata.
+func checkoutMarkerName() (string, error) {
+	home, err := GetConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve AF home for checkout marker: %w", err)
+	}
+	absHome, err := filepath.Abs(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute AF home for checkout marker: %w", err)
+	}
+	digest := sha256.Sum256([]byte(pathutil.ResolveForCompare(absHome)))
+	return checkoutMarkerFilePrefix + hex.EncodeToString(digest[:opaqueIDBytes]), nil
 }
 
 func ensureCheckoutID(markerPath string) (string, error) {
@@ -566,6 +590,16 @@ func storedProjectMarkerPath(root string) (string, bool, error) {
 }
 
 func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
+	info, statErr := os.Stat(root)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return false, nil
+	}
+	if statErr != nil {
+		return false, fmt.Errorf("inspect last-known project root %s: %w", root, statErr)
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
 	binding, err := resolveProjectBinding(root)
 	if err != nil {
 		// A caller-owned directory may legitimately reuse a moved checkout's

@@ -93,7 +93,7 @@ func TestProjectRegistryPersistsSessionlessRepoFromArbitraryPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []Project{registered}, projects,
 		"the registry must list an explicitly registered project with zero sessions and zero tasks")
-	_, err = os.Stat(filepath.Join(repo, ".git", checkoutMarkerDirName, checkoutMarkerFileName))
+	_, err = os.Stat(projectCheckoutMarkerPath(t, repo))
 	require.NoError(t, err, "registration must anchor identity in the Git common directory")
 }
 
@@ -105,7 +105,7 @@ func TestResetProjectRegistryRefusesMarkerItDoesNotOwn(t *testing.T) {
 	registered, err := RegisterProject(repo)
 	require.NoError(t, err)
 
-	marker := filepath.Join(repo, ".git", checkoutMarkerDirName, checkoutMarkerFileName)
+	marker := projectCheckoutMarkerPath(t, repo)
 	foreignID := "chk_ffffffffffffffffffffffffffffffff"
 	require.NoError(t, os.WriteFile(marker, []byte(foreignID+"\n"), 0o644))
 
@@ -280,6 +280,96 @@ func TestProjectRegistryMoveIgnoresReusedUnmarkedOldRoot(t *testing.T) {
 	}
 }
 
+func TestProjectRegistryMoveIgnoresReusedFileAtOldRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		move func(Project, string) (Project, error)
+	}{
+		{
+			name: "register",
+			move: func(_ Project, movedRoot string) (Project, error) {
+				return RegisterProject(movedRoot)
+			},
+		},
+		{
+			name: "rebind",
+			move: func(project Project, movedRoot string) (Project, error) {
+				return RebindProject(project.ID, movedRoot)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+			oldRoot := filepath.Join(base, "repo")
+			project, err := RegisterProject(initProjectRegistryRepo(t, oldRoot))
+			require.NoError(t, err)
+
+			movedRoot := filepath.Join(base, "moved")
+			require.NoError(t, os.Rename(oldRoot, movedRoot))
+			require.NoError(t, os.WriteFile(oldRoot, []byte("unrelated\n"), 0o644),
+				"an unrelated file now reuses the last-known path")
+
+			moved, err := tc.move(project, movedRoot)
+			require.NoError(t, err,
+				"a non-directory old path cannot contain this checkout's marker")
+			require.Equal(t, project.ID, moved.ID)
+			require.Equal(t, project.CheckoutID, moved.CheckoutID)
+			require.Equal(t, canonicalExistingPath(t, movedRoot), moved.Root)
+		})
+	}
+}
+
+func TestResetProjectRegistryPreservesAnotherHomesCheckoutIdentity(t *testing.T) {
+	base := t.TempDir()
+	repo := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+	firstHome := filepath.Join(base, "first-home")
+	secondHome := filepath.Join(base, "second-home")
+
+	t.Setenv("AGENT_FACTORY_HOME", firstHome)
+	_, err := RegisterProject(repo)
+	require.NoError(t, err)
+
+	t.Setenv("AGENT_FACTORY_HOME", secondHome)
+	second, err := RegisterProject(repo)
+	require.NoError(t, err)
+	secondBinding, err := resolveProjectBinding(repo)
+	require.NoError(t, err)
+
+	t.Setenv("AGENT_FACTORY_HOME", firstHome)
+	require.NoError(t, ResetProjectRegistry())
+
+	t.Setenv("AGENT_FACTORY_HOME", secondHome)
+	require.FileExists(t, secondBinding.checkoutMarkerPath,
+		"resetting one AF home must not remove another home's checkout identity")
+	again, err := RegisterProject(repo)
+	require.NoError(t, err,
+		"the untouched home must still resolve the checkout after the other home resets")
+	require.Equal(t, second.ID, again.ID)
+	require.Equal(t, second.CheckoutID, again.CheckoutID)
+}
+
+func TestProjectRegistryHomeAliasesShareCheckoutIdentity(t *testing.T) {
+	base := t.TempDir()
+	realHome := filepath.Join(base, "real-home")
+	require.NoError(t, os.MkdirAll(realHome, 0o755))
+	aliasHome := filepath.Join(base, "alias-home")
+	require.NoError(t, os.Symlink(realHome, aliasHome))
+	repo := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+
+	t.Setenv("AGENT_FACTORY_HOME", realHome)
+	registered, err := RegisterProject(repo)
+	require.NoError(t, err)
+	realMarker := projectCheckoutMarkerPath(t, repo)
+
+	t.Setenv("AGENT_FACTORY_HOME", aliasHome)
+	throughAlias, err := RegisterProject(repo)
+	require.NoError(t, err,
+		"two spellings of one AF home must not mint competing checkout identities")
+	require.Equal(t, registered, throughAlias)
+	require.Equal(t, realMarker, projectCheckoutMarkerPath(t, repo))
+}
+
 func TestRegisterProjectLinkedWorktreeUsesMainCheckoutIdentity(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
@@ -336,7 +426,7 @@ func TestRejectedReplacementRegistrationDoesNotMintCheckoutMarker(t *testing.T) 
 	require.NoError(t, os.Rename(originalPath, filepath.Join(base, "old-checkout")))
 
 	replacement := initProjectRegistryRepo(t, originalPath)
-	marker := filepath.Join(replacement, ".git", checkoutMarkerDirName, checkoutMarkerFileName)
+	marker := projectCheckoutMarkerPath(t, replacement)
 	require.NoFileExists(t, marker)
 
 	_, err = RegisterProject(replacement)
@@ -357,13 +447,13 @@ func TestRegisterProjectRejectsCopiedCheckoutMarkerAtTwoLiveRoots(t *testing.T) 
 	firstRoot := initProjectRegistryRepo(t, filepath.Join(base, "first"))
 	first, err := RegisterProject(firstRoot)
 	require.NoError(t, err)
-	markerData, err := os.ReadFile(filepath.Join(firstRoot, ".git", checkoutMarkerDirName, checkoutMarkerFileName))
+	markerData, err := os.ReadFile(projectCheckoutMarkerPath(t, firstRoot))
 	require.NoError(t, err)
 
 	secondRoot := initProjectRegistryRepo(t, filepath.Join(base, "second"))
-	secondMarkerDir := filepath.Join(secondRoot, ".git", checkoutMarkerDirName)
-	require.NoError(t, os.MkdirAll(secondMarkerDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(secondMarkerDir, checkoutMarkerFileName), markerData, 0o644))
+	secondMarker := projectCheckoutMarkerPath(t, secondRoot)
+	require.NoError(t, os.MkdirAll(filepath.Dir(secondMarker), 0o755))
+	require.NoError(t, os.WriteFile(secondMarker, markerData, 0o644))
 	_, err = RegisterProject(secondRoot)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), first.CheckoutID)
@@ -471,6 +561,13 @@ func runProjectRegistryGit(t *testing.T, root string, args ...string) {
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v failed: %s", args, out)
+}
+
+func projectCheckoutMarkerPath(t *testing.T, root string) string {
+	t.Helper()
+	binding, err := resolveProjectBinding(root)
+	require.NoError(t, err)
+	return binding.checkoutMarkerPath
 }
 
 func canonicalExistingPath(t *testing.T, path string) string {

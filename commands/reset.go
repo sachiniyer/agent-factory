@@ -88,6 +88,7 @@ type resetPlan struct {
 	sessions  int                 // live (non-archived) session records
 	archived  int                 // archived session records
 	tasks     int                 // scheduled cron/watch tasks
+	projects  int                 // durable project registrations for this AF home
 	worktrees int                 // AF-managed worktrees (excludes external --here trees)
 	repoRoots map[string]struct{} // distinct repos with AF records (display only)
 	branches  map[string][]string // repoRoot -> AF-created branch names to prune
@@ -130,6 +131,7 @@ type resetSummary struct {
 	sessions  int
 	archived  int
 	tasks     int
+	projects  int
 	worktrees int
 	branches  int // branches actually deleted (<= plan.branchCount())
 	corrupt   int // repos left intact because their records were unreadable
@@ -138,12 +140,13 @@ type resetSummary struct {
 
 var resetCmd = &cobra.Command{
 	Use:   "reset",
-	Short: "Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)",
+	Short: "Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)",
 	Long: `Factory-reset Agent Factory.
 
 Removes every AF-created resource — all sessions (live and archived), all
-scheduled cron/watch tasks, all AF worktrees, the AF session branches AF
-created, and all stored state — returning AF to a clean slate.
+scheduled cron/watch tasks, registered-project bindings and their reachable
+checkout identity markers for this AF home, all AF worktrees, the AF session
+branches AF created, and all stored state — returning AF to a clean slate.
 
 Stops every af daemon running for this AF home — the managed one and any
 orphan left behind by an upgrade or a source build — and removes the daemon
@@ -566,6 +569,11 @@ func planFactoryReset() (*resetPlan, error) {
 		return nil, fmt.Errorf("failed to read tasks: %w", err)
 	}
 	plan.tasks = len(tasks)
+	projects, err := config.ListProjects()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read registered projects: %w", err)
+	}
+	plan.projects = len(projects)
 
 	return plan, nil
 }
@@ -601,12 +609,15 @@ func branchCreatedByAF(w session.GitWorktreeData) bool {
 // whatever a transient failure left behind.
 func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	var errs []error
+	projectsRemoved := 0
 
 	// Project records own checkout markers inside Git common directories. Clear
 	// both while every registered worktree still exists; a blind AF-home wipe
 	// cannot find or safely identify that repo-local state.
 	if err := config.ResetProjectRegistry(); err != nil {
 		errs = append(errs, fmt.Errorf("reset project registry: %w", err))
+	} else {
+		projectsRemoved = plan.projects
 	}
 
 	// Snapshot which AF-created branches exist up front, so the final count is
@@ -742,6 +753,7 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		sessions:  plan.sessions,
 		archived:  plan.archived,
 		tasks:     plan.tasks,
+		projects:  projectsRemoved,
 		worktrees: plan.worktrees,
 		branches:  branchesDeleted,
 		corrupt:   len(plan.corruptRepoIDs),
@@ -880,6 +892,7 @@ func printResetPlan(out io.Writer, plan *resetPlan) {
 	fmt.Fprintln(out, "WILL REMOVE:")
 	fmt.Fprintf(out, "  • %d session(s) and %d archived session(s)\n", plan.sessions, plan.archived)
 	fmt.Fprintf(out, "  • %d scheduled task(s)\n", plan.tasks)
+	fmt.Fprintf(out, "  • %d registered project record(s), plus reachable checkout identity marker(s) for this AF home\n", plan.projects)
 	fmt.Fprintf(out, "  • %d AF worktree(s) across %d repo(s)\n", plan.worktrees, len(plan.repoRoots))
 	fmt.Fprintf(out, "  • %d AF-created session branch(es)\n", plan.branchCount())
 	fmt.Fprintln(out, "  • all AF state (live sessions, archived sessions, events, logs, locks)")
@@ -895,6 +908,7 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 	fmt.Fprintf(out, "  sessions:  %d\n", s.sessions)
 	fmt.Fprintf(out, "  archived:  %d\n", s.archived)
 	fmt.Fprintf(out, "  tasks:     %d\n", s.tasks)
+	fmt.Fprintf(out, "  projects:  %d\n", s.projects)
 	fmt.Fprintf(out, "  worktrees: %d\n", s.worktrees)
 	fmt.Fprintf(out, "  branches:  %d\n", s.branches)
 	if s.corrupt > 0 {
@@ -908,5 +922,5 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 			"Run the recovery command shown with each one below, then re-run `af reset` to finish.\n", s.blocked)
 	}
 	fmt.Fprintln(out, "Preserved: your git repositories and daemon config (config.toml).")
-	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task state and the same config.")
+	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task/project-registration state and the same config.")
 }

@@ -42,8 +42,10 @@ var projectsRegisterCmd = &cobra.Command{
 The returned project id survives an explicit rebind after the checkout moves.
 Two clones remain separate projects. Any directory inside a checkout resolves
 to that checkout's canonical main-repo root, and registration is idempotent for
-the same checkout. Identity is anchored in agent-factory/checkout-id under the
-Git common directory; no working-tree file is created.`,
+the same checkout. Identity is anchored in an AF-home-scoped
+agent-factory/checkout-id-<home-id> marker under the Git common directory, so
+one AF home's reset cannot remove another home's identity. No working-tree file
+is created.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

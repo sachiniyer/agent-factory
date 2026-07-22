@@ -200,7 +200,11 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, config.ProjectRegistryDirName, registered.ID, "project.json")); err != nil {
 		t.Fatalf("registered sessionless project is not durable before reset: %v", err)
 	}
-	checkoutMarker := filepath.Join(repo, ".git", "agent-factory", "checkout-id")
+	checkoutMarkers, err := filepath.Glob(filepath.Join(repo, ".git", "agent-factory", "checkout-id-????????????????????????????????"))
+	if err != nil || len(checkoutMarkers) != 1 {
+		t.Fatalf("registered checkout markers = %v, err = %v, want one", checkoutMarkers, err)
+	}
+	checkoutMarker := checkoutMarkers[0]
 	if _, err := os.Stat(checkoutMarker); err != nil {
 		t.Fatalf("registered checkout marker is not durable before reset: %v", err)
 	}
@@ -231,15 +235,21 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	if _, ok := plan.repoRoots[repo]; !ok || len(plan.repoRoots) != 1 {
 		t.Errorf("repoRoots = %v, want exactly {%s}", plan.repoRoots, repo)
 	}
+	var planOutput strings.Builder
+	printResetPlan(&planOutput, plan)
+	if !strings.Contains(planOutput.String(), "1 registered project record(s)") ||
+		!strings.Contains(planOutput.String(), "checkout identity marker(s)") {
+		t.Errorf("reset plan omitted the sessionless project registration it will remove:\n%s", planOutput.String())
+	}
 
 	// --- Execute ---
 	summary, err := executeFactoryReset(plan)
 	if err != nil {
 		t.Fatalf("executeFactoryReset: %v", err)
 	}
-	if summary.sessions != 3 || summary.archived != 1 || summary.tasks != 2 ||
+	if summary.sessions != 3 || summary.archived != 1 || summary.tasks != 2 || summary.projects != 1 ||
 		summary.worktrees != 3 || summary.branches != 2 || summary.corrupt != 0 {
-		t.Errorf("summary = %+v, want {3 1 2 3 2 0}", *summary)
+		t.Errorf("summary = %+v, want 3 sessions, 1 archived, 2 tasks, 1 project, 3 worktrees, 2 branches, no corruption", *summary)
 	}
 
 	// --- Everything AF is gone ---
@@ -314,14 +324,14 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second planFactoryReset: %v", err)
 	}
-	if plan2.sessions != 0 || plan2.archived != 0 || plan2.tasks != 0 || plan2.branchCount() != 0 {
+	if plan2.sessions != 0 || plan2.archived != 0 || plan2.tasks != 0 || plan2.projects != 0 || plan2.branchCount() != 0 {
 		t.Errorf("second plan not empty: %+v", *plan2)
 	}
 	summary2, err := executeFactoryReset(plan2)
 	if err != nil {
 		t.Fatalf("second executeFactoryReset: %v", err)
 	}
-	if summary2.sessions != 0 || summary2.archived != 0 || summary2.tasks != 0 ||
+	if summary2.sessions != 0 || summary2.archived != 0 || summary2.tasks != 0 || summary2.projects != 0 ||
 		summary2.worktrees != 0 || summary2.branches != 0 {
 		t.Errorf("second summary not empty: %+v", *summary2)
 	}
