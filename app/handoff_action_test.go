@@ -3,6 +3,7 @@ package app
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
@@ -180,6 +181,7 @@ func TestHandleStateSelectHandoffAgent_DropsARecreatedLegacyTarget(t *testing.T)
 	_, _ = h.handleHandoff()
 	require.True(t, h.store.RemoveInstanceByTitle(original.Title))
 	replacement := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	replacement.CreatedAt = original.CreatedAt.Add(time.Second)
 	require.False(t, replacement.CreatedAt.Equal(original.CreatedAt),
 		"fixture requires a distinct legacy identity")
 	h.store.AddInstance(replacement)
