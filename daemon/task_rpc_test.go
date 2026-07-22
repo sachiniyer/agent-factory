@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,14 @@ func enabledCronTask(id, repoPath string) task.Task {
 		Enabled:     true,
 		CreatedAt:   time.Now(),
 	}
+}
+
+func failingReloadTaskScheduler() *taskScheduler {
+	scheduler := newTaskScheduler()
+	scheduler.loadTasks = func() ([]task.Task, error) {
+		return nil, errors.New("forced task reload failure")
+	}
+	return scheduler
 }
 
 // TestControlListTasks_ReadsDisk pins that the ListTasks handler returns the
@@ -97,9 +106,14 @@ func TestControlUpdateTask_PostCommitFailureStillPublishes(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, task.AddTask(enabledCronTask("cccc0002", "")))
 
-	manager := &Manager{events: newEventsHub()}
+	ready := make(chan struct{})
+	close(ready)
+	manager := &Manager{events: newEventsHub(), ready: ready}
 	_, events := manager.events.subscribe()
-	srv := &controlServer{manager: manager} // nil scheduler fails after the write
+	srv := &controlServer{
+		manager:   manager,
+		scheduler: failingReloadTaskScheduler(),
+	}
 	disabled := false
 
 	var resp UpdateTaskResponse

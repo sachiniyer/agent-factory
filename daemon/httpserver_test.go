@@ -142,9 +142,12 @@ func TestHTTP_UpdateTask_PostCommitErrorCarriesOutcome(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// A nil scheduler deterministically fails only after task.UpdateTask has
-	// written the patch, reproducing the ambiguous production outcome.
-	rec := doHTTP(&controlServer{}, http.MethodPost, "/v1/UpdateTask", string(body))
+	// The scheduler admits the mutation's control lock, then fails while
+	// reloading after task.UpdateTask has written the patch. That reproduces the
+	// ambiguous production outcome without turning the failure into a pre-write
+	// admission error.
+	rec := doHTTP(&controlServer{scheduler: failingReloadTaskScheduler()},
+		http.MethodPost, "/v1/UpdateTask", string(body))
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	var env struct {
