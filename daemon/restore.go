@@ -9,42 +9,50 @@ import (
 
 // RestoreSession restores a user-restorable session regardless of how it became
 // unavailable: archived rows use the archive restore path, while Lost/Dead rows
-// run the same Recover path the daemon's automatic Lost loop uses.
-func (m *Manager) RestoreSession(req RestoreSessionRequest) (string, error) {
-	instance, repoID, _, err := m.findSession(req.Title, req.RepoID)
+// run the same Recover path the daemon's automatic Lost loop uses. It returns the
+// canonical stable identity that the operation resolved for event publication.
+// It returns the canonical identity resolved for the operation so the lifecycle
+// event cannot be reconstructed from stale request display fields. A non-empty
+// stable ID is authoritative: a stale queued action fails instead of falling
+// through to a same-title row.
+func (m *Manager) RestoreSession(req RestoreSessionRequest) (string, session.InstanceData, error) {
+	instance, repoID, title, resolvedID, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return "", err
+		return "", session.InstanceData{}, err
 	}
+	resolved := session.InstanceData{ID: resolvedID, Title: title}
 	if instance == nil {
-		return "", fmt.Errorf("cannot restore session %q: no such session", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("cannot restore session %q: no such session", title)
 	}
 
 	switch instance.GetLiveness() {
 	case session.LiveArchived:
-		return m.RestoreArchived(RestoreArchivedRequest{Title: req.Title, RepoID: repoID})
+		path, restoreErr := m.restoreArchivedInstance(instance, repoID, title)
+		return path, resolved, restoreErr
 	case session.LiveLost, session.LiveDead:
-		return m.restoreLostOrDeadSession(req, repoID, instance)
+		path, restoreErr := m.restoreLostOrDeadSession(repoID, title, instance)
+		return path, resolved, restoreErr
 	default:
-		return "", fmt.Errorf("session %q is not archived, lost, or dead", req.Title)
+		return "", session.InstanceData{}, fmt.Errorf("session %q is not archived, lost, or dead", title)
 	}
 }
 
-func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID string, instance *session.Instance) (string, error) {
+func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *session.Instance) (string, error) {
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 	if session.IsReservedTitle(instance.Title) {
-		return "", fmt.Errorf("cannot manually restore reserved session %q", req.Title)
+		return "", fmt.Errorf("cannot manually restore reserved session %q", title)
 	}
 	if !instance.Capabilities().Recover {
-		return "", fmt.Errorf("cannot restore remote session %q: reconnect is not supported", req.Title)
+		return "", fmt.Errorf("cannot restore remote session %q: reconnect is not supported", title)
 	}
 
-	key := daemonInstanceKey(repoID, req.Title)
+	key := daemonInstanceKey(repoID, title)
 	m.mu.Lock()
 	if _, busy := m.killsInFlight[key]; busy {
 		m.mu.Unlock()
-		return "", fmt.Errorf("an operation is already in progress for session %q", req.Title)
+		return "", fmt.Errorf("an operation is already in progress for session %q", title)
 	}
 	m.killsInFlight[key] = struct{}{}
 	m.mu.Unlock()
@@ -62,7 +70,7 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 	current := m.instances[key]
 	m.mu.Unlock()
 	if current != instance {
-		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
+		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
 	view := instance.LifecycleView()
 	if err := view.ValidateRuntimeAction(session.RuntimeActionRestoreLostOrDead); err != nil {
@@ -73,7 +81,7 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 	case session.LiveDead:
 		_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
 	default:
-		return "", fmt.Errorf("session %q changed state before restore could start", req.Title)
+		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
 
 	// The same live recheck the automatic loop runs before re-provisioning
@@ -89,7 +97,7 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 	// the destruction. A user who genuinely wants a new sandbox kills and
 	// recreates (#1794).
 	if m.remoteSandboxAnswersAlive(instance) {
-		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", req.Title)
+		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		m.clearRemoteLoss(remoteLossKey(repoID, instance))
 		m.persistInstance(repoID, instance)

@@ -535,7 +535,7 @@ func TestRestoreSession_PostManualRecoverBlipDoesNotReprovision(t *testing.T) {
 	}
 
 	// The user restores it by hand.
-	if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-manual", RepoID: repoID}); err != nil {
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-manual", RepoID: repoID}); err != nil {
 		t.Fatalf("RestoreSession: %v", err)
 	}
 	if got := backend.recoverCalls(); got != 1 {
@@ -583,7 +583,7 @@ func TestRestoreArchived_RemoteReprovisionClearsDebounce(t *testing.T) {
 
 	// It is archived, then restored — which re-provisions a fresh sandbox.
 	inst.SetStatusForTest(session.Archived)
-	if _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "remote-archived", RepoID: repoID}); err != nil {
+	if _, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "remote-archived", RepoID: repoID}); err != nil {
 		t.Fatalf("RestoreArchived: %v", err)
 	}
 	if got := backend.recoverCalls(); got != 1 {
@@ -631,7 +631,7 @@ func TestRestoreSession_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) {
 	// Marked Lost during an outage; the transport has since healed.
 	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-healed", srv.URL, session.Lost)
 
-	if _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-healed", RepoID: repoID}); err != nil {
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-healed", RepoID: repoID}); err != nil {
 		t.Fatalf("RestoreSession: %v", err)
 	}
 

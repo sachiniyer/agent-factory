@@ -77,7 +77,7 @@ func TestReserveCreate_HeldArchivedBranchRefusesBeforeRename(t *testing.T) {
 
 	// And the archived session is still restorable — the refusal cost the user
 	// nothing, which is the difference between this and the pre-fix behavior.
-	_, rerr := manager.RestoreArchived(RestoreArchivedRequest{Title: "foo", RepoID: repoID})
+	_, _, rerr := manager.RestoreArchived(RestoreArchivedRequest{Title: "foo", RepoID: repoID})
 	require.NoError(t, rerr, "the untouched archived session must still restore under its own name")
 }
 

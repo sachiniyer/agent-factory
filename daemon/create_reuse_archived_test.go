@@ -169,7 +169,7 @@ func TestReserveCreate_ReusesArchivedName(t *testing.T) {
 	assert.Equal(t, session.Archived, rec.Status)
 
 	// The renamed archive is still restorable and brings the original worktree back.
-	restorePath, rerr := manager.RestoreArchived(RestoreArchivedRequest{Title: "foo (archived)", RepoID: repoID})
+	restorePath, _, rerr := manager.RestoreArchived(RestoreArchivedRequest{Title: "foo (archived)", RepoID: repoID})
 	require.NoError(t, rerr, "the renamed archived session must still restore")
 	dirty, drr := os.ReadFile(filepath.Join(restorePath, "dirty.txt"))
 	require.NoError(t, drr, "the original worktree contents must come back on restore")

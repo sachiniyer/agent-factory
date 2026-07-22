@@ -106,10 +106,10 @@ func TestHandleRestore_LostRowRestoresWithoutConfirmation(t *testing.T) {
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	var gotTitle string
+	var gotRequest daemon.RestoreSessionRequest
 	prev := restoreSessionThroughDaemon
-	restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
-		gotTitle = title
+	restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {
+		gotRequest = request
 		return "/worktree/path", nil
 	}
 	defer func() { restoreSessionThroughDaemon = prev }()
@@ -122,10 +122,11 @@ func TestHandleRestore_LostRowRestoresWithoutConfirmation(t *testing.T) {
 	require.NotNil(t, cmd, "Lost restore must dispatch the restore command")
 
 	msg := cmd()
-	require.Equal(t, "worker", gotTitle)
+	require.Equal(t, daemon.RestoreSessionRequest{ID: inst.ID, Title: "worker", RepoID: h.repoID}, gotRequest)
 	done, ok := msg.(instanceRestoredMsg)
 	require.True(t, ok, "the command must emit instanceRestoredMsg")
 	require.NoError(t, done.err)
+	require.Equal(t, inst.ID, done.target.id)
 }
 
 // TestHandleArchive_RestingRowIsNoOp: after the #1605 clean break, `a` on an
@@ -227,19 +228,21 @@ func TestArchiveInstanceCmd_SurfacesError(t *testing.T) {
 func TestRestoreInstanceCmd_CallsDaemon(t *testing.T) {
 	h := newTestHome(t)
 
-	var gotTitle string
+	var gotRequest daemon.RestoreSessionRequest
 	prev := restoreSessionThroughDaemon
-	restoreSessionThroughDaemon = func(title, repoID string) (string, error) {
-		gotTitle = title
+	restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {
+		gotRequest = request
 		return "/worktree/path", nil
 	}
 	defer func() { restoreSessionThroughDaemon = prev }()
 
-	msg := h.restoreInstanceCmd("worker")()
-	require.Equal(t, "worker", gotTitle)
+	target := sessionActionTarget{id: "session-id", title: "worker", repoID: h.repoID}
+	msg := h.restoreInstanceCmd(target)()
+	require.Equal(t, target.restoreRequest(), gotRequest)
 	done, ok := msg.(instanceRestoredMsg)
 	require.True(t, ok, "the command must emit instanceRestoredMsg")
 	require.NoError(t, done.err)
+	require.Equal(t, target, done.target)
 }
 
 func TestHandleInstanceRestored_LostRowMarksLive(t *testing.T) {
@@ -248,7 +251,8 @@ func TestHandleInstanceRestored_LostRowMarksLive(t *testing.T) {
 	inst.SetInFlightOpForTest(session.OpRestoring)
 	h.store.AddInstance(inst)
 
-	model, _ := h.handleInstanceRestored(instanceRestoredMsg{title: "worker"})
+	target := captureSessionActionTarget(inst, h.repoID)
+	model, _ := h.handleInstanceRestored(instanceRestoredMsg{target: target})
 	h = model.(*home)
 
 	require.Equal(t, session.Running, inst.GetStatus())

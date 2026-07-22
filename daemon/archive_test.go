@@ -272,7 +272,7 @@ func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
 	expected, perr := sessiongit.RestoreWorktreePath(repoPath, "worker", inst.GetBranch())
 	require.NoError(t, perr)
 
-	worktreePath, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	worktreePath, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 
 	assert.Equal(t, expected, worktreePath, "restore must land the worktree at the standard sibling location")
@@ -302,7 +302,7 @@ func TestRestoreArchived_RejectsNonArchived(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerArchivable(t, manager, repoID, repoPath, "worker") // status Ready
 
-	_, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not archived")
 }
@@ -330,7 +330,7 @@ func TestRestoreArchived_RejectsPendingKill(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, inst.UserKilled(), "the failed kill must leave its terminal intent on the retained row")
 
-	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err, "restore must not revive a session whose kill is pending")
 	assert.Contains(t, err.Error(), "pending kill", "the refusal must explain why retrying restore cannot work")
 	assert.Equal(t, session.Archived, inst.GetStatus())
@@ -352,7 +352,7 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 
 	require.NoError(t, os.RemoveAll(repoPath), "simulate the origin repo being deleted")
 
-	_, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gone")
 	assert.True(t, exists(archivedPath), "the archived worktree must be left intact when the repo is gone")
@@ -374,7 +374,7 @@ func TestRestoreArchived_CollisionSuffixesPath(t *testing.T) {
 	require.NoError(t, perr)
 	require.NoError(t, os.MkdirAll(base, 0755))
 
-	worktreePath, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	worktreePath, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	assert.Equal(t, base+"-2", worktreePath, "restore must avoid clobbering an occupied sibling path")
 	assert.True(t, exists(filepath.Join(worktreePath, "dirty.txt")))

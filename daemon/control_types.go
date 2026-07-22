@@ -112,6 +112,11 @@ type ArchiveSessionResponse struct {
 type RestoreArchivedRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// ID is the session's stable id; see KillSessionRequest.ID. When non-empty
+	// the daemon resolves the archived row by id first and never falls back to a
+	// same-title replacement. Title+repo remains the one-shot CLI compatibility
+	// path.
+	ID string `json:"id"`
 }
 
 type RestoreArchivedResponse struct {
@@ -126,6 +131,10 @@ type RestoreArchivedResponse struct {
 type RestoreSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// ID is the session's stable id; see KillSessionRequest.ID. Retained UI
+	// actions send it so a restore queued for one row cannot resurrect a
+	// different session that reuses the title before dispatch.
+	ID string `json:"id"`
 }
 
 type RestoreSessionResponse struct {

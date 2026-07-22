@@ -390,7 +390,8 @@ func TestHandleInstanceRestored_FailureDropsBackToArchived(t *testing.T) {
 	h.store.AddInstance(inst)
 	require.False(t, inst.ShownArchived(), "precondition: eagerly re-homed to Instances")
 
-	h.handleInstanceRestored(instanceRestoredMsg{title: "worker", err: fmt.Errorf("origin repo gone")})
+	target := captureSessionActionTarget(inst, h.repoID)
+	h.handleInstanceRestored(instanceRestoredMsg{target: target, err: fmt.Errorf("origin repo gone")})
 
 	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "a failed restore clears the overlay")
 	require.True(t, inst.ShownArchived(),

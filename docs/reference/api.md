@@ -19,8 +19,8 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/Snapshot` | `repo_id` | List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos). |
 | `POST` | `/v1/KillSession` | `title`, `repo_id`, `id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
 | `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record. |
-| `POST` | `/v1/RestoreArchived` | `title`, `repo_id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
-| `POST` | `/v1/RestoreSession` | `title`, `repo_id` | Restore an archived, Lost, or Dead session. |
+| `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
+| `POST` | `/v1/RestoreSession` | `title`, `repo_id`, `id` | Restore an archived, Lost, or Dead session. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt`, `id` | Send a prompt to an existing session's agent. |
 | `POST` | `/v1/ResumeFromLimit` | `title`, `repo_id`, `id` | Resume a usage-limit-blocked session: re-spawn if needed, re-deliver the pending prompt, clear the limit. |
 | `POST` | `/v1/HandoffSession` | `title`, `repo_id`, `id`, `to`, `brief` | Continue a session under a different agent, in place: swap its agent program, keep its worktree and branch, and deliver a mission brief to the new agent. |

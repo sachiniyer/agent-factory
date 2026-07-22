@@ -409,9 +409,9 @@ func (m *Manager) trackedSessionByIDLocked(id string) (*session.Instance, string
 	return nil, ""
 }
 
-// resolveActionSession resolves a write-action target (kill/archive/send-prompt)
-// by the caller-supplied stable id FIRST — the web client's collision-proof key —
-// and falls back to {title, repoID} only when NO id is given (TUI/CLI callers).
+// resolveActionSession resolves a session mutation target by the caller-supplied
+// stable id FIRST — the retained clients' collision-proof key — and falls back
+// to {title, repoID} only when NO id is given (legacy/one-shot CLI callers).
 // Resolving by id is what stops a duplicate title across repos from targeting the
 // WRONG session on a destructive action: findSession with an empty repoID returns
 // the first title match in nondeterministic map order (#1592 Phase 5 follow-up).
@@ -580,34 +580,4 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	m.instances[key] = instance
 	m.mu.Unlock()
 	return instance, rid, data, nil
-}
-
-// stableIDFor resolves the stable session id (session.InstanceData.ID, #1195)
-// of the tracked session (repoID, title) from the in-memory instance map — the
-// same fast-path lookup findSession uses — WITHOUT the disk fallback or restore
-// side effects findSession performs. It exists so the control server can stamp
-// the stable id onto the delete-class lifecycle events (killed/archived/
-// restored), which historically carried only the title and forced clients to
-// key their session lists by title — wrong when titles collide across repos
-// (#1592 Phase 5 PR5). Returns "" for a session not tracked in memory (a
-// legacy/disk-only record that never appears in a live Snapshot, hence never in
-// a client's rail); the empty id is the client's title-fallback signal.
-func (m *Manager) stableIDFor(repoID, title string) string {
-	if title == "" {
-		return ""
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if repoID != "" {
-		if inst := m.instances[daemonInstanceKey(repoID, title)]; inst != nil {
-			return inst.ID
-		}
-		return ""
-	}
-	for _, inst := range m.instances {
-		if inst.Title == title {
-			return inst.ID
-		}
-	}
-	return ""
 }

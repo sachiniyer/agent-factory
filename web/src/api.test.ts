@@ -175,28 +175,17 @@ test("archiveSession posts the stable id alongside the title", async () => {
   assert.equal(cap.body.repo_id, "");
 });
 
-// restoreSession is the archive round-trip's missing return leg (#1932): the web
-// could archive but never restore. Unlike kill/archive it resolves by TITLE only —
-// the daemon's RestoreSessionRequest (daemon/control_types.go) has no `id` field —
-// so these pin BOTH that it hits the RestoreSession route the CLI/TUI use AND that
-// it sends NO `id`: a web request carries no client-version header, so the daemon
-// decodes with DisallowUnknownFields and a stray `id` would be a 400.
-test("restoreSession posts to RestoreSession by title, with an empty repo_id", async () => {
+// Restore is retained intent too: the confirmation may outlive the row it names,
+// so it sends the same stable session id as archive/kill and cannot retarget a
+// same-title replacement before the user confirms.
+test("restoreSession posts the stable id alongside the title", async () => {
   const cap = stubFetch();
-  await restoreSession("feature", "tok");
+  await restoreSession("id-repoB", "feature", "tok");
   assert.equal(cap.url, "/v1/RestoreSession", "must hit the same route af sessions restore / the TUI `r` use");
   assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.body.id, "id-repoB", "id must be sent so title reuse cannot redirect the restore");
   assert.equal(cap.body.title, "feature");
   assert.equal(cap.body.repo_id, "", "web is an all-repos client; repo_id stays empty, as it does for archive/kill");
-});
-
-test("restoreSession does NOT send an id (RestoreSessionRequest has no id field)", async () => {
-  const cap = stubFetch();
-  await restoreSession("feature", "tok");
-  // The daemon decodes web requests with DisallowUnknownFields; an `id` key it does
-  // not know would be rejected as a 400 "unknown field". Archive/kill send `id`
-  // only because THEIR request structs accept it — restore's does not.
-  assert.equal("id" in cap.body, false, "no id key may reach the daemon, or DisallowUnknownFields 400s the restore");
 });
 
 test("createTab / closeTab post the stable id alongside the title", async () => {
