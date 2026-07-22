@@ -216,6 +216,51 @@ func TestHandleStateSelectHandoffAgent_KeepsARebuiltLegacyTarget(t *testing.T) {
 	require.NotNil(t, h.confirmationOverlay)
 }
 
+func legacyHandoffAtConfirmation(t *testing.T) (*home, *session.Instance) {
+	t.Helper()
+	h := newTestHome(t)
+	original := handoffActionInstance(t, "worker", tmux.ProgramClaude)
+	original.ID = ""
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+	h.selectionOverlay.SetSelectedIndex(0)
+	_, _ = h.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, stateConfirm, h.state)
+	return h, original
+}
+
+func replaceLegacyHandoffTarget(t *testing.T, h *home, original *session.Instance) {
+	t.Helper()
+	require.True(t, h.store.RemoveInstanceByTitle(original.Title))
+	replacement := handoffActionInstance(t, original.Title, tmux.ProgramClaude)
+	replacement.CreatedAt = original.CreatedAt.Add(time.Second)
+	h.store.AddInstance(replacement)
+}
+
+func TestHandleStateSelectHandoffAgent_RechecksLegacyTargetAtConfirmation(t *testing.T) {
+	h, original := legacyHandoffAtConfirmation(t)
+	replaceLegacyHandoffTarget(t, h, original)
+
+	_, cmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	require.Nil(t, cmd, "a replacement during confirmation must not inherit the pending handoff")
+}
+
+func TestStartHandoffMsg_RechecksLegacyTargetAtDispatch(t *testing.T) {
+	h, original := legacyHandoffAtConfirmation(t)
+	_, cmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.NotNil(t, cmd)
+	start, ok := cmd().(startHandoffMsg)
+	require.True(t, ok)
+
+	replaceLegacyHandoffTarget(t, h, original)
+	_, dispatch := h.Update(start)
+
+	require.Nil(t, dispatch, "a replacement before async dispatch must not inherit the pending handoff")
+}
+
 // Cancelling the picker must leave the session untouched.
 func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 	h := newTestHome(t)
