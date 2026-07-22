@@ -46,8 +46,8 @@ func TestEnsureDaemonPrefersHomeServingUnit(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("bounded systemctl start was not invoked: %v", err)
 	}
-	if _, err := os.Stat(marker + ".reset"); err != nil {
-		t.Fatalf("retained systemd start-limit state was not reset before start: %v", err)
+	if _, err := os.Stat(marker + ".unexpected-reset"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("implicit cold start reset the crash-loop backstop; marker stat = %v", err)
 	}
 }
 
@@ -275,15 +275,11 @@ func installEnsureTestUnitAndManager(t *testing.T, block bool) (string, string) 
 	marker := filepath.Join(managerDir, "start-called")
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"--user\" ] && [ \"$2\" = \"reset-failed\" ] && [ \"$3\" = \"" + autostartUnitName + "\" ]; then\n" +
-		"  printf 'reset\\n' > " + shellQuote(marker+".reset") + "\n" +
+		"  printf 'reset\\n' > " + shellQuote(marker+".unexpected-reset") + "\n" +
 		"  exit 0\n" +
 		"fi\n" +
 		"if [ \"$1\" != \"--user\" ] || [ \"$2\" != \"start\" ] || [ \"$3\" != \"" + autostartUnitName + "\" ]; then\n" +
 		"  exit 64\n" +
-		"fi\n" +
-		"if [ ! -f " + shellQuote(marker+".reset") + " ]; then\n" +
-		"  printf 'start-limit-hit\\n' >&2\n" +
-		"  exit 1\n" +
 		"fi\n" +
 		"printf 'called\\n' > " + shellQuote(marker) + "\n"
 	if block {

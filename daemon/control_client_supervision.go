@@ -62,19 +62,14 @@ const (
 func runEnsureUnitStartCommand(deadline time.Time) error {
 	switch autostartGOOS {
 	case "linux":
-		resetErr := runEnsureManagerCommand(
-			deadline, "systemctl", "--user", "reset-failed", autostartUnitName,
-		)
-		startErr := runEnsureManagerCommand(
+		// Do not reset-failed here. EnsureDaemon is implicit in ordinary client
+		// calls, so clearing the retained state on every call would turn Phase
+		// 1's bounded crash loop into another restart burst per TUI/RPC action.
+		// Explicit install/restart/resume operations remain the recovery paths
+		// that deliberately clear a repaired unit's start-limit state.
+		return runEnsureManagerCommand(
 			deadline, "systemctl", "--user", "start", autostartUnitName,
 		)
-		if startErr == nil {
-			return nil
-		}
-		if resetErr != nil {
-			return fmt.Errorf("could not clear retained systemd failure state: %v; %w", resetErr, startErr)
-		}
-		return startErr
 	case "darwin":
 		return runEnsureManagerCommand(
 			deadline, "launchctl", "kickstart", "-k", launchdServiceTarget(),
