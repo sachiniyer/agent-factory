@@ -614,8 +614,9 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// Project records own checkout markers inside Git common directories. Clear
 	// both while every registered worktree still exists; a blind AF-home wipe
 	// cannot find or safely identify that repo-local state.
-	if err := config.ResetProjectRegistry(); err != nil {
-		errs = append(errs, fmt.Errorf("reset project registry: %w", err))
+	registryErr := config.ResetProjectRegistry()
+	if registryErr != nil {
+		errs = append(errs, fmt.Errorf("reset project registry: %w", registryErr))
 	} else {
 		projectsRemoved = plan.projects
 	}

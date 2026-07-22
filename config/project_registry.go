@@ -148,15 +148,9 @@ func ResetProjectRegistry() error {
 		}
 
 		for marker := range markers {
-			if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove checkout marker %s: %w", marker, err)
+			if err := removeCheckoutMarker(marker); err != nil {
+				return err
 			}
-			if err := os.Remove(marker + ".lock"); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove checkout marker lock %s: %w", marker+".lock", err)
-			}
-			// The directory is AF-owned, but future marker files may share it.
-			// Remove it only when empty; any error is therefore a safe keep.
-			_ = os.Remove(filepath.Dir(marker))
 		}
 		if err := os.RemoveAll(dir); err != nil {
 			return fmt.Errorf("remove project registry %s: %w", dir, err)
@@ -607,13 +601,27 @@ func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
 		if _, statErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(statErr, os.ErrNotExist) {
 			return false, nil
 		}
-		return false, fmt.Errorf("inspect last-known project root %s: %w", root, err)
+		return false, fmt.Errorf("inspect existing Git metadata at last-known project root %s: %w", root, err)
 	}
 	id, exists, err := readCheckoutID(binding.checkoutMarkerPath)
 	if err != nil {
 		return false, err
 	}
 	return exists && id == checkoutID, nil
+}
+
+// removeCheckoutMarker removes only the current AF home's marker path. The
+// containing directory is shared by other home-scoped markers, so it is removed
+// only if empty.
+func removeCheckoutMarker(marker string) error {
+	if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove checkout marker %s: %w", marker, err)
+	}
+	if err := os.Remove(marker + ".lock"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove checkout marker lock %s: %w", marker+".lock", err)
+	}
+	_ = os.Remove(filepath.Dir(marker))
+	return nil
 }
 
 func projectRootUsesGitCommonDir(root, commonDir string) bool {
