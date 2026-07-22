@@ -1,6 +1,7 @@
 package upgradetxn
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -378,9 +379,13 @@ func validateDaemonSnapshot(snapshot DaemonSnapshot) error {
 		if snapshot.Owner.ServiceName != "" {
 			return errors.New("ad-hoc daemon owner cannot name a service")
 		}
-	case SupervisionSystemd, SupervisionLaunchd:
-		if strings.TrimSpace(snapshot.Owner.ServiceName) == "" {
-			return errors.New("service-managed daemon owner omits its service name")
+	case SupervisionSystemd:
+		if snapshot.Owner.ServiceName != systemdDaemonService {
+			return fmt.Errorf("systemd daemon owner must be %q", systemdDaemonService)
+		}
+	case SupervisionLaunchd:
+		if snapshot.Owner.ServiceName != launchdDaemonService {
+			return fmt.Errorf("launchd daemon owner must be %q", launchdDaemonService)
 		}
 	default:
 		return fmt.Errorf("journal contains invalid daemon supervision kind %q", snapshot.Owner.Kind)
@@ -792,6 +797,9 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 	if err := removeDurableFile(t.journal.CandidatePath); err != nil {
 		return fmt.Errorf("remove inactive candidate artifact: %w", err)
 	}
+	if err := removeExactRecoveryUnit(t.journal); err != nil {
+		return err
+	}
 	if err := removeDurableTree(transactionDir(t.journal.HomeDir, t.journal.ID)); err != nil {
 		return fmt.Errorf("remove inactive transaction directory: %w", err)
 	}
@@ -800,6 +808,40 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 	}
 	if err := removeDurableFile(recoveryLockPath(t.journal.HomeDir, t.journal.ID)); err != nil {
 		return fmt.Errorf("remove inactive recovery lock: %w", err)
+	}
+	return nil
+}
+
+func removeExactRecoveryUnit(journal Journal) error {
+	if journal.RecoveryJob.Kind == RecoveryJobDetached {
+		return nil
+	}
+	var expected []byte
+	switch journal.RecoveryJob.Kind {
+	case RecoveryJobSystemd:
+		expected = []byte(renderSystemdRecoveryUnit(journal))
+	case RecoveryJobLaunchd:
+		expected = []byte(renderLaunchdRecoveryPlist(journal))
+	default:
+		return fmt.Errorf("cannot remove invalid recovery job kind %q", journal.RecoveryJob.Kind)
+	}
+	data, err := os.ReadFile(journal.RecoveryJob.UnitPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read recovery unit before cleanup: %w", err)
+	}
+	info, err := os.Lstat(journal.RecoveryJob.UnitPath)
+	if err != nil {
+		return fmt.Errorf("inspect recovery unit before cleanup: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm() != recoveryUnitMode || !bytes.Equal(data, expected) {
+		return errors.New("refusing to remove a recovery unit that no longer matches the transaction")
+	}
+	if err := removeDurableFile(journal.RecoveryJob.UnitPath); err != nil {
+		return fmt.Errorf("remove inactive recovery unit: %w", err)
 	}
 	return nil
 }

@@ -535,7 +535,9 @@ func TestRollbackFailedRemainsTerminalWhenJobDisableReportsAnError(t *testing.T)
 
 	err = (Supervisor{Operations: runtime.operations()}).Run(context.Background(), txn, lease)
 	require.ErrorIs(t, err, ErrRollbackRecoveryFailed,
-		"the recovery launcher must still recognize a terminal failure and avoid restart-looping")
+		"the durable circuit-breaker phase remains terminal")
+	require.ErrorIs(t, err, ErrRecoveryJobDisableFailed,
+		"the runner must not exit cleanly while the service manager can still restart this actor")
 	require.ErrorContains(t, err, "service manager unavailable")
 	require.NoError(t, lease.Release())
 }

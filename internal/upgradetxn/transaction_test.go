@@ -60,6 +60,20 @@ func TestRecoveryJobIdentityIsTransactionScopedAndJournaled(t *testing.T) {
 	require.Error(t, validateRecoveryJob("txn-2212", tampered))
 }
 
+func TestDaemonOwnerCannotNameAnUnrelatedService(t *testing.T) {
+	for _, owner := range []DaemonOwner{
+		{Kind: SupervisionSystemd, ServiceName: "unrelated.service"},
+		{Kind: SupervisionLaunchd, ServiceName: "com.example.unrelated"},
+	} {
+		err := validateDaemonSnapshot(DaemonSnapshot{
+			WasRunning: true,
+			BootID:     "previous-boot",
+			Owner:      owner,
+		})
+		require.ErrorContains(t, err, "daemon owner must be")
+	}
+}
+
 func TestRecoveryMutationAuthorityRequiresPreservedBinary(t *testing.T) {
 	txn, _, _ := prepareFixture(t)
 	lease, err := txn.TryAcquireRecovery()

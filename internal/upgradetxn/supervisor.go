@@ -26,6 +26,11 @@ var (
 	// and the active journal remain for explicit repair while the persistent job
 	// is disabled, so a corrupt snapshot cannot create a restart loop.
 	ErrRollbackRecoveryFailed = errors.New("automatic upgrade rollback failed; recovery artifacts retained")
+	// ErrRecoveryJobDisableFailed distinguishes a durable rollback circuit
+	// breaker from failure to disarm the service manager. A recovery actor may
+	// exit cleanly for the former, but must fail so the manager retries the
+	// latter instead of silently abandoning an enabled recovery job.
+	ErrRecoveryJobDisableFailed = errors.New("upgrade recovery job could not be disabled")
 
 	errSupervisorInterruptedBeforeShutdown = errors.New("upgrade supervisor restarted before daemon shutdown")
 	errSupervisorInterruptedBeforeCommit   = errors.New("upgrade supervisor restarted before candidate commit")
@@ -341,7 +346,8 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			if err := s.Operations.DisableRecoveryJob(ctx, journal); err != nil {
 				return errors.Join(
 					ErrRollbackRecoveryFailed,
-					fmt.Errorf("disable failed rollback recovery job: %w", err),
+					ErrRecoveryJobDisableFailed,
+					err,
 				)
 			}
 			return ErrRollbackRecoveryFailed
@@ -466,7 +472,12 @@ func (s Supervisor) finishFailedRollback(
 		return errors.Join(cause, fmt.Errorf("persist rollback failure: %w", err))
 	}
 	if err := s.Operations.DisableRecoveryJob(ctx, txn.Journal()); err != nil {
-		return errors.Join(ErrRollbackRecoveryFailed, cause, fmt.Errorf("disable failed rollback recovery job: %w", err))
+		return errors.Join(
+			ErrRollbackRecoveryFailed,
+			cause,
+			ErrRecoveryJobDisableFailed,
+			err,
+		)
 	}
 	return errors.Join(ErrRollbackRecoveryFailed, cause)
 }
