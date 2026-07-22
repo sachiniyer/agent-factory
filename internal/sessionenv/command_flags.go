@@ -138,33 +138,27 @@ func directAgentFlagState(call *syntax.CallExpr, agent, name string) (found, ena
 }
 
 func envAgentFlagState(assignments []*syntax.Assign, words []*syntax.Word, agent, name string) (found, enabled, ok bool) {
-	agentIndex := -1
-	for idx, word := range words {
-		if wordBaseEquals(word, agent) {
-			agentIndex = idx
-			break
-		}
-	}
-	if agentIndex < 0 {
-		return false, false, false
-	}
-
-	args := make([]string, 0, agentIndex+1)
+	args := make([]string, 0, len(words))
 	dynamicValues := make(map[string]struct{})
-	for idx, word := range words[:agentIndex+1] {
+	for idx, word := range words {
 		value, literal := literalShellWord(word)
 		if !literal {
 			assignmentName, assignment := shellWordAssignmentName(word)
-			if !assignment {
-				return false, false, false
+			if assignment {
+				value = fmt.Sprintf("%s=AF_DYNAMIC_VALUE_%d", assignmentName, idx)
+				dynamicValues[value] = struct{}{}
+			} else {
+				// Parse still needs a placeholder to locate env's command. If this
+				// dynamic word is the command, the placeholder cannot match agent;
+				// if it follows the literal command, Parse has already stopped.
+				value = fmt.Sprintf("AF_DYNAMIC_WORD_%d", idx)
 			}
-			value = fmt.Sprintf("%s=AF_DYNAMIC_VALUE_%d", assignmentName, idx)
-			dynamicValues[value] = struct{}{}
 		}
 		args = append(args, value)
 	}
 	invocation, err := envcommand.Parse(args, envcommand.Policy{AllowAssignments: true})
-	if err != nil || invocation.CommandIndex != agentIndex {
+	if err != nil || invocation.CommandIndex < 0 || invocation.CommandIndex >= len(args) ||
+		!strings.EqualFold(filepath.Base(args[invocation.CommandIndex]), agent) {
 		return false, false, false
 	}
 

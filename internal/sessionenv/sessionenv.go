@@ -246,7 +246,8 @@ func DockerCLIEnvironment(source []string, _ string, extras []string) []string {
 	out := make([]string, 0, len(source))
 	for _, entry := range source {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && allowedName(allowed, name) {
+		_, explicitlyAllowed := allowed[name]
+		if ok && explicitlyAllowed {
 			out = append(out, entry)
 		}
 	}

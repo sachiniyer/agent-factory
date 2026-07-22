@@ -49,6 +49,38 @@ func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t
 	}
 }
 
+func TestProvisionEnvironmentGrantReachesRuntimeWithoutBecomingDurable(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	runtime := &specCapturingRuntime{res: ProvisionResult{Backend: NewFakeBackend()}}
+	restore := SetRuntimeForTest(BackendDocker, func() Runtime { return runtime })
+	t.Cleanup(restore)
+
+	instance, err := NewInstance(InstanceOptions{
+		Title:                          "provision-only-env",
+		Path:                           repoRoot,
+		Backend:                        BackendDocker,
+		SessionEnvPassthrough:          []string{"DURABLE_OUTER_TOKEN"},
+		ProvisionSessionEnvPassthrough: []string{"CURRENT_GLOBAL_TOKEN"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"CURRENT_GLOBAL_TOKEN", "DURABLE_OUTER_TOKEN"} {
+		if !slices.Contains(runtime.spec.SessionEnvPassthrough, name) {
+			t.Fatalf("runtime provisioning omitted environment name %s", name)
+		}
+	}
+	instance.mu.RLock()
+	durable := append([]string(nil), instance.sessionEnvPassthrough...)
+	instance.mu.RUnlock()
+	if slices.Contains(durable, "CURRENT_GLOBAL_TOKEN") {
+		t.Fatal("one-create global environment grant became a durable per-instance grant")
+	}
+	if !slices.Contains(durable, "DURABLE_OUTER_TOKEN") {
+		t.Fatal("explicit outer-runtime environment grant was not retained")
+	}
+}
+
 func TestHookEnvironmentUsesResolvedProgramOverride(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "test-value")

@@ -108,13 +108,14 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 	}
 }
 
-func TestManagerCreateSessionReloadsConfiguredSessionEnvironment(t *testing.T) {
+func TestManagerCreateSessionDoesNotPersistGlobalEnvironmentGrant(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 
-	var got []string
+	var persisted, provisioned []string
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
-		got = append([]string(nil), opts.SessionEnvPassthrough...)
+		persisted = append([]string(nil), opts.SessionEnvPassthrough...)
+		provisioned = append([]string(nil), opts.ProvisionSessionEnvPassthrough...)
 		backend := session.NewFakeBackend()
 		backend.CompleteStart()
 		return readyFakeBackend{backend}, nil
@@ -142,8 +143,11 @@ func TestManagerCreateSessionReloadsConfiguredSessionEnvironment(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if len(got) != 1 || got[0] != "CURRENT_PROVIDER_TOKEN" {
-		t.Fatalf("backend received session environment names %v, want the current on-disk exact name", got)
+	if len(persisted) != 0 {
+		t.Fatalf("daemon persisted global session environment names %v as durable per-instance grants", persisted)
+	}
+	if len(provisioned) != 1 || provisioned[0] != "CURRENT_PROVIDER_TOKEN" {
+		t.Fatalf("backend received provisioning environment names %v, want the current on-disk exact name", provisioned)
 	}
 }
 

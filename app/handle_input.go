@@ -240,11 +240,11 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 		}
 	}
 	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:                 "",
-		Path:                  repoPath,
-		Program:               m.pendingProgram,
-		ForceRemote:           remote,
-		SessionEnvPassthrough: append([]string(nil), m.appConfig.SessionEnvPassthrough...),
+		Title:                          "",
+		Path:                           repoPath,
+		Program:                        m.pendingProgram,
+		ForceRemote:                    remote,
+		ProvisionSessionEnvPassthrough: append([]string(nil), m.appConfig.SessionEnvPassthrough...),
 	})
 	if err != nil {
 		return m, m.handleError(err)

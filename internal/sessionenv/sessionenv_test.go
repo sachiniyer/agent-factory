@@ -123,6 +123,7 @@ func TestFilterForCommandHonorsLiteralClaudeCloudModeSelectors(t *testing.T) {
 	commands := []string{
 		"CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env CLAUDE_CODE_USE_BEDROCK=true claude",
+		"env PATH=/opt/claude CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"env -i CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"/srv/af agent-server --listen :43110 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved",
 		"exec /srv/af agent-server --listen 127.0.0.1:0 --repo /workspace --title test --program 'CLAUDE_CODE_USE_BEDROCK=1 claude' --program-resolved --session-env CUSTOM_TOKEN",
@@ -231,15 +232,16 @@ func TestDockerForwardNamesCarriesOnlyExplicitNamesWhenPresent(t *testing.T) {
 		"HTTPS_PROXY=present",
 		"UNRELATED_DATABASE_KEY=present",
 		"CUSTOM_PROVIDER_TOKEN=present",
+		"LC_PACKAGE_TOKEN=present",
 	}
-	extras := []string{"CUSTOM_PROVIDER_TOKEN", "GH_TOKEN", "HTTPS_PROXY", "OPENAI_API_KEY"}
+	extras := []string{"CUSTOM_PROVIDER_TOKEN", "GH_TOKEN", "HTTPS_PROXY", "LC_PACKAGE_TOKEN", "OPENAI_API_KEY"}
 	got := DockerForwardNames(source, "codex", extras)
-	want := []string{"CUSTOM_PROVIDER_TOKEN", "GH_TOKEN", "HTTPS_PROXY", "OPENAI_API_KEY"}
+	want := []string{"CUSTOM_PROVIDER_TOKEN", "GH_TOKEN", "HTTPS_PROXY", "LC_PACKAGE_TOKEN", "OPENAI_API_KEY"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("DockerForwardNames() = %v, want %v", got, want)
 	}
 	client := DockerCLIEnvironment(source, "codex", extras)
-	for _, wantEntry := range []string{"CUSTOM_PROVIDER_TOKEN=present", "GH_TOKEN=present", "HTTPS_PROXY=present", "OPENAI_API_KEY=present"} {
+	for _, wantEntry := range []string{"CUSTOM_PROVIDER_TOKEN=present", "GH_TOKEN=present", "HTTPS_PROXY=present", "LC_PACKAGE_TOKEN=present", "OPENAI_API_KEY=present"} {
 		if !slices.Contains(client, wantEntry) {
 			t.Fatalf("explicit Docker trust grant omitted %s", strings.SplitN(wantEntry, "=", 2)[0])
 		}
@@ -253,10 +255,11 @@ func TestDockerRepoSelectedImageDoesNotReceiveBuiltInCredentials(t *testing.T) {
 		"OPENAI_API_KEY=fixture",
 		"HTTPS_PROXY=fixture",
 		"SSL_CERT_FILE=/fixture/ca.pem",
+		"LC_SECRET_TOKEN=fixture",
 	}
 	for _, entry := range DockerCLIEnvironment(source, "codex", nil) {
 		name, _, _ := strings.Cut(entry, "=")
-		for _, denied := range []string{"GH_TOKEN", "OPENAI_API_KEY", "HTTPS_PROXY", "SSL_CERT_FILE"} {
+		for _, denied := range []string{"GH_TOKEN", "OPENAI_API_KEY", "HTTPS_PROXY", "SSL_CERT_FILE", "LC_SECRET_TOKEN"} {
 			if name == denied {
 				t.Fatalf("Docker CLI environment exposed built-in variable %s to repo-controlled run arguments", name)
 			}

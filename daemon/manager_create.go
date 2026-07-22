@@ -121,16 +121,16 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 
 	instance, err := session.NewInstance(session.InstanceOptions{
-		ID:                    pending.ID,
-		CreatedAt:             pending.CreatedAt,
-		Title:                 title,
-		TaskID:                req.TaskID,
-		Path:                  repo.Root,
-		Program:               req.Program,
-		InPlace:               req.InPlace,
-		ForceRemote:           req.ForceRemote,
-		Backend:               session.BackendKind(req.Backend),
-		SessionEnvPassthrough: append([]string(nil), currentConfig.SessionEnvPassthrough...),
+		ID:                             pending.ID,
+		CreatedAt:                      pending.CreatedAt,
+		Title:                          title,
+		TaskID:                         req.TaskID,
+		Path:                           repo.Root,
+		Program:                        req.Program,
+		InPlace:                        req.InPlace,
+		ForceRemote:                    req.ForceRemote,
+		Backend:                        session.BackendKind(req.Backend),
+		ProvisionSessionEnvPassthrough: append([]string(nil), currentConfig.SessionEnvPassthrough...),
 	})
 	if err != nil {
 		return session.InstanceData{}, err

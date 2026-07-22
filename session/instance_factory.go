@@ -57,10 +57,15 @@ type InstanceOptions struct {
 	// fill this in yet (PR3-PR5); it is exercised by the out-of-process round-trip
 	// test.
 	RemoteAgentServer *AgentServerEndpoint
-	// SessionEnvPassthrough carries exact, operator-approved environment names
-	// into an out-of-process agent-server. Ordinary local callers leave it empty
-	// and use the global session_env_passthrough config key.
+	// SessionEnvPassthrough carries durable exact-name grants delegated by an
+	// outer agent-server. Ordinary daemon/local callers leave it empty and read
+	// the current global session_env_passthrough config on each launch.
 	SessionEnvPassthrough []string
+	// ProvisionSessionEnvPassthrough carries a current global-config snapshot to
+	// the runtime factory for this create only. It is deliberately not retained
+	// on the Instance: a removed global grant must disappear from later respawns,
+	// handoffs, archive restores, and config-agent launches without a restart.
+	ProvisionSessionEnvPassthrough []string
 }
 
 // backendFactory provisions the runtime for a new Instance, returning the
@@ -91,11 +96,18 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	if err != nil {
 		return ProvisionResult{}, err
 	}
+	provisionSessionEnv, err := sessionenv.NormalizeExtraNames(append(
+		append([]string(nil), opts.SessionEnvPassthrough...),
+		opts.ProvisionSessionEnvPassthrough...,
+	))
+	if err != nil {
+		return ProvisionResult{}, fmt.Errorf("invalid provisioning session environment pass-through: %w", err)
+	}
 	spec := ProvisionSpec{
 		RepoRoot:              absPath,
 		Title:                 opts.Title,
 		Program:               opts.Program,
-		SessionEnvPassthrough: append([]string(nil), opts.SessionEnvPassthrough...),
+		SessionEnvPassthrough: provisionSessionEnv,
 	}
 	// An off-box runtime clones the workspace from the repo's origin (epic
 	// decision 4: GitHub is the durable store); resolve it only for those kinds so
@@ -217,6 +229,11 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	opts.SessionEnvPassthrough = normalizedSessionEnv
+	normalizedProvisionEnv, err := sessionenv.NormalizeExtraNames(opts.ProvisionSessionEnvPassthrough)
+	if err != nil {
+		return nil, fmt.Errorf("invalid provisioning session environment pass-through: %w", err)
+	}
+	opts.ProvisionSessionEnvPassthrough = normalizedProvisionEnv
 
 	res, err := backendFactory(opts, absPath)
 	if err != nil {
