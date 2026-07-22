@@ -94,6 +94,13 @@ type lostRestoreState struct {
 	vanishedWorktreesLogged map[string]struct{}
 }
 
+type lostRestoreTrigger uint8
+
+const (
+	lostRestoreAutomatic lostRestoreTrigger = iota
+	lostRestoreManual
+)
+
 // RestoreLostSessions runs one restore pass over every Lost session the
 // manager owns. Called from the daemon poll loop after EnsureRootAgents (which
 // owns the reserved root title); a no-op until the initial restore finishes.
@@ -340,8 +347,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// now exists) and the flag stays wrong, so kill never deletes the branch and
 		// it is orphaned. persistInstance is best-effort (logs on write failure).
 		m.persistInstance(repoID, inst)
-		m.logVanishedWorktreeOnce(key, repoID, st, inst, err)
-		m.lostRestoreFailed(key, st, inst.Title, err)
+		m.recordLostRestoreFailure(key, repoID, inst, err, lostRestoreAutomatic)
 		return
 	}
 
@@ -441,7 +447,32 @@ func (m *Manager) lostRestoreFailed(key string, st *lostRestoreState, title stri
 	log.WarningLog.Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", title, st.consecutiveFailures, backoff, err)
 }
 
-func (m *Manager) logVanishedWorktreeOnce(key, repoID string, st *lostRestoreState, inst *session.Instance, restoreErr error) {
+// recordLostRestoreFailure is the single failure-accounting path for automatic
+// and user-triggered Lost-session restores. A manual restore can be the first
+// attempt in an episode, so the state is created here rather than relying on the
+// automatic loop to have visited the session first.
+//
+// The trigger distinguishes the manual path's own killsInFlight entry
+// from an independently requested teardown. That map is also the daemon's broad
+// per-session operation gate despite its historical name; treating the manual
+// restore's marker as kill intent would label a vanished worktree
+// "expected_teardown" in the diagnostic emitted for that very restore.
+func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Instance, restoreErr error, trigger lostRestoreTrigger) {
+	m.mu.Lock()
+	st := m.lostRestoreStates[key]
+	if st == nil {
+		st = &lostRestoreState{}
+		m.lostRestoreStates[key] = st
+	}
+	_, operationInFlight := m.killsInFlight[key]
+	m.mu.Unlock()
+
+	teardownInFlight := operationInFlight && trigger != lostRestoreManual
+	m.logVanishedWorktreeOnce(repoID, st, inst, restoreErr, teardownInFlight)
+	m.lostRestoreFailed(key, st, inst.Title, restoreErr)
+}
+
+func (m *Manager) logVanishedWorktreeOnce(repoID string, st *lostRestoreState, inst *session.Instance, restoreErr error, teardownInFlight bool) {
 	worktreePath, ok := missingWorktreePath(restoreErr)
 	if !ok {
 		return
@@ -455,7 +486,6 @@ func (m *Manager) logVanishedWorktreeOnce(key, repoID string, st *lostRestoreSta
 		}
 		st.vanishedWorktreesLogged[worktreePath] = struct{}{}
 	}
-	_, killInFlight := m.killsInFlight[key]
 	m.mu.Unlock()
 	if alreadyLogged {
 		return
@@ -476,7 +506,7 @@ func (m *Manager) logVanishedWorktreeOnce(key, repoID string, st *lostRestoreSta
 	liveness := inst.GetLiveness()
 	op := inst.GetInFlightOp()
 	userKilled := inst.UserKilled()
-	teardownIntent := userKilled || killInFlight || op == session.OpKilling || op == session.OpArchiving
+	teardownIntent := userKilled || teardownInFlight || op == session.OpKilling || op == session.OpArchiving
 	classification := classifyMissingWorktree(diag.WorktreeRegistrationKnown, diag.WorktreeRegistered, teardownIntent)
 
 	log.ErrorLog.Printf(
@@ -492,7 +522,7 @@ func (m *Manager) logVanishedWorktreeOnce(key, repoID string, st *lostRestoreSta
 		statusLabel(inst.GetStatus()),
 		inst.Started(),
 		userKilled,
-		killInFlight,
+		teardownInFlight,
 		op,
 		diag.ExternalWorktree,
 		diag.BranchCreatedByUs,

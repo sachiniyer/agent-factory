@@ -101,6 +101,7 @@ func (m *Manager) restoreLostOrDeadSession(req RestoreSessionRequest, repoID str
 
 	if err := instance.Recover(); err != nil {
 		m.persistInstance(repoID, instance)
+		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
 		return "", err
 	}
 	// Reset FIRST, before the persist below: recovery replaced the runtime the
