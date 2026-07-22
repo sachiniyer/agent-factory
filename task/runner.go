@@ -255,18 +255,23 @@ func isAmpPromptFrame(content string) bool {
 // opencode's composer has no labeled top rule (unlike amp's "╭──── medium ────╮"),
 // so the walk anchors on the distinctive bottom rule and steps UP one line: a real
 // composer always has a "┃" box-interior row directly above its rule. Requiring
-// that pairing rather than matching a lone "╹" anywhere is what keeps a stray
-// glyph in agent output from reading as a live composer.
+// that pairing rather than matching a lone "╹" anywhere excludes stray glyphs.
+// A transcript can still contain a complete copied frame, so the CURRENT frame
+// is the bottom-most complete pairing in the visible pane, never the first.
 func opencodeFrameLines(content string) (lines []string, ruleIdx int, ok bool) {
 	plain := paneAnsiEscape.ReplaceAllString(content, "")
 	lines = strings.Split(plain, "\n")
+	lastRuleIdx := -1
 	for i, line := range lines {
 		if !opencodeFrameBottomRule.MatchString(line) {
 			continue
 		}
 		if i > 0 && strings.Contains(lines[i-1], "┃") {
-			return lines, i, true
+			lastRuleIdx = i
 		}
+	}
+	if lastRuleIdx >= 0 {
+		return lines, lastRuleIdx, true
 	}
 	return lines, -1, false
 }
