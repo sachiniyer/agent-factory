@@ -86,6 +86,9 @@ func TestGlobalAgentSkills_DefaultWritesNothingIntoTheUsersConfig(t *testing.T) 
 		{"gemini", ensureGeminiSkillDir, func(h string) string {
 			return filepath.Join(h, ".gemini", "skills", "agent-factory", "SKILL.md")
 		}},
+		{"devin", ensureDevinSkillDir, func(h string) string {
+			return filepath.Join(h, ".config", "devin", "skills", "agent-factory", "SKILL.md")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.agent, func(t *testing.T) {

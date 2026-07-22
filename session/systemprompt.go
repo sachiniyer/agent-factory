@@ -231,6 +231,9 @@ func injectSystemPrompt(resolved string) string {
 		}
 		return resolved + " --read " + shellQuote(path)
 	case tmux.ProgramDevin:
+		if _, err := ensureDevinSkillDir(); err != nil {
+			log.WarningLog.Printf("failed to set up devin af skill, af guidance unavailable to devin: %v", err)
+		}
 		// af created and owns this worktree, so it is trusted. Suppress devin's
 		// interactive workspace-trust modal ("Do you trust the authors of this
 		// directory?") so the session reaches ready WITHOUT a human answering it —

@@ -201,6 +201,29 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	}
 }
 
+func TestInjectSystemPrompt_DevinSkill(t *testing.T) {
+	grantGlobalAgentSkills(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	result := injectSystemPrompt("devin")
+	if result != "devin --respect-workspace-trust false" {
+		t.Errorf("expected devin trust flag, got %q", result)
+	}
+
+	skillPath := filepath.Join(home, ".config", "devin", "skills", "agent-factory", "SKILL.md")
+	content, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("expected af skill written to %s: %v", skillPath, err)
+	}
+	if !strings.Contains(string(content), "af sessions whoami") {
+		t.Errorf("expected afUsageReference in devin SKILL.md, got %q", content)
+	}
+	if !strings.Contains(string(content), afSkillMarker) {
+		t.Errorf("expected devin SKILL.md to carry the af-managed marker, got %q", content)
+	}
+}
+
 // TestInjectSystemPrompt_Opencode pins opencode's ENV seam.
 //
 // opencode has no instructions flag, so af points OPENCODE_CONFIG at an af-OWNED
