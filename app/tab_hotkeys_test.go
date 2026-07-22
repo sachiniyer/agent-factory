@@ -283,19 +283,21 @@ func TestNewTabPickerCreatesVSCodeThroughDaemon(t *testing.T) {
 		"the resolved daemon name is the tab's addressable label, matching CLI creation")
 }
 
-// TestNewTabPickerReResolvesSnapshotReplacement guards the modal window: a
-// snapshot may rebuild the selected session while the picker owns the keyboard.
-// Submit must mutate the live replacement, never the orphaned pointer.
-func TestNewTabPickerReResolvesSnapshotReplacement(t *testing.T) {
+// A tab picker retains intent about one session while its modal owns the
+// keyboard. A different session that reuses the title in that window must not
+// inherit the pending create.
+func TestNewTabPickerDoesNotTargetSameTitleReplacement(t *testing.T) {
 	h := newTestHome(t)
 	stale := freshLocalInstance(t, "vscode-stale")
 	selectInstance(h, stale)
 	_, _ = h.showNewTabPicker()
 
 	replacement := freshLocalInstanceNamed(t, stale.Title)
+	require.NotEqual(t, stale.ID, replacement.ID)
 	require.True(t, h.store.ReplaceInstanceByTitle(stale.Title, replacement))
+	called := false
 	t.Cleanup(SetVSCodeTabCreatorForTest(func(title, repoID string) (string, string, error) {
-		require.Equal(t, replacement.Title, title)
+		called = true
 		return "vscode", "", nil
 	}))
 
@@ -303,8 +305,8 @@ func TestNewTabPickerReResolvesSnapshotReplacement(t *testing.T) {
 	_, _ = h.handleStateSelectTabKind(tea.KeyMsg{Type: tea.KeyEnter})
 
 	require.Equal(t, 1, stale.TabCount(), "the swapped-out projection must stay untouched")
-	require.Equal(t, 2, replacement.TabCount())
-	require.Equal(t, session.TabKindVSCode, replacement.GetTabs()[1].Kind)
+	require.Equal(t, 1, replacement.TabCount(), "the replacement must not inherit the pending tab create")
+	require.False(t, called, "a stale picker target must fail closed before the daemon request")
 }
 
 // TestNewTabPickerDefaultsToTerminal preserves the existing fast path inside the

@@ -69,6 +69,32 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	requireTUIInstancesEmpty(t, h)
 }
 
+// A tab name is reusable. If another client closes the intended tab and creates
+// a new tab with the same name before the daemon resolves this request, a
+// name-only close kills the replacement. The TUI already holds the stable tab
+// ID and must carry it through the destructive RPC.
+func TestHandleCloseTab_DoesNotTargetReusedTabName(t *testing.T) {
+	h := newTestHome(t)
+	inst := startedLocalInstance(t, "route-close-reuse")
+	selectInstance(h, inst)
+	h.store.SetActiveTab(1)
+
+	target := inst.GetTabs()[1]
+	require.NotEmpty(t, target.ID)
+	replacementID := "replacement-tab-id"
+	daemonNameOwner := map[string]string{target.Name: replacementID}
+	var killedID string
+	restore := SetTabCloserForTest(func(title, repoID, tabName string) error {
+		killedID = daemonNameOwner[tabName]
+		return nil
+	})
+	defer restore()
+
+	_, _ = h.handleCloseTab()
+	require.NotEqual(t, replacementID, killedID,
+		"a reused tab name must not redirect the close to the replacement tab")
+}
+
 // TestHandleCloseTab_AgentTabSkipsDaemon proves the agent-tab rule is enforced
 // TUI-side without a daemon round-trip: `w` on tab 0 is a friendly no-op and the
 // CloseTab RPC is never called.
