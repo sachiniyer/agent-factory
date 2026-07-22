@@ -36,20 +36,10 @@ func ParseRecoveryInvocation(args []string) (invocation RecoveryInvocation, matc
 	return RecoveryInvocation{HomeDir: home, TransactionID: args[4]}, true, nil
 }
 
-// RunRecoveryActor loads the named transaction, obtains recovery authority as
-// os.Executable (which TryAcquireRecovery requires to be the immutable
-// previous-binary artifact), and runs the supervisor. A duplicate launcher
-// exits successfully after losing the flock so Restart=on-failure does not
-// turn an ordinary service-manager race into a process storm.
-func RunRecoveryActor(ctx context.Context, invocation RecoveryInvocation, supervisor Supervisor) error {
-	return runRecoveryActorWith(
-		ctx,
-		invocation,
-		func(txn *Transaction) (*RecoveryLease, error) { return txn.TryAcquireRecovery() },
-		supervisor.Run,
-	)
-}
-
+// runRecoveryActorWith is the runner core for the later production entrypoint
+// binding. The binding must supply TryAcquireRecovery (which derives identity
+// from os.Executable) and Supervisor.Run together; keeping that wrapper out of
+// this production-disabled slice avoids publishing an unreachable API.
 func runRecoveryActorWith(
 	ctx context.Context,
 	invocation RecoveryInvocation,
