@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -91,6 +92,40 @@ func proxyGet(t *testing.T, mux *http.ServeMux, sessionID, tabID, sub string) *h
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/webtab/%s/%s/%s", sessionID, tabID, sub), nil)
 	mux.ServeHTTP(rec, req)
 	return rec
+}
+
+// followWebTabTokenBootstrap drives the two browser requests made when an iframe
+// src carries the daemon's private query credential: the 307 that stores the
+// HttpOnly cookie and removes the query parameter, then the clean cookie-backed
+// GET that may reach the preview app.
+func followWebTabTokenBootstrap(
+	t *testing.T, handler http.Handler, req *http.Request,
+) (bootstrap, clean *httptest.ResponseRecorder) {
+	t.Helper()
+	bootstrap = httptest.NewRecorder()
+	handler.ServeHTTP(bootstrap, req)
+	if bootstrap.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("bootstrap status = %d, want 307 (body: %s)", bootstrap.Code, bootstrap.Body.String())
+	}
+	location := bootstrap.Header().Get("Location")
+	redirectURL, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse bootstrap Location %q: %v", location, err)
+	}
+	if redirectURL.Query().Has(webtabTokenQueryParam) {
+		t.Fatalf("bootstrap Location %q still exposes %s", location, webtabTokenQueryParam)
+	}
+	cookie := cookieNamed(bootstrap, webtabTokenCookie)
+	if cookie == nil {
+		t.Fatal("bootstrap did not set the web-tab token cookie")
+	}
+
+	cleanReq := httptest.NewRequest(http.MethodGet, location, nil)
+	cleanReq.RemoteAddr = req.RemoteAddr
+	cleanReq.AddCookie(cookie)
+	clean = httptest.NewRecorder()
+	handler.ServeHTTP(clean, cleanReq)
+	return bootstrap, clean
 }
 
 // TestWebTabProxy_RejectsArchivedSession is the #1809 follow-up gate: archive now
@@ -321,24 +356,26 @@ func TestWebTabProxy_MirrorsSubdirectoryTarget(t *testing.T) {
 	}
 }
 
-// TestWebTabProxy_RootRedirectsToTargetPath verifies the other half of the mirror
-// model: a bare hit on the tab root is redirected to the target's own path, so the
-// browser's URL starts mirroring upstream from the first navigation and the
-// ?af_webtab_token that authorized it survives the hop.
+// TestWebTabProxy_RootRedirectsToTargetPath verifies that the credential cleanup
+// and path-mirror redirects compose: first the private query is removed in place,
+// then the clean cookie-backed request is sent to the target's own path.
 func TestWebTabProxy_RootRedirectsToTargetPath(t *testing.T) {
 	upstream := newStaticFileUpstream(t, "doc", "css", "shared")
 	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL+"/app/viewer.html")
 
-	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/v1/webtab/%s/%s/?af_webtab_token=tok", id, tabID), nil)
-	mux.ServeHTTP(rec, req)
+	bootstrap, clean := followWebTabTokenBootstrap(t, mux, req)
 
-	if rec.Code != http.StatusFound {
-		t.Fatalf("root: status = %d, want 302 (body: %s)", rec.Code, rec.Body.String())
+	wantCleanRoot := fmt.Sprintf("/v1/webtab/%s/%s/", id, tabID)
+	if got := bootstrap.Header().Get("Location"); got != wantCleanRoot {
+		t.Fatalf("bootstrap Location = %q, want %q", got, wantCleanRoot)
 	}
-	want := fmt.Sprintf("/v1/webtab/%s/%s/app/viewer.html?af_webtab_token=tok", id, tabID)
-	if got := rec.Header().Get("Location"); got != want {
+	if clean.Code != http.StatusFound {
+		t.Fatalf("clean root: status = %d, want 302 (body: %s)", clean.Code, clean.Body.String())
+	}
+	want := fmt.Sprintf("/v1/webtab/%s/%s/app/viewer.html", id, tabID)
+	if got := clean.Header().Get("Location"); got != want {
 		t.Fatalf("root: Location = %q, want %q", got, want)
 	}
 }
@@ -382,10 +419,11 @@ func TestMirrorRootRedirect(t *testing.T) {
 		// Root targets already mirror themselves — no redirect, no loop.
 		{target: "http://localhost:8899", wantRedir: false},
 		{target: "http://localhost:8899/", wantRedir: false},
-		// The token that authorized the top-level navigation rides along.
+		// Ordinary app query bytes ride along. The daemon token is already removed
+		// before this helper can run.
 		{
-			target: "http://localhost:8899/app/viewer.html", rawQuery: "af_webtab_token=tok",
-			want: prefix + "/app/viewer.html?af_webtab_token=tok", wantRedir: true,
+			target: "http://localhost:8899/app/viewer.html", rawQuery: "doc=hello%20world",
+			want: prefix + "/app/viewer.html?doc=hello%20world", wantRedir: true,
 		},
 	}
 	for _, tc := range cases {
@@ -536,6 +574,120 @@ func TestWebTabProxy_SetsScopedTokenCookie(t *testing.T) {
 	}
 }
 
+// TestWebTabProxy_QueryTokenIsOnlyABootstrapCredential pins the browser-facing
+// half of the token boundary. The private query parameter may authorize exactly
+// one request, but application code must never render at that credential-bearing
+// URL: the handler first stores the credential in an HttpOnly cookie and redirects
+// to the same path with only its own parameter removed. The clean, cookie-backed
+// follow-up is the first request allowed to reach the preview app.
+func TestWebTabProxy_QueryTokenIsOnlyABootstrapCredential(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	seenQuery := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		seenQuery <- r.URL.RawQuery
+		fmt.Fprint(w, "app-rendered")
+	}))
+	defer upstream.Close()
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	bootstrapPath := fmt.Sprintf(
+		"/v1/webtab/%s/%s/?doc=hello%%20world&af%%5Fwebtab%%5Ftoken=fixture-token&z=1",
+		id, tabID,
+	)
+	bootstrap := httptest.NewRecorder()
+	mux.ServeHTTP(bootstrap, httptest.NewRequest(http.MethodGet, bootstrapPath, nil))
+
+	if bootstrap.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("bootstrap status = %d, want 307 (body: %s)", bootstrap.Code, bootstrap.Body.String())
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("bootstrap reached the preview app %d time(s), want 0", got)
+	}
+	wantLocation := fmt.Sprintf("/v1/webtab/%s/%s/?doc=hello%%20world&z=1", id, tabID)
+	if got := bootstrap.Header().Get("Location"); got != wantLocation {
+		t.Fatalf("bootstrap Location = %q, want %q", got, wantLocation)
+	}
+	if strings.Contains(bootstrap.Header().Get("Location"), "fixture-token") ||
+		strings.Contains(bootstrap.Body.String(), "fixture-token") {
+		t.Fatal("bootstrap credential is readable in the redirect URL or body")
+	}
+	if got := bootstrap.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("bootstrap Cache-Control = %q, want no-store", got)
+	}
+	if got := bootstrap.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("bootstrap Referrer-Policy = %q, want no-referrer", got)
+	}
+	cookie := cookieNamed(bootstrap, webtabTokenCookie)
+	if cookie == nil || !cookie.HttpOnly {
+		t.Fatalf("bootstrap cookie = %+v, want an HttpOnly token cookie", cookie)
+	}
+
+	clean := httptest.NewRecorder()
+	cleanReq := httptest.NewRequest(http.MethodGet, wantLocation, nil)
+	cleanReq.AddCookie(cookie)
+	mux.ServeHTTP(clean, cleanReq)
+	if clean.Code != http.StatusOK {
+		t.Fatalf("clean follow-up status = %d, want 200 (body: %s)", clean.Code, clean.Body.String())
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("clean follow-up reached the preview app %d time(s), want 1", got)
+	}
+	if got := <-seenQuery; got != "doc=hello%20world&z=1" {
+		t.Fatalf("upstream RawQuery = %q, want exact clean app query", got)
+	}
+}
+
+// TestWebTabProxy_QueryTokenCleanupKeepsMirroredPath ensures a non-root target
+// cannot bypass the bootstrap boundary. The redirect stays on the exact mirrored
+// path and preserves the app's raw query bytes and order; it does not bounce via
+// the tab root or the upstream target URL.
+func TestWebTabProxy_QueryTokenCleanupKeepsMirroredPath(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		fmt.Fprintf(w, "path=%s query=%s", r.URL.EscapedPath(), r.URL.RawQuery)
+	}))
+	defer upstream.Close()
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL+"/app/viewer.html")
+
+	path := fmt.Sprintf(
+		"/v1/webtab/%s/%s/app/viewer.html?z=1&af_webtab_token=fixture-token&a=hello%%20world",
+		id, tabID,
+	)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("bootstrap status = %d, want 307 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("bootstrap reached the preview app %d time(s), want 0", got)
+	}
+	want := fmt.Sprintf("/v1/webtab/%s/%s/app/viewer.html?z=1&a=hello%%20world", id, tabID)
+	if got := rec.Header().Get("Location"); got != want {
+		t.Fatalf("bootstrap Location = %q, want %q", got, want)
+	}
+}
+
+// TestWebTabProxy_QueryTokenCleansBeforeTargetResolution pins the ordering that
+// matters for VS Code tabs: resolving their target can start an editor. Even a
+// server with no manager must perform the credential cleanup first, so no target
+// lookup or application process can precede the clean browser URL.
+func TestWebTabProxy_QueryTokenCleansBeforeTargetResolution(t *testing.T) {
+	mux := newHTTPMux(&controlServer{})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/v1/webtab/session/tab/?af_webtab_token=fixture-token", nil))
+
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want 307 before the missing-manager check (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/v1/webtab/session/tab/" {
+		t.Fatalf("Location = %q, want the clean request path", got)
+	}
+}
+
 // TestWebTabProxy_TokenCookieSecureTracksScheme is the #1808 regression test.
 //
 // The daemon serves PLAIN HTTP, and a browser silently DROPS a Secure cookie
@@ -596,8 +748,9 @@ func TestWebTabProxy_TokenCookieSecureTracksScheme(t *testing.T) {
 
 // TestWebTabProxy_RemotePeerSubResourcesAuthorize is the end-to-end #1808 proof at
 // the gate: a NETWORK peer over plain HTTP with require_token=true authorizes the
-// top-level navigation with ?af_webtab_token, and the cookie it gets back then
-// authorizes the iframe's sub-resource GETs — which carry neither header nor query.
+// top-level navigation with ?af_webtab_token. The handler cleans that URL before
+// application code renders, and the cookie it gets back then authorizes both the
+// clean navigation and iframe sub-resource GETs — which carry neither header nor query.
 // Before the fix the cookie was Secure, the browser dropped it, and every one of
 // those 401'd.
 func TestWebTabProxy_RemotePeerSubResourcesAuthorize(t *testing.T) {
@@ -616,16 +769,15 @@ func TestWebTabProxy_RemotePeerSubResourcesAuthorize(t *testing.T) {
 	authed := withAuth(mux, gate, nil)
 
 	// 1. The top-level navigation authorizes via ?af_webtab_token (an iframe src
-	//    cannot set a header) and gets the cookie back.
-	rec := httptest.NewRecorder()
+	//    cannot set a header), gets the cookie, and follows the clean URL.
 	req := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/v1/webtab/%s/%s/?af_webtab_token=secret-tok", id, tabID), nil)
 	req.RemoteAddr = "172.17.0.4:54321"
-	authed.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("top-level nav: status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	bootstrap, clean := followWebTabTokenBootstrap(t, authed, req)
+	if clean.Code != http.StatusOK {
+		t.Fatalf("clean top-level nav: status = %d, want 200 (body: %s)", clean.Code, clean.Body.String())
 	}
-	cookie := cookieNamed(rec, webtabTokenCookie)
+	cookie := cookieNamed(bootstrap, webtabTokenCookie)
 	if cookie == nil {
 		t.Fatal("no af_webtab_token cookie for the token-authorized navigation")
 	}
