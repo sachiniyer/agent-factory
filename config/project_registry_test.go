@@ -119,6 +119,50 @@ func TestResetProjectRegistryRefusesMarkerItDoesNotOwn(t *testing.T) {
 	require.NoError(t, statErr, "the registry must remain retryable when marker validation fails")
 }
 
+func TestResetProjectRegistryClearsUnavailableRoots(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		makeAbsent func(*testing.T, string)
+	}{
+		{
+			name: "moved",
+			makeAbsent: func(t *testing.T, root string) {
+				t.Helper()
+				require.NoError(t, os.Rename(root, filepath.Join(filepath.Dir(root), "moved-repo")))
+			},
+		},
+		{
+			name: "deleted",
+			makeAbsent: func(t *testing.T, root string) {
+				t.Helper()
+				require.NoError(t, os.RemoveAll(root))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			home := filepath.Join(base, "af-home")
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			repo := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+			_, err := RegisterProject(repo)
+			require.NoError(t, err)
+			tc.makeAbsent(t, repo)
+
+			projects, err := ListProjects()
+			require.NoError(t, err)
+			require.Len(t, projects, 1)
+			require.False(t, projects[0].PathExists)
+
+			require.NoError(t, ResetProjectRegistry(),
+				"an unavailable last-known root must not strand AF's registry")
+			projects, err = ListProjects()
+			require.NoError(t, err)
+			require.Empty(t, projects)
+			require.NoDirExists(t, filepath.Join(home, ProjectRegistryDirName))
+		})
+	}
+}
+
 func TestProjectRegistryConcurrentRegistrationIsIdempotent(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
@@ -280,6 +324,31 @@ func TestRegisterProjectDoesNotAdoptDifferentCloneAtReusedPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, projects, 1, "refusal followed by explicit rebind must leave one stable project record")
 	require.Equal(t, original.ID, projects[0].ID)
+}
+
+func TestRejectedReplacementRegistrationDoesNotMintCheckoutMarker(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	originalPath := filepath.Join(base, "repo")
+	original, err := RegisterProject(initProjectRegistryRepo(t, originalPath))
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(originalPath, filepath.Join(base, "old-checkout")))
+
+	replacement := initProjectRegistryRepo(t, originalPath)
+	marker := filepath.Join(replacement, ".git", checkoutMarkerDirName, checkoutMarkerFileName)
+	require.NoFileExists(t, marker)
+
+	_, err = RegisterProject(replacement)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), original.ID)
+	require.NoFileExists(t, marker,
+		"a rejected registration must not mutate a different checkout")
+	require.NoFileExists(t, marker+".lock")
+
+	require.NoError(t, ResetProjectRegistry(),
+		"the rejected checkout must not poison cleanup of the original record")
+	require.NoDirExists(t, filepath.Join(home, ProjectRegistryDirName))
 }
 
 func TestRegisterProjectRejectsCopiedCheckoutMarkerAtTwoLiveRoots(t *testing.T) {
