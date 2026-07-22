@@ -184,8 +184,8 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `ArchiveSession` returns `{ "ok": true, "archived_path": "…" }`;
 `RestoreArchived` returns `{ "ok": true, "worktree_path": "…" }`;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
-returns `{ "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
-(`tmux_name` is the tmux session the tab was spawned under, omitted for a
+returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
+(`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
 `CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
