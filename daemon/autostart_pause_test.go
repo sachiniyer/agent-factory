@@ -26,6 +26,7 @@ func TestPauseAndResumeAutostartUnitLinux(t *testing.T) {
 
 	want := [][]string{
 		{"systemctl", "--user", "stop", autostartUnitName},
+		{"systemctl", "--user", "reset-failed", autostartUnitName},
 		{"systemctl", "--user", "start", autostartUnitName},
 	}
 	if !reflect.DeepEqual(*calls, want) {

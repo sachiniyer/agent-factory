@@ -103,6 +103,9 @@ func TestDaemonRestartPreservesDaemonSpawnedTmux(t *testing.T) {
 	if !strings.Contains(string(log), "preserved scoped tmux server") {
 		t.Fatalf("forced control-group fault was not demonstrably survived; manager log:\n%s", log)
 	}
+	if got := strings.Count(string(log), "reset failed state"); got != 3 {
+		t.Fatalf("install and both restarts must clear a prior start-limit failure; reset count=%d log:\n%s", got, log)
+	}
 }
 
 func disposableLifecycleEnvironment() bool {
@@ -183,6 +186,10 @@ start_daemon() {
 
 case "${1:-}" in
     daemon-reload)
+        exit 0
+        ;;
+    reset-failed)
+        printf 'reset failed state\n' >>"$AF_FAKE_MANAGER_LOG"
         exit 0
         ;;
     enable)

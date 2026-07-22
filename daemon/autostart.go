@@ -21,8 +21,10 @@ import (
 // longer exist (#782).
 
 const (
-	autostartUnitName     = systemdunit.DaemonUnitName
-	autostartLaunchdLabel = "com.agent-factory.daemon"
+	autostartUnitName           = systemdunit.DaemonUnitName
+	autostartLaunchdLabel       = "com.agent-factory.daemon"
+	autostartStartLimitInterval = "60"
+	autostartStartLimitBurst    = "5"
 	// autostartSystemdMarker lets the daemon distinguish its direct service
 	// process from descendants that merely inherited the unit's environment.
 	// session/tmux checks it together with SYSTEMD_EXEC_PID before asking the
@@ -111,6 +113,11 @@ func formatSystemdEnvLine(name, value string) string {
 // process exits, so it kills exactly the persistent tmux server #2176 needs to
 // protect. New servers leave the service cgroup through systemd-run; process
 // also protects servers an older daemon already placed there before upgrade.
+//
+// StartLimitInterval and StartLimitBurst deliberately use their pre-v229/v230
+// names and [Service] location. Newer systemd keeps that form as a compatibility
+// alias, while the modern StartLimitIntervalSec spelling in [Unit] would leave
+// older supported Linux hosts on the unbounded default policy (#2168).
 func systemdAutostartUnit(execPath, pathEnv, shellEnv, agentFactoryHome string) string {
 	envLines := formatSystemdEnvLine("PATH", pathEnv) + "\n" + formatSystemdEnvLine("SHELL", shellEnv)
 	if agentFactoryHome != "" {
@@ -121,6 +128,8 @@ Description=Agent Factory daemon (task scheduler + session monitor)
 
 [Service]
 KillMode=process
+StartLimitInterval=%s
+StartLimitBurst=%s
 ExecStart=%s --daemon
 Restart=on-failure
 RestartSec=5
@@ -128,7 +137,8 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, quoteExecStartPath(execPath), formatSystemdEnvLine(autostartSystemdMarker, autostartUnitName)+"\n"+envLines)
+`, autostartStartLimitInterval, autostartStartLimitBurst,
+		quoteExecStartPath(execPath), formatSystemdEnvLine(autostartSystemdMarker, autostartUnitName)+"\n"+envLines)
 }
 
 // launchdAutostartPlist renders the launchd agent that keeps the daemon
@@ -197,11 +207,11 @@ func launchdAutostartPlist(execPath, pathEnv, shellEnv, agentFactoryHome, logPat
 //     daemon is left at worst enabled-but-inactive until the next login — far
 //     better than a present-but-not-enabled unit. (Previously a stop failure
 //     returned early, leaving the file on disk but never enabled.)
-//   - On a hard failure of the reload/enable/bootstrap step the just-written unit
-//     file is removed, so AutostartInstalled — which reports on file existence —
-//     can never misreport a not-enabled unit as installed and mislead the
-//     upgrade respawn path into RestartAutostartUnit on a unit that was never
-//     enabled.
+//   - On a hard failure of the reload/reset/enable/bootstrap step the
+//     just-written unit file is removed, so AutostartInstalled — which reports
+//     on file existence — can never misreport a not-enabled unit as installed
+//     and mislead the upgrade respawn path into RestartAutostartUnit on a unit
+//     that was never enabled.
 func InstallAutostart() (string, error) {
 	execPath, err := os.Executable()
 	if err != nil {
@@ -225,6 +235,10 @@ func InstallAutostart() (string, error) {
 		if out, err := autostartUnitCommand("systemctl", "--user", "daemon-reload"); err != nil {
 			removeAutostartUnitFile(unitPath)
 			return "", fmt.Errorf("failed to reload systemd user daemon: %w\n%s", err, strings.TrimSpace(string(out)))
+		}
+		if err := resetSystemdAutostartFailure(); err != nil {
+			removeAutostartUnitFile(unitPath)
+			return "", fmt.Errorf("failed to clear daemon service failure before enabling: %w", err)
 		}
 		// Hand any ad-hoc daemon over to the supervised one, but never let a
 		// stop failure block enabling — see the function comment (#974).
@@ -335,19 +349,20 @@ func AutostartInstalled() bool {
 }
 
 // RefreshAutostartUnit makes an already-installed Linux unit safe before an
-// upgrade or explicit restart stops its daemon (#2176). Older installs carry
-// the rendered unit on disk, so changing systemdAutostartUnit alone does
-// nothing for the machines at risk. Rewrite only KillMode, preserving the
-// captured executable, environment, and #2168's planned StartLimit policy,
-// then reload the user manager before a caller is allowed to restart.
+// upgrade or explicit restart stops its daemon (#2176, #2168). Older installs
+// carry the rendered unit on disk, so changing systemdAutostartUnit alone does
+// nothing for the machines at risk. Surgically enforce KillMode and AF's
+// restart-rate backstop while preserving the captured executable, environment,
+// and unrelated directives, then reload the user manager before restart.
 //
 // The reload runs even when the file already contains the safe directive. A
 // prior reload may have failed after the atomic write, leaving systemd's
 // in-memory unit stale; treating the on-disk text as sufficient would make the
 // next restart destructive again.
 //
-// launchd has no systemd cgroup KillMode equivalent. Its plist is deliberately
-// left byte-identical on Darwin rather than pretending this Linux fix applies.
+// launchd has neither systemd's cgroup KillMode nor its StartLimit directives.
+// Its plist is deliberately left byte-identical on Darwin rather than
+// pretending this Linux policy applies.
 func RefreshAutostartUnit() error {
 	if autostartGOOS != "linux" {
 		return nil
@@ -365,9 +380,32 @@ func RefreshAutostartUnit() error {
 		return fmt.Errorf("failed to read daemon autostart unit %s: %w", path, err)
 	}
 
-	content, changed, err := ensureSystemdServiceDirective(string(data), "KillMode", "process")
-	if err != nil {
-		return fmt.Errorf("cannot make daemon autostart unit restart-safe: %w", err)
+	content := string(data)
+	changed := false
+	for _, directive := range []struct {
+		key   string
+		value string
+	}{
+		{
+			key:   "StartLimitInterval",
+			value: autostartStartLimitInterval,
+		},
+		{
+			key:   "StartLimitBurst",
+			value: autostartStartLimitBurst,
+		},
+		{
+			key:   "KillMode",
+			value: "process",
+		},
+	} {
+		var directiveChanged bool
+		content, directiveChanged, err = ensureSystemdServiceDirective(
+			content, directive.key, directive.value)
+		if err != nil {
+			return fmt.Errorf("cannot make daemon autostart unit restart-safe: %w", err)
+		}
+		changed = changed || directiveChanged
 	}
 	if changed {
 		if err := config.AtomicWriteFile(path, []byte(content), 0644); err != nil {
@@ -382,8 +420,8 @@ func RefreshAutostartUnit() error {
 
 // ensureSystemdServiceDirective returns content with exactly one key=value in
 // [Service]. Other sections and directives remain byte-for-byte and in order;
-// this is a targeted safety migration, not a re-render that could overwrite an
-// install's captured PATH, home, executable, or future StartLimit settings.
+// this is a targeted migration, not a re-render that could overwrite an
+// install's captured PATH, home, executable, or unrelated policy.
 func ensureSystemdServiceDirective(content, key, value string) (string, bool, error) {
 	lines := strings.Split(content, "\n")
 	inService := false
@@ -694,6 +732,9 @@ func launchdPlistProgramPath(content string) (string, bool) {
 func RestartAutostartUnit() error {
 	switch autostartGOOS {
 	case "linux":
+		if err := resetSystemdAutostartFailure(); err != nil {
+			return fmt.Errorf("cannot restart daemon service: %w", err)
+		}
 		if out, err := autostartUnitCommand("systemctl", "--user", "restart", autostartUnitName); err != nil {
 			return fmt.Errorf("systemctl --user restart %s failed: %w\n%s", autostartUnitName, err, strings.TrimSpace(string(out)))
 		}
@@ -749,6 +790,9 @@ func PauseAutostartUnit() error {
 func ResumeAutostartUnit() error {
 	switch autostartGOOS {
 	case "linux":
+		if err := resetSystemdAutostartFailure(); err != nil {
+			return fmt.Errorf("cannot resume daemon service: %w", err)
+		}
 		if out, err := autostartUnitCommand("systemctl", "--user", "start", autostartUnitName); err != nil {
 			return fmt.Errorf("systemctl --user start %s failed: %w\n%s", autostartUnitName, err, strings.TrimSpace(string(out)))
 		}
@@ -768,6 +812,37 @@ func ResumeAutostartUnit() error {
 	default:
 		return fmt.Errorf("daemon autostart is not supported on %s", autostartGOOS)
 	}
+}
+
+// resetSystemdAutostartFailure clears both the failed state and the start-rate
+// counter before an AF command asks systemd to start the daemon. Without this,
+// the StartLimit backstop can make install, restart, and resume keep returning
+// "start-limit-hit" even after the underlying crash has been fixed (#2168).
+func resetSystemdAutostartFailure() error {
+	out, resetErr := autostartUnitCommand("systemctl", "--user", "reset-failed", autostartUnitName)
+	if resetErr == nil {
+		return nil
+	}
+
+	// A fresh or garbage-collected unit has no retained failed state or rate
+	// counter. systemd rejects its targeted reset as "not loaded"; probing it
+	// with show creates an inactive object only for that D-Bus connection, so
+	// trying reset again would race garbage collection. ActiveState is a stable
+	// machine value and lets this benign case proceed without parsing localized
+	// stderr. Any retained failed/active state still makes the reset mandatory.
+	stateOut, stateErr := autostartUnitCommand(
+		"systemctl", "--user", "show", autostartUnitName, "--property=ActiveState", "--value",
+	)
+	state := strings.TrimSpace(string(stateOut))
+	if stateErr == nil && state == "inactive" {
+		return nil
+	}
+	if stateErr != nil {
+		return fmt.Errorf("systemctl --user reset-failed %s failed: %w\n%s\nfailed to inspect unit state after reset failure: %v\n%s",
+			autostartUnitName, resetErr, strings.TrimSpace(string(out)), stateErr, state)
+	}
+	return fmt.Errorf("systemctl --user reset-failed %s failed while unit state was %q: %w\n%s",
+		autostartUnitName, state, resetErr, strings.TrimSpace(string(out)))
 }
 
 // UninstallAutostart removes the daemon autostart unit installed by

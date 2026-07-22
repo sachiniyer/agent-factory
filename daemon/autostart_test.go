@@ -16,6 +16,8 @@ Description=Agent Factory daemon (task scheduler + session monitor)
 
 [Service]
 KillMode=process
+StartLimitInterval=60
+StartLimitBurst=5
 ExecStart="/home/user/.local/bin/af" --daemon
 Restart=on-failure
 RestartSec=5
@@ -28,6 +30,26 @@ WantedBy=default.target
 `
 	if got != want {
 		t.Fatalf("systemd unit content mismatch.\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestSystemdAutostartUnitBoundsRestartBurstCompatibly is the new-install half
+// of #2168's Phase 1 backstop. RestartSec=5 outlives systemd's default
+// 10-second start-limit window, so the default limiter can never catch a
+// persistent crash. The legacy service-level spelling works before v229/v230
+// and remains accepted by newer systemd releases.
+func TestSystemdAutostartUnitBoundsRestartBurstCompatibly(t *testing.T) {
+	got := systemdAutostartUnit("/home/user/.local/bin/af", "/usr/bin:/bin", "/bin/zsh", "")
+	for _, want := range []string{
+		"StartLimitInterval=60\n",
+		"StartLimitBurst=5\n",
+	} {
+		if strings.Count(got, want) != 1 {
+			t.Errorf("systemd unit must contain exactly one %q:\n%s", strings.TrimSpace(want), got)
+		}
+	}
+	if strings.Contains(got, "StartLimitIntervalSec=") {
+		t.Fatalf("generated unit uses the v230-only interval spelling:\n%s", got)
 	}
 }
 
@@ -142,6 +164,8 @@ Description=Agent Factory daemon (task scheduler + session monitor)
 
 [Service]
 KillMode=process
+StartLimitInterval=60
+StartLimitBurst=5
 ExecStart="/home/user/.local/bin/af" --daemon
 Restart=on-failure
 RestartSec=5

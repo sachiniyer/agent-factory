@@ -99,6 +99,9 @@ func calledWith(calls [][]string, want ...string) bool {
 // AutostartInstalled does not later report a never-enabled unit as installed.
 func TestInstallAutostartEnablesUnitWhenStopDaemonFailsLinux(t *testing.T) {
 	dir := withAutostartTestEnv(t, "linux")
+	if err := os.WriteFile(filepath.Join(dir, autostartUnitName), []byte("[Service]\n"), 0o644); err != nil {
+		t.Fatalf("seed existing unit: %v", err)
+	}
 	calls := stubAutostartUnitCommand(t, nil)
 	stubAutostartStopDaemon(t, false, errors.New("could not stop ad-hoc daemon"))
 
@@ -115,8 +118,44 @@ func TestInstallAutostartEnablesUnitWhenStopDaemonFailsLinux(t *testing.T) {
 	if !AutostartInstalled() {
 		t.Fatalf("AutostartInstalled() = false after a successful install")
 	}
-	if !calledWith(*calls, "systemctl", "--user", "enable", "--now", autostartUnitName) {
-		t.Fatalf("enable did not run after the stop failure; calls = %v", *calls)
+	wantCalls := [][]string{
+		{"systemctl", "--user", "daemon-reload"},
+		{"systemctl", "--user", "reset-failed", autostartUnitName},
+		{"systemctl", "--user", "enable", "--now", autostartUnitName},
+	}
+	if !reflect.DeepEqual(*calls, wantCalls) {
+		t.Fatalf("install must clear a start-limit failure before enabling after the stop failure; calls=%v want=%v", *calls, wantCalls)
+	}
+}
+
+// systemd rejects reset-failed for a fresh or garbage-collected unit, and a
+// read-only show only holds its newly loaded object for that command's D-Bus
+// connection. If the stable ActiveState is inactive, there is no failed state
+// to clear and install must continue without parsing localized stderr.
+func TestInstallAutostartToleratesResetForUnloadedInactiveUnitLinux(t *testing.T) {
+	withAutostartTestEnv(t, "linux")
+	stubAutostartStopDaemon(t, true, nil)
+	calls := stubAutostartUnitCommandFunc(t, func(_ string, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "reset-failed" {
+			return []byte("Failed to reset failed state of unit " + autostartUnitName + ": Unit " + autostartUnitName + " not loaded."), errors.New("exit status 1")
+		}
+		if len(args) > 1 && args[1] == "show" {
+			return []byte("inactive\n"), nil
+		}
+		return nil, nil
+	})
+
+	if _, err := InstallAutostart(); err != nil {
+		t.Fatalf("fresh InstallAutostart treated an inactive unloaded unit as failed: %v", err)
+	}
+	want := [][]string{
+		{"systemctl", "--user", "daemon-reload"},
+		{"systemctl", "--user", "reset-failed", autostartUnitName},
+		{"systemctl", "--user", "show", autostartUnitName, "--property=ActiveState", "--value"},
+		{"systemctl", "--user", "enable", "--now", autostartUnitName},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("fresh install commands = %v, want %v", *calls, want)
 	}
 }
 
@@ -167,6 +206,71 @@ func TestInstallAutostartRemovesUnitWhenEnableFailsLinux(t *testing.T) {
 	}
 	if AutostartInstalled() {
 		t.Fatalf("AutostartInstalled() = true after a failed install left no enabled unit")
+	}
+}
+
+// If reset-failed fails and the manager cannot prove the unit is merely
+// inactive, install must surface that uncertainty rather than silently
+// treating a real failed unit as fresh.
+func TestInstallAutostartRemovesUnitWhenResetStateIsUnknownLinux(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	stubAutostartStopDaemon(t, true, nil)
+	calls := stubAutostartUnitCommandFunc(t, func(_ string, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "reset-failed" {
+			return []byte("reset failed"), errors.New("exit status 1")
+		}
+		if len(args) > 1 && args[1] == "show" {
+			return []byte("state unavailable"), errors.New("manager unavailable")
+		}
+		return nil, nil
+	})
+
+	if _, err := InstallAutostart(); err == nil ||
+		!strings.Contains(err.Error(), "reset failed") ||
+		!strings.Contains(err.Error(), "manager unavailable") {
+		t.Fatalf("InstallAutostart unknown reset state = %v, want both failures surfaced", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, autostartUnitName)); !os.IsNotExist(statErr) {
+		t.Fatalf("unit file should be cleaned up after unknown reset state; stat err = %v", statErr)
+	}
+	if calledWith(*calls, "systemctl", "--user", "enable", "--now", autostartUnitName) {
+		t.Fatalf("install continued without a trustworthy reset result; calls=%v", *calls)
+	}
+}
+
+// systemd retains a failed unit after an earlier install cleans up its file.
+// If reset-failed still fails in that state, a new install must neither mask
+// it as a fresh inactive unit nor leave a file it could misreport as usable.
+func TestInstallAutostartDoesNotMaskRetainedFailedUnitLinux(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	stubAutostartStopDaemon(t, true, nil)
+	calls := stubAutostartUnitCommandFunc(t, func(_ string, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "reset-failed" {
+			return []byte("reset failed"), errors.New("exit status 1")
+		}
+		if len(args) > 1 && args[1] == "show" {
+			return []byte("failed\n"), nil
+		}
+		return nil, nil
+	})
+
+	if _, err := InstallAutostart(); err == nil || !strings.Contains(err.Error(), "reset failed") {
+		t.Fatalf("InstallAutostart reset failure = %v, want surfaced command output", err)
+	}
+	unitPath := filepath.Join(dir, autostartUnitName)
+	if _, statErr := os.Stat(unitPath); !os.IsNotExist(statErr) {
+		t.Fatalf("unit file should be cleaned up after reset-failed failure; stat err = %v", statErr)
+	}
+	if calledWith(*calls, "systemctl", "--user", "enable", "--now", autostartUnitName) {
+		t.Fatalf("enable ran after reset-failed made the unit unstartable; calls=%v", *calls)
+	}
+	want := [][]string{
+		{"systemctl", "--user", "daemon-reload"},
+		{"systemctl", "--user", "reset-failed", autostartUnitName},
+		{"systemctl", "--user", "show", autostartUnitName, "--property=ActiveState", "--value"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("retained failed unit commands = %v, want %v", *calls, want)
 	}
 }
 
@@ -238,11 +342,12 @@ func TestRefreshAutostartUnitRewritesLegacyLinuxUnit(t *testing.T) {
 	unitPath := filepath.Join(dir, autostartUnitName)
 	legacy := "[Unit]\n" +
 		"Description=Agent Factory daemon\n" +
-		"StartLimitIntervalSec=60\n" +
-		"StartLimitBurst=5\n\n" +
+		"\n" +
 		"[Service]\n" +
 		"ExecStart=\"/opt/af\" --daemon\n" +
 		"Restart=on-failure\n" +
+		"StartLimitInterval=60\n" +
+		"StartLimitBurst=5\n" +
 		"RestartPreventExitStatus=78\n" +
 		"Environment=PATH=/custom/bin\n\n" +
 		"[Install]\nWantedBy=default.target\n"
@@ -262,7 +367,7 @@ func TestRefreshAutostartUnitRewritesLegacyLinuxUnit(t *testing.T) {
 		t.Fatalf("refreshed unit must contain exactly one safe KillMode:\n%s", text)
 	}
 	for _, preserved := range []string{
-		"StartLimitIntervalSec=60",
+		"StartLimitInterval=60",
 		"StartLimitBurst=5",
 		"RestartPreventExitStatus=78",
 		"ExecStart=\"/opt/af\" --daemon",
@@ -274,6 +379,58 @@ func TestRefreshAutostartUnitRewritesLegacyLinuxUnit(t *testing.T) {
 	}
 	if !calledWith(*calls, "systemctl", "--user", "daemon-reload") {
 		t.Fatalf("rewritten unit was not reloaded; calls=%v", *calls)
+	}
+}
+
+// TestRefreshAutostartUnitAddsRestartRateLimit is the existing-install half
+// of #2168's Phase 1 backstop. A renderer change alone leaves every installed
+// unit on the unbounded legacy policy, so the restart/upgrade migration must
+// add the AF-owned limit without re-rendering captured install-time values.
+func TestRefreshAutostartUnitAddsRestartRateLimit(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	calls := stubAutostartUnitCommand(t, nil)
+	unitPath := filepath.Join(dir, autostartUnitName)
+	legacy := "[Unit]\n" +
+		"Description=Agent Factory daemon\n\n" +
+		"[Service]\n" +
+		"KillMode=process\n" +
+		"ExecStart=\"/opt/af with space\" --daemon\n" +
+		"Restart=on-failure\n" +
+		"Environment=PATH=/custom/bin\n" +
+		"Environment=AGENT_FACTORY_HOME=/srv/custom-af\n\n" +
+		"[Install]\nWantedBy=default.target\n"
+	if err := os.WriteFile(unitPath, []byte(legacy), 0644); err != nil {
+		t.Fatalf("seed legacy unit: %v", err)
+	}
+
+	if err := RefreshAutostartUnit(); err != nil {
+		t.Fatalf("RefreshAutostartUnit: %v", err)
+	}
+	got, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read refreshed unit: %v", err)
+	}
+	text := string(got)
+	for _, want := range []string{
+		"StartLimitInterval=60\n",
+		"StartLimitBurst=5\n",
+	} {
+		if strings.Count(text, want) != 1 {
+			t.Errorf("refreshed unit must contain exactly one %q:\n%s", strings.TrimSpace(want), text)
+		}
+	}
+	for _, preserved := range []string{
+		"ExecStart=\"/opt/af with space\" --daemon",
+		"Environment=PATH=/custom/bin",
+		"Environment=AGENT_FACTORY_HOME=/srv/custom-af",
+		"KillMode=process",
+	} {
+		if !strings.Contains(text, preserved) {
+			t.Errorf("migration dropped captured directive %q:\n%s", preserved, text)
+		}
+	}
+	if !calledWith(*calls, "systemctl", "--user", "daemon-reload") {
+		t.Fatalf("migrated unit was not reloaded; calls=%v", *calls)
 	}
 }
 
@@ -301,7 +458,11 @@ func TestRefreshAutostartUnitReloadsAlreadySafeUnit(t *testing.T) {
 	dir := withAutostartTestEnv(t, "linux")
 	calls := stubAutostartUnitCommand(t, nil)
 	unitPath := filepath.Join(dir, autostartUnitName)
-	unit := "[Service]\nKillMode=process\nExecStart=/opt/af --daemon\n"
+	unit := "[Service]\n" +
+		"KillMode=process\n" +
+		"StartLimitInterval=60\n" +
+		"StartLimitBurst=5\n" +
+		"ExecStart=/opt/af --daemon\n"
 	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -351,8 +512,36 @@ func TestRestartAutostartUnitLinux(t *testing.T) {
 	if err := RestartAutostartUnit(); err != nil {
 		t.Fatalf("RestartAutostartUnit: %v", err)
 	}
-	want := [][]string{{"systemctl", "--user", "restart", autostartUnitName}}
-	if len(*calls) != 1 || strings.Join((*calls)[0], " ") != strings.Join(want[0], " ") {
+	want := [][]string{
+		{"systemctl", "--user", "reset-failed", autostartUnitName},
+		{"systemctl", "--user", "restart", autostartUnitName},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("unit commands = %v, want %v", *calls, want)
+	}
+}
+
+func TestRestartAutostartUnitToleratesUnloadedInactiveUnitLinux(t *testing.T) {
+	withAutostartTestEnv(t, "linux")
+	calls := stubAutostartUnitCommandFunc(t, func(_ string, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "reset-failed" {
+			return []byte("unit is not loaded"), errors.New("exit status 1")
+		}
+		if len(args) > 1 && args[1] == "show" {
+			return []byte("inactive\n"), nil
+		}
+		return nil, nil
+	})
+
+	if err := RestartAutostartUnit(); err != nil {
+		t.Fatalf("RestartAutostartUnit treated an inactive unloaded unit as failed: %v", err)
+	}
+	want := [][]string{
+		{"systemctl", "--user", "reset-failed", autostartUnitName},
+		{"systemctl", "--user", "show", autostartUnitName, "--property=ActiveState", "--value"},
+		{"systemctl", "--user", "restart", autostartUnitName},
+	}
+	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("unit commands = %v, want %v", *calls, want)
 	}
 }
@@ -431,7 +620,7 @@ func TestAutostartLaunchdCallsShareOneDomain(t *testing.T) {
 
 func TestRestartAutostartUnitFailureSurfacesOutput(t *testing.T) {
 	withAutostartTestEnv(t, "linux")
-	stubAutostartUnitCommand(t, errors.New("exit status 1"))
+	calls := stubAutostartUnitCommand(t, errors.New("exit status 1"))
 
 	err := RestartAutostartUnit()
 	if err == nil {
@@ -439,6 +628,13 @@ func TestRestartAutostartUnitFailureSurfacesOutput(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unit failure detail") {
 		t.Fatalf("error %q does not include the command output", err)
+	}
+	want := [][]string{
+		{"systemctl", "--user", "reset-failed", autostartUnitName},
+		{"systemctl", "--user", "show", autostartUnitName, "--property=ActiveState", "--value"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("restart must stop after reset-failed fails; calls=%v want=%v", *calls, want)
 	}
 }
 
