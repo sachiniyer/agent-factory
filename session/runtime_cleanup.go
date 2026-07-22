@@ -24,6 +24,9 @@ type RuntimeCleanupData struct {
 
 type DockerRuntimeCleanupData struct {
 	ContainerID string `json:"container_id"`
+	// EngineID is Docker's stable, non-secret daemon ID. Empty means a legacy
+	// tombstone that cannot be targeted safely and must fail closed.
+	EngineID string `json:"engine_id,omitempty"`
 }
 
 type SSHRuntimeCleanupData struct {
@@ -122,13 +125,24 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		if data.Docker == nil || strings.TrimSpace(data.Docker.ContainerID) == "" {
 			return nil, nil, fmt.Errorf("docker cleanup handle has no container id")
 		}
-		p := &dockerProvisioner{spec: ProvisionSpec{Title: title}, containerID: data.Docker.ContainerID}
+		if strings.TrimSpace(data.Docker.EngineID) == "" {
+			return nil, nil, fmt.Errorf("docker cleanup handle has no engine identity (legacy record); select the original Docker context or DOCKER_HOST before repairing the record")
+		}
+		p := &dockerProvisioner{
+			spec:               ProvisionSpec{Title: title},
+			containerID:        data.Docker.ContainerID,
+			engineID:           data.Docker.EngineID,
+			verifyEngineOnReap: true,
+		}
 		teardown := p.reap
 		return &dockerBackend{
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			containerID:        p.containerID,
 			provisioner:        p,
-			cleanup:            &DockerRuntimeCleanupData{ContainerID: p.containerID},
+			cleanup: &DockerRuntimeCleanupData{
+				ContainerID: p.containerID,
+				EngineID:    p.engineID,
+			},
 		}, teardown, nil
 	case "ssh":
 		if data.SSH == nil || strings.TrimSpace(data.SSH.Config.Host) == "" || strings.TrimSpace(data.SSH.SessionDir) == "" {

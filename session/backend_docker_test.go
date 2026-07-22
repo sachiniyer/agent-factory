@@ -54,6 +54,8 @@ func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 	defer SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		switch args[0] {
+		case "info":
+			return []byte("engine-create-fail\n"), nil
 		case "run":
 			// Container CREATED (id on stdout) but the start step fails → non-zero exit.
 			return createThenFailRunOutput(), fmt.Errorf("exit status 125")
@@ -70,6 +72,46 @@ func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 	require.Truef(t, sawDockerRm(calls, dockerCreatedID),
 		"#2008: created-then-failed container %s was not reaped (`docker rm -f` never issued); docker calls=%v",
 		dockerCreatedID, calls)
+}
+
+func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
+	const engineID = "engine-that-created-container"
+	defer SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, fmt.Errorf("missing docker command")
+		}
+		switch args[0] {
+		case "info":
+			return []byte(engineID + "\n"), nil
+		case "run":
+			return []byte(dockerCreatedID + "\n"), nil
+		case "cp":
+			return nil, nil
+		case "port":
+			return []byte("127.0.0.1:49152\n"), nil
+		case "exec":
+			if len(args) >= 4 && args[2] == "cat" && args[3] == dockerBannerPath {
+				return []byte(`{"addr":":8000","token":"test-only","title":"engine-bound"}`), nil
+			}
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected docker command: %v", args)
+		}
+	})()
+
+	p := &dockerProvisioner{
+		spec:  ProvisionSpec{Title: "engine-bound", CloneURL: "file:///repo"},
+		image: "image:latest",
+		afBin: "/tmp/test-af",
+	}
+	result, err := p.provision()
+	require.NoError(t, err)
+	backend, ok := result.Backend.(*dockerBackend)
+	require.Truef(t, ok, "provisioned backend type = %T, want *dockerBackend", result.Backend)
+	require.NotNil(t, backend.cleanup)
+	assert.Equal(t, dockerCreatedID, backend.cleanup.ContainerID)
+	assert.Equal(t, engineID, backend.cleanup.EngineID,
+		"cleanup handle must bind the container to the Docker engine that created it")
 }
 
 // TestRunContainer_CapturesCreatedIDOnError pins the fix at its source: even when
