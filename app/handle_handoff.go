@@ -129,9 +129,15 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		"Same worktree and branch — nothing is discarded."
 
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
+		// Confirmation is a second retained-intent boundary after the picker.
+		// Re-resolve the captured identity so an id-less legacy row replaced while
+		// the dialog was open cannot hand its title to the new session.
+		if m.resolveHandoffPickerTarget(pickerTarget) == nil {
+			return nil
+		}
 		return startHandoffMsg{request: daemon.HandoffSessionRequest{
 			ID: pickerTarget.id, Title: title, RepoID: pickerTarget.repoID, To: target,
-		}}
+		}, target: pickerTarget}
 	})
 }
 
@@ -167,6 +173,7 @@ func (m *home) resolveHandoffPickerTarget(target handoffPickerTarget) *session.I
 // another).
 type startHandoffMsg struct {
 	request daemon.HandoffSessionRequest
+	target  handoffPickerTarget
 }
 
 type handoffDoneMsg struct {
