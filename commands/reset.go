@@ -60,18 +60,21 @@ const worktreesResidueDir = "worktrees"
 // per-repo (removeArchivedDirs) so a preserved (corrupt/unreadable) record is
 // never left pointing at a deleted archive.
 //
+// NOTE: the project registry is deliberately NOT here. ResetProjectRegistry
+// validates its AF-owned directory and clears repo-local checkout markers before
+// any registered worktree can be removed.
+//
 // NOTE: "worktrees" is a wholesale removal only because the per-worktree pass is
 // expected to have emptied it. When that pass DELIBERATELY left a worktree in
 // place (#2110), this blind delete would destroy the very directory git still
 // owns — so the wipe below skips it and prunes the tree entry-by-entry instead.
 var resetWipePaths = []string{
-	worktreesResidueDir,           // AF-managed worktree parent dir (residue after cleanup)
-	config.ProjectRegistryDirName, // durable project identity and personal project state
-	"events",                      // daemon event queue
-	"logs",                        // per-task run logs
-	"locks",                       // per-task run locks
-	config.StateFileName,          // state.json (help-screen bitmask etc.)
-	config.TUIStateFileName,       // tui-state.json (TUI layout state)
+	worktreesResidueDir,     // AF-managed worktree parent dir (residue after cleanup)
+	"events",                // daemon event queue
+	"logs",                  // per-task run logs
+	"locks",                 // per-task run locks
+	config.StateFileName,    // state.json (help-screen bitmask etc.)
+	config.TUIStateFileName, // tui-state.json (TUI layout state)
 }
 
 // resetPlan is the pre-computed, non-destructive picture of what a factory
@@ -598,6 +601,13 @@ func branchCreatedByAF(w session.GitWorktreeData) bool {
 // whatever a transient failure left behind.
 func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	var errs []error
+
+	// Project records own checkout markers inside Git common directories. Clear
+	// both while every registered worktree still exists; a blind AF-home wipe
+	// cannot find or safely identify that repo-local state.
+	if err := config.ResetProjectRegistry(); err != nil {
+		errs = append(errs, fmt.Errorf("reset project registry: %w", err))
+	}
 
 	// Snapshot which AF-created branches exist up front, so the final count is
 	// accurate even though branch deletion happens AFTER worktree removal.

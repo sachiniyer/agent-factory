@@ -22,6 +22,15 @@ func TestListProjectsMissingHomeIsReadOnly(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist, "a read-only list must not materialize the AF home")
 }
 
+func TestResetProjectRegistryMissingHomeIsReadOnly(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "missing-af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	require.NoError(t, ResetProjectRegistry())
+	_, statErr := os.Stat(home)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "an empty reset must not materialize the AF home")
+}
+
 func TestProjectRegistryRebindPreservesIdentityAndClonesStayDistinct(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
@@ -86,6 +95,28 @@ func TestProjectRegistryPersistsSessionlessRepoFromArbitraryPath(t *testing.T) {
 		"the registry must list an explicitly registered project with zero sessions and zero tasks")
 	_, err = os.Stat(filepath.Join(repo, ".git", checkoutMarkerDirName, checkoutMarkerFileName))
 	require.NoError(t, err, "registration must anchor identity in the Git common directory")
+}
+
+func TestResetProjectRegistryRefusesMarkerItDoesNotOwn(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repo := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+	registered, err := RegisterProject(repo)
+	require.NoError(t, err)
+
+	marker := filepath.Join(repo, ".git", checkoutMarkerDirName, checkoutMarkerFileName)
+	foreignID := "chk_ffffffffffffffffffffffffffffffff"
+	require.NoError(t, os.WriteFile(marker, []byte(foreignID+"\n"), 0o644))
+
+	err = ResetProjectRegistry()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), registered.ID)
+	data, readErr := os.ReadFile(marker)
+	require.NoError(t, readErr)
+	require.Equal(t, foreignID+"\n", string(data), "reset must not remove a marker it cannot validate")
+	_, statErr := os.Stat(filepath.Join(home, ProjectRegistryDirName, registered.ID, projectMetadataFileName))
+	require.NoError(t, statErr, "the registry must remain retryable when marker validation fails")
 }
 
 func TestProjectRegistryConcurrentRegistrationIsIdempotent(t *testing.T) {

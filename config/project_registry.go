@@ -16,9 +16,12 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// ProjectRegistryDirName is the AF-home directory containing durable project
-// identities and their future personal configuration.
-const ProjectRegistryDirName = "projects"
+// ProjectRegistryDirName is the unmistakably AF-owned directory containing
+// durable project identities and their future personal configuration. The
+// explicit namespace matters when AGENT_FACTORY_HOME is a broad caller-owned
+// directory such as the user's home: reset must never confuse ~/projects with
+// AF state.
+const ProjectRegistryDirName = ".agent-factory-projects"
 
 const (
 	projectRegistrySchemaVersion = 1
@@ -97,6 +100,65 @@ func ListProjects() ([]Project, error) {
 	return projects, nil
 }
 
+// ResetProjectRegistry removes durable project records and the checkout
+// markers they own. It validates every record and marker before deleting
+// anything, then removes only the unmistakably AF-owned registry directory.
+// Callers must run this before deleting registered worktrees so their Git
+// common directories are still resolvable.
+func ResetProjectRegistry() error {
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("inspect project registry: %w", err)
+	}
+
+	return WithFileLock(projectRegistryLockPath(dir), func() error {
+		records, err := loadProjectRecords(dir)
+		if err != nil {
+			return err
+		}
+		markers := make(map[string]string, len(records))
+		for _, record := range records {
+			binding, err := resolveProjectBinding(record.Root)
+			if err != nil {
+				return fmt.Errorf("locate checkout marker for project %s: %w", record.ID, err)
+			}
+			markerID, exists, err := readCheckoutID(binding.checkoutMarker)
+			if err != nil {
+				return err
+			}
+			if exists && markerID != record.CheckoutID {
+				return fmt.Errorf("project %s expects checkout marker %s, but %s contains %s", record.ID, record.CheckoutID, binding.checkoutMarker, markerID)
+			}
+			if prior, exists := markers[binding.checkoutMarker]; exists && prior != record.CheckoutID {
+				return fmt.Errorf("checkout marker %s is claimed by both %s and %s", binding.checkoutMarker, prior, record.CheckoutID)
+			}
+			markers[binding.checkoutMarker] = record.CheckoutID
+		}
+
+		for marker := range markers {
+			if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove checkout marker %s: %w", marker, err)
+			}
+			if err := os.Remove(marker + ".lock"); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove checkout marker lock %s: %w", marker+".lock", err)
+			}
+			// The directory is AF-owned, but future marker files may share it.
+			// Remove it only when empty; any error is therefore a safe keep.
+			_ = os.Remove(filepath.Dir(marker))
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("remove project registry %s: %w", dir, err)
+		}
+		return nil
+	})
+}
+
 // RegisterProject records path as a project and returns its opaque identity.
 // Registering the same checkout again is idempotent, including when path names
 // a subdirectory: registration resolves it to the canonical main repo root. A
@@ -124,12 +186,15 @@ func RegisterProject(path string) (Project, error) {
 		for _, record := range records {
 			if record.CheckoutID == checkoutID && record.RelativeRoot == binding.relativeRoot {
 				if !sameProjectPath(record.Root, binding.root) {
-					oldRootExists := projectPathExists(record.Root)
-					if oldRootExists && projectPathExists(binding.root) &&
+					oldRootHasMarker, err := projectRootHasCheckoutID(record.Root, checkoutID)
+					if err != nil {
+						return err
+					}
+					if oldRootHasMarker && projectPathExists(binding.root) &&
 						!projectRootUsesGitCommonDir(record.Root, binding.gitCommonDir) {
 						return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 					}
-					if !oldRootExists {
+					if !oldRootHasMarker {
 						record.Root = binding.root
 						record.CheckoutRoot = binding.checkoutRoot
 						if err := writeProjectRecord(dir, record); err != nil {
@@ -220,10 +285,15 @@ func RebindProject(id, path string) (Project, error) {
 				return fmt.Errorf("checkout root %s and relative root %s are already registered as project %s", binding.checkoutRoot, binding.relativeRoot, candidate.ID)
 			}
 		}
-		if record.CheckoutID == checkoutID && !sameProjectPath(record.Root, binding.root) &&
-			projectPathExists(record.Root) && projectPathExists(binding.root) &&
-			!projectRootUsesGitCommonDir(record.Root, binding.gitCommonDir) {
-			return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
+		if record.CheckoutID == checkoutID && !sameProjectPath(record.Root, binding.root) {
+			oldRootHasMarker, err := projectRootHasCheckoutID(record.Root, checkoutID)
+			if err != nil {
+				return err
+			}
+			if oldRootHasMarker && projectPathExists(binding.root) &&
+				!projectRootUsesGitCommonDir(record.Root, binding.gitCommonDir) {
+				return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
+			}
 		}
 		record.CheckoutID = checkoutID
 		record.Root = binding.root
@@ -436,6 +506,38 @@ func ensureCheckoutID(markerPath string) (string, error) {
 		return "", err
 	}
 	return checkoutID, nil
+}
+
+func readCheckoutID(markerPath string) (id string, exists bool, err error) {
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read checkout marker %s: %w", markerPath, err)
+	}
+	id = strings.TrimSpace(string(data))
+	if !checkoutIDPattern.MatchString(id) {
+		return "", false, fmt.Errorf("checkout marker %s contains invalid id %q", markerPath, id)
+	}
+	return id, true, nil
+}
+
+func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
+	binding, err := resolveProjectBinding(root)
+	if err != nil {
+		// A caller-owned directory may legitimately reuse a moved checkout's
+		// old path. With no .git entry it cannot carry this checkout marker.
+		if _, statErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(statErr, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect last-known project root %s: %w", root, err)
+	}
+	id, exists, err := readCheckoutID(binding.checkoutMarker)
+	if err != nil {
+		return false, err
+	}
+	return exists && id == checkoutID, nil
 }
 
 func projectRootUsesGitCommonDir(root, commonDir string) bool {
