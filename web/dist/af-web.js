@@ -6183,14 +6183,27 @@ function envelopeErrorText(err, statusLine) {
   }
   return errorText(err, statusLine);
 }
+function envelopeErrorCode(err) {
+  if (err === null || typeof err !== "object") {
+    return "";
+  }
+  const code = err.code;
+  return typeof code === "string" ? code : "";
+}
+var MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 var ApiError = class extends Error {
   status;
-  constructor(status, message) {
+  code;
+  constructor(status, message, code = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 };
+function isMutationCommittedError(e) {
+  return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE;
+}
 async function af(method, body, token2) {
   const headers = { "Content-Type": "application/json" };
   if (token2 !== "") {
@@ -6213,10 +6226,10 @@ async function af(method, body, token2) {
   }
   const statusLine = `${resp.status} ${resp.statusText}`.trim();
   if (!resp.ok) {
-    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine));
+    throw new ApiError(resp.status, envelopeErrorText(env?.error, statusLine), envelopeErrorCode(env?.error));
   }
   if (env && env.error != null) {
-    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine));
+    throw new ApiError(resp.status, envelopeErrorText(env.error, statusLine), envelopeErrorCode(env.error));
   }
   return env?.data;
 }
@@ -12803,6 +12816,12 @@ function openEditTask(task) {
           closeModal();
           refreshTasks();
         }).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            closeModal();
+            refreshTasks();
+            surfaceTabError(e);
+            return;
+          }
           m.setBusy(false);
           m.setError(describeError(e));
         });
@@ -12816,7 +12835,12 @@ function toggleTask(task) {
   if (tok === null) {
     return;
   }
-  void updateTask(task.id, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void updateTask(task.id, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
+    if (isMutationCommittedError(e)) {
+      refreshTasks();
+    }
+    surfaceTabError(e);
+  });
 }
 function doTriggerTask(task) {
   const tok = token;
