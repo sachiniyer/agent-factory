@@ -15,12 +15,6 @@ import (
 
 type handoffPickerTarget = sessionActionTarget
 
-func (target handoffPickerTarget) request(to string) daemon.HandoffSessionRequest {
-	return daemon.HandoffSessionRequest{
-		ID: target.id, Title: target.title, RepoID: target.repoID, To: to,
-	}
-}
-
 // handoffAgentChoices returns the agents the selected session may be handed to:
 // every supported agent except the one already running.
 //
@@ -133,7 +127,7 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		if m.resolveSessionActionTarget(pickerTarget) == nil {
 			return nil
 		}
-		return startHandoffMsg{request: pickerTarget.request(target), target: pickerTarget}
+		return startHandoffMsg{request: pickerTarget.handoffRequest(target), target: pickerTarget}
 	})
 }
 

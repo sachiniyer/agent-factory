@@ -60,3 +60,9 @@ func (target sessionActionTarget) killRequest() daemon.KillSessionRequest {
 func (target sessionActionTarget) archiveRequest() daemon.ArchiveSessionRequest {
 	return daemon.ArchiveSessionRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
+
+func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessionRequest {
+	return daemon.HandoffSessionRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID, To: to,
+	}
+}
