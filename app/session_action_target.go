@@ -66,3 +66,7 @@ func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessio
 		ID: target.id, Title: target.title, RepoID: target.repoID, To: to,
 	}
 }
+
+func (target sessionActionTarget) resumeFromLimitRequest() daemon.ResumeFromLimitRequest {
+	return daemon.ResumeFromLimitRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
+}

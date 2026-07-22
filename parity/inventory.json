@@ -423,7 +423,7 @@
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "partial",
-        "pointer": "app/session_action_target.go captures stable identity; handle_actions.go sends it for kill/archive and handle_handoff.go sends it for handoff"
+        "pointer": "app/session_action_target.go captures stable identity; handle_actions.go sends it for kill/archive/limit retry and handle_handoff.go sends it for handoff"
       },
       "web": {
         "status": "yes",
@@ -435,7 +435,7 @@
       },
       "verdict": "real-gap",
       "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, and archive now carry one captured identity through modal, daemon dispatch, and completion. The remaining TUI mutations are still title-addressed and need an action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for a TUI action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, and usage-limit retry now carry one captured identity through daemon dispatch and completion. The remaining TUI mutations are still title-addressed and need an action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
     },
     {
       "id": "session.watch",
@@ -1870,11 +1870,6 @@
         "cli": {
           "id": {
             "ok": "The CLI resolves sessions by title under --repo scoping, exactly as kill/archive/send-prompt do; the stable id is the all-project web client's collision-proof key."
-          }
-        },
-        "tui": {
-          "id": {
-            "gap": "wire.id-addressing"
           }
         }
       },

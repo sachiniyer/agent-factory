@@ -191,9 +191,9 @@ var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeletePro
 // the agent if it exited, re-delivers the pending prompt, and clears the limit
 // state. A package var so the app test suite can stub it without dialing a real
 // daemon.
-var resumeFromLimitThroughDaemon = func(title, repoID string) error {
+var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
+		return c.ResumeFromLimit(request)
 	})
 }
 
@@ -458,7 +458,7 @@ func SetTaskRemoverForTest(f func(id string) error) func() {
 
 // SetLimitResumerForTest swaps the usage-limit resume seam (#1146) so a test can
 // assert the TUI routes `c` through the daemon — without dialing a real one.
-func SetLimitResumerForTest(f func(title, repoID string) error) func() {
+func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) error) func() {
 	prev := resumeFromLimitThroughDaemon
 	resumeFromLimitThroughDaemon = f
 	return func() { resumeFromLimitThroughDaemon = prev }

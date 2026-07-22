@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -35,7 +36,7 @@ func TestHandleLimitRetry_NonLimitRow_NoDispatch(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetLimitResumerForTest(func(string, string) error { called = true; return nil })
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error { called = true; return nil })
 	defer restore()
 
 	_, _ = h.handleLimitRetry()
@@ -50,8 +51,11 @@ func TestHandleLimitRetry_LimitRow_Dispatches(t *testing.T) {
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	var gotTitle string
-	restore := SetLimitResumerForTest(func(title, _ string) error { gotTitle = title; return nil })
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
 	defer restore()
 
 	_, cmd := h.handleLimitRetry()
@@ -60,7 +64,39 @@ func TestHandleLimitRetry_LimitRow_Dispatches(t *testing.T) {
 	done, ok := msg.(limitRetriedMsg)
 	require.True(t, ok, "the command must emit limitRetriedMsg")
 	require.NoError(t, done.err)
-	require.Equal(t, "worker", gotTitle, "the resume command must call the daemon for the selected title")
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest,
+		"the resume command must preserve the selected session's stable identity")
+}
+
+// A manual retry retains its target while the tea.Cmd waits to run. If a
+// snapshot replaces the selected row with a different session that reused the
+// title in that window, the pending retry must not deliver the old prompt into
+// the replacement.
+func TestHandleLimitRetry_DoesNotTargetSameTitleReplacement(t *testing.T) {
+	h := newTestHome(t)
+	original := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	h.store.AddInstance(original)
+	h.sidebar.SetSelectedInstance(0)
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.NotNil(t, cmd)
+
+	replacement := limitActionInstance(t, original.Title, time.Now().Add(2*time.Hour))
+	require.NotEqual(t, original.ID, replacement.ID)
+	require.True(t, h.store.ReplaceInstance(original, replacement))
+
+	_ = cmd()
+	require.Equal(t, original.ID, gotRequest.ID,
+		"the pending retry must retain the original session's stable ID")
+	require.NotEqual(t, replacement.ID, gotRequest.ID,
+		"a same-title replacement must not inherit the pending retry")
 }
 
 // TestHandleLimitRetry_TearingDownRow_NoDispatch: pressing c on a limit-blocked
@@ -74,7 +110,7 @@ func TestHandleLimitRetry_TearingDownRow_NoDispatch(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetLimitResumerForTest(func(string, string) error { called = true; return nil })
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error { called = true; return nil })
 	defer restore()
 
 	_, cmd := h.handleLimitRetry()
@@ -87,12 +123,13 @@ func TestHandleLimitRetry_TearingDownRow_NoDispatch(t *testing.T) {
 // completion message (handled into the error box, limit state left intact).
 func TestResumeFromLimitCmd_SurfacesError(t *testing.T) {
 	h := newTestHome(t)
-	restore := SetLimitResumerForTest(func(string, string) error {
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error {
 		return errors.New("session is not blocked on a usage limit")
 	})
 	defer restore()
 
-	msg := h.resumeFromLimitCmd("worker")()
+	target := sessionActionTarget{id: "worker-id", title: "worker", repoID: h.repoID}
+	msg := h.resumeFromLimitCmd(target)()
 	done, ok := msg.(limitRetriedMsg)
 	require.True(t, ok)
 	require.Error(t, done.err)
@@ -106,15 +143,32 @@ func TestHandleLimitRetried_ClearsLocally(t *testing.T) {
 	h.store.AddInstance(inst)
 	require.True(t, inst.LimitReached())
 
-	_, _ = h.handleLimitRetried(limitRetriedMsg{title: "worker"})
+	target := captureSessionActionTarget(inst, h.repoID)
+	_, _ = h.handleLimitRetried(limitRetriedMsg{target: target})
 	require.False(t, inst.LimitReached(), "a successful retry must clear the local limit state")
+}
+
+func TestHandleLimitRetried_DoesNotClearSameTitleReplacement(t *testing.T) {
+	h := newTestHome(t)
+	original := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
+	h.store.AddInstance(original)
+	target := captureSessionActionTarget(original, h.repoID)
+
+	replacement := limitActionInstance(t, original.Title, time.Now().Add(2*time.Hour))
+	require.NotEqual(t, original.ID, replacement.ID)
+	require.True(t, h.store.ReplaceInstance(original, replacement))
+
+	_, _ = h.handleLimitRetried(limitRetriedMsg{target: target})
+	require.True(t, replacement.LimitReached(),
+		"the old retry completion must not clear a same-title replacement's limit state")
 }
 
 func TestHandleLimitRetried_NoOpKeepsLimitLocally(t *testing.T) {
 	h := newTestHome(t)
 	inst := limitActionInstance(t, "worker", time.Now().Add(time.Hour))
 	h.store.AddInstance(inst)
+	target := captureSessionActionTarget(inst, h.repoID)
 
-	_, _ = h.handleLimitRetried(limitRetriedMsg{title: "worker", err: errors.New("resume was not performed: another operation owns the retry")})
+	_, _ = h.handleLimitRetried(limitRetriedMsg{target: target, err: errors.New("resume was not performed: another operation owns the retry")})
 	require.True(t, inst.LimitReached(), "a daemon no-op must not clear the local limit state")
 }
