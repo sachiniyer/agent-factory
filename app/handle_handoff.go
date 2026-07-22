@@ -130,7 +130,7 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 		// Confirmation is a second retained-intent boundary after the picker.
 		// Re-resolve the captured identity so an id-less legacy row replaced while
 		// the dialog was open cannot hand its title to the new session.
-		if m.resolveHandoffPickerTarget(pickerTarget) == nil {
+		if m.resolveSessionActionTarget(pickerTarget) == nil {
 			return nil
 		}
 		return startHandoffMsg{request: pickerTarget.request(target), target: pickerTarget}
