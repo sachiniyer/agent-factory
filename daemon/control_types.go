@@ -438,8 +438,8 @@ type SetPRInfoResponse struct {
 
 // PauseStatusPollRequest asks the daemon to pause its per-instance capture-pane
 // liveness poll for ONE session while a TUI is attached full-screen to it
-// (#1160, Fix A follow-up to #1157). Title selects the session; RepoID scopes
-// the lookup like the other sessions verbs. There is deliberately NO
+// (#1160, Fix A follow-up to #1157). ID identifies the lease owner when
+// present; legacy clients fall back to {Title, RepoID}. There is deliberately NO
 // client-supplied duration: the daemon always applies its own fixed
 // statusPollLease, so a misbehaving or crashed client can never silence an
 // instance for an unbounded time. The TUI renews the lease with a heartbeat
@@ -447,6 +447,9 @@ type SetPRInfoResponse struct {
 type PauseStatusPollRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// ID is the attached session's stable id. Keying the lease by identity keeps
+	// an old heartbeat from pausing a different session that reused the title.
+	ID string `json:"id"`
 }
 
 type PauseStatusPollResponse struct {
@@ -459,6 +462,8 @@ type PauseStatusPollResponse struct {
 type ResumeStatusPollRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// ID is the stable lease key; see PauseStatusPollRequest.ID.
+	ID string `json:"id"`
 }
 
 type ResumeStatusPollResponse struct {

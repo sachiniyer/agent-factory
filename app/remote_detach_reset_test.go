@@ -30,7 +30,7 @@ func runAttachOverlayCallback(t *testing.T, h *home) tea.Cmd {
 	ch := make(chan struct{})
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
+		done <- h.attachOverlayCallback(testAttachTarget(h, "t1"), "test-attach", "", func() (chan struct{}, error) {
 			return ch, nil
 		})
 	}()
@@ -186,7 +186,7 @@ func TestAttachOverlayCallback_NoResetWhenAttachErrors(t *testing.T) {
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
 
-	cmd := h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
+	cmd := h.attachOverlayCallback(testAttachTarget(h, "t1"), "test-attach", "", func() (chan struct{}, error) {
 		return nil, assert.AnError
 	})
 

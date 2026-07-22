@@ -290,15 +290,15 @@ var (
 // swap under `go test -parallel -race` (the #964 / #960-PR4 snapshot-fetcher
 // race). The seams live per-home instead; tests assign a fake to
 // h.pauseStatusPoll / h.resumeStatusPoll directly.
-func pauseStatusPollThroughDaemon(title, repoID string) error {
+func pauseStatusPollThroughDaemon(request daemon.PauseStatusPollRequest) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.PauseStatusPoll(daemon.PauseStatusPollRequest{Title: title, RepoID: repoID})
+		return c.PauseStatusPoll(request)
 	})
 }
 
-func resumeStatusPollThroughDaemon(title, repoID string) error {
+func resumeStatusPollThroughDaemon(request daemon.ResumeStatusPollRequest) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.ResumeStatusPoll(daemon.ResumeStatusPollRequest{Title: title, RepoID: repoID})
+		return c.ResumeStatusPoll(request)
 	})
 }
 

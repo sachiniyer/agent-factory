@@ -775,6 +775,7 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	// instance + repoID are captured here at keypress so a deferred attach (help
 	// overlay open) targets the captured session, not a drifted selection (#716).
 	repoID := m.repoID
+	target := captureSessionActionTarget(instance, repoID)
 	attach := func() (chan struct{}, error) {
 		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
 		// misroute the full-screen stream; empty falls back to the ordinal.
@@ -783,7 +784,7 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {
-			return attachOverlayCallbackFn(m, instance.Title, label, "", attach)
+			return attachOverlayCallbackFn(m, target, label, "", attach)
 		})
 	})
 }

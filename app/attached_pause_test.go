@@ -11,8 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
+
+func testAttachTarget(h *home, title string) sessionActionTarget {
+	return sessionActionTarget{title: title, repoID: h.repoID}
+}
 
 // assertPostDetachRepaintSequence pins that a post-detach cmd is the uniform
 // tea.Sequence(tea.ClearScreen, repaintAfterDetachMsg) the callback now returns
@@ -129,7 +134,7 @@ func TestAttachOverlayCallback_ClearsFlagOnDetach(t *testing.T) {
 
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("t1", "test-attach", " title=t1", attach)
+		done <- h.attachOverlayCallback(testAttachTarget(h, "t1"), "test-attach", " title=t1", attach)
 	}()
 
 	// While the callback is blocked on <-ch the flag must be set.
@@ -163,7 +168,7 @@ func TestAttachOverlayCallback_LeavesFlagAloneWhenAttachErrors(t *testing.T) {
 	attachErr := errors.New("simulated attach failure")
 	attach := func() (chan struct{}, error) { return nil, attachErr }
 
-	cmd := h.attachOverlayCallback("t1", "test-attach", "", attach)
+	cmd := h.attachOverlayCallback(testAttachTarget(h, "t1"), "test-attach", "", attach)
 
 	assert.Nil(t, cmd, "attachOverlayCallback must return nil when attach fails")
 	assert.False(t, h.attached.Load(),
@@ -180,14 +185,16 @@ func TestAttachOverlayCallback_LeavesFlagAloneWhenAttachErrors(t *testing.T) {
 // on the model under test and no real daemon is contacted.
 func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 	h := newTestHome(t)
+	target := sessionActionTarget{id: "alpha-id", title: "alpha", repoID: h.repoID}
 
 	var mu sync.Mutex
-	var pausedTitle, resumedTitle string
+	var pausedRequest daemon.PauseStatusPollRequest
+	var resumedRequest daemon.ResumeStatusPollRequest
 	var pauseCount, resumeCount int
 	pausedNow := make(chan struct{}, 1)
-	h.pauseStatusPoll = func(title, _ string) error {
+	h.pauseStatusPoll = func(request daemon.PauseStatusPollRequest) error {
 		mu.Lock()
-		pausedTitle = title
+		pausedRequest = request
 		pauseCount++
 		mu.Unlock()
 		select {
@@ -196,9 +203,9 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 		}
 		return nil
 	}
-	h.resumeStatusPoll = func(title, _ string) error {
+	h.resumeStatusPoll = func(request daemon.ResumeStatusPollRequest) error {
 		mu.Lock()
-		resumedTitle = title
+		resumedRequest = request
 		resumeCount++
 		mu.Unlock()
 		return nil
@@ -209,7 +216,7 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("alpha", "test-attach", "", attach)
+		done <- h.attachOverlayCallback(target, "test-attach", "", attach)
 	}()
 
 	// The pause must fire while the user is still attached — i.e. before we
@@ -220,7 +227,8 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 		t.Fatal("PauseStatusPoll was not called before detach — the daemon poll must pause on attach")
 	}
 	mu.Lock()
-	require.Equal(t, "alpha", pausedTitle, "pause must target the attached instance's title")
+	require.Equal(t, target.pauseStatusPollRequest(), pausedRequest,
+		"pause must retain the attached session's stable identity")
 	require.Positive(t, pauseCount, "pause must fire on attach")
 	require.Zero(t, resumeCount, "resume must not fire while still attached")
 	mu.Unlock()
@@ -236,7 +244,8 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 		return resumeCount > 0
 	}, time.Second, time.Millisecond, "ResumeStatusPoll must fire on detach")
 	mu.Lock()
-	assert.Equal(t, "alpha", resumedTitle, "resume must target the detached instance's title")
+	assert.Equal(t, target.resumeStatusPollRequest(), resumedRequest,
+		"resume must release the exact stable lease acquired on attach")
 	mu.Unlock()
 
 	require.False(t, h.attached.Load(), "attached flag must clear on detach")
@@ -260,7 +269,7 @@ func TestAttachOverlayCallback_ResumeOrderedAfterLastPause(t *testing.T) {
 	releasePause := make(chan struct{})
 	firstPause := true
 
-	h.pauseStatusPoll = func(_, _ string) error {
+	h.pauseStatusPoll = func(daemon.PauseStatusPollRequest) error {
 		// Only gate the FIRST pause (the on-attach one) so the test can hold a
 		// pause RPC "in flight" across the detach and prove resume waits for it.
 		mu.Lock()
@@ -279,7 +288,7 @@ func TestAttachOverlayCallback_ResumeOrderedAfterLastPause(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	h.resumeStatusPoll = func(_, _ string) error {
+	h.resumeStatusPoll = func(daemon.ResumeStatusPollRequest) error {
 		mu.Lock()
 		order = append(order, "resume")
 		mu.Unlock()
@@ -290,7 +299,7 @@ func TestAttachOverlayCallback_ResumeOrderedAfterLastPause(t *testing.T) {
 	attach := func() (chan struct{}, error) { return ch, nil }
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("alpha", "test-attach", "", attach)
+		done <- h.attachOverlayCallback(testAttachTarget(h, "alpha"), "test-attach", "", attach)
 	}()
 
 	// Wait until the on-attach pause is in-flight (blocked on releasePause).
@@ -333,15 +342,15 @@ func TestAttachOverlayCallback_ResumeOrderedAfterLastPause(t *testing.T) {
 // callback still returns the repaint cmd and clears m.attached via its defer.
 func TestAttachOverlayCallback_AttachSucceedsWhenPauseErrors(t *testing.T) {
 	h := newTestHome(t)
-	h.pauseStatusPoll = func(string, string) error { return errors.New("daemon down") }
-	h.resumeStatusPoll = func(string, string) error { return errors.New("daemon down") }
+	h.pauseStatusPoll = func(daemon.PauseStatusPollRequest) error { return errors.New("daemon down") }
+	h.resumeStatusPoll = func(daemon.ResumeStatusPollRequest) error { return errors.New("daemon down") }
 
 	ch := make(chan struct{})
 	attach := func() (chan struct{}, error) { return ch, nil }
 
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("alpha", "test-attach", "", attach)
+		done <- h.attachOverlayCallback(testAttachTarget(h, "alpha"), "test-attach", "", attach)
 	}()
 
 	require.Eventually(t, func() bool { return h.attached.Load() },

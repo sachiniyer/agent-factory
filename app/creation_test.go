@@ -106,8 +106,8 @@ func newTestHome(t *testing.T) *home {
 		// Per-home fields (not shared globals), so parallel tests can't race each
 		// other's swaps; tests exercising the pause/resume path assign their own
 		// recorders to h.pauseStatusPoll / h.resumeStatusPoll.
-		pauseStatusPoll:  func(string, string) error { return nil },
-		resumeStatusPoll: func(string, string) error { return nil },
+		pauseStatusPoll:  func(daemon.PauseStatusPollRequest) error { return nil },
+		resumeStatusPoll: func(daemon.ResumeStatusPollRequest) error { return nil },
 		store:            proj,
 		repoID:           repoID,
 	}
