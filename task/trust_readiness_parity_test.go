@@ -11,11 +11,10 @@ import (
 // length DocTrustPromptPresent requires (it deliberately refuses to match a
 // shortened prefix — see its doc in session/tmux/start.go).
 //
-// It must contain NO agent composer glyph. Several arms are a disjunction of a
-// trust predicate and a composer glyph (codex is CodexTrustPromptPresent || "›"),
-// so a stray glyph would make those agents "ready" for a reason that has nothing
-// to do with a trust dialog, and the label checks below would blame runner.go for
-// a change in this string. TestTrustDialogFixtureHasNoComposerGlyph guards it.
+// It must read as ready ONLY because it is a trust dialog: several arms are a
+// disjunction of a trust predicate and some other ready signal, so a second
+// signal hiding in here would satisfy a label check for the wrong reason.
+// TestTrustDialogFixtureCarriesOnlyATrustSignal guards that, via nonTrustTwin.
 const docTrustDialogFixture = `Add https://aider.chat/docs/faq.html to the chat?
 Open documentation url for more info
 (Y)es/(N)o/(D)on't ask again [Yes]:`
@@ -103,17 +102,41 @@ var trustReadinessArm = map[string]trustArmSpec{
 	tmux.ProgramDevin: {arm: armNone, inGate: false},
 }
 
-// TestTrustDialogFixtureHasNoComposerGlyph guards the precondition the label
-// checks depend on. Several readiness arms are (trust predicate || composer
-// glyph); a glyph in the fixture would make those agents ready for an unrelated
-// reason and produce a confident, wrong diagnosis pointing at runner.go.
-func TestTrustDialogFixtureHasNoComposerGlyph(t *testing.T) {
-	// claude ❯, codex ›, devin ❭, and frame glyphs the amp/opencode checks use.
-	for _, glyph := range []string{"❯", "›", "❭", "┃", "╹", "╰"} {
-		if strings.Contains(docTrustDialogFixture, glyph) {
-			t.Fatalf("docTrustDialogFixture contains the composer glyph %q; agents whose arm is "+
-				"(trust predicate || glyph) would read as ready for a reason unrelated to any trust "+
-				"dialog, and the parity checks would misattribute that to runner.go", glyph)
+// nonTrustTwin is docTrustDialogFixture with its doc-trust anchors removed, so
+// nothing about it should read as ready to any agent.
+//
+// DERIVED from the fixture rather than written alongside it. That is the
+// load-bearing part: a parallel constant would drift, while a replacement
+// carries any edit to the fixture into the twin automatically. If the fixture
+// ever gains a second ready signal, the twin gains it too and the check below
+// fails.
+var nonTrustTwin = strings.NewReplacer(
+	"Open documentation url for more info", "Some unrelated status line",
+	"(D)on't ask again", "",
+).Replace(docTrustDialogFixture)
+
+// TestTrustDialogFixtureCarriesOnlyATrustSignal guards the precondition every
+// label check depends on: that docTrustDialogFixture reads as ready ONLY because
+// it is a trust dialog.
+//
+// Several arms are (trust predicate || some other ready signal) — codex is
+// CodexTrustPromptPresent || "›", aider is isDocTrustPrompt || "\n> " || "Aider
+// v". A second signal hiding in the fixture would satisfy an armGeneric label
+// check for the wrong reason, making that row's verification vacuous while
+// staying green, and would fail armAgentSpecific rows with a confident diagnosis
+// blaming runner.go for a change in this string.
+//
+// Asserting on the derived twin rather than enumerating forbidden glyphs is
+// deliberate. An enumeration is a hand-maintained list that fails SILENTLY when
+// incomplete — the exact failure this whole change is about. A reviewer
+// demonstrated it: with a glyph list, adding "\n> " to the fixture left both
+// tests green while aider's arm had genuinely lost isDocTrustPrompt.
+func TestTrustDialogFixtureCarriesOnlyATrustSignal(t *testing.T) {
+	for _, agent := range tmux.SupportedPrograms {
+		if isReadyContent(nonTrustTwin, agent) {
+			t.Errorf("the doc-trust-stripped twin reads ready for %q: docTrustDialogFixture carries a "+
+				"ready signal that is not the trust dialog, so %q's label check is satisfied for the "+
+				"wrong reason and proves nothing", agent, agent)
 		}
 	}
 }
@@ -147,9 +170,18 @@ func TestTrustDialogIsReadyOnlyForAgentsAFCanDismiss(t *testing.T) {
 		// The gate answer is checked against the STATED expectation, so no arm
 		// relabel can move it. See trustArmSpec.inGate.
 		if inGate != spec.inGate {
-			t.Errorf("ProgramNeedsTrustDismissal(%q) = %t, want %t; if this is an intended change, "+
-				"update the row and say why — do not relabel its arm to make this pass",
-				agent, inGate, spec.inGate)
+			// Carry the reason into the message, not just the row comment: this is
+			// what someone reads in CI, and which direction they broke it in
+			// decides which harm they are about to ship.
+			why := "letting it into the gate buys no dismissal AF can perform and leaves only " +
+				"DocTrustPromptPresent's false-positive exposure on live panes (#1952)"
+			if spec.inGate {
+				why = "dropping it from the gate leaves a dialog AF calls ready with nothing to " +
+					"clear it, so the briefing is typed into the modal (#729)"
+			}
+			t.Errorf("ProgramNeedsTrustDismissal(%q) = %t, want %t: %s. If this is an intended "+
+				"change, update the row and say why — do not relabel its arm to make this pass",
+				agent, inGate, spec.inGate, why)
 		}
 
 		// Then verify the arm label itself against runner.go, so a stale or
