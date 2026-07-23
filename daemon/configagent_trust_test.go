@@ -99,15 +99,16 @@ func TestDismissConfigAgentTrustPrompt_SkipsNonAgents(t *testing.T) {
 	}
 }
 
-// TestDismissConfigAgentTrustPrompt_ClearsEveryTrustPromptAgent is the #2416
+// TestDismissConfigAgentTrustPrompt_ChecksEveryAgentInTheGate is the #2416
 // regression.
 //
 // This gate used to be its own hand-copied list of agents under a comment
 // claiming it mirrored LocalBackend.CheckAndHandleTrustPrompt. It had drifted:
 // opencode was added to that gate in #1959 and never here, so an opencode config
-// agent took the default branch, never ran the dismissal loop, and would hang on
-// a dialog a normal session cleared — the #729 defect class the comment was
-// written to prevent.
+// agent took the default branch and never ran the dismissal loop. It did not
+// hang — isReadyContent's opencode arm calls the dialog ready, so the spawn went
+// on to deliver the briefing into it. That is the #729 defect class the comment
+// was written to prevent.
 //
 // The case runs over the shared gate rather than a literal list, so it covers
 // whatever agents are in the gate today, and a future agent is covered the
@@ -123,11 +124,10 @@ func TestDismissConfigAgentTrustPrompt_SkipsNonAgents(t *testing.T) {
 // two claude cases above, and per-agent ready glyphs belong to task's tests
 // rather than being restated here.
 func TestDismissConfigAgentTrustPrompt_ChecksEveryAgentInTheGate(t *testing.T) {
-	// Compress the retry delay: if the gate regresses, a pane whose ready glyph
-	// this fake does not render would otherwise burn the readiness timeout before
-	// reporting, turning a clear failure into a slow and misleading one.
-	defer task.SetTrustPromptTimingForTest(time.Nanosecond)()
-
+	// No timing seam needed: prompts is zero, so the first check ends the loop
+	// and the readiness re-wait is never reached. (Compressing it would not help
+	// anyway — SetTrustPromptTimingForTest moves the poll interval, not
+	// WaitForReadyOn's deadline; see the context bound on the sibling case.)
 	covered := 0
 	for _, agent := range tmux.SupportedPrograms {
 		if !tmux.ProgramNeedsTrustDismissal(agent) {
@@ -151,12 +151,11 @@ func TestDismissConfigAgentTrustPrompt_ChecksEveryAgentInTheGate(t *testing.T) {
 
 // TestDismissConfigAgentTrustPrompt_SkipsAgentsOutsideTheGate is the other half
 // of #2416: closing the drift must not over-correct into driving a dismissal
-// loop for an agent AF has no dismissal for. devin is the current member — AF
-// has no predicate for its workspace-trust modal, so a check could only ever
-// come back empty while the pane is treated as still-prompting.
+// loop for an agent AF has no dismissal for. devin is the current member — the
+// only predicate membership would run for it is DocTrustPromptPresent, which
+// cannot match its modal wording, so the loop buys no dismissal and leaves only
+// that predicate's false-positive exposure on live panes (#1952).
 func TestDismissConfigAgentTrustPrompt_SkipsAgentsOutsideTheGate(t *testing.T) {
-	defer task.SetTrustPromptTimingForTest(time.Nanosecond)()
-
 	covered := 0
 	for _, agent := range tmux.SupportedPrograms {
 		if tmux.ProgramNeedsTrustDismissal(agent) {

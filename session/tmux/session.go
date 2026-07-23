@@ -50,10 +50,24 @@ func IsSupportedProgram(name string) bool {
 //
 // It is deliberately NOT named "has a trust prompt": amp and opencode are in the
 // set without a known dialog of their own. The question this answers is whether
-// AF looks, and looking is close to free — TmuxSession.CheckAndHandleTrustPrompt
-// injects nothing unless it positively identifies a dialog it knows how to
-// clear. Being wrongly OUT of the set is the expensive direction: the pane sits
-// on an undismissed dialog until the readiness wait times out.
+// AF looks.
+//
+// Both ways of being wrong cost something, and neither is free:
+//
+//   - Wrongly OUT: every agent in the set also has a trust arm in isReadyContent,
+//     so a pane showing the dialog reads as READY. Nothing then clears it and the
+//     briefing is typed into the modal. That is #729's actual signature, not a
+//     hang — codex was excluded here, its dialog was surfaced by isReadyContent,
+//     and the prompt went into it. #2416 put opencode in the same state.
+//   - Wrongly IN: membership subjects live panes to DocTrustPromptPresent on the
+//     daemon's one-second poll, and a false positive there types 'D'+Enter into a
+//     running agent that asked nothing — re-firing every tick the phrase stays on
+//     screen (#1952). See that predicate's own doc in start.go; it is deliberately
+//     conservative for exactly this reason.
+//
+// So a new agent belongs in the set once its first-run behaviour is characterized,
+// not by default in either direction. Guess IN and you may inject keystrokes into
+// live sessions; guess OUT and you may hand a briefing to a modal.
 //
 // This is the ONE gate. Both dismissal sites call it instead of enumerating the
 // agents themselves: LocalBackend.CheckAndHandleTrustPrompt (a live session) and
@@ -69,12 +83,18 @@ func IsSupportedProgram(name string) bool {
 // arbitrary program is the harm this gate exists to prevent.
 //
 // devin is out of the set because AF has no predicate that identifies its
-// workspace-trust modal. Looking would cost a check that can never match, and
-// #2410 declined to treat an unclearable dialog as handled for the same reason
-// isReadyContent has no devin trust arm — that is the #729 trap. Note this is
-// NOT the same claim as "devin never shows the modal": normal sessions suppress
-// it with --respect-workspace-trust false, but that flag is injected by
-// injectSystemPrompt, which the config-agent spawn path does not call (#2435).
+// workspace-trust modal ("Do you trust the authors of this directory?"). The only
+// check membership would run for it is DocTrustPromptPresent, which cannot ever
+// true-positive on that wording — so the set would buy no dismissal at all and
+// only the false-positive exposure above. #2410 declined to treat an unclearable
+// dialog as handled for the same reason, which is the #729 trap.
+//
+// This is NOT the claim that devin never shows the modal. Two paths arm it:
+// the config-agent spawn, which never calls injectSystemPrompt and so never gets
+// --respect-workspace-trust false (#2435); and any session whose
+// program_overrides.devin already carries the flag, since devinCarriesWorkspaceTrustFlag
+// deliberately lets a user's explicit value win. Closing those needs an anchored
+// devin predicate, not a change here.
 //
 // TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent forces a new agent
 // to record which side it is on rather than defaulting quietly out of the set.
