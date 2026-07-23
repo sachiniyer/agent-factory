@@ -226,7 +226,7 @@ func (w *TabbedWindow) ContentSeq() uint64 {
 }
 
 // SetPreview applies a transient render binding without mutating the committed
-// pane binding. original is rendered in the PREVIEW header so the reversible
+// pane binding. original is rendered in the preview header so the reversible
 // state is visible to the user.
 func (w *TabbedWindow) SetPreview(instance *session.Instance, tab int, original string) uint64 {
 	if w.preview != nil &&
@@ -601,7 +601,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
-		text = fmt.Sprintf(" PREVIEW %s · %s (original %s) ", inst.Title, label, w.preview.original)
+		text = fmt.Sprintf(" Preview %s · %s (original %s) ", inst.Title, label, w.preview.original)
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
@@ -615,7 +615,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		// Scroll mode is pane chrome, not terminal history. Keeping this cue in
 		// the header prevents an AF-owned footer row from consuming the first
 		// scroll gesture or changing the child's history coordinates (#2192).
-		text = strings.TrimSuffix(text, " ") + " · SCROLL · Esc exits "
+		text = strings.TrimSuffix(text, " ") + " · Scroll · Esc exits "
 	}
 	style := paneHeaderStyle
 	switch {

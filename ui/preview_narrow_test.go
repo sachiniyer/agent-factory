@@ -86,7 +86,7 @@ func TestPreviewBodyNonEmptyWhenCaptureTallerThanPane(t *testing.T) {
 			setWindowInstance(w, inst)
 			w.SetRect(layout.Rect{W: tc.w, H: tc.h})
 			// Enter the transient preview binding for the shell tab (index 1) so the
-			// header renders "PREVIEW …" exactly as the reported repro does.
+			// header renders "Preview …" exactly as the reported repro does.
 			w.SetPreview(inst, 1, "alpha · shell")
 			// Publish the shell capture as the pane's content, as the daemon-backed
 			// capture would on a refresh.
@@ -101,7 +101,7 @@ func TestPreviewBodyNonEmptyWhenCaptureTallerThanPane(t *testing.T) {
 				}
 			}
 			// The header must always be correct — the bug never touched it.
-			require(strings.Contains(rendered, "PREVIEW"), "preview header must render")
+			require(strings.Contains(rendered, "Preview"), "preview header must render")
 			require(previewBodyHasContent(rendered),
 				"preview body must not be empty when the capture is taller than the pane")
 			require(strings.Contains(xansi.Strip(rendered), marker),
