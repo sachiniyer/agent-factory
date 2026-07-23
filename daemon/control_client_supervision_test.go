@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // These tests exercise the ordinary EnsureDaemon production gate with a real
@@ -93,9 +95,21 @@ func TestEnsureDaemonPrefersHomeServingLaunchdUnit(t *testing.T) {
 	}
 }
 
-func TestEnsureDaemonManagerHangFallsBackWithDegradation(t *testing.T) {
+// TestEnsureDaemonManagerHangFallsBackToReachableDaemon: a hung service manager
+// must fall back to an ad-hoc daemon and report SUCCESS. EnsureDaemon's contract
+// is "daemon reachable when I return nil", and every caller hard-returns on a
+// non-nil result and skips the RPC — so a non-nil supervision-degradation return
+// after a working fallback broke the first client action on hosts without a
+// systemd user bus (#2373). The degradation stays visible through the warning
+// log, not through a caller-breaking error.
+func TestEnsureDaemonManagerHangFallsBackToReachableDaemon(t *testing.T) {
 	marker, _ := installEnsureTestUnitAndManager(t, true)
 	startServer, serverErr := ensureTestServerStarter(t)
+
+	var warnBuf bytes.Buffer
+	prevOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnBuf)
+	defer log.WarningLog.SetOutput(prevOut)
 
 	adHocLaunched := false
 	started := time.Now()
@@ -105,21 +119,22 @@ func TestEnsureDaemonManagerHangFallsBackWithDegradation(t *testing.T) {
 	})
 	elapsed := time.Since(started)
 
-	if err == nil {
-		t.Fatal("manager degradation was silent; want an explicit non-nil result")
-	}
-	var degraded *SupervisionDegradedError
-	if !errors.As(err, &degraded) {
-		t.Fatalf("degradation error type = %T, want *SupervisionDegradedError", err)
-	}
-	if !strings.Contains(err.Error(), "unsupervised daemon") || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("degradation error = %q, want unsupervised fallback plus timeout cause", err)
+	if err != nil {
+		t.Fatalf("successful ad-hoc fallback must return nil (callers skip the RPC on any error), got: %v", err)
 	}
 	if err := serverErr(); err != nil {
 		t.Fatalf("start fake ad-hoc daemon: %v", err)
 	}
 	if !adHocLaunched {
 		t.Fatal("hung manager left no daemon instead of falling back")
+	}
+	// The fallback daemon is actually reachable over the control socket.
+	if err := pingDaemon(); err != nil {
+		t.Fatalf("fallback returned nil but the daemon is not reachable: %v", err)
+	}
+	// The degradation is not silent: it is surfaced through the warning log.
+	if !strings.Contains(warnBuf.String(), "falling back to an ad-hoc daemon") {
+		t.Fatalf("fallback did not warn about the supervision downgrade; log = %q", warnBuf.String())
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("the manager hang was not actually exercised: %v", err)
@@ -141,12 +156,41 @@ func TestEnsureDaemonFallbackGetsFreshReadinessWindow(t *testing.T) {
 		time.Sleep(daemonReadyTimeout - ensureUnitStartTimeout + 250*time.Millisecond)
 		return startServer()
 	})
-	var degraded *SupervisionDegradedError
-	if !errors.As(err, &degraded) {
-		t.Fatalf("fallback result = %v, want successful launch plus *SupervisionDegradedError", err)
+	if err != nil {
+		t.Fatalf("delayed ad-hoc fallback must return nil, got: %v", err)
 	}
 	if err := serverErr(); err != nil {
 		t.Fatalf("start delayed ad-hoc daemon: %v", err)
+	}
+}
+
+// TestCallDaemonCompletesAfterManagerHangFallback drives a real caller
+// (callDaemon) through a hung service manager and proves the RPC still completes.
+// This is the #2373 regression at the layer users hit: before the fix EnsureDaemon
+// returned a supervision-degradation error after the working ad-hoc fallback, and
+// callDaemon — like withDaemonHTTP and attach — hard-returned it without ever
+// issuing the RPC, so the first `af sessions create` / TUI action / attach failed
+// on a serving daemon and only self-healed on the second call.
+func TestCallDaemonCompletesAfterManagerHangFallback(t *testing.T) {
+	marker, _ := installEnsureTestUnitAndManager(t, true)
+	startServer, serverErr := ensureTestServerStarter(t)
+
+	// callDaemon uses the real EnsureDaemon(), which spawns through
+	// launchDaemonProcessFn. Inject the fake control server as that launcher so the
+	// ad-hoc fallback binds the testbox socket instead of a real daemon.
+	prevLaunch := launchDaemonProcessFn
+	launchDaemonProcessFn = func() error { return startServer() }
+	t.Cleanup(func() { launchDaemonProcessFn = prevLaunch })
+
+	var resp PingResponse
+	if err := callDaemon("Ping", PingRequest{}, &resp); err != nil {
+		t.Fatalf("callDaemon must complete the RPC after a supervised-start fallback, got: %v", err)
+	}
+	if err := serverErr(); err != nil {
+		t.Fatalf("start fake ad-hoc daemon: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the manager hang was not exercised: %v", err)
 	}
 }
 

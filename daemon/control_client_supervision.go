@@ -37,20 +37,6 @@ func ResolveSupervisionOwner(configDir string) (SupervisionOwner, error) {
 	return OwnerAdHoc, nil
 }
 
-// SupervisionDegradedError reports that AF recovered availability through an
-// ad-hoc daemon after the installed home-serving unit could not start. The
-// fallback is intentionally visible: silently returning nil would recreate the
-// supervision downgrade #2168 is fixing.
-type SupervisionDegradedError struct {
-	Cause error
-}
-
-func (e *SupervisionDegradedError) Error() string {
-	return fmt.Sprintf("installed daemon service could not start; started an unsupervised daemon instead: %v", e.Cause)
-}
-
-func (e *SupervisionDegradedError) Unwrap() error { return e.Cause }
-
 // The unit gets a bounded share of EnsureDaemon's existing five-second ready
 // budget. A wedged manager must leave time for the compatibility fallback to
 // bind and answer rather than consuming the whole launch window itself.

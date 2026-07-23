@@ -146,7 +146,15 @@ func ensureDaemonThroughUnit(launch func() error) error {
 	if err := ensureDaemonAdHoc(launch); err != nil {
 		return fmt.Errorf("installed daemon service failed: %v; ad-hoc fallback failed: %w", unitErr, err)
 	}
-	return &SupervisionDegradedError{Cause: unitErr}
+	// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's contract is
+	// "daemon reachable when I return nil", and every caller (callDaemon,
+	// withDaemonHTTP, attach) hard-returns on a non-nil result and skips the RPC —
+	// so returning a supervision-degradation error here failed the first client
+	// action on any host without a systemd user bus even though the daemon was
+	// serving, self-healing only on the second call (#2373). The degradation is
+	// still surfaced where the user looks: the warning above, and af doctor /
+	// af daemon status carry a supervision-owner row. Report success.
+	return nil
 }
 
 func ensureDaemonAdHoc(launch func() error) error {
