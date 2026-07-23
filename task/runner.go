@@ -315,24 +315,35 @@ func isOpencodePromptFrame(content string) bool {
 func ampFrameBottomRule(content string) (string, bool) {
 	plain := paneAnsiEscape.ReplaceAllString(content, "")
 	lines := strings.Split(plain, "\n")
+	var lastBottomRule string
+	found := false
 	for i, line := range lines {
 		if !ampPromptFrameTop.MatchString(line) {
 			continue
 		}
 		// Walk downward from the labeled top rule: box-interior rows begin with
-		// the "│" border; the first bottom rule closes a real, current frame.
-		// Any other line before the bottom rule means these borders are not one
-		// contiguous box, so this top rule is stale scrollback — keep scanning.
+		// the "│" border, and a bottom rule closes a contiguous box. Any other line
+		// before the bottom rule means these borders are not one box, so this top
+		// rule is stale scrollback — keep scanning.
+		//
+		// Keep the LAST such frame, not the first: agent output can quote a
+		// complete frame (labeled top rule, "│" interior, bottom rule) above the
+		// live one, so the CURRENT frame is the bottom-most complete pairing, never
+		// the first — returning the first pinned an idle session at Running when the
+		// quoted rule read as working (#2439). opencodeFrameLines tracks its last
+		// rule for the same reason.
 		for j := i + 1; j < len(lines); j++ {
 			if ampPromptFrameBottom.MatchString(lines[j]) {
-				return lines[j], true
+				lastBottomRule = lines[j]
+				found = true
+				break
 			}
 			if !strings.HasPrefix(strings.TrimSpace(lines[j]), "│") {
 				break
 			}
 		}
 	}
-	return "", false
+	return lastBottomRule, found
 }
 
 // IsWorkingContent reports whether the captured pane shows POSITIVE evidence
