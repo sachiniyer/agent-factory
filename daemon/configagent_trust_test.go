@@ -167,11 +167,22 @@ func TestDismissConfigAgentTrustPrompt_SkipsAgentsOutsideTheGate(t *testing.T) {
 			// prompts: 1 so a pane that IS asked would answer "dialog present" and
 			// be counted — the check has to be able to fail.
 			target := &fakeTrustTarget{agent: agent, prompts: 1}
-			if err := dismissConfigAgentTrustPrompt(context.Background(), target); err != nil {
-				t.Fatalf("%s is outside the trust-dismissal gate, got: %v", agent, err)
-			}
+			// A regressed gate would enter the loop and then block in the readiness
+			// re-wait, because this fake renders claude's glyph and no other
+			// agent's. SetTrustPromptTimingForTest compresses the poll interval but
+			// not WaitForReadyOn's 60s deadline, so bound it here instead;
+			// WaitForReadyOn observes cancellation at the top of each iteration.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := dismissConfigAgentTrustPrompt(ctx, target)
+			// Assert the checks BEFORE the error: on a regression both fire, and
+			// this is the one that names the actual defect. Leading with err would
+			// report a readiness timeout and send the next reader to the wrong file.
 			if target.checks != 0 {
 				t.Fatalf("%s's pane must not be driven through the dismissal loop, got %d checks", agent, target.checks)
+			}
+			if err != nil {
+				t.Fatalf("%s is outside the trust-dismissal gate, got: %v", agent, err)
 			}
 		})
 	}
