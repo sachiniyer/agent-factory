@@ -304,10 +304,11 @@ func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
 // The per-agent gate is tmux.ProgramNeedsTrustDismissal — the same call
 // LocalBackend.CheckAndHandleTrustPrompt makes, not a copy of its list. This
 // used to enumerate the agents here under a comment claiming it mirrored that
-// one, and it had already drifted: opencode was missing (#2416). The cost was
-// not a hang — isReadyContent's opencode arm treats the dialog as ready, so the
-// spawn proceeded and delivered the briefing INTO the undismissed dialog, which
-// is #729's signature.
+// one, and it had already drifted: opencode was missing (#2416). The exposure
+// was not a hang: isReadyContent's opencode arm calls a doc-trust dialog ready,
+// so had opencode ever raised one the spawn would have gone on to deliver the
+// briefing INTO it — #729's signature. opencode is not known to raise one, which
+// is why this stayed latent rather than being reported.
 func dismissConfigAgentTrustPrompt(ctx context.Context, target task.TrustPromptTarget) error {
 	if !tmux.ProgramNeedsTrustDismissal(target.ResolvedAgent()) {
 		return nil // AF has no dismissal to run for this program

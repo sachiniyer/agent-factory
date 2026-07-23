@@ -54,11 +54,14 @@ func IsSupportedProgram(name string) bool {
 //
 // Both ways of being wrong cost something, and neither is free:
 //
-//   - Wrongly OUT: every agent in the set also has a trust arm in isReadyContent,
-//     so a pane showing the dialog reads as READY. Nothing then clears it and the
-//     briefing is typed into the modal. That is #729's actual signature, not a
-//     hang — codex was excluded here, its dialog was surfaced by isReadyContent,
-//     and the prompt went into it. #2416 put opencode in the same state.
+//   - Wrongly OUT: an agent that belongs in the set is one whose dialog
+//     isReadyContent also recognizes, so a pane showing that dialog reads as
+//     READY. Nothing then clears it and the briefing is typed into the modal.
+//     That is #729's actual signature, not a hang — codex was excluded here, its
+//     dialog was surfaced by isReadyContent, and the prompt went into it. #2416
+//     put opencode in the same state. task's
+//     TestTrustDialogIsReadyOnlyForAgentsAFCanDismiss is what keeps those two
+//     enumerations from drifting apart again.
 //   - Wrongly IN: membership subjects live panes to DocTrustPromptPresent on the
 //     daemon's one-second poll, and a false positive there types 'D'+Enter into a
 //     running agent that asked nothing — re-firing every tick the phrase stays on
@@ -67,7 +70,9 @@ func IsSupportedProgram(name string) bool {
 //
 // So a new agent belongs in the set once its first-run behaviour is characterized,
 // not by default in either direction. Guess IN and you may inject keystrokes into
-// live sessions; guess OUT and you may hand a briefing to a modal.
+// live sessions; guess OUT and you may hand a briefing to a modal. (amp is the one
+// member that predates this rule and was never characterized; it is grandfathered
+// in the classification table, not precedent for a new agent.)
 //
 // This is the ONE gate. Both dismissal sites call it instead of enumerating the
 // agents themselves: LocalBackend.CheckAndHandleTrustPrompt (a live session) and

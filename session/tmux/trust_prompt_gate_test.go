@@ -10,12 +10,24 @@ import "testing"
 // forgetting the other was a silent, shippable mistake. It shipped twice: codex
 // (#729) and opencode (#1959 → #2416).
 //
-// The gate is one function now, but a new agent still defaults quietly to false,
-// and false is the expensive direction: the pane sits on an undismissed dialog
-// until readiness times out. This table is the forcing function — it must name
-// every entry of SupportedPrograms, so adding an agent fails here until someone
-// states which side it is on. Do not fix a failure by deleting the row; decide,
-// then record the decision with the reason.
+// The gate is one function now, but a new agent still defaults quietly to false.
+// This table is the forcing function: it must name every entry of
+// SupportedPrograms, so adding an agent fails here until someone states which
+// side it is on. Do not fix a failure by deleting the row; decide, then record
+// the decision with the reason.
+//
+// READ THIS BEFORE CHOOSING — both answers can cause harm, and the cheap one is
+// not obvious. ProgramNeedsTrustDismissal's doc carries the full argument:
+//
+//   - Wrongly false: an agent whose dialog isReadyContent recognizes reads as
+//     READY, nothing clears it, and the briefing is typed into the modal. That
+//     is #729, then #2416.
+//   - Wrongly true: the agent's live panes get DocTrustPromptPresent on the
+//     daemon's one-second poll, and a false positive there types 'D'+Enter into
+//     an agent that asked nothing, re-firing every tick (#1952).
+//
+// So neither answer is a safe default. Characterize the agent's first run, then
+// record what you saw.
 func TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent(t *testing.T) {
 	classified := map[string]bool{
 		// Dialogs AF positively identifies and clears: claude's trust/MCP screens,
@@ -25,19 +37,22 @@ func TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent(t *testing.T) 
 		ProgramCodex:  true,
 		ProgramAider:  true,
 		ProgramGemini: true,
-		// In the set without a known dialog of their own. opencode is verified to
-		// go straight to its composer in a fresh repo (0.0.0-main-202604230742);
-		// amp's first-run behaviour is not characterized here. Both are in anyway:
-		// the check injects nothing unless it identifies a dialog it can clear, so
-		// looking is close to free, while being wrongly OUT is how #729 and #2416
-		// both shipped.
-		ProgramAmp:      true,
+		// Verified to go straight to its composer in a fresh repo
+		// (0.0.0-main-202604230742), so no dialog of its own. In the set because
+		// the omission is exactly what #2416 was, and its generic-dialog behaviour
+		// is pinned by task's TestTrustDialogIsReadyOnlyForAgentsAFCanDismiss.
 		ProgramOpencode: true,
-		// Out because AF has no predicate that identifies devin's workspace-trust
-		// modal — the check could never match it, and treating an unclearable
-		// dialog as handled is the #729 trap (#2410 declined it for the same
-		// reason isReadyContent has no devin trust arm). This is NOT the claim
-		// that the modal never appears: see #2435.
+		// Grandfathered — the one row that does not meet the "characterize first"
+		// rule above. amp's first run was never captured here; it has carried the
+		// dismissal check since before this gate was extracted, with no
+		// false-positive report against it. Left as it was rather than flipped on
+		// an untested guess. Not precedent for a NEW agent.
+		ProgramAmp: true,
+		// Out because AF has no predicate identifying devin's workspace-trust
+		// modal: DocTrustPromptPresent cannot true-positive on that wording, so
+		// membership would buy no dismissal and leave only the false-positive
+		// exposure. Treating an unclearable dialog as handled is the #729 trap
+		// (#2410). NOT the claim that the modal never appears — see #2435.
 		ProgramDevin: false,
 	}
 
@@ -45,7 +60,7 @@ func TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent(t *testing.T) 
 		want, named := classified[program]
 		if !named {
 			t.Errorf("supported agent %q is not classified for trust dismissal; "+
-				"decide whether AF should check its pane for a dialog and add it to this table", program)
+				"characterize its first run, then add it to this table with the reason", program)
 			continue
 		}
 		if got := ProgramNeedsTrustDismissal(program); got != want {

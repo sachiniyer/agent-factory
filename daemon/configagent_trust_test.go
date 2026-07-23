@@ -105,10 +105,11 @@ func TestDismissConfigAgentTrustPrompt_SkipsNonAgents(t *testing.T) {
 // This gate used to be its own hand-copied list of agents under a comment
 // claiming it mirrored LocalBackend.CheckAndHandleTrustPrompt. It had drifted:
 // opencode was added to that gate in #1959 and never here, so an opencode config
-// agent took the default branch and never ran the dismissal loop. It did not
-// hang — isReadyContent's opencode arm calls the dialog ready, so the spawn went
-// on to deliver the briefing into it. That is the #729 defect class the comment
-// was written to prevent.
+// agent took the default branch and never ran the dismissal loop. The exposure
+// was not a hang: isReadyContent's opencode arm calls a doc-trust dialog ready,
+// so had opencode ever raised one the spawn would have delivered the briefing
+// into it — the #729 defect class the comment was written to prevent. opencode
+// is not known to raise one, which is why this stayed latent.
 //
 // The case runs over the shared gate rather than a literal list, so it covers
 // whatever agents are in the gate today, and a future agent is covered the
