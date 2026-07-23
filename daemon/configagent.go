@@ -301,16 +301,16 @@ func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
 // dismissConfigAgentTrustPrompt clears the agent's first-run trust dialog, the
 // same loop task.StartAndSendPrompt runs for a normal session.
 //
-// The per-agent gate mirrors LocalBackend.CheckAndHandleTrustPrompt
-// (session/backend_local.go): only the known agents have a trust dialog, and
-// asking a non-agent command about one would tap Enter into an arbitrary
-// program. The decision is keyed off the RESOLVED agent for the same reason it
-// is there.
+// The per-agent gate is tmux.ProgramNeedsTrustDismissal — the same call
+// LocalBackend.CheckAndHandleTrustPrompt makes, not a copy of its list. This
+// used to enumerate the agents here under a comment claiming it mirrored that
+// one, and it had already drifted: opencode was missing (#2416). The cost was
+// not a hang — isReadyContent's opencode arm treats the dialog as ready, so the
+// spawn proceeded and delivered the briefing INTO the undismissed dialog, which
+// is #729's signature.
 func dismissConfigAgentTrustPrompt(ctx context.Context, target task.TrustPromptTarget) error {
-	switch target.ResolvedAgent() {
-	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp:
-	default:
-		return nil // not a known agent: it has no trust dialog to dismiss
+	if !tmux.ProgramNeedsTrustDismissal(target.ResolvedAgent()) {
+		return nil // AF has no dismissal to run for this program
 	}
 	return task.DismissTrustPrompt(ctx, target)
 }

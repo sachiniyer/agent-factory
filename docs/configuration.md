@@ -127,11 +127,16 @@ environment whose access matches the risk.
 
 Agent Factory still dismisses a supported agent's one-time workspace trust
 dialog during first-run setup. That only gets a new session to a usable prompt;
-it does not approve later tool calls or actions. (**Devin** is the exception: af
-launches it with `--respect-workspace-trust false` so its workspace-trust modal
-never appears — af created and owns the worktree, so it is already trusted.
-Include the flag yourself if you set a custom `program_overrides.devin`, or af
-appends it for you when your override omits it.)
+it does not approve later tool calls or actions.
+
+**Devin** is the exception: af suppresses the dialog at launch instead of
+dismissing it, appending `--respect-workspace-trust false` — af created and owns
+the worktree, so it is already trusted. Your own value wins if you set one, so
+include the flag in a custom `program_overrides.devin` only when you want to
+choose it; af appends it when your override omits it. Two cases fall outside that
+suppression and will show devin's modal, which af has no dismissal for: setting
+`--respect-workspace-trust true` explicitly, and agent-assisted `af config` when
+`default_program` is devin ([#2435](https://github.com/sachiniyer/agent-factory/issues/2435)).
 
 Codex's **additional safety checks** model-routing picker is separate from
 approval and sandbox flags. The daemon recognizes the known

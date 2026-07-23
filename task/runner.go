@@ -209,12 +209,19 @@ func isReadyContent(content, agent string) bool {
 		// and claude's "❯" (U+276F). Matched on the raw pane like codex's glyph
 		// (devin does not split the glyph with color escapes), so no ANSI strip.
 		//
-		// Deliberately NO isDocTrustPrompt arm (unlike the file-seam agents): af
-		// launches devin with --respect-workspace-trust false (injectSystemPrompt),
-		// so devin's interactive workspace-trust modal never appears, and af wires
-		// no devin trust dismissal. Treating a trust/doc prompt as ready without an
-		// anchored way to clear it is the #729 trap — af would type the first prompt
-		// into an undismissed modal. The "❭" composer is the only ready signal.
+		// Deliberately NO isDocTrustPrompt arm (unlike the file-seam agents),
+		// because af wires no devin trust dismissal: tmux.ProgramNeedsTrustDismissal
+		// excludes devin, as DocTrustPromptPresent cannot match its modal wording.
+		// Treating a trust/doc prompt as ready without an anchored way to clear it
+		// is the #729 trap — af would type the first prompt into an undismissed
+		// modal. The "❭" composer is the only ready signal.
+		//
+		// Note the modal CAN appear. af normally launches devin with
+		// --respect-workspace-trust false, but that is injected by
+		// injectSystemPrompt, which the config-agent spawn path does not call
+		// (#2435), and a program_overrides.devin carrying the flag explicitly wins
+		// over the injection. Omitting the arm is what keeps such a pane from being
+		// called ready.
 		return strings.Contains(content, "❭")
 	case tmux.ProgramClaude:
 		if strings.Contains(content, "❯") ||
