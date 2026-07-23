@@ -64,24 +64,16 @@ func recordingExecutor(rec *recordedArgs) cmd.Executor {
 	}
 }
 
-// packedArgvBytes models what tmux actually measures. The client packs the
-// command into a single MSG_COMMAND imsg as NUL-terminated argv strings, and the
-// whole message — payload plus the 16-byte imsg header — must fit in
-// MAX_IMSGSIZE (16384). argv[0] here is the "tmux" binary name exec prepends,
-// which is not sent, so it is excluded.
+// packedArgvBytes is the size the command spends against sendRawKeysArgvBudget:
+// NUL-terminated argv, excluding argv[0] (the "tmux" binary name exec prepends,
+// which is not part of the command tmux packs).
 func packedArgvBytes(args []string) int {
-	total := imsgHeaderBytes + msgCommandHeaderBytes
+	total := 0
 	for _, a := range args[1:] {
-		total += len(a) + 1 // trailing NUL
+		total += len(a) + 1
 	}
 	return total
 }
-
-const (
-	imsgHeaderBytes       = 16
-	msgCommandHeaderBytes = 8 // struct msg_command_data { int argc; }, padded
-	maxIMsgSize           = 16384
-)
 
 // decodeHexPayload extracts the input bytes a `send-keys -H` argv carries, and
 // asserts the command's shape: the exact-match target and the -H flag must be
@@ -117,6 +109,12 @@ func decodeHexPayload(t *testing.T, args []string) []byte {
 
 const testPasteSession = "af2414-paste"
 
+// testChunkSize is the chunk the mock-backed tests' session gets.
+func testChunkSize() int {
+	return NewTmuxSessionFromSanitizedNameWithDeps(
+		testPasteSession, "sh", MakePtyFactory(), recordingExecutor(&recordedArgs{})).sendRawKeysChunkSize()
+}
+
 // TestSendRawKeysChunksLargePastes is the #2414 regression. A 6 KB paste — an
 // ordinary pasted stack trace or code block — must reach the pane. Before the
 // fix SendRawKeys emitted ONE command carrying 6144 hex arguments, ~18.5 KB
@@ -142,7 +140,7 @@ func TestSendRawKeysChunksLargePastes(t *testing.T) {
 	}
 	// Straddle a chunk boundary with bracketed-paste markers so a chunker that
 	// tried to be clever about escape sequences is caught here.
-	copy(payload[sendRawKeysMaxChunk-3:], []byte("\x1b[200~hello\x1b[201~"))
+	copy(payload[ts.sendRawKeysChunkSize()-3:], []byte("\x1b[200~hello\x1b[201~"))
 
 	if err := ts.SendRawKeys(payload); err != nil {
 		t.Fatalf("SendRawKeys(6KB): %v", err)
@@ -154,15 +152,43 @@ func TestSendRawKeysChunksLargePastes(t *testing.T) {
 	}
 	var got []byte
 	for i, args := range issued {
-		if n := packedArgvBytes(args); n >= maxIMsgSize {
-			t.Fatalf("chunk %d packs to %d bytes, at or over tmux's %d-byte command limit — tmux rejects this",
-				i, n, maxIMsgSize)
+		if n := packedArgvBytes(args); n > sendRawKeysArgvBudget {
+			t.Fatalf("chunk %d packs to %d bytes, over the %d-byte budget a command may spend",
+				i, n, sendRawKeysArgvBudget)
 		}
 		got = append(got, decodeHexPayload(t, args)...)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("chunking did not preserve the byte stream: got %d bytes, want %d (first difference at %d)",
 			len(got), len(payload), firstDiff(got, payload))
+	}
+}
+
+// TestSendRawKeysChunkSizeAccountsForTheSessionName pins the part of the budget
+// that is not payload. The session name is an argument too, and a repo-scoped
+// name has no fixed length, so a long project path must shrink the chunk rather
+// than silently push the command over.
+func TestSendRawKeysChunkSizeAccountsForTheSessionName(t *testing.T) {
+	short := NewTmuxSessionFromSanitizedNameWithDeps("af_x", "sh", MakePtyFactory(), recordingExecutor(&recordedArgs{}))
+	long := NewTmuxSessionFromSanitizedNameWithDeps(
+		"af_"+strings.Repeat("verylongprojectname", 8), "sh", MakePtyFactory(), recordingExecutor(&recordedArgs{}))
+
+	if long.sendRawKeysChunkSize() >= short.sendRawKeysChunkSize() {
+		t.Fatalf("a longer session name must buy a smaller chunk: short=%d long=%d",
+			short.sendRawKeysChunkSize(), long.sendRawKeysChunkSize())
+	}
+	for _, ts := range []*TmuxSession{short, long} {
+		rec := &recordedArgs{}
+		sized := NewTmuxSessionFromSanitizedNameWithDeps(ts.sanitizedName, "sh", MakePtyFactory(), recordingExecutor(rec))
+		if err := sized.SendRawKeys(bytes.Repeat([]byte("q"), 4*sendRawKeysArgvBudget)); err != nil {
+			t.Fatalf("SendRawKeys: %v", err)
+		}
+		for i, args := range rec.all() {
+			if n := packedArgvBytes(args); n > sendRawKeysArgvBudget {
+				t.Fatalf("session %q chunk %d packs to %d bytes, over the %d-byte budget",
+					ts.sanitizedName, i, n, sendRawKeysArgvBudget)
+			}
+		}
 	}
 }
 
@@ -186,7 +212,7 @@ func TestSendRawKeysKeepsSmallInputInOneCommand(t *testing.T) {
 	}{
 		{"single keystroke", []byte("a")},
 		{"arrow key", []byte("\x1b[A")},
-		{"at the chunk limit", bytes.Repeat([]byte("x"), sendRawKeysMaxChunk)},
+		{"at the chunk limit", bytes.Repeat([]byte("x"), testChunkSize())},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &recordedArgs{}
@@ -245,7 +271,7 @@ func TestSendRawKeysStopsOnChunkFailure(t *testing.T) {
 	}
 	ts := NewTmuxSessionFromSanitizedNameWithDeps(testPasteSession, "sh", MakePtyFactory(), ex)
 
-	err := ts.SendRawKeys(bytes.Repeat([]byte("y"), 5*sendRawKeysMaxChunk))
+	err := ts.SendRawKeys(bytes.Repeat([]byte("y"), 5*testChunkSize()))
 	if err == nil {
 		t.Fatal("a failed chunk must not report success — that is silent paste truncation")
 	}
@@ -255,6 +281,61 @@ func TestSendRawKeysStopsOnChunkFailure(t *testing.T) {
 	if n := len(rec.all()); n != 2 {
 		t.Fatalf("issued %d send-keys commands, want 2 (stop at the first failure)", n)
 	}
+}
+
+// TestSendRawKeysChunkFitsRealTmux is the guard that keeps sendRawKeysArgvBudget
+// a checked fact rather than an assumption, and it exists because the assumption
+// was wrong once already.
+//
+// The budget was first derived from MAX_IMSGSIZE (16384), which the issue's Linux
+// measurement corroborates exactly. macOS refuses far sooner — a 4096-byte chunk,
+// ~12 KB of argv and comfortably inside 16384, fails there — so no single
+// platform's constant can be reasoned from. Only asking the tmux that is actually
+// installed settles it, and it must be asked on every platform we ship rather
+// than on whichever one a developer happens to use.
+//
+// On failure it binary-searches the real ceiling and reports it, so the fix is
+// the measured number rather than another guess. It logs that number on success
+// too: the headroom is the thing worth watching, and a budget that has quietly
+// crept up to the edge should be visible before it starts dropping pastes.
+func TestSendRawKeysChunkFitsRealTmux(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af2414-budget"
+	ex := cmd.MakeExecutor()
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sh").CombinedOutput(); err != nil {
+		t.Fatalf("new-session: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = ex.Run(exec.Command("tmux", "kill-session", "-t", "="+name)) })
+
+	ts := NewTmuxSessionFromSanitizedNameWithDeps(name, "sh", MakePtyFactory(), ex)
+	chunk := ts.sendRawKeysChunkSize()
+
+	// One command carrying a full chunk: exactly what SendRawKeys emits for any
+	// input at or over the chunk size.
+	if err := ts.sendRawKeysChunk(bytes.Repeat([]byte("x"), chunk)); err != nil {
+		t.Errorf("this tmux rejects a full %d-byte chunk (budget %d): %v", chunk, sendRawKeysArgvBudget, err)
+		t.Fatalf("largest chunk this tmux actually accepts is %d bytes — lower sendRawKeysArgvBudget to about %d",
+			maxAcceptedChunk(ts, chunk), 3*maxAcceptedChunk(ts, chunk))
+	}
+	t.Logf("tmux accepted a full %d-byte chunk (argv budget %d); largest accepted chunk here is %d bytes",
+		chunk, sendRawKeysArgvBudget, maxAcceptedChunk(ts, 1<<16))
+}
+
+// maxAcceptedChunk binary-searches the largest single send-keys chunk this tmux
+// accepts, between 1 and hi. Reported rather than asserted on: the number is
+// platform-specific, and the point is to inform the budget, not to pin it.
+func maxAcceptedChunk(ts *TmuxSession, hi int) int {
+	lo := 0
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if ts.sendRawKeysChunk(bytes.Repeat([]byte("x"), mid)) == nil {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
 }
 
 // TestRealSendRawKeysDeliversLargePaste drives a REAL tmux. The mock above

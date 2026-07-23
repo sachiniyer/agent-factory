@@ -75,28 +75,53 @@ func (t *TmuxSession) DisablePipePane() error {
 	return nil
 }
 
-// sendRawKeysMaxChunk bounds how many INPUT bytes go into one `send-keys -H`
-// command, because tmux bounds the command itself. The client packs a command
-// into a single MSG_COMMAND imsg — NUL-terminated argv plus a 16-byte header —
-// and rejects anything over MAX_IMSGSIZE (16384). `-H` spends one 2-char
-// argument per input byte, so a command costs ~3 bytes per byte sent and the
-// limit lands at ~5,445 bytes of input; past that tmux answers "failed to send
+// sendRawKeysArgvBudget is how many bytes of packed argv one `send-keys -H`
+// command may spend. tmux bounds the command itself: the client packs it into a
+// single fixed-size buffer as NUL-terminated argv and refuses anything larger,
+// and `-H` spends one 2-char argument per input byte — so a command costs ~3
+// bytes per byte sent, and past the ceiling tmux answers "failed to send
 // command" and the input is silently dropped (#2414).
 //
-// 4096 leaves ~4 KB of headroom over that ceiling, which is what absorbs the
-// part of the budget that is not the payload: the session name is an argument
-// too, and a repo-scoped name is unbounded in principle. Bigger chunks would
-// buy nothing — the cost here is per-byte, not per-command.
-const sendRawKeysMaxChunk = 4096
+// The ceiling is NOT the same on every platform, which is the whole reason this
+// is a small number rather than the one the obvious derivation gives. Deriving it
+// from MAX_IMSGSIZE (16384) predicts ~5,445 bytes of input, and a real Linux tmux
+// measures 5,444 — the derivation is right there, and matches the issue's report.
+// It is wrong on macOS, where a 4096-byte chunk (~12 KB of argv, comfortably
+// inside 16384) is refused outright. Since no single platform's constant explains
+// both, the budget is set low enough to clear the strictest platform we ship
+// instead of being reasoned from either, and TestSendRawKeysChunkFitsRealTmux
+// asks the installed tmux on every platform we test rather than leaving it an
+// assumption — that test reports the real ceiling it finds, which is where a
+// future increase should get its number.
+//
+// 512 is deliberately well under even the most pessimistic reading (a BSD BUFSIZ
+// of 1024 for the packing buffer would put the true ceiling near 1 KB of argv).
+// Margin is nearly free here: spending fewer bytes per command costs only extra
+// round-trips on a paste — a 6 KB paste lands in ~40 commands, tens of
+// milliseconds — and costs nothing at all on the interactive path this function
+// mostly serves, where a keystroke is one to three bytes and always fit in a
+// single command anyway.
+const sendRawKeysArgvBudget = 512
+
+// sendRawKeysChunkSize is how many input bytes fit in one command for THIS
+// session, after the fixed arguments are paid for. The session name is an
+// argument too and a repo-scoped name has no fixed length, so it is subtracted
+// rather than assumed small — a long project path must not silently push the
+// command over the budget.
+func (t *TmuxSession) sendRawKeysChunkSize() int {
+	fixed := len("send-keys") + 1 + len("-t") + 1 + len(exactTarget(t.sanitizedName)) + 1 + len("-H") + 1
+	// 3 bytes per input byte: two hex digits and the argument's NUL.
+	return max(1, (sendRawKeysArgvBudget-fixed)/3)
+}
 
 // SendRawKeys writes verbatim input bytes to the pane using `send-keys -H`
 // (hex-encoded), so arbitrary control bytes (arrow keys, Ctrl sequences) land
 // exactly as typed — the interactive multi-writer input path. Empty input is a
 // no-op.
 //
-// Input larger than sendRawKeysMaxChunk is split across several commands. A web
-// terminal delivers a paste as ONE frame (xterm.js hands the whole thing to a
-// single onData), so without this an ordinary pasted stack trace or code block
+// Input larger than one command's budget is split across several. A web terminal
+// delivers a paste as ONE frame (xterm.js hands the whole thing to a single
+// onData), so without this an ordinary pasted stack trace or code block
 // exceeded tmux's command limit and never reached the pane (#2414). Splitting is
 // safe because this is a byte STREAM, not a message: the chunks preserve order
 // and content exactly, so a receiving application's parser cannot tell where the
@@ -120,8 +145,9 @@ const sendRawKeysMaxChunk = 4096
 // — rather than leaving a second, subtler way for a wedged server to park a
 // goroutine.
 func (t *TmuxSession) SendRawKeys(b []byte) error {
+	chunk := t.sendRawKeysChunkSize()
 	for len(b) > 0 {
-		n := min(len(b), sendRawKeysMaxChunk)
+		n := min(len(b), chunk)
 		if err := t.sendRawKeysChunk(b[:n]); err != nil {
 			return err
 		}
@@ -130,7 +156,7 @@ func (t *TmuxSession) SendRawKeys(b []byte) error {
 	return nil
 }
 
-// sendRawKeysChunk issues one `send-keys -H` for at most sendRawKeysMaxChunk
+// sendRawKeysChunk issues one `send-keys -H` for at most sendRawKeysChunkSize
 // bytes. The caller guarantees the size bound; this owns the argv shape, the
 // deadline, and the error classification for a single command.
 func (t *TmuxSession) sendRawKeysChunk(b []byte) error {
