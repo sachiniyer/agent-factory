@@ -193,9 +193,16 @@ type SetResult struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// exposureWarning returns a warning when the config that RESULTS from this set
-// serves an unauthenticated control plane to the network — the combination of a
+// exposureWarning returns a warning when cfg — the config that RESULTS from
+// this set, parsed from the bytes about to be written — serves an
+// unauthenticated control plane to the network, i.e. the combination of a
 // non-loopback listen_addr and require_token = false.
+//
+// cfg is the OUTCOME, not the starting point: it already carries the value
+// being written, so nothing is spliced in here. That is deliberate (#2412) —
+// splicing meant taking the other half of the pairing from a config loaded
+// before the file lock, which two racing writers could each read stale. See
+// scalarWrite.apply.
 //
 // It exists because this is now easy to do by accident. Before `listen_addr`
 // became settable, exposing the listener took a deliberate hand-edit; now it is
@@ -217,28 +224,26 @@ type SetResult struct {
 // and the daemon repeats it once when the listener binds (startHTTPServer) — it
 // no longer forecasts a failure, because there is not going to be one.
 //
-// Both directions of the pairing are checked, because either key can create the
+// Both directions of the pairing warn, because either key can create the
 // exposure: pointing listen_addr at the network while the token is off, or
-// turning the token off while listen_addr is already on the network.
+// turning the token off while listen_addr is already on the network. Setting
+// any OTHER key stays silent even on an already-exposed config — this speaks to
+// the change the user just made, and warning on every unrelated `config set`
+// would train them to ignore it.
 //
 // The exposure test is ListenerServesUnauthenticatedNetwork — the SAME predicate
 // the daemon's refusal uses, itself built on the IsLoopbackListenAddr the token
 // gate derives from. Two definitions of "is this exposed" drifting apart is
 // precisely how a security check rots, so there is only one.
-func exposureWarning(cfg *Config, key, canonical string) string {
+func exposureWarning(cfg *Config, key string) string {
 	if cfg == nil {
 		return ""
 	}
-	addr, tokenRequired := cfg.ListenAddr, cfg.RequireToken
-	switch key {
-	case "listen_addr":
-		addr = canonical
-	case "require_token":
-		tokenRequired = canonical == "true"
-	default:
+	if key != "listen_addr" && key != "require_token" {
 		return ""
 	}
-	if !ListenerServesUnauthenticatedNetwork(addr, tokenRequired) {
+	addr := cfg.ListenAddr
+	if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
 		return ""
 	}
 	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, which puts a "+
@@ -291,12 +296,10 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 
 	// Ensure config.toml exists (migrating a legacy config.json if needed) and
 	// that the current config actually loads, so a later parse failure is
-	// unambiguously our edit's fault, not a pre-existing broken file. The loaded
-	// config is KEPT: exposureWarning needs the values this write lands on to
-	// judge the resulting posture — a listen_addr write is only dangerous in the
-	// company of require_token = false, and vice versa.
-	currentCfg, err := LoadConfig()
-	if err != nil {
+	// unambiguously our edit's fault, not a pre-existing broken file. This is a
+	// PRECONDITION only — the loaded values are deliberately not carried into the
+	// write. See scalarWrite.apply for why (#2412).
+	if _, err := LoadConfig(); err != nil {
 		return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 	}
 	configDir, err := GetConfigDir()
@@ -306,31 +309,86 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyPath := prettyHomePath(tomlPath)
 
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded}
+
 	var result *SetResult
 	writeErr := WithFileLock(tomlPath, func() error {
-		current, err := os.ReadFile(tomlPath)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to read %s: %w", prettyPath, err)
-		}
-		updated := setTOMLScalar(string(current), section, leaf, encoded)
-		updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
-
-		// Final gate: the edited bytes must parse and validate exactly as the
-		// loader would, so `config set` can never leave an unloadable config.
-		if _, err := parseConfigTOML([]byte(updated), prettyPath); err != nil {
-			return fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
-		}
-		if err := AtomicWriteFile(tomlPath, []byte(updated), 0644); err != nil {
-			return err
-		}
-		result = &SetResult{Key: key, Value: canonical, Path: tomlPath, RequiresRestart: true}
-		if w := exposureWarning(currentCfg, key, canonical); w != "" {
-			result.Warnings = append(result.Warnings, w)
-		}
-		return nil
+		var err error
+		result, err = write.apply(tomlPath, prettyPath)
+		return err
 	})
 	if writeErr != nil {
 		return nil, writeErr
+	}
+	return result, nil
+}
+
+// scalarWrite is one validated, canonicalized `config set` edit, ready to apply
+// to config.toml.
+type scalarWrite struct {
+	// key is the user-facing key ("listen_addr", "program_overrides.claude").
+	key string
+	// section is the TOML table the key lives under ("" = the root block).
+	section string
+	// leaf is the key within that section.
+	leaf string
+	// canonical is the scalar's canonical string form, echoed back to the user.
+	canonical string
+	// encoded is its TOML encoding — the bytes that actually land in the file.
+	encoded string
+}
+
+// apply is SetGlobalConfigValue's critical section: re-read config.toml, make
+// the surgical edit, prove the result still loads, write it, and judge the
+// exposure of the config that results. Callers must hold the config.toml file
+// lock.
+//
+// Everything here reads the file as it exists INSIDE the lock, including the
+// exposure judgment. That last part is the #2412 fix and it is load-bearing:
+// the warning used to be computed from a *Config loaded before the lock was
+// taken, while the bytes being edited were re-read inside it. Since the
+// exposure is a PAIRING — a non-loopback listen_addr together with
+// require_token = false — judging it needs the value of the key the caller is
+// NOT setting, and that value came from the stale pre-lock snapshot.
+//
+// Two processes racing could therefore each turn on one half of the exposure
+// and each see the other half as it was before the race: `af config set
+// listen_addr 0.0.0.0:8443` reads require_token = true, `af config set
+// require_token false` reads a loopback listen_addr, both exit 0 silently, and
+// the config left on disk serves an unauthenticated control plane with nobody
+// having been told. The daemon is not a backstop — it emits its own notice only
+// when it binds, so an already-running daemon says nothing until the next
+// restart.
+//
+// Judging the RESULT rather than reconstructing it also removes the
+// reconstruction: exposureWarning no longer has to splice the written value
+// into a snapshot of the other one, because parseConfigTOML has already
+// produced the exact config this write lands on. Whichever racer writes second
+// now sees the full pairing and warns.
+func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
+	current, err := os.ReadFile(tomlPath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+	}
+	updated := setTOMLScalar(string(current), w.section, w.leaf, w.encoded)
+	updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
+
+	// Final gate: the edited bytes must parse and validate exactly as the loader
+	// would, so `config set` can never leave an unloadable config. The parsed
+	// result is also the config this write RESULTS in — the same values
+	// LoadConfig will return for these bytes, since it reaches this very
+	// function (parseLoadedConfigTOML adds provenance, not values) — so it is
+	// what the exposure judgment below is made against.
+	resulting, err := parseConfigTOML([]byte(updated), prettyPath)
+	if err != nil {
+		return nil, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+	}
+	if err := AtomicWriteFile(tomlPath, []byte(updated), 0644); err != nil {
+		return nil, err
+	}
+	result := &SetResult{Key: w.key, Value: w.canonical, Path: tomlPath, RequiresRestart: true}
+	if warn := exposureWarning(resulting, w.key); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
 	}
 	return result, nil
 }

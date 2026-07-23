@@ -575,13 +575,19 @@ func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
 // webListenerPolicy also uses); two definitions drifting apart is exactly how a
 // security check rots, so this fails if a second one is ever introduced.
 func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.RequireToken = false
+	// cfg is the config the write RESULTS in, so the address under test is the
+	// one it already carries (#2412).
+	resulting := func(addr string) *Config {
+		cfg := DefaultConfig()
+		cfg.RequireToken = false
+		cfg.ListenAddr = addr
+		return cfg
+	}
 	for _, addr := range []string{"127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
 		if !IsLoopbackListenAddr(addr) {
 			t.Fatalf("precondition: %q should be loopback", addr)
 		}
-		if w := exposureWarning(cfg, "listen_addr", addr); w != "" {
+		if w := exposureWarning(resulting(addr), "listen_addr"); w != "" {
 			t.Errorf("%q is loopback — no exposure warning expected, got: %s", addr, w)
 		}
 	}
@@ -589,7 +595,7 @@ func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
 		if IsLoopbackListenAddr(addr) {
 			t.Fatalf("precondition: %q should NOT be loopback", addr)
 		}
-		if w := exposureWarning(cfg, "listen_addr", addr); w == "" {
+		if w := exposureWarning(resulting(addr), "listen_addr"); w == "" {
 			t.Errorf("%q is network-reachable with require_token=false — expected a warning", addr)
 		}
 	}
