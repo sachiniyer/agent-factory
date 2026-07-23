@@ -75,21 +75,65 @@ func (t *TmuxSession) DisablePipePane() error {
 	return nil
 }
 
+// sendRawKeysMaxChunk bounds how many INPUT bytes go into one `send-keys -H`
+// command, because tmux bounds the command itself. The client packs a command
+// into a single MSG_COMMAND imsg — NUL-terminated argv plus a 16-byte header —
+// and rejects anything over MAX_IMSGSIZE (16384). `-H` spends one 2-char
+// argument per input byte, so a command costs ~3 bytes per byte sent and the
+// limit lands at ~5,445 bytes of input; past that tmux answers "failed to send
+// command" and the input is silently dropped (#2414).
+//
+// 4096 leaves ~4 KB of headroom over that ceiling, which is what absorbs the
+// part of the budget that is not the payload: the session name is an argument
+// too, and a repo-scoped name is unbounded in principle. Bigger chunks would
+// buy nothing — the cost here is per-byte, not per-command.
+const sendRawKeysMaxChunk = 4096
+
 // SendRawKeys writes verbatim input bytes to the pane using `send-keys -H`
 // (hex-encoded), so arbitrary control bytes (arrow keys, Ctrl sequences) land
 // exactly as typed — the interactive multi-writer input path. Empty input is a
 // no-op.
 //
-// Bounded by tmuxCommandTimeout (#1787). This runs on the WS reader goroutine,
-// which holds no broker lock, so a stall here is milder than the pipe-pane pair
-// above — it strands one connection's input loop rather than the session's
-// capture transitions. It is bounded anyway to keep ONE invariant over the whole
-// clientless channel — no tmux command on the WS data path is unbounded — rather
-// than leaving a second, subtler way for a wedged server to park a goroutine.
+// Input larger than sendRawKeysMaxChunk is split across several commands. A web
+// terminal delivers a paste as ONE frame (xterm.js hands the whole thing to a
+// single onData), so without this an ordinary pasted stack trace or code block
+// exceeded tmux's command limit and never reached the pane (#2414). Splitting is
+// safe because this is a byte STREAM, not a message: the chunks preserve order
+// and content exactly, so a receiving application's parser cannot tell where the
+// boundaries fell — including one landing inside a bracketed-paste marker. The
+// TUI attach path already relied on exactly this, reading stdin in 32-byte
+// chunks (apiclient/attach.go), which is the only reason it never hit the limit.
+//
+// A chunked send is NOT atomic, and deliberately fails loudly rather than
+// partially: on a chunk error it stops and propagates, so the caller sees a
+// failed send instead of a success that delivered a truncated paste (the silent
+// prompt-corruption class of #1982/#2099). Concurrent writers were already
+// interleaved at frame granularity — the broker's input path takes no lock and
+// the TUI path has always sent many small frames — so this adds no ordering
+// guarantee that callers previously had.
+//
+// Each chunk is bounded by tmuxCommandTimeout (#1787). This runs on the WS reader
+// goroutine, which holds no broker lock, so a stall here is milder than the
+// pipe-pane pair above — it strands one connection's input loop rather than the
+// session's capture transitions. It is bounded anyway to keep ONE invariant over
+// the whole clientless channel — no tmux command on the WS data path is unbounded
+// — rather than leaving a second, subtler way for a wedged server to park a
+// goroutine.
 func (t *TmuxSession) SendRawKeys(b []byte) error {
-	if len(b) == 0 {
-		return nil
+	for len(b) > 0 {
+		n := min(len(b), sendRawKeysMaxChunk)
+		if err := t.sendRawKeysChunk(b[:n]); err != nil {
+			return err
+		}
+		b = b[n:]
 	}
+	return nil
+}
+
+// sendRawKeysChunk issues one `send-keys -H` for at most sendRawKeysMaxChunk
+// bytes. The caller guarantees the size bound; this owns the argv shape, the
+// deadline, and the error classification for a single command.
+func (t *TmuxSession) sendRawKeysChunk(b []byte) error {
 	args := make([]string, 0, len(b)+4)
 	args = append(args, "send-keys", "-t", exactTarget(t.sanitizedName), "-H")
 	for _, c := range b {
