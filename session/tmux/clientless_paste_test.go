@@ -301,29 +301,37 @@ func TestSendRawKeysStopsOnChunkFailure(t *testing.T) {
 func TestSendRawKeysChunkFitsRealTmux(t *testing.T) {
 	testguard.IsolateTmux(t)
 
+	// The pane runs `cat >/dev/null` rather than a shell: the search below sends
+	// tens of KB of filler, and a shell would echo every byte back through the
+	// pane and its line editor for no benefit to what is being measured.
 	const name = "af2414-budget"
 	ex := cmd.MakeExecutor()
-	if out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sh").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "cat >/dev/null").CombinedOutput(); err != nil {
 		t.Fatalf("new-session: %v: %s", err, out)
 	}
 	t.Cleanup(func() { _ = ex.Run(exec.Command("tmux", "kill-session", "-t", "="+name)) })
 
-	ts := NewTmuxSessionFromSanitizedNameWithDeps(name, "sh", MakePtyFactory(), ex)
+	ts := NewTmuxSessionFromSanitizedNameWithDeps(name, "cat", MakePtyFactory(), ex)
 	chunk := ts.sendRawKeysChunkSize()
 
 	// One command carrying a full chunk: exactly what SendRawKeys emits for any
 	// input at or over the chunk size.
-	if err := ts.sendRawKeysChunk(bytes.Repeat([]byte("x"), chunk)); err != nil {
-		t.Errorf("this tmux rejects a full %d-byte chunk (budget %d): %v", chunk, sendRawKeysArgvBudget, err)
-		t.Fatalf("largest chunk this tmux actually accepts is %d bytes — lower sendRawKeysArgvBudget to about %d",
-			maxAcceptedChunk(ts, chunk), 3*maxAcceptedChunk(ts, chunk))
+	err := ts.sendRawKeysChunk(bytes.Repeat([]byte("x"), chunk))
+	// Search once, and report either way. The bound is generous enough to reveal
+	// a ceiling well above ours (Linux measures 5444) without spending the search
+	// on sizes no budget would ever want.
+	ceiling := maxAcceptedChunk(ts, 8192)
+	if err != nil {
+		t.Fatalf("this tmux rejects a full %d-byte chunk (argv budget %d): %v\n"+
+			"largest chunk it actually accepts is %d bytes — lower sendRawKeysArgvBudget to about %d",
+			chunk, sendRawKeysArgvBudget, err, ceiling, 3*ceiling)
 	}
 	t.Logf("tmux accepted a full %d-byte chunk (argv budget %d); largest accepted chunk here is %d bytes",
-		chunk, sendRawKeysArgvBudget, maxAcceptedChunk(ts, 1<<16))
+		chunk, sendRawKeysArgvBudget, ceiling)
 }
 
 // maxAcceptedChunk binary-searches the largest single send-keys chunk this tmux
-// accepts, between 1 and hi. Reported rather than asserted on: the number is
+// accepts, between 0 and hi. Reported rather than asserted on: the number is
 // platform-specific, and the point is to inform the budget, not to pin it.
 func maxAcceptedChunk(ts *TmuxSession, hi int) int {
 	lo := 0
