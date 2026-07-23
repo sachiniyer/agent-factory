@@ -116,6 +116,7 @@ af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>]
 af tasks get <id>
 af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--program <agent>] [--enabled true|false]
+af tasks restart <id>          # reload an edited watch script (watch tasks only)
 af tasks trigger <id>          # run a cron task immediately (cron tasks only)
 af tasks remove <id>
 ```
