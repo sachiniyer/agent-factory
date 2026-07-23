@@ -141,8 +141,10 @@ type Dialer func(ctx context.Context, since uint64) (Stream, error)
 // the bubbletea event loop; the run loop (inbound) and send pump (outbound) run on
 // their own goroutines. gridMu guards the emulator grid between the run loop's
 // writes and Render's reads; connMu guards the current stream + cursor + desired
-// size between the loops and the event-loop mutators. Close is safe to call more
-// than once.
+// size between the loops and the event-loop mutators; resizeMu serializes the two
+// RESIZE senders so the newest size is always the one written last (assertSize).
+// resizeMu is ordered before connMu, and no lock here is ever held across stream
+// I/O. Close is safe to call more than once.
 type TermPane struct {
 	gridMu sync.RWMutex
 	emu    *vt.Emulator
@@ -174,6 +176,13 @@ type TermPane struct {
 	stream             Stream // current live stream; nil while (re)connecting
 	wantRows, wantCols uint16 // desired size, (re)asserted on each connect
 	cursor             uint64 // absolute output cursor for ?since replay
+
+	// resizeMu serializes the two RESIZE senders — Resize() and the run loop's
+	// per-connect re-assert — so that reading the desired size and writing it is
+	// one indivisible step. It is what makes the server's last-resize-wins rule
+	// mean last-INTENT-wins; see assertSize. Ordered BEFORE connMu and never held
+	// the other way round.
+	resizeMu sync.Mutex
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -264,7 +273,6 @@ func (t *TermPane) run() {
 		// repaint re-synchronises.
 		t.cursor = stream.StartSeq()
 		t.stream = stream
-		rows, cols := t.wantRows, t.wantCols
 		t.connMu.Unlock()
 
 		t.gridMu.Lock()
@@ -275,9 +283,7 @@ func (t *TermPane) run() {
 
 		// (Re)assert our desired size so the server sizes this tab's window to us —
 		// the pane may have resized while we were disconnected (last-resize-wins).
-		wctx, cancelW := context.WithTimeout(t.ctx, writeTimeout)
-		_ = stream.SendResize(wctx, rows, cols)
-		cancelW()
+		t.assertSize(stream)
 
 		t.readStream(stream)
 
@@ -457,13 +463,41 @@ func (t *TermPane) Resize(width, height int) {
 	t.connMu.Lock()
 	t.wantRows, t.wantCols = uint16(height), uint16(width) //nolint:gosec // clampSize bounds to [1, 4096]
 	stream := t.stream
-	rows, cols := t.wantRows, t.wantCols
 	t.connMu.Unlock()
 	if stream != nil {
-		wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
-		_ = stream.SendResize(wctx, rows, cols)
-		cancel()
+		t.assertSize(stream)
 	}
+}
+
+// assertSize writes the pane's CURRENT desired size to stream as a RESIZE frame.
+//
+// The read and the write are one step, under resizeMu, because they have two
+// writers: Resize() when the geometry changes, and the run loop once per
+// (re)connect, to tell a brand-new stream a size the server has never heard. When
+// each merely captured the size and wrote it after unlocking, a Resize() landing
+// in the run loop's window updated the size and wrote it FIRST, leaving the run
+// loop's now-stale frame to arrive LAST. The server's rule is last-resize-wins, so
+// the stale value won and was echoed back, pinning the emulator grid to the old
+// geometry while the TUI frame stayed at the new one (#2417). Serializing makes
+// the last frame on the wire necessarily the newest intent: whichever sender
+// writes last reads the desired size only after acquiring resizeMu, and Resize()
+// always writes after committing its value.
+//
+// Deliberately NOT connMu, though connMu already guards these fields. connMu is
+// also taken per inbound data event to advance the replay cursor, and on the
+// bubbletea event loop by Resize/Close; holding it across a network write bounded
+// by writeTimeout would stall those behind a slow socket. This mirrors sendPump,
+// which likewise reads the stream under connMu and writes outside it — no lock in
+// this type is ever held across stream I/O.
+func (t *TermPane) assertSize(stream Stream) {
+	t.resizeMu.Lock()
+	defer t.resizeMu.Unlock()
+	t.connMu.Lock()
+	rows, cols := t.wantRows, t.wantCols
+	t.connMu.Unlock()
+	wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
+	_ = stream.SendResize(wctx, rows, cols)
+	cancel()
 }
 
 // Render returns the emulator's grid as exactly height ANSI-styled lines of
