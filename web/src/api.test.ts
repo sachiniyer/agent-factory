@@ -96,6 +96,28 @@ test("createSession omits backend when the field is absent altogether", async ()
   assert.equal("backend" in cap.body, false, "an undefined backend is the same 'let the repo decide' as an empty one");
 });
 
+test("createSession sends force_remote when requested", async () => {
+  const cap = stubFetch();
+  await createSession(createInput({ forceRemote: true }), "tok");
+
+  assert.equal(cap.body.force_remote, true, "remote checkbox must become force_remote on the API");
+});
+
+test("createSession does not send backend when force_remote is true", async () => {
+  const cap = stubFetch();
+  await createSession(createInput({ forceRemote: true, backend: "hook" }), "tok");
+
+  assert.equal("backend" in cap.body, false, "force_remote alone must determine hook routing");
+});
+
+test("createSession omits force_remote when disabled", async () => {
+  const cap = stubFetch();
+  await createSession(createInput({ forceRemote: false }), "tok");
+  await createSession(createInput(), "tok");
+
+  assert.equal("force_remote" in cap.body, false, "explicit false leaves force_remote absent");
+});
+
 test("listBackends asks the daemon for the picked repo's catalog", async () => {
   const cap = stubFetch();
   await listBackends("/repos/af", "tok");

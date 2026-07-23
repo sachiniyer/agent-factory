@@ -312,12 +312,16 @@ export function newSessionModal(
   const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
   promptArea.setAttribute("aria-label", "Initial prompt");
 
+  const forceRemoteCheckbox = h("input", { type: "checkbox" });
+  forceRemoteCheckbox.setAttribute("aria-label", "Create on remote hooks backend");
+
   body.append(
     field("Title", titleInput),
     field("Project", projectSelect),
     field("Program", programSelect),
     field("Backend", backendSelect),
     backendHint,
+    field("Remote hooks", forceRemoteCheckbox),
     field("Prompt", promptArea),
   );
 
@@ -341,6 +345,7 @@ export function newSessionModal(
       // REPO_DEFAULT ("") when the user did not choose — createSession then omits
       // `backend` entirely and the repo's config decides (#1933).
       backend: backendSelect.value,
+      forceRemote: forceRemoteCheckbox.checked,
     });
   });
 
