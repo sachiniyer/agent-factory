@@ -82,25 +82,31 @@ func (t *TmuxSession) DisablePipePane() error {
 // bytes per byte sent, and past the ceiling tmux answers "failed to send
 // command" and the input is silently dropped (#2414).
 //
-// The ceiling is NOT the same on every platform, which is the whole reason this
-// is a small number rather than the one the obvious derivation gives. Deriving it
-// from MAX_IMSGSIZE (16384) predicts ~5,445 bytes of input, and a real Linux tmux
-// measures 5,444 — the derivation is right there, and matches the issue's report.
-// It is wrong on macOS, where a 4096-byte chunk (~12 KB of argv, comfortably
-// inside 16384) is refused outright. Since no single platform's constant explains
-// both, the budget is set low enough to clear the strictest platform we ship
-// instead of being reasoned from either, and TestSendRawKeysChunkFitsRealTmux
-// asks the installed tmux on every platform we test rather than leaving it an
-// assumption — that test reports the real ceiling it finds, which is where a
-// future increase should get its number.
+// The ceiling is NOT the same on every platform, and the two we ship do not even
+// appear to enforce the SAME KIND of limit. Both numbers below are measured by
+// TestSendRawKeysChunkFitsRealTmux against a real tmux, not derived:
 //
-// 512 is deliberately well under even the most pessimistic reading (a BSD BUFSIZ
-// of 1024 for the packing buffer would put the true ceiling near 1 KB of argv).
-// Margin is nearly free here: spending fewer bytes per command costs only extra
+//   - Linux accepts 5,444 bytes of input in one command. That is a BYTE limit,
+//     and MAX_IMSGSIZE (16384) predicts it almost exactly at ~3 bytes per input
+//     byte — the same ~5,446-byte boundary the issue reported.
+//   - macOS accepts 996. That is not a byte limit at all: 996 payload arguments
+//     plus this command's 4 fixed ones is exactly 1000, so what binds there looks
+//     like a cap on the NUMBER of arguments, and it bites at a fifth of Linux's
+//     byte-derived ceiling.
+//
+// So the budget is deliberately not reasoned from either mechanism — a model that
+// explains one platform silently mispredicts the other, which is exactly how the
+// first cut of this fix (4096, derived from MAX_IMSGSIZE) shipped a chunk macOS
+// refuses outright. 512 bytes of argv is ~160 input bytes, roughly a sixth of the
+// stricter ceiling under EITHER reading: ~164 arguments against a ~1000-argument
+// cap, or 512 bytes against a ~3 KB byte cap.
+//
+// Margin is nearly free. Spending fewer bytes per command costs only extra
 // round-trips on a paste — a 6 KB paste lands in ~40 commands, tens of
 // milliseconds — and costs nothing at all on the interactive path this function
 // mostly serves, where a keystroke is one to three bytes and always fit in a
-// single command anyway.
+// single command anyway. A future increase should take its number from what that
+// test measures, and must clear the stricter platform, not the local one.
 const sendRawKeysArgvBudget = 512
 
 // sendRawKeysChunkSize is how many input bytes fit in one command for THIS

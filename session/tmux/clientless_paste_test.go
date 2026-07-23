@@ -24,11 +24,14 @@ import (
 // accepted by the WebSocket and then dropped by tmux, never appearing in the
 // terminal.
 //
-// That limit is platform-specific, which is why the tests below assert against
+// That limit is platform-specific — and the two platforms we ship do not even
+// enforce the same KIND of limit — which is why the tests below assert against
 // sendRawKeysArgvBudget rather than any derived constant, and why
 // TestSendRawKeysChunkFitsRealTmux measures the real ceiling instead of trusting
-// one. On Linux it is MAX_IMSGSIZE (16384), giving the ~5,445-byte input the
-// issue reported and the 5,444 that test measures. macOS refuses far sooner.
+// one. Measured: Linux accepts 5,444 input bytes (a byte limit, MAX_IMSGSIZE at
+// ~3 bytes per input byte, matching the issue's report); macOS accepts 996,
+// which with this command's 4 fixed arguments is exactly 1000 — an argument
+// COUNT cap, not a byte one.
 //
 // The TUI attach path never hit this only because apiclient/attach.go reads
 // stdin in 32-byte chunks and so already sends many small frames. Chunking
