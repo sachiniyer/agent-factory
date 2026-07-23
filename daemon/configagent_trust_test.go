@@ -95,3 +95,69 @@ func TestDismissConfigAgentTrustPrompt_SkipsNonAgents(t *testing.T) {
 		t.Fatalf("Enter must never be tapped into a non-agent program, got %d checks", target.checks)
 	}
 }
+
+// TestDismissConfigAgentTrustPrompt_ClearsEveryTrustPromptAgent is the #2416
+// regression.
+//
+// This gate used to be its own hand-copied list of agents under a comment
+// claiming it mirrored LocalBackend.CheckAndHandleTrustPrompt. It had drifted:
+// opencode was added to that gate in #1959 and never here, so an opencode config
+// agent took the default branch, never ran the dismissal loop, and would hang on
+// a dialog a normal session cleared — the #729 defect class the comment was
+// written to prevent.
+//
+// The case runs over the shared gate rather than a literal list, so it covers
+// whatever agents are classified as prompting today, and a future agent that
+// starts prompting is covered the moment it is classified.
+//
+// What is asserted is the gate, not the loop: each pane is given no dialog, so
+// DismissTrustPrompt makes exactly one check and returns without a readiness
+// wait. One check means the agent reached the loop; zero is the defect
+// signature. The loop's own behaviour — budget, re-wait, bound — is held by the
+// two claude cases above, and per-agent ready glyphs belong to task's tests
+// rather than being restated here.
+func TestDismissConfigAgentTrustPrompt_ClearsEveryTrustPromptAgent(t *testing.T) {
+	covered := 0
+	for _, agent := range tmux.SupportedPrograms {
+		if !tmux.ProgramHasTrustPrompt(agent) {
+			continue
+		}
+		covered++
+		t.Run(agent, func(t *testing.T) {
+			target := &fakeTrustTarget{agent: agent}
+			if err := dismissConfigAgentTrustPrompt(context.Background(), target); err != nil {
+				t.Fatalf("config agent must run %s's trust-dismissal loop, got: %v", agent, err)
+			}
+			if target.checks != 1 {
+				t.Fatalf("expected %s's pane to be checked once for a trust dialog, got %d checks", agent, target.checks)
+			}
+		})
+	}
+	if covered == 0 {
+		t.Fatal("no agent is classified as having a trust prompt; the gate under test is vacuous")
+	}
+}
+
+// TestDismissConfigAgentTrustPrompt_SkipsAgentsWithNoDialog is the other half of
+// #2416: closing the drift must not over-correct into dismissing for an agent
+// whose modal AF already suppresses at launch. devin is launched with
+// --respect-workspace-trust false (#2410), so there is no dialog — and Enter
+// tapped at its composer would submit whatever is sitting there.
+func TestDismissConfigAgentTrustPrompt_SkipsAgentsWithNoDialog(t *testing.T) {
+	for _, agent := range tmux.SupportedPrograms {
+		if tmux.ProgramHasTrustPrompt(agent) {
+			continue
+		}
+		t.Run(agent, func(t *testing.T) {
+			// prompts: 1 so a pane that IS asked would answer "dialog present" and
+			// be counted — the check has to be able to fail.
+			target := &fakeTrustTarget{agent: agent, prompts: 1}
+			if err := dismissConfigAgentTrustPrompt(context.Background(), target); err != nil {
+				t.Fatalf("%s has no trust dialog to dismiss, got: %v", agent, err)
+			}
+			if target.checks != 0 {
+				t.Fatalf("Enter must never be tapped into %s's composer, got %d checks", agent, target.checks)
+			}
+		})
+	}
+}

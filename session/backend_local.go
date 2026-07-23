@@ -806,11 +806,14 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	// opencode has NO trust gate of its own (a fresh `git init` repo goes straight
 	// to its composer, verified on 0.0.0-main-202604230742), so it lands in
 	// CheckAndHandleTrustPrompt's generic doc-trust branch and no-ops harmlessly.
-	// It is listed anyway: this is the one site enumerating every agent, and an
-	// agent silently missing from it is the #729 defect (codex was excluded here,
-	// so its dialog was surfaced by isReadyContent but never dismissed).
-	switch i.ResolvedAgent() {
-	case tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramGemini, tmux.ProgramAmp, tmux.ProgramOpencode:
+	// It answers true anyway: an agent silently missing from the gate is the #729
+	// defect (codex was excluded, so its dialog was surfaced by isReadyContent but
+	// never dismissed).
+	//
+	// The membership answer itself lives in tmux.ProgramHasTrustPrompt, which the
+	// daemon's config-agent spawn calls too. This site used to hold the list and
+	// the daemon's a copy of it; the copy drifted and lost opencode (#2416).
+	if tmux.ProgramHasTrustPrompt(i.ResolvedAgent()) {
 		return ts.CheckAndHandleTrustPrompt()
 	}
 	return false

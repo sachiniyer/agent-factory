@@ -45,6 +45,36 @@ func IsSupportedProgram(name string) bool {
 	return false
 }
 
+// ProgramHasTrustPrompt reports whether an agent can raise a first-run
+// trust/permission dialog that AF has to dismiss before the pane is usable.
+//
+// This is the ONE gate. Both dismissal sites call it instead of enumerating the
+// agents themselves: LocalBackend.CheckAndHandleTrustPrompt (a live session) and
+// dismissConfigAgentTrustPrompt (a config-agent spawn). Two hand-copied lists
+// under a "mirrors the other one" comment is exactly what #2416 was — opencode
+// was added to the session gate in #1959 and missed in the daemon's, so a config
+// agent would hang on a dialog a normal session clears. #2097 was the same drift
+// over the retry budget, and #729 was codex missing from the enumeration
+// entirely. The answer has to come from one place or it drifts again.
+//
+// The name is the RESOLVED agent, so a program_overrides entry pointing an agent
+// name at some other binary never inherits an agent's trust handling
+// (#1116/#1131). A non-agent answers false: tapping Enter into an arbitrary
+// program is the harm this gate exists to prevent.
+//
+// devin is deliberately absent. AF launches it with `--respect-workspace-trust
+// false`, so its modal never renders (#2410) — there is nothing to dismiss, and
+// a dismissal loop would tap Enter into a live composer.
+// TestProgramHasTrustPrompt_ClassifiesEverySupportedAgent forces a new agent to
+// record which side it is on rather than defaulting quietly into this one.
+func ProgramHasTrustPrompt(program string) bool {
+	switch program {
+	case ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini, ProgramAmp, ProgramOpencode:
+		return true
+	}
+	return false
+}
+
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {
 	// Initialized by NewTmuxSession
