@@ -52,27 +52,17 @@ func IsSupportedProgram(name string) bool {
 // set without a known dialog of their own. The question this answers is whether
 // AF looks.
 //
-// Both ways of being wrong cost something, and neither is free:
+// Neither answer is a safe default: wrongly out risks a briefing typed into an
+// undismissed modal (#729, #2416), wrongly in risks 'D'+Enter injected into a
+// live agent that asked nothing (#1952). The full argument, and the per-agent
+// decisions with their evidence, live in ONE place —
+// TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent's table, which is
+// what goes red when a new agent is added and so is where the decision actually
+// gets made. Do not restate the argument here; two copies of it is what #2416
+// was, in prose.
 //
-//   - Wrongly OUT: an agent that belongs in the set is one whose dialog
-//     isReadyContent also recognizes, so a pane showing that dialog reads as
-//     READY. Nothing then clears it and the briefing is typed into the modal.
-//     That is #729's actual signature, not a hang — codex was excluded here, its
-//     dialog was surfaced by isReadyContent, and the prompt went into it. #2416
-//     put opencode in the same state. task's
-//     TestTrustDialogIsReadyOnlyForAgentsAFCanDismiss is what keeps those two
-//     enumerations from drifting apart again.
-//   - Wrongly IN: membership subjects live panes to DocTrustPromptPresent on the
-//     daemon's one-second poll, and a false positive there types 'D'+Enter into a
-//     running agent that asked nothing — re-firing every tick the phrase stays on
-//     screen (#1952). See that predicate's own doc in start.go; it is deliberately
-//     conservative for exactly this reason.
-//
-// So a new agent belongs in the set once its first-run behaviour is characterized,
-// not by default in either direction. Guess IN and you may inject keystrokes into
-// live sessions; guess OUT and you may hand a briefing to a modal. (amp is the one
-// member that predates this rule and was never characterized; it is grandfathered
-// in the classification table, not precedent for a new agent.)
+// task's TestTrustDialogIsReadyOnlyForAgentsAFCanDismiss holds this set against
+// isReadyContent's trust arms, so the two enumerations cannot drift apart.
 //
 // This is the ONE gate. Both dismissal sites call it instead of enumerating the
 // agents themselves: LocalBackend.CheckAndHandleTrustPrompt (a live session) and

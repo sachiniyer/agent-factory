@@ -37,17 +37,20 @@ func TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent(t *testing.T) 
 		ProgramCodex:  true,
 		ProgramAider:  true,
 		ProgramGemini: true,
-		// Verified to go straight to its composer in a fresh repo
-		// (0.0.0-main-202604230742), so no dialog of its own. In the set because
-		// the omission is exactly what #2416 was, and its generic-dialog behaviour
-		// is pinned by task's TestTrustDialogIsReadyOnlyForAgentsAFCanDismiss.
-		ProgramOpencode: true,
 		// Grandfathered — the one row that does not meet the "characterize first"
 		// rule above. amp's first run was never captured here; it has carried the
 		// dismissal check since before this gate was extracted, with no
 		// false-positive report against it. Left as it was rather than flipped on
-		// an untested guess. Not precedent for a NEW agent.
+		// an untested guess, and NOT precedent for a new agent. Flipping it is
+		// also no longer a free comment change: amp's isReadyContent arm carries
+		// isDocTrustPrompt, so task's parity test fails on the desync.
 		ProgramAmp: true,
+		// Verified to go straight to its composer in a fresh repo
+		// (0.0.0-main-202604230742), so no dialog of its own is known. In the set
+		// because the omission is exactly what #2416 was, and because its
+		// isReadyContent arm carries isDocTrustPrompt regardless — which is the
+		// desync task's parity test locks.
+		ProgramOpencode: true,
 		// Out because AF has no predicate identifying devin's workspace-trust
 		// modal: DocTrustPromptPresent cannot true-positive on that wording, so
 		// membership would buy no dismissal and leave only the false-positive
