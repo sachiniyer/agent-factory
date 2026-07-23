@@ -203,11 +203,35 @@ compose across `docker exec` invocations.
 `AGENT_FACTORY_AUTO_UPDATE` (driver sets to `false` to prevent mid-test
 self-updates that would timeout instance creation),
 `AF_DRIVER_TIMEOUT` (`25`s), `AF_DRIVER_POLL` (`0.25`s),
-`AF_DRIVER_DETACH_KEY` (`C-w`), `AF_DRIVER_BIN` (auto-resolved).
+`AF_DRIVER_DETACH_KEY` (`C-w`), `AF_DRIVER_BIN` (auto-resolved),
+`AF_DRIVER_HELP_SEEN` (`15`).
 
 Set `AF_DRIVER_COLS`/`ROWS` **before** `af_boot` to launch at a non-default
 size — `af_boot` pins it so it sticks (see the tiny-size gate below). Change
 the size mid-run with `af_resize <cols> <rows>`.
+
+### Driving a first-run overlay
+
+`af_boot` writes `help_screens_seen` before launching, and the default `15`
+marks **every** one-time overlay seen — that suppression is what makes ordinary
+scenarios deterministic, but it also means no scenario could reach a first-run
+screen at all. Clear the bit for the overlay you want:
+
+| bit | overlay |
+|-----|---------|
+| `1` | general help (`?`) |
+| `2` | instance-start help (`n`) |
+| `4` | instance-attach help (`o`) |
+| `8` | interactive-pane help (`enter` on a live pane) |
+
+```bash
+export AF_DRIVER_HELP_SEEN=7   # everything seen EXCEPT the interactive help
+```
+
+The bits are `app/help.go`'s `mask()` methods. Re-run `af_reset_sandbox` before
+a second boot in the same container — it wipes `state.json`, so the overlay is
+genuinely "first run" again; without it the first boot has already marked it
+seen. `scripts/tui-2413-scenario.sh` is a worked example.
 
 ---
 
@@ -229,6 +253,21 @@ scenario that failed in #1156, now deterministic:
 
 Green means the driver drives the TUI reliably. Any failure prints the step
 and the offending screen.
+
+### One scenario script (a per-fix real-TUI gate)
+
+```bash
+scripts/testbox.sh scenario scripts/tui-2413-scenario.sh
+```
+
+Runs a single scenario script in the same ephemeral, uniquely-named sandbox the
+self-test uses, then tears it down. The path is repo-relative (the repo is
+mounted read-only at `/src`); pin `AF_SELFTEST_NAME` to reuse a container
+instead.
+
+Use this for a regression scenario that belongs to one fix. Do **not** bolt such
+a case onto `tui-driver-selftest.sh`: that scenario is the shared acceptance
+proof, and destabilizing it costs more than the bug the new case guards.
 
 ### Driving by hand
 
