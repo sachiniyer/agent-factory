@@ -177,8 +177,9 @@ func TestExposureWarningAgreesWithTheDaemonNotice(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				cfg := DefaultConfig()
 				cfg.RequireToken = requireToken
+				cfg.ListenAddr = addr
 
-				warned := exposureWarning(cfg, "listen_addr", addr) != ""
+				warned := exposureWarning(cfg, "listen_addr") != ""
 
 				noticedCfg := DefaultConfig()
 				noticedCfg.ListenAddr = addr
