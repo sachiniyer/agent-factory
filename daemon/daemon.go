@@ -512,7 +512,15 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				// TaskRunActive on that transition, but keep this raw-row projection
 				// defensive for a record written by an intermediate/older build: a
 				// contradictory stale bit must not wedge max_concurrent_runs forever.
-				if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown {
+				// UserKilled is terminal in the same way and matters more here, because
+				// the ghost path is the one place its slot can never be released
+				// otherwise: holdsTaskRunSlot already frees a tombstoned INSTANCE (via
+				// canAutoRestoreLostSession — "finish-this-kill, never restore-this"),
+				// but the bit is only cleared by finishing the kill, and finishUserKill
+				// runs against m.instances, which is exactly where a ghost is absent. A
+				// tombstoned row that stops loading would therefore hold its slot for
+				// good and park every later event for that task (#2418).
+				if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown && !item.UserKilled {
 					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
 				}
