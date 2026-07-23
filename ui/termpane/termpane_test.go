@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,12 @@ type fakeStream struct {
 	mu      sync.Mutex
 	input   []byte
 	resizes [][2]uint16 // {rows, cols}
+	// resizeGate, when set, runs at the START of SendResize — after the caller has
+	// captured the size it is about to write, but before that frame is recorded. It
+	// is the seam a test needs to drive the reconnect/resize interleaving
+	// deterministically instead of racing it (#2417). Set before New; never held
+	// under s.mu, so a concurrent sender can still record while it runs.
+	resizeGate func()
 }
 
 func newFakeStream(startSeq uint64) *fakeStream {
@@ -56,6 +63,9 @@ func (s *fakeStream) SendInput(_ context.Context, b []byte) error {
 }
 
 func (s *fakeStream) SendResize(_ context.Context, rows, cols uint16) error {
+	if s.resizeGate != nil {
+		s.resizeGate()
+	}
 	s.mu.Lock()
 	s.resizes = append(s.resizes, [2]uint16{rows, cols})
 	s.mu.Unlock()
@@ -172,6 +182,98 @@ func TestResizeSendsResizeFrame(t *testing.T) {
 		r, ok := s.lastResize()
 		return ok && r == [2]uint16{30, 100} // rows, cols
 	}, 2*time.Second, 10*time.Millisecond, "Resize must send a RESIZE frame (rows,cols)=(30,100)")
+}
+
+// TestReconnectResizeKeepsTheNewestSize is the #2417 regression: last-resize-wins
+// has to mean last-INTENT-wins, not last-frame-to-win-the-write-lock.
+//
+// Both senders write RESIZE frames — Resize() when the pane geometry changes, and
+// run() once per (re)connect, to re-assert a size the server has never been told
+// (the pane may have resized while disconnected). run() captured the desired size
+// under connMu and then wrote it after unlocking, so a Resize() landing in that
+// window updated the size and sent it FIRST, leaving run()'s now-stale frame to
+// arrive LAST and win. The server sizes the PTY to the stale value and echoes it
+// back, so the emulator grid is forced to the old size while the TUI frame is at
+// the new one — mismatched wrapping until something resizes again.
+//
+// The interleaving is driven, not raced: the gate fires inside run()'s write, which
+// is exactly the window between its capture and its send, and the test waits for
+// the new geometry to be committed before letting that write proceed. Asserting on
+// the LAST frame rather than the frame count is deliberate — either sender may
+// legitimately write, and which of them writes last is the only thing the server's
+// last-resize-wins rule reads.
+func TestReconnectResizeKeepsTheNewestSize(t *testing.T) {
+	const (
+		oldWidth, oldHeight = 80, 24
+		newWidth, newHeight = 120, 40
+	)
+
+	s := newFakeStream(0)
+	d := &queueDialer{streams: []*fakeStream{s}}
+
+	// The gate runs on the run goroutine and needs the pane New() has not returned
+	// yet, so publish it through a channel rather than racing the assignment.
+	paneCh := make(chan *TermPane, 1)
+	resized := make(chan struct{})
+	// Deliberately NOT sync.Once: Do blocks its concurrent callers until the first
+	// call returns, which would park the very writer this gate is waiting for
+	// inside the gate itself. The guard has to let every later call straight
+	// through.
+	var gated atomic.Bool
+	s.resizeGate = func() {
+		if gated.CompareAndSwap(false, true) {
+			tp := <-paneCh
+			go func() {
+				defer close(resized)
+				tp.Resize(newWidth, newHeight)
+			}()
+			// Wait for the new geometry to reach the pane's desired size. That commit
+			// is the precise moment run()'s captured value goes stale, and it happens
+			// under connMu before Resize() writes anything — so this cannot deadlock
+			// against a fix that serializes the two writers.
+			require.Eventually(t, func() bool {
+				tp.connMu.Lock()
+				defer tp.connMu.Unlock()
+				return tp.wantRows == newHeight && tp.wantCols == newWidth
+			}, 5*time.Second, time.Millisecond, "Resize never committed the new desired size")
+
+			// Then hand the racing writer every chance to get its frame onto the wire
+			// FIRST, which is the losing interleaving being pinned: the stale frame
+			// this call is carrying would then land last and win. Waiting on the frame
+			// itself rather than on a bare sleep is what makes the reproduction
+			// deterministic instead of timing-dependent.
+			//
+			// A fix that serializes the two writers makes this wait run its full
+			// course by construction — the other sender cannot write while this one
+			// holds the serializer — so the bound is this test's fixed cost when
+			// green, never a flake. Timing out early could only ever cost a missed
+			// regression, not a false failure.
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				s.mu.Lock()
+				raced := len(s.resizes) > 0
+				s.mu.Unlock()
+				if raced {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+
+	tp := New(d.dial, oldWidth, oldHeight)
+	t.Cleanup(func() { _ = tp.Close() })
+	paneCh <- tp
+	<-resized
+
+	// The server's last word must be the size the user actually resized to.
+	require.Eventually(t, func() bool {
+		r, ok := s.lastResize()
+		return ok && r == [2]uint16{newHeight, newWidth}
+	}, 5*time.Second, 10*time.Millisecond,
+		"the LAST resize frame must carry the newest size (rows,cols)=(%d,%d); a stale "+
+			"re-assert landing last sizes the PTY to the old geometry and the server echoes it back",
+		newHeight, newWidth)
 }
 
 // TestResizeKeepsContentThenServerRepaints pins the PR6 resize behavior: unlike
