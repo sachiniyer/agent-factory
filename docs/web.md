@@ -372,10 +372,10 @@ from that wall and stays hidden in every other state. Send follow-up instruction
 typing in the attached terminal (or with `af sessions send-prompt`).
 
 **Create** a session with **`+ New`**; the pending row appears immediately without
-destructive controls, then opens attached when creation completes. Kill and archive
-resolve the row that exposed the action by its stable id, so acting on an unselected
-row and titles that collide across repos are unambiguous. Accessible action names also
-include that row's title.
+destructive controls, then opens attached when creation completes. Kill, archive,
+and restore resolve the row that exposed the action by its stable id, so acting on
+an unselected row and titles that collide across repos are unambiguous. Accessible
+action names also include that row's title.
 
 ### Tabs
 
