@@ -124,7 +124,7 @@ af daemon install      # register autostart at login
 af daemon uninstall    # remove it (the daemon still starts on demand)
 ```
 
-- Task edits made through `af tasks` or the TUI go through the daemon: writes persist and the daemon re-arms its schedules atomically in one RPC. The daemon is the sole task writer; the TUI sends field-level patches (`UpdateTask(id, patch)`) so a single-field edit cannot clobber a concurrent edit another client made to a different field (#1700).
+- Task edits made through `af tasks` or the TUI go through the daemon: writes persist and the daemon re-arms its schedules in one RPC. The write lands first; if the schedule refresh fails, the edit is already committed and the daemon reports the post-commit failure rather than rolling it back. The daemon is the sole task writer; the TUI sends field-level patches (`UpdateTask(id, patch)`) so a single-field edit cannot clobber a concurrent edit another client made to a different field (#1700).
 
 ## Migration notes
 
