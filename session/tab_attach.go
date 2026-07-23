@@ -55,7 +55,7 @@ func (i *Instance) resolveAttachedTabLocked(name, tabID string) (*Tab, bool, err
 			}
 		}
 	}
-	for _, tab := range i.Tabs {
+	for idx, tab := range i.Tabs {
 		if tab.Name != name {
 			continue
 		}
@@ -63,8 +63,13 @@ func (i *Instance) resolveAttachedTabLocked(name, tabID string) (*Tab, bool, err
 			return tab, true, nil
 		}
 		if tab.ID == "" {
-			tab.ID = tabID
-			return tab, true, nil
+			// Adopt the daemon's id through copy-on-write, not an in-place
+			// tab.ID = tabID: this pointer may already be held by a GetTabs
+			// snapshot whose callers read ID off-lock, so writing the field in
+			// place races them (the instance.go copy-on-write invariant, #1930).
+			// ReconcileTabsFromData adopts an id the same way; #2420.
+			i.replaceTabFieldLocked(idx, func(c *Tab) { c.ID = tabID })
+			return i.Tabs[idx], true, nil
 		}
 		return nil, true, fmt.Errorf(
 			"cannot attach daemon tab %q (%s): that name now belongs to tab %s",
