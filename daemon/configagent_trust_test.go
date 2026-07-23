@@ -24,7 +24,10 @@ type fakeTrustTarget struct {
 func (f *fakeTrustTarget) ResolvedAgent() string { return f.agent }
 
 // PreviewContent renders claude's ready glyph, so the readiness re-wait between
-// dismissals returns on its first poll instead of dominating the test.
+// dismissals returns on its first poll instead of dominating the test. It is
+// claude's glyph specifically: isReadyContent keys on a different one per agent,
+// so any case that drives another agent THROUGH a dismissal must either supply
+// that agent's glyph or avoid reaching the re-wait at all.
 func (f *fakeTrustTarget) PreviewContent(context.Context) (string, error) { return "❯", nil }
 
 func (f *fakeTrustTarget) HooksDone() <-chan struct{} { return nil }
@@ -107,8 +110,11 @@ func TestDismissConfigAgentTrustPrompt_SkipsNonAgents(t *testing.T) {
 // written to prevent.
 //
 // The case runs over the shared gate rather than a literal list, so it covers
-// whatever agents are classified as prompting today, and a future agent that
-// starts prompting is covered the moment it is classified.
+// whatever agents are in the gate today, and a future agent is covered the
+// moment it is classified into it. That does make the SELECTION circular — this
+// cannot catch a wrong classification, only a call site that stopped delegating.
+// The non-circular half is the literal table in
+// TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent.
 //
 // What is asserted is the gate, not the loop: each pane is given no dialog, so
 // DismissTrustPrompt makes exactly one check and returns without a readiness
@@ -116,10 +122,15 @@ func TestDismissConfigAgentTrustPrompt_SkipsNonAgents(t *testing.T) {
 // signature. The loop's own behaviour — budget, re-wait, bound — is held by the
 // two claude cases above, and per-agent ready glyphs belong to task's tests
 // rather than being restated here.
-func TestDismissConfigAgentTrustPrompt_ClearsEveryTrustPromptAgent(t *testing.T) {
+func TestDismissConfigAgentTrustPrompt_ChecksEveryAgentInTheGate(t *testing.T) {
+	// Compress the retry delay: if the gate regresses, a pane whose ready glyph
+	// this fake does not render would otherwise burn the readiness timeout before
+	// reporting, turning a clear failure into a slow and misleading one.
+	defer task.SetTrustPromptTimingForTest(time.Nanosecond)()
+
 	covered := 0
 	for _, agent := range tmux.SupportedPrograms {
-		if !tmux.ProgramHasTrustPrompt(agent) {
+		if !tmux.ProgramNeedsTrustDismissal(agent) {
 			continue
 		}
 		covered++
@@ -134,30 +145,40 @@ func TestDismissConfigAgentTrustPrompt_ClearsEveryTrustPromptAgent(t *testing.T)
 		})
 	}
 	if covered == 0 {
-		t.Fatal("no agent is classified as having a trust prompt; the gate under test is vacuous")
+		t.Fatal("no agent is in the trust-dismissal gate; the case under test is vacuous")
 	}
 }
 
-// TestDismissConfigAgentTrustPrompt_SkipsAgentsWithNoDialog is the other half of
-// #2416: closing the drift must not over-correct into dismissing for an agent
-// whose modal AF already suppresses at launch. devin is launched with
-// --respect-workspace-trust false (#2410), so there is no dialog — and Enter
-// tapped at its composer would submit whatever is sitting there.
-func TestDismissConfigAgentTrustPrompt_SkipsAgentsWithNoDialog(t *testing.T) {
+// TestDismissConfigAgentTrustPrompt_SkipsAgentsOutsideTheGate is the other half
+// of #2416: closing the drift must not over-correct into driving a dismissal
+// loop for an agent AF has no dismissal for. devin is the current member — AF
+// has no predicate for its workspace-trust modal, so a check could only ever
+// come back empty while the pane is treated as still-prompting.
+func TestDismissConfigAgentTrustPrompt_SkipsAgentsOutsideTheGate(t *testing.T) {
+	defer task.SetTrustPromptTimingForTest(time.Nanosecond)()
+
+	covered := 0
 	for _, agent := range tmux.SupportedPrograms {
-		if tmux.ProgramHasTrustPrompt(agent) {
+		if tmux.ProgramNeedsTrustDismissal(agent) {
 			continue
 		}
+		covered++
 		t.Run(agent, func(t *testing.T) {
 			// prompts: 1 so a pane that IS asked would answer "dialog present" and
 			// be counted — the check has to be able to fail.
 			target := &fakeTrustTarget{agent: agent, prompts: 1}
 			if err := dismissConfigAgentTrustPrompt(context.Background(), target); err != nil {
-				t.Fatalf("%s has no trust dialog to dismiss, got: %v", agent, err)
+				t.Fatalf("%s is outside the trust-dismissal gate, got: %v", agent, err)
 			}
 			if target.checks != 0 {
-				t.Fatalf("Enter must never be tapped into %s's composer, got %d checks", agent, target.checks)
+				t.Fatalf("%s's pane must not be driven through the dismissal loop, got %d checks", agent, target.checks)
 			}
 		})
+	}
+	// Without this, reclassifying the last excluded agent would retire the
+	// over-correction half of #2416 to a green test with zero assertions.
+	if covered == 0 {
+		t.Fatal("every supported agent is now in the gate; this case asserts nothing — " +
+			"delete it deliberately or restore an excluded agent")
 	}
 }

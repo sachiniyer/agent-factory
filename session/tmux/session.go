@@ -45,29 +45,40 @@ func IsSupportedProgram(name string) bool {
 	return false
 }
 
-// ProgramHasTrustPrompt reports whether an agent can raise a first-run
-// trust/permission dialog that AF has to dismiss before the pane is usable.
+// ProgramNeedsTrustDismissal reports whether AF should run its trust-dismissal
+// check against a pane running this agent.
+//
+// It is deliberately NOT named "has a trust prompt": amp and opencode are in the
+// set without a known dialog of their own. The question this answers is whether
+// AF looks, and looking is close to free — TmuxSession.CheckAndHandleTrustPrompt
+// injects nothing unless it positively identifies a dialog it knows how to
+// clear. Being wrongly OUT of the set is the expensive direction: the pane sits
+// on an undismissed dialog until the readiness wait times out.
 //
 // This is the ONE gate. Both dismissal sites call it instead of enumerating the
 // agents themselves: LocalBackend.CheckAndHandleTrustPrompt (a live session) and
 // dismissConfigAgentTrustPrompt (a config-agent spawn). Two hand-copied lists
 // under a "mirrors the other one" comment is exactly what #2416 was — opencode
-// was added to the session gate in #1959 and missed in the daemon's, so a config
-// agent would hang on a dialog a normal session clears. #2097 was the same drift
-// over the retry budget, and #729 was codex missing from the enumeration
-// entirely. The answer has to come from one place or it drifts again.
+// was added to the session gate in #1959 and missed in the daemon's. #2097 was
+// the same drift over the retry budget, and #729 was codex missing from the
+// enumeration entirely. The answer has to come from one place or it drifts again.
 //
-// The name is the RESOLVED agent, so a program_overrides entry pointing an agent
-// name at some other binary never inherits an agent's trust handling
-// (#1116/#1131). A non-agent answers false: tapping Enter into an arbitrary
-// program is the harm this gate exists to prevent.
+// The argument is the RESOLVED agent, so a program_overrides entry pointing an
+// agent name at some other binary never inherits an agent's trust handling
+// (#1116/#1131). A non-agent answers false: running a dismissal loop against an
+// arbitrary program is the harm this gate exists to prevent.
 //
-// devin is deliberately absent. AF launches it with `--respect-workspace-trust
-// false`, so its modal never renders (#2410) — there is nothing to dismiss, and
-// a dismissal loop would tap Enter into a live composer.
-// TestProgramHasTrustPrompt_ClassifiesEverySupportedAgent forces a new agent to
-// record which side it is on rather than defaulting quietly into this one.
-func ProgramHasTrustPrompt(program string) bool {
+// devin is out of the set because AF has no predicate that identifies its
+// workspace-trust modal. Looking would cost a check that can never match, and
+// #2410 declined to treat an unclearable dialog as handled for the same reason
+// isReadyContent has no devin trust arm — that is the #729 trap. Note this is
+// NOT the same claim as "devin never shows the modal": normal sessions suppress
+// it with --respect-workspace-trust false, but that flag is injected by
+// injectSystemPrompt, which the config-agent spawn path does not call (#2435).
+//
+// TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent forces a new agent
+// to record which side it is on rather than defaulting quietly out of the set.
+func ProgramNeedsTrustDismissal(program string) bool {
 	switch program {
 	case ProgramClaude, ProgramCodex, ProgramAider, ProgramGemini, ProgramAmp, ProgramOpencode:
 		return true

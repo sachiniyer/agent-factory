@@ -800,20 +800,13 @@ func (b *LocalBackend) CheckAndHandleTrustPrompt(i *Instance) bool {
 	// never gets an agent's trust-prompt handling (#1116/#1131 defect class),
 	// while restored sessions with legacy free-form Program values (e.g.
 	// "/home/foo/bin/claude") still get it — same persisted-state class of
-	// regression as #677. Codex was added in #729: it was previously excluded
-	// here, so a codex trust/confirmation dialog was never dismissed even
-	// though isReadyContent could surface it.
-	// opencode has NO trust gate of its own (a fresh `git init` repo goes straight
-	// to its composer, verified on 0.0.0-main-202604230742), so it lands in
-	// CheckAndHandleTrustPrompt's generic doc-trust branch and no-ops harmlessly.
-	// It answers true anyway: an agent silently missing from the gate is the #729
-	// defect (codex was excluded, so its dialog was surfaced by isReadyContent but
-	// never dismissed).
+	// regression as #677.
 	//
-	// The membership answer itself lives in tmux.ProgramHasTrustPrompt, which the
-	// daemon's config-agent spawn calls too. This site used to hold the list and
-	// the daemon's a copy of it; the copy drifted and lost opencode (#2416).
-	if tmux.ProgramHasTrustPrompt(i.ResolvedAgent()) {
+	// Which agents are in the set, and why, lives with the gate itself in
+	// tmux.ProgramNeedsTrustDismissal — the daemon's config-agent spawn calls the
+	// same function. This site used to hold the list and the daemon's a copy of
+	// it; the copy drifted and lost opencode (#2416).
+	if tmux.ProgramNeedsTrustDismissal(i.ResolvedAgent()) {
 		return ts.CheckAndHandleTrustPrompt()
 	}
 	return false

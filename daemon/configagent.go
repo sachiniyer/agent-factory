@@ -301,14 +301,14 @@ func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
 // dismissConfigAgentTrustPrompt clears the agent's first-run trust dialog, the
 // same loop task.StartAndSendPrompt runs for a normal session.
 //
-// The per-agent gate is tmux.ProgramHasTrustPrompt — the same call
+// The per-agent gate is tmux.ProgramNeedsTrustDismissal — the same call
 // LocalBackend.CheckAndHandleTrustPrompt makes, not a copy of its list. This
 // used to enumerate the agents here under a comment claiming it mirrored that
 // one, and it had already drifted: opencode was missing, so a config agent
 // would hang on a dialog a normal session cleared (#2416).
 func dismissConfigAgentTrustPrompt(ctx context.Context, target task.TrustPromptTarget) error {
-	if !tmux.ProgramHasTrustPrompt(target.ResolvedAgent()) {
-		return nil // nothing to dismiss for this program
+	if !tmux.ProgramNeedsTrustDismissal(target.ResolvedAgent()) {
+		return nil // AF has no dismissal to run for this program
 	}
 	return task.DismissTrustPrompt(ctx, target)
 }
