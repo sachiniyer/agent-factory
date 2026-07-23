@@ -401,6 +401,41 @@ func TestHandoffSession_RefusesArchivedSession(t *testing.T) {
 	}
 }
 
+// TestHandoffSession_RefusesTheReservedRootSession keeps the root refusal locked
+// at the daemon boundary (#2436).
+//
+// The rule now lives in the shared ValidateRuntimeAction guard rather than in a
+// standalone IsReservedTitle check here, because holding it here alone is what
+// let the TUI open its picker for root and only surface the refusal after the
+// user confirmed. This test asserts the daemon still refuses regardless of where
+// the rule is implemented, so the move cannot quietly become a removal — and
+// there was no daemon-level test covering it before, which is how a guard came
+// to be relied on without ever being exercised.
+func TestHandoffSession_RefusesTheReservedRootSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, session.RootSessionTitle, backend)
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: session.RootSessionTitle, RepoID: repoID, To: tmux.ProgramGemini,
+	})
+	if err == nil {
+		t.Fatal("handoff accepted the daemon-managed root agent")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "root") {
+		t.Fatalf("error = %q, want a refusal that names the reserved root agent", err)
+	}
+	if swaps, prompts := backend.snapshot(); swaps != 0 || len(prompts) != 0 {
+		t.Fatalf("refused root handoff touched the runtime (swaps=%d prompts=%d), want neither", swaps, len(prompts))
+	}
+	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
+		t.Fatalf("Program = %q after refused handoff, want %q", got, tmux.ProgramClaude)
+	}
+	if ledger := inst.Handoffs(); len(ledger) != 0 {
+		t.Fatalf("refused root handoff wrote %d ledger entries, want 0", len(ledger))
+	}
+}
+
 func TestHandoffSession_PreflightFailureLeavesOutgoingAgentUntouched(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}

@@ -102,11 +102,14 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// has a live runtime that may be replaced. Keeping state first prevents an
 	// Archived/Lost/Dead row from being reanimated through a capable backend
 	// instead of its restore path (#2231).
+	// The reserved-root refusal is part of that shared guard now, not a separate
+	// check here (#2436). It lived here alone, which meant the TUI — which asks
+	// ValidateRuntimeAction and nothing else before opening its picker — could not
+	// see it, and only discovered the refusal after the user chose an agent and
+	// confirmed. Moving it into the predicate both sides already call is what stops
+	// the two from disagreeing about the same session again.
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
 		return HandoffSessionResponse{}, err
-	}
-	if session.IsReservedTitle(instance.Title) {
-		return HandoffSessionResponse{}, fmt.Errorf("session %q cannot be handed off", req.Title)
 	}
 	target := strings.TrimSpace(req.To)
 	if err := instance.ValidateHandoffTarget(target); err != nil {
