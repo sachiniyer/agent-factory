@@ -354,6 +354,52 @@ func TestHookReapUnaffectedByCancelledCaller(t *testing.T) {
 	assert.NoDirExists(t, h.sandbox(p.slug))
 }
 
+// TestHookReapKillsAnOrphanedLaunchChildBeforeDeleting locks the ordering that
+// makes the reap authoritative (#2440).
+//
+// runHookScript kills only the SCRIPT, so a launch_cmd killed at its bound
+// leaves whatever it had in flight — the `terraform`/`gcloud` doing the actual
+// provisioning — running. Before the fix, delete_cmd reaped only what existed at
+// that instant and reported SUCCESS, and the orphan then created the resource
+// AFTER the reap. Nothing surfaced it: provisioning failed so af keeps no record
+// of the session, and orphanWarning fires only when the reap FAILS.
+//
+// This is what TestHookReapUnaffectedByCancelledCaller was hitting intermittently
+// on CI, where the in-flight child was the fixture's own `mkdir` descheduled
+// under load. Here the window is explicit instead of a scheduling accident, so
+// the leak reproduces every run rather than one cell in four.
+func TestHookReapKillsAnOrphanedLaunchChildBeforeDeleting(t *testing.T) {
+	shrinkHookTimeouts(t, 50*time.Millisecond, 5*time.Second)
+	h := newHookState(t, "", "")
+
+	// The real shape of a launch_cmd: the provisioning is done by a CHILD, and
+	// the script is still waiting on it when the launch bound fires.
+	child := writeHookScript(t, filepath.Join(h.dir, "provision-child.sh"), fmt.Sprintf(`
+sleep 0.25
+mkdir -p '%s'/sandboxes/"$name"
+echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
+`, h.dir, h.dir))
+	writeHookScript(t, h.launch, fmt.Sprintf(`'%s' --name "$name"`, child))
+
+	p := newHookProvisioner(h, "orphaned child")
+	_, err := p.provisionOrReap()
+	require.Error(t, err, "launch_cmd is killed at its bound, so provisioning must fail")
+	require.True(t, h.deleteRan(t), "delete_cmd must run: launch_cmd started")
+
+	// Watch across the whole window in which the orphan would land its side
+	// effect. A resource that appears at ANY point after the reap is the leak —
+	// delete_cmd already reported success and will never run again.
+	sandbox := h.sandbox(p.slug)
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(sandbox); statErr == nil {
+			t.Fatalf("a launch_cmd child outlived the reap and re-created %s: "+
+				"delete_cmd reported success, so this sandbox now bills with nothing pointing at it", sandbox)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestHookProvisionSucceedsWhenLaunchLeavesOutputPipeOpen guards the regression
 // the bound itself could cause. A launch_cmd that exits 0 and leaves a tunnel or
 // backgrounded daemon holding its stdout — a documented pattern, since the script
