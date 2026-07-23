@@ -2,11 +2,8 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -302,6 +299,17 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		if err := m.refuseHeldBranchReuseLocked(repo.ID, repo.Root, title, nameNamespace, req.InPlace, diskData); err != nil {
 			return nil, "", nil, nil, err
 		}
+		// And refuse for every other reason the rename cannot clear, still ahead
+		// of it (#2415). Freeing the title does not free an orphan tmux session of
+		// the same name, a hook slug another project owns, or the reserved "root"
+		// name — so validateTitleAvailableLocked below could refuse AFTER the
+		// rename had already relocated the archived worktree and rewritten its
+		// durable record, leaving exactly the state this function promises never to
+		// produce. Asking the record-independent half first turns those into
+		// side-effect-free refusals.
+		if err := m.refuseUnclaimableTitleReuseLocked(repo.ID, repo.Root, title, req.Program, nameNamespace, req.allowReserved, diskData); err != nil {
+			return nil, "", nil, nil, err
+		}
 		renamedArchived, err = m.renameArchivedForReuseLocked(repo.ID, repo.Root, title, req.Program, nameNamespace, &diskData)
 		if err != nil {
 			return nil, "", nil, nil, err
@@ -421,6 +429,44 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	return fmt.Errorf("cannot create session %q: the archived session %q still has branch %q checked out at %s, and the new session would derive that same branch. Renaming the archived session aside frees its name but not its branch, so the create would fail at `git worktree add` — permanently delete the archived session to release both (%s), or create this session under a different name",
 		title, archived.Title, branch, config.ShellQuotePath(holder),
 		shellsuggest.Command("af", "sessions", "kill", archived.Title))
+}
+
+// refuseUnclaimableTitleReuseLocked refuses an explicit-title create BEFORE the
+// archived-name-reuse rename touches anything, when the title cannot be claimed
+// for a reason the rename has no effect on (#2415). Runs under m.mu.
+//
+// renameArchivedForReuseLocked clears exactly one thing: an af RECORD holding the
+// title. It does not free the "root" name, an orphan tmux session left by a crash,
+// or a hook slug another project owns — yet validateTitleAvailableLocked checks all
+// of those, and it ran AFTER the rename. So a create could fail on a condition that
+// was already true before anything happened, with the archived session left renamed
+// to "<title> (archived)", its worktree physically relocated, its manager key
+// changed, and its durable record rewritten — permanently, with no rollback, for a
+// create that never occurred. That is the same invariant #2127 protects from the
+// branch side, and the one reserveCreate's admission comment promises.
+//
+// The gap was structural rather than a missing case: the checks lived inline in a
+// function called after the mutation, so every check added there inherited the bug.
+// Splitting validateTitleAvailableLocked into a record-dependent half and a
+// record-independent half is what makes "ask everything answerable before mutating"
+// the default for future checks instead of a thing to remember.
+//
+// Two deliberate non-firings, mirroring refuseHeldBranchReuseLocked:
+//
+//   - No archived collision means no rename will happen, so there is no invariant
+//     to protect and this must stay out of the way. The create proceeds and
+//     validateTitleAvailableLocked reports the same refusal in the same words, at
+//     the same point it always did.
+//   - The archived row itself is excluded from the scans (the ignore argument).
+//     It is the claim the rename is about to release, so counting it would refuse
+//     a reuse that would have succeeded — turning a data-integrity fix into a
+//     feature regression.
+func (m *Manager) refuseUnclaimableTitleReuseLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData) error {
+	archived, _, err := m.findArchivedOnlyCollisionLocked(repoID, repoPath, title, namespace, diskData)
+	if err != nil || archived == nil {
+		return err
+	}
+	return m.validateTitleClaimableLocked(repoID, repoPath, title, program, namespace, allowReserved, diskData, archived)
 }
 
 // reuseArchivedRenamePersist is the durable title rewrite the archived-name-reuse
@@ -679,168 +725,6 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 		}
 	}
 	return "", fmt.Errorf("could not find an available title for %q", baseTitle)
-}
-
-func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData) error {
-	// Whitespace-only titles (e.g. "   ") are non-empty and so slip past a bare
-	// == "" check, creating sessions with effectively blank names (#973). Trim
-	// before the emptiness gate; the TUI naming flow applies the same check.
-	if strings.TrimSpace(title) == "" {
-		return fmt.Errorf("session title is required")
-	}
-	// The "root" title belongs to the daemon-managed root agent (#1106).
-	// Every creation path lands here — TUI, `af sessions create`, task
-	// spawns, DeliverPrompt auto-creates — so this single gate reserves the
-	// name everywhere. Only the daemon's own ensure loop passes
-	// allowReserved; title-base derivation (nextAvailableTitleLocked) never
-	// does, so a base of "root" skips to "root-2" instead of erroring.
-	if !allowReserved && session.IsReservedTitle(title) {
-		return fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", title)
-	}
-	// Titles are sanitized into git branch names (git.SanitizeBranchName
-	// lowercases, turns spaces into dashes, strips unsafe chars, and collapses
-	// dashes), so distinct titles can map to the same branch: "MyApp"/"myapp"
-	// (#605) or "A B"/"a-b" (#741) both collide. The second worktree create
-	// would otherwise fail with a cryptic git error, so reject the conflict
-	// here, before any worktree or tmux setup runs.
-	if existing, kind, collisionNamespace := m.findTitleConflictLocked(repoID, repoPath, title, namespace == runtimeNamespaceLocalTmux, diskData); existing != "" {
-		switch {
-		case existing == title:
-			if kind == titleConflictReserved {
-				return fmt.Errorf("session with title %q is already reserved: %w", title, errConcurrentCreate)
-			}
-			return fmt.Errorf("session with title %q already exists: %w", title, errConcurrentCreate)
-		case collisionNamespace == titleNamespaceTmux:
-			return fmt.Errorf("session titled %q conflicts with existing session %q: both map to tmux session %q", title, existing, tmux.SanitizedNameForRepo(title, repoPath))
-		default:
-			return fmt.Errorf("session titled %q conflicts with existing session %q: both sanitize to the same git branch %q", title, existing, m.branchForTitle(title))
-		}
-	}
-	if namespace == runtimeNamespaceRemoteHook {
-		candidate := session.Slugify(title)
-		// Hook names are the ONE namespace that stays global while titles go
-		// per-repo: launch_cmd/delete_cmd receive `--name <slug>` verbatim, with
-		// no repo component, and external provisioners tag and reap real
-		// VMs/containers by it. Two repos handing scripts the same name would
-		// clobber one sandbox and let either delete reap the other's. So every
-		// check below spans ALL repos, unlike the per-repo title rules above.
-		if _, ok := m.reservedRemoteNames[candidate]; ok {
-			return fmt.Errorf("remote hook name %q is already reserved", candidate)
-		}
-		// Guard against in-memory remote sessions that are not (yet) on disk.
-		// refreshDaemonInstances preserves a running remote instance in
-		// m.instances even after its repo directory is deleted externally (a
-		// recoverable inconsistency), yet loadRepoInstanceData returns nothing
-		// for it — so a disk-only slug check would let a second title that
-		// slugifies to the same hook name through. The branch-collision check
-		// above misses this pair because Slugify drops underscores while branch
-		// sanitization keeps them as dashes ("My_App"->branch "my-app"/slug
-		// "myapp" vs "MyApp"->branch "myapp"/slug "myapp"). The TUI pre-check
-		// (FindSlugCollision over Snapshot()) catches it, but the HTTP
-		// CreateSession path bypasses that, so the daemon-side check must be
-		// complete (#1636).
-		for _, inst := range m.instances {
-			if inst == nil {
-				continue
-			}
-			data := inst.ToInstanceData()
-			if !data.IsRemoteHook() {
-				continue
-			}
-			if session.Slugify(data.Title) == candidate {
-				return fmt.Errorf("remote session titled %q already maps to hook name %q", data.Title, candidate)
-			}
-		}
-		for _, data := range diskData {
-			if !data.IsRemoteHook() {
-				continue
-			}
-			if session.Slugify(data.Title) == candidate {
-				return fmt.Errorf("remote session titled %q already maps to hook name %q", data.Title, candidate)
-			}
-		}
-		// diskData holds only THIS repo's rows, so a settled hook session in
-		// another repo would otherwise slip through — the hole that let two repos
-		// create the same hook name sequentially (they just could not race).
-		owner, ownerRepo, err := hookSlugOwnerInOtherRepos(candidate, repoID)
-		if err != nil {
-			return err
-		}
-		if owner != "" {
-			return fmt.Errorf("remote session titled %q in project %s already maps to hook name %q; remote hook names are shared across projects because the hook scripts receive them verbatim as --name — pick another title for this remote session", owner, ownerRepo, candidate)
-		}
-		return nil
-	}
-	if namespace != runtimeNamespaceLocalTmux {
-		return nil
-	}
-	tmuxSession := tmux.NewTmuxSessionForRepo(title, repoPath, program)
-	// Existence gates the create here, so read the tri-state, not the lossy bool
-	// (#1962): only a CONFIRMED existing session (known && exists) blocks. A
-	// wedged/timed-out has-session is NOT proof of a name collision — reporting
-	// "exists" through ExistsOrUnknown would refuse a legitimate create against a
-	// merely-wedged server. An unanswered probe (!known) falls through and lets the
-	// create proceed. That never silently clobbers a real orphan: the create's own
-	// `tmux new-session -s <name>` fails on a duplicate name, and Start's existence
-	// check (now ProbeSession too) surfaces it as "already exists" once the server
-	// answers, or as ErrTmuxTimeout while it stays wedged — either way non-
-	// destructive. Blocking here on a guess is the only unsafe option.
-	if exists, known := tmuxSession.ProbeSession(); known && exists {
-		// A tmux session exists with no daemon reservation, in-memory instance,
-		// or disk record — an orphan left by a crash or an external process.
-		// No creator will ever finish it, so this stays a plain error (not
-		// errConcurrentCreate): DeliverPrompt must fail fast with cleanup
-		// guidance rather than wait out waitForTargetSession's timeout (#916).
-		return fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: %s", title, shellsuggest.Command("tmux", "kill-session", "-t", tmuxSession.SanitizedName()))
-	}
-	return nil
-}
-
-// hookSlugOwnerInOtherRepos reports the title (and repo path) of a persisted
-// remote-hook session in ANY repo other than repoID whose slug equals candidate,
-// or "" when the hook name is free.
-//
-// The caller already scans this repo's rows and every in-memory instance; this
-// covers the remaining case — a settled hook session in a different repo, whose
-// rows loadRepoInstanceData(repoID) never returns. Without it the global
-// hook-name namespace is only enforced against concurrent creates (the in-flight
-// reservation), so two repos could take the same name sequentially and hand both
-// sandboxes the identical --name.
-//
-// Corrupted per-repo files are surfaced rather than skipped: a hidden hook
-// session would otherwise let a colliding name through, and the cost of a false
-// refusal here is a clear error, while the cost of a miss is two provisioned
-// sandboxes fighting over one name.
-func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error) {
-	allInstances, err := config.LoadAllRepoInstances()
-	if err != nil {
-		return "", "", fmt.Errorf("%w: %v", errTitleCheckFatal, err)
-	}
-	var corrupted []string
-	for rid, raw := range allInstances {
-		if rid == repoID {
-			continue
-		}
-		var rows []session.InstanceData
-		if err := json.Unmarshal(raw, &rows); err != nil {
-			corrupted = append(corrupted, rid)
-			continue
-		}
-		for i := range rows {
-			if !rows[i].IsRemoteHook() {
-				continue
-			}
-			if session.Slugify(rows[i].Title) == candidate {
-				return rows[i].Title, rows[i].Path, nil
-			}
-		}
-	}
-	if len(corrupted) > 0 {
-		sort.Strings(corrupted)
-		return "", "", fmt.Errorf("%w: cannot verify remote hook name %q is free: %d repo(s) have a corrupted instances.json that may be hiding a session using it: %s",
-			errTitleCheckFatal, candidate, len(corrupted), strings.Join(corrupted, ", "))
-	}
-	return "", "", nil
 }
 
 // errTitleCheckFatal marks a title-availability failure that is NOT "this
