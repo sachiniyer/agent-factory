@@ -102,6 +102,14 @@ func (p *hookProvisioner) provisionOrReap() (ProvisionResult, error) {
 	if err == nil {
 		return res, nil
 	}
+	// Stop anything launch_cmd left mid-provision BEFORE delete_cmd runs, so the
+	// reap is authoritative rather than a snapshot something can outlive (#2440).
+	// This belongs here and not in reap: it is sound only while the launch we are
+	// cleaning up after has JUST returned. reap also backs Kill and archive,
+	// where the launch ended long ago and its group id may since have been
+	// recycled onto an unrelated process.
+	p.quiesceLaunchGroup()
+
 	// launch_cmd may have provisioned a sandbox before failing to hand back a
 	// usable endpoint: it can exit 0 having printed no/bad JSON, exit non-zero
 	// after creating a VM, or be killed at the timeout mid-provision. Reap via
@@ -381,10 +389,6 @@ func (p *hookProvisioner) reap() error {
 		if !p.launchStarted {
 			return
 		}
-		// Stop anything launch_cmd left provisioning BEFORE delete_cmd runs, so
-		// the reap is authoritative rather than a snapshot something can outlive.
-		p.quiesceLaunchGroup()
-
 		// runHookScript builds its timeout from context.Background(), NEVER a
 		// caller's context — and that is load-bearing here. reap's whole job is to
 		// run on the failure path, where the launch context is already cancelled or
@@ -417,10 +421,19 @@ func (p *hookProvisioner) reap() error {
 // orphanWarning never fires, because the reap did not fail. The resource bills
 // forever with nothing pointing at it, which is the exact harm #1955 was about.
 //
-// Only reap calls this, and reap runs only while a session is being torn down: a
-// failed provision, Kill, or archive. On those paths every descendant is garbage
-// by definition, so the "we stop listening; we kill nothing" rule that governs
-// the SUCCESS path does not apply here and must not be extended to it.
+// Only provisionOrReap calls this, and only on the failure of a launch that has
+// just returned. Every descendant of a launch being reaped seconds after it
+// failed is garbage by definition, so the "we stop listening; we kill nothing"
+// rule that governs the SUCCESS path does not apply — but it must not be
+// extended to the other reap paths, for two independent reasons:
+//
+//   - Kill and archive reap a launch that ended long ago. Its group is empty by
+//     then, so the group id may have been RECYCLED onto an unrelated process,
+//     and signalling it would kill a stranger's process tree. Freshness is what
+//     makes the pgid safe to signal, and only this call site has it.
+//   - Those paths rebuild the provisioner from the stored cleanup handle
+//     (runtime_cleanup.go), which has no pgid to begin with — so the guard below
+//     already makes them no-ops. This comment records why that must stay true.
 func (p *hookProvisioner) quiesceLaunchGroup() {
 	if p.launchPgid == 0 {
 		return
