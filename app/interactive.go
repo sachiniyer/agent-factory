@@ -114,6 +114,19 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	return nil
 }
 
+// isInteractiveExitKey reports whether msg is keys.KeyExitInteractive (Ctrl-]),
+// the ONE host-reserved key inside interactive mode. Everything else forwards to
+// the agent/shell.
+//
+// It is the single definition of that key for the app package, because two
+// places need to agree on it and they are not adjacent: handleInteractiveKey
+// acts on it, and the enterInteractiveMsg replay must refuse to feed it back in
+// (#2413). A second literal tea.KeyCtrlCloseBracket comparison drifting from
+// this one is exactly how that bug came back.
+func isInteractiveExitKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyCtrlCloseBracket
+}
+
 // paneErrorLabel names pane p's session for a user-facing message, falling back
 // to a generic phrase when the title is unknown. A pane whose instance vanished
 // (or was never titled) used to render the name as an empty pair of quotes,
@@ -133,7 +146,7 @@ func paneErrorLabel(p *store.OpenPane) string {
 // sequence (the #1089 input contract; the honest not-forwarded list lives on
 // termpane.translateKey).
 func (m *home) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyCtrlCloseBracket {
+	if isInteractiveExitKey(msg) {
 		m.setInteractive(false)
 		return m, nil
 	}
