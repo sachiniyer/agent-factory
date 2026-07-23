@@ -207,6 +207,72 @@ func TestStartupUnknownGhostDoesNotHoldTaskRunSlot(t *testing.T) {
 	}
 }
 
+// TestUserKilledGhostDoesNotHoldTaskRunSlot covers the kill tombstone (#1108) on
+// the raw-row path. The loaded-instance half already frees this slot —
+// holdsTaskRunSlot defers to canAutoRestoreLostSession, which refuses a UserKilled
+// record ("finish-this-kill, never restore-this"). Ghost accounting reads storage
+// directly, so it has to reach the same verdict on its own or the two halves
+// disagree about the same session.
+//
+// Disagreeing here is unrecoverable rather than merely wrong. A tombstone is
+// cleared by FINISHING the kill, and finishUserKill only ever runs against an
+// instance in m.instances — the one place a ghost is by definition absent. So the
+// bit that would release the slot can only be cleared by the path the row cannot
+// reach, and the cap stays at its limit for as long as the row is unloadable:
+// every later event for that task parks forever. That is the same
+// wedged-cap failure TestGhostTaskRunReleasesWhenItsRunIsOver and
+// TestStartupUnknownGhostDoesNotHoldTaskRunSlot exist to prevent, arrived at
+// through the third terminal marker (#2418).
+func TestUserKilledGhostDoesNotHoldTaskRunSlot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	const title = "tombstoned-ghost"
+	// The wedge as it reaches disk: the user killed the session, so the tombstone
+	// is committed, but the run marker was never cleared — the kill did not get to
+	// finish. Nothing in the row can ever clear it once the row stops loading.
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:            "tombstoned-id",
+		TaskID:        "task1",
+		Title:         title,
+		Path:          repoPath,
+		Status:        session.Lost,
+		Liveness:      session.LiveLost,
+		TaskRunActive: true,
+		UserKilled:    true,
+		BackendType:   "local",
+		Worktree:      session.GitWorktreeData{RepoPath: repoPath},
+	}); err != nil {
+		t.Fatalf("append tombstoned row: %v", err)
+	}
+	failLoadFor(t, title)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.RestoreInstances(); err != nil {
+		t.Fatalf("RestoreInstances: %v", err)
+	}
+	manager.mu.Lock()
+	_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+	counted := manager.countTaskRunsLocked(repo.ID, "task1")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+	manager.mu.Unlock()
+	if live {
+		t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
+	}
+	if counted != 0 {
+		t.Fatalf("tombstoned ghost consumed %d task slot(s); an explicit kill releases the cap", counted)
+	}
+	if admitErr != nil {
+		t.Fatalf("tombstoned ghost wedged the task's cap — no later event can ever land: %v", admitErr)
+	}
+}
+
 // TestGhostTaskRunClearsWhenTheRowLoadsAgain: the ghost set is a projection,
 // rebuilt every refresh — not bookkeeping. A row that starts loading again must
 // stop being a ghost, or its slot would be held twice: once by the ghost and once
