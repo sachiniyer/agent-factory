@@ -11,10 +11,11 @@ set -euo pipefail
 # playtest-entry.sh.
 (cd / && git config --global --add safe.directory /src) 2>/dev/null || true
 
-# Copy without .git: dev checkouts are often linked worktrees whose .git is
-# a pointer to a host path that does not exist in the container.
-mkdir -p /work
-(cd /src && tar -c --exclude=.git .) | tar -x -C /work
+# Copy without .git (linked worktrees) or anything this user cannot read
+# (#2432); copy-src.sh carries the reasoning for both.
+# shellcheck source=scripts/container/copy-src.sh
+. /src/scripts/container/copy-src.sh
+copy_src_tree /src /work
 cd /work
 
 if [ $# -eq 0 ]; then

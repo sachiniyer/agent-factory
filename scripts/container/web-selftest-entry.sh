@@ -16,10 +16,12 @@
 set -euo pipefail
 
 # --- writable working copy (the /src bind mount is read-only) ---------------
-# Copy without .git: dev checkouts are often linked worktrees whose .git is a
-# pointer to a host path absent in the container (mirrors run-tests.sh).
-mkdir -p /work
-(cd /src && tar -c --exclude=.git --exclude=web/node_modules --exclude=web/test-results .) | tar -x -C /work
+# Copy without .git (linked worktrees) or anything this user cannot read
+# (#2432); copy-src.sh carries the reasoning for both. Shared with run-tests.sh
+# so the two entrypoints cannot drift on which paths reach the build.
+# shellcheck source=scripts/container/copy-src.sh
+. /src/scripts/container/copy-src.sh
+copy_src_tree /src /work --exclude=web/node_modules --exclude=web/test-results
 cd /work
 
 HOME_DIR=/work/afhome
