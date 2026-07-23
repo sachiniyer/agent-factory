@@ -575,6 +575,11 @@ var sensitiveJSONKeys = map[string]bool{
 	// fields (agent, captured_at) are not worth reconstructing a shape
 	// contract for here (#1839).
 	"conversation": true, "agent_conversation": true,
+	// pending_handoff_mission mirrors the typed-path redaction (redactInstanceData
+	// blanks PendingHandoffMission): the rendered takeover brief embeds the user's
+	// free-text prompt/goal verbatim, the same sensitivity class as prompt. A
+	// record that fails the typed decode must still drop it (#2419).
+	"pending_handoff_mission": true,
 }
 
 // redactUnknownJSON recursively rebuilds a decoded JSON value, blanking any
@@ -618,6 +623,13 @@ func redactInstanceData(d *session.InstanceData) {
 	}
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker
+	}
+	// PendingHandoffMission is a rendered takeover brief that embeds the user's
+	// free-text prompt/goal verbatim — the same sensitivity class as Prompt. It
+	// was added with transactional handoff (#2286) after this policy was written,
+	// so it passed through unredacted into publicly shared bundles (#2419).
+	if d.PendingHandoffMission != "" {
+		d.PendingHandoffMission = redactedMarker
 	}
 	if d.Worktree.SessionName != "" {
 		d.Worktree.SessionName = redactedMarker
