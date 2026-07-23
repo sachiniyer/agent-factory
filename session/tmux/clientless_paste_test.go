@@ -20,16 +20,24 @@ import (
 // #2414: the web terminal delivers a paste as ONE xterm.js onData call and
 // forwards it as one InputFrame, so SendRawKeys received the whole payload at
 // once. It rendered one hex argument per byte into a single `send-keys -H`, and
-// tmux rejects a command whose packed argv exceeds its ~16 KB imsg limit — which
-// a paste crosses at ~5,446 bytes. The paste was accepted by the WebSocket and
-// then dropped by tmux, so it simply never appeared in the terminal.
+// tmux refuses a command whose packed argv exceeds its limit — so the paste was
+// accepted by the WebSocket and then dropped by tmux, never appearing in the
+// terminal.
+//
+// That limit is platform-specific, which is why the tests below assert against
+// sendRawKeysArgvBudget rather than any derived constant, and why
+// TestSendRawKeysChunkFitsRealTmux measures the real ceiling instead of trusting
+// one. On Linux it is MAX_IMSGSIZE (16384), giving the ~5,445-byte input the
+// issue reported and the 5,444 that test measures. macOS refuses far sooner.
 //
 // The TUI attach path never hit this only because apiclient/attach.go reads
 // stdin in 32-byte chunks and so already sends many small frames. Chunking
 // inside SendRawKeys gives every caller that same property.
 
 // recordedArgs collects the argv of every tmux command an executor is handed.
-// It is safe for concurrent use so the concurrency test below can share one.
+// The mutex is not for the tests here, which are single-goroutine: it is so a
+// later test that does drive SendRawKeys concurrently can share a recorder
+// without the recorder itself being the race it would be trying to find.
 type recordedArgs struct {
 	mu   sync.Mutex
 	args [][]string
