@@ -4,15 +4,178 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestHookCleanupHandleRestoresFilteredEnvironment(t *testing.T) {
+	const (
+		customName = "CUSTOM_PROVIDER_TOKEN"
+		deniedName = "AF_TEST_UNRELATED_SECRET"
+	)
+	t.Setenv(customName, "test-value")
+	t.Setenv("OPENAI_API_KEY", "test-value")
+	t.Setenv(deniedName, "test-value")
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "delete-saw-filtered-env")
+	deleteCmd := filepath.Join(dir, "delete.sh")
+	script := "#!/bin/sh\n" +
+		"names=$(env | cut -d= -f1)\n" +
+		"printf '%s\\n' \"$names\" | grep -qx " + customName + " || exit 9\n" +
+		"printf '%s\\n' \"$names\" | grep -qx OPENAI_API_KEY || exit 9\n" +
+		"printf '%s\\n' \"$names\" | grep -qx " + deniedName + " && exit 9\n" +
+		": > " + shellQuote(marker) + "\n"
+	if err := os.WriteFile(deleteCmd, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := json.Marshal(map[string]any{
+		"id":           "hook-cleanup-env-id",
+		"title":        "hook-cleanup-env",
+		"path":         "/repo",
+		"backend_type": "remote",
+		"user_killed":  true,
+		"runtime_cleanup": map[string]any{
+			"hook": map[string]any{
+				"delete_cmd":              deleteCmd,
+				"slug":                    "hook-cleanup-env",
+				"agent":                   "codex",
+				"agent_resolved":          true,
+				"session_env_passthrough": []string{customName},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored InstanceData
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored = stored.ForStorage()
+	restored, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("restored hook cleanup lost its approved environment: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("restored delete_cmd did not receive its filtered cleanup environment")
+	}
+}
+
+func TestHookCleanupHandlePreservesInlineCloudSelector(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
+	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
+	repoRoot := initTempGitRepo(t)
+	scriptDir := t.TempDir()
+	launch := writeScript(t, scriptDir, "launch.sh", `
+echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
+`)
+	marker := filepath.Join(scriptDir, "cleanup-complete")
+	deleteCmd := writeScript(t, scriptDir, "delete.sh", `
+names=$(env | cut -d= -f1)
+printf '%s\n' "$names" | grep -qx AWS_ACCESS_KEY_ID || exit 9
+printf '%s\n' "$names" | grep -qx AWS_SECRET_ACCESS_KEY || exit 9
+printf '%s\n' "$names" | grep -qx AZURE_CLIENT_SECRET && exit 9
+: > "$AF_TEST_CLEANUP_MARKER"
+`)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "hook",
+		"remote_hooks": map[string]any{
+			"launch_cmd": launch,
+			"delete_cmd": deleteCmd,
+		},
+		"program_overrides": map[string]any{
+			tmux.ProgramClaude: "CLAUDE_CODE_USE_BEDROCK=1 claude",
+		},
+	})
+
+	result, err := (hookRuntime{}).Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "inline-selector-cleanup",
+		Program:  tmux.ProgramClaude,
+		SessionEnvPassthrough: []string{
+			"AF_TEST_CLEANUP_MARKER",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AF_TEST_CLEANUP_MARKER", marker)
+	inst := &Instance{
+		ID:              "inline-selector-cleanup-id",
+		Title:           "inline-selector-cleanup",
+		Path:            repoRoot,
+		backend:         result.Backend,
+		runtimeTeardown: result.Teardown,
+		userKilled:      true,
+	}
+	stored := inst.ToInstanceData().ForStorage()
+	if stored.RuntimeCleanup == nil || stored.RuntimeCleanup.Hook == nil {
+		t.Fatal("hook tombstone omitted its durable cleanup policy")
+	}
+	cleanup := stored.RuntimeCleanup.Hook
+	if !cleanup.AuthSelectorsResolved || !reflect.DeepEqual(cleanup.AuthSelectors, []string{"CLAUDE_CODE_USE_BEDROCK"}) {
+		t.Fatalf("stored hook authentication selectors = %v (resolved=%v), want the value-free Bedrock selector snapshot",
+			cleanup.AuthSelectors, cleanup.AuthSelectorsResolved)
+	}
+	restored, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Kill(); err != nil {
+		t.Fatalf("restored hook cleanup lost its inline cloud selector: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("restored delete_cmd did not complete with its selected cloud credentials")
+	}
+}
+
+func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
+	const deniedName = "ANTHROPIC_API_KEY"
+	t.Setenv(deniedName, "test-value")
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "delete-used-common-only-environment")
+	deleteCmd := filepath.Join(dir, "delete.sh")
+	script := "#!/bin/sh\n" +
+		"env | cut -d= -f1 | grep -qx " + deniedName + " && exit 9\n" +
+		": > " + shellQuote(marker) + "\n"
+	if err := os.WriteFile(deleteCmd, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, teardown, err := restoreRuntimeCleanup("hook-common-only", "remote", &RuntimeCleanupData{
+		Hook: &HookRuntimeCleanupData{
+			DeleteCmd:     deleteCmd,
+			Slug:          "hook-common-only",
+			AgentResolved: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := teardown(); err != nil {
+		t.Fatalf("restored no-agent cleanup admitted agent credentials: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("restored no-agent cleanup did not run")
+	}
+}
 
 // TestSSHCleanupHandleSurvivesTombstoneRoundTrip covers the restart half of
 // #2198's cleanup retry contract. A kill tombstone can survive only if the exact
@@ -161,7 +324,12 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 					slug:          "cleanup-slug",
 					launchStarted: true,
 				},
-				cleanup: &HookRuntimeCleanupData{DeleteCmd: "/opt/hooks/delete", Slug: "cleanup-slug"},
+				cleanup: &HookRuntimeCleanupData{
+					DeleteCmd: "/opt/hooks/delete", Slug: "cleanup-slug",
+					Agent: tmux.ProgramClaude, AgentResolved: true,
+					AuthSelectors: []string{"CLAUDE_CODE_USE_BEDROCK"}, AuthSelectorsResolved: true,
+					SessionEnvPassthrough: []string{"CUSTOM_PROVIDER_TOKEN"},
+				},
 			},
 		},
 	}
@@ -226,7 +394,7 @@ func restoreDockerTombstoneForTest(t *testing.T, engineID string) *Instance {
 func TestRestoredDockerCleanupRefusesDifferentEngine(t *testing.T) {
 	restored := restoreDockerTombstoneForTest(t, "engine-a")
 	var calls [][]string
-	restoreExec := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+	restoreExec := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		if len(args) > 0 && args[0] == "info" {
 			return []byte("engine-b\n"), nil
@@ -249,7 +417,7 @@ func TestRestoredDockerCleanupRefusesDifferentEngine(t *testing.T) {
 func TestRestoredDockerCleanupReapsMatchingEngine(t *testing.T) {
 	restored := restoreDockerTombstoneForTest(t, "engine-a")
 	var calls [][]string
-	restoreExec := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+	restoreExec := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		if len(args) > 0 && args[0] == "info" {
 			return []byte("engine-a\n"), nil
@@ -269,7 +437,7 @@ func TestRestoredDockerCleanupReapsMatchingEngine(t *testing.T) {
 func TestRestoredDockerCleanupRetriesIdentityProbe(t *testing.T) {
 	restored := restoreDockerTombstoneForTest(t, "engine-a")
 	var infoCalls, rmCalls int
-	restoreExec := SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+	restoreExec := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) == 0 {
 			return nil, errors.New("missing docker command")
 		}
@@ -306,7 +474,7 @@ func TestRestoredDockerCleanupRetriesIdentityProbe(t *testing.T) {
 func TestLegacyDockerCleanupWithoutEngineIdentityFailsClosed(t *testing.T) {
 	restored := restoreDockerTombstoneForTest(t, "")
 	var calls int
-	restoreExec := SetDockerExecForTest(func(_ context.Context, _ ...string) ([]byte, error) {
+	restoreExec := SetDockerExecForTest(func(_ context.Context, _ []string, _ ...string) ([]byte, error) {
 		calls++
 		return nil, nil
 	})
@@ -390,6 +558,22 @@ func TestMalformedRemoteCleanupHandleFailsClosed(t *testing.T) {
 			backend: "ssh",
 			cleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
 				Config: config.SSHConfig{Host: "host"}, SessionDir: "/session", RemotePID: "not-a-pid",
+			}},
+		},
+		{
+			name:    "hook selector without resolved marker",
+			backend: "remote",
+			cleanup: &RuntimeCleanupData{Hook: &HookRuntimeCleanupData{
+				DeleteCmd: "/opt/hooks/delete", Slug: "session", Agent: tmux.ProgramClaude,
+				AgentResolved: true, AuthSelectors: []string{"CLAUDE_CODE_USE_BEDROCK"},
+			}},
+		},
+		{
+			name:    "unknown hook selector",
+			backend: "remote",
+			cleanup: &RuntimeCleanupData{Hook: &HookRuntimeCleanupData{
+				DeleteCmd: "/opt/hooks/delete", Slug: "session", Agent: tmux.ProgramClaude,
+				AgentResolved: true, AuthSelectorsResolved: true, AuthSelectors: []string{"UNKNOWN_SELECTOR"},
 			}},
 		},
 	}

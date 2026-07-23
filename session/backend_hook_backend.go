@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The remote-hook runtime (#1592 Phase 4 PR7) — the bring-your-own-provisioner
@@ -77,6 +79,12 @@ var (
 	hookQuiescePoll = 5 * time.Millisecond
 )
 
+// hookNoAgentEnvironmentProgram is an internal selector, never an executed
+// command. It lets a persisted hook cleanup retain "no known agent" across a
+// daemon restart without the legacy empty-program fallback admitting Claude
+// credentials.
+const hookNoAgentEnvironmentProgram = "__af_no_agent_environment__"
+
 // hookRuntime provisions a session on user-provided infrastructure via the
 // remote_hooks scripts (#1592 Phase 4 PR7). Declared in runtime.go's registry;
 // its Provision lives here (it replaces the pre-Phase-4 ForceRemote HookBackend
@@ -84,11 +92,23 @@ var (
 type hookRuntime struct{}
 
 func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
-	hooks, err := loadRemoteHooksForPath(spec.RepoRoot)
+	resolved, err := resolveRepoConfig(spec.RepoRoot)
 	if err != nil {
+		return ProvisionResult{}, fmt.Errorf("backend=hook: failed to resolve repo config: %w", err)
+	}
+	if resolved.RemoteHooks == nil {
+		return ProvisionResult{}, fmt.Errorf("backend=hook: no remote hooks configured")
+	}
+	if err := resolved.RemoteHooks.Validate(); err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
 	}
-	p := &hookProvisioner{hooks: hooks, spec: spec, slug: Slugify(spec.Title)}
+	hooks := *resolved.RemoteHooks
+	p := &hookProvisioner{
+		hooks:   hooks,
+		spec:    spec,
+		slug:    Slugify(spec.Title),
+		program: config.ResolveProgram(&resolved.Config, spec.Program),
+	}
 	return p.provisionOrReap()
 }
 
@@ -98,6 +118,7 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // with a hand-built provisioner — the gate is the thing #1955 was about, and a
 // test that re-implemented it would prove nothing about this path.
 func (p *hookProvisioner) provisionOrReap() (ProvisionResult, error) {
+	p.resolveAuthSelectors()
 	res, err := p.provision()
 	if err == nil {
 		return res, nil
@@ -159,8 +180,8 @@ func (p *hookProvisioner) manualReapCommand() string {
 	return shellsuggest.Command(p.hooks.DeleteCmd, "--name", p.slug)
 }
 
-// runHookScript runs one hook script under a timeout and returns its combined
-// output. It exists to answer a question the obvious CombinedOutput() gets wrong:
+// runHookScriptWithEnvironment runs one hook script under a timeout and returns
+// its combined output. It exists to answer a question the obvious CombinedOutput() gets wrong:
 // WHICH CHILDREN ARE OURS TO KILL?
 //
 // Answer: only the script itself. A launch_cmd is DOCUMENTED to leave a tunnel or
@@ -187,7 +208,16 @@ func (p *hookProvisioner) manualReapCommand() string {
 //
 // Reaping a FAILED launch's sandbox is a separate act with a real criterion, and
 // it is delete_cmd's job, not a side effect of how we captured output: see reap.
-func runHookScript(timeout time.Duration, name string, args ...string) ([]byte, *exec.Cmd, error) {
+func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
+	agentName := sessionenv.AgentForCommand(program)
+	if agentName == "" && strings.TrimSpace(program) == "" {
+		agentName = tmux.ProgramClaude
+	}
+	authSelectors := sessionenv.ResolveAuthSelectors(os.Environ(), agentName, program)
+	return runHookScriptWithResolvedEnvironment(timeout, name, agentName, authSelectors, passthrough, args...)
+}
+
+func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent string, authSelectors, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -204,6 +234,11 @@ func runHookScript(timeout time.Duration, name string, args ...string) ([]byte, 
 	}()
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	filtered, err := sessionenv.FilterWithAuthSelectors(os.Environ(), agent, authSelectors, passthrough)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving the hook environment policy failed: %w", err)
+	}
+	cmd.Env = filtered
 	cmd.Stdout = f
 	cmd.Stderr = f
 	// Lead a process group so that a FAILED launch's descendants can be torn down
@@ -227,6 +262,14 @@ type hookProvisioner struct {
 	hooks config.RemoteHooks
 	spec  ProvisionSpec
 	slug  string
+	// program is the resolved command used to select the environment allowlist
+	// and as the command handed to the remote agent-server.
+	program string
+	// authSelectors is a value-free snapshot of the resolved conditional
+	// provider modes. It keeps launch and delete on the same allowlist and is
+	// safe to persist in the durable cleanup handle.
+	authSelectors         []string
+	authSelectorsResolved bool
 
 	// launchStarted records that the kernel spawned launch_cmd — NOT that it
 	// succeeded. It gates the delete_cmd reap, so it must stay the weaker of the
@@ -273,14 +316,23 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 		Backend: &HookBackend{
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
-			cleanup: &HookRuntimeCleanupData{
-				DeleteCmd: p.hooks.DeleteCmd,
-				Slug:      p.slug,
-			},
+			cleanup:            p.cleanupData(),
 		},
 		Endpoint: ep,
 		Teardown: teardown,
 	}, nil
+}
+
+func (p *hookProvisioner) cleanupData() *HookRuntimeCleanupData {
+	return &HookRuntimeCleanupData{
+		DeleteCmd:             p.hooks.DeleteCmd,
+		Slug:                  p.slug,
+		Agent:                 p.environmentAgent(),
+		AgentResolved:         true,
+		AuthSelectors:         append([]string(nil), p.authSelectors...),
+		AuthSelectorsResolved: true,
+		SessionEnvPassthrough: append([]string(nil), p.spec.SessionEnvPassthrough...),
+	}
 }
 
 // hookOutputSuffix renders a hook script's combined output for an error
@@ -318,10 +370,16 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	if prog := strings.TrimSpace(p.spec.Program); prog != "" {
+	if prog := strings.TrimSpace(p.environmentProgram()); prog != "" {
 		args = append(args, "--program", prog)
+		args = append(args, "--program-resolved")
 	}
-	out, cmd, err := runHookScript(hookLaunchTimeout, p.hooks.LaunchCmd, args...)
+	for _, name := range p.spec.SessionEnvPassthrough {
+		args = append(args, "--session-env", name)
+	}
+
+	out, cmd, err := runHookScriptWithResolvedEnvironment(hookLaunchTimeout, p.hooks.LaunchCmd,
+		p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, args...)
 
 	// Gate the reap on whether launch_cmd STARTED, not on whether it succeeded
 	// (#1955). A script that creates a VM and then times out or exits non-zero
@@ -395,13 +453,15 @@ func (p *hookProvisioner) reap() error {
 		if !p.launchStarted {
 			return
 		}
+		p.resolveAuthSelectors()
 		// runHookScript builds its timeout from context.Background(), NEVER a
 		// caller's context — and that is load-bearing here. reap's whole job is to
 		// run on the failure path, where the launch context is already cancelled or
 		// expired, and a WithTimeout derived from a dead parent is born expired:
 		// delete_cmd would never spawn and the sandbox would leak in silence. That
 		// is the exact failure #1955 is about, reintroduced by the cleanup.
-		out, _, err := runHookScript(hookDeleteTimeout, p.hooks.DeleteCmd, "--name", p.slug)
+		out, _, err := runHookScriptWithResolvedEnvironment(hookDeleteTimeout, p.hooks.DeleteCmd,
+			p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, "--name", p.slug)
 		if err != nil {
 			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
 			log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
@@ -478,6 +538,29 @@ func (p *hookProvisioner) quiesceLaunchGroup() {
 		}
 		time.Sleep(hookQuiescePoll)
 	}
+}
+
+func (p *hookProvisioner) environmentProgram() string {
+	if strings.TrimSpace(p.program) != "" {
+		return p.program
+	}
+	return p.spec.Program
+}
+
+func (p *hookProvisioner) environmentAgent() string {
+	agent := sessionenv.AgentForCommand(p.environmentProgram())
+	if agent == "" && strings.TrimSpace(p.environmentProgram()) == "" {
+		return tmux.ProgramClaude
+	}
+	return agent
+}
+
+func (p *hookProvisioner) resolveAuthSelectors() {
+	if p.authSelectorsResolved {
+		return
+	}
+	p.authSelectors = sessionenv.ResolveAuthSelectors(os.Environ(), p.environmentAgent(), p.environmentProgram())
+	p.authSelectorsResolved = true
 }
 
 // HookBackend is the in-process Backend for a remote-hook session (#1592 Phase 4

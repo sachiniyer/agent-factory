@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // RuntimeCleanupData is the storage-only teardown identity committed alongside a
@@ -36,8 +38,13 @@ type SSHRuntimeCleanupData struct {
 }
 
 type HookRuntimeCleanupData struct {
-	DeleteCmd string `json:"delete_cmd"`
-	Slug      string `json:"slug"`
+	DeleteCmd             string   `json:"delete_cmd"`
+	Slug                  string   `json:"slug"`
+	Agent                 string   `json:"agent,omitempty"`
+	AgentResolved         bool     `json:"agent_resolved,omitempty"`
+	AuthSelectors         []string `json:"auth_selectors,omitempty"`
+	AuthSelectorsResolved bool     `json:"auth_selectors_resolved,omitempty"`
+	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty"`
 }
 
 type runtimeCleanupProvider interface {
@@ -65,6 +72,8 @@ func (d *RuntimeCleanupData) clone() *RuntimeCleanupData {
 	}
 	if d.Hook != nil {
 		v := *d.Hook
+		v.AuthSelectors = append([]string(nil), d.Hook.AuthSelectors...)
+		v.SessionEnvPassthrough = append([]string(nil), d.Hook.SessionEnvPassthrough...)
 		out.Hook = &v
 	}
 	return out
@@ -96,6 +105,8 @@ func (b *HookBackend) runtimeCleanupData() *RuntimeCleanupData {
 		return nil
 	}
 	v := *b.cleanup
+	v.AuthSelectors = append([]string(nil), b.cleanup.AuthSelectors...)
+	v.SessionEnvPassthrough = append([]string(nil), b.cleanup.SessionEnvPassthrough...)
 	return &RuntimeCleanupData{Hook: &v}
 }
 
@@ -169,11 +180,42 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			return nil, nil, fmt.Errorf("hook cleanup handle is missing delete_cmd or slug")
 		}
 		cleanup := *data.Hook
+		passthrough, err := sessionenv.NormalizeExtraNames(data.Hook.SessionEnvPassthrough)
+		if err != nil {
+			return nil, nil, fmt.Errorf("hook cleanup handle has invalid session environment names: %w", err)
+		}
+		agent := data.Hook.Agent
+		if agent != "" && !tmux.IsSupportedProgram(agent) {
+			return nil, nil, fmt.Errorf("hook cleanup handle has invalid agent %q", agent)
+		}
+		if len(data.Hook.AuthSelectors) != 0 && !data.Hook.AuthSelectorsResolved {
+			return nil, nil, fmt.Errorf("hook cleanup handle has authentication selectors without a resolved policy marker")
+		}
+		authSelectors, err := sessionenv.NormalizeAuthSelectors(agent, data.Hook.AuthSelectors)
+		if err != nil {
+			return nil, nil, fmt.Errorf("hook cleanup handle has invalid authentication selector names: %w", err)
+		}
+		// Records written before the environment boundary had no agent field and
+		// historically ran hooks with Claude's environment. New records distinguish
+		// that legacy absence from a resolved command that intentionally matched no
+		// known agent, which must restore with the common allowlist only.
+		program := agent
+		if data.Hook.AgentResolved && agent == "" {
+			program = hookNoAgentEnvironmentProgram
+		}
+		cleanup.SessionEnvPassthrough = append([]string(nil), passthrough...)
+		cleanup.AuthSelectors = append([]string(nil), authSelectors...)
 		p := &hookProvisioner{
-			hooks:         config.RemoteHooks{DeleteCmd: data.Hook.DeleteCmd},
-			spec:          ProvisionSpec{Title: title},
-			slug:          data.Hook.Slug,
-			launchStarted: true,
+			hooks: config.RemoteHooks{DeleteCmd: data.Hook.DeleteCmd},
+			spec: ProvisionSpec{
+				Title:                 title,
+				SessionEnvPassthrough: passthrough,
+			},
+			slug:                  data.Hook.Slug,
+			program:               program,
+			authSelectors:         authSelectors,
+			authSelectorsResolved: data.Hook.AuthSelectorsResolved,
+			launchStarted:         true,
 		}
 		teardown := p.reap
 		return &HookBackend{

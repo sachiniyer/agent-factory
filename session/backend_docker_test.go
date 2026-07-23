@@ -51,7 +51,7 @@ func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
 
 	var calls [][]string
-	defer SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		switch args[0] {
 		case "info":
@@ -76,7 +76,7 @@ func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 
 func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 	const engineID = "engine-that-created-container"
-	defer SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) == 0 {
 			return nil, fmt.Errorf("missing docker command")
 		}
@@ -120,7 +120,7 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 // guarded on p.containerID != "" — can remove it. Before the fix p.containerID
 // stayed empty on the error path.
 func TestRunContainer_CapturesCreatedIDOnError(t *testing.T) {
-	defer SetDockerExecForTest(func(_ context.Context, args ...string) ([]byte, error) {
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		return createThenFailRunOutput(), fmt.Errorf("exit status 125")
 	})()
 

@@ -40,7 +40,10 @@ func TestStart_ReadinessTimeoutOnWedgedServer_PropagatesTheUnknown(t *testing.T)
 			time.Sleep(2 * time.Second)
 			return fmt.Errorf("wedged tmux server never answered")
 		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if len(c.Args) >= 2 && c.Args[1] == "show-options" {
+				return nil, fmt.Errorf("no server running")
+			}
 			return nil, fmt.Errorf("wedged tmux server never answered")
 		},
 	}

@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -154,7 +156,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		spec:    spec,
 		cfg:     sshCfg,
 		afBin:   afBin,
-		program: spec.Program,
+		program: config.ResolveProgram(&cfg.Config, spec.Program),
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -476,11 +478,18 @@ func (p *sshProvisioner) configureGit() error {
 // materializes the pushed session branch as a local ref so the remote Setup
 // checks it out.
 func (p *sshProvisioner) cloneWorkspace() error {
-	script := fmt.Sprintf("git clone %s %s", shellQuote(p.spec.CloneURL), shellQuote(p.workspacePath()))
+	script := gitCloneCommand(p.spec.CloneURL, p.workspacePath())
 	out, err := p.runCombined(sshProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=ssh: cloning %q on the remote failed (is git installed, and the URL reachable from the remote host?): %s: %w",
 			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
+	}
+	if credentialCommand := gitPersistCredentialCommand(p.spec.CloneURL, p.workspacePath()); credentialCommand != "" {
+		out, err = p.runCombined(sshShortStepTimeout, credentialCommand)
+		if err != nil {
+			return fmt.Errorf("backend=ssh: configuring value-free GitHub credentials in the remote clone failed: %s: %w",
+				strings.TrimSpace(string(out)), err)
+		}
 	}
 	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
 		return p.fetchRestoreBranch(branch)
@@ -533,15 +542,14 @@ func (p *sshProvisioner) copyAfBinary() error {
 // workspace title matches the daemon-side session title so the daemon's remote
 // client dials /v1/sessions/{title}/stream. readBanner then polls the banner file.
 func (p *sshProvisioner) startAgentServer() error {
-	inner := fmt.Sprintf("%s agent-server --listen 127.0.0.1:0 --repo %s --title %s",
-		shellQuote(p.afPath()), shellQuote(p.workspacePath()), shellQuote(p.spec.Title))
-	if strings.TrimSpace(p.program) != "" {
-		inner += " --program " + shellQuote(p.program)
+	filteredInner, err := p.agentServerCommand()
+	if err != nil {
+		return err
 	}
 	// nohup + background + redirected fds + </dev/null so the agent-server outlives
 	// this ssh command; `echo $!` prints the background PID on stdout.
 	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
-		inner, shellQuote(p.bannerPath()), shellQuote(p.logPath()))
+		filteredInner, shellQuote(p.bannerPath()), shellQuote(p.logPath()))
 	out, err := p.runOut(sshShortStepTimeout, launch)
 	if err != nil {
 		return fmt.Errorf("backend=ssh: starting af agent-server on the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -552,6 +560,33 @@ func (p *sshProvisioner) startAgentServer() error {
 		return fmt.Errorf("backend=ssh: starting af agent-server returned invalid background PID %q", pid)
 	}
 	return nil
+}
+
+func (p *sshProvisioner) agentServerCommand() (string, error) {
+	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s",
+		shellQuote(p.afPath()), shellQuote(p.workspacePath()), shellQuote(p.spec.Title))
+	if strings.TrimSpace(p.program) != "" {
+		inner += " --program " + shellQuote(p.program)
+		inner += " --program-resolved"
+	}
+	for _, name := range p.spec.SessionEnvPassthrough {
+		inner += " --session-env " + shellQuote(name)
+	}
+	filteredInner, err := sessionenv.WrapCommand(
+		p.afPath(), p.agentName(), p.spec.SessionEnvPassthrough, inner,
+	)
+	if err != nil {
+		return "", fmt.Errorf("backend=ssh: preparing filtered agent-server environment failed: %w", err)
+	}
+	return filteredInner, nil
+}
+
+func (p *sshProvisioner) agentName() string {
+	agentName := sessionenv.AgentForCommand(p.program)
+	if agentName == "" && strings.TrimSpace(p.program) == "" {
+		return tmux.ProgramClaude
+	}
+	return agentName
 }
 
 // readBanner polls the remote banner file until the agent-server has bound its

@@ -109,16 +109,25 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
 
+	// Session environment grants are security-sensitive and configurable while
+	// the daemon is running. Reload them for every new create rather than pinning
+	// the values that happened to be present when this Manager started.
+	currentConfig, err := config.LoadConfig()
+	if err != nil {
+		return session.InstanceData{}, fmt.Errorf("load current session environment configuration: %w", err)
+	}
+
 	instance, err := session.NewInstance(session.InstanceOptions{
-		ID:          pending.ID,
-		CreatedAt:   pending.CreatedAt,
-		Title:       title,
-		TaskID:      req.TaskID,
-		Path:        repo.Root,
-		Program:     req.Program,
-		InPlace:     req.InPlace,
-		ForceRemote: req.ForceRemote,
-		Backend:     session.BackendKind(req.Backend),
+		ID:                             pending.ID,
+		CreatedAt:                      pending.CreatedAt,
+		Title:                          title,
+		TaskID:                         req.TaskID,
+		Path:                           repo.Root,
+		Program:                        req.Program,
+		InPlace:                        req.InPlace,
+		ForceRemote:                    req.ForceRemote,
+		Backend:                        session.BackendKind(req.Backend),
+		ProvisionSessionEnvPassthrough: append([]string(nil), currentConfig.SessionEnvPassthrough...),
 	})
 	if err != nil {
 		return session.InstanceData{}, err

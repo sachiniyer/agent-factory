@@ -72,6 +72,7 @@ type configEntry struct {
 var globalConfigReadOrder = []string{
 	"default_program",
 	"program_overrides",
+	"session_env_passthrough",
 	"auto_update",
 	"listen_addr",
 	"require_token",

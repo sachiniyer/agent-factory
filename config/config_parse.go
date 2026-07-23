@@ -9,6 +9,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -169,6 +170,11 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 			return nil, err
 		}
 	}
+	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(config.SessionEnvPassthrough)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
+	}
+	config.SessionEnvPassthrough = normalizedSessionEnv
 
 	sanitizeLimitPatterns(config)
 	sanitizeThemeColors(config, prettyConfigPath)

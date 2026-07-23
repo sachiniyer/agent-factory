@@ -79,6 +79,10 @@ type ProvisionSpec struct {
 	// Only the sandbox runtimes (docker/ssh) honor it; the in-process runtimes
 	// never clone, so it is a no-op for them.
 	RestoreBranch string
+	// SessionEnvPassthrough contains exact global-only variable names approved
+	// for the agent. Sandboxed runtimes pass names, never values, to their
+	// version-matched agent-server.
+	SessionEnvPassthrough []string
 }
 
 // ProvisionResult is what a Runtime hands back: the in-process Backend that

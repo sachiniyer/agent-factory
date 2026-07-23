@@ -71,6 +71,7 @@ func TestSessionEnvFlagsEmptyWhenUnsupported(t *testing.T) {
 // orphaned pane descendant back to its session after teardown.
 func TestStartInjectsEnvMarkers(t *testing.T) {
 	forceNewSessionEnvMarkers(t, true)
+	forceSessionEnvExecutable(t, "/test/af")
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
@@ -84,7 +85,12 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 			}
 			return nil
 		},
-		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
+				return nil, fmt.Errorf("no server running")
+			}
+			return []byte("output"), nil
+		},
 	}
 
 	workdir := t.TempDir()
@@ -92,7 +98,7 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	require.NoError(t, session.Start(workdir))
 	require.NotEmpty(t, ptyFactory.cmds)
 	require.Equal(t,
-		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_HOME=%s claude",
-			workdir, home),
+		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_HOME=%s %s",
+			workdir, home, wrappedProgramForTest(t, "/test/af", "claude")),
 		cmd2.ToString(ptyFactory.cmds[0]))
 }

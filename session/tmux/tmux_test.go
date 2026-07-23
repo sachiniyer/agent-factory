@@ -16,6 +16,7 @@ import (
 	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
 
@@ -25,6 +26,7 @@ import (
 // TestMain initializes the logger so tests that exercise paths writing to
 // InfoLog/ErrorLog (e.g. Restore's re-spawn fallback) do not nil-deref.
 func TestMain(m *testing.M) {
+	sessionenv.HandleInternalExec()
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
@@ -179,6 +181,7 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// Pin the exact new-session argv regardless of the box's tmux version;
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
+	forceSessionEnvExecutable(t, "/test/af")
 	ptyFactory := NewMockPtyFactory(t)
 
 	// First two has-session calls report missing (the outer Restore check, then
@@ -196,7 +199,12 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 			}
 			return nil
 		},
-		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
+				return nil, fmt.Errorf("no server running")
+			}
+			return []byte("output"), nil
+		},
 	}
 
 	workdir := t.TempDir()
@@ -209,7 +217,8 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// Re-spawn must include the resume-most-recent flag so the prior
 	// conversation isn't lost on lazy respawn after a reboot (#595).
 	require.Equal(t,
-		fmt.Sprintf("tmux new-session -d -s af_missing -c %s claude --continue", workdir),
+		fmt.Sprintf("tmux new-session -d -s af_missing -c %s %s", workdir,
+			wrappedProgramForTest(t, "/test/af", "claude --continue")),
 		cmd2.ToString(ptyFactory.cmds[0]))
 }
 
@@ -242,6 +251,7 @@ func TestStartTmuxSession(t *testing.T) {
 	// Pin the exact new-session argv regardless of the box's tmux version;
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
+	forceSessionEnvExecutable(t, "/test/af")
 	ptyFactory := NewMockPtyFactory(t)
 
 	created := false
@@ -254,6 +264,9 @@ func TestStartTmuxSession(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
+				return nil, fmt.Errorf("no server running")
+			}
 			return []byte("output"), nil
 		},
 	}
@@ -266,7 +279,8 @@ func TestStartTmuxSession(t *testing.T) {
 	// Only the new-session PTY command now: the internal Restore("") opens no
 	// attach-session client (#1592 Phase 2 PR7).
 	require.Equal(t, 1, len(ptyFactory.cmds))
-	require.Equal(t, fmt.Sprintf("tmux new-session -d -s af_test-session -c %s claude", workdir),
+	require.Equal(t, fmt.Sprintf("tmux new-session -d -s af_test-session -c %s %s", workdir,
+		wrappedProgramForTest(t, "/test/af", "claude")),
 		cmd2.ToString(ptyFactory.cmds[0]))
 
 	require.Equal(t, 1, len(ptyFactory.files))

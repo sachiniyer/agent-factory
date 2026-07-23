@@ -112,6 +112,10 @@ type TmuxSession struct {
 	// accessors in program.go (#1254) — never touch these fields directly.
 	program   string
 	programMu sync.RWMutex
+	// envPassthrough is the explicit, global-only extension to the session
+	// environment allowlist. It is protected by programMu because a start reads
+	// it alongside program and sibling tabs copy both launch settings.
+	envPassthrough []string
 	// inputMu serializes every multi-command transaction that injects pane input.
 	// A submit must not clear/paste between a prompt handler's selected-row
 	// capture and Enter, two submits must not clear each other's freshly pasted
@@ -309,5 +313,10 @@ func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory,
 // tmux session name (already repo-scoped/sanitized by the caller); program is
 // the command to run.
 func (t *TmuxSession) NewSiblingSession(sanitizedName, program string) *TmuxSession {
-	return newTmuxSession(sanitizedName, program, t.ptyFactory, t.cmdExec)
+	t.programMu.RLock()
+	extra := append([]string(nil), t.envPassthrough...)
+	t.programMu.RUnlock()
+	sibling := newTmuxSession(sanitizedName, program, t.ptyFactory, t.cmdExec)
+	_ = sibling.SetEnvPassthrough(extra)
+	return sibling
 }
