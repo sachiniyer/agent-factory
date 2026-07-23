@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
@@ -195,7 +196,7 @@ func TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp(t *testing.T) {
 	assert.Nil(t, inst.GetPRInfo(), "precondition: no cached PR info")
 
 	info := &git.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, repoID: h.repoID, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{target: captureSessionActionTarget(inst, h.repoID), info: info})
 
 	got := inst.GetPRInfo()
 	require.NotNil(t, got)
@@ -219,7 +220,7 @@ func TestPrInfoUpdatedMsg_Error_PreservesCacheAndDebounces(t *testing.T) {
 	// Simulate the prInfoLastFetched timestamp being old by clearing it via
 	// a fresh SetPRInfo with the same cached value, then waiting would be
 	// flaky — instead rely on MarkPRInfoFetched behavior to check debounce.
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, repoID: h.repoID, err: errors.New("gh timeout")})
+	_, _ = h.Update(prInfoUpdatedMsg{target: captureSessionActionTarget(inst, h.repoID), err: errors.New("gh timeout")})
 
 	assert.Same(t, cached, inst.GetPRInfo(),
 		"transient fetch error must not clobber cached PR info")
@@ -341,10 +342,10 @@ func TestFetchPRInfoCmd_Force_StillRunsWhileFetchInFlight(t *testing.T) {
 // prInfoUpdatedMsg handler captured at kickoff.
 // ----------------------------------------------------------------------------
 
-// TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance — the
-// captured instance is swapped out for a fresh same-title copy while the fetch
-// is in flight. The completed update must land on the live sidebar instance,
-// not the orphan.
+// TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance — a
+// snapshot rebuilds the captured session as a fresh pointer with the same
+// stable ID while the fetch is in flight. The completed update must land on the
+// live sidebar instance, not the orphan.
 func TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance(t *testing.T) {
 	h := newTestHome(t)
 
@@ -355,12 +356,13 @@ func TestPrInfoUpdatedMsg_InstanceSwappedDuringFetch_AppliesToLiveInstance(t *te
 	// Simulate the #765 swap: remove the captured instance and add a fresh
 	// same-title copy (as FromInstanceData would build).
 	live := newStartedInstance(t, "swapped")
+	live.ID = orphan.ID // snapshot pointer rebuild, not title reuse
 	h.store.RemoveInstanceByTitle("swapped")
 	h.store.AddInstance(live)
 	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
 
 	info := &git.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, repoID: h.repoID, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{target: captureSessionActionTarget(orphan, h.repoID), info: info})
 
 	got := live.GetPRInfo()
 	require.NotNil(t, got, "PR info must be applied to the live sidebar instance")
@@ -380,7 +382,7 @@ func TestPrInfoUpdatedMsg_InstanceGoneDuringFetch_DropsUpdate(t *testing.T) {
 	h.store.RemoveInstanceByTitle("gone")
 
 	info := &git.PRInfo{Number: 7, Title: "lost", State: "OPEN"}
-	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, repoID: h.repoID, info: info})
+	_, cmd := h.Update(prInfoUpdatedMsg{target: captureSessionActionTarget(orphan, h.repoID), info: info})
 
 	assert.Nil(t, cmd)
 	assert.Nil(t, orphan.GetPRInfo(),
@@ -388,8 +390,8 @@ func TestPrInfoUpdatedMsg_InstanceGoneDuringFetch_DropsUpdate(t *testing.T) {
 }
 
 // TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance — the error
-// path must also re-resolve by title: MarkPRInfoFetched should debounce the
-// live instance, not the orphan.
+// path must also re-resolve by stable ID: MarkPRInfoFetched should debounce the
+// rebuilt live instance, not the orphan.
 func TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance(t *testing.T) {
 	h := newTestHome(t)
 
@@ -398,12 +400,15 @@ func TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance(t *testing.
 	h.sidebar.SetSelectedInstance(0)
 
 	live := newStartedInstance(t, "swapped")
+	live.ID = orphan.ID // snapshot pointer rebuild, not title reuse
 	h.store.RemoveInstanceByTitle("swapped")
 	h.store.AddInstance(live)
 	require.Greater(t, live.PRInfoAge(), 365*24*time.Hour,
 		"precondition: live instance is never-fetched")
 
-	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, repoID: h.repoID, err: errors.New("gh timeout")})
+	_, _ = h.Update(prInfoUpdatedMsg{
+		target: captureSessionActionTarget(orphan, h.repoID), err: errors.New("gh timeout"),
+	})
 
 	assert.Less(t, live.PRInfoAge(), time.Second,
 		"the live instance must be marked fetched to debounce retries")
@@ -414,19 +419,15 @@ func TestPrInfoUpdatedMsg_Error_SwappedDuringFetch_MarksLiveInstance(t *testing.
 // ----------------------------------------------------------------------------
 // Regression tests for issue #921 (sachiniyer/agent-factory):
 // "PR info updates can apply to the wrong worktree when an instance is
-// recreated with the same title on a different branch". The fetch captures the
-// branch at kickoff, but the title-only re-resolution in the prInfoUpdatedMsg
-// handler can land on a same-title instance now attached to a *different*
-// branch (kill + recreate while the fetch is in flight). PR info is
-// branch-specific, so the handler must drop the update when the resolved
-// target's branch no longer matches the captured one.
+// recreated with the same title on a different branch". PR info is
+// branch-specific, so the handler must drop an in-flight update when the
+// retained identity is gone or its branch no longer matches the captured one.
 // ----------------------------------------------------------------------------
 
 // TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate — the captured instance is
 // killed and a fresh same-title instance is created on a different branch while
-// the fetch is in flight. The title-only fallback resolves to that new
-// instance, but its branch differs from the fetch's branch, so the stale PR
-// info must NOT be applied.
+// the fetch is in flight. Its different stable ID prevents the stale PR info
+// from being applied even before the branch guard becomes relevant.
 func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 	h := newTestHome(t)
 
@@ -442,7 +443,9 @@ func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 	h.store.AddInstance(recreated)
 
 	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}
-	_, cmd := h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", repoID: h.repoID, info: info})
+	_, cmd := h.Update(prInfoUpdatedMsg{
+		target: captureSessionActionTarget(orphan, h.repoID), branch: "feature/x", info: info,
+	})
 
 	assert.Nil(t, cmd)
 	assert.Nil(t, recreated.GetPRInfo(),
@@ -451,9 +454,41 @@ func TestPrInfoUpdatedMsg_BranchMismatch_DropsUpdate(t *testing.T) {
 		"the orphaned pointer must not receive the update either")
 }
 
-// TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate — same swap as above, but the
-// recreated same-title instance is back on the original branch. The captured
-// branch matches, so the update applies to the live instance.
+// TestPrInfoUpdatedMsg_SameBranchReplacement_DropsUpdate closes the identity
+// hole left by the branch guard: killing and recreating a session can reuse both
+// its title and branch while still producing a distinct session. A PR fetch
+// retained for the old stable ID must not paint or persist onto that replacement.
+func TestPrInfoUpdatedMsg_SameBranchReplacement_DropsUpdate(t *testing.T) {
+	h := newTestHome(t)
+
+	original := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
+	h.store.AddInstance(original)
+
+	replacement := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
+	require.NotEqual(t, original.ID, replacement.ID)
+	h.store.RemoveInstanceByTitle("reused")
+	h.store.AddInstance(replacement)
+
+	persisted := false
+	restore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
+		persisted = true
+		return nil
+	})
+	defer restore()
+
+	info := &git.PRInfo{Number: 42, Title: "old session PR", State: "MERGED"}
+	_, cmd := h.Update(prInfoUpdatedMsg{
+		target: captureSessionActionTarget(original, h.repoID), branch: "feature/x", info: info,
+	})
+
+	assert.Nil(t, cmd)
+	assert.False(t, persisted, "an old fetch must not persist onto a replacement with the same title and branch")
+	assert.Nil(t, replacement.GetPRInfo(), "an old fetch must not paint the replacement's PR badge")
+	assert.Nil(t, original.GetPRInfo(), "the detached original pointer must remain untouched")
+}
+
+// TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate — a snapshot pointer rebuild
+// retains the stable ID and branch, so the update applies to the live instance.
 func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
 	h := newTestHome(t)
 
@@ -462,12 +497,15 @@ func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	live := newStartedInstanceWithWorktreeBranch(t, "reused", "feature/x")
+	live.ID = orphan.ID // snapshot rebuild of the same session
 	h.store.RemoveInstanceByTitle("reused")
 	h.store.AddInstance(live)
 	require.NotSame(t, orphan, live, "sanity: swap must produce a distinct pointer")
 
 	info := &git.PRInfo{Number: 42, Title: "branch X PR", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: orphan, branch: "feature/x", repoID: h.repoID, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{
+		target: captureSessionActionTarget(orphan, h.repoID), branch: "feature/x", info: info,
+	})
 
 	got := live.GetPRInfo()
 	require.NotNil(t, got, "matching-branch update must apply to the live instance")
@@ -480,11 +518,10 @@ func TestPrInfoUpdatedMsg_BranchMatch_AppliesUpdate(t *testing.T) {
 // "PR info from a previous project can be applied after switching projects
 // mid-fetch". Same staleness class as #1723, one level up: an in-place project
 // switch (#1461) resets the store and swaps m.repoID while a gh fetch for the
-// OLD project is still in flight. The handler's title-only re-resolution then
-// lands the old project's PR info on a same-title session in the NEW project,
-// and the #921 branch guard misses it whenever both sessions share a branch
-// name (common: "main", or the same feature branch across two checkouts). The
-// result is persisted under the new project's repoID, and the snapshot
+// OLD project is still in flight. A same-title session in the NEW project must
+// not receive the result even if both sessions share a branch name (common:
+// "main", or the same feature branch across two checkouts). The result would
+// otherwise be persisted under the new project's repoID, and the snapshot
 // reconcile mirrors it back — making the bleed durable. The fetch captures the
 // repoID at kickoff, and the handler must drop any result whose repoID no
 // longer matches, mirroring snapshotFetchedMsg's guard.
@@ -513,7 +550,7 @@ func TestPrInfoUpdatedMsg_ProjectSwitch_DropsUpdate(t *testing.T) {
 	h.store.AddInstance(repoBWorker)
 
 	var persisted bool
-	restore := SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error {
+	restore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
 		persisted = true
 		return nil
 	})
@@ -521,7 +558,7 @@ func TestPrInfoUpdatedMsg_ProjectSwitch_DropsUpdate(t *testing.T) {
 
 	info := &git.PRInfo{Number: 42, Title: "project A PR", State: "OPEN"}
 	_, cmd := h.Update(prInfoUpdatedMsg{
-		instance: orphan, branch: "feature/x", repoID: projectARepoID, info: info,
+		target: captureSessionActionTarget(orphan, projectARepoID), branch: "feature/x", info: info,
 	})
 
 	assert.Nil(t, cmd)
@@ -551,7 +588,7 @@ func TestPrInfoUpdatedMsg_ProjectSwitch_ErrorDropsUpdate(t *testing.T) {
 		"precondition: project B's session is never-fetched")
 
 	_, _ = h.Update(prInfoUpdatedMsg{
-		instance: orphan, branch: "feature/x", repoID: projectARepoID,
+		target: captureSessionActionTarget(orphan, projectARepoID), branch: "feature/x",
 		err: errors.New("gh timeout"),
 	})
 
@@ -576,8 +613,9 @@ func TestFetchPRInfoCmd_StampsRepoIDAtKickoff(t *testing.T) {
 
 	msg, ok := cmd().(prInfoUpdatedMsg)
 	require.True(t, ok, "the cmd must emit a prInfoUpdatedMsg")
-	assert.Equal(t, "repo-a", msg.repoID,
+	assert.Equal(t, "repo-a", msg.target.repoID,
 		"the fetch must carry the repoID captured at kickoff so the handler can drop it after a project switch")
+	assert.Equal(t, inst.ID, msg.target.id, "the fetch must retain the session identity captured at kickoff")
 	assert.Equal(t, inst.GetBranch(), msg.branch)
 	require.NotNil(t, msg.info)
 	assert.Equal(t, msg.branch, msg.info.Branch)

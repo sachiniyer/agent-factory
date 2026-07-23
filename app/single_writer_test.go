@@ -38,13 +38,12 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	require.Equal(t, 3, inst.TabCount(), "the daemon-created tab must appear locally")
 
 	// PR-info update: the write routes through the daemon (stubbed no-op).
-	prRestore := SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error { return nil })
+	prRestore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error { return nil })
 	defer prRestore()
 	_, _ = h.Update(prInfoUpdatedMsg{
-		instance: inst,
-		branch:   inst.GetBranch(),
-		repoID:   h.repoID,
-		info:     &sessiongit.PRInfo{Number: 5, State: "OPEN"},
+		target: captureSessionActionTarget(inst, h.repoID),
+		branch: inst.GetBranch(),
+		info:   &sessiongit.PRInfo{Number: 5, State: "OPEN"},
 	})
 
 	// After every previously-persisting path, the TUI's instances.json is still

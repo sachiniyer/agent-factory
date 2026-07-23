@@ -82,42 +82,27 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detachTraceMark("prInfoUpdatedMsg-handler-entry")
 		// Drop PR info fetched for a repo we have since switched away from
 		// (#1780). An in-place project switch (#1461) resets the store and swaps
-		// m.repoID, so the title-only re-resolution below can land the previous
-		// project's result on a same-title session in the new project — and the
-		// branch guard misses it when both sessions share a branch name. Gate on
-		// the captured repo first, mirroring snapshotFetchedMsg. No tick re-arm
+		// m.repoID. Gate on the captured repo before stable-ID resolution, mirroring
+		// snapshotFetchedMsg. No tick re-arm
 		// here: the PR-info tick re-arms itself in tickUpdatePRInfoMessage.
-		if msg.repoID != m.repoID {
+		if msg.target.repoID != m.repoID {
 			return m, nil
 		}
-		// msg.instance is the pointer captured when the async gh fetch kicked
-		// off. A background refresh can swap it out of the sidebar while the
-		// fetch is in flight — RemoveInstanceByTitle + a rebuilt
-		// FromInstanceData pointer (#765) — orphaning it. Writing the result to
-		// that orphan loses the update from the UI and from persisted state.
-		// Re-resolve the live instance by title (mirroring the #808 fix to
-		// instanceStartedMsg) so the update lands on whatever instance now
-		// represents this session. If the session is gone entirely, drop the
-		// stale fetch result (#862).
-		target := msg.instance
-		if !m.store.ContainsInstance(target) {
-			target = m.store.GetInstanceByTitle(msg.instance.Title)
-		}
+		// Resolve the immutable identity captured before the async gh fetch. A
+		// snapshot may rebuild the pointer for the same stable ID (#862), but a
+		// killed/recreated row may reuse both title AND branch. Title/branch is
+		// therefore a content check, never identity (#2358).
+		target := m.resolveSessionActionTarget(msg.target)
 		if target == nil {
 			return m, nil
 		}
-		// The title-only re-resolution above can land on a different session
-		// than the fetch was kicked off for: a user can kill the original
-		// instance and recreate one with the same title on a *different*
-		// branch while the gh fetch is in flight (#921). PR info is
-		// branch-specific, so applying a branch-X result to a branch-Y
-		// instance would show the wrong PR badge and persist it. Gate the
-		// apply on the captured branch still matching the resolved target.
+		// PR info is branch-specific too, so a same-ID row whose branch changed
+		// while gh was running must still reject the old result (#921).
 		if target.GetWorktreeBranch() != msg.branch {
 			return m, nil
 		}
 		if msg.err != nil {
-			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.instance.Title, msg.err)
+			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.target.title, msg.err)
 			// Mark as fetched anyway so we don't thrash retries on every
 			// selection change when the network is unreachable.
 			target.MarkPRInfoFetched()
@@ -140,7 +125,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		saveStart := time.Now()
-		if err := setPRInfoThroughDaemon(target.Title, m.repoID, prData); err != nil {
+		if err := setPRInfoThroughDaemon(msg.target.setPRInfoRequest(prData)); err != nil {
 			// In-memory update already applied for the UI; surface the persist
 			// failure but don't drop the badge. callDaemon already waited out the
 			// daemon warm-up window (#829), so a residual error is a real failure,

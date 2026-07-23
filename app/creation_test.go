@@ -65,7 +65,7 @@ func newTestHome(t *testing.T) *home {
 	t.Cleanup(SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
 	}))
-	t.Cleanup(SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error {
+	t.Cleanup(SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
 		return nil
 	}))
 

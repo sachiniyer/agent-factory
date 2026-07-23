@@ -65,6 +65,10 @@ func (target sessionActionTarget) restoreRequest() daemon.RestoreSessionRequest 
 	return daemon.RestoreSessionRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
 
+func (target sessionActionTarget) setPRInfoRequest(info session.PRInfoData) daemon.SetPRInfoRequest {
+	return daemon.SetPRInfoRequest{ID: target.id, Title: target.title, RepoID: target.repoID, PRInfo: info}
+}
+
 func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessionRequest {
 	return daemon.HandoffSessionRequest{
 		ID: target.id, Title: target.title, RepoID: target.repoID, To: to,

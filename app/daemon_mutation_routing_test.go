@@ -181,21 +181,21 @@ func TestPrInfoUpdatedMsg_RoutesWriteThroughDaemon(t *testing.T) {
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	var gotTitle, gotRepo string
-	var gotInfo session.PRInfoData
-	restore := SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error {
-		gotTitle, gotRepo, gotInfo = title, repoID, info
+	var gotRequest daemon.SetPRInfoRequest
+	restore := SetPRInfoSetterForTest(func(request daemon.SetPRInfoRequest) error {
+		gotRequest = request
 		return nil
 	})
 	defer restore()
 
 	info := &sessiongit.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, repoID: h.repoID, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{target: captureSessionActionTarget(inst, h.repoID), info: info})
 
-	require.Equal(t, inst.Title, gotTitle, "SetPRInfo must target the resolved session")
-	require.Equal(t, h.repoID, gotRepo, "SetPRInfo must be scoped to the TUI's repo")
-	require.Equal(t, 42, gotInfo.Number, "SetPRInfo must carry the fetched PR number")
-	require.Equal(t, "add feature", gotInfo.Title)
+	require.Equal(t, inst.ID, gotRequest.ID, "SetPRInfo must retain the selected session identity")
+	require.Equal(t, inst.Title, gotRequest.Title, "SetPRInfo must carry display context")
+	require.Equal(t, h.repoID, gotRequest.RepoID, "SetPRInfo must be scoped to the TUI's repo")
+	require.Equal(t, 42, gotRequest.PRInfo.Number, "SetPRInfo must carry the fetched PR number")
+	require.Equal(t, "add feature", gotRequest.PRInfo.Title)
 
 	got := inst.GetPRInfo()
 	require.NotNil(t, got, "the badge must be applied in-memory for instant UX")
@@ -216,7 +216,7 @@ func TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetPRInfoSetterForTest(func(title, repoID string, info session.PRInfoData) error {
+	restore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
 		called = true
 		return nil
 	})
@@ -224,7 +224,9 @@ func TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon(t *testing.T) {
 
 	info := &sessiongit.PRInfo{Number: 99, Title: "wrong branch", State: "OPEN"}
 	// The fetch was kicked off for a different branch than the instance now has.
-	_, _ = h.Update(prInfoUpdatedMsg{instance: inst, branch: "feature-y", repoID: h.repoID, info: info})
+	_, _ = h.Update(prInfoUpdatedMsg{
+		target: captureSessionActionTarget(inst, h.repoID), branch: "feature-y", info: info,
+	})
 
 	require.False(t, called, "a branch mismatch must not write PR info to the daemon")
 	require.Nil(t, inst.GetPRInfo(), "a branch mismatch must not apply the badge")
