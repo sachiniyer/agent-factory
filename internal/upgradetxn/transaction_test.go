@@ -42,7 +42,8 @@ func prepareFixture(t *testing.T) (*Transaction, string, string) {
 }
 
 func TestRecoveryJobIdentityIsTransactionScopedAndJournaled(t *testing.T) {
-	unitDir := t.TempDir()
+	unitDir, err := canonicalExistingDir(t.TempDir())
+	require.NoError(t, err)
 	systemd, err := NewRecoveryJob(RecoveryJobSystemd, "txn-2212", unitDir)
 	require.NoError(t, err)
 	require.Equal(t, "agent-factory-upgrade-recovery-txn-2212.service", systemd.Name)
@@ -58,6 +59,20 @@ func TestRecoveryJobIdentityIsTransactionScopedAndJournaled(t *testing.T) {
 	tampered := systemd
 	tampered.Name = "agent-factory-upgrade-recovery-another.service"
 	require.Error(t, validateRecoveryJob("txn-2212", tampered))
+}
+
+func TestDaemonOwnerCannotNameAnUnrelatedService(t *testing.T) {
+	for _, owner := range []DaemonOwner{
+		{Kind: SupervisionSystemd, ServiceName: "unrelated.service"},
+		{Kind: SupervisionLaunchd, ServiceName: "com.example.unrelated"},
+	} {
+		err := validateDaemonSnapshot(DaemonSnapshot{
+			WasRunning: true,
+			BootID:     "previous-boot",
+			Owner:      owner,
+		})
+		require.ErrorContains(t, err, "daemon owner must be")
+	}
 }
 
 func TestRecoveryMutationAuthorityRequiresPreservedBinary(t *testing.T) {

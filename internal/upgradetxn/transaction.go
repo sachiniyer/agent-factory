@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 )
 
 const (
@@ -22,6 +24,8 @@ const (
 	journalFileMode      = 0o600
 	transactionDirMode   = 0o700
 	recoveryNonceBytes   = 32
+	systemdDaemonService = systemdunit.DaemonUnitName
+	launchdDaemonService = "com.agent-factory.daemon"
 )
 
 var (
