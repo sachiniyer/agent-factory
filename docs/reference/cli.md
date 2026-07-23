@@ -29,9 +29,12 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
-- [`af projects`](#af-projects) — Manage projects (repo groupings of sessions)
-- [`af projects delete`](#af-projects-delete) — Delete a project: archive its sessions and remove it (reversibly)
-- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
+- [`af projects`](#af-projects) — Manage projects and durable registrations
+- [`af projects delete`](#af-projects-delete) — Archive and remove a project's sessions (reversibly)
+- [`af projects list`](#af-projects-list) — List registered projects
+- [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
+- [`af projects register`](#af-projects-register) — Register a project with a stable local identity
+- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
@@ -97,8 +100,8 @@ af [flags]
 - [`af debug`](#af-debug) — Print debug information like config paths
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
-- [`af projects`](#af-projects) — Manage projects (repo groupings of sessions)
-- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
+- [`af projects`](#af-projects) — Manage projects and durable registrations
+- [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
@@ -839,7 +842,7 @@ af keys
 
 ## af projects
 
-Manage projects (repo groupings of sessions)
+Manage projects and durable registrations
 
 ```
 af projects
@@ -847,7 +850,10 @@ af projects
 
 **Subcommands**
 
-- [`af projects delete`](#af-projects-delete) — Delete a project: archive its sessions and remove it (reversibly)
+- [`af projects delete`](#af-projects-delete) — Archive and remove a project's sessions (reversibly)
+- [`af projects list`](#af-projects-list) — List registered projects
+- [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
+- [`af projects register`](#af-projects-register) — Register a project with a stable local identity
 
 **Flags**
 
@@ -864,20 +870,22 @@ af projects
 
 ## af projects delete
 
-Delete a project: archive its sessions and remove it (reversibly)
+Archive and remove a project's sessions (reversibly)
 
-Delete a project — the group of sessions sharing a git repository.
+Archive and remove every live session for a git repository.
 
-This is ARCHIVE-THEN-REMOVE and reversible. Every live session of the repo is
+This is archive-then-remove and reversible. Every live session of the repo is
 archived (its tmux is torn down and its worktree moved to the archive dir, but
-its branch and uncommitted changes are preserved), the project drops out of the
-active projects list, and its always-on root agent (if any) is stopped and its
-root_agents opt-in removed. In-place sessions (the root agent, 'af sessions
-create --here') are torn down instead of archived — their cleanup never touches
-your working tree or branch.
+its branch and uncommitted changes are preserved), and its always-on root agent
+(if any) is stopped and its root-agent opt-in removed. In-place sessions (the
+root agent, 'af sessions create --here') are torn down instead of archived —
+their cleanup never touches your working tree or branch.
+
+The durable project registration, if any, is preserved. This command removes
+session state; it does not unregister the project.
 
 Your real git repository is never touched. To undo a mis-click, restore any
-archived session with 'af sessions restore <title>' — its project reappears.
+archived session with 'af sessions restore <title>'.
 
 [repo] is a path inside the repository to delete (default: the current repo).
 Deleting an unknown or already-empty project is a clean no-op. Prints how many
@@ -895,15 +903,84 @@ af projects delete [repo]
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af projects list
+
+List registered projects
+
+List durable machine-local project bindings.
+
+path_exists reports only whether the last-known path is present. It does not
+claim that a new checkout at a reused path has the registered identity.
+
+```
+af projects list
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af projects rebind
+
+Rebind a registered project after its checkout moves
+
+Rebind a stable project id to a new checkout path.
+
+The project id is preserved. Rebinding refuses to take a path already owned by
+another registered project.
+
+```
+af projects rebind <project-id> <path>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af projects register
+
+Register a project with a stable local identity
+
+Register a project directory with a stable, machine-local identity.
+
+The returned project id survives an explicit rebind after the checkout moves.
+Two clones remain separate projects. Any directory inside a checkout resolves
+to that checkout's canonical main-repo root, and registration is idempotent for
+the same checkout. Identity is anchored in an AF-home-scoped
+agent-factory/checkout-id-<home-id> marker under the Git common directory, so
+one AF home's reset cannot remove another home's identity. No working-tree file
+is created.
+
+```
+af projects register <path>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af reset
 
-Factory-reset Agent Factory: remove ALL AF sessions, tasks, worktrees, and state (keeps your repos + config)
+Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 
 Factory-reset Agent Factory.
 
 Removes every AF-created resource — all sessions (live and archived), all
-scheduled cron/watch tasks, all AF worktrees, the AF session branches AF
-created, and all stored state — returning AF to a clean slate.
+scheduled cron/watch tasks, registered-project bindings and their reachable
+checkout identity markers for this AF home, all AF worktrees, the AF session
+branches AF created, and all stored state — returning AF to a clean slate.
 
 Stops every af daemon running for this AF home — the managed one and any
 orphan left behind by an upgrade or a source build — and removes the daemon

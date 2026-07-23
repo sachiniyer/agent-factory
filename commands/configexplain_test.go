@@ -117,7 +117,7 @@ codex = "/repo/codex"
 	assert.Contains(t, output, "repo-shared")
 	assert.Contains(t, output, "winner · highest-precedence present allowed source")
 
-	_, statErr := os.Stat(filepath.Join(home, "projects"))
+	_, statErr := os.Stat(filepath.Join(home, config.ProjectRegistryDirName))
 	assert.True(t, os.IsNotExist(statErr), "a path selector must not register durable identity in stage two")
 	_, statErr = os.Stat(filepath.Join(home, "repos"))
 	assert.True(t, os.IsNotExist(statErr), "a project config read must not persist load-observation state")

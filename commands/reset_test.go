@@ -193,6 +193,21 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	repo, liveWT, reusedWT := seedMockRepo(t, home)
 	cfgBytes := seedAFState(t, home, repo, liveWT, reusedWT)
 	repoID := config.RepoIDFromRoot(repo)
+	registered, err := config.RegisterProject(repo)
+	if err != nil {
+		t.Fatalf("RegisterProject: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, config.ProjectRegistryDirName, registered.ID, "project.json")); err != nil {
+		t.Fatalf("registered sessionless project is not durable before reset: %v", err)
+	}
+	checkoutMarkers, err := filepath.Glob(filepath.Join(repo, ".git", "agent-factory", "checkout-id-????????????????????????????????"))
+	if err != nil || len(checkoutMarkers) != 1 {
+		t.Fatalf("registered checkout markers = %v, err = %v, want one", checkoutMarkers, err)
+	}
+	checkoutMarker := checkoutMarkers[0]
+	if _, err := os.Stat(checkoutMarker); err != nil {
+		t.Fatalf("registered checkout marker is not durable before reset: %v", err)
+	}
 
 	// --- Plan reflects the real scope ---
 	plan, err := planFactoryReset()
@@ -220,15 +235,21 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	if _, ok := plan.repoRoots[repo]; !ok || len(plan.repoRoots) != 1 {
 		t.Errorf("repoRoots = %v, want exactly {%s}", plan.repoRoots, repo)
 	}
+	var planOutput strings.Builder
+	printResetPlan(&planOutput, plan)
+	if !strings.Contains(planOutput.String(), "1 registered project record(s)") ||
+		!strings.Contains(planOutput.String(), "checkout identity marker(s)") {
+		t.Errorf("reset plan omitted the sessionless project registration it will remove:\n%s", planOutput.String())
+	}
 
 	// --- Execute ---
 	summary, err := executeFactoryReset(plan)
 	if err != nil {
 		t.Fatalf("executeFactoryReset: %v", err)
 	}
-	if summary.sessions != 3 || summary.archived != 1 || summary.tasks != 2 ||
+	if summary.sessions != 3 || summary.archived != 1 || summary.tasks != 2 || summary.projects != 1 ||
 		summary.worktrees != 3 || summary.branches != 2 || summary.corrupt != 0 {
-		t.Errorf("summary = %+v, want {3 1 2 3 2 0}", *summary)
+		t.Errorf("summary = %+v, want 3 sessions, 1 archived, 2 tasks, 1 project, 3 worktrees, 2 branches, no corruption", *summary)
 	}
 
 	// --- Everything AF is gone ---
@@ -240,8 +261,18 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	assertGone(t, filepath.Join(home, config.StateFileName))
 	assertGone(t, filepath.Join(home, config.TUIStateFileName))
 	assertGone(t, filepath.Join(home, "tasks.json"))
+	assertGone(t, filepath.Join(home, config.ProjectRegistryDirName))
+	assertGone(t, checkoutMarker)
+	assertGone(t, checkoutMarker+".lock")
 	assertGone(t, liveWT)
 	assertGone(t, reusedWT)
+	projects, err := config.ListProjects()
+	if err != nil {
+		t.Fatalf("ListProjects after reset: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Errorf("projects after reset = %d, want 0", len(projects))
+	}
 
 	tasks, err := task.LoadTasks()
 	if err != nil {
@@ -293,14 +324,14 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second planFactoryReset: %v", err)
 	}
-	if plan2.sessions != 0 || plan2.archived != 0 || plan2.tasks != 0 || plan2.branchCount() != 0 {
+	if plan2.sessions != 0 || plan2.archived != 0 || plan2.tasks != 0 || plan2.projects != 0 || plan2.branchCount() != 0 {
 		t.Errorf("second plan not empty: %+v", *plan2)
 	}
 	summary2, err := executeFactoryReset(plan2)
 	if err != nil {
 		t.Fatalf("second executeFactoryReset: %v", err)
 	}
-	if summary2.sessions != 0 || summary2.archived != 0 || summary2.tasks != 0 ||
+	if summary2.sessions != 0 || summary2.archived != 0 || summary2.tasks != 0 || summary2.projects != 0 ||
 		summary2.worktrees != 0 || summary2.branches != 0 {
 		t.Errorf("second summary not empty: %+v", *summary2)
 	}
@@ -308,6 +339,88 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	got2, _ := os.ReadFile(filepath.Join(home, "config.toml"))
 	if string(got2) != string(cfgBytes) {
 		t.Errorf("config.toml changed on second reset")
+	}
+
+	reregistered, err := config.RegisterProject(repo)
+	if err != nil {
+		t.Fatalf("RegisterProject after reset: %v", err)
+	}
+	if reregistered.CheckoutID == registered.CheckoutID {
+		t.Errorf("checkout id after reset = %s, want a newly minted identity", reregistered.CheckoutID)
+	}
+}
+
+func TestFactoryReset_PreservesUnownedProjectsDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+
+	userFile := filepath.Join(home, "projects", "personal-repo", "README.md")
+	writeFile(t, userFile, "keep me")
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("planFactoryReset: %v", err)
+	}
+	if _, err := executeFactoryReset(plan); err != nil {
+		t.Fatalf("executeFactoryReset: %v", err)
+	}
+
+	got, err := os.ReadFile(userFile)
+	if err != nil {
+		t.Fatalf("factory reset removed caller-owned projects directory: %v", err)
+	}
+	if string(got) != "keep me" {
+		t.Fatalf("caller-owned project changed to %q", got)
+	}
+}
+
+func TestFactoryReset_MalformedProjectRegistryDoesNotBlockOtherCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+
+	const projectID = "prj_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	recordPath := filepath.Join(home, config.ProjectRegistryDirName, projectID, "project.json")
+	writeFile(t, recordPath, "{not valid json")
+	if err := task.AddTask(task.Task{
+		ID: "reset-task", CronExpr: "* * * * *", Prompt: "do", Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+	eventsDir := filepath.Join(home, "events")
+	writeFile(t, filepath.Join(eventsDir, "pending.json"), "{}")
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("a malformed project record must not block reset planning: %v", err)
+	}
+	if !plan.projectCountUnavailable {
+		t.Fatal("malformed registry should make the project count explicitly unavailable")
+	}
+	var planOutput strings.Builder
+	printResetPlan(&planOutput, plan)
+	if !strings.Contains(planOutput.String(), "project record count unavailable") ||
+		!strings.Contains(planOutput.String(), "cleanup") {
+		t.Fatalf("reset plan hid the unreadable registry:\n%s", planOutput.String())
+	}
+	summary, err := executeFactoryReset(plan)
+	if err == nil || !strings.Contains(err.Error(), "reset project registry") {
+		t.Fatalf("executeFactoryReset error = %v, want the deferred project-registry error", err)
+	}
+	if summary.tasks != 1 {
+		t.Fatalf("removed tasks = %d, want 1", summary.tasks)
+	}
+	tasks, loadErr := task.LoadTasks()
+	if loadErr != nil {
+		t.Fatalf("LoadTasks after reset: %v", loadErr)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("tasks after reset = %d, want 0", len(tasks))
+	}
+	assertGone(t, eventsDir)
+	if _, statErr := os.Stat(recordPath); statErr != nil {
+		t.Fatalf("malformed project record should remain for repair: %v", statErr)
 	}
 }
 

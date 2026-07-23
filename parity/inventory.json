@@ -583,21 +583,22 @@
     },
     {
       "id": "project.list",
-      "title": "See the list of projects",
+      "title": "See the list of durable projects",
       "tui": {
-        "status": "yes",
+        "status": "partial",
         "pointer": "keys/keys.go:172 (ctrl+p) -> app/switch_project.go:25"
       },
       "web": {
-        "status": "yes",
+        "status": "partial",
         "pointer": "web/src/ui.ts:1047 project switcher"
       },
       "cli": {
-        "status": "no",
-        "pointer": "af projects has only `delete` (derived)"
+        "status": "yes",
+        "pointer": "api/projects.go projectsListCmd"
       },
-      "verdict": "unclear",
-      "notes": "`af projects list` does not exist; projects are derivable from `af sessions list`. Low impact, but the group looks lopsided with a delete-only noun."
+      "verdict": "real-gap",
+      "issue": "#2216",
+      "notes": "The CLI reads the durable registry introduced in #2216's identity slice. The TUI and web still derive their switchers from sessions and legacy root-agent paths, so they expose only a partial, different set until the later #2216 UI/RPC slice consumes this registry."
     },
     {
       "id": "project.delete",
@@ -621,7 +622,7 @@
       "id": "project.add",
       "title": "Register a new project",
       "tui": {
-        "status": "yes",
+        "status": "partial",
         "pointer": "app/switch_project.go:196-216 (picker '+ Add project…' row)"
       },
       "web": {
@@ -629,11 +630,31 @@
         "pointer": "web/src/modals.ts:153-157 'No projects yet — create a session in the TUI first'"
       },
       "cli": {
-        "status": "no",
-        "pointer": "a project is implicitly registered by `af sessions create --repo`"
+        "status": "yes",
+        "pointer": "api/projects.go projectsRegisterCmd"
       },
-      "verdict": "unclear",
-      "notes": "The web's own empty state tells users to go to the TUI, which is an explicit parity admission in copy. But projects are implicit (any repo you create a session in), so 'add project' may not warrant a first-class verb. Owner call."
+      "verdict": "real-gap",
+      "issue": "#2216",
+      "notes": "The CLI now explicitly registers a sessionless project by path in the durable registry. The TUI's existing row persists a legacy root_agents entry instead of the new identity, and the web has no registration action; the later #2216 UI/RPC slice will build on the registry rather than create another one."
+    },
+    {
+      "id": "project.rebind",
+      "title": "Rebind a stable project identity to a replacement checkout",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects.go projectsRebindCmd"
+      },
+      "verdict": "real-gap",
+      "issue": "#2216",
+      "notes": "The CLI exposes the explicit repair required after a reclone. TUI/web status and repair actions remain part of the later #2216 project-identity integration."
     },
     {
       "id": "project.switch",
@@ -1317,6 +1338,9 @@
       "af hook-guard-tmux": "internal.hook-guard-tmux",
       "af keys": "meta.discovery",
       "af projects delete": "project.delete",
+      "af projects list": "project.list",
+      "af projects rebind": "project.rebind",
+      "af projects register": "project.add",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
       "af sessions attach": "session.attach",
@@ -1510,6 +1534,9 @@
       "af projects --help": "meta.discovery",
       "af projects --json": "cli.json-envelope",
       "af projects delete --help": "meta.discovery",
+      "af projects list --help": "meta.discovery",
+      "af projects rebind --help": "meta.discovery",
+      "af projects register --help": "meta.discovery",
       "af reset --force": "install.reset",
       "af reset --help": "meta.discovery",
       "af reset --yes": "install.reset",
