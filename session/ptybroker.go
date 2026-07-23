@@ -135,7 +135,15 @@ type ptyBroker struct {
 
 	capturing   bool
 	stopCapture func() // tears down the capture goroutine + clientless channel
-	closed      bool
+	// captureEnded records that the CURRENT capture's readLoop has exited on its
+	// own — its upstream ended (a remote WS dropped by a proxy, a local pipe that
+	// EOF'd) rather than a teardown stopping it. `capturing` alone cannot express
+	// this: it stays true over the dead loop, so every later bring-up
+	// short-circuits and no new capture is ever dialled (#2438). Set by readLoop
+	// under mu BEFORE it closes `done`, so anything that joins the loop sees it;
+	// cleared by ensureCaptureStartedLocked when it reconciles.
+	captureEnded bool
+	closed       bool
 	// tabClosed records that this broker was shut down because ITS TAB was closed
 	// (#2136) rather than because the whole session was torn down. It only selects
 	// which end-of-stream error NextEvent reports (ErrTabClosed vs bare io.EOF);
@@ -331,11 +339,33 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 		b.mu.Unlock()
 		return fmt.Errorf("pty broker closed")
 	}
-	if b.capturing {
+	if b.capturing && !b.captureEnded {
 		b.mu.Unlock()
 		return nil
 	}
+	// Either nothing is capturing (the lazy first bring-up) or the current
+	// capture's upstream died under us and its readLoop has exited (#2438). Both
+	// want the same thing: a fresh capture. The dead one must be RELEASED, not
+	// merely forgotten — the remote channel holds one socket at a time and its
+	// StartCapture refuses ("remote clientless capture already started") while it
+	// still holds the dropped one, so clearing the latch alone would leave the
+	// broker permanently un-restartable. Running the stored teardown also JOINS
+	// the finished readLoop, so no goroutine leaks across the re-dial.
+	//
+	// This is the only place the release may happen: it needs captureMu (held by
+	// every caller of this function) to stay ordered against a concurrent
+	// teardown (#1661), and readLoop itself must NOT take captureMu — a teardown
+	// parks on `<-done` while holding it, so a readLoop reaching for it would
+	// deadlock. Marking the latch there and reconciling here keeps readLoop free
+	// of both locks it cannot safely take.
+	stale := b.stopCapture
+	b.capturing = false
+	b.stopCapture = nil
+	b.captureEnded = false
 	b.mu.Unlock()
+	if stale != nil {
+		stale()
+	}
 
 	r, err := b.ch.StartCapture()
 	if err != nil {
@@ -551,8 +581,28 @@ func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot)
 
 // readLoop copies the clientless capture reader into the ring until it errors or
 // the capture is stopped.
+//
+// On the way out it latches captureEnded so the next bring-up knows this capture
+// is spent and reconciles it (#2438). That matters for the case nothing else
+// observes: the upstream dying on its OWN. A remote session's data plane is a
+// long-lived WebSocket, independent of the REST control plane the daemon probes,
+// so a proxy or tunnel can drop it while the sandbox keeps answering Snapshot()
+// and Alive() perfectly — the session is never marked Lost, no recovery hook
+// runs (resetBrokerCaptures is localAgentServer's, the remote runtime has no
+// equivalent), and without this latch `capturing` stays true over a dead loop
+// and freezes the terminal for good.
+//
+// The latch is set BEFORE close(done) so a teardown joining on `done` cannot
+// observe the loop as finished while the latch still reads live. It deliberately
+// takes only mu — never captureMu, which a teardown holds while parked on
+// `<-done` (see ensureCaptureStartedLocked, where the reconcile happens).
 func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
-	defer close(done)
+	defer func() {
+		b.mu.Lock()
+		b.captureEnded = true
+		b.mu.Unlock()
+		close(done)
+	}()
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := r.Read(buf)
