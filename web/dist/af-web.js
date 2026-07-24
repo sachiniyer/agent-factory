@@ -11390,14 +11390,13 @@ var AppShell = class {
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
     if (!state.selectedProject) {
-      const newBtn = h2(
-        "button",
-        { type: "button", class: "af-rail-empty-new", title: "New session" },
-        icon("plus"),
-        "New"
+      list.replaceChildren(
+        h2(
+          "li",
+          { class: "af-rail-empty" },
+          "No projects yet. A project appears here once af is managing a repo for you."
+        )
       );
-      newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
-      list.replaceChildren(h2("li", { class: "af-rail-empty" }, "No sessions yet \u2014 ", newBtn));
       return;
     }
     const rows = visible.map((s) => {

@@ -3669,10 +3669,14 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
   // empty-state copy instead of rows, and the count reads 0 — the empty state renders
   // as designed rather than a broken/blank shell.
   await expect(page.locator(".af-app")).toBeVisible();
-  await expect(page.locator(".af-rail-empty")).toContainText("No sessions yet");
-  // #2479: the global empty state offers an in-UI New button, not a shell command.
-  await expect(page.locator(".af-rail-empty .af-rail-empty-new")).toBeVisible();
+  await expect(page.locator(".af-rail-empty")).toContainText("No projects yet");
+  // #2479: the zero-projects state names no shell command AND offers no button
+  // that cannot act — with no projects the New-session modal's Create is disabled,
+  // so a New button here would dead-end. The real "+ Add project" affordance lands
+  // with #2456.
   await expect(page.locator(".af-rail-empty")).not.toContainText("af sessions create");
+  await expect(page.locator(".af-rail-empty")).not.toContainText("in the TUI");
+  await expect(page.locator(".af-rail-empty .af-rail-empty-new")).toHaveCount(0);
   await expect(page.locator(".af-rail-count")).toHaveText("0");
   // With nothing selected the main pane is the "Select a session" placeholder.
   await expect(page.locator(".af-main-empty")).toContainText("Select a session");

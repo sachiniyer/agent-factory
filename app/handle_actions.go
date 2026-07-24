@@ -650,12 +650,6 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	return mod, tea.Batch(cmd, interactCmd)
 }
 
-// interactiveGuard returns the user-facing error that fences Enter off a
-// session in a state it cannot be entered or attached in — shared by the
-// interactive and full-screen paths (the #935 dead-tmux error, the Deleting
-// fence, the #1108 Lost fence). A nil error does NOT mean embeddable (see
-// liveSessionName); nil instance and Loading are the caller's silent no-op
-// cases.
 // restoreKeyHint is the configured restore key, named in copy so a
 // Lost/Dead/archived session's off-ramp points at the in-TUI action rather than
 // a shell command the user would have to leave the interface to run (#2479). It
@@ -664,6 +658,12 @@ func restoreKeyHint() string {
 	return keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
 }
 
+// interactiveGuard returns the user-facing error that fences Enter off a
+// session in a state it cannot be entered or attached in — shared by the
+// interactive and full-screen paths (the #935 dead-tmux error, the Deleting
+// fence, the #1108 Lost fence). A nil error does NOT mean embeddable (see
+// liveSessionName); nil instance and Loading are the caller's silent no-op
+// cases.
 func interactiveGuard(inst *session.Instance) error {
 	if inst == nil || inst.IsCreating() {
 		return nil
