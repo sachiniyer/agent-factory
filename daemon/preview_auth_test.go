@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -164,18 +165,44 @@ func TestPreviewCredentialSeparation_BothDirections(t *testing.T) {
 		"the preview token must NOT authenticate the control plane")
 }
 
-// TestPreviewAuthEndpoint_ReturnsTokenToAuthenticatedClient pins the retrieval
-// endpoint: an authenticated control-plane client gets the ephemeral preview
-// token, and when the preview listener is disabled the token is withheld.
-func TestPreviewAuthEndpoint_ReturnsTokenToAuthenticatedClient(t *testing.T) {
-	m, _, controlAddr := startPreviewDaemon(t)
-	client := previewHTTPClient()
+// TestPreviewAuthEndpoint_RequiresAuthThenReturnsToken pins the retrieval endpoint
+// against a STRICT control listener (require_token + require_loopback_token), so
+// auth is actually exercised rather than short-circuited by the tokenless-loopback
+// default: no credential is 401, and the daemon token is 200 with the preview
+// token. The response is no-store — it carries a raw bearer.
+func TestPreviewAuthEndpoint_RequiresAuthThenReturnsToken(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.PreviewListenAddr = "127.0.0.1:0"
+	cfg.RequireToken = true
+	cfg.RequireLoopbackToken = true
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, closeHTTP()) })
 
-	// Loopback + tokenless-default control listener authorizes without a token.
-	resp, err := client.Get("http://" + controlAddr + "/v1/preview-auth")
+	controlAddr := m.lifecycle.snapshot().listeners.TCPBoundAddr
+	client := previewHTTPClient()
+	url := "http://" + controlAddr + "/v1/preview-auth"
+
+	// No credential → 401 (the negative test the endpoint lacked).
+	require.Equal(t, http.StatusUnauthorized, previewGet(t, client, url, ""),
+		"the credential-vending endpoint must require control-plane auth")
+
+	// Daemon token → 200 with the preview token, and no-store.
+	daemonToken, err := LoadToken(mustTokenPath(t))
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+daemonToken)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "no-store", resp.Header.Get("Cache-Control"),
+		"a raw-bearer response must not be cacheable")
 
 	var env struct {
 		Data previewAuthResponse `json:"data"`
@@ -183,18 +210,65 @@ func TestPreviewAuthEndpoint_ReturnsTokenToAuthenticatedClient(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
 	require.Equal(t, m.previewToken, env.Data.Token,
 		"an authenticated control-plane client must be able to fetch the preview token")
+}
 
-	// When preview is disabled, the endpoint withholds the (unusable) token.
-	off := controlServerForPreviewDisabled(t)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/preview-auth", nil)
-	off.previewAuthHandler(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-	var offEnv struct {
+// TestPreviewAuthEndpoint_WithholdsTokenUnlessBound pins that the token is vended
+// only when the preview listener actually BOUND, not merely configured — so a
+// bind conflict (non-fatal by design: PreviewConfigured=true, PreviewBound=false)
+// does not hand out a live-looking credential for a dead port.
+func TestPreviewAuthEndpoint_WithholdsTokenUnlessBound(t *testing.T) {
+	// Disabled: no preview listener at all.
+	t.Run("disabled", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		cfg := config.DefaultConfig()
+		cfg.ListenAddr = "127.0.0.1:0"
+		cfg.PreviewListenAddr = ""
+		m, err := NewManager(cfg)
+		require.NoError(t, err)
+		closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, closeHTTP()) })
+		require.Empty(t, fetchPreviewAuthToken(t, m), "a disabled preview listener must vend no token")
+	})
+
+	// Configured but bind FAILED: the port is already taken.
+	t.Run("configured but bind failed", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		blocker, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer func() { _ = blocker.Close() }()
+
+		cfg := config.DefaultConfig()
+		cfg.ListenAddr = "127.0.0.1:0"
+		cfg.PreviewListenAddr = blocker.Addr().String() // guaranteed EADDRINUSE
+		m, err := NewManager(cfg)
+		require.NoError(t, err)
+		closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, closeHTTP()) })
+
+		listeners := m.lifecycle.snapshot().listeners
+		require.True(t, listeners.PreviewConfigured, "the address was configured")
+		require.False(t, listeners.PreviewBound, "the bind failed")
+		require.Empty(t, fetchPreviewAuthToken(t, m),
+			"a configured-but-unbound preview listener must not vend a token for a dead port")
+	})
+}
+
+// fetchPreviewAuthToken calls GET /v1/preview-auth on m's control listener (over
+// its own unix-socket-trust loopback default) and returns the vended token.
+func fetchPreviewAuthToken(t *testing.T, m *Manager) string {
+	t.Helper()
+	controlAddr := m.lifecycle.snapshot().listeners.TCPBoundAddr
+	resp, err := previewHTTPClient().Get("http://" + controlAddr + "/v1/preview-auth")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var env struct {
 		Data previewAuthResponse `json:"data"`
 	}
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&offEnv))
-	require.Empty(t, offEnv.Data.Token, "a disabled preview listener must not hand out an unusable credential")
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
+	return env.Data.Token
 }
 
 // TestPreviewToken_EphemeralAndNeverOnDisk pins the two properties of the
@@ -240,19 +314,6 @@ func previewGetWithCookie(t *testing.T, client *http.Client, url, cookieValue st
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode
-}
-
-// controlServerForPreviewDisabled builds a controlServer whose manager has the
-// preview listener disabled, for the endpoint's withhold path.
-func controlServerForPreviewDisabled(t *testing.T) *controlServer {
-	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	cfg := config.DefaultConfig()
-	cfg.PreviewListenAddr = "" // disabled
-	m, err := NewManager(cfg)
-	require.NoError(t, err)
-	require.NotEmpty(t, m.previewToken, "the token is still minted; it is only withheld from the endpoint")
-	return &controlServer{manager: m, scheduler: newTaskScheduler()}
 }
 
 // TestPreviewPresentedToken_IsolatedFromDaemonTransports pins the extractor

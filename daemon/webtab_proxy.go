@@ -559,7 +559,15 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// promises on the client. The app's own params, including its own
 			// ?access_token= (a DIFFERENT name from the daemon's), ride through
 			// untouched.
+			// Strip BOTH af credential query params before forwarding: af_webtab_token
+			// (this gate's) and af_preview_token (the preview origin's). They share a
+			// cookie jar and a path scope (RFC 6265 §8.5 — cookies are not port-scoped),
+			// so a crafted request to this origin can carry either, and the strip set
+			// must cover everything ANY af gate accepts, never just this one's (the
+			// webtab_url.go rule; the daemon-bearer half of it is why the first strip
+			// exists). Neither may reach the untrusted dev server.
 			pr.Out.URL.RawQuery = stripRawQueryParam(pr.Out.URL.RawQuery, webtabTokenQueryParam)
+			pr.Out.URL.RawQuery = stripRawQueryParam(pr.Out.URL.RawQuery, previewTokenQueryParam)
 			pr.SetXForwarded()
 			// SetXForwarded derives X-Forwarded-Proto from the DAEMON-facing hop,
 			// which OVERWRITES what the client's own hop reported (#1875). The
@@ -691,15 +699,27 @@ func cleanBootstrapToken(w http.ResponseWriter, r *http.Request, queryParam, coo
 	return true
 }
 
-// forwardAppCookies forwards the dev app's cookies upstream while stripping the
-// daemon's own token cookie, so a cookie-backed dev server sees its session/CSRF
-// cookies but never the daemon bearer token.
+// forwardAppCookies forwards the dev app's cookies upstream while stripping every
+// af credential cookie, so a cookie-backed dev server sees its session/CSRF
+// cookies but never a daemon or preview bearer.
+//
+// It strips BOTH af_webtab_token AND af_preview_token, and that second name is
+// load-bearing, not defensive tidiness. Cookies are scoped by (host, path), NOT
+// by port (RFC 6265 §8.5), so the app origin (127.0.0.1:8443) and the preview
+// origin (:8444) share ONE cookie jar: once the preview flow mints af_preview_token
+// (scoped to the same /v1/webtab/ path), the browser sends it here too, and
+// forwarding it upstream would hand a single GLOBAL preview credential to the
+// arbitrary repo/agent-controlled dev server — cross-session preview access, the
+// exact escalation the separate origin exists to prevent. The rule is the same one
+// webtab_url.go states for the strip set: it must cover everything ANY af gate
+// would accept (webTabAwareToken reads af_webtab_token; previewPresentedToken reads
+// af_preview_token), so both names are stripped here.
 func forwardAppCookies(r *http.Request) {
 	cookies := r.Cookies()
 	r.Header.Del("Cookie")
 	var b strings.Builder
 	for _, c := range cookies {
-		if c.Name == webtabTokenCookie {
+		if c.Name == webtabTokenCookie || c.Name == previewTokenCookie {
 			continue
 		}
 		if b.Len() > 0 {

@@ -10,14 +10,24 @@ import (
 
 // The web-tab PREVIEW origin's auth (#1856 step 2).
 //
-// The preview listener (preview_listen_addr) is a SEPARATE origin from the SPA,
-// so — once step 3 relaxes the sandbox — a framed dev server there cannot reach
-// the SPA's storage or the daemon bearer. This file gives that origin its own
-// credential: the daemon mints an ephemeral preview token (Manager.previewToken),
-// the listener's gate compares against it, and it is delivered to the browser
-// under the #2400 clean-before-render discipline exactly like the app-origin
-// web-tab flow — but on distinct query/cookie names holding the distinct
-// low-privilege credential, so the two can never be read for one another.
+// The preview listener (preview_listen_addr) is a SEPARATE origin from the SPA
+// (different port), so DOM/storage IS isolated: a framed dev server on the preview
+// origin cannot read the SPA's window or localStorage. This file gives that origin
+// its own low-privilege credential: the daemon mints an ephemeral preview token
+// (Manager.previewToken), the listener's gate compares against it, and it is
+// delivered under the #2400 clean-before-render discipline like the app-origin
+// web-tab flow — on distinct query/cookie NAMES.
+//
+// What separation this actually buys, stated precisely because the naive framing
+// is wrong: cookies are scoped by (host, path) and NOT by port (RFC 6265 §8.5), so
+// the two origins share ONE cookie jar. Both credential cookies (af_webtab_token,
+// af_preview_token) are transmitted to BOTH ports on every /v1/webtab/ request.
+// The separation is enforced by the EXTRACTOR, not the browser: previewPresentedToken
+// reads only af_preview_token and webTabAwareToken reads only af_webtab_token, so
+// neither credential is HONORED on the other surface even though both are sent. The
+// consequence for the proxy is that forwardAppCookies / the upstream query strip
+// (webtab_proxy.go) MUST remove BOTH names, or the shared jar would leak the preview
+// token to the untrusted dev server — see those sites.
 //
 // This step opens the auth handshake only; the preview origin still serves NO
 // content (step 3 wires the proxy routes).
@@ -93,8 +103,8 @@ func newPreviewMux() http.Handler {
 
 // previewAuthResponse is the body of GET /v1/preview-auth: the preview origin's
 // ephemeral bearer token, which an authenticated control-plane client (the SPA)
-// then delivers to the preview iframe. Empty token ⇒ the preview listener is
-// disabled (preview_listen_addr unset), so there is nothing to authenticate.
+// then delivers to the preview iframe. Empty token ⇒ the preview listener is not
+// bound (disabled, or its bind failed), so there is nothing to authenticate.
 type previewAuthResponse struct {
 	Token string `json:"token"`
 }
@@ -106,9 +116,16 @@ type previewAuthResponse struct {
 // LESS privileged. It is the ONLY way to obtain the token: the token lives in
 // memory, is never written to disk, and is never logged.
 //
-// When preview_listen_addr is unset the token is withheld (empty): there is no
-// preview listener to present it to, so exposing an unusable credential would only
-// mislead.
+// The response is no-store: it carries a raw bearer, so it must never sit in a
+// shared/proxy cache (the recommended deployment fronts af with nginx/Caddy). This
+// mirrors the clean-before-render bootstrap, which sets the same on its
+// credential-bearing redirect.
+//
+// The token is withheld (empty) unless the preview listener is actually BOUND, not
+// merely configured. The bind is deliberately non-fatal (a port conflict leaves
+// PreviewConfigured=true, PreviewBound=false), and vending a live-looking token for
+// a dead port would only mislead the client into addressing an origin that will not
+// answer.
 func (cs *controlServer) previewAuthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeHTTPError(w, r, http.StatusMethodNotAllowed,
@@ -120,8 +137,10 @@ func (cs *controlServer) previewAuthHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	token := ""
-	if cs.manager.cfg != nil && cs.manager.cfg.PreviewListenAddr != "" {
+	if cs.manager.lifecycle != nil && cs.manager.lifecycle.snapshot().listeners.PreviewBound {
 		token = cs.manager.previewToken
 	}
+	// A raw credential in the body: keep it out of any shared cache.
+	w.Header().Set("Cache-Control", "no-store")
 	writeHTTPSuccess(w, r, previewAuthResponse{Token: token})
 }

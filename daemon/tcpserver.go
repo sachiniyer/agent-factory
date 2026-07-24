@@ -119,13 +119,19 @@ func previewListenerPolicy(_ *config.Config) tokenGatePolicy {
 // pasted a token. Making this an explicit argument keeps "who serves the
 // frontend" a decision at the call site rather than an accident of sharing
 // startTCPListener.
-type webShell bool
+type webShell int
 
 const (
 	// withWebShell serves the browser SPA on every non-/v1 path — the daemon.
-	withWebShell webShell = true
-	// withoutWebShell leaves non-/v1 paths to the mux's own 404 — the agent-server.
-	withoutWebShell webShell = false
+	withWebShell webShell = iota
+	// withoutWebShell answers every non-/v1 path with the agent-server's
+	// "no web UI here, the daemon serves it at http://localhost:8443" 404.
+	withoutWebShell
+	// previewShell answers every non-/v1 path with the preview origin's OWN 404.
+	// It must NOT reuse withoutWebShell's message: that text names the control-plane
+	// address, which the preview port must not advertise (least of all to an
+	// unauthenticated peer), and "agent-server" is simply wrong here (#1856).
+	previewShell
 )
 
 // tcpListenerAuth overrides the credential a listener's gate uses. Nil selects
@@ -213,10 +219,13 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 	// 404s), so the web assets never appear on the socket path. The agent-server
 	// passes withoutWebShell — it cannot back the SPA (see webShell).
 	handler := withAuth(mux, gate, cfg.CORSAllowedOrigins)
-	if shell == withWebShell {
+	switch shell {
+	case withWebShell:
 		handler = webShellHandler(handler)
-	} else {
-		handler = noWebShellHandler(handler)
+	case previewShell:
+		handler = noWebShellHandler(handler, noPreviewContentMessage)
+	default: // withoutWebShell — the agent-server
+		handler = noWebShellHandler(handler, noWebShellMessage)
 	}
 	srv := &http.Server{
 		Handler:           handler,

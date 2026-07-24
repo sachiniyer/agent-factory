@@ -207,7 +207,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// DeliverPrompt warning, or its control-plane credential.
 		policy := previewListenerPolicy(manager.cfg)
 		notice := config.PreviewListenerExposureNotice(manager.cfg)
-		if closer, info, err := startTCPListener(newPreviewMux(), manager.cfg.PreviewListenAddr, manager.cfg, policy, withoutWebShell, previewListenerAuth(manager)); err != nil {
+		if closer, info, err := startTCPListener(newPreviewMux(), manager.cfg.PreviewListenAddr, manager.cfg, policy, previewShell, previewListenerAuth(manager)); err != nil {
 			log.WarningLog.Printf("failed to start web-tab preview listener on %q: %v", manager.cfg.PreviewListenAddr, err)
 		} else {
 			closePreview = closer

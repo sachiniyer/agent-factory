@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"testing"
@@ -101,11 +102,23 @@ func TestStartHTTPServer_PreviewBindsButServesNothing(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, snapWithPreview,
 		"authenticated, the preview origin still serves no control API — /v1/Snapshot must 404, not dispatch")
 
-	// No browser shell either (withoutWebShell): an authenticated root request 404s
-	// rather than returning the SPA.
-	rootWithPreview := previewGet(t, client, "http://"+previewAddr+"/", m.previewToken)
-	require.Equal(t, http.StatusNotFound, rootWithPreview,
-		"the preview origin serves no content yet — root must 404, not return the SPA")
+	// The non-/v1 404 sits OUTSIDE the gate (previewShell answers a root request
+	// UNAUTHENTICATED, before the token is consulted — so this deliberately sends no
+	// token). It must carry the PREVIEW origin's own message: not the SPA, and
+	// crucially NOT the agent-server's text, which names the control-plane address
+	// and would advertise it to an unauthenticated peer.
+	rootResp, err := client.Get("http://" + previewAddr + "/")
+	require.NoError(t, err)
+	rootBody, _ := io.ReadAll(rootResp.Body)
+	_ = rootResp.Body.Close()
+	require.Equal(t, http.StatusNotFound, rootResp.StatusCode,
+		"the preview origin serves no content — root must 404, not return the SPA")
+	require.Contains(t, string(rootBody), "preview origin",
+		"the preview port must answer with its own message")
+	require.NotContains(t, string(rootBody), "localhost:8443",
+		"the preview port must NOT advertise the control-plane address to an unauthenticated peer")
+	require.NotContains(t, string(rootBody), "agent-server",
+		"the preview port is not the agent-server; it must not borrow that message")
 
 	// The control listener, by contrast, DOES serve the API (tokenless loopback
 	// default), so the two ports are genuinely different surfaces.

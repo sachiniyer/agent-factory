@@ -66,24 +66,33 @@ const noWebShellMessage = "this is an af agent-server (a headless single-workspa
 	"The web UI is served by the daemon: run 'af daemon' and open http://localhost:8443. " +
 	"This server speaks only the /v1/agent/* API that a daemon drives."
 
+// noPreviewContentMessage is the preview origin's non-/v1 404 (#1856). It is
+// deliberately NOT noWebShellMessage: that text names the control-plane address
+// (http://localhost:8443), and the preview port — which will host untrusted
+// repo/agent-controlled content and answers this branch UNAUTHENTICATED — must
+// never advertise the control plane, nor call itself an "agent-server". It
+// discloses only that this is the preview origin and where the UI lives, no
+// address and no state.
+const noPreviewContentMessage = "this is the af web-tab preview origin; it serves web-tab previews only, opened from the af web UI. " +
+	"There is nothing to browse here directly."
+
 // noWebShellHandler wraps the authed API handler for listeners that serve NO
-// frontend (the agent-server). It answers every non-/v1 path with a plain 404
-// explaining where the web UI actually lives, and routes /v1/... through the authed
-// handler untouched.
+// frontend (the agent-server, the preview origin). It answers every non-/v1 path
+// with a plain 404 carrying message, and routes /v1/... through the authed handler
+// untouched.
 //
 // The explanatory 404 sits OUTSIDE the gate, in the same place webShellHandler
 // serves the shell unauthenticated — a human who opened the wrong port has no token
-// to present, so gating the explanation would leave them staring at a bare 401. It
-// discloses only a fixed string (no state, no token, no workspace detail), and it is
-// strictly LESS exposure than what this listener served before: the entire SPA
-// bundle, unauthenticated, on the same paths.
-func noWebShellHandler(api http.Handler) http.Handler {
+// to present, so gating the explanation would leave them staring at a bare 401. So
+// message must disclose only a fixed, address-free string (no state, no token, no
+// workspace detail): it is shown to an UNAUTHENTICATED peer.
+func noWebShellHandler(api http.Handler, message string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/") {
 			api.ServeHTTP(w, r)
 			return
 		}
-		writeHTTPError(w, r, http.StatusNotFound, errors.New(noWebShellMessage))
+		writeHTTPError(w, r, http.StatusNotFound, errors.New(message))
 	})
 }
 
