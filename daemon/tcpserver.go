@@ -122,11 +122,15 @@ func previewListenerPolicy(_ *config.Config) tokenGatePolicy {
 type webShell int
 
 const (
+	// withoutWebShell answers every non-/v1 path with the agent-server's "no web UI
+	// here, the daemon serves it at http://localhost:8443" 404. It is FIRST so it is
+	// the zero value: like tokenGatePolicy and authGate's bool fields, an unset
+	// webShell must default to the fail-safe posture (serve NO frontend), never to
+	// mounting the SPA + its token-paste login on a listener that was never meant to
+	// carry it (#1696 fail-safe-zero-value convention).
+	withoutWebShell webShell = iota
 	// withWebShell serves the browser SPA on every non-/v1 path — the daemon.
-	withWebShell webShell = iota
-	// withoutWebShell answers every non-/v1 path with the agent-server's
-	// "no web UI here, the daemon serves it at http://localhost:8443" 404.
-	withoutWebShell
+	withWebShell
 	// previewShell answers every non-/v1 path with the preview origin's OWN 404.
 	// It must NOT reuse withoutWebShell's message: that text names the control-plane
 	// address, which the preview port must not advertise (least of all to an

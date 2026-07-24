@@ -29,6 +29,24 @@ import (
 // (webtab_proxy.go) MUST remove BOTH names, or the shared jar would leak the preview
 // token to the untrusted dev server — see those sites.
 //
+// WHAT THIS STEP DELIBERATELY DOES NOT BUY — session isolation. Manager.previewToken
+// is ONE process-global token, and the bootstrap parks it in a cookie scoped to the
+// WHOLE webtabPathPrefix. So the credential a preview page for session A would carry
+// is byte-identical to session B's, and is ambiently attached to a same-origin
+// fetch of ANY session's preview path. That is acceptable ONLY because this step
+// serves NO content: nothing sits behind the gate to read cross-session. It must NOT
+// survive into step 3. Before the preview proxy serves a single byte, the credential
+// has to become PER-TAB (an HMAC(secret, sid/tid)-derived token, gate validated
+// against the sid/tid in the request path) with the cookie scoped to
+// /v1/webtab/<sid>/<tid>/ — otherwise a global token turns the preview origin into a
+// cross-session read and makes #1856 WORSE than the status quo. Even per-tab tokens
+// only bound a page to ITS OWN credential; on this SHARED origin a concurrently-open
+// other tab's path-scoped cookie is still ambiently attached to a cross-tab
+// same-origin fetch, so FULL cross-tab isolation additionally needs per-tab ORIGINS
+// (a listener/port per tab) — the origin-model decision step 3 must make, tracked on
+// #1856. Do not read "separate origin" here as "sessions are isolated"; they are not
+// yet.
+//
 // This step opens the auth handshake only; the preview origin still serves NO
 // content (step 3 wires the proxy routes).
 
@@ -82,9 +100,10 @@ func previewListenerAuth(m *Manager) *tcpListenerAuth {
 // It is reached only AFTER withAuth's preview gate authorized the request against
 // the preview token, so the bootstrap here only moves that already-validated
 // credential from the URL into the scoped cookie and redirects to the clean URL.
-// The cookie is scoped to webtabPathPrefix: the preview origin serves its content
-// under the same /v1/webtab/<sid>/<tid>/ path the app origin mirrors, so the
-// browser sends the preview cookie on exactly those sub-resource requests.
+// The cookie is scoped to webtabPathPrefix — the WHOLE prefix, deliberately flagged:
+// that is the non-isolating scope the file header warns must narrow to
+// /v1/webtab/<sid>/<tid>/ before step 3 serves content. It is safe here only because
+// nothing is served yet.
 func newPreviewMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(webtabPathPrefix+"{sessionId}/{tabId}/{rest...}", func(w http.ResponseWriter, r *http.Request) {
@@ -113,8 +132,12 @@ type previewAuthResponse struct {
 // ephemeral preview token. It is behind the daemon's normal auth gate, so only a
 // client already authorized to the control plane can read it — which is fine, that
 // client can already do everything, and the preview token it learns is strictly
-// LESS privileged. It is the ONLY way to obtain the token: the token lives in
-// memory, is never written to disk, and is never logged.
+// LESS privileged than the daemon bearer (it authenticates only the preview origin,
+// which serves nothing yet). It is NOT per-session: it is the one process-global
+// token, so it does not distinguish sessions — the endpoint gains a session/tab
+// selector when step 3 moves to per-tab tokens (see the file header). It is the ONLY
+// way to obtain the token: the token lives in memory, is never written to disk, and
+// is never logged.
 //
 // The response is no-store: it carries a raw bearer, so it must never sit in a
 // shared/proxy cache (the recommended deployment fronts af with nginx/Caddy). This

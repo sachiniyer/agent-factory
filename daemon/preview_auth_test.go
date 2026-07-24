@@ -85,6 +85,42 @@ func TestPreviewBootstrap_CleanBeforeRender(t *testing.T) {
 		"the cookie is scoped to the preview content path, not the whole origin's root")
 }
 
+// TestPreviewBootstrap_ScrubsEveryAfCredential pins P2-a: the clean-before-render
+// sanitizer must strip the WHOLE set of af credential query params from the URL it
+// redirects to, not just the one this flow authorized on. A navigation that carries
+// both the preview token (which authorizes it here) AND the daemon bearer (which
+// rides along because the two origins share a query surface and cookie jar,
+// RFC 6265 §8.5) must land on a URL with NEITHER — otherwise the higher-value
+// daemon bearer is stranded in the document window.location the preview page renders
+// under. The cookie set is still only the preview one (this flow's own credential).
+func TestPreviewBootstrap_ScrubsEveryAfCredential(t *testing.T) {
+	m, previewAddr, _ := startPreviewDaemon(t)
+	client := noRedirectClient()
+
+	url := "http://" + previewAddr + "/v1/webtab/s1/t1/?doc=1&af_preview_token=" + m.previewToken + "&af_webtab_token=daemon-bearer-value"
+	resp, err := client.Get(url)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+	require.Equal(t, "/v1/webtab/s1/t1/?doc=1", resp.Header.Get("Location"),
+		"BOTH af credential params must be scrubbed; the daemon bearer must not survive in the redirect URL")
+
+	var previewCookie, webtabCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		switch c.Name {
+		case previewTokenCookie:
+			previewCookie = c
+		case webtabTokenCookie:
+			webtabCookie = c
+		}
+	}
+	require.NotNil(t, previewCookie, "the preview flow sets its own credential cookie")
+	require.Equal(t, m.previewToken, previewCookie.Value)
+	require.Nil(t, webtabCookie,
+		"the preview flow must NOT mint the daemon-bearer cookie — it strips that param, it does not adopt it")
+}
+
 // TestPreviewGate_CookieAuthenticatesFollowUpAndRejectsOthers pins the gate on the
 // preview listener: the cookie the bootstrap set authenticates a sub-resource
 // request (which carries neither header nor query), a wrong credential is 401, and

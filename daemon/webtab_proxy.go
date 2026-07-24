@@ -658,16 +658,31 @@ func cleanWebTabTokenBootstrap(w http.ResponseWriter, r *http.Request) bool {
 	return cleanBootstrapToken(w, r, webtabTokenQueryParam, webtabTokenCookie, webtabPathPrefix)
 }
 
+// afCredentialQueryParams is the full set of private query params any af auth gate
+// will accept as a bearer: the daemon's (af_webtab_token) and the preview origin's
+// (af_preview_token). The clean-before-render sanitizer must scrub EVERY one of
+// them from the URL it redirects to, not just the one the current flow authorized
+// on — see cleanBootstrapToken. This is the webtab_url.go rule ("the STRIPPED set
+// must cover everything the AUTH GATE would ACCEPT") applied to the redirect URL,
+// which is the surface #2400 is actually about.
+var afCredentialQueryParams = []string{webtabTokenQueryParam, previewTokenQueryParam}
+
 // cleanBootstrapToken is the #2400 clean-before-render primitive, shared by the
-// app-origin web-tab flow and the preview-origin flow (#1856). It moves a
-// credential presented on the Authorization header or the private query param
-// into an HttpOnly cookie scoped to cookiePath, then — only when that query param
-// was present — redirects to the same request URI with it removed, so no app JS
-// ever sees the credential in its own window.location.
+// app-origin web-tab flow and the preview-origin flow (#1856). It moves the
+// credential presented on the Authorization header or this flow's private query
+// param into an HttpOnly cookie scoped to cookiePath, then redirects to the same
+// request URI with EVERY af credential param removed, so no app JS ever sees any
+// af bearer in its own window.location.
 //
-// The two callers pass DIFFERENT queryParam/cookieName so the daemon bearer and
-// the preview credential are never written to, or read from, each other's
-// transport. Keeping this one function is deliberate: two hand-copied
+// It SETS only cookieName (this flow's own credential), but STRIPS the whole
+// afCredentialQueryParams set. That asymmetry is the #2400 fix generalized to two
+// credentials: on the preview origin a navigation can legitimately carry both
+// (?af_preview_token authorizes it, ?af_webtab_token rides along because the two
+// origins share a cookie jar and query surface), and leaving the OTHER param in
+// the redirect URL would strand the daemon bearer — the higher-value credential —
+// in the document the preview page renders under. Both callers pass DIFFERENT
+// queryParam/cookieName so the two credentials are never written to, or read from,
+// each other's cookie; keeping this one function is deliberate — two hand-copied
 // clean-before-render blocks are exactly the drift #2400's own class warns about.
 func cleanBootstrapToken(w http.ResponseWriter, r *http.Request, queryParam, cookieName, cookiePath string) bool {
 	presented := agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader))
@@ -685,7 +700,10 @@ func cleanBootstrapToken(w http.ResponseWriter, r *http.Request, queryParam, coo
 		})
 	}
 
-	cleanRawQuery := stripRawQueryParam(r.URL.RawQuery, queryParam)
+	cleanRawQuery := r.URL.RawQuery
+	for _, p := range afCredentialQueryParams {
+		cleanRawQuery = stripRawQueryParam(cleanRawQuery, p)
+	}
 	if cleanRawQuery == r.URL.RawQuery {
 		return false
 	}
