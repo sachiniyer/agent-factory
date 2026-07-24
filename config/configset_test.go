@@ -425,6 +425,10 @@ func TestSetGlobalConfigValueNewlySettableKeys(t *testing.T) {
 		// The documented opt-out: "" disables the web server, so it must be
 		// settable, not treated as a missing argument.
 		{"listen_addr", "", func(c *Config) any { return c.ListenAddr }},
+		// preview_listen_addr (#1856) shares listen_addr's grammar and settability.
+		{"preview_listen_addr", "127.0.0.1:8444", func(c *Config) any { return c.PreviewListenAddr }},
+		// "" is the default and disables the preview listener — a real value.
+		{"preview_listen_addr", "", func(c *Config) any { return c.PreviewListenAddr }},
 		{"require_loopback_token", "true", func(c *Config) any { return c.RequireLoopbackToken }},
 		{"vscode_server_binary", "/opt/code-server/bin/code-server", func(c *Config) any { return c.VSCodeServerBinary }},
 		// Empty means PATH detection — also a real value.
@@ -466,6 +470,11 @@ func TestSetGlobalConfigValueRejectsInvalidNewKeys(t *testing.T) {
 		{"listen_addr", "8443", "listen_addr"},            // no port
 		{"listen_addr", "foo:bar", "listen_addr"},         // unknown service
 		{"listen_addr", "127.0.0.1:99999", "listen_addr"}, // port out of range
+		// preview_listen_addr reuses the same validator; assert on the offending
+		// value (present in every branch's message) rather than the key name, since
+		// the shared validator phrases its guidance in terms of listen_addr.
+		{"preview_listen_addr", "9444", "9444"},             // no port
+		{"preview_listen_addr", "127.0.0.1:99999", "99999"}, // port out of range
 		{"limit_retry_interval", "soon", "limit_retry_interval"},
 		{"limit_retry_interval", "-5m", "limit_retry_interval"},
 		{"require_loopback_token", "yesplease", "boolean"},

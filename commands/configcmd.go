@@ -79,6 +79,7 @@ var globalConfigReadOrder = []string{
 	"listen_addr",
 	"require_token",
 	"require_loopback_token",
+	"preview_listen_addr",
 	"cors_allowed_origins",
 	"daemon_poll_interval",
 	"log_max_size_mb",
@@ -299,6 +300,9 @@ Settable keys:
                              listener with a TLS-terminating proxy or a private network.
   require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
   require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
+  preview_listen_addr        host:port for a separate web-tab preview server, or "" to disable (default "").
+                             Kept apart from listen_addr on purpose: it serves web-tab previews only, never
+                             the control API. Same address grammar as listen_addr.
   daemon_poll_interval       positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer

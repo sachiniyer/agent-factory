@@ -29,6 +29,14 @@ type DaemonListenerStatus struct {
 	TCPBound      bool   `json:"tcp_bound"`
 	TCPListenAddr string `json:"tcp_listen_addr,omitempty"`
 	TCPBoundAddr  string `json:"tcp_bound_addr,omitempty"`
+	// Preview* mirror the TCP* fields for the web-tab preview listener (#1856),
+	// the second TCP listener bound from preview_listen_addr. PreviewConfigured is
+	// whether preview_listen_addr is set; PreviewBound / PreviewBoundAddr report
+	// whether it actually bound and on which concrete address.
+	PreviewConfigured bool   `json:"preview_configured"`
+	PreviewBound      bool   `json:"preview_bound"`
+	PreviewListenAddr string `json:"preview_listen_addr,omitempty"`
+	PreviewBoundAddr  string `json:"preview_bound_addr,omitempty"`
 }
 
 type daemonLifecycleSnapshot struct {
@@ -53,7 +61,7 @@ type daemonLifecycle struct {
 
 const daemonBootIDBytes = 16
 
-func newDaemonLifecycle(transactionID, tcpListenAddr string) (*daemonLifecycle, error) {
+func newDaemonLifecycle(transactionID, tcpListenAddr, previewListenAddr string) (*daemonLifecycle, error) {
 	if transactionID != "" && strings.TrimSpace(transactionID) == "" {
 		return nil, fmt.Errorf("upgrade transaction ID cannot be blank")
 	}
@@ -66,8 +74,10 @@ func newDaemonLifecycle(transactionID, tcpListenAddr string) (*daemonLifecycle, 
 		transactionID: transactionID,
 		phase:         DaemonPhaseWarming,
 		listeners: DaemonListenerStatus{
-			TCPConfigured: tcpListenAddr != "",
-			TCPListenAddr: tcpListenAddr,
+			TCPConfigured:     tcpListenAddr != "",
+			TCPListenAddr:     tcpListenAddr,
+			PreviewConfigured: previewListenAddr != "",
+			PreviewListenAddr: previewListenAddr,
 		},
 	}
 	return lifecycle, nil
@@ -157,10 +167,26 @@ func (l *daemonLifecycle) clearTCPBound() {
 	l.listeners.TCPBoundAddr = ""
 }
 
+func (l *daemonLifecycle) setPreviewBound(addr string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.PreviewBound = true
+	l.listeners.PreviewBoundAddr = addr
+}
+
+func (l *daemonLifecycle) clearPreviewBound() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.PreviewBound = false
+	l.listeners.PreviewBoundAddr = ""
+}
+
 func (l *daemonLifecycle) clearHTTPListeners() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.listeners.HTTPUnixBound = false
 	l.listeners.TCPBound = false
 	l.listeners.TCPBoundAddr = ""
+	l.listeners.PreviewBound = false
+	l.listeners.PreviewBoundAddr = ""
 }

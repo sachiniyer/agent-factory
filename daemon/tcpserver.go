@@ -90,6 +90,27 @@ func webListenerPolicy(cfg *config.Config) tokenGatePolicy {
 	}
 }
 
+// previewListenerPolicy is the token-gate posture for the web-tab preview
+// listener (#1856). It is a SEPARATE seam from webListenerPolicy on purpose: the
+// preview origin is not the control-plane listener and does not inherit its
+// require_token/require_loopback_token posture.
+//
+// It returns the STRICT zero value — token mandatory for every peer, no
+// exemptions — deliberately, for the step that only opens the port. Two facts
+// make that the safe default rather than a placeholder guess:
+//
+//   - the preview listener serves NOTHING yet (an empty mux), so nothing is
+//     behind this gate to reach with or without a token; and
+//   - the preview origin's real credential is a preview-scoped one wired in a
+//     later step, and pre-committing to the control plane's require_token model
+//     here would be the wrong answer to bake in.
+//
+// So the fail-safe posture holds the seam until that step replaces it, and never
+// silently exposes a preview surface that does not exist.
+func previewListenerPolicy(_ *config.Config) tokenGatePolicy {
+	return tokenGatePolicy{}
+}
+
 // webShell selects whether a TCP listener also serves the embedded browser SPA.
 // Only the daemon's own web listener does: the SPA speaks the daemon's REST
 // surface (/v1/Snapshot, /v1/CreateSession, …), which the agent-server does not
@@ -107,18 +128,24 @@ const (
 	withoutWebShell webShell = false
 )
 
-// startTCPListener binds the plain-HTTP TCP listener on cfg.ListenAddr and
-// serves mux wrapped in a token-enforcing gate + the CORS allow-list. It
-// returns a cleanup function that shuts the server down and the banner payload
-// the caller logs. policy selects how the gate treats peers (loopback
-// exemption / token disable); its zero value is the strict "token mandatory for
-// everyone" posture. shell selects whether the browser SPA rides along.
+// startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
+// wrapped in a token-enforcing gate + the CORS allow-list. It returns a cleanup
+// function that shuts the server down and the banner payload the caller logs.
+// policy selects how the gate treats peers (loopback exemption / token disable);
+// its zero value is the strict "token mandatory for everyone" posture. shell
+// selects whether the browser SPA rides along.
+//
+// addr is passed explicitly rather than read from cfg because the daemon binds
+// TWO listeners from one cfg: the control-plane web listener on cfg.ListenAddr
+// and the web-tab preview listener on cfg.PreviewListenAddr (#1856). cfg still
+// supplies the shared token file and CORS allow-list; only the bind target
+// differs.
 //
 // It ensures the bearer token exists before opening the port (so an operator
 // enabling the listener always has a credential to present) and reads that
 // token FRESH per auth event through the gate so `af token rotate` takes effect
 // for new connections without a daemon restart.
-func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePolicy, shell webShell) (func() error, tcpListenerInfo, error) {
+func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell) (func() error, tcpListenerInfo, error) {
 	// Generate-if-absent so enabling the listener always yields a usable token;
 	// the gate below re-reads the file per auth event, so rotation stays live.
 	tokenPath, err := TokenPath()
@@ -138,11 +165,10 @@ func startTCPListener(mux http.Handler, cfg *config.Config, policy tokenGatePoli
 	}
 
 	// A plain TCP listener — net.Listen (not tls.Listen). Addr() reports the
-	// concrete port even when cfg.ListenAddr requests :0 (used by the
-	// integration test).
-	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	// concrete port even when addr requests :0 (used by the integration test).
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, tcpListenerInfo{}, fmt.Errorf("bind TCP listener on %q: %w", cfg.ListenAddr, err)
+		return nil, tcpListenerInfo{}, fmt.Errorf("bind TCP listener on %q: %w", addr, err)
 	}
 
 	// The DAEMON's TCP listener also serves the embedded browser SPA (#1592 Phase 5

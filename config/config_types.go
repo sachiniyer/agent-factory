@@ -326,6 +326,27 @@ type Config struct {
 	// Global-only (daemon network surface), like require_token — a cloned repo must
 	// never be able to flip it. See docs/remote-http-auth.md.
 	RequireLoopbackToken bool `json:"require_loopback_token" toml:"require_loopback_token"`
+	// PreviewListenAddr binds a SECOND plain-HTTP TCP listener — the dedicated
+	// web-tab PREVIEW origin (#1856). It exists so previews can eventually be
+	// served CROSS-ORIGIN to the SPA (listen_addr): a framed dev server on a
+	// different origin cannot reach the SPA's bearer token, which is what lets the
+	// preview sandbox relax and absolute-path assets load. That re-addressing is a
+	// later step; THIS field only opens the port.
+	//
+	// It DEFAULTS to "" (disabled) — the zero value, so an absent key opens no
+	// second port and every existing daemon is byte-identical until an operator
+	// opts in. A host:port value binds the preview listener; it accepts the same
+	// address forms as listen_addr (validateListenAddrValue) and a bind failure is
+	// logged and skipped, never fatal, exactly like listen_addr.
+	//
+	// It is NOT listen_addr and does not serve listen_addr's surface: the preview
+	// origin must never carry the daemon control API (that is the whole security
+	// point — see PreviewListenerExposureNotice). Today it serves nothing; the
+	// preview routes move onto it in a later step.
+	//
+	// Global-only (daemon network surface), like listen_addr: a cloned repo must
+	// never be able to open a network port. See docs/configuration.md.
+	PreviewListenAddr string `json:"preview_listen_addr,omitempty" toml:"preview_listen_addr,omitempty"`
 	// Keys is the raw [keys] rebinding table (#1026): action name → a key
 	// string or list of key strings, replacing that action's default binding
 	// entirely (unlisted actions keep their defaults). TOML-ONLY by design —

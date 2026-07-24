@@ -230,7 +230,7 @@ func newManagerShell(cfg *config.Config) (*Manager, error) {
 // an ordinary caller can construct only a normal shell, while runDaemon owns
 // the probation selection.
 func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manager, error) {
-	lifecycle, err := newDaemonLifecycle(transactionID, cfg.ListenAddr)
+	lifecycle, err := newDaemonLifecycle(transactionID, cfg.ListenAddr, cfg.PreviewListenAddr)
 	if err != nil {
 		return nil, err
 	}

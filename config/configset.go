@@ -95,6 +95,12 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"listen_addr": {kind: cfgString, validate: func(_, v string) error {
 		return validateListenAddrValue(v)
 	}},
+	// The preview origin's bind address (#1856). Same address grammar as
+	// listen_addr, so the identical validator — an empty value disables the
+	// second listener, any host:port binds it.
+	"preview_listen_addr": {kind: cfgString, validate: func(_, v string) error {
+		return validateListenAddrValue(v)
+	}},
 	// Empty is meaningful (detect code-server/openvscode-server on PATH) and any
 	// non-empty value is a path the daemon resolves — including a "~" it expands
 	// and a binary that may not exist yet — so there is nothing to validate here

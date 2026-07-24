@@ -15,7 +15,7 @@ import (
 )
 
 func TestDaemonLifecycleNormalReadinessBarrier(t *testing.T) {
-	lifecycle, err := newDaemonLifecycle("", "127.0.0.1:8443")
+	lifecycle, err := newDaemonLifecycle("", "127.0.0.1:8443", "")
 	require.NoError(t, err)
 
 	initial := lifecycle.snapshot()
@@ -24,6 +24,7 @@ func TestDaemonLifecycleNormalReadinessBarrier(t *testing.T) {
 	require.Empty(t, initial.transactionID)
 	require.True(t, initial.listeners.TCPConfigured)
 	require.Equal(t, "127.0.0.1:8443", initial.listeners.TCPListenAddr)
+	require.False(t, initial.listeners.PreviewConfigured, "an empty preview_listen_addr configures no preview listener")
 	require.Error(t, lifecycle.markReady(), "liveness must not become readiness before restore")
 
 	lifecycle.markRestoreComplete()
@@ -43,7 +44,7 @@ func TestUpgradeProbationErrorIsTypedAndRetryable(t *testing.T) {
 
 func TestDaemonLifecycleProbationCannotSelfAdmit(t *testing.T) {
 	const transactionID = "transaction-2212"
-	lifecycle, err := newDaemonLifecycle(transactionID, "")
+	lifecycle, err := newDaemonLifecycle(transactionID, "", "")
 	require.NoError(t, err)
 
 	require.True(t, IsDaemonUpgradeProbationErr(lifecycle.mutationAdmissionError()))

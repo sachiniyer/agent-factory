@@ -150,6 +150,75 @@ func TestListenerExposureNoticeNilConfig(t *testing.T) {
 	assert.Empty(t, ListenerExposureNotice(nil))
 }
 
+// TestPreviewListenerExposureNotice pins the preview origin's OWN posture (#1856),
+// and what makes it a separate notice from the control-plane one is the point:
+// the preview listener never serves the daemon API, so it must NEVER borrow the
+// control-plane warning (that would be false, and a false alarm trains an
+// operator to ignore the real one). It also does not gate on require_token — that
+// key is the control listener's, not the preview origin's.
+func TestPreviewListenerExposureNotice(t *testing.T) {
+	cases := []struct {
+		name              string
+		previewListenAddr string
+		wantNotice        bool
+	}{
+		// Off / loopback: nothing off-box, nothing to warn about.
+		{"disabled (default)", "", false},
+		{"loopback", "127.0.0.1:8444", false},
+		{"loopback ipv6", "[::1]:8444", false},
+		{"localhost by name", "localhost:8444", false},
+		// Network-reachable: warned, regardless of require_token (not the preview
+		// origin's key).
+		{"all interfaces", "0.0.0.0:8444", true},
+		{"unspecified ipv6", "[::]:8444", true},
+		{"empty host binds every interface", ":8444", true},
+		{"routable ip", "192.168.1.10:8444", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// require_token is deliberately toggled to prove it does NOT govern the
+			// preview notice.
+			for _, requireToken := range []bool{false, true} {
+				cfg := DefaultConfig()
+				cfg.PreviewListenAddr = tc.previewListenAddr
+				cfg.RequireToken = requireToken
+
+				notice := PreviewListenerExposureNotice(cfg)
+				if !tc.wantNotice {
+					assert.Empty(t, notice, "a disabled or loopback preview origin has nothing to warn about")
+					continue
+				}
+				require.NotEmpty(t, notice, "a network-reachable preview origin must be reported")
+				assert.Contains(t, notice, tc.previewListenAddr, "name the exposed address")
+				// It must NOT masquerade as the control-plane warning: DeliverPrompt is
+				// the distinctive claim of ListenerExposureNotice, and it must not appear
+				// here because this listener never serves it.
+				assert.NotContains(t, notice, "DeliverPrompt",
+					"the preview origin does not serve the control API — it must not borrow that warning")
+				// Instead it states the reassuring invariant positively.
+				assert.Contains(t, notice, "never serves the daemon control API",
+					"the notice must say the preview origin never carries the control plane, not warn that it does")
+				assert.Contains(t, notice, "preview", "name what this listener is")
+				assert.NotContains(t, notice, "\n", "one line: this goes in a log and a status row")
+			}
+		})
+	}
+}
+
+// TestPreviewListenerExposureNoticeNilConfig mirrors the control-plane nil guard:
+// a caller with a config it failed to load must get "", not a crash.
+func TestPreviewListenerExposureNoticeNilConfig(t *testing.T) {
+	assert.Empty(t, PreviewListenerExposureNotice(nil))
+}
+
+// TestDefaultConfigHasNoPreviewExposureNotice pins the common case: the shipped
+// default leaves preview_listen_addr empty, so an untouched config is never
+// warned about a preview origin it does not have.
+func TestDefaultConfigHasNoPreviewExposureNotice(t *testing.T) {
+	assert.Empty(t, PreviewListenerExposureNotice(DefaultConfig()),
+		"the shipped default disables the preview listener — it must never trip this warning")
+}
+
 // TestDefaultConfigHasNoExposureNotice pins the common case: a user who never
 // touched these keys is never warned about an exposure they do not have.
 func TestDefaultConfigHasNoExposureNotice(t *testing.T) {
