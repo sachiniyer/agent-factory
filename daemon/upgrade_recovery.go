@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -56,6 +57,17 @@ func HandleUpgradeRecoveryExec() {
 		fmt.Fprintln(os.Stderr, "af: invalid internal upgrade recovery invocation")
 		os.Exit(64) // EX_USAGE: the argv is malformed, not a recovery failure.
 	}
+	// Bind this process to the home the transaction is recovering BEFORE any
+	// home-derived path resolves — logging, the control socket, the pid file, and
+	// the autostart unit all go through config.GetConfigDir(), which reads
+	// AGENT_FACTORY_HOME. The recovery job execs us with --home only and supplies
+	// no environment (renderSystemd/LaunchdRecoveryUnit emit no Environment=), so
+	// without this every op would resolve the DEFAULT home and stop, validate, or
+	// restart a different daemon than the one being recovered (#782/#1916, #2212).
+	if setErr := os.Setenv("AGENT_FACTORY_HOME", invocation.HomeDir); setErr != nil {
+		fmt.Fprintln(os.Stderr, "af: cannot bind the upgrade recovery home")
+		os.Exit(1)
+	}
 	log.Initialize(false)
 	defer log.Close()
 	if runErr := RunUpgradeRecoveryActor(context.Background(), invocation); runErr != nil {
@@ -99,6 +111,26 @@ func productionSupervisorOperations() upgradetxn.SupervisorOperations {
 	}
 }
 
+// recoveryHomeGuard fails closed when this process is not resolved to the AF
+// home the transaction is recovering. HandleUpgradeRecoveryExec binds the home
+// from the invocation, so a mismatch means that binding did not take — and every
+// home-dependent op (StopDaemon, the health probe, the autostart unit) would then
+// act on a DIFFERENT daemon than the one under recovery. Refusing is the only safe
+// answer: proceeding on the wrong home is how a "stop" fabricates StopConfirmed
+// over a live candidate.
+func recoveryHomeGuard(journal upgradetxn.Journal) error {
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return fmt.Errorf("resolve AF home for upgrade recovery: %w", err)
+	}
+	if dir != journal.HomeDir {
+		return fmt.Errorf(
+			"upgrade recovery is bound to AF home %q but the transaction recovers %q; refusing to act on the wrong daemon",
+			dir, journal.HomeDir)
+	}
+	return nil
+}
+
 // stopCandidateDaemon stops the candidate daemon so the previous binary and
 // metadata can be restored. The candidate serves this AF home's control socket
 // and pid file, so StopDaemon signals exactly it; WaitForShutdownCompletion then
@@ -107,7 +139,15 @@ func productionSupervisorOperations() upgradetxn.SupervisorOperations {
 // reports no daemon and the socket is already quiet — StopConfirmed.
 func stopCandidateDaemon(ctx context.Context, journal upgradetxn.Journal) (upgradetxn.StopOutcome, error) {
 	_ = ctx
-	_ = journal
+	// Fail closed if this process is not resolved to the home being recovered:
+	// StopDaemon/WaitForShutdownCompletion act on config.GetConfigDir()'s home, so
+	// a mismatch would report StopConfirmed while the transaction's candidate is
+	// still alive — the destructive lie this op must never tell. StopUnknown, not
+	// StopConfirmed, so the supervisor never restores the previous binary under a
+	// live candidate.
+	if err := recoveryHomeGuard(journal); err != nil {
+		return upgradetxn.StopUnknown, err
+	}
 	if _, err := StopDaemon(); err != nil {
 		return upgradetxn.StopUnknown, fmt.Errorf("stop upgrade candidate daemon: %w", err)
 	}
@@ -129,6 +169,9 @@ func stopCandidateDaemon(ctx context.Context, journal upgradetxn.Journal) (upgra
 // already up, and the ad-hoc launcher is a no-op reclaim when a daemon answers.
 func startPreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error {
 	_ = ctx
+	if err := recoveryHomeGuard(journal); err != nil {
+		return err
+	}
 	switch journal.Daemon.Owner.Kind {
 	case upgradetxn.SupervisionSystemd, upgradetxn.SupervisionLaunchd:
 		if err := startPreviousViaUnitFn(); err != nil {
@@ -149,6 +192,9 @@ func startPreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error 
 // no-spawn health probe within a bounded grace; a wrong version, a missing
 // listener, or no answer by the deadline is a rollback validation failure.
 func validatePreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error {
+	if err := recoveryHomeGuard(journal); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(upgradeValidateGrace)
 	var lastErr error
 	for {
@@ -174,6 +220,17 @@ func validatePreviousDaemon(ctx context.Context, journal upgradetxn.Journal) err
 func previousDaemonHealthy(h HealthStatus, journal upgradetxn.Journal) error {
 	if h.PingErr != nil {
 		return fmt.Errorf("previous daemon is not answering: %w", h.PingErr)
+	}
+	// A non-empty transaction id is the tell of an upgrade CANDIDATE in probation
+	// (runDaemon carries it; an ordinary daemon reports empty). The restored
+	// previous daemon is an ordinary daemon, so a responder still carrying a
+	// transaction id is the candidate that never went away — not proof of a
+	// restart. Ping retains this field for the full candidate boot exactly so a
+	// supervisor can reject it (#1947). Without this check a rebuild/reinstall
+	// where from==to (dev-install, a re-published tag) would let a surviving
+	// candidate satisfy every version/listener test and pass off as rolled back.
+	if h.TransactionID != "" {
+		return fmt.Errorf("responder is an upgrade candidate (transaction %s), not the restored previous daemon", h.TransactionID)
 	}
 	if h.DaemonVersion == "" {
 		return errors.New("previous daemon answered but did not report its version")

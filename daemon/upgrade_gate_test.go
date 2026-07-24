@@ -112,11 +112,13 @@ func TestUpgradeGate_ContextDeadline_Proceeds(t *testing.T) {
 	}
 }
 
-// The wrapper's context is the hard ceiling: a gate that honors its deadline
-// cannot make the launch wait past upgradeGateTimeout.
+// The wrapper's context is the hard ceiling tied to upgradeGateTimeout: a gate
+// that honors its deadline cannot make the launch wait past it. The bound is
+// asserted as a small multiple of the CONFIGURED value, so a regression that
+// hardcodes a larger ceiling (e.g. reverting to a fixed multi-second wait) fails.
 func TestUpgradeGate_IsBoundedByTimeout(t *testing.T) {
 	prevTimeout := upgradeGateTimeout
-	upgradeGateTimeout = 60 * time.Millisecond
+	upgradeGateTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { upgradeGateTimeout = prevTimeout })
 
 	stubEntrypointGate(t, func(ctx context.Context, _ string, _ bool) error {
@@ -130,8 +132,8 @@ func TestUpgradeGate_IsBoundedByTimeout(t *testing.T) {
 	if decision != upgradeGateProceed || err != nil {
 		t.Fatalf("a timed-out gate must proceed; got decision=%v err=%v", decision, err)
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("gate was not bounded by the timeout; took %s", elapsed)
+	if elapsed > 5*upgradeGateTimeout {
+		t.Fatalf("gate was not bounded by the configured %s ceiling; took %s", upgradeGateTimeout, elapsed)
 	}
 }
 
@@ -151,24 +153,37 @@ func TestUpgradeGate_PassesSkipWakeThrough(t *testing.T) {
 }
 
 // End-to-end against the REAL gate: no journal on disk is the overwhelmingly
-// common case and must proceed with no wait, on both variants.
+// common case and must proceed WITHOUT waiting. The fastness bound is a fraction
+// of upgradeGateTimeout, so a regression that started waiting the whole budget
+// (rather than returning immediately) fails.
 func TestUpgradeGate_NoJournalOnDisk_Proceeds(t *testing.T) {
+	prevTimeout := upgradeGateTimeout
+	upgradeGateTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { upgradeGateTimeout = prevTimeout })
+
 	home := t.TempDir()
 	for _, skipWake := range []bool{false, true} {
 		start := time.Now()
 		decision, err := checkUpgradeGate(home, skipWake)
+		elapsed := time.Since(start)
 		if decision != upgradeGateProceed || err != nil {
 			t.Fatalf("empty home must proceed (skipWake=%v); got decision=%v err=%v", skipWake, decision, err)
 		}
-		if time.Since(start) > 2*time.Second {
-			t.Fatalf("no-journal gate was not fast (skipWake=%v); took %s", skipWake, time.Since(start))
+		if elapsed > upgradeGateTimeout/2 {
+			t.Fatalf("no-journal gate waited instead of proceeding (skipWake=%v, ceiling %s); took %s",
+				skipWake, upgradeGateTimeout, elapsed)
 		}
 	}
 }
 
 // End-to-end against the REAL gate: a corrupt on-disk journal must not block or
-// fatal an af launch (the exact hazard the fail-open gate exists for).
+// fatal an af launch (the exact hazard the fail-open gate exists for), and must
+// return WITHOUT waiting — asserted as a fraction of upgradeGateTimeout.
 func TestUpgradeGate_CorruptJournalOnDisk_Proceeds(t *testing.T) {
+	prevTimeout := upgradeGateTimeout
+	upgradeGateTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { upgradeGateTimeout = prevTimeout })
+
 	home := t.TempDir()
 	upgradeDir := filepath.Join(home, "upgrade")
 	if err := os.MkdirAll(upgradeDir, 0o755); err != nil {
@@ -180,10 +195,11 @@ func TestUpgradeGate_CorruptJournalOnDisk_Proceeds(t *testing.T) {
 
 	start := time.Now()
 	decision, err := checkUpgradeGate(home, false)
+	elapsed := time.Since(start)
 	if decision != upgradeGateProceed || err != nil {
 		t.Fatalf("a corrupt on-disk journal must proceed, never wedge the launch; got decision=%v err=%v", decision, err)
 	}
-	if time.Since(start) > 2*time.Second {
-		t.Fatalf("corrupt-journal gate was not fast; took %s", time.Since(start))
+	if elapsed > upgradeGateTimeout/2 {
+		t.Fatalf("corrupt-journal gate waited instead of proceeding (ceiling %s); took %s", upgradeGateTimeout, elapsed)
 	}
 }

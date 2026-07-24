@@ -9,9 +9,11 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 )
 
-// stubRecoveryOps replaces the recovery-op collaborators with hermetic fakes and
-// shortens validatePreviousDaemon's polling, restoring everything on cleanup.
-func stubRecoveryOps(t *testing.T) {
+// stubRecoveryOps replaces the recovery-op collaborators with hermetic fakes,
+// shortens validatePreviousDaemon's polling, and binds AGENT_FACTORY_HOME to a
+// throwaway home so the recovery-home guard passes. It returns that home so
+// tests build journals whose HomeDir matches. Everything is restored on cleanup.
+func stubRecoveryOps(t *testing.T) string {
 	t.Helper()
 	prevHealth := upgradeRecoveryHealthFn
 	prevUnit := startPreviousViaUnitFn
@@ -27,18 +29,23 @@ func stubRecoveryOps(t *testing.T) {
 	})
 	upgradeValidateGrace = 500 * time.Millisecond
 	upgradeValidatePoll = time.Millisecond
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	return home
 }
 
-func journalAt(fromVersion string, listeners upgradetxn.ListenerExpectation) upgradetxn.Journal {
+func journalAt(home, fromVersion string, listeners upgradetxn.ListenerExpectation) upgradetxn.Journal {
 	return upgradetxn.Journal{
+		HomeDir:     home,
 		FromVersion: fromVersion,
 		Daemon:      upgradetxn.DaemonSnapshot{Listeners: listeners},
 	}
 }
 
 // previousDaemonHealthy is the rollback readiness gate: "something answered" is
-// not health (#1947). It must require the exact FromVersion and every listener
-// that was healthy before the upgrade.
+// not health (#1947). It must require the exact FromVersion, every listener that
+// was healthy before the upgrade, and — critically — that the responder is NOT a
+// surviving upgrade candidate (which carries a transaction id).
 func TestPreviousDaemonHealthy(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -49,43 +56,52 @@ func TestPreviousDaemonHealthy(t *testing.T) {
 		{
 			name:    "healthy exact version, no listeners required",
 			health:  HealthStatus{DaemonVersion: "1.0.100"},
-			journal: journalAt("1.0.100", upgradetxn.ListenerExpectation{}),
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{}),
 			wantErr: false,
 		},
 		{
 			name:    "not answering",
 			health:  HealthStatus{PingErr: errors.New("connection refused")},
-			journal: journalAt("1.0.100", upgradetxn.ListenerExpectation{}),
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{}),
 			wantErr: true,
 		},
 		{
 			name:    "answered but no version reported (older responder)",
 			health:  HealthStatus{},
-			journal: journalAt("1.0.100", upgradetxn.ListenerExpectation{}),
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{}),
 			wantErr: true,
 		},
 		{
 			name:    "wrong version is not the previous daemon",
 			health:  HealthStatus{DaemonVersion: "1.0.210"},
-			journal: journalAt("1.0.100", upgradetxn.ListenerExpectation{}),
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{}),
+			wantErr: true,
+		},
+		{
+			// The from==to case (a rebuild/reinstall): a surviving candidate matches
+			// the version, but its non-empty transaction id gives it away. Without
+			// the transaction-id check this would falsely pass as rolled back.
+			name:    "surviving candidate at the same version is rejected by its transaction id",
+			health:  HealthStatus{DaemonVersion: "1.0.100", TransactionID: "txn-abc"},
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{}),
 			wantErr: true,
 		},
 		{
 			name:    "http listener not rebound",
 			health:  HealthStatus{DaemonVersion: "1.0.100", Listeners: DaemonListenerStatus{HTTPUnixBound: false}},
-			journal: journalAt("1.0.100", upgradetxn.ListenerExpectation{HTTPUnixBound: true}),
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{HTTPUnixBound: true}),
 			wantErr: true,
 		},
 		{
 			name:    "http listener rebound",
 			health:  HealthStatus{DaemonVersion: "1.0.100", Listeners: DaemonListenerStatus{HTTPUnixBound: true}},
-			journal: journalAt("1.0.100", upgradetxn.ListenerExpectation{HTTPUnixBound: true}),
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{HTTPUnixBound: true}),
 			wantErr: false,
 		},
 		{
 			name:    "tcp listener not rebound",
 			health:  HealthStatus{DaemonVersion: "1.0.100", Listeners: DaemonListenerStatus{TCPBound: false}},
-			journal: journalAt("1.0.100", upgradetxn.ListenerExpectation{TCPConfigured: true, TCPBound: true}),
+			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{TCPConfigured: true, TCPBound: true}),
 			wantErr: true,
 		},
 	} {
@@ -132,6 +148,42 @@ func TestForwardActivationOpsAreNotEnabled(t *testing.T) {
 	}
 }
 
+// P2: every home-dependent op acts on config.GetConfigDir()'s home, so if the
+// process is not bound to the transaction's home, a "stop" would report success
+// against a daemon it cannot even see — restoring the previous binary under a
+// live candidate. The op must fail closed (StopUnknown), never fabricate a stop.
+func TestStopCandidateDaemon_HomeMismatchFailsClosed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	journal := upgradetxn.Journal{HomeDir: "/some/other/af/home"}
+
+	outcome, err := stopCandidateDaemon(context.Background(), journal)
+	if outcome != upgradetxn.StopUnknown {
+		t.Fatalf("a home mismatch must return StopUnknown, never a fabricated stop; got %v", outcome)
+	}
+	if err == nil {
+		t.Fatal("a home mismatch must return an error, not proceed on the wrong daemon")
+	}
+}
+
+func TestStartPreviousDaemon_HomeMismatchRefuses(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	prevUnit := startPreviousViaUnitFn
+	t.Cleanup(func() { startPreviousViaUnitFn = prevUnit })
+	called := false
+	startPreviousViaUnitFn = func() error { called = true; return nil }
+
+	journal := upgradetxn.Journal{
+		HomeDir: "/some/other/af/home",
+		Daemon:  upgradetxn.DaemonSnapshot{Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd}},
+	}
+	if err := startPreviousDaemon(context.Background(), journal); err == nil {
+		t.Fatal("a home mismatch must refuse to start a daemon for the wrong home")
+	}
+	if called {
+		t.Fatal("a home mismatch must not touch the local unit")
+	}
+}
+
 func TestStartPreviousDaemon_DispatchesByOwner(t *testing.T) {
 	for _, tc := range []struct {
 		kind      upgradetxn.SupervisionKind
@@ -144,12 +196,13 @@ func TestStartPreviousDaemon_DispatchesByOwner(t *testing.T) {
 		{upgradetxn.SupervisionNone, false, true},
 	} {
 		t.Run(string(tc.kind)+"-owner", func(t *testing.T) {
-			stubRecoveryOps(t)
+			home := stubRecoveryOps(t)
 			unitCalled, adHocCalled := false, false
 			startPreviousViaUnitFn = func() error { unitCalled = true; return nil }
 			startPreviousAdHocFn = func(string) error { adHocCalled = true; return nil }
 
 			j := upgradetxn.Journal{
+				HomeDir:        home,
 				ExecutablePath: "/opt/agent-factory/bin/af",
 				Daemon:         upgradetxn.DaemonSnapshot{Owner: upgradetxn.DaemonOwner{Kind: tc.kind}},
 			}
@@ -164,7 +217,7 @@ func TestStartPreviousDaemon_DispatchesByOwner(t *testing.T) {
 }
 
 func TestValidatePreviousDaemon_WaitsThenValidates(t *testing.T) {
-	stubRecoveryOps(t)
+	home := stubRecoveryOps(t)
 	calls := 0
 	upgradeRecoveryHealthFn = func() HealthStatus {
 		calls++
@@ -173,17 +226,17 @@ func TestValidatePreviousDaemon_WaitsThenValidates(t *testing.T) {
 		}
 		return HealthStatus{DaemonVersion: "1.0.100"}
 	}
-	if err := validatePreviousDaemon(context.Background(), journalAt("1.0.100", upgradetxn.ListenerExpectation{})); err != nil {
+	if err := validatePreviousDaemon(context.Background(), journalAt(home, "1.0.100", upgradetxn.ListenerExpectation{})); err != nil {
 		t.Fatalf("validate must succeed once the previous daemon answers at FromVersion: %v", err)
 	}
 }
 
 func TestValidatePreviousDaemon_WrongVersionFailsRollback(t *testing.T) {
-	stubRecoveryOps(t)
+	home := stubRecoveryOps(t)
 	// The candidate never went away; a newer version keeps answering. Validation
 	// must fail so the supervisor rolls back rather than declaring success.
 	upgradeRecoveryHealthFn = func() HealthStatus { return HealthStatus{DaemonVersion: "1.0.210"} }
-	if err := validatePreviousDaemon(context.Background(), journalAt("1.0.100", upgradetxn.ListenerExpectation{})); err == nil {
+	if err := validatePreviousDaemon(context.Background(), journalAt(home, "1.0.100", upgradetxn.ListenerExpectation{})); err == nil {
 		t.Fatal("validate must fail when the responder is not the previous version")
 	}
 }
@@ -194,7 +247,7 @@ func TestValidatePreviousDaemon_WrongVersionFailsRollback(t *testing.T) {
 // deferring to this very actor) is proven in upgrade_gate_test.go; here we prove
 // the operations the actor drives actually bring the previous daemon back.
 func TestRollbackRestore_RestartsThenValidatesPreviousDaemon(t *testing.T) {
-	stubRecoveryOps(t)
+	home := stubRecoveryOps(t)
 	started := false
 	startPreviousViaUnitFn = func() error { started = true; return nil }
 	upgradeRecoveryHealthFn = func() HealthStatus {
@@ -207,6 +260,7 @@ func TestRollbackRestore_RestartsThenValidatesPreviousDaemon(t *testing.T) {
 
 	ops := productionSupervisorOperations()
 	journal := upgradetxn.Journal{
+		HomeDir:        home,
 		FromVersion:    "1.0.100",
 		ExecutablePath: "/opt/agent-factory/bin/af",
 		Daemon: upgradetxn.DaemonSnapshot{
