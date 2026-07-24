@@ -235,6 +235,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"KillSession":      blockedDuringProbation,
 	"PauseStatusPoll":  blockedDuringProbation,
 	"ReapConfigAgent":  blockedDuringProbation,
+	"RegisterProject":  blockedDuringProbation,
 	"ReloadTasks":      blockedDuringProbation,
 	"RemoveTask":       blockedDuringProbation,
 	"RestartTask":      blockedDuringProbation,
