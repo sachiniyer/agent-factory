@@ -45,6 +45,21 @@ written back.
   `CLAUDE_CODE_USE_*` assignment are admitted only for one literal Claude
   invocation. Compound commands, redirects, arbitrary wrappers, and dynamic
   words must use an exported selector or explicit pass-through names.
+- **No agent inherits cloud-infrastructure credentials by default.** Which agent
+  a session runs is repo-settable (`default_program`, `program_overrides`), and
+  swapping the program is legitimate — so a swap must not also be a credential
+  grant. Gemini's `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT`, and
+  `GOOGLE_CLOUD_LOCATION` now follow its own `GOOGLE_GENAI_USE_VERTEXAI` /
+  `GOOGLE_GENAI_USE_GCA` selectors, on the same terms as Claude's. OpenCode no
+  longer receives AWS credentials or Google application-default credentials at
+  all: it has no environment variable that selects a cloud provider, so there is
+  nothing to gate them behind.
+- **Action required if you run OpenCode against Bedrock or Vertex**: list the
+  exact credential names you need in the global `session_env_passthrough` (for
+  example `AWS_PROFILE`, `AWS_REGION`, and whichever of `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` or
+  `AWS_SHARED_CREDENTIALS_FILE` your setup uses). Aider is unaffected — its
+  Azure entries are Azure OpenAI service keys, not cloud credentials.
 
 ## Keymap Changes
 

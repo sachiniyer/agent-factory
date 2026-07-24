@@ -54,7 +54,9 @@ var agentNames = map[string]map[string]struct{}{
 	),
 	"gemini": nameSet(
 		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_CLI_HOME",
-		"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+		// The two selectors stay here, as Claude's do: they are the operator's
+		// mode signal, not a credential. Google Cloud's credentials are behind
+		// them in conditionalAgentNames (#2462).
 		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
 	),
 	"amp": nameSet("AMP_API_KEY", "AMP_HOME"),
@@ -65,6 +67,26 @@ var agentNames = map[string]map[string]struct{}{
 		"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
 		"COHERE_API_KEY", "XAI_API_KEY", "AIDER_OPENAI_API_KEY", "AIDER_ANTHROPIC_API_KEY",
 	),
+	// OpenCode gets model-provider API keys and its own config locations, and
+	// deliberately NOT cloud-infrastructure credentials.
+	//
+	// It used to carry the operator's whole AWS credential set and Google
+	// application-default credentials unconditionally, for its Bedrock and Vertex
+	// providers. That made an agent SWAP a credential grant: `program_overrides`
+	// and `default_program` are both settable by a repository's checked-in
+	// config, so `claude = "opencode"` in a cloned repo moved the session onto an
+	// allowlist holding AWS_SECRET_ACCESS_KEY — the #2310 outcome through a door
+	// #2329 does not cover, because a swap carries no selector assignment to
+	// reject (#2462).
+	//
+	// Unlike Claude and Gemini there is no selector to gate them behind: OpenCode
+	// chooses a provider inside its config file or model id (`amazon-bedrock/…`)
+	// and reads the standard AWS variables directly, so OPENCODE_CONFIG* name
+	// config LOCATIONS and signal nothing about provider choice. Inventing an
+	// af-only flag would be new config surface that no agent reads, existing
+	// solely to re-permit what this removes. So these names take the escape hatch
+	// the docs already prescribe for an uncommon provider variable: the
+	// global-only, therefore operator-controlled, `session_env_passthrough`.
 	"opencode": nameSet(
 		"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT",
 		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
@@ -72,11 +94,16 @@ var agentNames = map[string]map[string]struct{}{
 		"OPENAI_API_BASE", "OPENAI_BASE_URL",
 		"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
 		"COHERE_API_KEY", "XAI_API_KEY",
-		"AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID",
-		"AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
-		"AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN",
 	),
 }
+
+// geminiCloudNames is Google Cloud's credential group for the Gemini CLI: the
+// application-default credential file and the project/location that scope it.
+// Shared by both selector entries below rather than written twice, so the two
+// modes can never drift into granting different things.
+var geminiCloudNames = nameSet(
+	"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+)
 
 type conditionalNames struct {
 	selector string
@@ -84,10 +111,16 @@ type conditionalNames struct {
 }
 
 // Cloud-provider credentials are narrower than the selected agent: Claude can
-// authenticate through Anthropic without needing the operator's unrelated AWS,
-// Google Cloud, or Azure production credentials. Admit each provider group only
-// when Claude's documented mode selector is enabled in the source environment
-// or as a literal assignment on the command that launches Claude.
+// authenticate through Anthropic, and Gemini through a Gemini API key, without
+// either needing the operator's unrelated AWS, Google Cloud, or Azure production
+// credentials. Admit each provider group only when that agent's own documented
+// mode selector is enabled in the source environment or as a literal assignment
+// on the command that launches it.
+//
+// An agent belongs here exactly when it HAS such a selector. That is the whole
+// test, and it is why OpenCode is absent rather than listed with an invented
+// flag: gating on a signal no agent reads would be af policy wearing the shape
+// of a mode switch (#2462).
 var conditionalAgentNames = map[string][]conditionalNames{
 	"claude": {
 		{
@@ -115,6 +148,20 @@ var conditionalAgentNames = map[string][]conditionalNames{
 				"AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET", "AZURE_TOKEN_CREDENTIALS",
 			),
 		},
+	},
+	// Gemini authenticates with a Gemini/Google API key by default and needs
+	// Google Cloud's credentials only in its cloud modes, which it selects with
+	// these two documented variables — GOOGLE_GENAI_USE_VERTEXAI for Vertex AI,
+	// GOOGLE_GENAI_USE_GCA for Google Cloud application-default auth. Either mode
+	// unlocks the same group; both entries share geminiCloudNames so they cannot
+	// diverge.
+	//
+	// Before #2462 this group was unconditional, so `default_program = "gemini"`
+	// in a repository's checked-in config reached the operator's
+	// GOOGLE_APPLICATION_CREDENTIALS with no selector anywhere.
+	"gemini": {
+		{selector: "GOOGLE_GENAI_USE_VERTEXAI", names: geminiCloudNames},
+		{selector: "GOOGLE_GENAI_USE_GCA", names: geminiCloudNames},
 	},
 }
 
