@@ -94,17 +94,32 @@ const (
 	LifecycleActionRestore LifecycleAction = "restore"
 )
 
+// opIsTeardown reports whether op is a teardown already in flight — a kill or an
+// archive. Both are documented mutation FENCES (see BeginKill/BeginArchive and
+// IsTearingDown): while one is running, no competing lifecycle mutation may
+// start. The two UI visibility gates below share this so neither can drift from
+// the other or from the fence — the #2500 defect was exactly that, the gates
+// excluding OpCreating/OpReplacing but not these, so a session mid-teardown still
+// offered Kill/Archive/Restore and pressing one hit "kill already in progress".
+func opIsTeardown(op InFlightOp) bool {
+	return op == OpKilling || op == OpArchiving
+}
+
 // lifecycleActionFor is the one archive/restore policy shared by Instance (the
 // TUI) and ToInstanceData (the web projection). A creating row has a provisional
 // identity but no session to manage yet. An id-less row cannot address a mutation
 // API unambiguously, so it also exposes nothing. A startup-unknown row must not
 // reuse its unconfirmed runtime binding, while a replacing row is inside one
-// transactional handoff and cannot admit a competing lifecycle mutation. Resting
-// rows restore; every other settled row archives. Kill addressability is
-// intentionally independent (CanKill): a retained startup-unknown row must remain
-// removable without becoming attachable, archivable, or restorable.
+// transactional handoff and cannot admit a competing lifecycle mutation. A row
+// already tearing down (OpKilling/OpArchiving) is inside the teardown fence, so
+// it offers no verb either — the action it would show (Archive on a live row,
+// Restore on the archived result) is precisely the mutation the fence exists to
+// refuse. Resting rows restore; every other settled row archives. Kill
+// addressability is intentionally independent (CanKill): a retained
+// startup-unknown row must remain removable without becoming attachable,
+// archivable, or restorable.
 func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown bool) LifecycleAction {
-	if id == "" || op == OpCreating || op == OpReplacing || startupStateUnknown {
+	if id == "" || op == OpCreating || op == OpReplacing || opIsTeardown(op) || startupStateUnknown {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -118,10 +133,12 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStat
 // canKillFor answers only whether a row has a stable teardown target. It does not
 // imply that the runtime binding is safe to reuse: startup-unknown rows are the
 // important counterexample. A creating row has no confirmed session to tear down;
-// a replacing row already owns the runtime mutation fence; and an id-less legacy
-// row cannot address the destructive API without guessing.
+// a replacing row already owns the runtime mutation fence; a row already tearing
+// down (OpKilling/OpArchiving) has a kill/archive in flight, so a second one is
+// the "kill already in progress" refusal the fence exists to prevent (#2500); and
+// an id-less legacy row cannot address the destructive API without guessing.
 func canKillFor(id string, op InFlightOp) bool {
-	return id != "" && op != OpCreating && op != OpReplacing
+	return id != "" && op != OpCreating && op != OpReplacing && !opIsTeardown(op)
 }
 
 // LifecycleAction returns the shared lifecycle verb for this instance. TUI menus

@@ -194,6 +194,46 @@ func TestHandleKill_DeletingInstanceIsNoOp(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "already being deleted")
 }
 
+// TestTeardownRowHandlersShowMessageNotSilence is the #2500 handler-side
+// regression. Adding OpKilling/OpArchiving to canKillFor/lifecycleActionFor
+// makes CanKill()/LifecycleAction() report "no action" for a teardown row —
+// which is the point (the footer stops offering the keybind). But each handler
+// checked that gate BEFORE its IsTearingDown() message, so the gate change folded
+// the informative "already being deleted" answer into a SILENT no-op: a key
+// pressed anyway did nothing and said nothing. The handlers check IsTearingDown
+// first now; this pins that a teardown row still gets a message, not silence.
+func TestTeardownRowHandlersShowMessageNotSilence(t *testing.T) {
+	setKillerForTest(t, func(title, repoID string) error {
+		t.Errorf("no teardown must be dispatched for an already-tearing-down row (title %q)", title)
+		return nil
+	})
+	for _, tc := range []struct {
+		name    string
+		invoke  func(*home) (tea.Model, tea.Cmd)
+		wantMsg string
+	}{
+		{"kill", func(h *home) (tea.Model, tea.Cmd) { return h.handleKill() }, "already being deleted"},
+		{"archive", func(h *home) (tea.Model, tea.Cmd) { return h.handleArchive() }, "is being deleted"},
+		{"restore", func(h *home) (tea.Model, tea.Cmd) { return h.handleRestore() }, "is being deleted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.errBox.SetSize(500, 1)
+			inst := newKillableInstance(t, "going-away")
+			inst.SetStatusForTest(session.Deleting) // raises the teardown op
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+
+			model, _ := tc.invoke(h)
+			hm := model.(*home)
+			assert.Equal(t, stateDefault, hm.state, "no confirmation dialog for a teardown row")
+			assert.Nil(t, hm.confirmationOverlay)
+			assert.Contains(t, h.errBox.String(), tc.wantMsg,
+				"a teardown row must answer %s with a message, not silence (#2500)", tc.name)
+		})
+	}
+}
+
 // TestHandleEnter_DeletingInstanceIsNoOp: attaching to a mid-deletion session
 // would race the teardown; Enter must refuse with a brief message.
 func TestHandleEnter_DeletingInstanceIsNoOp(t *testing.T) {

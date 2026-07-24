@@ -157,11 +157,18 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 // so the event loop never blocks on it (#844).
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || !selected.CanKill() {
+	if selected == nil {
 		return m, nil
 	}
+	// IsTearingDown BEFORE CanKill: a teardown-in-progress row now reports
+	// CanKill()==false (#2500), so checking CanKill first would fold this
+	// informative "already being deleted" message into the silent no-op below.
+	// The gate hides the keybind; this still answers a key pressed anyway.
 	if selected.IsTearingDown() {
 		return m, m.handleError(fmt.Errorf("session '%s' is already being deleted", selected.Title))
+	}
+	if !selected.CanKill() {
+		return m, nil
 	}
 
 	// Capture stable identity at confirmation-open time. A title may be reused
@@ -321,12 +328,15 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
+	// IsTearingDown BEFORE the LifecycleAction gate: a teardown-in-progress row now
+	// reports LifecycleAction()==None (#2500), so gating first would fold this
+	// informative message into the silent no-op below.
+	if selected.IsTearingDown() {
+		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+	}
 	lifecycleAction := selected.LifecycleAction()
 	if lifecycleAction == session.LifecycleActionNone {
 		return m, nil
-	}
-	if selected.IsTearingDown() {
-		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
 	title := selected.Title
 	target := captureSessionActionTarget(selected, m.repoID)
@@ -378,12 +388,15 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
+	// IsTearingDown BEFORE the LifecycleAction gate: a teardown-in-progress row now
+	// reports LifecycleAction()==None (#2500), so gating first would fold this
+	// informative message into the silent no-op below.
+	if selected.IsTearingDown() {
+		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
+	}
 	lifecycleAction := selected.LifecycleAction()
 	if lifecycleAction == session.LifecycleActionNone {
 		return m, nil
-	}
-	if selected.IsTearingDown() {
-		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
 	title := selected.Title
 	target := captureSessionActionTarget(selected, m.repoID)
