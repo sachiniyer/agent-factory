@@ -17,9 +17,9 @@ const goldenUsageReferencePath = "testdata/af_usage_reference.golden"
 // bytes.
 //
 // This is the load-bearing lock of the #2172 refactor. afUsageReference used to
-// be one literal; it is now a five-part concatenation
+// be one literal; it is now a six-part concatenation
 //
-//	afUsageIntroInside + " " + afUsageBody + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+//	afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 //
 // and every joint is a place where a future edit — a trailing space, a "\n\n"
 // that becomes "\n" — silently changes the guidance text delivered to EVERY
@@ -135,9 +135,14 @@ func TestAfUsageReferenceJoints(t *testing.T) {
 		want string
 	}{
 		{
-			// intro + " " + body: one space, same paragraph.
-			name: "intro to body",
-			want: `with the "af" CLI. Commands print JSON on stdout;`,
+			// intro + "\n\n" + dispatched: a blank line, a new paragraph.
+			name: "intro to dispatched",
+			want: "the user cannot see.\n\nWhen another instance dispatched you",
+		},
+		{
+			// dispatched + "\n\n" + body: a blank line, a new paragraph.
+			name: "dispatched to body",
+			want: "no one can help.\n\nCommands print JSON on stdout;",
 		},
 		{
 			// body + "\n\n" + outro: a blank line, a new paragraph.
@@ -201,5 +206,8 @@ func TestUsageReferencesShareOneBody(t *testing.T) {
 	}
 	if strings.Contains(afUsageReference, afUsageIntroPlugin) {
 		t.Error("afUsageReference carries the plugin framing; af's own agents ARE running inside af")
+	}
+	if strings.Contains(AfPluginUsageReference, afUsageDispatched) {
+		t.Error("AfPluginUsageReference carries the dispatched-parent escalation guidance; a plugin installer is a caller of af, not a sub-instance a parent dispatched")
 	}
 }

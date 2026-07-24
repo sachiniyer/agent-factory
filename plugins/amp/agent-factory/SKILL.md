@@ -21,11 +21,11 @@ Sessions (one agent per isolated worktree):
   af sessions handoff <title> --to <agent>             Continue a stuck session under a different agent (same worktree/branch)
   af sessions restore <title>                          Restore an archived, lost, or dead session
 
-Tabs (extra processes in a session's worktree; max 9 per session; not available for remote sessions):
-  af sessions tab-create <title> --command <cmd> [--name <tab>]   Prints the resolved tab name; tabs persist across restarts
-  af sessions tab-create <title> --kind web --port <n>|--url <u>  A browser pane (no PTY): shows a dev server/site to the user in the web UI
-  af sessions tab-create <title> --kind vscode                    A VS Code editor pane on this session's worktree (no --url/--port); needs code-server installed
-  af sessions tab-delete <title> --name <tab>                     The agent tab itself can't be deleted; kill the session instead
+Tabs (extra processes and views in your instance's worktree; max 9; not for remote sessions). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
+  af sessions tab-create <title> --command <cmd> [--name <tab>]   Terminal tab running <cmd> in the worktree; prints the tab name; persists across restarts
+  af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)
+  af sessions tab-create <title> --kind vscode                    VS Code editor tab on the worktree (no --url/--port); needs code-server installed
+  af sessions tab-delete <title> --name <tab>                     Delete a tab; the agent tab can't be deleted (kill the session instead)
 
 Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch script prints a stdout line; exactly one of --cron/--watch-cmd per task):
   af tasks list [--all]                                List this project's tasks (--all spans every project)
