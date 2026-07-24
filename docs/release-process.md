@@ -58,7 +58,7 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
 ## How updates flow to users
 
 - **Auto-update follows the stable channel by default.** On launch
-  (throttled to once per 24h), `af` resolves the newest release on the
+  (throttled to once every 6h), `af` resolves the newest release on the
   configured channel and swaps the binary in place. With the default
   `update_channel: "stable"` it asks GitHub's `releases/latest` endpoint,
   which is pinned to the newest non-prerelease release — previews never

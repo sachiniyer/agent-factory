@@ -142,7 +142,7 @@ func withTestHome(t *testing.T) string {
 // TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable guards against the
 // regression tracked in issue #262: on Windows, when a newer release exists,
 // the early-return path must still record a successful platform decision so
-// the 24-hour throttle fires and the GitHub API is not hit on every launch.
+// the 6-hour throttle fires and the GitHub API is not hit on every launch.
 // It also guards #1002:
 // the Windows skip must precede any network call, so the fetch seam here is a
 // tripwire that fails the test if invoked.
