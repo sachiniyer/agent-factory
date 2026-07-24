@@ -150,7 +150,7 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 	// The agent-server uses the strict zero-value policy: token mandatory for
 	// every peer, loopback NOT exempt — so "missing token → 401" holds even over
 	// this loopback socket (#1696).
-	closeTCP, info, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{}, withoutWebShell)
+	closeTCP, info, err := startTCPListener(hs.newMux(), cfg.ListenAddr, cfg, tokenGatePolicy{}, withoutWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 	require.NotEmpty(t, info.Token)
@@ -309,7 +309,7 @@ func TestAgentServerServesNoWebShell(t *testing.T) {
 	cfg.ListenAddr = "127.0.0.1:0"
 	hs := &headlessServer{}
 
-	closeTCP, info, err := startTCPListener(hs.newMux(), cfg, tokenGatePolicy{}, withoutWebShell)
+	closeTCP, info, err := startTCPListener(hs.newMux(), cfg.ListenAddr, cfg, tokenGatePolicy{}, withoutWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 

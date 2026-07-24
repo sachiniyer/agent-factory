@@ -73,3 +73,37 @@ func ListenerExposureNotice(cfg *Config) string {
 		"(`af token show` prints it), or set listen_addr to 127.0.0.1:8443 to serve this machine only",
 		cfg.ListenAddr)
 }
+
+// PreviewListenerExposureNotice returns the one-line operator notice for the
+// web-tab preview listener (#1856) when preview_listen_addr binds a network
+// interface, or "" when it is unset or loopback-only.
+//
+// This is deliberately NOT ListenerExposureNotice, and the difference is the
+// point of the whole feature. That notice warns that the daemon's control API —
+// DeliverPrompt and the rest — is exposed. The preview listener NEVER serves the
+// control API: it is a separate origin that exists precisely so preview content
+// cannot reach the SPA's token or the control plane. So it must never borrow the
+// control-plane warning, which would be false and would train an operator to
+// ignore the real one.
+//
+// It also does not gate on require_token. That key governs the control-plane
+// listener's bearer token; the preview origin's own auth is a separate concern
+// (a preview-scoped credential, wired in a later step). Today this listener
+// serves NOTHING — the preview routes have not moved onto it yet — so the honest
+// notice on a network bind is that the origin is reachable and currently inert,
+// not a warning about content that is not served. It exists now so the posture
+// is established at the seam and the later step only has to change the message,
+// never discover it needs one.
+//
+// Same emit-at-most-once-per-daemon-start discipline as ListenerExposureNotice:
+// a string, reported by the one startup site, never on a per-request path.
+func PreviewListenerExposureNotice(cfg *Config) string {
+	if cfg == nil || cfg.PreviewListenAddr == "" || IsLoopbackListenAddr(cfg.PreviewListenAddr) {
+		return ""
+	}
+	return fmt.Sprintf("preview_listen_addr %q is reachable from the network · it is the web-tab preview origin, "+
+		"kept separate from listen_addr so it never serves the daemon control API · it serves no content yet "+
+		"(web-tab previews move onto it in a later step) · set it to a loopback address such as 127.0.0.1:8444, "+
+		"or \"\" to disable it, if it should not be network-reachable",
+		cfg.PreviewListenAddr)
+}

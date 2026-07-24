@@ -90,7 +90,7 @@ func TestTCPListener_NetworkBindDeniesLoopbackWithoutToken(t *testing.T) {
 	policy := webListenerPolicy(cfg)
 	require.False(t, policy.loopbackExempt, "a network bind must NOT exempt loopback (proxy-bypass fix)")
 
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, policy, withWebShell)
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 	require.NotEmpty(t, info.Token)
@@ -150,7 +150,7 @@ func TestTCPListener_LoopbackBindStillExemptViaPolicy(t *testing.T) {
 	require.True(t, policy.loopbackExempt, "a loopback bind must exempt loopback")
 	require.False(t, policy.tokenDisabled, "the gate must be live, so the exemption is what carries the request")
 
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, policy, withWebShell)
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 
@@ -181,7 +181,7 @@ func TestTCPListener_DefaultConfigIsTokenless(t *testing.T) {
 	policy := webListenerPolicy(cfg)
 	require.True(t, policy.tokenDisabled, "the default config must disable the token gate")
 
-	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg, policy, withWebShell)
+	closeTCP, info, err := startTCPListener(newHTTPMux(cs), cfg.ListenAddr, cfg, policy, withWebShell)
 	require.NoError(t, err)
 	defer func() { _ = closeTCP() }()
 

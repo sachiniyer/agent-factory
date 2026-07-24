@@ -154,7 +154,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// opened, so the operator gets a single accurate line rather than a warning
 		// about a listener that was never served — and nothing on a per-request or
 		// per-connection path repeats it.
-		if closer, info, err := startTCPListener(mux, manager.cfg, policy, withWebShell); err != nil {
+		if closer, info, err := startTCPListener(mux, manager.cfg.ListenAddr, manager.cfg, policy, withWebShell); err != nil {
 			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
 		} else {
 			closeTCP = closer
@@ -185,6 +185,48 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		}
 	}
 
+	// The web-tab PREVIEW listener (#1856), a SECOND TCP listener bound from
+	// preview_listen_addr. It exists so previews can eventually be served
+	// cross-origin to the SPA — a different origin the framed dev server cannot use
+	// to reach the SPA's token. This step only OPENS the port: it serves an empty
+	// mux (newPreviewMux) behind the strict preview policy, with the preview routes
+	// and the sandbox relax landing in a later step.
+	//
+	// Same non-fatal discipline as the web listener above: a bind failure (a port
+	// conflict, an unbindable host) is logged and skipped, never fatal — the unix
+	// socket and control plane must not regress because a second web port could not
+	// open. Disabled by default: an unset preview_listen_addr skips this block
+	// entirely, so no second port opens until an operator opts in.
+	closePreview := func() error { return nil }
+	if manager.cfg.PreviewListenAddr != "" {
+		// Its OWN policy (previewListenerPolicy) and OWN exposure notice
+		// (PreviewListenerExposureNotice), never the control plane's: the preview
+		// origin does not serve the daemon API and must not borrow its posture or
+		// its DeliverPrompt warning.
+		policy := previewListenerPolicy(manager.cfg)
+		notice := config.PreviewListenerExposureNotice(manager.cfg)
+		if closer, info, err := startTCPListener(newPreviewMux(), manager.cfg.PreviewListenAddr, manager.cfg, policy, withoutWebShell); err != nil {
+			log.WarningLog.Printf("failed to start web-tab preview listener on %q: %v", manager.cfg.PreviewListenAddr, err)
+		} else {
+			closePreview = closer
+			if manager.lifecycle != nil {
+				manager.lifecycle.setPreviewBound(info.Addr)
+				go func() {
+					<-info.done
+					manager.lifecycle.clearPreviewBound()
+				}()
+			}
+			// Deliberately no "bearer token:" line here: the preview origin's own
+			// credential is a later step, and this listener serves nothing yet, so
+			// printing the daemon token as if it were a login for this port would
+			// mislead.
+			log.InfoLog.Printf("web-tab preview listener enabled on %s (serves no content yet — preview routing lands in a later step)", info.Addr)
+			if notice != "" {
+				log.WarningLog.Printf("%s", notice)
+			}
+		}
+	}
+
 	return func() error {
 		// Close stops the listener (which unlinks the Unix socket file, net's
 		// default for a listener it created) and terminates active connections.
@@ -194,11 +236,26 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 			manager.lifecycle.clearHTTPListeners()
 		}
 		tcpErr := closeTCP()
+		previewErr := closePreview()
 		if err := srv.Close(); err != nil {
 			return err
 		}
-		return tcpErr
+		if tcpErr != nil {
+			return tcpErr
+		}
+		return previewErr
 	}, nil
+}
+
+// newPreviewMux is the handler for the web-tab preview listener (#1856). It is
+// an EMPTY mux today: this step opens the preview port but serves no content, so
+// every path 404s. The preview routes (and the cross-origin sandbox relax) move
+// onto it in a later step. It is deliberately NOT the daemon control mux — the
+// whole point of the separate origin is that it must never serve the control
+// API — so a request for /v1/Snapshot on the preview port 404s rather than
+// dispatching.
+func newPreviewMux() http.Handler {
+	return http.NewServeMux()
 }
 
 // newHTTPMux builds the route table by iterating servedHTTPRoutes() — the public

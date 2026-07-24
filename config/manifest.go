@@ -226,6 +226,18 @@ var configManifest = []ManifestEntry{
 
 	// ---- Tier 3: everything else user-facing ----
 	{
+		Key:        "preview_listen_addr",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "Address for a separate web-tab preview server, kept apart from the main interface · off by default; it hosts previews only and never the control API.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "daemon_poll_interval",
 		Type:       "int",
 		Default:    "1000",

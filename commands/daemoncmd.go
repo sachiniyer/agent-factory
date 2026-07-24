@@ -266,6 +266,16 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 		default:
 			fmt.Fprintf(w, "  tcp listener:   %s (not bound)\n", info.Listeners.TCPListenAddr)
 		}
+		// The web-tab preview listener (#1856). Only printed when configured, so an
+		// operator who never set preview_listen_addr sees no extra line.
+		switch {
+		case !info.Listeners.PreviewConfigured:
+			// preview_listen_addr unset: omit the line entirely (the common case).
+		case info.Listeners.PreviewBound:
+			fmt.Fprintf(w, "  preview listen: %s (bound)\n", info.Listeners.PreviewBoundAddr)
+		default:
+			fmt.Fprintf(w, "  preview listen: %s (not bound)\n", info.Listeners.PreviewListenAddr)
+		}
 	}
 	fmt.Fprintf(w, "  control socket: %s (%s)\n", info.ControlSocket, presence(info.ControlSocketFile))
 	if info.HTTPSocket != "" {
