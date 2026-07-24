@@ -91,25 +91,73 @@ func EnsureDaemon() error {
 	return ensureDaemonWithLauncher(launchDaemonProcessFn)
 }
 
+var launchDaemonProcessAtFn = launchDaemonProcessAt
+
 // EnsureDaemonFromPath starts the daemon from execPath if the control socket is
 // not already serving. It is used by post-upgrade restart paths after the
 // current process's executable may have been replaced on disk: asking the
 // still-running old process for os.Executable can resolve to a deleted inode,
 // while execPath is the freshly written binary path the new daemon must run.
 func EnsureDaemonFromPath(execPath string) error {
-	return ensureDaemonWithLauncher(func() error {
-		return launchDaemonProcessAt(execPath)
-	})
+	return ensureDaemonWithPolicy(func() error {
+		return launchDaemonProcessAtFn(execPath)
+	}, false)
 }
 
 func ensureDaemonWithLauncher(launch func() error) error {
+	return ensureDaemonWithPolicy(launch, true)
+}
+
+func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 	ensureDaemonMu.Lock()
 	defer ensureDaemonMu.Unlock()
 
 	if err := pingDaemon(); err == nil {
 		return nil
 	}
+	if preferUnit {
+		configDir, configErr := config.GetConfigDir()
+		if configErr != nil {
+			log.WarningLog.Printf("could not resolve AF home while choosing daemon supervisor; using ad-hoc launch: %v", configErr)
+		} else {
+			owner, ownerErr := ResolveSupervisionOwner(configDir)
+			switch {
+			case ownerErr != nil:
+				log.WarningLog.Printf("could not determine daemon supervision owner; using ad-hoc launch: %v", ownerErr)
+			case owner == OwnerUnit:
+				return ensureDaemonThroughUnit(launch)
+			}
+		}
+	}
+	return ensureDaemonAdHoc(launch)
+}
 
+func ensureDaemonThroughUnit(launch func() error) error {
+	unitDeadline := time.Now().Add(ensureUnitStartTimeout)
+
+	unitErr := runEnsureUnitStartCommand(unitDeadline)
+	if unitErr == nil {
+		unitErr = waitForDaemonReady(unitDeadline)
+		if unitErr == nil {
+			return nil
+		}
+	}
+	log.WarningLog.Printf("failed to start daemon through its installed service; falling back to an ad-hoc daemon: %v", unitErr)
+	if err := ensureDaemonAdHoc(launch); err != nil {
+		return fmt.Errorf("installed daemon service failed: %v; ad-hoc fallback failed: %w", unitErr, err)
+	}
+	// The ad-hoc fallback brought up a reachable daemon. EnsureDaemon's contract is
+	// "daemon reachable when I return nil", and every caller (callDaemon,
+	// withDaemonHTTP, attach) hard-returns on a non-nil result and skips the RPC —
+	// so returning a supervision-degradation error here failed the first client
+	// action on any host without a systemd user bus even though the daemon was
+	// serving, self-healing only on the second call (#2373). The degradation is
+	// still surfaced where the user looks: the warning above, and af doctor /
+	// af daemon status carry a supervision-owner row. Report success.
+	return nil
+}
+
+func ensureDaemonAdHoc(launch func() error) error {
 	// A previous daemon version may have a PID file but no control socket. Stop
 	// it before launching the control-plane daemon so we do not run duplicate
 	// scheduler and session-monitor loops. StopDaemon is also how an
@@ -143,7 +191,10 @@ func ensureDaemonWithLauncher(launch func() error) error {
 		return err
 	}
 
-	deadline := time.Now().Add(daemonReadyTimeout)
+	return waitForDaemonReady(time.Now().Add(daemonReadyTimeout))
+}
+
+func waitForDaemonReady(deadline time.Time) error {
 	var lastErr error
 	for time.Now().Before(deadline) {
 		if err := pingDaemon(); err == nil {
@@ -152,6 +203,9 @@ func ensureDaemonWithLauncher(launch func() error) error {
 			lastErr = err
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("readiness deadline elapsed before the daemon could be probed")
 	}
 	return fmt.Errorf("daemon did not become ready: %w", lastErr)
 }
