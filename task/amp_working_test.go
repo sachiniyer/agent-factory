@@ -139,3 +139,28 @@ func TestIsWorkingContentAmpStaleScrollback(t *testing.T) {
 		t.Error("IsWorkingContent(stale working rule above a current idle frame, amp) = true, want false — a settled session would never go green again")
 	}
 }
+
+// TestIsWorkingContentAmpQuotedCompleteFrame is the #2439 regression. Unlike the
+// lone stale bottom rule TestIsWorkingContentAmpStaleScrollback covers, agent
+// output can quote a COMPLETE amp frame — labeled top rule, "│" interior, and a
+// working bottom rule — above the current idle frame (e.g. the agent pasting an
+// example of amp's UI, or an older turn's frame left in scrollback). Because
+// ampFrameBottomRule returned the FIRST complete frame, that quoted working rule
+// pinned a genuinely idle session at Running forever. The CURRENT frame is the
+// bottom-most complete pairing, never the first — the same reason
+// opencodeFrameLines tracks its LAST rule.
+func TestIsWorkingContentAmpQuotedCompleteFrame(t *testing.T) {
+	working, err := os.ReadFile("testdata/amp_working_streaming.ansi")
+	if err != nil {
+		t.Fatalf("read working fixture: %v", err)
+	}
+	idle, err := os.ReadFile("testdata/amp_idle_after_turn.ansi")
+	if err != nil {
+		t.Fatalf("read idle fixture: %v", err)
+	}
+	// A complete working frame sitting above the current idle frame.
+	quoted := string(working) + "\n" + string(idle)
+	if IsWorkingContent(quoted, tmux.ProgramAmp) {
+		t.Error("IsWorkingContent(complete working frame above the current idle frame, amp) = true, want false — the current frame is the bottom-most, so a settled session must go green")
+	}
+}
