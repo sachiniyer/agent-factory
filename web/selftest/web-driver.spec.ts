@@ -37,6 +37,7 @@
 // AF_WEB_SESSION_A / AF_WEB_SESSION_B. No token is needed.
 
 import { expect, type Browser, type BrowserContext, type Locator, type Page, test } from "@playwright/test";
+import { decode, Op } from "../src/frame.js";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -1187,6 +1188,118 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(page.locator(".af-term-head button", { hasText: "Prompt" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Archive" })).toHaveCount(0);
   await expect(page.locator(".af-term-head button", { hasText: "Kill" })).toHaveCount(0);
+});
+
+test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps CR", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  const inputPayloads: number[][] = [];
+  let shellCreated = false;
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    await row(p, SESSION_A).click();
+    await expect(p.locator(".af-term-host .xterm")).toBeVisible();
+    await expect(p.locator(".af-term-meta")).toContainText("Live");
+
+    await p.keyboard.press("Shift+Enter");
+    await expect.poll(() => inputPayloads.length, { message: "Shift+Enter must emit one OpInput" }).toBe(1);
+    expect(inputPayloads[0], "Shift+Enter reaches the PTY as LF / Ctrl+J, never xterm's default CR").toEqual([0x0a]);
+
+    await p.keyboard.press("Enter");
+    await expect.poll(() => inputPayloads.length, { message: "plain Enter must emit one more OpInput" }).toBe(2);
+    expect(inputPayloads[1], "plain Enter keeps xterm's submitting CR path").toEqual([0x0d]);
+
+    // A direct websocket write can produce the right LF while bypassing xterm's
+    // user-input effects. Build real agent scrollback, park at the oldest line,
+    // and create a real xterm selection. Shift+Enter must both reach the PTY and
+    // return the user to the prompt with no stale selection left behind.
+    const host = p.locator(".af-term-host");
+    await host.click();
+    for (let i = 1; i <= 40; i += 1) {
+      await p.keyboard.type(`shift-enter-scroll-${i}`);
+      await p.keyboard.press("Enter");
+    }
+    await expect(host).toContainText("shift-enter-scroll-40", { timeout: 15_000 });
+    const viewport = host.locator(".xterm-viewport");
+    await host.hover();
+    await p.mouse.wheel(0, -5000);
+    await expect(host, "the real wheel must park the agent viewport above the prompt").not.toContainText(
+      "shift-enter-scroll-40",
+    );
+    const parked = await viewport.evaluate((el) => el.scrollTop);
+
+    const oldestRow = host.locator(".xterm-rows > div", { hasText: READY_MARKER }).first();
+    await expect(oldestRow).toBeVisible();
+    const oldestBox = await oldestRow.boundingBox();
+    expect(oldestBox, "the visible ready-marker row must have selectable geometry").toBeTruthy();
+    const { x, y, width, height } = oldestBox as { x: number; y: number; width: number; height: number };
+    await p.mouse.move(x + 4, y + height / 2);
+    await p.mouse.down();
+    await p.mouse.move(x + Math.min(width - 4, 120), y + height / 2, { steps: 8 });
+    await p.mouse.up();
+    const selection = host.locator(".xterm-selection > div");
+    await expect(selection, "the setup must create an actual xterm selection").not.toHaveCount(0);
+
+    inputPayloads.length = 0;
+    await p.keyboard.press("Shift+Enter");
+    await expect.poll(() => inputPayloads.length, { message: "the selected agent still receives one LF" }).toBe(1);
+    expect(inputPayloads[0]).toEqual([0x0a]);
+    await expect(host, "genuine user input must reveal the newest line at the prompt").toContainText(
+      "shift-enter-scroll-40",
+    );
+    await expect
+      .poll(async () => viewport.evaluate((el) => el.scrollTop), {
+        message: "genuine user input must advance the viewport from its parked scrollback position",
+      })
+      .toBeGreaterThan(parked);
+    await expect(selection, "genuine user input must clear the stale xterm selection").toHaveCount(0);
+
+    // Ctrl+C immediately after the newline is the behavioral discriminator: if
+    // the selection survived, the clipboard branch would copy and send no ETX.
+    await p.keyboard.press("Control+c");
+    await expect.poll(() => inputPayloads.length, { message: "Ctrl+C after Shift+Enter must interrupt" }).toBe(2);
+    expect(inputPayloads[1], "the cleared selection leaves Ctrl+C on the interrupt path").toEqual([0x03]);
+
+    // The same terminal component owns non-agent tabs, where raw-mode programs
+    // may distinguish CR from LF. Preserve xterm's historical Shift+Enter CR and
+    // execute one command with each Enter variant to pin both paths end to end.
+    await createTerminalTab(p);
+    shellCreated = true;
+    await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
+    await expect(p.locator(".af-term-meta")).toContainText("Live");
+
+    inputPayloads.length = 0;
+    await p.keyboard.type("echo $((233700 + 42))");
+    await p.keyboard.press("Shift+Enter");
+    await expect(p.locator(".af-term-host")).toContainText("233742");
+    expect(inputPayloads.at(-1), "a shell keeps xterm's historical Shift+Enter CR").toEqual([0x0d]);
+
+    await p.keyboard.type("echo $((233700 + 43))");
+    await p.keyboard.press("Enter");
+    await expect(p.locator(".af-term-host")).toContainText("233743");
+    expect(inputPayloads.at(-1), "plain shell Enter remains CR").toEqual([0x0d]);
+  } finally {
+    if (shellCreated) {
+      await resetToAgentTab(p);
+    }
+    await ctx.close();
+  }
 });
 
 test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to rail", REAL_FIXTURE, async () => {

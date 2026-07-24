@@ -191,14 +191,14 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/terminal.ts:151 onData -> sendInput"
+        "pointer": "web/src/terminal.ts:225 onData + :233 attachCustomKeyEventHandler"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions.go:346 sendPromptCmd"
       },
       "verdict": "parity",
-      "notes": "The TUI and web reach this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport."
+      "notes": "The TUI and web reach this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport. In the agent tab, the web maps bare Shift+Enter to LF/Ctrl+J for a multiline composer while plain Enter remains the submitting CR; shell/process tabs retain xterm's native Enter handling."
     },
     {
       "id": "session.send-prompt.broadcast",

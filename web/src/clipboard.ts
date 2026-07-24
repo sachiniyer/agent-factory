@@ -14,6 +14,8 @@
 //     no-op otherwise, and NEVER interrupts.
 //   - Ctrl+V / Ctrl+Shift+V → paste, by deferring to xterm's native browser
 //     paste (see below).
+//   - Shift+Enter in the AGENT tab → LF (Ctrl+J), which Codex and Claude bind to
+//     composer newline; non-agent tabs and plain Enter stay on xterm's CR path.
 //
 // This is the DECISION half, kept pure and DOM-free so it unit-tests against
 // what reaches the wire/clipboard rather than against a synthetic keydown.
@@ -38,6 +40,8 @@ export interface ClipboardKeyEvent {
  *  ones; tests supply spies so an assertion can read exactly what would reach the
  *  clipboard and the input frame. */
 export interface ClipboardDeps {
+  /** Whether this PTY is the agent composer rather than a shell/process tab. */
+  composerNewline: boolean;
   /** Whether the terminal currently has a text selection (xterm.hasSelection). */
   hasSelection(): boolean;
   /** The selected text (xterm.getSelection). Only read when hasSelection() is true. */
@@ -49,10 +53,15 @@ export interface ClipboardDeps {
   copy(text: string): void;
   /** Send text to the PTY as OpInput — the same path onData uses for typed keys. */
   sendInput(text: string): void;
+  /** Feed genuine typed input back through xterm so it runs onUserInput effects
+   *  (scroll-to-bottom and selection clearing) before onData sends the bytes. */
+  sendUserInput(text: string): void;
 }
 
 /** The Ctrl+C interrupt byte (End-of-Text), sent verbatim on the no-selection path. */
 const ETX = "\x03";
+/** Line Feed / Ctrl+J: the cross-agent composer-newline input (#2337). */
+const LF = "\n";
 
 /**
  * Decide what a key event does for clipboard vs. interrupt. Returns whether xterm
@@ -62,9 +71,9 @@ const ETX = "\x03";
  *   - `false` → we fully handled it; xterm skips its own processing so it does not
  *     ALSO emit bytes for the key.
  *
- * Only Ctrl+* is claimed. Cmd+* (metaKey) and Alt+* are left untouched so macOS
- * Cmd+C/Cmd+V keep working exactly as before — the browser copies/pastes before
- * xterm ever sees the key.
+ * Only Ctrl+* clipboard gestures and bare Shift+Enter in an agent composer are
+ * claimed. Cmd+* (metaKey), Alt+*, and every Enter in a shell/process tab are left
+ * untouched so their browser/xterm/application bindings keep working as before.
  *
  * Paste note: for Ctrl+V (and Ctrl+Shift+V) we return `false` WITHOUT calling
  * preventDefault. In xterm, a custom handler that returns false makes _keyDown
@@ -79,6 +88,26 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
   // returning false there would suppress xterm's own keyup/keypress bookkeeping.
   if (ev.type !== "keydown") {
     return true;
+  }
+  // xterm maps Enter and Shift+Enter to the same CR, so the agent cannot otherwise
+  // distinguish "newline" from "submit". Both shipped agent composers recognize
+  // LF / Ctrl+J as newline without terminal-protocol negotiation. Claim ONLY the
+  // bare Shift variant in the one agent tab: plain Enter and every non-agent tab
+  // keep xterm's CR path, while Ctrl/Alt/Meta combinations remain available to the
+  // application. Terminal.input(..., true) is deliberate: unlike a direct socket
+  // write it fires xterm's onUserInput path, which scrolls to the prompt and clears
+  // an active selection before onData sends the LF.
+  if (
+    deps.composerNewline &&
+    ev.key === "Enter" &&
+    ev.shiftKey &&
+    !ev.ctrlKey &&
+    !ev.metaKey &&
+    !ev.altKey
+  ) {
+    ev.preventDefault();
+    deps.sendUserInput(LF);
+    return false;
   }
   // Leave Cmd+* (macOS) and Alt+* to the browser/xterm untouched.
   if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
