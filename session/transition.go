@@ -173,10 +173,13 @@ func BeginRestore() TransitionEvent { return TransitionEvent{kind: tkBeginRestor
 func AbortRestoreToLost() TransitionEvent { return TransitionEvent{kind: tkAbortRestoreToLost} }
 
 // MarkRestoring overlays OpRestoring WITHOUT touching liveness — the TUI's
-// optimistic restore action. It deliberately keeps liveness=Archived (unlike
-// BeginRestore, the daemon edge, which flips to Lost) so the reconcile still
-// sees the Archived→live transition and rebuilds the row (#1203), while
-// ShownArchived re-homes it into the live section eagerly (#1210).
+// optimistic restore action. It keeps whatever liveness the row had (the target
+// is {s.liveness, OpRestoring}), unlike BeginRestore, the daemon edge, which
+// flips to Lost. For the common archived→restore that means liveness stays
+// Archived, so the reconcile still sees the Archived→live transition and rebuilds
+// the row (#1203) while ShownArchived re-homes it into the live section eagerly
+// (#1210). handleRestore also offers `r` on Lost/Dead rows, where this preserves
+// that liveness instead.
 func MarkRestoring() TransitionEvent { return TransitionEvent{kind: tkMarkRestoring} }
 
 // BeginHandoff raises the OpReplacing fence before the outgoing pane is touched.

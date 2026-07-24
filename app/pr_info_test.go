@@ -630,15 +630,17 @@ func TestFetchPRInfoCmd_StampsRepoIDAtKickoff(t *testing.T) {
 // rare case. OpKilling is dropped for its own reason: a record about to be
 // deleted has no use for PR info.
 //
-// The companion TestPrInfoUpdatedMsg_SettledLiveTargetStillApplies, and the
-// pre-existing TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp (which
-// drives a LOADING instance, i.e. OpCreating), are what keep this from being
-// widened to HasInFlightOp — a session that is merely being created is coming
-// back live and still wants its badge.
+// The pre-existing TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp
+// (which drives a LOADING instance, i.e. OpCreating) is what keeps this from
+// being widened to HasInFlightOp — a session that is merely being created is
+// coming back live and still wants its badge, and that test fails if the
+// predicate is widened.
 //
-// Restore is not a counterexample either way: the TUI's own MarkRestoring keeps
-// liveness=Archived by design, so IsArchived already drops it; only the daemon's
-// BeginRestore (LiveLost+OpRestoring) is still applied.
+// Restore is deliberately outside the predicate: MarkRestoring keeps whatever
+// liveness it entered with (not a fixed Archived), and `r` is offered on Lost
+// and Dead rows too, so it routinely reaches {LiveLost, OpRestoring} — which is
+// still applied, on purpose, since a restoring session is coming back live. See
+// the handler comment for the freeze residual that follows from that.
 func TestPrInfoUpdatedMsg_TearingDownTargetDropsUpdate(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
