@@ -625,7 +625,20 @@ func (b *ptyBroker) remove(id uint64) {
 		return
 	}
 	delete(b.subs, id)
-	lastLeft := len(b.subs) == 0 && b.capturing
+	// Deliberately NOT `&& b.capturing`. A capture being DIALLED right now has
+	// capturing=false until StartCapture returns, so gating on it made the last
+	// subscriber's departure skip the teardown entirely — and the dial then
+	// installed a capture with nobody attached and nothing that would ever stop
+	// it. That window was rare while recovery was user-driven and local; #2450
+	// made it routine, because a background timer now dials across a remote
+	// WebSocket handshake bounded at ten seconds, and a browser tab closed during
+	// a sandbox outage is an ordinary thing to do.
+	//
+	// Calling maybeStopCapture unconditionally is safe and is how it converges:
+	// it re-reads the subscriber count under captureMu, so it no-ops when there is
+	// genuinely nothing to stop, and when a dial is in flight it simply waits for
+	// captureMu and then tears down the capture that dial just installed.
+	lastLeft := len(b.subs) == 0
 	b.mu.Unlock()
 	if lastLeft {
 		b.maybeStopCapture()

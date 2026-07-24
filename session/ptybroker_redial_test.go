@@ -59,7 +59,9 @@ func TestPTYBrokerReDialsWithoutANewSubscribe(t *testing.T) {
 	// The WebSocket dies under the live capture. A stays attached and parked in
 	// NextEvent; the sandbox is still healthy over REST, so nothing marks the
 	// session Lost and no external hook fires.
+	ch.mu.Lock()
 	ch.snapshot = []byte("RECOVERED")
+	ch.mu.Unlock()
 	ch.dropUpstream()
 
 	// No new subscribe anywhere in this test. That is the whole point.
@@ -238,9 +240,21 @@ func TestPTYBrokerReDialSurvivesAFlapWhileTheLoopIsExiting(t *testing.T) {
 
 // TestPTYBrokerReDialStopsWhenTheLastSubscriberLeaves pins the lazy lifecycle
 // against the new self-driving recovery: with nobody attached there is no pane to
-// keep alive, so the recovery must NOT hold a capture open. Otherwise a broker
-// whose last client detached would keep a socket dialled against the sandbox
-// forever, which is the resource leak the lazy start/stop exists to avoid.
+// keep alive, so the recovery must NOT leave a capture open. Otherwise a broker
+// whose last client detached keeps a socket dialled against the sandbox forever,
+// which is the resource leak the lazy start/stop exists to avoid.
+//
+// The subscriber detaches while the re-dial is IN FLIGHT, which is the window
+// that actually leaks. An earlier version of this test closed the subscriber
+// BEFORE the drop, so redialLoop never started — it passed with the entire
+// hand-off disabled and proved nothing. Reported in review; this is the rewrite.
+//
+// The leak it now covers: recoverCapture reads the subscriber count, then dials,
+// and only sets capturing=true once StartCapture returns. remove() used to gate
+// its teardown on `capturing`, so a departure during the dial saw capturing=false,
+// skipped maybeStopCapture, and let the completing dial install a capture with
+// zero subscribers and nothing to stop it. Rare while recovery was user-driven and
+// local; routine once a background timer dials across a remote WS handshake.
 func TestPTYBrokerReDialStopsWhenTheLastSubscriberLeaves(t *testing.T) {
 	defer setRedialTimingForTest(time.Millisecond)()
 
@@ -254,21 +268,88 @@ func TestPTYBrokerReDialStopsWhenTheLastSubscriberLeaves(t *testing.T) {
 	}
 	mustRepaintContains(t, a, "SCREEN")
 
-	// Last subscriber leaves, THEN the upstream dies. maybeStopCapture has already
-	// torn the capture down, so there is nothing to recover and nobody to recover
-	// for.
-	if err := a.Close(); err != nil {
-		t.Fatalf("close A: %v", err)
-	}
+	// Hold the NEXT dial open, so the detach below lands mid-handshake.
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	ch.mu.Lock()
+	ch.startGate, ch.gateEntered = gate, entered
+	ch.mu.Unlock()
+
+	// Release the gate on EVERY exit. Registered after the deferred br.close(), so
+	// it runs before it: a t.Fatal below would otherwise leave the dial parked
+	// holding captureMu, and close() would deadlock on it instead of reporting the
+	// real failure.
+	var gateOnce sync.Once
+	releaseGate := func() { gateOnce.Do(func() { close(gate) }) }
+	defer releaseGate()
+
 	ch.dropUpstream()
 
-	starts, _ := ch.counts()
-	time.Sleep(100 * time.Millisecond)
-	after, _ := ch.counts()
-	if after != starts {
-		t.Fatalf("StartCapture calls went %d -> %d with NO subscriber attached; the recovery must "+
-			"leave the lazy lifecycle alone and let the next subscribe bring the capture up",
-			starts, after)
+	// Wait for the dial to reach its gate. Not `starts >= 2`: that counter is
+	// incremented on the far side of the gate, so waiting on it would wait for the
+	// thing being held.
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the re-dial never reached StartCapture, so the in-flight window was never entered")
+	}
+
+	// Detach CONCURRENTLY. Close blocks: remove() hands off to maybeStopCapture,
+	// which waits for captureMu — held by the dial we are gating. That is the real
+	// shape (a detach during a slow handshake genuinely waits), so the test has to
+	// let it happen rather than serialise it and deadlock itself.
+	closed := make(chan error, 1)
+	go func() { closed <- a.Close() }()
+
+	// Give Close time to reach maybeStopCapture and park on captureMu, so the
+	// teardown is genuinely pending when the dial lands.
+	time.Sleep(50 * time.Millisecond)
+	releaseGate() // let the dial complete, with nobody attached
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close A: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("closing the last subscriber never returned — the teardown is wedged behind the dial")
+	}
+
+	// The capture that dial installed must be released, not orphaned.
+	deadline := time.Now().Add(2 * time.Second)
+	for ch.isHeld() {
+		if time.Now().After(deadline) {
+			starts, stops := ch.counts()
+			t.Fatalf("a capture is still held with NO subscriber attached: starts=%d stops=%d.\n\n"+
+				"The last subscriber left while the re-dial was in flight, so the teardown was "+
+				"skipped and the completing dial installed a socket nothing will ever close — a "+
+				"leaked capture against the sandbox for the life of the broker.", starts, stops)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestRedialDelayClimbsAndCaps locks the ladder SHAPE, which the rate-ceiling
+// test above cannot: a flat backoff pinned at redialInitialBackoff yields 30
+// dials against its ceiling of 34, so that test passes with the doubling
+// removed. This one is pure arithmetic — no timing, no flakiness.
+func TestRedialDelayClimbsAndCaps(t *testing.T) {
+	defer setRedialTimingForTest(10 * time.Millisecond)()
+
+	if got, want := redialDelay(0), redialInitialBackoff; got != want {
+		t.Errorf("redialDelay(0) = %s, want %s (the first retry waits the initial rung)", got, want)
+	}
+	if got, want := redialDelay(1), 2*redialInitialBackoff; got != want {
+		t.Errorf("redialDelay(1) = %s, want %s — the ladder must DOUBLE, not stay flat", got, want)
+	}
+	if got, want := redialDelay(2), 4*redialInitialBackoff; got != want {
+		t.Errorf("redialDelay(2) = %s, want %s", got, want)
+	}
+	// And it must saturate rather than grow without bound.
+	for _, attempt := range []int{3, 10, 1000} {
+		if got := redialDelay(attempt); got != redialMaxBackoff {
+			t.Errorf("redialDelay(%d) = %s, want the cap %s", attempt, got, redialMaxBackoff)
+		}
 	}
 }
 

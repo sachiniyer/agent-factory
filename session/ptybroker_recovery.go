@@ -225,7 +225,21 @@ func (b *ptyBroker) recoverCapture(onlyIfNoHealthyCapture bool) {
 	// readLoop begins feeding and waking subscribers IMMEDIATELY — the barrier is what
 	// keeps those bytes behind the repaint built below (#1975).
 	if err := b.ensureCaptureStartedLocked(); err != nil {
-		log.WarningLog.Printf("pty broker: restart capture after recovery: %v", err)
+		// Same reasoning as the stop-error split in ensureCaptureStartedLocked, and
+		// this is the site that fires MORE often: a failed dial is the unreachable
+		// -endpoint case, which the stop path never even reaches. redialLoop gives
+		// up only on closed / healthy / no-subscribers, so a tab left open against a
+		// down sandbox retries forever — at WARNING that is a failure line every 30s
+		// per tab, indefinitely, for a condition the user can see in the pane.
+		//
+		// The self-driven path (onlyIfNoHealthyCapture) logs it as routine; the
+		// externally-driven respawn hook keeps WARNING, because there a failure means
+		// a recovery someone asked for did not happen.
+		if onlyIfNoHealthyCapture {
+			log.InfoLog.Printf("pty broker: re-dial after upstream death failed, will retry: %v", err)
+		} else {
+			log.WarningLog.Printf("pty broker: restart capture after recovery: %v", err)
+		}
 		return
 	}
 	rp = b.recoveryRepaint()
