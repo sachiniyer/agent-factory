@@ -232,6 +232,10 @@ func TestPTYBrokerHealthyCaptureIsNotReDialled(t *testing.T) {
 // closed), a dead upstream must NOT be re-dialled. Otherwise the recovery path
 // would dial a fresh socket into a torn-down sandbox that nothing will ever
 // close — the #1632 resurrection this broker already refuses.
+//
+// This one is a LOCK, not a fail-first: the `b.closed` check short-circuits
+// before the reconcile is even reached, so it passes on master too. It is here
+// so a later change to the reconcile cannot quietly grow a resurrection path.
 func TestPTYBrokerUpstreamDeathDoesNotResurrectAClosedBroker(t *testing.T) {
 	ch := &singleSocketChannel{snapshot: []byte("SCREEN")}
 	br := newPTYBroker(ch)
