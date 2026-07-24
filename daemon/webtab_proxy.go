@@ -638,30 +638,46 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	proxy.ServeHTTP(w, r)
 }
 
-// cleanWebTabTokenBootstrap persists a credential presented directly by the
-// caller and, when the private query transport is present, redirects to the same
-// request URI without it. It reports whether it wrote that redirect.
+// cleanWebTabTokenBootstrap persists the daemon credential presented on the
+// app-origin web-tab navigation and, when the private query transport is present,
+// redirects to the same request URI without it. It reports whether it wrote that
+// redirect.
 //
 // The caller is behind withAuth, so a query value reaching this point has already
 // been compared with the daemon's token. Existing cookie-authorized requests do
 // not reissue the cookie: only a credential PRESENTED in the header or query does.
 func cleanWebTabTokenBootstrap(w http.ResponseWriter, r *http.Request) bool {
+	return cleanBootstrapToken(w, r, webtabTokenQueryParam, webtabTokenCookie, webtabPathPrefix)
+}
+
+// cleanBootstrapToken is the #2400 clean-before-render primitive, shared by the
+// app-origin web-tab flow and the preview-origin flow (#1856). It moves a
+// credential presented on the Authorization header or the private query param
+// into an HttpOnly cookie scoped to cookiePath, then — only when that query param
+// was present — redirects to the same request URI with it removed, so no app JS
+// ever sees the credential in its own window.location.
+//
+// The two callers pass DIFFERENT queryParam/cookieName so the daemon bearer and
+// the preview credential are never written to, or read from, each other's
+// transport. Keeping this one function is deliberate: two hand-copied
+// clean-before-render blocks are exactly the drift #2400's own class warns about.
+func cleanBootstrapToken(w http.ResponseWriter, r *http.Request, queryParam, cookieName, cookiePath string) bool {
 	presented := agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader))
 	if presented == "" {
-		presented = r.URL.Query().Get(webtabTokenQueryParam)
+		presented = r.URL.Query().Get(queryParam)
 	}
 	if presented != "" {
 		http.SetCookie(w, &http.Cookie{
-			Name:     webtabTokenCookie,
+			Name:     cookieName,
 			Value:    presented,
-			Path:     webtabPathPrefix,
+			Path:     cookiePath,
 			HttpOnly: true,
 			Secure:   requestIsHTTPS(r),
 			SameSite: http.SameSiteStrictMode,
 		})
 	}
 
-	cleanRawQuery := stripRawQueryParam(r.URL.RawQuery, webtabTokenQueryParam)
+	cleanRawQuery := stripRawQueryParam(r.URL.RawQuery, queryParam)
 	if cleanRawQuery == r.URL.RawQuery {
 		return false
 	}

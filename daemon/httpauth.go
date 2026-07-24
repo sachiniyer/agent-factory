@@ -61,6 +61,14 @@ type authGate struct {
 	// the token: the agent-server sets it false (mandatory token for every peer),
 	// the daemon's web listener sets it true.
 	loopbackExempt bool
+
+	// presentedToken extracts the credential a request presents. Nil ⇒
+	// webTabAwareToken, the daemon/agent-server default (Authorization header, then
+	// the ?access_token= / webtab query+cookie fallbacks). The PREVIEW listener
+	// (#1856) sets previewPresentedToken instead: it authenticates a SEPARATE
+	// ephemeral credential on a distinct query/cookie name, so the daemon bearer and
+	// the preview credential can never be read for one another.
+	presentedToken func(*http.Request) string
 }
 
 // authRequired reports whether THIS request must present a valid bearer token to
@@ -91,7 +99,11 @@ func (g *authGate) authorize(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return ConstantTimeEqual(webTabAwareToken(r), want)
+	extract := g.presentedToken
+	if extract == nil {
+		extract = webTabAwareToken
+	}
+	return ConstantTimeEqual(extract(r), want)
 }
 
 // webTabAwareToken returns the request's bearer token, resolved differently under

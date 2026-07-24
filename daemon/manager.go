@@ -15,6 +15,18 @@ import (
 type Manager struct {
 	cfg *config.Config
 
+	// previewToken is the ephemeral bearer credential for the web-tab PREVIEW
+	// listener (#1856 step 2). It is minted once, in memory, at daemon start
+	// (crypto/rand) and never written to disk — so it rotates on every restart and
+	// leaves no persistent secret. It is DELIBERATELY distinct from the daemon
+	// bearer token: the preview origin serves untrusted, repo/agent-controlled
+	// content, so a credential that leaked from there must authorize preview
+	// serving ONLY, never the control API (DeliverPrompt et al.). The preview
+	// listener's gate compares against this; an authenticated control-plane client
+	// learns it via GET /v1/preview-auth. Immutable after construction, read
+	// lock-free.
+	previewToken string
+
 	// limitDetector is the resolved usage-limit matcher set (#1146), built once
 	// from cfg.LimitPatterns at construction (it compiles the override regexes)
 	// and reused across poll ticks. Immutable; read lock-free by the poll loop.
@@ -234,6 +246,13 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	if err != nil {
 		return nil, err
 	}
+	// Mint the ephemeral preview credential (#1856 step 2). In memory only, so it
+	// never touches disk and rotates on restart; generateToken is the same 256-bit
+	// crypto/rand source the daemon bearer uses.
+	previewToken, err := generateToken()
+	if err != nil {
+		return nil, fmt.Errorf("mint preview token: %w", err)
+	}
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, "")
 	if err != nil {
@@ -251,6 +270,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	}
 	return &Manager{
 		cfg:                 cfg,
+		previewToken:        previewToken,
 		limitDetector:       task.NewLimitDetector(cfg.LimitPatterns),
 		ready:               make(chan struct{}),
 		lifecycle:           lifecycle,
