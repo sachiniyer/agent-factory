@@ -169,6 +169,47 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 	return gw.RestoreWorktreeTo(dest)
 }
 
+// ArchivedBranchForReclaim reports the branch an archived session is holding
+// when — and only when — that branch may safely be renamed aside so a new session
+// can take its title (#2127). ok is false whenever it may not be, and the caller
+// must then leave the branch alone.
+//
+// It lives here rather than in the daemon because the archived instance's
+// worktree is not reachable through GetGitWorktree: that accessor is gated on
+// `started`, which archiving clears, so a caller outside this package cannot ask
+// the question at all. Answering it here also keeps every read of gitWorktree
+// under i.mu, like the rest of this file.
+//
+// Four declines, each one a case where renaming the user's branch is worse than
+// refusing the create:
+//
+//   - Not a local worktree (hook/docker/ssh): there is no local branch to move.
+//   - No worktree or no recorded branch: nothing to reclaim.
+//   - An EXTERNAL worktree (`--here`, or a pre-#930 adopted checkout). af adopted
+//     that branch rather than creating it; renaming it is not af's call.
+//   - PUBLISHED, or an upstream that could not be determined. A rename desyncs a
+//     pushed branch's local name from the remote it tracks and from any open PR.
+//     The unknown case declines for the same reason: a probe that cannot answer
+//     must not be what authorizes rewriting a user's branch.
+func (i *Instance) ArchivedBranchForReclaim() (string, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveArchived {
+		return "", false
+	}
+	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
+		return "", false
+	}
+	gw := i.gitWorktree
+	if gw == nil || gw.GetBranchName() == "" || gw.IsExternalWorktree() {
+		return "", false
+	}
+	if published, known := gw.BranchIsPublished(); published || !known {
+		return "", false
+	}
+	return gw.GetBranchName(), true
+}
+
 // RenameArchived atomically relocates an archived instance's worktree to dest (a
 // new title-keyed archive dir) and updates its Title, so a fresh session can reuse
 // the archived session's name (feat: reuse archived name). Both mutations happen
@@ -177,12 +218,26 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 // are inert — no async Start/Recover goroutine touches them — so holding i.mu
 // across the git move only blocks a brief Snapshot RLock, never a live operation.
 //
-// The stable id, git branch, and worktree contents are preserved: only the on-disk
-// directory + git's two-way registration move, and only the display title changes.
+// The stable id and worktree contents are preserved: only the on-disk directory +
+// git's two-way registration move, and only the display title changes.
 // On a relocation failure the worktree and title are left untouched and the error
 // is surfaced, so the caller can abort the reuse without having half-renamed the
 // archived session.
-func (i *Instance) RenameArchived(newTitle, dest string) error {
+//
+// newBranch, when non-empty, moves the BRANCH aside with the title (#2127).
+// Freeing the title alone was never enough: archiving relocates the worktree
+// rather than removing it (#2013), so the archived session keeps its branch
+// checked out, and the new session — which derives that same branch — then failed
+// at `git worktree add` on a name the rename was supposed to have freed. Empty
+// keeps the branch where it is, which is what a session with no local branch to
+// move (a hook/sandbox workspace) needs.
+//
+// Branch first, worktree second, and the branch is put back if the worktree move
+// fails. Both orders leave a window; this one's window is the cheap, exactly
+// reversible half — a renamed branch with the worktree still at its old path is
+// undone by one more rename, whereas a moved worktree whose branch rename then
+// failed would need the bytes moved back to recover.
+func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.liveness != LiveArchived {
@@ -192,13 +247,30 @@ func (i *Instance) RenameArchived(newTitle, dest string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
 	}
+	oldBranch := gw.GetBranchName()
+	if newBranch != "" && newBranch != oldBranch {
+		if err := gw.RenameBranch(newBranch); err != nil {
+			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
+		}
+	}
 	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
 	// updates gw's stored worktree path — all under i.mu here, matching how
 	// ToInstanceData reads the worktree path under i.mu.RLock.
 	if err := gw.MoveWorktree(dest); err != nil {
+		if newBranch != "" && newBranch != oldBranch {
+			// Best-effort: the move already failed, so this is recovery, and a
+			// second failure must not mask the first. It is reported with it —
+			// a branch left under the new name while the record still says the
+			// old one is exactly the drift a silent rollback would hide.
+			if rbErr := gw.RenameBranch(oldBranch); rbErr != nil {
+				return fmt.Errorf("%w (and the branch could not be renamed back from %q to %q: %v)",
+					err, newBranch, oldBranch, rbErr)
+			}
+		}
 		return err
 	}
 	i.Title = newTitle
+	i.Branch = gw.GetBranchName()
 	return nil
 }
 
