@@ -8,6 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/daemon"
 )
 
 // TestInteractivePollPause_HoldsLeaseForFocusedInteractivePane is the
@@ -25,16 +27,16 @@ func TestInteractivePollPause_HoldsLeaseForFocusedInteractivePane(t *testing.T) 
 
 	var mu sync.Mutex
 	var paused, resumed []string
-	h.pauseStatusPoll = func(title, _ string) error {
+	h.pauseStatusPoll = func(request daemon.PauseStatusPollRequest) error {
 		mu.Lock()
 		defer mu.Unlock()
-		paused = append(paused, title)
+		paused = append(paused, request.Title)
 		return nil
 	}
-	h.resumeStatusPoll = func(title, _ string) error {
+	h.resumeStatusPoll = func(request daemon.ResumeStatusPollRequest) error {
 		mu.Lock()
 		defer mu.Unlock()
-		resumed = append(resumed, title)
+		resumed = append(resumed, request.Title)
 		return nil
 	}
 	run := func(cmd tea.Cmd) {
@@ -53,7 +55,7 @@ func TestInteractivePollPause_HoldsLeaseForFocusedInteractivePane(t *testing.T) 
 	h.setInteractive(true)
 	run(h.interactivePollPauseCmd())
 	assert.Equal(t, []string{inst.Title}, pausedSnap(), "entering an interactive pane holds the target's lease")
-	assert.Equal(t, inst.Title, h.interactivePauseTitle)
+	assert.Equal(t, inst.ID, h.interactivePauseTarget.id)
 
 	// Still interactive within the renew window → throttled, no extra RPC.
 	run(h.interactivePollPauseCmd())
@@ -68,7 +70,63 @@ func TestInteractivePollPause_HoldsLeaseForFocusedInteractivePane(t *testing.T) 
 	h.setInteractive(false)
 	run(h.interactivePollPauseCmd())
 	assert.Equal(t, []string{inst.Title}, resumedSnap(), "leaving interactive releases the lease")
-	assert.Empty(t, h.interactivePauseTitle)
+	assert.True(t, h.interactivePauseTarget.isZero())
+}
+
+// TestInteractivePollPause_SameTitleReplacementTransfersLease is the #2358
+// fail-first. A capture-poll lease belongs to the session being edited, not to
+// its reusable title: when a snapshot replaces the focused pane binding with a
+// different same-title session, the old lease must be released and the new
+// identity paused immediately. Comparing only titles mistakes the replacement
+// for a renewal of the old session and does neither.
+func TestInteractivePollPause_SameTitleReplacementTransfersLease(t *testing.T) {
+	h, original := liveTestHome(t)
+	stubLiveTermFactory(t)
+	h.syncLiveTermPane()
+
+	var mu sync.Mutex
+	var paused []daemon.PauseStatusPollRequest
+	var resumed []daemon.ResumeStatusPollRequest
+	h.pauseStatusPoll = func(request daemon.PauseStatusPollRequest) error {
+		mu.Lock()
+		defer mu.Unlock()
+		paused = append(paused, request)
+		return nil
+	}
+	h.resumeStatusPoll = func(request daemon.ResumeStatusPollRequest) error {
+		mu.Lock()
+		defer mu.Unlock()
+		resumed = append(resumed, request)
+		return nil
+	}
+	run := func(cmd tea.Cmd) {
+		if cmd != nil {
+			_ = cmd()
+		}
+	}
+
+	h.setInteractive(true)
+	run(h.interactivePollPauseCmd())
+	require.Equal(t, original.ID, h.interactivePauseTarget.id, "precondition: original lease is retained")
+
+	replacement := startedLocalInstance(t, "replacement")
+	replacement.Title = original.Title
+	require.NotEqual(t, original.ID, replacement.ID, "replacement must have a distinct stable identity")
+	require.Equal(t, original.Title, replacement.Title, "replacement must reuse the exact title")
+	require.True(t, h.store.ReplaceInstanceByTitle(original.Title, replacement))
+	require.Same(t, replacement, h.focusedOpenPane().Instance(), "focused pane must now bind the replacement")
+	require.True(t, h.interactive, "replacement must occur while the pane remains interactive")
+	require.Equal(t, original.ID, h.interactivePauseTarget.id, "old identity lease must still be retained")
+	h.interactivePauseAt = time.Now() // stay inside the title-only renewal throttle
+
+	run(h.interactivePollPauseCmd())
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, paused, 2, "replacement identity must acquire its own pause immediately")
+	require.Len(t, resumed, 1, "the original identity's pause must be released")
+	require.Equal(t, []string{original.ID, replacement.ID}, []string{paused[0].ID, paused[1].ID})
+	require.Equal(t, original.ID, resumed[0].ID)
 }
 
 // TestInteractivePollPause_NoLeaseWhileFullScreenAttached pins that the
@@ -82,13 +140,13 @@ func TestInteractivePollPause_NoLeaseWhileFullScreenAttached(t *testing.T) {
 
 	var mu sync.Mutex
 	var paused []string
-	h.pauseStatusPoll = func(title, _ string) error {
+	h.pauseStatusPoll = func(request daemon.PauseStatusPollRequest) error {
 		mu.Lock()
 		defer mu.Unlock()
-		paused = append(paused, title)
+		paused = append(paused, request.Title)
 		return nil
 	}
-	h.resumeStatusPoll = func(string, string) error { return nil }
+	h.resumeStatusPoll = func(daemon.ResumeStatusPollRequest) error { return nil }
 
 	h.setInteractive(true)
 	h.attached.Store(true) // full-screen attach owns the lease now
@@ -98,5 +156,5 @@ func TestInteractivePollPause_NoLeaseWhileFullScreenAttached(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Empty(t, paused, "the embedded path must not pause while full-screen attached")
-	assert.Empty(t, h.interactivePauseTitle)
+	assert.True(t, h.interactivePauseTarget.isZero())
 }

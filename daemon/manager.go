@@ -153,9 +153,10 @@ type Manager struct {
 	instanceOpLocks map[string]*sync.Mutex
 
 	// pausedPolls records sessions whose daemon capture-pane liveness poll is
-	// paused while a TUI is attached full-screen to them (#1160), keyed by
-	// daemon instance key → lease expiry. Guarded by pausedMu, a DEDICATED
-	// mutex (NOT m.mu): refreshInstanceStatus deliberately snapshots under m.mu
+	// paused while a TUI is attached full-screen to them (#1160), keyed by stable
+	// session ID when the client has one and by daemon instance key only for
+	// legacy ID-less callers. Guarded by pausedMu, a DEDICATED mutex (NOT m.mu):
+	// refreshInstanceStatus deliberately snapshots under m.mu
 	// and then runs each slow tmux probe with m.mu RELEASED so a hung probe
 	// can't block unrelated RPCs — the pause check runs inside that lock-free
 	// window, so reusing m.mu would reintroduce exactly the contention the
@@ -166,14 +167,13 @@ type Manager struct {
 	pausedPolls map[string]time.Time
 	// taskRunProbeDue schedules the backstop observation for a PAUSED session whose
 	// task run is still in flight (#1892). Guarded by pausedMu (the same lock as
-	// pausedPolls) but keyed by remoteLossKey — the stable instance ID — NOT by
-	// pausedPolls' daemonInstanceKey: taskRunBackstopDue is its only writer and keys
-	// it that way, so a same-title successor never inherits a predecessor's stale due
-	// time. An attach suppresses the liveness probe, and the cap's slot is released
+	// pausedPolls) but keyed by remoteLossKey — the stable instance ID — rather
+	// than the legacy daemon-instance-key lease fallback. An attach suppresses the
+	// liveness probe, and the cap's slot is released
 	// by observing the agent go idle — so without a bounded backstop a user watching
 	// their own task run silently stalls the task. Entries live only while the
 	// session is paused: ResumeStatusPoll drops one on a clean detach (matching the
-	// writer's key), and sweepTaskRunProbeDue reclaims any whose lease lapsed or
+	// writer's key), and sweepPausedPollState reclaims any whose lease lapsed or
 	// whose session was torn down, so the map tracks pausedPolls and never grows
 	// unbounded over the daemon's lifetime (#2015).
 	taskRunProbeDue map[string]time.Time

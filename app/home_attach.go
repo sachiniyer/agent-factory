@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -155,7 +156,7 @@ func SetAttachStreamFnForTest(fn func(context.Context, string, string, string, i
 // terminal-tab) all funnel through one place — and so the pause-while-attached
 // gating + the flag-clears-on-error path are testable without spinning up
 // a real WS stream.
-func (m *home) attachOverlayCallback(title, label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
+func (m *home) attachOverlayCallback(target sessionActionTarget, label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
 	detachTraceMark(label + "-onDismiss-entry" + traceSuffix)
 	// Snapshot the terminal-write seam ONCE, here, before the attach starts —
 	// same rule as the per-home seams captured below and as apiclient's attach
@@ -188,16 +189,15 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, attach fu
 	// heartbeat renews the daemon's lease-bounded pause until detach; the pause
 	// is best-effort so a down/slow daemon never disturbs the attach.
 	//
-	// Capture the seams + repoID off the home HERE, on the event loop, before
+	// Capture the seams off the home HERE, on the event loop, before
 	// any goroutine spawns: the seams are per-home fields (not shared globals)
 	// precisely so the goroutines never read home state a sibling test could
 	// reassign under `go test -parallel -race` (the #964 / #960-PR4 race class).
 	pause := m.pauseStatusPoll
 	resume := m.resumeStatusPoll
-	repoID := m.repoID
 	pauseDone := make(chan struct{})
 	heartbeatExited := make(chan struct{})
-	go runStatusPollPauseHeartbeat(pause, title, repoID, pauseDone, heartbeatExited)
+	go runStatusPollPauseHeartbeat(pause, target.pauseStatusPollRequest(), pauseDone, heartbeatExited)
 
 	m.attached.Store(true)
 	defer m.attached.Store(false)
@@ -217,7 +217,7 @@ func (m *home) attachOverlayCallback(title, label, traceSuffix string, attach fu
 	// never blocks on the wait or the RPC — attach/detach responsiveness is the
 	// whole point of #1160.
 	close(pauseDone)
-	go runStatusPollResume(resume, title, repoID, heartbeatExited)
+	go runStatusPollResume(resume, target.resumeStatusPollRequest(), heartbeatExited)
 	detachStart := time.Now()
 	detachTraceMark(label + "-<-ch-unblocked" + traceSuffix)
 	m.attachTransitioning = false
@@ -337,18 +337,18 @@ const statusPollRenewInterval = 1 * time.Second
 
 // runStatusPollPauseHeartbeat pauses the daemon's capture-pane poll for the
 // attached instance and renews that lease every statusPollRenewInterval until
-// done closes (detach), then closes exited. pause + repoID are captured off the
+// done closes (detach), then closes exited. pause + request are captured off the
 // event loop by the caller so this goroutine never touches shared home state
 // (#964 race class). Every RPC is best-effort — a down/slow daemon logs and
 // continues, never disturbing the attach (worst case the daemon keeps polling,
 // the pre-#1160 behavior). Because pause() is called SYNCHRONOUSLY in the loop,
 // once this goroutine returns no pause RPC is in-flight or pending, so exited
 // firing is the signal a following resume can safely win the wire.
-func runStatusPollPauseHeartbeat(pause func(title, repoID string) error, title, repoID string, done <-chan struct{}, exited chan<- struct{}) {
+func runStatusPollPauseHeartbeat(pause func(daemon.PauseStatusPollRequest) error, request daemon.PauseStatusPollRequest, done <-chan struct{}, exited chan<- struct{}) {
 	defer close(exited)
 	send := func() {
-		if err := pause(title, repoID); err != nil {
-			log.ErrorLog.Printf("failed to pause daemon status poll for %q: %v", title, err)
+		if err := pause(request); err != nil {
+			log.ErrorLog.Printf("failed to pause daemon status poll for %q: %v", request.Title, err)
 		}
 	}
 	send() // pause immediately on attach, before the first renew tick
@@ -368,12 +368,12 @@ func runStatusPollPauseHeartbeat(pause func(title, repoID string) error, title, 
 // resumes immediately rather than after the lease expires (#1160). It waits for
 // heartbeatExited FIRST so the resume RPC strictly follows the heartbeat's final
 // pause() — guaranteeing resume wins over any in-flight pause instead of racing
-// it (Greptile P). resume + repoID are captured off the event loop by the
+// it (Greptile P). resume + request are captured off the event loop by the
 // caller (#964 race class). Best-effort; the caller runs this on its own
 // goroutine so the detach hot path never blocks on the wait or the RPC.
-func runStatusPollResume(resume func(title, repoID string) error, title, repoID string, heartbeatExited <-chan struct{}) {
+func runStatusPollResume(resume func(daemon.ResumeStatusPollRequest) error, request daemon.ResumeStatusPollRequest, heartbeatExited <-chan struct{}) {
 	<-heartbeatExited
-	if err := resume(title, repoID); err != nil {
-		log.ErrorLog.Printf("failed to resume daemon status poll for %q: %v", title, err)
+	if err := resume(request); err != nil {
+		log.ErrorLog.Printf("failed to resume daemon status poll for %q: %v", request.Title, err)
 	}
 }

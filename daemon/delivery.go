@@ -89,7 +89,21 @@ func (e *notAttemptedError) Is(target error) bool { return target == errNotAttem
 // user is typing in (#1638). Only automated deliveries set DeferWhileAttached; a
 // manual send-prompt is an explicit user action and still lands immediately.
 func (m *Manager) deferWhileAttached(repoID string, req DeliverPromptRequest) bool {
-	return req.DeferWhileAttached && m.isPollPaused(repoID, req.Title)
+	if !req.DeferWhileAttached {
+		return false
+	}
+	// DeliverPrompt addresses the row by title, but the pause lease belongs to
+	// its stable identity. Resolve only the already-tracked row here; an absent
+	// row cannot be attached, while legacy ID-less pauses still use the title
+	// fallback inside isPollPaused.
+	m.mu.Lock()
+	instance := m.instances[daemonInstanceKey(repoID, req.Title)]
+	id := ""
+	if instance != nil {
+		id = instance.ID
+	}
+	m.mu.Unlock()
+	return m.isPollPaused(repoID, req.Title, id)
 }
 
 // DeliverPrompt delivers a prompt to a target session, auto-creating that

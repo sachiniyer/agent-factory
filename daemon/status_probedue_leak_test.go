@@ -60,14 +60,14 @@ func TestResumeStatusPoll_FreesTaskRunProbeDueEntry(t *testing.T) {
 
 	// Attach: pause the poll, then one refresh ARMS the backstop timer (the first
 	// paused tick only arms; see taskRunBackstopDue).
-	manager.PauseStatusPoll(repoID, "attached-run")
+	manager.PauseStatusPoll(repoID, "attached-run", "")
 	manager.RefreshStatuses()
 	if n := probeDueLen(manager); n != 1 {
 		t.Fatalf("after arming, taskRunProbeDue size = %d, want 1 (a paused task run must arm its backstop)", n)
 	}
 
 	// Detach: a clean ResumeStatusPoll must reclaim the armed entry.
-	manager.ResumeStatusPoll(repoID, "attached-run")
+	manager.ResumeStatusPoll(repoID, "attached-run", "")
 	if n := probeDueLen(manager); n != 0 {
 		t.Fatalf("after clean detach, taskRunProbeDue size = %d, want 0 — the entry leaked (#2015: cleanup keyed by the wrong function)", n)
 	}
@@ -83,7 +83,7 @@ func TestRefreshStatuses_SweepsLapsedTaskRunProbeDue(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerTaskRun(t, manager, repoID, repoPath, "crashed-attach")
 
-	manager.PauseStatusPoll(repoID, "crashed-attach")
+	manager.PauseStatusPoll(repoID, "crashed-attach", "")
 	manager.RefreshStatuses() // arms
 	if n := probeDueLen(manager); n != 1 {
 		t.Fatalf("after arming, taskRunProbeDue size = %d, want 1", n)
@@ -105,7 +105,7 @@ func TestRefreshStatuses_SweepsTornDownTaskRunProbeDue(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerTaskRun(t, manager, repoID, repoPath, "torn-down")
 
-	manager.PauseStatusPoll(repoID, "torn-down")
+	manager.PauseStatusPoll(repoID, "torn-down", "")
 	manager.RefreshStatuses() // arms
 	if n := probeDueLen(manager); n != 1 {
 		t.Fatalf("after arming, taskRunProbeDue size = %d, want 1", n)

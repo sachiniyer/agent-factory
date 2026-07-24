@@ -230,49 +230,48 @@ func (m *home) paneIsPreviewing(p *store.OpenPane) bool {
 func (m *home) interactivePollPauseCmd() tea.Cmd {
 	// The session the user is actively typing into in-pane, if any. Interactive
 	// mode is only ever true while the FOCUSED pane has a live attachment, whose
-	// instance is a local, started session, so its title keys the same daemon pause
-	// map full-screen attach uses.
-	want := ""
+	// instance is a local, started session. Capture the same stable identity the
+	// full-screen attach heartbeat uses; title is only legacy/display context.
+	want := sessionActionTarget{}
 	if m.interactive && !m.attached.Load() {
 		if p := m.focusedOpenPane(); p != nil {
 			if inst := p.Instance(); inst != nil {
-				want = inst.Title
+				want = captureSessionActionTarget(inst, m.repoID)
 			}
 		}
 	}
 
-	// Capture the seams + repoID on the event loop before any goroutine reads them
+	// Capture the seams on the event loop before any goroutine reads them
 	// (the #964 per-home-field discipline).
-	repoID := m.repoID
 	pause := m.pauseStatusPoll
 	resume := m.resumeStatusPoll
 
-	if want == "" {
-		if m.interactivePauseTitle == "" {
+	if want.isZero() {
+		if m.interactivePauseTarget.isZero() {
 			return nil
 		}
 		// Interactive ended (or focus left the pane): release the lease now so the
 		// daemon resumes delivering into the session immediately.
-		release := m.interactivePauseTitle
-		m.interactivePauseTitle = ""
+		release := m.interactivePauseTarget.resumeStatusPollRequest()
+		m.interactivePauseTarget = sessionActionTarget{}
 		m.interactivePauseAt = time.Time{}
 		return func() tea.Msg {
-			_ = resume(release, repoID)
+			_ = resume(release)
 			return nil
 		}
 	}
 
-	if want != m.interactivePauseTitle {
+	if !want.sameIdentity(m.interactivePauseTarget) {
 		// Newly interactive on this session (or the focused session changed): release
 		// any previous hold and pause the new target.
-		prev := m.interactivePauseTitle
-		m.interactivePauseTitle = want
+		prev := m.interactivePauseTarget
+		m.interactivePauseTarget = want
 		m.interactivePauseAt = time.Now()
 		return func() tea.Msg {
-			if prev != "" {
-				_ = resume(prev, repoID)
+			if !prev.isZero() {
+				_ = resume(prev.resumeStatusPollRequest())
 			}
-			_ = pause(want, repoID)
+			_ = pause(want.pauseStatusPollRequest())
 			return nil
 		}
 	}
@@ -284,7 +283,7 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 	}
 	m.interactivePauseAt = time.Now()
 	return func() tea.Msg {
-		_ = pause(want, repoID)
+		_ = pause(want.pauseStatusPollRequest())
 		return nil
 	}
 }

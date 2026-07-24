@@ -76,8 +76,8 @@ func TestAttachedTaskRunReleasesItsSlotOnCompletion(t *testing.T) {
 	}
 
 	// The user attaches full-screen and the TUI starts renewing the pause.
-	manager.PauseStatusPoll(repo.ID, data.Title)
-	if !manager.isPollPaused(repo.ID, data.Title) {
+	manager.PauseStatusPoll(repo.ID, data.Title, "")
+	if !manager.isPollPaused(repo.ID, data.Title, "") {
 		t.Fatal("precondition: the attach must actually pause the poll")
 	}
 
@@ -91,8 +91,8 @@ func TestAttachedTaskRunReleasesItsSlotOnCompletion(t *testing.T) {
 	// The attach continues — renewed, so the lease never lapses. The backstop is
 	// what has to save this; the pause itself never will.
 	advance(taskRunPollBackstop + time.Second)
-	manager.PauseStatusPoll(repo.ID, data.Title)
-	if !manager.isPollPaused(repo.ID, data.Title) {
+	manager.PauseStatusPoll(repo.ID, data.Title, "")
+	if !manager.isPollPaused(repo.ID, data.Title, "") {
 		t.Fatal("precondition: the TUI renews the lease, so the poll stays paused — this bug is not fixed by the lease lapsing")
 	}
 	manager.RefreshStatuses()
@@ -133,11 +133,11 @@ func TestAttachedTaskRunKeepsItsSlotWhileWorking(t *testing.T) {
 
 	// A working agent: the pane keeps changing.
 	inst.SetBackend(busyFakeBackend{session.NewFakeBackend()})
-	manager.PauseStatusPoll(repo.ID, data.Title)
+	manager.PauseStatusPoll(repo.ID, data.Title, "")
 
 	for i := 0; i < 3; i++ {
 		advance(taskRunPollBackstop + time.Second)
-		manager.PauseStatusPoll(repo.ID, data.Title)
+		manager.PauseStatusPoll(repo.ID, data.Title, "")
 		manager.RefreshStatuses()
 	}
 	if !inst.TaskRunActive() {
@@ -181,10 +181,10 @@ func TestAttachedTaskRunIsNeverMarkedLost(t *testing.T) {
 	// no dead session could serve. The normal poll marks this Lost; the backstop
 	// must not.
 	inst.SetBackend(deadTmuxBackend{session.NewFakeBackend()})
-	manager.PauseStatusPoll(repo.ID, data.Title)
+	manager.PauseStatusPoll(repo.ID, data.Title, "")
 	for i := 0; i < 3; i++ {
 		advance(taskRunPollBackstop + time.Second)
-		manager.PauseStatusPoll(repo.ID, data.Title)
+		manager.PauseStatusPoll(repo.ID, data.Title, "")
 		manager.RefreshStatuses()
 	}
 	if got := inst.GetStatus(); got == session.Lost {

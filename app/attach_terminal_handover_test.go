@@ -68,7 +68,7 @@ func TestAttachOverlayCallback_ReleasesTerminalAroundTheAttach(t *testing.T) {
 	ch := make(chan struct{})
 	done := make(chan tea.Cmd, 1)
 	go func() {
-		done <- h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
+		done <- h.attachOverlayCallback(testAttachTarget(h, "t1"), "test-attach", "", func() (chan struct{}, error) {
 			rec.record("attach")
 			return ch, nil
 		})
@@ -121,7 +121,7 @@ func TestAttachOverlayCallback_ReclaimsTerminalWhenAttachFails(t *testing.T) {
 	var out bytes.Buffer
 	swapRemoteDetachResetWriter(t, &out)
 
-	cmd := h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
+	cmd := h.attachOverlayCallback(testAttachTarget(h, "t1"), "test-attach", "", func() (chan struct{}, error) {
 		rec.record("attach")
 		return nil, assert.AnError
 	})
@@ -330,7 +330,7 @@ func TestAttachOwnsTheTerminalAlone(t *testing.T) {
 	callbackDone := make(chan struct{})
 	go func() {
 		defer close(callbackDone)
-		h.attachOverlayCallback("t1", "test-attach", "", func() (chan struct{}, error) {
+		h.attachOverlayCallback(testAttachTarget(h, "t1"), "test-attach", "", func() (chan struct{}, error) {
 			go func() {
 				var got []byte
 				buf := make([]byte, 32) // the attach pump's read size

@@ -26,6 +26,23 @@ func captureSessionActionTarget(inst *session.Instance, repoID string) sessionAc
 	}
 }
 
+func (target sessionActionTarget) isZero() bool {
+	return target.id == "" && target.title == "" && target.repoID == "" && target.createdAt.IsZero()
+}
+
+// sameIdentity compares the immutable part of two retained targets. A stable ID
+// is authoritative; pre-ID records fall back to the same non-zero CreatedAt
+// policy resolveSessionActionTarget uses.
+func (target sessionActionTarget) sameIdentity(other sessionActionTarget) bool {
+	if target.repoID != other.repoID {
+		return false
+	}
+	if target.id != "" || other.id != "" {
+		return target.id != "" && target.id == other.id
+	}
+	return target.title == other.title && !target.createdAt.IsZero() && target.createdAt.Equal(other.createdAt)
+}
+
 // resolveSessionActionTarget resolves target only inside the project that
 // captured it. A non-empty ID is authoritative and never falls back to title.
 // Legacy records use the same non-zero CreatedAt fallback as snapshot
@@ -67,6 +84,14 @@ func (target sessionActionTarget) restoreRequest() daemon.RestoreSessionRequest 
 
 func (target sessionActionTarget) setPRInfoRequest(info session.PRInfoData) daemon.SetPRInfoRequest {
 	return daemon.SetPRInfoRequest{ID: target.id, Title: target.title, RepoID: target.repoID, PRInfo: info}
+}
+
+func (target sessionActionTarget) pauseStatusPollRequest() daemon.PauseStatusPollRequest {
+	return daemon.PauseStatusPollRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
+}
+
+func (target sessionActionTarget) resumeStatusPollRequest() daemon.ResumeStatusPollRequest {
+	return daemon.ResumeStatusPollRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
 
 func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessionRequest {

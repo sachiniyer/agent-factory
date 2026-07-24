@@ -44,8 +44,8 @@ func TestHandleEnterAttachesCapturedInstanceAfterSelectionDrift(t *testing.T) {
 	// into the attach closure at Enter-press time (#716), so a title of
 	// "instance-b" here would mean the code re-read the drifted live selection.
 	var attachedTitle string
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
-		attachedTitle = title
+	swapAttachOverlayCallbackFn(t, func(m *home, target sessionActionTarget, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
+		attachedTitle = target.title
 		return nil
 	})
 
@@ -76,7 +76,7 @@ func TestFirstRunAttachHelpEscCancelsAttach(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	attached := 0
-	swapAttachOverlayCallbackFn(t, func(m *home, title, label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
+	swapAttachOverlayCallbackFn(t, func(m *home, target sessionActionTarget, label, traceSuffix string, attach func() (chan struct{}, error)) tea.Cmd {
 		attached++
 		return nil
 	})

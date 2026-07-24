@@ -35,7 +35,7 @@ func TestDeliverPrompt_ReemergingRootDefersWhileAttached(t *testing.T) {
 
 	// A TUI attaches full-screen to root before it exists — the pause-poll lease
 	// is keyed by (repoID, title) and needs no live session.
-	manager.PauseStatusPoll(repo.ID, session.RootSessionTitle)
+	manager.PauseStatusPoll(repo.ID, session.RootSessionTitle, "")
 
 	// A short while into the delivery's wait, the ensure loop re-materializes root
 	// in place. The delivery must then DEFER (attached), not send.
@@ -100,7 +100,7 @@ func TestDeliverPrompt_ConcurrentCreateDefersWhileAttached(t *testing.T) {
 	manager.mu.Unlock()
 
 	// A TUI attaches BEFORE the session exists.
-	manager.PauseStatusPoll(repo.ID, "captain")
+	manager.PauseStatusPoll(repo.ID, "captain", "")
 
 	var wg sync.WaitGroup
 	var status string
