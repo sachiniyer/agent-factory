@@ -41,15 +41,14 @@ const hookWaitDelay = 2 * time.Second
 // readiness wait uses it so a slow build hook running concurrently with the
 // agent is not charged against the agent's startup budget (see task.WaitForReady).
 func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath string) <-chan struct{} {
-	return RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, worktreePath, "", nil)
+	return RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, worktreePath, nil)
 }
 
 // RunPostWorktreeHooksAsyncWithEnvironment is the session-aware form used by
 // GitWorktree. Repository-provided commands receive common Git/runtime names
 // plus only the operator's explicit extensions. Selecting an agent for the
-// session does not grant that agent's provider credentials to repository code;
-// the agent parameter remains only for compatibility with existing callers.
-func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath, _ string, passthrough []string) <-chan struct{} {
+// session does not grant that agent's provider credentials to repository code.
+func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath string, passthrough []string) <-chan struct{} {
 	done := make(chan struct{})
 	repoCfg, err := config.ResolveConfig(repoPath)
 	if err != nil {

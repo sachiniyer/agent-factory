@@ -49,8 +49,7 @@ func (g *GitWorktree) Setup() error {
 	}
 
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath,
-		"", g.hookEnvPassthrough)
+	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
 	return nil
 }
 
@@ -82,8 +81,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	}
 	g.branchCreatedByUs = branchCreatedByUs
 
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath,
-		"", g.hookEnvPassthrough)
+	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
 	return nil
 }
 
@@ -123,8 +121,7 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 
 	g.baseCommitSHA = baseCommit
 	g.branchCreatedByUs = true
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath,
-		"", g.hookEnvPassthrough)
+	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
 	return nil
 }
 

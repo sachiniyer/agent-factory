@@ -113,9 +113,9 @@ type GitWorktree struct {
 }
 
 // SetHookEnvironment sets exact operator-approved names used by post-worktree
-// commands. The agent parameter remains for compatibility but never grants
-// provider credentials to repository code. Call this before Setup or rebuild.
-func (g *GitWorktree) SetHookEnvironment(_ string, names []string) error {
+// commands. Post-worktree commands never receive an agent's provider
+// credentials. Call this before Setup or rebuild.
+func (g *GitWorktree) SetHookEnvironment(names []string) error {
 	normalized, err := sessionenv.NormalizeExtraNames(names)
 	if err != nil {
 		return err

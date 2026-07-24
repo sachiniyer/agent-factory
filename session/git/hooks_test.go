@@ -30,7 +30,7 @@ func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T
 	repoPath := freshRepoConfig(t, []string{
 		fmt.Sprintf(`env | sed 's/=.*//' | sort > %q`, namesPath),
 	})
-	done := RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), "codex", []string{customName})
+	done := RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), []string{customName})
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
