@@ -63,6 +63,29 @@ var (
 	// again in…" (relative, openai/codex#3031) — so it is intentionally not
 	// anchored here.
 	codexLimitDetect = regexp.MustCompile(`You've hit your usage limit`)
+
+	// devinLimitDetect matches devin's usage-quota exhaustion banner (#2411).
+	//
+	// INFERRED, NOT OBSERVED LIVE. #2410 deliberately gave devin no limit matcher
+	// because its exhausted-state banner was never captured — the account was not
+	// driven to exhaustion. This pattern is inferred from the devin binary's
+	// strings and its published docs, so it is a best-effort DETECT: it is keyed on
+	// the distinctive exhaustion phrase and nothing else, and it is matched
+	// case-insensitively for resilience to display casing.
+	//
+	// It must NOT fire on devin's HEALTHY quota-status displays, which show the
+	// same "quota" vocabulary — "59% remaining", "(resets in 3d)", "Quota used:",
+	// "Quota resets" — none of which contain the exhaustion clause. Those
+	// non-matches are pinned in the tests.
+	//
+	// Detect-only, parseReset nil: the exhausted-state reset format is likewise
+	// uncharacterized, so this surfaces the stall (badge + manual resume) without
+	// claiming a reset time it cannot parse — the same posture claude/codex fall
+	// back to when their reset clause is unparseable. Auto-resume is deliberately
+	// NOT wired here; it needs a trustworthy reset time, which this does not have.
+	// When a real exhausted-state banner is captured, replace this inference and
+	// add a parseReset.
+	devinLimitDetect = regexp.MustCompile(`(?i)usage quota has been exhausted`)
 )
 
 // builtinLimitMatchers returns a fresh map of the shipped per-agent matchers.
@@ -72,6 +95,10 @@ func builtinLimitMatchers() map[string]agentLimitMatcher {
 	return map[string]agentLimitMatcher{
 		tmux.ProgramClaude: {detect: claudeLimitDetect, parseReset: parseClaudeReset},
 		tmux.ProgramCodex:  {detect: codexLimitDetect, parseReset: parseCodexReset},
+		// devin is DETECT-ONLY (#2411): its exhaustion banner is inferred, not
+		// captured, and its reset format is uncharacterized — so no parseReset and
+		// no auto-resume. See devinLimitDetect.
+		tmux.ProgramDevin: {detect: devinLimitDetect, parseReset: nil},
 	}
 }
 
@@ -149,7 +176,7 @@ func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, re
 //
 // Return contract:
 //   - hit=false: no banner for this agent (or an agent with no matcher, e.g.
-//     any non-claude/codex agent in v1). resetAt/hasResetTime are zero.
+//     gemini/aider/amp/opencode). resetAt/hasResetTime are zero.
 //   - hit=true, hasResetTime=true: banner detected and a reset time parsed;
 //     resetAt is that time in UTC.
 //   - hit=true, hasResetTime=false: banner detected but the reset time was

@@ -309,7 +309,7 @@ Because the default profile skips permission prompts, only opt in repositories w
 
 > This section covers the two auto-resume config keys. For the whole usage-limit feature end to end — detection, the `[limit]` badge, manual retry, auto-resume, and task park-don't-fail — see [docs/usage-limits.md](usage-limits.md).
 
-When a `claude` or `codex` session hits a plan usage-limit wall, af marks it with a `[limit]` badge in the sidebar and — when the banner states a reset time — shows when the limit resets. By default the row stays there until you resume it yourself (the `c` key on the session).
+When a `claude`, `codex`, or `devin` session hits a plan usage-limit wall, af marks it with a `[limit]` badge in the sidebar and — when the banner states a reset time — shows when the limit resets (`devin` is detect-only and carries no reset time). By default the row stays there until you resume it yourself (the `c` key on the session).
 
 `limit_auto_resume = true` opts the **daemon** into resuming such a session on its own once the limit window has elapsed:
 
@@ -330,10 +330,11 @@ Resuming re-delivers the session's stored task prompt (task-driven sessions resu
 
 ### Custom usage-limit detection (`limit_patterns`)
 
-The built-in usage-limit detection recognizes the shipped `claude`/`codex`
-banners. If an agent reworded its banner, override the **detection** regex per
-agent with `limit_patterns`; the built-in reset-time parser is kept, so a custom
-detect pattern still schedules auto-resume against the parsed reset time.
+The built-in usage-limit detection recognizes the shipped `claude`, `codex`, and
+`devin` banners. If an agent reworded its banner, override the **detection** regex
+per agent with `limit_patterns`; the built-in reset-time parser (where the agent
+has one) is kept, so a custom detect pattern still schedules auto-resume against
+the parsed reset time.
 
 ```toml
 [limit_patterns]
@@ -342,7 +343,8 @@ codex  = "You've hit your usage limit"
 ```
 
 - Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`).
-- An override for an agent with no built-in matcher (`aider`/`gemini`/`amp`/`opencode`/`devin` today) is ignored with a warning — af ships built-in reset-banner matchers only for `claude`/`codex`. (`devin` tracks its own separate quota and shows a persistent "N% remaining" line, but af does not yet parse a devin limit-reached banner.)
+- An override for an agent with no built-in matcher (`aider`/`gemini`/`amp`/`opencode` today) is ignored with a warning — af ships built-in matchers for `claude`, `codex`, and `devin` only.
+- `devin` is **detect-only**: it gets the `[limit]` badge but no reset time (its exhaustion banner is inferred from the binary and docs rather than captured live, and its reset format is uncharacterized), so it never auto-resumes on a parsed time — it waits for your manual `c` retry, or the `limit_retry_interval` fallback if `limit_auto_resume` is on. Its healthy `N% remaining` / `resets in …` quota-status line is not treated as a limit.
 - An uncompilable regex warns and falls back to the built-in default, so a typo can never disable detection.
 - `limit_patterns` is a detection tweak, not a behavior switch: it is honored everywhere the built-in detector runs (the daemon status poll, and the task-run startup park path).
 

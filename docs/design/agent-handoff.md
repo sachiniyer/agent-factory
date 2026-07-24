@@ -371,10 +371,12 @@ worth keeping; here it holds everything the outgoing agent did.
 
 ### 5.1 Who can trigger a handoff
 
-Only **claude** and **codex** — they are the only agents with limit detection
-(`task/limit.go:71`), because they are the only plan-metered ones with a parseable
-reset window. gemini/aider/amp/opencode are API-key-metered; a "limit" there is a
-transient 429 the CLI already retries (`docs/usage-limits.md:12-25`). Unchanged
+Only **claude** and **codex** — as of this design, the only agents with limit
+detection (`task/limit.go`), because they are the only plan-metered ones with a
+parseable reset window. (#2411 later added **devin** as a *detect-only* matcher —
+badge + manual retry, no reset time — so a limited devin session can now trigger a
+handoff too.) gemini/aider/amp/opencode are API-key-metered; a "limit" there is a
+transient 429 the CLI already retries (`docs/usage-limits.md`). Unchanged
 by this design.
 
 ### 5.2 Who can receive one

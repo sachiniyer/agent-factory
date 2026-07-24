@@ -123,6 +123,47 @@ func TestIsLimitContent(t *testing.T) {
 			wantHit:   true,
 			wantReset: false,
 		},
+		// devin (#2411): detect-only. The exhaustion banner is a hit with NO reset
+		// time (the format is uncharacterized), and devin's HEALTHY quota-status
+		// displays — which share the "quota" vocabulary — must NOT trip it.
+		{
+			name:      "devin usage-quota exhausted -> hit, no reset (detect-only)",
+			agent:     tmux.ProgramDevin,
+			content:   "Your usage quota has been exhausted. Upgrade your plan to continue.",
+			wantHit:   true,
+			wantReset: false,
+		},
+		{
+			name:      "devin exhaustion banner is case-insensitive",
+			agent:     tmux.ProgramDevin,
+			content:   "USAGE QUOTA HAS BEEN EXHAUSTED",
+			wantHit:   true,
+			wantReset: false,
+		},
+		{
+			name:    "devin healthy: percent remaining is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "❭ 59% remaining, resets in 3d",
+			wantHit: false,
+		},
+		{
+			name:    "devin healthy: (resets clause is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "Quota: 12% used (resets in 3 days)",
+			wantHit: false,
+		},
+		{
+			name:    "devin healthy: Quota used: line is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "Quota used: 41%",
+			wantHit: false,
+		},
+		{
+			name:    "devin healthy: Quota resets line is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "Quota resets in 2 days",
+			wantHit: false,
+		},
 		{
 			name:      "codex banner present but no reset phrase -> hit, no reset",
 			agent:     tmux.ProgramCodex,
@@ -233,6 +274,14 @@ func TestResolveLimitMatchers(t *testing.T) {
 	}
 	if _, ok := base[tmux.ProgramCodex]; !ok {
 		t.Fatalf("built-in codex matcher missing")
+	}
+	// devin has a DETECT-ONLY matcher (#2411): present, but with no reset parser.
+	devinMatcher, ok := base[tmux.ProgramDevin]
+	if !ok {
+		t.Fatalf("built-in devin matcher missing")
+	}
+	if devinMatcher.parseReset != nil {
+		t.Fatalf("devin must be detect-only: parseReset must be nil (no auto-resume from an uncharacterized reset format)")
 	}
 	if _, ok := base[tmux.ProgramGemini]; ok {
 		t.Fatalf("gemini should have no matcher in v1")
