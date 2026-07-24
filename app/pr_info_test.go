@@ -633,8 +633,12 @@ func TestFetchPRInfoCmd_StampsRepoIDAtKickoff(t *testing.T) {
 // The companion TestPrInfoUpdatedMsg_SettledLiveTargetStillApplies, and the
 // pre-existing TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp (which
 // drives a LOADING instance, i.e. OpCreating), are what keep this from being
-// widened to HasInFlightOp — a session that is merely creating or restoring is
-// coming back live and still wants its badge.
+// widened to HasInFlightOp — a session that is merely being created is coming
+// back live and still wants its badge.
+//
+// Restore is not a counterexample either way: the TUI's own MarkRestoring keeps
+// liveness=Archived by design, so IsArchived already drops it; only the daemon's
+// BeginRestore (LiveLost+OpRestoring) is still applied.
 func TestPrInfoUpdatedMsg_TearingDownTargetDropsUpdate(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

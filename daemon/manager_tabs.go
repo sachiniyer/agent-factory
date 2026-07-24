@@ -329,7 +329,10 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	// behind an archive arrives with current == instance and UserKilled() false,
 	// passes both, and overwrites the PR info the archive just preserved, then
 	// persists the loss. Archive is inert in BOTH directions (#1809); this was the
-	// last mutation of the instance record still missing that gate (#2437).
+	// last USER-FACING mutation of the instance record missing that gate (#2437).
+	// Not the last one outright: captureAgentConversation mutates and persists the
+	// same record with no op-lock at all, so it can interleave INSIDE an archive
+	// rather than merely queue behind one — a different shape, tracked in #2451.
 	//
 	// The window is not theoretical: the TUI starts `gh pr view` against a target
 	// captured before an archive can begin and sends the result whenever it lands,

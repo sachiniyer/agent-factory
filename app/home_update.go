@@ -119,20 +119,27 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//     rides along for its own reason: a record about to be deleted has no
 		//     use for PR info.
 		//
-		// Deliberately NOT the wider HasInFlightOp, tempting as that is: the same
-		// op-lock is held by every long daemon op, so a wider gate would also
-		// suppress the badge for a session that is merely CREATING (OpCreating) or
-		// RESTORING — both of which are coming back live and want their result. A
-		// loading session getting its PR badge is normal, and is covered by
-		// TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp.
+		// Deliberately NOT the wider HasInFlightOp: that would also suppress the
+		// badge for a session that is merely CREATING, and a loading session getting
+		// its PR badge is normal. The pre-existing
+		// TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp drives exactly
+		// that (newLoadingInstance is OpCreating) and fails if the predicate is
+		// widened.
 		//
-		// That leaves a real residual, stated plainly rather than papered over:
-		// setPRInfoThroughDaemon below runs INLINE on the Update goroutine, so a
-		// result landing during a restore still parks the TUI event loop on that
-		// session's op-lock until the restore finishes. This guard narrows that
-		// window to the ops whose results are worthless anyway; it does not close
-		// it. Closing it means not making a blocking RPC from the event loop at
-		// all, which is a different change.
+		// Restore is NOT the counterexample it looks like, in either direction, and
+		// the two restore edges differ: MarkRestoring — the TUI's own optimistic
+		// restore — deliberately keeps liveness=Archived (see its doc), so IsArchived
+		// already catches it and the result is dropped. Only the daemon edge,
+		// BeginRestore, moves to LiveLost+OpRestoring, and a result landing in THAT
+		// window is still applied.
+		//
+		// Which is where the honest residual sits: setPRInfoThroughDaemon below runs
+		// INLINE on the Update goroutine, and every long daemon op holds this
+		// session's op-lock — so a result arriving during a daemon-side restore still
+		// parks the TUI event loop until that restore finishes. This guard narrows
+		// the window to the ops whose results are worthless anyway; it does not close
+		// it. Closing it means not making a blocking RPC from the event loop at all,
+		// which is a different change.
 		//
 		// Dropping costs at most a stale badge: fetchPRInfoCmd already called
 		// MarkPRInfoFetched at kickoff, so nothing retries in a tight loop, and the
