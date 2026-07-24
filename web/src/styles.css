@@ -610,31 +610,6 @@ body {
   font-size: var(--af-fs-xs);
 }
 
-.af-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
-}
-
-.af-live-pip {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 50%;
-  background: var(--af-text-3);
-}
-
-.af-live-pip.af-live-open {
-  background: var(--af-dot-ready);
-}
-
-.af-live-pip.af-live-connecting,
-.af-live-pip.af-live-reconnecting {
-  background: var(--af-dot-lost);
-  animation: af-pulse 1.2s ease-in-out infinite;
-}
-
 /* The trailing appbar controls are one semantic group. It stays inline on desktop;
  * the narrow breakpoint turns the wrapper into a single More trigger + popover so
  * project context gets the phone's scarce primary-row width (#2227). */
@@ -1188,18 +1163,10 @@ body {
   color: var(--af-dot-limit);
 }
 
-/* af-pulse is retained for the connection live-pip (.af-live-connecting /
- * .af-live-reconnecting / .af-term-connecting); the session status dot no longer
- * animates — a working row shows no dot at all (#1766). */
-@keyframes af-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
+/* af-pulse is gone with its last consumer. It survived #1766's "no animated
+ * indicators" rule as the connection live-pip's pulse; removing that pip (#2458)
+ * left the keyframes with nothing to animate, and the stylesheet now contains no
+ * animation at all. */
 
 /* Main content area — an empty state, or the live attach terminal. */
 .af-main {
@@ -1298,30 +1265,6 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.af-term-meta {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Status tints on the pane header, matching the live-pip vocabulary. */
-.af-term-meta.af-term-open {
-  color: var(--af-dot-ready);
-}
-
-.af-term-meta.af-term-connecting,
-.af-term-meta.af-term-reconnecting {
-  color: var(--af-dot-lost);
-}
-
-.af-term-meta.af-term-exited {
-  color: var(--af-dot-dead);
 }
 
 /* Tab bar (#1592 Phase 5 PR7, #2224): the flexible middle of the pane's single
@@ -2598,11 +2541,6 @@ body {
 
   .af-appbar-tools-open > .af-appbar-tools {
     display: flex;
-  }
-
-  .af-appbar-tools .af-live {
-    min-height: 2.75rem;
-    padding-inline: var(--af-sp-3);
   }
 
   .af-appbar-tools .af-install {

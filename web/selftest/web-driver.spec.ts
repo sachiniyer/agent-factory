@@ -477,7 +477,7 @@ async function realRailDiagnostics(page: Page): Promise<string> {
   const selectedRepo = await page.locator(".af-project-switch-name").textContent().catch(() => null);
   const selectedRepoKey = await page.evaluate(() => localStorage.getItem("af-project")).catch(() => null);
   const renderedRows = await page.locator(".af-rail-list .af-row").allTextContents().catch(() => []);
-  const livePipClass = await page.locator(".af-live-pip").getAttribute("class").catch(() => null);
+  const liveState = await page.locator(".af-app").getAttribute("data-live").catch(() => null);
 
   let snapshotLine: string;
   try {
@@ -537,7 +537,7 @@ async function realRailDiagnostics(page: Page): Promise<string> {
 
   return [
     `selected repo=${JSON.stringify(selectedRepo)} persisted=${JSON.stringify(selectedRepoKey)}`,
-    `rendered rail rows=${JSON.stringify(renderedRows)} ui events=${JSON.stringify(livePipClass)}`,
+    `rendered rail rows=${JSON.stringify(renderedRows)} ui events=${JSON.stringify(liveState)}`,
     `real Snapshot: ${snapshotLine}`,
     `real events: ${eventsLine}`,
   ].join("\n");
@@ -627,8 +627,8 @@ test("tokenless loopback (#1696): the SPA auto-connects with no token, no login 
   await expect(page.locator("#af-token")).toHaveCount(0);
   await assertRealRailFixture(page);
   // The events WS connected on the empty-token credential (the ?access_token= is
-  // blank and the loopback peer is exempt): the live pip reads open.
-  await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
+  // blank and the loopback peer is exempt): the client publishes an open stream.
+  await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
 });
 
 test("#2276: a fresh shell with no seeded real row reports rail-plane diagnostics", async ({ browser }) => {
@@ -820,7 +820,7 @@ test("token persistence: a NEW TAB after a login resumes the token and never pro
   await expect(second.locator("#af-token")).toHaveCount(0);
   // And it is really authorized, not just past the gate: the events WS connected on
   // the resumed credential.
-  await expect(second.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await expect(second.locator(".af-app")).toHaveAttribute("data-live", "open");
 
   // A reload of the ORIGINAL tab resumes it too (the browser-restart case, minus the
   // restart), and the login form still never appears.
@@ -938,9 +938,9 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", REAL_FI
   // The top-right switcher shows the current (default) project.
   await expect(page.locator(".af-project-switch-name")).toContainText("mock-repo");
   await expect(page.locator(".af-rail-count")).toHaveText(/[2-9]|\d{2,}/);
-  // The events WebSocket connected: the live pip reads "Live" (open), proving the
+  // The events WebSocket connected: the client publishes an open stream, proving the
   // push plane the rail resyncs from is up.
-  await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
 });
 
 test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", REAL_FIXTURE, async ({
@@ -1156,6 +1156,70 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   await ctx.close();
 });
 
+// #2458: the two "live" indicators are gone from the rendered UI — the pip and
+// "Live"/"Connecting…" label beside the project selector, and the "Live · master"
+// meta beside the attached session's title.
+//
+// Asserted on the REAL shell, attached, because that is the only state in which
+// both used to render: a removal test run on an empty pane would pass against the
+// unfixed code. The paired data-attribute assertions are the other half — they
+// prove the machinery still reports open, so this is a removal of the indicators
+// and not of the thing they indicated.
+test("#2458: no live indicator by the project selector, no live/branch meta by the title", REAL_FIXTURE, async () => {
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+  await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
+
+  await expect(page.locator(".af-live"), "the appbar live indicator must be gone").toHaveCount(0);
+  await expect(page.locator(".af-live-pip")).toHaveCount(0);
+  await expect(page.locator(".af-live-label")).toHaveCount(0);
+  await expect(page.locator(".af-term-meta"), "the pane-header live/branch meta must be gone").toHaveCount(0);
+
+  // Text, not just class names: a rebuilt indicator under a different class would
+  // slip past the selectors above while looking identical to the user. The appbar
+  // and pane header are checked rather than the whole page, since "Live" can
+  // legitimately appear in session content or the terminal's own output.
+  await expect(page.locator(".af-appbar")).not.toContainText("Live");
+  await expect(page.locator(".af-appbar")).not.toContainText("Connecting…");
+  await expect(page.locator(".af-term-head")).not.toContainText("Live");
+
+  // The branch went with it: "Live · master" was one unit, and the head now carries
+  // the session title alone.
+  const head = await page.locator(".af-term-head-main").textContent();
+  expect(head?.trim()).toBe(SESSION_A);
+});
+
+// The phone path is checked separately because the indicator was not merely
+// narrower there — below the breakpoint it moved INTO the More popover and carried
+// its own sizing rule, so a desktop-only check would miss a copy still rendering
+// behind a disclosure the user has to open to see.
+test("#2458 mobile (375px): the More popover carries no live indicator", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await expect(p.locator(".af-app")).toHaveAttribute("data-live", "open");
+
+    const more = p.locator(".af-appbar-more");
+    await expect(more).toBeVisible();
+    await more.click();
+    const tools = p.locator(".af-appbar-tools");
+    await expect(tools).toBeVisible();
+
+    // Opened, so this is a real look inside rather than a pass earned by the
+    // popover being collapsed.
+    await expect(tools.locator(".af-live")).toHaveCount(0);
+    await expect(tools).not.toContainText("Live");
+    await expect(tools).not.toContainText("Connecting…");
+    // The controls that DO belong there survived the removal — the popover lost one
+    // child, not its contents.
+    await expect(tools.getByRole("button", { name: "Disconnect" })).toBeVisible();
+    await expect(tools.locator(".af-theme-opt").first()).toBeVisible();
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXTURE, async () => {
   await row(page, SESSION_A).click();
 
@@ -1168,9 +1232,9 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   // a real binary PTY frame decoded by the TS codec and painted in the browser.
   await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
-  // The pane header status resolved to the live stream, and the keyboard followed
-  // the attach into terminal mode (#1693/#1694).
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  // The terminal's own connection resolved to the live stream, and the keyboard
+  // followed the attach into terminal mode (#1693/#1694).
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
 
   // Every actionable instance reserves the quiet action slot, but only the selected
@@ -1215,7 +1279,7 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     await openTokenless(p);
     await row(p, SESSION_A).click();
     await expect(p.locator(".af-term-host .xterm")).toBeVisible();
-    await expect(p.locator(".af-term-meta")).toContainText("Live");
+    await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
     await p.keyboard.press("Shift+Enter");
     await expect.poll(() => inputPayloads.length, { message: "Shift+Enter must emit one OpInput" }).toBe(1);
@@ -1282,7 +1346,7 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     await createTerminalTab(p);
     shellCreated = true;
     await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
-    await expect(p.locator(".af-term-meta")).toContainText("Live");
+    await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
     inputPayloads.length = 0;
     await p.keyboard.type("echo $((233700 + 42))");
@@ -1479,7 +1543,7 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   await expect(page.locator(".af-term-host")).not.toContainText(READY_MARKER);
   // Wait for the shell tab's stream to be live before typing — keystrokes sent
   // before the WS opens are dropped by the terminal's send() guard.
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   // The + attached the shell tab, so keys reach it: type a marker and see it come
   // back over the new tab's stream — proof the switch re-pointed to a live PTY.
   await page.keyboard.type("echo AF_TAB_OUTPUT_OK");
@@ -1530,7 +1594,7 @@ test("split panes (feat): drag a tab to a pane edge splits into two live panes; 
   const tabbar = page.locator(".af-tabbar");
   await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
   // A single pane so far — today's zero-config default.
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
@@ -1553,7 +1617,7 @@ test("split panes (feat): drag a tab to a pane edge splits into two live panes; 
   // The other pane (the shell tab) is an independent live PTY — focus it and type, and
   // its echo comes back over its own stream, proving both panes are live at once.
   await shellPane.locator(".af-pane-host").click();
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   await page.keyboard.type("echo AF_SPLIT_OK");
   await page.keyboard.press("Enter");
   await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
@@ -1735,7 +1799,7 @@ test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT 
   await resetToAgentTab(page);
   await createTerminalTab(page);
   await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   // Creating a tab switches to it: the pane now shows Terminal, and Terminal is the tab
   // the bar marks active. That is the gesture's precondition — the dragged tab and the
   // target pane's tab are THE SAME.
@@ -1771,7 +1835,7 @@ test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT 
   await expect(agentPane, "the new half is the Agent tab").toHaveAttribute("data-tab-id", rightId ?? "");
   const termPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
   await termPane.locator(".af-pane-host").click();
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   await page.keyboard.type("echo AF_SELFSPLIT_OK");
   await page.keyboard.press("Enter");
   await expect(termPane).toContainText("AF_SELFSPLIT_OK", { timeout: 15_000 });
@@ -1804,7 +1868,7 @@ test("split panes (#1901): dragging the only tab of a ONE-tab session is an iner
   await expect(page.locator(".af-term-host .af-pane")).toHaveAttribute("data-tab-id", before ?? "");
   // The pane is untouched, not merely present: its stream still carries the session.
   await page.locator(".af-term-host .af-pane-host").click();
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 });
 
 test("web tab (feat): a local dev-server preview is daemon-proxied and rendered in an iframe", REAL_FIXTURE, async () => {
@@ -2463,7 +2527,7 @@ test("split panes (feat): logout clears retained trees — a fresh login shows t
   await expect(page.locator(".af-login")).toBeVisible();
   await page.locator(".af-login button.af-primary").click();
   await expect(page.locator(".af-app")).toBeVisible();
-  await expect(page.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
 
   // Re-select A: the retained split was cleared on logout, so it opens as a SINGLE
   // pane (the zero-config default), not the previous two-pane split.
@@ -3959,7 +4023,7 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     const firstShell = first.locator(".af-tabbar .af-tab", { hasText: shellName });
     await expect(firstShell).toHaveCount(1, { timeout: 15_000 });
     await firstShell.click();
-    await expect(first.locator(".af-term-meta")).toContainText("Live");
+    await expect(first.locator(".af-main")).toHaveAttribute("data-term-status", "open");
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(24);
@@ -3992,7 +4056,7 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     const secondShell = second.locator(".af-tabbar .af-tab", { hasText: shellName });
     await expect(secondShell).toHaveCount(1, { timeout: 15_000 });
     await secondShell.click();
-    await expect(second.locator(".af-term-meta")).toContainText("Live");
+    await expect(second.locator(".af-main")).toHaveAttribute("data-term-status", "open");
     const secondHost = second.locator(".af-term-host");
     await expect.poll(firstRows).toBeGreaterThan(60);
     // New output while the first client is inactive must not stale its reading
@@ -4080,7 +4144,7 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     await first.locator(".af-nav-toggle").click();
     await expect(row(first, sessionName)).toBeVisible({ timeout: 15_000 });
     await row(first, sessionName).click();
-    await expect(first.locator(".af-term-meta")).toContainText("Live");
+    await expect(first.locator(".af-main")).toHaveAttribute("data-term-status", "open");
     const firstHost = first.locator(".af-term-host");
     const firstRows = (): Promise<number> => firstHost.locator(".xterm-rows > div").count();
     await expect.poll(firstRows).toBeGreaterThan(0);
@@ -4117,7 +4181,7 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
       await peer.locator(".af-nav-toggle").click();
       await expect(row(peer, sessionName)).toBeVisible({ timeout: 15_000 });
       await row(peer, sessionName).click();
-      await expect(peer.locator(".af-term-meta")).toContainText("Live");
+      await expect(peer.locator(".af-main")).toHaveAttribute("data-term-status", "open");
       await expect.poll(firstRows, { message: label }).toBeGreaterThan(lineCount);
       const stranded = await terminalGeometry(firstHost, true);
       expect(stranded.rows, `${label}; peer geometry=${JSON.stringify(stranded)}`).toBeGreaterThan(lineCount);
@@ -4392,7 +4456,7 @@ test("#1815: a tab created out-of-band must not rewind the scrolled terminal", R
   await expect(shell).toHaveCount(1, { timeout: 15_000 });
   await shell.click();
   await expect(shell).toHaveClass(/af-tab-active/);
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
   // More than one screen of numbered output, so which line is on screen is exact.
   // xterm renders only the VISIBLE rows, so the pane's text IS its viewport.
@@ -4491,7 +4555,7 @@ test("#1815: a resize must not re-arm the rewind on the next out-of-band resync"
   await expect(shellTab).toHaveCount(1, { timeout: 15_000 });
   await shellTab.click();
   await expect(shellTab).toHaveClass(/af-tab-active/);
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
   await dragTabToPane(page, "Agent", "right");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
@@ -4501,7 +4565,7 @@ test("#1815: a resize must not re-arm the rewind on the next out-of-band resync"
 
   // Fill the shell pane's scrollback and park the view up in it.
   await shellPane.locator(".af-pane-host").click();
-  await expect(page.locator(".af-term-meta")).toContainText("Live");
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   await page.keyboard.type("for i in $(seq 1 200); do echo resize-line-$i; done");
   await page.keyboard.press("Enter");
   await expect(shellPane).toContainText("resize-line-200", { timeout: 15_000 });
@@ -5061,7 +5125,7 @@ test("the service worker NEVER caches /v1 — not the API, not the stream (the b
   // the Snapshot fetch both ran to render the rail, and the events WS is open. That
   // matters — a worker that cached indiscriminately would have caught them, so the
   // absence below is a real result rather than an absence of opportunity.
-  await expect(p.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await expect(p.locator(".af-app")).toHaveAttribute("data-live", "open");
   await p.evaluate(() => fetch("/v1/auth-info"));
 
   const { urls } = await cacheContents(p);
@@ -5080,7 +5144,7 @@ test("the service worker does not SERVE /v1: offline, the shell survives from ca
   // offline assertions below are only meaningful once the shell is actually cached —
   // otherwise "the shell survives offline" could fail for want of a cache rather than
   // for the reason under test.
-  await expect(p.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await expect(p.locator(".af-app")).toHaveAttribute("data-live", "open");
   await expect.poll(async () => (await cacheContents(p)).urls.some((u) => u.endsWith("/af-web.js"))).toBe(true);
 
   // Offline is the sharpest discriminator available, and the reason this test exists
@@ -5120,11 +5184,11 @@ test("a live PTY stream and the events WS survive the service worker controlling
   // The functional half of the bypass, and the one that matters to a user: with the
   // worker in control, attach and watch real PTY frames arrive. A worker that
   // intercepted or delayed the stream would show up here as an empty pane.
-  await expect(p.locator(".af-live-pip.af-live-open")).toBeVisible();
+  await expect(p.locator(".af-app")).toHaveAttribute("data-live", "open");
   await row(p, SESSION_A).click();
   await expect(p.locator(".af-term-host .xterm")).toBeVisible();
   await expect(p.locator(".af-term-host")).toContainText(READY_MARKER);
-  await expect(p.locator(".af-term-meta")).toContainText("Live");
+  await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   await ctx.close();
 });
 
@@ -6190,9 +6254,9 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
       `the event gap must exist before daemon mutations; socket states=${JSON.stringify(eventSocketClose.states)}`,
     ).toBe(true);
     await expect(
-      win.locator(".af-live-pip"),
+      win.locator(".af-app"),
       "the client must enter reconnecting state while the events endpoint stays blocked",
-    ).toHaveClass(/af-live-reconnecting/);
+    ).toHaveAttribute("data-live", "reconnecting");
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
 
