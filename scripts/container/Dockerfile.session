@@ -1,0 +1,66 @@
+# Session runtime image for agent-factory's docker backend (#2194).
+#
+# This is the image a session runs in when backend = "docker": the daemon
+# `docker run`s a container from it, clones the repo into /workspace, docker-cp's
+# the `af` binary in, and starts an in-container `af agent-server` that drives the
+# agent through tmux. There is NO af-published image — you bring your own
+# (Sachin-locked decision); this is the one this repo builds as a starting point.
+# Build it with `make session-image` (no build context is sent; there is no COPY).
+#
+# Base — glibc, deliberately. The `af` binary copied in at session start is the
+# daemon's OWN executable, and production/release builds are a plain `go build`
+# (cgo on) on ubuntu-latest, i.e. dynamically linked against glibc 2.39. Such a
+# binary will NOT run on a musl base (alpine) or an older glibc (debian bookworm =
+# 2.36). node:22-trixie-slim is Debian 13 (glibc 2.41 — >= 2.39, with headroom) and
+# carries Node 22, which the codex CLI requires. If you rebuild the daemon on a
+# newer-glibc distro, rebuild this image on a matching-or-newer base too. (A static
+# `af`, CGO_ENABLED=0, would run on any base — but that is not how release builds
+# are produced today; see the integration test, which force-builds a static `af`
+# precisely so it can use an alpine test image.)
+FROM node:22-trixie-slim
+
+# Workspace tooling: git clones /workspace, tmux drives the agent PTY, and
+# ca-certificates lets the HTTPS clone and the agent API calls verify TLS. sh,
+# sleep, and dd (used to stream the live PTY) already come from the base coreutils.
+# procps (ps/pgrep) is NOT needed by the in-container `af agent-server` — af's
+# only pgrep use is the host daemon's SIGTERM-fallback scan, which never runs
+# here — but it is kept so an operator can inspect a contained session's process
+# tree (`docker exec <c> ps -ef`), which is the point of running sessions boxed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git tmux procps ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Stable in-container git identity so no clone or commit depends on host git config
+# leaking in (mirrors the testbox images), and mark /workspace safe so git never
+# refuses the daemon-owned clone as "dubious ownership" (#1167).
+RUN git config --system user.name "AF Session" \
+    && git config --system user.email "session@localhost" \
+    && git config --system init.defaultBranch master \
+    && git config --system --add safe.directory /workspace
+
+# Agent CLIs. This image ships claude + codex — the minimum #2194 asks for, and the
+# only agents this repo's sessions actually use (codex is the default here, claude
+# the other). Installed globally from npm; Node 22 satisfies both (claude needs
+# >= 18, codex needs >= 22). npm's global prefix (/usr/local) is on PATH, so the
+# binaries resolve regardless of the container's HOME.
+#
+# State plainly what is and is not in this image:
+#   INCLUDED:            claude, codex
+#   NOT included (opt in below): gemini, amp, opencode, aider
+#   devin:               not installed — af forwards it no per-agent credentials,
+#                        and there is no standard local-CLI credential model for it.
+RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+    && npm cache clean --force
+
+# Opt-in agents — uncomment the line(s) your sessions use, then `make session-image`:
+#   gemini:   RUN npm install -g @google/gemini-cli && npm cache clean --force
+#   amp:      RUN npm install -g @ampcode/cli && npm cache clean --force   # renamed from @sourcegraph/amp (May 2026)
+#   opencode: RUN npm install -g opencode-ai && npm cache clean --force
+#   aider (needs a Python toolchain, so it is a heavier add):
+#     RUN apt-get update \
+#         && apt-get install -y --no-install-recommends python3 python3-pip pipx \
+#         && rm -rf /var/lib/apt/lists/* \
+#         && pipx install aider-chat
+
+# Do NOT EXPOSE or bind port 8000 — it is reserved for the in-container
+# `af agent-server` the daemon starts and dials over a published loopback port.

@@ -10,6 +10,7 @@
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
 	lifecycle-container lifecycle-selftest \
 	testbox-image testbox-clean testbox-selftest \
+	session-image \
 	lint-file-length docs web-build web-test web-selftest-container
 
 # Structural-health lint (#1145): fail if any Go file exceeds its line limit
@@ -88,6 +89,19 @@ backend-docker-roundtrip:
 # where docker is unavailable. See docs/backends.md.
 backend-ssh-roundtrip:
 	go test ./integration -run 'TestSSHBackend(RoundTrip|ArchiveRestore)' -v -count=1 -timeout 20m
+
+# Session runtime image (#2194): the bring-your-own container image the docker
+# backend runs sessions in. There is NO af-published image (Sachin-locked
+# decision) — you build it locally and point a repo's .agent-factory/config
+# docker.image at the resulting tag. The `af` binary is docker-cp'd in at session
+# start, so this image carries only the workspace tooling: git, tmux, and the
+# agent CLIs (claude + codex; see scripts/container/Dockerfile.session for the
+# opt-in others). Built from stdin with no build context (the Dockerfile has no
+# COPY), matching the testbox images. Override the tag with SESSION_IMAGE=…; it
+# must be a glibc base >= the daemon's build glibc (see the Dockerfile header).
+SESSION_IMAGE ?= af-session:local
+session-image:
+	docker build -t $(SESSION_IMAGE) - < scripts/container/Dockerfile.session
 
 # Interactive TUI play-test sandbox: builds af inside, scaffolds a
 # throwaway AF home + mock project repo, drops you in a shell with a
