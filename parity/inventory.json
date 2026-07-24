@@ -1443,6 +1443,7 @@
       "POST /v1/SetConfigValue": "config.write",
       "POST /v1/SetPRInfo": "session.pr.set",
       "POST /v1/Snapshot": "session.list",
+      "POST /v1/SuggestSessionName": "-",
       "POST /v1/TriggerTask": "task.trigger",
       "POST /v1/UpdateTask": "task.edit"
     },
@@ -1517,6 +1518,7 @@
       "ResumeFromLimit": "session.limit-retry",
       "SetConfigValue": "config.write",
       "Snapshot": "session.list",
+      "SuggestSessionName": "-",
       "TriggerTask": "task.trigger",
       "UpdateTask": "task.edit"
     },

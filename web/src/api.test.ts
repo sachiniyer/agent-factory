@@ -28,6 +28,7 @@ import {
   reorderTab,
   restoreSession,
   resumeFromLimit,
+  suggestSessionName,
   triggerTask,
   updateTask,
 } from "./api.js";
@@ -175,6 +176,19 @@ test("listPrograms works with no repo picked", async () => {
 
   assert.equal(cap.url, "/v1/ListPrograms");
   assert.equal(cap.body.repo_path, "");
+});
+
+// The autocreate-name suggestion (#2470). The daemon owns the wordlist, so the web
+// asks for one name and renders it; it sends no arguments (the suggestion is
+// repo-agnostic) and reads `name` out of the envelope.
+test("suggestSessionName asks the daemon and returns the name", async () => {
+  const cap = stubFetch(); // envelope data carries name: "shell"
+  const name = await suggestSessionName("tok");
+
+  assert.equal(cap.url, "/v1/SuggestSessionName");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.deepEqual(cap.body, {}, "the suggestion takes no arguments");
+  assert.equal(name, "shell", "the resolved name is read from the envelope");
 });
 
 test("killSession posts the stable id as the primary key alongside the title", async () => {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/namegen"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -27,6 +28,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateDefault
 		m.namingInstance = nil
+		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -45,7 +47,18 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// through to session creation, producing an invisible name in the
 		// sidebar (#973). TrimSpace mirrors the daemon's validateTitleAvailableLocked.
 		if strings.TrimSpace(instance.Title) == "" {
-			return m, m.handleError(fmt.Errorf("title cannot be empty"))
+			// #2470: an untouched (or whitespace-only) field adopts the shadow
+			// placeholder shown in its row, so pressing enter autocreates the
+			// suggested name. It was generated collision-free in startNewInstance;
+			// the reserved/collision/preflight checks below still run on it. Fall back
+			// to the old error only if no placeholder was generated (never, in
+			// practice — startNewInstance always sets one).
+			if m.namingPlaceholder == "" {
+				return m, m.handleError(fmt.Errorf("title cannot be empty"))
+			}
+			if err := instance.SetTitle(m.namingPlaceholder); err != nil {
+				return m, m.handleError(err)
+			}
 		}
 		// "root" is reserved for the daemon-managed root agent (#1106). The
 		// daemon's reserveCreate is the authoritative gate; rejecting here
@@ -99,6 +112,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		prompt := strings.TrimSpace(m.pendingPrompt)
 		m.pendingPrompt = ""
 		m.namingInstance = nil
+		m.clearNamingPlaceholder()
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
@@ -183,6 +197,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
 		m.namingInstance = nil
+		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -253,8 +268,47 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.store.AddInstance(instance)
 	m.sidebar.SelectInstance(instance)
 	m.namingInstance = instance
+	// #2470: generate the autocreate-name suggestion and show it as shadow text on
+	// the naming row. Pressing enter on the untouched field adopts it.
+	m.namingPlaceholder = m.suggestSessionName(instance)
+	m.sidebar.SetNamingPlaceholder(instance, m.namingPlaceholder)
 	m.state = stateNew
 	m.menu.SetNamingHasPrompt(false)
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
+}
+
+// suggestSessionName picks a readable random "adjective-noun" name for the
+// naming placeholder (#2470) that the naming flow would not itself reject: it
+// avoids the reserved root title and any existing title git.TitlesCollide flags
+// — the exact rule the enter handler enforces — so accepting the placeholder on
+// an empty submit passes those same checks. A residual collision (a session
+// created during naming) is still caught at submit and, authoritatively, by the
+// daemon.
+func (m *home) suggestSessionName(naming *session.Instance) string {
+	prefix := ""
+	if m.appConfig != nil {
+		prefix = m.appConfig.BranchPrefix
+	}
+	return namegen.Suggest(func(name string) bool {
+		if session.IsReservedTitle(name) {
+			return true
+		}
+		for _, other := range m.store.GetInstances() {
+			if other == naming {
+				continue
+			}
+			if git.TitlesCollide(other.Title, name, prefix) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// clearNamingPlaceholder drops the autocreate-name shadow text (#2470) from both
+// the model and the sidebar renderer when a naming session ends by any route.
+func (m *home) clearNamingPlaceholder() {
+	m.namingPlaceholder = ""
+	m.sidebar.SetNamingPlaceholder(nil, "")
 }

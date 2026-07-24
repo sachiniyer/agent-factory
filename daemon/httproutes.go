@@ -74,6 +74,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/SuggestSessionName",
+		Description:   "Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder.",
+		RequestFields: jsonFields(reflect.TypeOf(SuggestSessionNameRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SuggestSessionName) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/Snapshot",
 		Description:   "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
 		RequestFields: jsonFields(reflect.TypeOf(SnapshotRequest{})),

@@ -32,6 +32,7 @@ import {
   listBackends,
   listProjects,
   listPrograms,
+  suggestSessionName,
   listTasks,
   setConfigValue,
   loadToken,
@@ -611,6 +612,9 @@ function newSession(): void {
       loadBackends: (repoPath: string) => (token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token)),
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
+      // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
+      // the web asks rather than generating a name of its own.
+      suggestName: () => (token === null ? Promise.reject(new Error("not authorized")) : suggestSessionName(token)),
       onSubmit: (values: CreateSessionInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

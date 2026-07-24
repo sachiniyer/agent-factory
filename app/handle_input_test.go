@@ -536,3 +536,51 @@ func TestNamingCreateFlow_NoDoubleTransition(t *testing.T) {
 	// returned async cmd, which this test does not run).
 	assert.Equal(t, session.OpCreating, inst.GetInFlightOp())
 }
+
+// TestHandleStateNewEmptySubmitAdoptsPlaceholder pins the #2470 autocreate: with
+// the name field left untouched, pressing enter adopts the generated shadow
+// placeholder as the session title instead of erroring "title cannot be empty".
+func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
+
+	_, _ = h.startNewInstance(false)
+	inst := h.namingInstance
+	require.NotNil(t, inst)
+	require.Equal(t, "", inst.Title, "precondition: the name field starts empty")
+	require.NotEmpty(t, h.namingPlaceholder, "startNewInstance must generate a suggested name")
+	placeholder := h.namingPlaceholder
+
+	// Enter on the untouched field.
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Nil(t, h.namingInstance, "an empty submit with a placeholder submits, it does not error")
+	assert.Equal(t, placeholder, inst.Title, "the empty submit adopted the shadow placeholder as the title")
+	assert.Empty(t, h.namingPlaceholder, "the placeholder is cleared once naming ends")
+	assert.Equal(t, stateDefault, h.state)
+}
+
+// TestCancelNamingClearsPlaceholder guards that both cancel paths drop the #2470
+// placeholder alongside the naming pointer, so a later frame cannot paint a stale
+// suggestion on some other row.
+func TestCancelNamingClearsPlaceholder(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"escape", tea.KeyMsg{Type: tea.KeyEsc}},
+		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			_, _ = h.startNewInstance(false)
+			require.NotNil(t, h.namingInstance)
+			require.NotEmpty(t, h.namingPlaceholder, "precondition: a placeholder was generated")
+
+			_, _ = h.handleStateNew(tc.key)
+
+			assert.Nil(t, h.namingInstance, "cancel clears the naming pointer")
+			assert.Empty(t, h.namingPlaceholder, "cancel clears the placeholder")
+		})
+	}
+}

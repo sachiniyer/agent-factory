@@ -148,6 +148,11 @@ type home struct {
 	// Stored as a direct pointer so background sync cannot change which
 	// instance the naming keystrokes target.
 	namingInstance *session.Instance
+	// namingPlaceholder is the random "adjective-noun" name shown as shadow text
+	// while namingInstance has an empty title (#2470). Pressing enter on the
+	// untouched field adopts it as the session name (the "autocreate"); it is
+	// generated once per naming in startNewInstance and cleared with namingInstance.
+	namingPlaceholder string
 
 	// keySent is used to manage underlining menu items
 	keySent bool

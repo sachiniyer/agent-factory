@@ -262,6 +262,9 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"ReleaseUpgradeProbation": allowedDuringProbation,
 	"Shutdown":                allowedDuringProbation,
 	"Snapshot":                allowedDuringProbation,
+	// A name suggestion is a best-effort read (no readiness gate), so it answers
+	// during probation like the other read-only lookups (#2470).
+	"SuggestSessionName": allowedDuringProbation,
 }
 
 func TestControlServerProbationAdmissionLedger(t *testing.T) {

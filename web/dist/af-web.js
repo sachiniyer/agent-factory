@@ -6263,6 +6263,10 @@ async function listBackends(repoPath, token2) {
 async function listPrograms(repoPath, token2) {
   return af("ListPrograms", { repo_path: repoPath }, token2);
 }
+async function suggestSessionName(token2) {
+  const resp = await af("SuggestSessionName", {}, token2);
+  return resp?.name ?? "";
+}
 async function createSession(input, token2) {
   const body = {
     title_base: input.title,
@@ -6553,6 +6557,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   });
   const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
   titleInput.setAttribute("aria-label", "Session title");
+  let suggestedName = "";
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
   if (projects.length === 0) {
@@ -6655,11 +6660,23 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   renderPrograms();
   renderChoices();
   loadCatalogsFor(projectSelect.value);
+  void callbacks.suggestName().then((name) => {
+    if (name !== "") {
+      suggestedName = name;
+      titleInput.placeholder = name;
+    }
+  }).catch(() => {
+  });
   const card = handle.el.firstElementChild;
   asForm(card, () => {
-    const title = titleInput.value.trim();
-    if (title === "" || projectSelect.value === "") {
-      handle.setError("A title and a project are required.");
+    const typed = titleInput.value.trim();
+    const title = typed !== "" ? typed : suggestedName;
+    if (projectSelect.value === "") {
+      handle.setError("A project is required.");
+      return;
+    }
+    if (title === "") {
+      handle.setError("A title is required.");
       return;
     }
     handle.setError(null);
@@ -12652,6 +12669,9 @@ function newSession() {
       loadBackends: (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token),
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
+      // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
+      // the web asks rather than generating a name of its own.
+      suggestName: () => token === null ? Promise.reject(new Error("not authorized")) : suggestSessionName(token),
       onSubmit: (values) => {
         const tok = token;
         if (tok === null || !modal) {

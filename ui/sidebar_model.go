@@ -219,6 +219,13 @@ func (s *Sidebar) SetSize(width, height int) {
 	s.renderer.SetWidth(s.contentWidth())
 }
 
+// SetNamingPlaceholder threads the autocreate-name shadow text (#2470) from the
+// app's naming state down to the row renderer: while inst is being named with an
+// empty title, its row shows text as muted placeholder. (nil, "") clears it.
+func (s *Sidebar) SetNamingPlaceholder(inst *session.Instance, text string) {
+	s.renderer.SetNamePlaceholder(inst, text)
+}
+
 // contentWidth is the effective row width inside the sidebar allocation: the
 // full width minus the 2-cell row padding the row styles add. This replaces
 // the pre-cutover AdjustPreviewWidth 0.9 buffer (#1024 PR 4) — the tree gets

@@ -152,6 +152,9 @@ export function newSessionModal(
     onCancel: () => void;
     loadBackends: (repoPath: string) => Promise<BackendCatalog>;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    // #2470: fetch a random, readable session name from the daemon (the wordlist
+    // is Go-only) to show as shadow text; an empty submit adopts it.
+    suggestName: () => Promise<string>;
   },
 ): ModalHandle {
   const { handle, body, confirmBtn } = modalChrome({
@@ -163,6 +166,11 @@ export function newSessionModal(
 
   const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
   titleInput.setAttribute("aria-label", "Session title");
+  // #2470: the daemon-suggested autocreate name. Shown as the title placeholder
+  // (shadow text that clears the instant the user types) and, when the field is
+  // submitted empty, used as the session name. "" until the fetch lands or if it
+  // fails — in which case the field falls back to requiring a typed title.
+  let suggestedName = "";
 
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
@@ -328,11 +336,35 @@ export function newSessionModal(
   renderChoices();
   loadCatalogsFor(projectSelect.value);
 
+  // Ask for the autocreate name once, on open. Repo-agnostic (the daemon avoids
+  // every live title), so it needs no re-fetch on a project change. A failure is
+  // silent: the field keeps its static placeholder and simply requires a typed
+  // title, exactly as before this feature.
+  void callbacks
+    .suggestName()
+    .then((name) => {
+      if (name !== "") {
+        suggestedName = name;
+        titleInput.placeholder = name;
+      }
+    })
+    .catch(() => {
+      /* no suggestion — leave the static placeholder and the typed-title requirement */
+    });
+
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
-    const title = titleInput.value.trim();
-    if (title === "" || projectSelect.value === "") {
-      handle.setError("A title and a project are required.");
+    // #2470: an empty field adopts the suggested name (the shadow text). The
+    // placeholder already equals suggestedName, so submitting untouched creates
+    // exactly the name the user saw.
+    const typed = titleInput.value.trim();
+    const title = typed !== "" ? typed : suggestedName;
+    if (projectSelect.value === "") {
+      handle.setError("A project is required.");
+      return;
+    }
+    if (title === "") {
+      handle.setError("A title is required.");
       return;
     }
     handle.setError(null);

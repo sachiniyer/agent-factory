@@ -170,6 +170,11 @@ var tabRowSelectedStyle = lipgloss.NewStyle().
 // the background (#844, #853).
 var deletingTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
 
+// placeholderTitleColor renders the autocreate-name shadow text (#2470) in the
+// muted foreground so it reads as a suggestion, not a real name — the same
+// treatment the task/prompt forms give their placeholders.
+var placeholderTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
+
 // ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
 func ApplyTheme(t Theme) {
 	readyStyle = lipgloss.NewStyle().Foreground(t.Success)
@@ -201,6 +206,7 @@ func ApplyTheme(t Theme) {
 		Background(t.SelectionBackground).
 		Foreground(t.SelectionForeground)
 	deletingTitleColor = t.ForegroundMuted
+	placeholderTitleColor = t.ForegroundMuted
 }
 
 // InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
@@ -210,6 +216,15 @@ type InstanceRenderer struct {
 	// usable column (its rect minus row padding), keeping the layout math in
 	// one place outside this package.
 	width int
+	// namingInstance and namePlaceholder drive the autocreate-name shadow text
+	// (#2470): while an instance with an EMPTY title is being named, its row shows
+	// namePlaceholder in muted foreground instead of a blank name. Keyed by pointer
+	// identity so only the one row being named shows it, and it vanishes the instant
+	// the title is non-empty (the user typed a character). Set by the sidebar from
+	// the app's naming state; the zero value means "not naming", so every other
+	// caller (and every existing test) renders exactly as before.
+	namingInstance  *session.Instance
+	namePlaceholder string
 }
 
 // NewInstanceRenderer creates a renderer.
@@ -220,6 +235,14 @@ func NewInstanceRenderer() *InstanceRenderer {
 // SetWidth sets the effective content width rows render into.
 func (r *InstanceRenderer) SetWidth(width int) {
 	r.width = width
+}
+
+// SetNamePlaceholder sets the instance whose empty-title row shows shadow text,
+// and that text (#2470). Passing (nil, "") clears it — the state the renderer
+// carries between naming sessions.
+func (r *InstanceRenderer) SetNamePlaceholder(inst *session.Instance, text string) {
+	r.namingInstance = inst
+	r.namePlaceholder = text
 }
 
 // branchIcon is the real terminal branch glyph ⎇ (U+2387), matching the web
@@ -320,6 +343,16 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	// Cut the title if it's too long
 	titleText := i.Title
+	// Autocreate-name shadow text (#2470): a row being named with an empty title
+	// shows the suggested name in muted foreground. The check is exact-empty, not
+	// trimmed, so typing any character (a space included) reveals the real title and
+	// hides the placeholder — flowing the suggestion through the same truncation and
+	// prefix logic below, just recoloured.
+	placeholder := i == r.namingInstance && i.Title == "" && r.namePlaceholder != ""
+	if placeholder {
+		titleText = r.namePlaceholder
+		titleS = titleS.Foreground(placeholderTitleColor)
+	}
 	if i.Capabilities().Workspace == session.WorkspaceRemote {
 		titleText = "[remote] " + titleText
 	}

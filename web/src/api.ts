@@ -354,6 +354,16 @@ export async function listPrograms(repoPath: string, token: string): Promise<Pro
   return af<ProgramCatalog>("ListPrograms", { repo_path: repoPath }, token);
 }
 
+/** Asks the daemon for a random, readable "adjective-noun" session name not used
+ *  by any live session (#2470), for the create form's autocreate placeholder. The
+ *  wordlist is Go-only (the #1970 "serve the list, don't duplicate it" ruling), so
+ *  the web never generates names itself — it shows this and, on an empty submit,
+ *  sends it back as the title. Returns "" if the daemon has no suggestion. */
+export async function suggestSessionName(token: string): Promise<string> {
+  const resp = await af<{ name: string }>("SuggestSessionName", {}, token);
+  return resp?.name ?? "";
+}
+
 /** Creates a session and returns the daemon's authoritative projection of it (the
  *  resolved title + stable id). The created row also arrives via /v1/events. */
 export async function createSession(input: CreateSessionInput, token: string): Promise<SessionData> {
