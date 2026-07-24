@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/terminal"
@@ -166,7 +167,27 @@ type ptyBroker struct {
 	// removed rather than moved after the join: moving them would add a second
 	// b.mu section on three teardown paths to change nothing.
 	captureEnded bool
-	closed       bool
+	// captureStarted is when the CURRENT capture was installed. It exists only to
+	// decide whether a death is a fresh incident or a continuation of one: a
+	// capture that survived redialHealthySpan resets the backoff ladder, so an
+	// endpoint that drops once an hour does not inherit the delay earned by a
+	// flapping one. Set under mu by ensureCaptureStartedLocked.
+	captureStarted time.Time
+	// redialing marks that a recovery goroutine is already running for this
+	// broker, so N deaths cannot spawn N goroutines all dialling the same channel.
+	// Set under mu by the readLoop hand-off, cleared by redialLoop on its way out.
+	redialing bool
+	// redialAttempts is how many consecutive dials have been spent without a
+	// capture surviving redialHealthySpan. It is the ladder position, not a
+	// failure count — a dial that succeeds and then dies immediately consumes a
+	// rung, because that is the storm shape (#2450).
+	redialAttempts int
+	closed         bool
+	// closedCh is closed exactly once, by shutdown, so a recovery goroutine parked
+	// on its backoff wakes immediately instead of sleeping up to redialMaxBackoff
+	// past the teardown. Reading `closed` under mu answers the same question, but
+	// only when the goroutine is awake to ask.
+	closedCh chan struct{}
 	// tabClosed records that this broker was shut down because ITS TAB was closed
 	// (#2136) rather than because the whole session was torn down. It only selects
 	// which end-of-stream error NextEvent reports (ErrTabClosed vs bare io.EOF);
@@ -180,6 +201,7 @@ func newPTYBroker(ch clientlessChannel) *ptyBroker {
 		ch:       ch,
 		maxBytes: ptyRingMaxBytes,
 		subs:     make(map[uint64]*ptySub),
+		closedCh: make(chan struct{}),
 	}
 }
 
@@ -397,9 +419,29 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 	done := make(chan struct{})
 	b.mu.Lock()
 	b.capturing = true
+	b.captureStarted = time.Now()
 	b.stopCapture = func() {
 		if err := b.ch.StopCapture(); err != nil {
-			log.WarningLog.Printf("pty broker: stop clientless capture: %v", err)
+			// A stop that is RELEASING an already-dead capture is expected to fail
+			// to close cleanly: remoteClientlessChannel does
+			// conn.Close(StatusNormalClosure) on a socket whose read already
+			// errored, and coder/websocket reports that. Before #2450 this was rare
+			// — it took a user refresh to reach it — but the self-driven recovery
+			// runs it on every re-dial, which against a down endpoint means a
+			// WARNING every backoff interval, forever. The error is not news on
+			// that path, so it is logged as such.
+			//
+			// This is a log-level split only. Making the close itself clean
+			// (CloseNow) changes the graceful-close behaviour of ORDINARY teardowns
+			// too, so it stays its own change (#2450 item 3).
+			b.mu.Lock()
+			releasingDead := b.captureEnded
+			b.mu.Unlock()
+			if releasingDead {
+				log.InfoLog.Printf("pty broker: released a capture whose upstream had already ended: %v", err)
+			} else {
+				log.WarningLog.Printf("pty broker: stop clientless capture: %v", err)
+			}
 		}
 		_ = r.Close()
 		<-done
@@ -436,172 +478,6 @@ func (b *ptyBroker) maybeStopCapture() {
 	}
 }
 
-// resetCapture recovers the broker onto a re-spawned tmux pane WITHOUT closing it or
-// dropping its subscribers (#1682). On session recovery the previous tmux — and with
-// it the `pipe-pane` writer feeding this broker's FIFO — died, but the broker's
-// readLoop is parked on the O_RDWR FIFO (which never sees EOF) with `capturing` still
-// true, so the cached broker keeps short-circuiting ensureCaptureStarted and no bytes
-// ever flow again. resetCapture, holding captureMu across the whole transition so no
-// concurrent bring-up/teardown can interleave (#1661):
-//
-//  1. Stops the stale capture — unblocking and JOINING the parked readLoop (no
-//     goroutine leak) — and clears the capturing latch.
-//  2. Discards the dead pane's still-buffered ring bytes, so a subscriber that was
-//     lagging at recovery cannot be handed them after the repaint (#1840).
-//  3. If subscribers are STILL attached (a web/TUI client that stayed connected
-//     across the respawn — the common case), restarts the capture against the fresh
-//     pane and re-seeds each subscriber with a repaint of the recovered screen, so it
-//     resumes output on its OWN rather than hanging until some unrelated later
-//     Subscribe happens to bring the capture back up (the #1682 residual T-Rex hit).
-//     With no subscribers left, the lazy lifecycle is simply re-armed for the next
-//     Subscribe.
-//
-// Recovery is ATOMIC as each attached subscriber sees it (#1975): the barrier armed
-// below holds every subscriber's content stream from the moment recovery starts until
-// the repaint is installed, so the repaint is the FIRST thing a subscriber renders
-// after the respawn. Without it, steps 1-3 each leak a frame the repaint then wipes —
-// the dead pane's still-buffered bytes before the discard, and (the reported case) the
-// re-spawned pane's live bytes during step 3's snapshot, which runs without b.mu while
-// the freshly-started readLoop is already feeding and waking subscribers.
-//
-// The subscriber count is re-read AFTER the stop (still under captureMu) so a
-// subscriber that left during the blocking teardown is not resurrected onto a capture
-// nobody wants. A no-op when the broker is already closed.
-func (b *ptyBroker) resetCapture() {
-	b.captureMu.Lock()
-	defer b.captureMu.Unlock()
-
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return
-	}
-	// Arm the barrier FIRST — before the teardown, the discard, and the restart — so no
-	// subscriber can emit a frame at any point inside the recovery. Armed subscribers
-	// are captured by identity, not re-read from b.subs at release time, so one that
-	// detaches mid-recovery is still released rather than left parked (#1975).
-	armed := b.armRecoveryRepaintLocked()
-	var stop func()
-	if b.capturing {
-		stop = b.stopCapture
-		b.capturing = false
-		b.stopCapture = nil
-	}
-	b.mu.Unlock()
-
-	// The barrier MUST be lifted on EVERY path out — a failed restart, a Snapshot
-	// error, nobody left attached — or an armed subscriber parks in NextEvent forever
-	// waiting for a repaint that never comes. rp is read when the deferred call runs,
-	// so this single exit point both installs whatever repaint the recovery managed to
-	// build and lifts the barrier, atomically under b.mu.
-	var rp *repaintSnapshot
-	defer func() { b.releaseRecoveryRepaint(armed, rp) }()
-
-	if stop != nil {
-		stop()
-	}
-
-	// Discard the dead pane's buffered output (#1840). This is the ONLY point where
-	// that is race-free: the old readLoop has been joined by the stop above and the
-	// fresh one is not started until below, so the ring provably holds dead-pane bytes
-	// and nothing else, and no feed can interleave. Dropping the bytes while KEEPING
-	// the seq monotonic (base jumps to head over an emptied ring) means a lagging
-	// subscriber — one whose WS write blocked while the dying pane kept producing —
-	// hits the existing `cursor < base` eviction clamp in NextEvent and fast-forwards
-	// to the live tail. Without this it would take the recovery repaint and THEN the
-	// pre-recovery bytes, overwriting the recovered screen with the dead pane's
-	// content. Nothing needs to touch subscriber cursors directly; the clamp is the
-	// same mechanism a ring overflow already uses.
-	//
-	// Unconditional, including when nobody is attached: a later Subscribe(since) would
-	// otherwise replay the dead pane's tail into a fresh client. That no-subscriber path
-	// is why subscribe() repaints a reconnect whose `since` lands below base — the
-	// discard leaves it a cursor that can never be replayed, and with nobody attached
-	// there is no re-seed here to cover it.
-	b.mu.Lock()
-	b.base = b.headLocked()
-	b.buf = nil
-	// Re-read the subscriber count AFTER the teardown drained: nobody left → just the
-	// lazy re-arm, the next Subscribe restarts a fresh capture.
-	resume := !b.closed && len(b.subs) != 0
-	b.mu.Unlock()
-	if !resume {
-		return
-	}
-
-	// A subscriber stayed attached across the respawn. Restart the capture against the
-	// re-spawned pane and re-seed every current subscriber so it repaints the recovered
-	// screen and resumes live output without a new Subscribe. The restarted capture's
-	// readLoop begins feeding and waking subscribers IMMEDIATELY — the barrier is what
-	// keeps those bytes behind the repaint built below (#1975).
-	if err := b.ensureCaptureStartedLocked(); err != nil {
-		log.WarningLog.Printf("pty broker: restart capture after recovery: %v", err)
-		return
-	}
-	rp = b.recoveryRepaint()
-}
-
-// armRecoveryRepaintLocked holds every currently-registered subscriber's content
-// stream (PTYCursor/PTYData) until the recovery repaint is installed, and returns the
-// subscribers it armed. Caller holds b.mu.
-//
-// The returned slice — NOT a later re-read of b.subs — is what releaseRecoveryRepaint
-// walks: a subscriber that detaches mid-recovery is gone from the map but may still be
-// parked in NextEvent, and it must be released too.
-func (b *ptyBroker) armRecoveryRepaintLocked() []*ptySub {
-	armed := make([]*ptySub, 0, len(b.subs))
-	for _, s := range b.subs {
-		s.repaintArmed = true
-		armed = append(armed, s)
-	}
-	return armed
-}
-
-// recoveryRepaint captures the recovered pane's screen and builds the repaint bytes
-// the re-seed installs, so a client that stayed attached across a tmux respawn
-// repaints the current screen and resumes live output on its own (#1682). It mirrors
-// subscribe()'s initial-repaint injection but builds ONE snapshot for all subscribers.
-// The Snapshot exec runs without b.mu held (matching subscribe) — which is precisely
-// the window the barrier exists to cover. Best-effort: a Snapshot error or an empty
-// screen yields nil, and the release degrades to just lifting the barrier and waking
-// the subscribers — the restarted capture's next live byte still reaches them — rather
-// than failing the recovery. Caller holds captureMu.
-func (b *ptyBroker) recoveryRepaint() *repaintSnapshot {
-	snap, err := b.ch.Snapshot()
-	if err != nil {
-		log.WarningLog.Printf("pty broker: snapshot for recovery re-seed: %v", err)
-		return nil
-	}
-	if !snapshotHasRepaintState(snap) {
-		return nil
-	}
-	rp := buildRepaintSnapshot(snap)
-	rp.provenance = PTYRepaintRecovery
-	return &rp
-}
-
-// releaseRecoveryRepaint installs rp on every armed subscriber and lifts the barrier —
-// both under ONE b.mu hold, so a subscriber can never observe the lifted barrier
-// without also seeing the repaint that was owed to it. Waking is what makes a parked
-// subscriber re-read that state.
-func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot) {
-	b.mu.Lock()
-	for _, s := range armed {
-		if rp != nil && len(rp.data) > 0 {
-			s.pendingRepaint = rp
-		}
-		s.repaintArmed = false
-	}
-	b.wakeAllLocked()
-	b.mu.Unlock()
-	// wakeAllLocked only rings subscribers still in b.subs. An armed subscriber that
-	// detached mid-recovery is not in the map but can still be parked on the barrier,
-	// so ring its doorbell directly; wake() is a coalescing no-op when already signaled.
-	for _, s := range armed {
-		s.wake()
-	}
-}
-
 // readLoop copies the clientless capture reader into the ring until it errors or
 // the capture is stopped.
 //
@@ -619,12 +495,45 @@ func (b *ptyBroker) releaseRecoveryRepaint(armed []*ptySub, rp *repaintSnapshot)
 // observe the loop as finished while the latch still reads live. It deliberately
 // takes only mu — never captureMu, which a teardown holds while parked on
 // `<-done` (see ensureCaptureStartedLocked, where the reconcile happens).
+//
+// The latch alone only makes the dead capture RECOVERABLE — by the next
+// subscribe. With one client attached over a healthy daemon-browser WebSocket
+// there is no next subscribe, so this exit also HANDS OFF to redialLoop, which
+// is what actually brings the pane back (#2450). The hand-off is a goroutine for
+// the same reason the latch is not a teardown: stopCapture ends in `<-done`, so
+// this loop cannot run its own release inline. See ptybroker_recovery.go.
 func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
 	defer func() {
 		b.mu.Lock()
 		b.captureEnded = true
+		// Distinguish "the upstream died under us" from "a teardown stopped us".
+		// Every teardown — maybeStopCapture, recoverCapture, shutdown, and the
+		// reconcile in ensureCaptureStartedLocked — clears `capturing` under mu
+		// BEFORE it invokes stop(), and stop() is what ends this loop. So seeing
+		// `capturing` still true here means nothing asked us to stop: the socket
+		// dropped on its own, and this is the #2450 case where nobody else will
+		// ever notice.
+		spontaneous := b.capturing && !b.closed
+		var start bool
+		if spontaneous {
+			// A capture that ran a long time is a fresh incident, not a rung on the
+			// current ladder — reset before the hand-off reads the position.
+			if !b.captureStarted.IsZero() && time.Since(b.captureStarted) >= redialHealthySpan {
+				b.redialAttempts = 0
+			}
+			if !b.redialing {
+				b.redialing = true
+				start = true
+			}
+		}
 		b.mu.Unlock()
 		close(done)
+		// Started AFTER close(done): a teardown parked on `<-done` holds captureMu,
+		// which the recovery needs, so handing off first would just make the new
+		// goroutine wait — and then find `capturing` cleared and do nothing anyway.
+		if start {
+			go b.redialLoop()
+		}
 	}()
 	buf := make([]byte, 32*1024)
 	for {
@@ -751,6 +660,9 @@ func (b *ptyBroker) shutdown(tabClosed bool) {
 	}
 	b.closed = true
 	b.tabClosed = tabClosed
+	// Wake any recovery goroutine parked on its backoff. Closed exactly once —
+	// the `b.closed` guard above makes this section run once per broker.
+	close(b.closedCh)
 	b.wakeAllLocked()
 	var stop func()
 	if b.capturing {

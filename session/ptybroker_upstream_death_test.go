@@ -30,6 +30,16 @@ type singleSocketChannel struct {
 	starts   int
 	stops    int
 	snapshot []byte
+	// dieOnStart makes every dialled socket drop immediately, modelling an
+	// endpoint that accepts the WebSocket and then loses it (a proxy flapping, a
+	// sandbox mid-restart). It is what turns a readLoop-driven re-dial into a
+	// feedback loop, so it is how the backoff bound is exercised.
+	dieOnStart bool
+	// failStarts is how many further StartCapture calls must fail outright,
+	// modelling an endpoint that is unreachable rather than flapping — the dial
+	// itself errors, so no socket is ever held and no readLoop is ever spawned.
+	// Each failure decrements it, so a test can have the endpoint come back.
+	failStarts int
 }
 
 func (c *singleSocketChannel) StartCapture() (io.ReadCloser, error) {
@@ -38,10 +48,21 @@ func (c *singleSocketChannel) StartCapture() (io.ReadCloser, error) {
 	if c.held {
 		return nil, fmt.Errorf("remote clientless capture already started")
 	}
+	if c.failStarts > 0 {
+		c.failStarts--
+		c.starts++
+		return nil, fmt.Errorf("dial sandbox agent-server: connection refused")
+	}
 	c.held = true
 	c.starts++
 	r, w := io.Pipe()
 	c.w = w
+	if c.dieOnStart {
+		// Close the write end straight away: the broker's readLoop gets EOF on its
+		// first Read, exactly as it would if the socket dropped mid-flight.
+		c.w = nil
+		_ = w.Close()
+	}
 	return r, nil
 }
 
