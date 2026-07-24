@@ -216,7 +216,10 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 		return "", false, nil
 	}
 	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
-		return "", true, fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); event not delivered this attempt: %w", repo.Root, err)
+		// Pre-flight: the root never reappeared within the wait, so nothing was
+		// sent — refund the rate slot (#2501). This is the reserved-root outage
+		// path a monitor task targeting `root` hits during a tmux blip.
+		return "", true, notAttempted(fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); event not delivered this attempt: %w", repo.Root, err))
 	}
 	// A TUI can attach to root during the wait above, so re-check the defer lease
 	// before sending — otherwise this path pastes into an attached pane the

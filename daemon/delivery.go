@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,16 +69,44 @@ var errTargetBusy = errors.New("target session is attached; delivery deferred un
 // over-refunding breaks the guarantee.
 var errNotAttempted = errors.New("delivery not attempted")
 
-// notAttempted tags err as a pre-flight failure. The wrapper is transparent:
-// Error() is the wrapped message verbatim, so every log line reads exactly as
-// before and only errors.Is(err, errNotAttempted) flips.
-func notAttempted(err error) error { return &notAttemptedError{err: err} }
+// notAttempted tags err as a pre-flight failure that provably delivered nothing.
+// The wrapper is TRANSPARENT — Error() is the wrapped message verbatim — so these
+// errors reach `af sessions send-prompt` users and the broadcast error field with
+// no internal token trailing a pasteable command (#2512). nil in, nil out.
+func notAttempted(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &notAttemptedError{err: err}
+}
 
 type notAttemptedError struct{ err error }
 
 func (e *notAttemptedError) Error() string        { return e.err.Error() }
 func (e *notAttemptedError) Unwrap() error        { return e.err }
 func (e *notAttemptedError) Is(target error) bool { return target == errNotAttempted }
+
+// notDeliveredMarker is the WIRE-VISIBLE phrase that lets a pre-flight failure be
+// recognized after net/rpc flattens it to a plain string. The task delivery path
+// reaches the manager over the daemon's OWN control socket (deliverPromptForTask
+// is the control-client DeliverPrompt, taskrun.go), and net/rpc destroys the
+// *notAttemptedError type and its Is() method — so the type alone cannot carry
+// the classification back to the watcher (that is why the first cut of #2501 did
+// not actually refund). Same idiom, same reason, as atConcurrencyLimitErrText
+// (#1892) — but chosen to be NATURAL user-facing text that already belongs in
+// these messages ("... prompt not delivered"), NOT an appended token, so the wire
+// survivability costs the user nothing. Every pre-flight message reachable from
+// the watch path carries it; deliverTaskPrompt re-mints the sentinel on a match.
+const notDeliveredMarker = "prompt not delivered"
+
+// isNotAttemptedErr reports whether err — INCLUDING one flattened by net/rpc on
+// its way back from the daemon — is a pre-flight not-attempted failure. The
+// phrase arm is what survives the RPC round trip; the type arm covers in-process
+// callers. The phrase is absent from the ambiguous send/create failures (which
+// say "failed to send prompt" / "failed to auto-create"), so it never over-refunds.
+func isNotAttemptedErr(err error) bool {
+	return err != nil && (errors.Is(err, errNotAttempted) || strings.Contains(err.Error(), notDeliveredMarker))
+}
 
 // deferWhileAttached reports whether an automated delivery must be held because a
 // TUI is attached full-screen to the target (#1586). Every SendPrompt delivery
@@ -115,15 +144,21 @@ func (m *Manager) deferWhileAttached(repoID string, req DeliverPromptRequest) bo
 // when reserveCreate rejected the duplicate. Returns "started" when this call
 // created the session and "sent" when it delivered into an existing one.
 func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
+	// These all fail before any create or send — nothing was delivered — so they
+	// are pre-flight and tagged notAttempted so the watch path refunds the rate
+	// slot (#2501). RepoFromPath in particular is watch-reachable: a momentarily
+	// unresolvable project during an outage must not burn budget.
 	if req.Prompt == "" {
-		return "", fmt.Errorf("prompt is required")
+		return "", notAttempted(fmt.Errorf("prompt is required"))
 	}
 	if req.RepoPath == "" {
-		return "", fmt.Errorf("repo path is required")
+		return "", notAttempted(fmt.Errorf("repo path is required"))
 	}
 	repo, err := config.RepoFromPath(req.RepoPath)
 	if err != nil {
-		return "", err
+		// Carry notDeliveredMarker so this is refundable across the RPC hop (#2501):
+		// a momentarily unresolvable project during an outage must not burn budget.
+		return "", notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 	}
 
 	unlock := m.lockTarget(repo.ID, req.Title)
@@ -132,13 +167,15 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 
 	exists, deleting, liveness, err := m.targetSessionState(repo.ID, req.Title)
 	if err != nil {
-		return "", err
+		// A pre-flight state refresh that failed sent nothing (#2501): the watch
+		// path must refund the rate slot this attempt reserved, not charge it.
+		return "", notAttempted(fmt.Errorf("could not check target session %q state; %s: %w", req.Title, notDeliveredMarker, err))
 	}
 	if deleting {
-		return "", fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title)
+		return "", notAttempted(fmt.Errorf("target session %q is being deleted; %s", req.Title, notDeliveredMarker))
 	}
 	if err := promptTargetLivenessError(req.Title, liveness); err != nil {
-		return "", err
+		return "", notAttempted(err)
 	}
 	if exists {
 		// A TUI is attached full-screen to this session (#1160 pause lease), so
@@ -184,7 +221,12 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 		// are not retryable and surface as-is.
 		if isConcurrentCreateErr(err) {
 			if werr := m.waitForTargetSession(repo.ID, req.Title); werr != nil {
-				return "", werr
+				// The target never materialized within the wait (its liveness went
+				// bad, it was deleted, or targetDeliverWait elapsed): nothing was
+				// sent, so this is pre-flight and must refund (#2501). This is the
+				// outage path — a 30s wait that times out repeatedly would otherwise
+				// drain the budget the recovery needs.
+				return "", notAttempted(werr)
 			}
 			// A TUI can attach during the wait above, so re-check the defer lease
 			// before sending — otherwise this path pastes into an attached pane the
@@ -255,10 +297,15 @@ func (m *Manager) waitForTargetSession(repoID, title string) error {
 	for {
 		exists, deleting, liveness, err := m.targetSessionState(repoID, title)
 		if err != nil {
-			return err
+			// Carry notDeliveredMarker on EVERY error path so a wait that ends
+			// without delivering is refundable across the RPC hop (#2501). The
+			// deleting/liveness branches already say "prompt not delivered"; the
+			// state-refresh and timeout paths must too, since the timeout is the
+			// outage case a root-targeted watch task hits.
+			return fmt.Errorf("could not check target session %q state; %s: %w", title, notDeliveredMarker, err)
 		}
 		if deleting {
-			return fmt.Errorf("target session %q is being deleted; prompt not delivered", title)
+			return fmt.Errorf("target session %q is being deleted; %s", title, notDeliveredMarker)
 		}
 		if err := promptTargetLivenessError(title, liveness); err != nil {
 			return err
@@ -267,7 +314,7 @@ func (m *Manager) waitForTargetSession(repoID, title string) error {
 			return nil
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("timed out waiting for target session %q to be created", title)
+			return fmt.Errorf("timed out waiting for target session %q to be created; %s", title, notDeliveredMarker)
 		}
 		time.Sleep(targetDeliverPoll)
 	}

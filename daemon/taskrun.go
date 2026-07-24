@@ -125,7 +125,17 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		DeferWhileAttached: deferWhileAttached,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to deliver prompt to target session %q: %w", target, err)
+		wrapped := fmt.Errorf("failed to deliver prompt to target session %q: %w", target, err)
+		// deliverPromptForTask reached the manager over net/rpc, which flattened
+		// any pre-flight notAttempted tag to a plain string. Re-mint the in-process
+		// sentinel by matching the wire marker, so the watch paths' errors.Is
+		// refunds the rate slot (#2501) — the exact round-trip re-mint the cap
+		// refusal already does above. Without this the tag never survives the hop
+		// and the budget drains over an outage, which is the bug #2501 reports.
+		if isNotAttemptedErr(err) {
+			return "", notAttempted(wrapped)
+		}
+		return "", wrapped
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
 	return status, nil

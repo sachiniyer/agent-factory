@@ -64,6 +64,90 @@ func seedDisabledWatchTask(t *testing.T, taskID string) {
 	}
 }
 
+// seedEnabledWatchTask is seedDisabledWatchTask's ENABLED sibling: the
+// production deliverWatchEvent hook passes its pre-flight checks and reaches the
+// delivery path, so a test can drive the target-session delivery for real.
+func seedEnabledWatchTask(t *testing.T, taskID, target string) string {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	seedTargetSession(t, repo, target)
+	if err := task.AddTask(task.Task{
+		ID:            taskID,
+		Name:          "gh-issues",
+		Prompt:        "Triage: {{line}}",
+		WatchCmd:      "watch.sh",
+		TargetSession: target,
+		ProjectPath:   repo,
+		Enabled:       true,
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	return repo
+}
+
+// TestNotAttemptedSurvivesRPCFlattening is the #2501 wire contract, and the exact
+// gap the first cut of the fix had: notAttempted() was minted inside the Manager,
+// but the watch path reaches the Manager over the daemon's own control socket
+// (deliverPromptForTask), and net/rpc flattens a *notAttemptedError to a plain
+// string — so errors.Is against the sentinel stays FALSE on the way back and the
+// slot never refunds. The marker in the wire text is what survives; this pins it.
+// Mirrors TestIsAtConcurrencyLimitErrSurvivesRPCFlattening (#1892).
+func TestNotAttemptedSurvivesRPCFlattening(t *testing.T) {
+	preflight := notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", "captain"))
+
+	// Exactly what net/rpc does: reconstitute the server error from its text only.
+	flattened := fmt.Errorf("%s", preflight.Error())
+
+	// The precondition the first cut missed — assert it, so this test cannot pass
+	// for the wrong reason the way an in-process check did.
+	if errors.Is(flattened, errNotAttempted) {
+		t.Fatal("precondition failed: flattening did not destroy the type, so this proves nothing about the wire")
+	}
+	if !isNotAttemptedErr(flattened) {
+		t.Fatal("a pre-flight failure must still be recognizable after net/rpc flattens it to a string (#2501)")
+	}
+	// The other half of the rule: an ambiguous send failure must NOT be refunded.
+	if isNotAttemptedErr(fmt.Errorf("failed to send prompt: connection reset by peer")) {
+		t.Fatal("an ambiguous send failure must not be mistaken for a pre-flight not-attempted failure")
+	}
+}
+
+// TestWatcherHandleEvent_RefundsAcrossTheRPCHop is the end-to-end #2501
+// regression: it drives the REAL deliverWatchEvent → deliverTaskPrompt path with
+// deliverPromptForTask returning a FLATTENED pre-flight error — what actually
+// comes back over the control socket — and asserts the slot is refunded. This is
+// the layer the source-level test skipped: it fails if the re-mint in
+// deliverTaskPrompt is missing, even though the Manager still wraps correctly.
+func TestWatcherHandleEvent_RefundsAcrossTheRPCHop(t *testing.T) {
+	seedEnabledWatchTask(t, "cafe2501", "captain")
+
+	// The manager's pre-flight error, flattened by net/rpc to a bare string — the
+	// type is gone; only the marker text remains.
+	origDeliver := deliverPromptForTask
+	deliverPromptForTask = func(DeliverPromptRequest) (string, error) {
+		wire := notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", "captain")).Error()
+		return "", fmt.Errorf("%s", wire)
+	}
+	t.Cleanup(func() { deliverPromptForTask = origDeliver })
+
+	w := newRateSlotWatcher(t, "cafe2501", deliverWatchEvent)
+	close(w.stopCh) // no drainer behind the assertions
+
+	w.handleEvent("new issue #9", &tailBuffer{})
+
+	if got := spentSlots(w); got != 0 {
+		t.Fatalf("rate slots spent = %d, want 0.\n\n"+
+			"A pre-flight failure came back flattened over net/rpc; deliverTaskPrompt must "+
+			"re-mint notAttempted from the wire marker so the watcher refunds — otherwise the "+
+			"budget drains over an outage, which is #2501.", got)
+	}
+	if got := w.queue.pendingCount(); got != 1 {
+		t.Fatalf("pending = %d, want 1 (a failed delivery is queued for replay)", got)
+	}
+}
+
 // TestWatcherHandleEvent_RefundsRateSlotWhenNothingWasDelivered is the #2102
 // regression on the live path: a genuine error that failed pre-flight (here a
 // disabled task) delivers nothing, exactly like a deferral, so it must refund

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -469,6 +470,108 @@ func TestSendPrompt_RefusesLostAndDeadTargetsBeforeBackendSend(t *testing.T) {
 				t.Fatalf("%s send reached SendPromptCommand %d time(s); want 0", tc.wantStatus, backend.sent)
 			}
 		})
+	}
+}
+
+// TestDeliverAndSendPreflightErrorsAreNotAttempted is the #2501 regression.
+//
+// DeliverPrompt and SendPrompt reject a target that is being deleted, is racing
+// into teardown, or is not live — all BEFORE any byte reaches a pane. The watch
+// delivery path reserves a rate slot per attempt and refunds it only when the
+// error is tagged errNotAttempted; these pre-flight errors were plain
+// fmt.Errorf, so the watcher never refunded and the 10-events/min budget drained
+// over an outage. Every such error must now carry the notAttempted tag.
+//
+// This covers the MANAGER layer only — that the two functions return a tagged
+// error IN-PROCESS. Necessary but not sufficient: the watch path reaches the
+// manager over net/rpc, which flattens the tag to a string, so the wire survival
+// and the actual refund are pinned separately by
+// TestNotAttemptedSurvivesRPCFlattening and
+// TestWatcherHandleEvent_RefundsAcrossTheRPCHop. An earlier cut of this fix had
+// ONLY this layer and did not refund at all — the #2501 P1.
+func TestDeliverAndSendPreflightErrorsAreNotAttempted(t *testing.T) {
+	// DeliverPrompt, target mid-teardown (the `deleting` branch).
+	t.Run("deliver into a deleting target", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		installRecordingBackend(t)
+		repoPath := setupControlRepo(t)
+		repo, err := config.RepoFromPath(repoPath)
+		if err != nil {
+			t.Fatalf("RepoFromPath: %v", err)
+		}
+		manager, err := NewManager(config.DefaultConfig())
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
+		}
+		if _, err := manager.DeliverPrompt(DeliverPromptRequest{
+			Title: "captain", RepoPath: repoPath, Program: "claude", Prompt: "init",
+		}); err != nil {
+			t.Fatalf("initial create: %v", err)
+		}
+		manager.mu.Lock()
+		inst := manager.instances[daemonInstanceKey(repo.ID, "captain")]
+		manager.mu.Unlock()
+		inst.SetStatusForTest(session.Deleting)
+
+		_, err = manager.DeliverPrompt(DeliverPromptRequest{
+			Title: "captain", RepoPath: repoPath, Program: "claude", Prompt: "during-delete",
+		})
+		assertNotAttempted(t, err, "being deleted")
+	})
+
+	// DeliverPrompt and SendPrompt, target not live (the liveness pre-flight,
+	// shared by both). Lost is representative; Dead/Archived take the same branch.
+	t.Run("deliver into a Lost target", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		backend := &failingPromptBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+		registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Lost)
+
+		_, err := manager.DeliverPrompt(DeliverPromptRequest{
+			Title: "captain", RepoPath: repoPath, Program: "claude", Prompt: "during-outage",
+		})
+		assertNotAttempted(t, err, "is Lost")
+	})
+
+	t.Run("send into a Lost target", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		backend := &failingPromptBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+		registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Lost)
+
+		err := manager.SendPrompt(SendPromptRequest{Title: "captain", RepoID: repoID, Prompt: "during-outage"})
+		assertNotAttempted(t, err, "is Lost")
+	})
+}
+
+// assertNotAttempted checks err is a #2501 pre-flight error on FOUR axes: it
+// carries wantMsg (actionable), flips errors.Is (in-process refund), carries the
+// wire marker so the tag survives net/rpc flattening (#2501 P1), and — the #2512
+// P3 — its user-facing text carries NO internal classification token. These
+// errors go straight to `af sessions send-prompt` users and the broadcast error
+// field; an appended "(delivery not attempted)" would trail a pasteable command.
+func assertNotAttempted(t *testing.T, err error, wantMsg string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected a pre-flight error containing %q, got nil", wantMsg)
+	}
+	if !strings.Contains(err.Error(), wantMsg) {
+		t.Fatalf("error = %q, want it to contain %q", err.Error(), wantMsg)
+	}
+	if !errors.Is(err, errNotAttempted) {
+		t.Fatalf("pre-flight error %q is NOT tagged notAttempted, so the watch path will not "+
+			"refund its rate slot — the #2501 leak", err.Error())
+	}
+	// The classification must survive the RPC hop the watch path takes: the type
+	// is destroyed by net/rpc, so the wire marker (a natural phrase) is what
+	// isNotAttemptedErr matches. Assert on the FLATTENED form, not the typed one.
+	flattened := fmt.Errorf("%s", err.Error())
+	if !isNotAttemptedErr(flattened) {
+		t.Fatalf("pre-flight error %q loses its classification once net/rpc flattens it to a "+
+			"string — the watch path would not refund (#2501 P1)", err.Error())
+	}
+	// The #2512 P3: no internal token in what users see.
+	if strings.Contains(err.Error(), "delivery not attempted") {
+		t.Fatalf("user-facing error %q contains the internal classification token; it must not — "+
+			"users see this via jsonError and the broadcast error field (#2512)", err.Error())
 	}
 }
 
