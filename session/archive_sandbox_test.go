@@ -360,6 +360,7 @@ func (r *specCapturingRuntime) Provision(s ProvisionSpec) (ProvisionResult, erro
 func TestArchiveSandbox_PartialFailureReprovisionsOnPushedBranch(t *testing.T) {
 	i := newStubbedSandboxInstance(&stubAgentServer{branch: "root/s", killErr: fmt.Errorf("container rm failed")})
 	i.Path = t.TempDir()
+	i.sessionEnvPassthrough = []string{"CUSTOM_PROVIDER_TOKEN"}
 
 	_, err := i.ArchiveSandbox()
 	require.Error(t, err, "this test is about the PARTIAL failure path")
@@ -376,6 +377,8 @@ func TestArchiveSandbox_PartialFailureReprovisionsOnPushedBranch(t *testing.T) {
 	require.NoError(t, i.reprovisionRemote())
 	assert.Equal(t, "root/s", rt.spec.RestoreBranch,
 		"recovery after a partial archive must clone the pushed branch back, not fall through to the default branch (#1781)")
+	assert.Contains(t, rt.spec.SessionEnvPassthrough, "CUSTOM_PROVIDER_TOKEN",
+		"recovery must preserve the explicit session environment policy")
 }
 
 // TestReprovisionRemote_RebindsInstance drives the restore re-provision wiring

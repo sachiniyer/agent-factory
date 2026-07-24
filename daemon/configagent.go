@@ -220,6 +220,13 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// every af cleanup path recognizes (`^af_`).
 	seq := fmt.Sprintf("%s%d", configAgentSessionPrefix, configAgentSeq.Add(1))
 	ts := tmux.NewTmuxSession(seq, req.Program)
+	currentConfig, err := config.LoadConfig()
+	if err != nil {
+		return "", "", fmt.Errorf("config agent: cannot load current session environment configuration: %w", err)
+	}
+	if err := ts.SetEnvPassthrough(currentConfig.SessionEnvPassthrough); err != nil {
+		return "", "", fmt.Errorf("config agent: invalid session environment pass-through: %w", err)
+	}
 	if err := ts.Start(home); err != nil {
 		return "", "", fmt.Errorf("config agent: failed to start tmux session: %w", err)
 	}

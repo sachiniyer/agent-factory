@@ -108,6 +108,49 @@ func TestManagerCreateSessionPersistsAndRejectsDuplicate(t *testing.T) {
 	}
 }
 
+func TestManagerCreateSessionDoesNotPersistGlobalEnvironmentGrant(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+
+	var persisted, provisioned []string
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		persisted = append([]string(nil), opts.SessionEnvPassthrough...)
+		provisioned = append([]string(nil), opts.ProvisionSessionEnvPassthrough...)
+		backend := session.NewFakeBackend()
+		backend.CompleteStart()
+		return readyFakeBackend{backend}, nil
+	})
+	t.Cleanup(restore)
+
+	cfg := config.DefaultConfig()
+	cfg.SessionEnvPassthrough = []string{"REMOVED_PROVIDER_TOKEN"}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	current := config.DefaultConfig()
+	current.SessionEnvPassthrough = []string{"CURRENT_PROVIDER_TOKEN"}
+	if err := config.SaveConfig(current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title:    "configured-env",
+		RepoPath: repoPath,
+		Program:  "claude",
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if len(persisted) != 0 {
+		t.Fatalf("daemon persisted global session environment names %v as durable per-instance grants", persisted)
+	}
+	if len(provisioned) != 1 || provisioned[0] != "CURRENT_PROVIDER_TOKEN" {
+		t.Fatalf("backend received provisioning environment names %v, want the current on-disk exact name", provisioned)
+	}
+}
+
 // TestManagerCreateSessionAtomicWithRefresh is a regression test for
 // sachiniyer/agent-factory#509. The pre-fix code persisted a new session to
 // disk before inserting it into m.instances under m.mu. The daemon's refresh

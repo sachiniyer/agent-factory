@@ -192,7 +192,12 @@ func newConfigAgentCodexFixture(t *testing.T, mode string) (*Manager, string, st
 		program = "CODEX_HOME=" + shSingleQuote(codexHome) + " " + program
 	}
 
-	manager, err := NewManager(config.DefaultConfig())
+	cfg := config.DefaultConfig()
+	cfg.SessionEnvPassthrough = []string{configAgentCodexFixtureEnv, configAgentCodexFixtureModeEnv}
+	if err := config.SaveConfig(cfg); err != nil {
+		t.Fatalf("save config-agent fixture config: %v", err)
+	}
+	manager, err := NewManager(cfg)
 	if err != nil {
 		t.Fatalf("construct manager: %v", err)
 	}

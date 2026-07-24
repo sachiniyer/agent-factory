@@ -142,6 +142,12 @@ type Config struct {
 	// (typically a full path with flags). When unset for an agent, the
 	// bare agent name is used and resolved via $PATH.
 	ProgramOverrides map[string]string `json:"program_overrides,omitempty" toml:"program_overrides,omitempty"`
+	// SessionEnvPassthrough extends the built-in, default-deny environment for
+	// agent sessions with exact variable names. It is deliberately global-only:
+	// a cloned repository must never be able to request a credential from the
+	// daemon's environment. Values are looked up only when a session starts and
+	// are never written to config, argv, or logs.
+	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty" toml:"session_env_passthrough,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.

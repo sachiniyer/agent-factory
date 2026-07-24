@@ -30,6 +30,7 @@ update_channel = "stable"
 limit_auto_resume = false
 global_agent_skills = false
 limit_retry_interval = "30m"
+session_env_passthrough = []
 
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
@@ -60,6 +61,7 @@ pane_border_preview = "#DC8CC3"
 |-------|-------------|
 | `default_program` | Default agent enum. Must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`. |
 | `program_overrides` | Optional map from agent enum to the full command string used when launching that agent. Use this to pin a path or pass flags (e.g. `--dangerously-skip-permissions`). Keys must be one of `claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`. Agent-specific injection (claude's `--plugin-dir` flag, aider's `--read` flag, opencode's `OPENCODE_CONFIG` env var pointing at an af-owned config, devin's `--respect-workspace-trust false` to skip its workspace-trust modal, and — when `global_agent_skills = true` — the af skill file dropped into codex/gemini/amp/devin's own skills folder) and readiness detection follow the program the override actually runs, not the key: pointing an agent name at a different command (even a non-agent one like `bash`) launches it with no injected agent flags, and a command running no known agent counts as ready once its pane shows output. The agent is identified by command-token basename (`/opt/tools/claude --model opus` and `ionice -c 3 claude` are claude; `/opt/claude-wrapper/run` is not), so if you wrap an agent in a script, name the script after the agent to keep its flags and readiness behavior. |
+| `session_env_passthrough` | Extra exact environment variable names agent sessions may inherit. Default: none beyond af's built-in runtime, Git/GitHub, network, and selected-agent authentication allowlist; Docker requires explicit names because repo config selects its image. Global-only and hand-edited; values stay in the process environment and must not be placed in this list. See [Session environment isolation](#session-environment-isolation). |
 | `auto_update` | Startup self-update. Defaults to `true`: an interactive `af` checks the configured `update_channel` on launch — at most once every 6 hours, so a relaunch inside that window costs nothing and makes no network call — and when a newer release exists it installs it, restarts the daemon from it (sessions survive), and relaunches you into the new version straight away. It never downgrades, never interrupts an `af` that is already running, and skips silently when the check fails or you are offline. It is also skipped whenever stdout is not a terminal, so a script or CI job that calls `af` keeps the binary it installed. Set to `false`, or set `AGENT_FACTORY_AUTO_UPDATE=0`, to pin the installed version; `af upgrade` still works either way. |
 | `daemon_poll_interval` | Daemon polling interval in ms. |
 | `listen_addr` | Address the daemon serves the bundled **web UI** + HTTP/WS API on, over **plain HTTP** (no TLS). Defaults to `127.0.0.1:8443` (loopback), so a fresh install has a browser client at `http://127.0.0.1:8443` that connects with no token and no login screen. Set it to `""` to **disable** the web server entirely (pure-unix daemon); set it to a routable host:port like `0.0.0.0:8443` to expose it to the network — pair that with **`require_token = true`** unless you trust the network, because a tokenless network bind serves the control API to anyone who can reach it. af **allows** it and warns once at daemon start rather than refusing (see [Remote daemon access](remote-http-auth.md#the-tokenless-network-warning)). af serves no TLS either way, so front a routable listener with a TLS-terminating proxy or a private network. A web-port bind conflict is logged and skipped — it never blocks the daemon. Global-only. See [The web client](web.md) and [Remote daemon access](remote-http-auth.md). |
@@ -144,6 +146,89 @@ picker, navigates to **Keep waiting** by its label, confirms that row is selecte
 before accepting it, and compares Codex's model status line before and after.
 The intervention and verification result are written to `agent-factory.log`; a
 changed picker that af cannot match safely is logged and left untouched.
+
+### Session environment isolation
+
+Agent processes use a default-deny environment. af no longer copies every
+variable held by the shell or daemon into a session. This limits unrelated
+credentials from secret managers, databases, CI systems, and infrastructure
+providers from becoming ambient authority in a coding agent.
+
+The built-in allowlist keeps the pieces sessions need:
+
+- Process and terminal basics: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TERM`, `COLORTERM`, `LANG`, `LANGUAGE`, every valid `LC_*` name, `TZ`,
+  `TMPDIR`/`TMP`/`TEMP`, `PWD`, XDG config/data/cache/state/runtime paths,
+  terminal color preferences, and tmux's own `TMUX`, `TMUX_PANE`, and
+  `TMUX_TMPDIR` markers.
+- Agent Factory state: `AGENT_FACTORY_HOME`, `AGENT_FACTORY_AUTO_UPDATE`,
+  `AF_HOME`, `AF_SESSION`, `AF_DAEMON_URL`, and `AF_DAEMON_TOKEN`.
+- Git and GitHub authentication: `GH_TOKEN`, `GITHUB_TOKEN`, their Enterprise
+  variants, `GH_HOST`, `GH_CONFIG_DIR`, `SSH_AUTH_SOCK`, Git SSH/askpass and
+  config-file selectors, Git author/committer identity, and GPG agent/home
+  selectors. Stored `gh` login, Git credential helpers, and native keyrings
+  continue to work through `HOME`, XDG paths, and the desktop session bus.
+- Network access: upper- and lower-case HTTP/HTTPS/all/no-proxy variables plus
+  the standard OpenSSL, Node, Requests, and curl custom-CA paths.
+- Authentication for the selected agent only: Claude gets Anthropic/OAuth, and
+  gets each Bedrock, Vertex, or Foundry credential group only when that mode's
+  `CLAUDE_CODE_USE_*` selector is exported or is a literal assignment in the
+  resolved command (for example,
+  `program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"`). A
+  command-local selector is trusted only when the entire command is one literal
+  Claude invocation (optionally through `env` or `exec`) or af's own generated
+  agent-server handoff. Compound commands, redirects, arbitrary wrappers, and
+  dynamic words require exporting the selector before starting af, or explicitly
+  listing the provider credential names. Codex gets
+  `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
+  `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys and
+  Google application-default/Vertex selectors; Amp gets `AMP_API_KEY` and
+  `AMP_HOME`; Aider and OpenCode get their common model-provider API keys and
+  their own config locations. File- or keyring-backed logins remain preferred
+  because they do not put a credential in any environment at all.
+
+Docker is a stricter trust boundary. A repository selects its container image,
+so af does not automatically send that image any built-in agent, GitHub,
+proxy, or CA variable. Add each required name to `session_env_passthrough` only
+after trusting the configured image, preferably at an immutable digest. Local,
+SSH, and hook launches retain the built-in selected-agent behavior; SSH reads
+matching values from the remote account rather than copying the daemon's.
+If the Docker client itself needs a proxy or private CA to reach its daemon or
+registry, list those exact names too.
+
+Claude's cloud modes are selected by `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, and `CLAUDE_CODE_USE_FOUNDRY`, and turning one on
+grants the session that provider's whole credential group — your AWS keys,
+Google application credentials, or Azure client secrets. af reads that selector
+from your environment or from the resolved agent command, so
+`program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"` in your **global**
+config works as written.
+
+A repository may **not** do the same. `program_overrides` is one of the keys an
+in-repo `.agent-factory/config.toml` may set, and a checked-in value carrying one
+of those assignments is **rejected at load** with an error naming the selector:
+otherwise cloning a repository and starting a session would hand that
+repository's agent your cloud credentials. A repo may still choose *which*
+program runs — a path, flags, a wrapper — because that grants nothing. Set the
+selector in your own global config or export it in your shell if you want it.
+
+An agent wrapper that hides the real executable name, a custom Codex model
+provider whose `env_key` is user-defined, or a less-common Aider/OpenCode
+provider may need another variable. Add its **name**, never its value, to the
+global config:
+
+```toml
+session_env_passthrough = ["CUSTOM_PROVIDER_TOKEN"]
+```
+
+Entries are exact POSIX names; assignments and wildcards are rejected. The key
+is global-only so a cloned repository cannot request secrets from the daemon's
+environment. Git worktree subprocesses and `post_worktree_commands` use the
+same boundary; list a package-manager/build credential explicitly if a setup
+command needs it. For Docker, listing a name is also the explicit trust grant
+that lets the repo-selected image receive it. New and respawned panes use the
+current list. A pane that was already running before an upgrade keeps the
+environment it started with until that process is restarted.
 
 ### Theme colors (`theme`)
 
@@ -326,7 +411,7 @@ delete_cmd = "./infra/delete.sh"
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
-| `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `vscode_server_binary`, `global_agent_skills` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
+| `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `vscode_server_binary`, `global_agent_skills`, `session_env_passthrough` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `session_env_passthrough` is global-only so a cloned repo cannot request credentials from the daemon environment. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

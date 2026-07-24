@@ -25,6 +25,23 @@ func writeInRepoConfig(t *testing.T, repoRoot string, fields map[string]any) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, config.ConfigFileName), data, 0644))
 }
 
+// setOperatorProgramOverride records a program override in the GLOBAL config,
+// through the same `af config set` path an operator uses.
+//
+// The distinction from writeInRepoConfig is the whole point of the #2310
+// boundary and not a stylistic one: a program override's value is a command
+// string, and the launch path reads an inline environment assignment off it to
+// decide whether a conditional cloud mode is on. That is safe from the global
+// config, which only the operator can write, and unsafe from a repository's
+// checked-in file, which anyone whose repo you clone can write — so
+// config.LoadInRepoConfig refuses the latter. Tests that need an inline cloud
+// selector must therefore use this, or they are asserting the bypass.
+func setOperatorProgramOverride(t *testing.T, agent, command string) {
+	t.Helper()
+	_, err := config.SetGlobalConfigValue("program_overrides."+agent, command)
+	require.NoError(t, err)
+}
+
 // TestParseBackendKind pins the enum validation: empty defaults to local, the
 // four canonical values round-trip, and anything else is a clear error (the
 // validation the --backend flag and the config `backend` key both run).

@@ -14,12 +14,14 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 func TestMain(m *testing.M) {
+	sessionenv.HandleInternalExec()
 	// A re-exec of this test binary standing in for code-server (see
 	// writeFakeVSCodeBinary): serve and exit. It must return BEFORE the tripwires
 	// and sandboxing below — it is a child process of a test, not a test run, and

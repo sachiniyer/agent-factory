@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // networkGitTimeout bounds git operations that perform network I/O (currently
@@ -126,7 +128,7 @@ func (g *GitWorktree) runGitCommandContext(ctx context.Context, path string, arg
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
 	// remote needs auth and no terminal is attached.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(sessionenv.Filter(os.Environ(), "", g.hookEnvPassthrough), "GIT_TERMINAL_PROMPT=0")
 	// Own process group so the deadline kills git AND its transport child
 	// together. exec.CommandContext's default Cancel SIGKILLs only the git
 	// process, leaving ssh / git-remote-https orphaned and still holding the

@@ -65,6 +65,25 @@ clones the branch back (see [Archive & restore](#archive--restore)).
 | `docker.image` | yes | The container image the session runs in (see requirements below). |
 | `docker.run_args` | no | Extra arguments appended verbatim to `docker run` (mounts, env, resource limits). |
 
+The Docker runtime does not copy the daemon's whole environment into the
+container. Because repository config selects the image and its binaries, af
+does not automatically grant that image the built-in agent, GitHub, proxy, or
+CA variables used by local sessions. Only names explicitly listed in the
+global `session_env_passthrough` setting cross this boundary. Docker receives
+each as `-e NAME`, so the value does not appear in the docker command line.
+Container-native `HOME` and `PATH` remain owned by the image. An environment
+added through `docker.run_args` still has to be built in or named in
+`session_env_passthrough` before the agent pane may inherit it.
+
+Treat each Docker pass-through name as a trust grant to the configured image,
+and prefer an image pinned by digest. For example, a private GitHub Codex
+session using environment-backed credentials may explicitly list
+`GH_TOKEN` and `OPENAI_API_KEY`; that keeps clone, `gh`, HTTPS push, and Codex
+authentication working after the operator has made that trust decision. If you
+use stored credentials instead, mount only the relevant config or
+credential-helper resources deliberately with `docker.run_args`; host paths and
+native keyrings are not implicitly mounted into a container.
+
 ### Image requirements (bring-your-own image)
 
 There is **no `af`-published image**: you bring your own (Sachin-locked
@@ -175,6 +194,13 @@ could MITM the connection and capture the bearer token). There is no
 "insecure/ignore" option: for an ephemeral or freshly-provisioned host, seed its
 key first with `ssh-keyscan -H host >> ~/.ssh/known_hosts` (or point
 `ssh.known_hosts` at a dedicated file), then create the session.
+
+The Go SSH client never forwards the daemon's environment. The remote
+agent-server and pane use credentials already present for the remote login
+account, filtered through the same built-in allowlist. Names in the daemon's
+global `session_env_passthrough` list are sent to the remote as names only; if a
+matching variable exists in the remote account's environment, the agent may
+inherit it. A local token is never copied to the SSH host implicitly.
 
 ### Requirements on the remote host
 

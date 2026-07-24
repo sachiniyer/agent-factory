@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -14,6 +15,7 @@ import (
 // sandbox escape to reach the developer's real ~/.agent-factory/config.json
 // or leave orphaned af_ sessions on the developer's tmux server.
 func TestMain(m *testing.M) {
+	sessionenv.HandleInternalExec()
 	verifyRealConfig := testguard.ConfigTripwire()
 	verifyTmux := testguard.TmuxTripwire()
 	// #1056: default the package into a sandboxed AGENT_FACTORY_HOME so any

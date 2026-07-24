@@ -312,6 +312,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "session_env_passthrough",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Extra environment variable names an agent session may inherit · exact names only, values stay out of config, and each name explicitly trusts a repo-selected Docker image.",
+		Tier:       TierAdvanced,
+		Settable:   false,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "limit_patterns",
 		Type:       "table",
 		Default:    "none · the built-in patterns are used",
