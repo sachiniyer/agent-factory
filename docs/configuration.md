@@ -181,11 +181,28 @@ The built-in allowlist keeps the pieces sessions need:
   dynamic words require exporting the selector before starting af, or explicitly
   listing the provider credential names. Codex gets
   `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
-  `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys and
-  Google application-default/Vertex selectors; Amp gets `AMP_API_KEY` and
+  `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys, and
+  gets Google Cloud's credentials (`GOOGLE_APPLICATION_CREDENTIALS`,
+  `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`) only when one of its own cloud
+  modes is selected by `GOOGLE_GENAI_USE_VERTEXAI` or `GOOGLE_GENAI_USE_GCA`, on
+  the same exported-or-inline terms as Claude's; Amp gets `AMP_API_KEY` and
   `AMP_HOME`; Aider and OpenCode get their common model-provider API keys and
-  their own config locations. File- or keyring-backed logins remain preferred
-  because they do not put a credential in any environment at all.
+  their own config locations, and **no** cloud-infrastructure credentials.
+  File- or keyring-backed logins remain preferred because they do not put a
+  credential in any environment at all.
+
+  **OpenCode against Bedrock or Vertex** needs its cloud credentials listed
+  explicitly in `session_env_passthrough` (for example `AWS_PROFILE`,
+  `AWS_REGION`, and whichever of `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/
+  `AWS_SESSION_TOKEN` or `AWS_SHARED_CREDENTIALS_FILE` your setup uses). Unlike
+  Claude and Gemini, OpenCode has no environment variable that selects a cloud
+  provider — it chooses one inside its own config file or model id — so there is
+  no mode signal af could gate those credentials behind. Since the alternative is
+  handing them to every OpenCode session unconditionally, af requires the
+  operator to name them. That matters because the agent a session runs is
+  repo-settable through `default_program`/`program_overrides`: without this, a
+  cloned repository could swap the agent to OpenCode and inherit your cloud
+  credentials.
 
 Docker is a stricter trust boundary. A repository selects its container image,
 so af does not automatically send that image any built-in agent, GitHub,
@@ -211,6 +228,14 @@ otherwise cloning a repository and starting a session would hand that
 repository's agent your cloud credentials. A repo may still choose *which*
 program runs — a path, flags, a wrapper — because that grants nothing. Set the
 selector in your own global config or export it in your shell if you want it.
+
+Gemini's cloud modes work the same way, selected by `GOOGLE_GENAI_USE_VERTEXAI`
+or `GOOGLE_GENAI_USE_GCA`. Choosing *which* agent runs is also a repo's to make
+— `default_program` and `program_overrides` are both repo-settable, and swapping
+the program is a legitimate thing to do — so no agent's allowlist carries cloud
+credentials unconditionally. Whichever agent a session ends up running, reaching
+your AWS, Google Cloud, or Azure credentials takes a selector you set or a name
+you listed in `session_env_passthrough`.
 
 An agent wrapper that hides the real executable name, a custom Codex model
 provider whose `env_key` is user-defined, or a less-common Aider/OpenCode
