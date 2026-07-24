@@ -428,6 +428,29 @@ func ResolveAuthSelectors(source []string, agent, command string) []string {
 	return selectors
 }
 
+// GuardedSelectors returns every conditional cloud-mode selector name across
+// all agents, sorted and deduplicated.
+//
+// It exists so a surface that must stay in step with the guarded set can
+// ENUMERATE it instead of keeping a copy. The copy is what rots: #2462 put
+// Gemini's two selectors under guard, and config's operator-facing refusal kept
+// answering with its generic fallback for them because its own list had not
+// grown. A caller that iterates this cannot drift the same way.
+func GuardedSelectors() []string {
+	set := make(map[string]struct{})
+	for _, groups := range conditionalAgentNames {
+		for _, group := range groups {
+			set[group.selector] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for selector := range set {
+		out = append(out, selector)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // NormalizeAuthSelectors validates a stored selector-name snapshot against the
 // selected agent's known conditional modes. Errors identify only the position,
 // never the untrusted stored text, so an accidental NAME=value record cannot

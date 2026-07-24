@@ -57,6 +57,16 @@ func TestInRepoProgramOverrideCannotEnableCloudCredentials(t *testing.T) {
 		// guard that keyed off the map key would miss this entirely.
 		{"cross-keyed under codex", `{"program_overrides": {"codex": "CLAUDE_CODE_USE_BEDROCK=1 claude"}}`,
 			"CLAUDE_CODE_USE_BEDROCK", "AWS"},
+		// Gemini's own cloud selectors, guarded since #2462. These are the cases
+		// that caught the follow-up: the rejection already fired, but the message
+		// named the variable and then fell through to the generic "cloud provider"
+		// because cloudProviderForSelector had not grown with the guarded set.
+		{"gemini vertex", `{"program_overrides": {"gemini": "GOOGLE_GENAI_USE_VERTEXAI=1 gemini"}}`,
+			"GOOGLE_GENAI_USE_VERTEXAI", "Google Cloud"},
+		{"gemini gca", `{"program_overrides": {"gemini": "GOOGLE_GENAI_USE_GCA=1 gemini"}}`,
+			"GOOGLE_GENAI_USE_GCA", "Google Cloud"},
+		{"gemini via env", `{"program_overrides": {"gemini": "env GOOGLE_GENAI_USE_VERTEXAI=true gemini"}}`,
+			"GOOGLE_GENAI_USE_VERTEXAI", "Google Cloud"},
 	}
 
 	for _, c := range cases {
@@ -158,16 +168,26 @@ func TestCommandEnablesCloudCredentialsAgreesWithSelectorResolution(t *testing.T
 }
 
 // TestInRepoCloudCredentialRefusalNamesEveryProvider keeps the operator-facing
-// message honest as the conditional set grows: a new provider added to
-// sessionenv without a name here would be reported as the generic fallback.
+// message honest as the conditional set grows: a selector put under guard in
+// sessionenv without a provider name here is reported as the generic fallback,
+// so the refusal quotes a variable without saying what is at stake.
+//
+// It enumerates sessionenv.GuardedSelectors rather than listing the selectors,
+// because a list is exactly what failed. This test previously hardcoded Claude's
+// three; #2462 then guarded Gemini's GOOGLE_GENAI_USE_VERTEXAI and
+// GOOGLE_GENAI_USE_GCA, and the test kept passing while their refusals said
+// "your cloud provider credentials" instead of "your Google Cloud credentials".
+// Deriving from the real set is what makes this a guard rather than a snapshot.
 func TestInRepoCloudCredentialRefusalNamesEveryProvider(t *testing.T) {
-	for _, selector := range []string{
-		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-	} {
+	guarded := sessionenv.GuardedSelectors()
+	require.NotEmpty(t, guarded, "no guarded selectors — this test would pass vacuously")
+
+	for _, selector := range guarded {
 		provider := cloudProviderForSelector(selector)
 		assert.NotEqual(t, "cloud provider", provider,
-			"%s fell through to the generic phrase — name its provider so the refusal says what is at stake",
-			selector)
+			"%s is guarded in sessionenv but has no provider name in cloudProviderForSelector, so its "+
+				"refusal falls through to the generic phrase — name its provider so the message says "+
+				"what is at stake", selector)
 		assert.False(t, strings.Contains(provider, "_"),
 			"%s should map to a human provider name, got %q", selector, provider)
 	}

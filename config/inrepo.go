@@ -401,11 +401,17 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 // conditional selector unlocks, so the rejection above can say what is actually
 // at stake instead of only quoting a variable name. An unknown selector falls
 // back to a truthful generic phrase rather than guessing.
+//
+// Every selector in sessionenv.GuardedSelectors belongs here.
+// TestInRepoCloudCredentialRefusalNamesEveryProvider enumerates that list rather
+// than a copy of it, because the copy is what went stale: #2462 put Gemini's two
+// selectors under guard and this switch kept answering "cloud provider" for
+// them, so the refusal named the variable without naming the stakes.
 func cloudProviderForSelector(selector string) string {
 	switch selector {
 	case "CLAUDE_CODE_USE_BEDROCK":
 		return "AWS"
-	case "CLAUDE_CODE_USE_VERTEX":
+	case "CLAUDE_CODE_USE_VERTEX", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA":
 		return "Google Cloud"
 	case "CLAUDE_CODE_USE_FOUNDRY":
 		return "Azure"
