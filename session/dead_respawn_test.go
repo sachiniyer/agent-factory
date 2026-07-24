@@ -369,10 +369,10 @@ func TestRunningInstance_AllShellsDead_EveryShellReplaced(t *testing.T) {
 	firstShell := agentName + shellTmuxSuffix
 	secondShell := agentName + "__shell-2"
 
-	// Only the agent is alive; both shells are gone. Their Restore re-spawns are
-	// allowed to succeed (persistPtyFactory), so on master the fallback would run
-	// but replace only the first shell — here Restore itself re-spawns both, so to
-	// force the fallback we fail BOTH re-spawns and let the fresh-shell spawns win.
+	// Only the agent is alive; both shells are gone. failNFirstNewSessionsPty fails
+	// the first TWO new-sessions — each dead shell's Restore re-spawn — so both stay
+	// dead and the setupTabs fallback must replace them; the later fresh-shell
+	// new-sessions succeed. On master the fallback replaced only the first shell.
 	var newSessions int
 	exec := countingExec(map[string]bool{agentName: true}, &newSessions)
 	failed := 0
@@ -394,6 +394,12 @@ func TestRunningInstance_AllShellsDead_EveryShellReplaced(t *testing.T) {
 	assert.True(t, restored.TabAlive(2),
 		"the second dead shell must ALSO be replaced — the all-dead path replaced only the first (#2527)")
 	assert.Equal(t, 2, newSessions, "one fresh shell per dead shell")
+	// The two replacements must take DISTINCT tmux names — never resolve to the same
+	// token and collide on the second Start (#2527 review).
+	tabs := restored.GetTabs()
+	require.Len(t, tabs, 3)
+	assert.NotEqual(t, tabs[1].tmux.SanitizedName(), tabs[2].tmux.SanitizedName(),
+		"the two replacement shells must get distinct tmux names")
 }
 
 // failNFirstNewSessionsPty fails the first N `tmux new-session` calls (the dead
