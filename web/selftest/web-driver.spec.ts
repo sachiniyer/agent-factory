@@ -1189,6 +1189,37 @@ test("#2458: no live indicator by the project selector, no live/branch meta by t
   expect(head?.trim()).toBe(SESSION_A);
 });
 
+// The phone path is checked separately because the indicator was not merely
+// narrower there — below the breakpoint it moved INTO the More popover and carried
+// its own sizing rule, so a desktop-only check would miss a copy still rendering
+// behind a disclosure the user has to open to see.
+test("#2458 mobile (375px): the More popover carries no live indicator", REAL_FIXTURE, async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await expect(p.locator(".af-app")).toHaveAttribute("data-live", "open");
+
+    const more = p.locator(".af-appbar-more");
+    await expect(more).toBeVisible();
+    await more.click();
+    const tools = p.locator(".af-appbar-tools");
+    await expect(tools).toBeVisible();
+
+    // Opened, so this is a real look inside rather than a pass earned by the
+    // popover being collapsed.
+    await expect(tools.locator(".af-live")).toHaveCount(0);
+    await expect(tools).not.toContainText("Live");
+    await expect(tools).not.toContainText("Connecting…");
+    // The controls that DO belong there survived the removal — the popover lost one
+    // child, not its contents.
+    await expect(tools.getByRole("button", { name: "Disconnect" })).toBeVisible();
+    await expect(tools.locator(".af-theme-opt").first()).toBeVisible();
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXTURE, async () => {
   await row(page, SESSION_A).click();
 
