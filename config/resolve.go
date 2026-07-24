@@ -28,9 +28,10 @@ var legacyDeprecationLogged sync.Map
 type ResolvedConfig struct {
 	// Config carries the effective app-level fields. DefaultProgram and
 	// ProgramOverrides may have been overridden/merged from the in-repo
-	// file; the global-only fields (AutoUpdate, DaemonPollInterval,
-	// BranchPrefix, DetachKeys) always come from the global config because
-	// LoadInRepoConfig rejects them per-repo.
+	// file; the global-only fields (e.g. AutoUpdate, DaemonPollInterval,
+	// BranchPrefix, DetachKeys — the manifest's full sourceGlobalOnly set)
+	// always come from the global config because LoadInRepoConfig rejects them
+	// per-repo.
 	Config
 
 	// PostWorktreeCommands are the effective post-worktree hooks: the

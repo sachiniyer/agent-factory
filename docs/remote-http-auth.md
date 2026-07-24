@@ -95,8 +95,8 @@ TLS termination or a private network (see
 ### 1. Point the listener at the network
 
 `listen_addr` is a **global-only** key (a cloned repo must never be able to open
-a network port), and it is not one of the scalar keys `af config set` writes, so
-**hand-edit** your global config. Change the default loopback address to a
+a network port). Set it with `af config set listen_addr <host:port>`, or
+hand-edit your global config directly. Change the default loopback address to a
 routable one:
 
 ```toml
