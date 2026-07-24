@@ -196,6 +196,22 @@ matching values from the remote account rather than copying the daemon's.
 If the Docker client itself needs a proxy or private CA to reach its daemon or
 registry, list those exact names too.
 
+Claude's cloud modes are selected by `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, and `CLAUDE_CODE_USE_FOUNDRY`, and turning one on
+grants the session that provider's whole credential group — your AWS keys,
+Google application credentials, or Azure client secrets. af reads that selector
+from your environment or from the resolved agent command, so
+`program_overrides.claude = "CLAUDE_CODE_USE_BEDROCK=1 claude"` in your **global**
+config works as written.
+
+A repository may **not** do the same. `program_overrides` is one of the keys an
+in-repo `.agent-factory/config.toml` may set, and a checked-in value carrying one
+of those assignments is **rejected at load** with an error naming the selector:
+otherwise cloning a repository and starting a session would hand that
+repository's agent your cloud credentials. A repo may still choose *which*
+program runs — a path, flags, a wrapper — because that grants nothing. Set the
+selector in your own global config or export it in your shell if you want it.
+
 An agent wrapper that hides the real executable name, a custom Codex model
 provider whose `env_key` is user-defined, or a less-common Aider/OpenCode
 provider may need another variable. Add its **name**, never its value, to the

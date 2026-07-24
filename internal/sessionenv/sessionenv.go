@@ -319,9 +319,53 @@ func selectedAgentNames(agent string, selectors []string) map[string]struct{} {
 	return selected
 }
 
+// CommandEnablesCloudCredentials reports the first conditional cloud-credential
+// mode that command would turn ON, and whether there is one. It is the guard
+// for command strings that are NOT operator-controlled.
+//
+// The danger it exists for: enabling a selector does not merely pick a provider,
+// it widens the environment boundary to that provider's whole credential group —
+// the operator's AWS keys for Bedrock, GCP application credentials for Vertex,
+// Azure client secrets for Foundry (conditionalAgentNames). ResolveAuthSelectors
+// honors an assignment carried by the RESOLVED agent command, and a repository's
+// checked-in config can supply that command: InRepoConfig.ProgramOverrides is
+// merged key-wise over the global map, so `claude = "CLAUDE_CODE_USE_BEDROCK=1
+// claude"` in a cloned repo would hand that repo's agent the operator's cloud
+// credentials. Cloning a hostile repo and starting a session must not do that,
+// so the untrusted layer rejects such a value instead (config.LoadInRepoConfig).
+//
+// The agent is derived from the command rather than taken from the caller,
+// because that is exactly what the launch paths do (TmuxSession.launchEnvironment
+// and hookProvisioner.environmentAgent both call AgentForCommand). A check that
+// re-derived it differently could disagree with the resolution it is guarding —
+// the key a repo files an override under does not have to name the agent the
+// value actually runs.
+//
+// Only the ENABLE direction is reported. A command that turns a mode OFF, or
+// that this parser cannot prove anything about, is not a widening and is left to
+// ResolveAuthSelectors.
+func CommandEnablesCloudCredentials(command string) (string, bool) {
+	agent := AgentForCommand(command)
+	if agent == "" {
+		return "", false
+	}
+	for _, group := range conditionalAgentNames[agent] {
+		if found, enabled := commandEnvironmentFlagState(command, agent, group.selector); found && enabled {
+			return group.selector, true
+		}
+	}
+	return "", false
+}
+
 // ResolveAuthSelectors returns the deterministic names of the selected agent's
 // conditional authentication modes that are effectively enabled. It persists
 // no values: callers may safely retain these names as durable policy state.
+//
+// The command may enable a mode, which widens the boundary to that provider's
+// credential group. That is safe ONLY because every command reaching here is
+// operator-controlled: the global config's program_overrides, or the operator's
+// own environment. The one layer a repository controls is filtered before it can
+// become a command — see CommandEnablesCloudCredentials.
 func ResolveAuthSelectors(source []string, agent, command string) []string {
 	var selectors []string
 	for _, group := range conditionalAgentNames[agent] {

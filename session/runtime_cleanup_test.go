@@ -99,10 +99,10 @@ printf '%s\n' "$names" | grep -qx AZURE_CLIENT_SECRET && exit 9
 			"launch_cmd": launch,
 			"delete_cmd": deleteCmd,
 		},
-		"program_overrides": map[string]any{
-			tmux.ProgramClaude: "CLAUDE_CODE_USE_BEDROCK=1 claude",
-		},
 	})
+	// Operator-controlled, not repo-controlled — a checked-in override naming a
+	// cloud mode is refused at config load (#2310).
+	setOperatorProgramOverride(t, tmux.ProgramClaude, "CLAUDE_CODE_USE_BEDROCK=1 claude")
 
 	result, err := (hookRuntime{}).Provision(ProvisionSpec{
 		RepoRoot: repoRoot,

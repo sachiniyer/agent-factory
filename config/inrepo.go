@@ -14,6 +14,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"golang.org/x/sys/unix"
 )
@@ -369,9 +370,48 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		); err != nil {
 			return nil, nil, err
 		}
+		// A repo may choose WHICH program its sessions run — that is what this
+		// key is for, and it is why the value is command-bearing. It may not
+		// choose what the operator's environment CONTAINS.
+		//
+		// An environment-assignment prefix crosses that line. The agent launch
+		// path reads such an assignment off the resolved command to decide
+		// whether a conditional cloud mode is on, and turning one on widens the
+		// session boundary to that provider's entire credential group — the
+		// operator's AWS keys, GCP application credentials, or Azure client
+		// secrets. This file is checked into the repository, so honoring it here
+		// would mean cloning a hostile repo and starting a session hands that
+		// repo the operator's cloud credentials. Reject the value instead; the
+		// operator's own global config keeps the same power, because that layer
+		// is theirs.
+		if selector, enables := sessionenv.CommandEnablesCloudCredentials(value); enables {
+			return nil, nil, fmt.Errorf(
+				"in-repo config %s: program_overrides.%s sets %s, which would grant this repository's "+
+					"sessions your %s credentials. A checked-in config may choose which program runs, not what "+
+					"your environment contains. Remove the %s= assignment from the value; set it in %s if you "+
+					"intend it for every repo, or export it in your own shell",
+				prettyPath, key, selector, cloudProviderForSelector(selector), selector, tomlGlobalConfigLocation)
+		}
 	}
 
 	return &cfg, data, nil
+}
+
+// cloudProviderForSelector names the provider whose credential group a
+// conditional selector unlocks, so the rejection above can say what is actually
+// at stake instead of only quoting a variable name. An unknown selector falls
+// back to a truthful generic phrase rather than guessing.
+func cloudProviderForSelector(selector string) string {
+	switch selector {
+	case "CLAUDE_CODE_USE_BEDROCK":
+		return "AWS"
+	case "CLAUDE_CODE_USE_VERTEX":
+		return "Google Cloud"
+	case "CLAUDE_CODE_USE_FOUNDRY":
+		return "Azure"
+	default:
+		return "cloud provider"
+	}
 }
 
 // beforeInRepoConfigWrite is a test hook for exercising filesystem races at

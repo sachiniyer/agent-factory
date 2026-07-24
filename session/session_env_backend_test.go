@@ -154,10 +154,12 @@ echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
 			"launch_cmd": launch,
 			"delete_cmd": "true",
 		},
-		"program_overrides": map[string]any{
-			tmux.ProgramClaude: "CLAUDE_CODE_USE_BEDROCK=1 claude",
-		},
 	})
+	// The inline selector comes from the OPERATOR's global config. It must not
+	// come from the in-repo file above: that file is checked in, so a cloned
+	// repo could otherwise name a cloud mode and be handed these AWS keys
+	// (#2310). TestHookEnvironmentRefusesRepoDeclaredCloudMode is the other half.
+	setOperatorProgramOverride(t, tmux.ProgramClaude, "CLAUDE_CODE_USE_BEDROCK=1 claude")
 
 	result, err := (hookRuntime{}).Provision(ProvisionSpec{
 		RepoRoot: repoRoot,
@@ -169,6 +171,59 @@ echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
 	}
 	if result.Teardown != nil {
 		defer func() { _ = result.Teardown() }()
+	}
+}
+
+// TestHookEnvironmentRefusesRepoDeclaredCloudMode is the end-to-end half of the
+// #2310 cloud-credential guard: the config-level rejection is only worth having
+// if a repo genuinely cannot reach a backend launch with it.
+//
+// The sibling test above proves an inline cloud mode DOES select its provider's
+// credentials when the operator asks for it. This proves the same request, made
+// by the repository instead, never gets that far — provisioning fails at config
+// load, so launch_cmd is never spawned and the operator's AWS keys are never
+// assembled into an environment for it.
+func TestHookEnvironmentRefusesRepoDeclaredCloudMode(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
+	repoRoot := initTempGitRepo(t)
+	scriptDir := t.TempDir()
+	// Records that it ran. It must not: a repo that can make af spawn its
+	// launch_cmd with cloud credentials has already won.
+	spawned := filepath.Join(scriptDir, "launch-ran")
+	launch := writeScript(t, scriptDir, "launch.sh", `
+: > "`+spawned+`"
+echo '{"url":"http://127.0.0.1:9","token":"test-token"}'
+`)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "hook",
+		"remote_hooks": map[string]any{
+			"launch_cmd": launch,
+			"delete_cmd": "true",
+		},
+		"program_overrides": map[string]any{
+			tmux.ProgramClaude: "CLAUDE_CODE_USE_BEDROCK=1 claude",
+		},
+	})
+
+	result, err := (hookRuntime{}).Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "repo-declared-cloud-mode",
+		Program:  tmux.ProgramClaude,
+	})
+	if result.Teardown != nil {
+		defer func() { _ = result.Teardown() }()
+	}
+	if err == nil {
+		t.Fatal("a repository that declares CLAUDE_CODE_USE_BEDROCK in its checked-in program_overrides " +
+			"was allowed to provision — cloning that repo would hand its agent the operator's AWS credentials (#2310)")
+	}
+	if !strings.Contains(err.Error(), "CLAUDE_CODE_USE_BEDROCK") {
+		t.Errorf("the refusal must name the selector so the operator can see what the repo asked for, got: %v", err)
+	}
+	if _, statErr := os.Stat(spawned); statErr == nil {
+		t.Fatal("launch_cmd was spawned despite the refusal — the repo reached a real process")
 	}
 }
 
