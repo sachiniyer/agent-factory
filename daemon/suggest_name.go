@@ -35,6 +35,12 @@ type SuggestSessionNameResponse struct {
 	Name string `json:"name"`
 }
 
+// suggestName is the wordlist generator the RPC calls. It is a package var (not a
+// direct namegen.Suggest call) purely so a test can capture the collision predicate
+// the handler builds from live titles and assert it deterministically — the random
+// generator cannot be forced into an observable collision otherwise.
+var suggestName = namegen.Suggest
+
 // SuggestSessionName returns a random, readable session name that avoids every
 // live session's title. It draws from the daemon-owned wordlist so every client
 // renders names from the same list.
@@ -57,7 +63,7 @@ func (s *controlServer) SuggestSessionName(req SuggestSessionNameRequest, resp *
 			}
 		}
 	}
-	resp.Name = namegen.Suggest(func(name string) bool {
+	resp.Name = suggestName(func(name string) bool {
 		return taken[strings.ToLower(name)]
 	})
 	return nil
