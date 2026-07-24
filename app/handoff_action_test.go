@@ -73,6 +73,66 @@ func TestHandleHandoff_RefusesArchivedSessionBeforePicker(t *testing.T) {
 	require.Contains(t, strings.ToLower(h.errBox.FullError()), "archived")
 }
 
+// TestHandleHandoff_RefusesReservedRootBeforePicker is the #2436 regression. The
+// daemon has always refused to hand off the reserved root agent, but the TUI let
+// the user pick an agent and confirm the swap first, so the refusal arrived after
+// the interaction instead of instead of it — the exact shape this file's sibling
+// above exists to prevent, and which handleHandoff's own comment ("Guards run
+// BEFORE the picker, not after the choice") calls out as reading like a bug.
+//
+// Root is otherwise a perfectly healthy Ready session, so nothing else in the
+// guard chain rejects it: the row is live, started, and its backend advertises
+// Handoff. Only the reserved title makes it ineligible.
+func TestHandleHandoff_RefusesReservedRootBeforePicker(t *testing.T) {
+	h := newTestHome(t)
+	root := handoffActionInstance(t, session.RootSessionTitle, tmux.ProgramClaude)
+	h.store.AddInstance(root)
+	h.sidebar.SetSelectedInstance(0)
+
+	called := false
+	restore := SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (string, error) {
+		called = true
+		return "", nil
+	})
+	defer restore()
+
+	_, _ = h.handleHandoff()
+
+	require.Equal(t, stateDefault, h.state, "the reserved root agent must not enter the handoff flow")
+	require.Nil(t, h.selectionOverlay, "the user must not be asked to pick a target for a handoff that cannot happen")
+	require.False(t, called, "no handoff may be dispatched for the reserved root agent")
+	// The refusal has to say WHY, or the user's next move is to try again.
+	require.Contains(t, strings.ToLower(h.errBox.FullError()), "root")
+}
+
+// A session merely NAMED like the reserved one in a different case is still the
+// reserved one — IsReservedTitle matches case-insensitively on the trimmed title
+// precisely so " ROOT " cannot masquerade as a separate session. The guard has to
+// use that predicate rather than comparing against the literal.
+func TestHandleHandoff_RefusesReservedRootRegardlessOfCase(t *testing.T) {
+	h := newTestHome(t)
+	h.store.AddInstance(handoffActionInstance(t, "Root", tmux.ProgramClaude))
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+
+	require.Equal(t, stateDefault, h.state, "a case-variant of the reserved title is still reserved")
+	require.Nil(t, h.selectionOverlay)
+}
+
+// An ordinary session must be unaffected: the guard rejects the reserved title,
+// not every session whose name happens to contain it.
+func TestHandleHandoff_AllowsSessionNamedLikeRoot(t *testing.T) {
+	h := newTestHome(t)
+	h.store.AddInstance(handoffActionInstance(t, "rootcause", tmux.ProgramClaude))
+	h.sidebar.SetSelectedInstance(0)
+
+	_, _ = h.handleHandoff()
+
+	require.Equal(t, stateSelectHandoffAgent, h.state, "only the reserved title is refused, not names containing it")
+	require.NotNil(t, h.selectionOverlay)
+}
+
 // The picker's selected index must be resolved against the FILTERED choice list
 // it was built from. Resolving it against tmux.SupportedPrograms instead would
 // hand off to the wrong agent — silently, and to a plausible-looking one.

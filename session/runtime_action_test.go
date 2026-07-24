@@ -59,3 +59,41 @@ func TestRuntimeAction_HandoffRejectsTerminalStates(t *testing.T) {
 		}
 	}
 }
+
+// TestRuntimeAction_HandoffRejectsTheReservedTitle pins the reserved-root rule to
+// the SHARED predicate rather than to any one caller (#2436).
+//
+// The daemon has always refused this handoff, but it did so with its own
+// IsReservedTitle check after calling here — so the TUI, which asks this
+// predicate and nothing else, believed a root handoff was eligible and only
+// learned otherwise after making the user pick an agent and confirm. A rule that
+// two callers have to remember independently is a rule one of them will forget;
+// this is the question both of them already ask.
+//
+// Root is otherwise perfectly eligible — live, started, no in-flight op — so the
+// title is doing all the work here.
+func TestRuntimeAction_HandoffRejectsTheReservedTitle(t *testing.T) {
+	view := LifecycleView{Title: RootSessionTitle, Liveness: LiveRunning, Started: true}
+	err := view.ValidateRuntimeAction(RuntimeActionHandoff)
+	if err == nil {
+		t.Fatal("handoff accepted the reserved root title; the daemon would reject it after the user confirmed")
+	}
+	if !strings.Contains(err.Error(), RootSessionTitle) {
+		t.Fatalf("refusal must name the session; got %v", err)
+	}
+
+	// Case-insensitive on the trimmed title, matching IsReservedTitle — otherwise
+	// " ROOT " would route around the guard the daemon still enforces.
+	for _, title := range []string{"Root", " ROOT ", "rOoT"} {
+		variant := LifecycleView{Title: title, Liveness: LiveRunning, Started: true}
+		if err := variant.ValidateRuntimeAction(RuntimeActionHandoff); err == nil {
+			t.Fatalf("handoff accepted reserved-title variant %q", title)
+		}
+	}
+
+	// A name that merely CONTAINS the reserved word is an ordinary session.
+	ordinary := LifecycleView{Title: "rootcause", Liveness: LiveRunning, Started: true}
+	if err := ordinary.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
+		t.Fatalf("an ordinary session whose name contains the reserved word must still hand off: %v", err)
+	}
+}

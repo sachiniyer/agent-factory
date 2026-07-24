@@ -78,6 +78,25 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 			return runtimeActionBusyError(v)
 		}
 	case RuntimeActionHandoff:
+		// The reserved root agent is the daemon's own singleton: it is re-ensured
+		// when it dies, so swapping its agent out from under the daemon is not a
+		// thing that can be committed to. This is checked FIRST, and here rather
+		// than at a caller, for two different reasons.
+		//
+		// First over the others because it is permanent. A busy row says "try again
+		// in a moment"; root will never become eligible, and sending the user back
+		// to retry a thing that cannot work is the worse of the two answers.
+		//
+		// Here rather than at a caller because the daemon used to hold this rule
+		// alone, next to its own call into this function. The TUI asks this
+		// predicate and nothing else before opening the handoff picker, so it
+		// believed root was eligible and only surfaced the refusal after the user
+		// had picked an agent and confirmed the swap (#2436). A rule each caller has
+		// to remember separately is one a caller will forget; this is the question
+		// they already share.
+		if IsReservedTitle(v.Title) {
+			return fmt.Errorf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
+		}
 		if v.InFlightOp != OpNone {
 			return runtimeActionBusyError(v)
 		}
