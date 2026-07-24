@@ -1,6 +1,7 @@
 package session
 
 import (
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -43,6 +44,44 @@ var (
 	redialMaxBackoff     = 30 * time.Second
 	redialHealthySpan    = 60 * time.Second
 )
+
+// redialLoopExitHook runs inside redialLoop immediately after it releases mu,
+// while it is on its way out. nil in production.
+//
+// It exists because the lost-wakeup this file guards against lives in a window a
+// few instructions wide, between the loop deciding to stop driving and the next
+// thing that touches `redialing`. A stress test would hit it only by luck; this
+// makes the interleaving exact. -race cannot substitute for it — every access to
+// `redialing` is already under mu, so that failure is a missed signal, not a
+// data race.
+//
+// Guarded by its own mutex rather than left a bare global: recovery goroutines
+// read it while a test writes it, which IS a data race, and -race duly caught
+// the first version of this seam. redialHookMu is a leaf — taken only here,
+// never while holding mu or captureMu.
+var (
+	redialHookMu       sync.Mutex
+	redialLoopExitHook func()
+)
+
+func redialExitHook() func() {
+	redialHookMu.Lock()
+	defer redialHookMu.Unlock()
+	return redialLoopExitHook
+}
+
+// setRedialLoopExitHookForTest installs fn and returns a restore func. Test-only.
+func setRedialLoopExitHookForTest(fn func()) func() {
+	redialHookMu.Lock()
+	prev := redialLoopExitHook
+	redialLoopExitHook = fn
+	redialHookMu.Unlock()
+	return func() {
+		redialHookMu.Lock()
+		redialLoopExitHook = prev
+		redialHookMu.Unlock()
+	}
+}
 
 // setRedialTimingForTest compresses the re-dial ladder so a test can exercise
 // several rungs without sleeping through the real one. Returns a restore func,
@@ -268,17 +307,41 @@ func redialDelay(attempt int) time.Duration {
 // lifecycle owns that case — the next subscribe brings the capture up), or a
 // healthy capture appearing (a subscribe beat us to it).
 func (b *ptyBroker) redialLoop() {
-	defer func() {
-		b.mu.Lock()
-		b.redialing = false
-		b.mu.Unlock()
-	}()
-
 	for {
 		b.mu.Lock()
 		healthy := b.capturing && !b.captureEnded
 		if b.closed || healthy || len(b.subs) == 0 {
+			// Clear `redialing` in the SAME critical section as the decision to stop
+			// driving. Splitting them — deciding here and clearing in a deferred
+			// section — opens a lost wakeup that reinstates the #2450 freeze:
+			//
+			//   1. this loop sees the capture it just re-dialled as healthy and
+			//      commits to returning, then releases mu;
+			//   2. that capture's upstream dies, and its readLoop hand-off takes mu,
+			//      finds `redialing` STILL true (this loop has not run its defer
+			//      yet), and therefore does NOT spawn a replacement;
+			//   3. the deferred clear then runs.
+			//
+			// The broker is left with capturing=true, captureEnded=true,
+			// redialing=false, a subscriber still attached, and NOBODY driving
+			// recovery — frozen until a new subscribe, which is the bug this file
+			// exists to fix. Clearing under the same lock makes the two outcomes the
+			// only ones reachable: the death lands BEFORE this section, so `healthy`
+			// is false and the loop keeps driving, or AFTER it, so the hand-off sees
+			// redialing=false and spawns a fresh loop.
+			//
+			// Note this is a missed-signal race, not a data race: every access is
+			// already under mu, so -race cannot see it. It is held by
+			// TestPTYBrokerReDialSurvivesAFlapWhileTheLoopIsExiting.
+			b.redialing = false
 			b.mu.Unlock()
+			// Test seam: lands an upstream death in the window described above,
+			// which is otherwise a few instructions wide. nil in production. With
+			// the clear above it is harmless — the hand-off sees redialing=false and
+			// spawns a replacement; with the clear deferred it reproduces the freeze.
+			if hook := redialExitHook(); hook != nil {
+				hook()
+			}
 			return
 		}
 		delay := redialDelay(b.redialAttempts)
@@ -287,6 +350,11 @@ func (b *ptyBroker) redialLoop() {
 
 		select {
 		case <-b.closedCh:
+			// The broker is closed, so no hand-off can be spontaneous (it requires
+			// !b.closed) and clearing here can strand nothing.
+			b.mu.Lock()
+			b.redialing = false
+			b.mu.Unlock()
 			return
 		case <-time.After(delay):
 		}

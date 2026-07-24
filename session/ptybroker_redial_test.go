@@ -1,6 +1,7 @@
 package session
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -165,6 +166,74 @@ func TestPTYBrokerReDialKeepsTryingUntilTheEndpointComesBack(t *testing.T) {
 	mustRepaintContains(t, a, "RECOVERED")
 	ch.emit(t, []byte("back-online"))
 	mustData(t, a, "back-online")
+}
+
+// TestPTYBrokerReDialSurvivesAFlapWhileTheLoopIsExiting is the lost-wakeup
+// regression.
+//
+// redialLoop stops driving once it sees a healthy capture. If the flag that says
+// "a recovery goroutine exists" is cleared in a DEFERRED section rather than in
+// the same critical section as that decision, there is a window between the two
+// where the broker claims a driver it no longer has:
+//
+//  1. the loop sees the capture it just re-dialled as healthy, commits to
+//     returning, and releases mu;
+//  2. that capture's upstream dies. Its readLoop hand-off takes mu, finds
+//     `redialing` still true, and declines to spawn a replacement;
+//  3. the deferred clear runs.
+//
+// The broker is then capturing=true, captureEnded=true, redialing=false, with a
+// subscriber attached and NOBODY driving recovery — the #2450 freeze, restored
+// by the fix for #2450.
+//
+// The window is a few instructions wide, so this drives it exactly through
+// redialLoopExitHook rather than hoping a stress loop lands in it. -race is no
+// substitute: every access is already under mu, so this is a missed signal
+// rather than a data race, and the detector is silent either way.
+func TestPTYBrokerReDialSurvivesAFlapWhileTheLoopIsExiting(t *testing.T) {
+	defer setRedialTimingForTest(2 * time.Millisecond)()
+
+	ch := &singleSocketChannel{snapshot: []byte("SCREEN")}
+	br := newPTYBroker(ch)
+	defer br.close()
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN")
+
+	// Fire once, on the loop's way out, after it has decided the re-dialled
+	// capture is healthy. That is the window.
+	var once sync.Once
+	defer setRedialLoopExitHookForTest(func() {
+		once.Do(func() {
+			ch.dropUpstream()
+			// Give the dying readLoop's hand-off time to take mu and make its
+			// spawn decision while this loop is still returning.
+			time.Sleep(20 * time.Millisecond)
+		})
+	})()
+
+	// First death: spawns the loop, which re-dials, sees the new capture healthy,
+	// and exits — running the hook, which kills that capture inside the window.
+	ch.dropUpstream()
+
+	// 1 initial + 1 re-dial + 1 more after the flap. Reaching 3 is the whole
+	// assertion: it means SOMETHING was still driving recovery after the flap.
+	waitForStarts(t, ch, 3, 3*time.Second)
+
+	// And the attached subscriber is actually live again, not merely re-dialled.
+	ch.emit(t, []byte("after-flap"))
+	for {
+		ev, err := nextWithin(t, a, 2*time.Second)
+		if err != nil {
+			t.Fatalf("NextEvent after the flap: %v", err)
+		}
+		if ev.Kind == PTYData && string(ev.Data) == "after-flap" {
+			break
+		}
+	}
 }
 
 // TestPTYBrokerReDialStopsWhenTheLastSubscriberLeaves pins the lazy lifecycle
