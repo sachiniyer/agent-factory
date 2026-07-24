@@ -153,8 +153,7 @@ sessions `af` never launched, which the push never did.
 Everything under `plugins/`, plus `.agents/plugins/marketplace.json` and
 `.claude-plugin/marketplace.json`, is **generated**. The source is
 `afUsageReference` in `session/systemprompt.go` — the one text every af surface
-teaches. `commands/plugins_gen.go` reframes it for a plugin audience (the
-canonical text opens "You are running inside Agent Factory (af)", which is false
+teaches. `commands/plugins_gen.go` reframes it for a plugin audience (the canonical text opens "You are an AI coding agent running inside Agent Factory (af)", which is false
 for a plugin user) and emits each agent's artifacts from that single body.
 
 Change the guidance in `session/systemprompt.go`, then:
