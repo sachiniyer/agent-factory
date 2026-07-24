@@ -126,20 +126,26 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// that (newLoadingInstance is OpCreating) and fails if the predicate is
 		// widened.
 		//
-		// Restore is NOT the counterexample it looks like, in either direction, and
-		// the two restore edges differ: MarkRestoring — the TUI's own optimistic
-		// restore — deliberately keeps liveness=Archived (see its doc), so IsArchived
-		// already catches it and the result is dropped. Only the daemon edge,
-		// BeginRestore, moves to LiveLost+OpRestoring, and a result landing in THAT
-		// window is still applied.
+		// Restore is deliberately NOT in the predicate, and it is worth being exact
+		// about why, because it is the residual below. MarkRestoring (the optimistic
+		// overlay) keeps whatever liveness it entered with — tkMarkRestoring's target
+		// is {s.liveness, OpRestoring}, not a fixed Archived. On an Archived row that
+		// is Archived, so IsArchived drops the result; but `r`/handleRestore is
+		// offered on Lost and Dead rows too (lifecycleActionFor), so the SAME edge
+		// routinely lands on {LiveLost, OpRestoring} — as does the daemon's
+		// BeginRestore, and as does adoptSnapshotOp reconciling a daemon-side
+		// restore. In those windows neither IsArchived nor IsTearingDown fires and
+		// the result is still applied. That is intended: a restoring session is
+		// coming back live and wants its badge.
 		//
-		// Which is where the honest residual sits: setPRInfoThroughDaemon below runs
-		// INLINE on the Update goroutine, and every long daemon op holds this
-		// session's op-lock — so a result arriving during a daemon-side restore still
-		// parks the TUI event loop until that restore finishes. This guard narrows
-		// the window to the ops whose results are worthless anyway; it does not close
-		// it. Closing it means not making a blocking RPC from the event loop at all,
-		// which is a different change.
+		// Which is the honest residual: setPRInfoThroughDaemon below runs INLINE on
+		// the Update goroutine, and every long daemon op holds this session's
+		// op-lock — so a result arriving during ANY restore (the TUI's own `r` on a
+		// Lost row included, not just a daemon-side one) still parks the event loop
+		// until that restore finishes. This guard narrows the freeze window to the
+		// ops whose results are worthless anyway; it does not close it. Closing it
+		// means not making a blocking RPC from the event loop at all, a different
+		// change.
 		//
 		// Dropping costs at most a stale badge: fetchPRInfoCmd already called
 		// MarkPRInfoFetched at kickoff, so nothing retries in a tight loop, and the
