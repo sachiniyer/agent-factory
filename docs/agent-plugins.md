@@ -108,10 +108,11 @@ each agent needs a blocking lifecycle seam that af actually delivers:
 | Amp | No | af ships a skill, not a blocking hook integration. |
 | Aider | No | af injects read-only guidance with `--read`; it has no af-delivered blocking command hook. |
 | OpenCode | No | af injects guidance through `OPENCODE_CONFIG`; it has no af-delivered blocking command hook. |
+| Devin | No | af ships a skill, not a blocking hook integration. |
 
 Codex can disable hooks globally, skip untrusted plugin hooks, or be configured
 to accept managed hooks only. Those modes are outside this plugin's control and
-leave the Codex session unguarded. Gemini, Amp, Aider, and OpenCode must be
+leave the Codex session unguarded. Gemini, Amp, Aider, OpenCode, and Devin must be
 treated as unguarded until af ships and verifies a blocking delivery seam for
 each one.
 

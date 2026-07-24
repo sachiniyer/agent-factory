@@ -179,6 +179,7 @@ failure even though nothing was actually wrong — you'd just hit your plan limi
 | `aider` | — | — | — | — | — | ✅ |
 | `amp` | — | — | — | — | — | ✅ |
 | `opencode` | — | — | — | — | — | ✅ |
+| `devin` | — | — | — | — | — | ✅ |
 
 Auto-resume covers `claude`/`codex` because their banners carry a parseable
 reset window; other supported agents either do not expose a known plan-reset
@@ -203,7 +204,7 @@ codex  = "You've hit your usage limit"
 ```
 
 Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`,
-`opencode`); an override for an agent with no built-in matcher
-(`aider`/`gemini`/`amp`/`opencode` today) is ignored, and an uncompilable regex
+`opencode`, `devin`); an override for an agent with no built-in matcher
+(`aider`/`gemini`/`amp`/`opencode`/`devin` today) is ignored, and an uncompilable regex
 warns and falls back to the built-in default.
 See [configuration.md](configuration.md#custom-usage-limit-detection-limit_patterns).
