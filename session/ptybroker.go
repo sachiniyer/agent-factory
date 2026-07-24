@@ -155,17 +155,20 @@ type ptyBroker struct {
 	//   - A teardown that HAS a capture to release ends by joining the readLoop
 	//     (`<-done` inside stopCapture), and the loop's last act before closing
 	//     `done` is to latch this flag. So a clear placed before that join is
-	//     undone by it — #2438 shipped exactly that in three sites, and it did
-	//     nothing.
+	//     undone by it.
 	//   - A teardown that has NOTHING to release (it found `capturing` already
-	//     false, so stopCapture was nil and no join happened) could clear the flag
+	//     false, so stopCapture was nil and no join happened) can clear the flag
 	//     and make it stick. But there is nothing left to describe by then: the
 	//     capture it referred to is gone.
 	//
-	// Either way the residue is unobservable, because the sole reader is guarded
-	// by `capturing`, which every teardown has already cleared. So the clears were
-	// removed rather than moved after the join: moving them would add a second
-	// b.mu section on three teardown paths to change nothing.
+	// #2438 shipped clears at all three teardowns and every one was unobservable,
+	// though not all for the same reason: maybeStopCapture only reaches its clear
+	// with a live capture, so its clear was always undone by the join;
+	// resetCapture and shutdown cleared unconditionally, so on the capturing-false
+	// path their clear actually stuck — harmlessly, because the sole reader is
+	// guarded by `capturing`, which every teardown has already cleared. So the
+	// clears were removed rather than moved after the join: moving them would add a
+	// second b.mu section on three teardown paths to change nothing observable.
 	captureEnded bool
 	// captureStarted is when the CURRENT capture was installed. It exists only to
 	// decide whether a death is a fresh incident or a continuation of one: a
