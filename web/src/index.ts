@@ -219,9 +219,9 @@ function mount(): void {
 
   // The keyboard/focus state machine (#1693), wired once at the document level in
   // the CAPTURE phase so it decides BEFORE xterm's textarea handler: in rail mode
-  // j/k always navigate; in terminal mode keys fall through to the agent except
-  // Escape, which we swallow here (stopPropagation) so detaching never leaks a
-  // stray ESC byte into the PTY.
+  // j/k always navigate; in terminal mode keys fall through to the agent — Escape
+  // included, so it can interrupt the agent (#2517) — and only the ctrl+] detach
+  // chord is swallowed here (stopPropagation) so it never leaks into the PTY.
   document.addEventListener("keydown", onKeydown, true);
 
   // Follow the OS theme while the choice is Auto (redesign PR1).
@@ -421,9 +421,9 @@ function openFromRail(id: string): void {
  *  When the focused pane has NO terminal — a web or VS Code tab, which renders an
  *  iframe — there is nothing to attach to, so we fall back to the rail instead of
  *  claiming "terminal" mode over a terminal that does not exist. That state strands
- *  the user: nav.ts resolves every non-Escape key to {kind:"none"} while focus is
- *  "terminal", so j/k/digits/t/w reach neither an xterm nor the rail handler and are
- *  silently swallowed until Escape.
+ *  the user: nav.ts resolves every key but the ctrl+] detach to {kind:"none"} while
+ *  focus is "terminal", so j/k/digits/t/w reach neither an xterm nor the rail handler
+ *  and are silently swallowed until ctrl+] (or a non-keyboard rail exit).
  *
  *  The decision lives HERE, behind SplitView.focus()'s boolean, rather than at each
  *  call site: openTab, createSessionTab and openFromRail all route through this
@@ -448,8 +448,8 @@ function focusTerminal(): void {
   store.set({ focus: "terminal" });
 }
 
-/** Returns the keyboard to the rail (Escape / detach): blurs every pane so
- *  document-level j/k navigate again. */
+/** Returns the keyboard to the rail (ctrl+] / detach, or a non-keyboard rail exit):
+ *  blurs every pane so document-level j/k navigate again. */
 function focusRail(): void {
   store.set({ focus: "rail" });
   splitView.blur();
@@ -1613,9 +1613,9 @@ function onKeydown(e: KeyboardEvent): void {
   }
   // Let native controls handle their own keys, EXCEPT the terminal (whose textarea
   // lives in termHost and is driven by the nav state machine) and Escape (which must
-  // still close a modal / detach the terminal even from a focused field). Without
-  // this a focused + New / Disconnect / pane-action button would have its Enter
-  // hijacked as an attach, and modal typing would move the rail.
+  // still close a modal even from a focused field). Without this a focused + New /
+  // Disconnect / pane-action button would have its Enter hijacked as an attach, and
+  // modal typing would move the rail.
   const target = e.target as HTMLElement | null;
   const inTerminal = target ? termHost.contains(target) : false;
   if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
@@ -1658,14 +1658,20 @@ function onKeydown(e: KeyboardEvent): void {
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
     },
-    { alt: e.altKey },
+    { alt: e.altKey, ctrl: e.ctrlKey },
   );
   if (action.kind === "none") {
+    // Not ours — including Escape while a terminal is focused, which now FORWARDS to
+    // the agent as its interrupt (#2517). Returning without preventDefault lets the
+    // capture-phase event continue to xterm's textarea, so the ESC goes down the PTY
+    // like every other key. (An open menu's own capture listener still stops Escape
+    // and closes itself before xterm sees it — see ui.ts.)
     return;
   }
   // A handled key is ours: preventDefault AND stopPropagation so it never also
-  // reaches xterm's textarea (capture phase) — this is what suppresses the stray
-  // ESC byte when Escape detaches the terminal.
+  // reaches xterm's textarea (capture phase). This is what keeps the ctrl+] detach
+  // chord from leaking into the PTY; a plain "]" is not handled here, so it still
+  // reaches the agent.
   e.preventDefault();
   e.stopPropagation();
   switch (action.kind) {

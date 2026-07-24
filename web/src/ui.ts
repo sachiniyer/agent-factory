@@ -119,8 +119,9 @@ export interface AppState {
   /** the attach terminal's connection state, shown in the pane header. */
   termStatus: TerminalStatus;
   /** which pane owns the keyboard (#1693): "rail" is the default nav mode (j/k move
-   *  the selection); "terminal" means keys go to the agent until Escape. Drives the
-   *  visible focus indicator so the active mode is legible, mirroring the TUI. */
+   *  the selection); "terminal" means keys go to the agent — Escape included, as its
+   *  interrupt (#2517) — until ctrl+] hands the keyboard back. Drives the visible
+   *  focus indicator so the active mode is legible, mirroring the TUI. */
   focus: KeyboardFocus;
   /** the selected session's active tab index (#1592 Phase 5 PR7): 0 is the agent
    *  tab, 1-8 the user-created shell/process tabs. The attach terminal streams
@@ -1570,8 +1571,9 @@ export class AppShell {
       if (e.key !== "Escape") {
         return;
       }
-      // Swallow it: an open menu owns Escape, so closing it must not ALSO detach
-      // the terminal / drop rail focus the way a bare Escape does.
+      // Swallow it: an open menu owns Escape, so closing it must NOT also let the ESC
+      // reach the agent (a bare Escape now forwards to the PTY as the agent's
+      // interrupt, #2517 — an open menu is the exception).
       e.stopPropagation();
       close();
       trigger.focus();
@@ -1584,13 +1586,14 @@ export class AppShell {
       scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
       window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
-      // CAPTURE phase, deliberately. The app's own keydown handler is a
-      // capture-phase listener on document that stopPropagation()s Escape (so
-      // detaching can't leak a stray ESC into the PTY), which stops the event
-      // before it can bubble back here — a bubble-phase listener would simply never
-      // see it, and Escape would not close this menu. Same-node listeners are
-      // unaffected by stopPropagation, so registering in capture puts this beside
-      // the app's handler rather than downstream of it.
+      // CAPTURE phase, deliberately, so this runs BEFORE xterm's textarea handler:
+      // when the menu is open, Escape must close it here and this listener's own
+      // stopPropagation must keep the ESC from also reaching the agent (#2517: a bare
+      // Escape now forwards to the PTY as the agent's interrupt — an open menu is the
+      // exception that still owns it). It sits beside the app's own capture-phase
+      // document handler (index.ts onKeydown), which no longer stopPropagations
+      // Escape; same-node capture listeners both fire, so this one does the closing
+      // and the stopping.
       document.addEventListener("keydown", onKeyDown, true);
     };
 

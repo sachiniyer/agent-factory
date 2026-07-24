@@ -7423,7 +7423,7 @@ function decideKey(key, ctx, mods = {}) {
     return { kind: "closePane" };
   }
   if (ctx.focus === "terminal") {
-    return key === "Escape" ? { kind: "toRail" } : { kind: "none" };
+    return mods.ctrl === true && key === "]" ? { kind: "toRail" } : { kind: "none" };
   }
   if (key === "[") {
     return { kind: "switchView", view: cycleView(ctx.view, -1) };
@@ -13169,7 +13169,7 @@ function onKeydown(e) {
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false
     },
-    { alt: e.altKey }
+    { alt: e.altKey, ctrl: e.ctrlKey }
   );
   if (action.kind === "none") {
     return;

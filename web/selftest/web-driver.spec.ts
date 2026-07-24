@@ -13,7 +13,8 @@
 //                      literal "[object Object]" the string/object envelope fork gave
 //   2. sidebar         the rail lists the sessions from the Snapshot/events plane
 //   3. attach          click-to-attach opens the xterm terminal + shows live output
-//   4. keyboard (#1694) j/k navigate the rail, Enter attaches, Escape returns to rail
+//   4. keyboard (#1694/#2517) j/k navigate the rail, Enter attaches, ctrl+] returns to
+//      rail, and Escape forwards to the agent as its interrupt
 //   5. create          the + New modal creates a session; its row appears
 //   6. kill            the kill confirm removes the session's row
 //   7. archive         the archive confirm moves a session to the archived group
@@ -1366,10 +1367,12 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
   }
 });
 
-test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to rail", REAL_FIXTURE, async () => {
-  // We are attached to A (terminal mode from the previous flow). Escape is the one
-  // hatch back to the rail — no stray ESC byte leaks to the PTY.
-  await page.keyboard.press("Escape");
+test("the #1694 keyboard model: j/k navigate, Enter attaches, ctrl+] returns to rail", REAL_FIXTURE, async () => {
+  // We are attached to A (terminal mode from the previous flow). ctrl+] is the one
+  // KEYBOARD hatch back to the rail (#2517, mirroring the TUI's tea.KeyCtrlCloseBracket)
+  // — no stray byte leaks to the PTY. Escape is no longer a detach (it interrupts the
+  // agent); the dedicated interrupt-forwarding test below proves that on the PTY.
+  await page.keyboard.press("Control+]");
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
   await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
 
@@ -1393,17 +1396,73 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, Escape returns to 
   await page.keyboard.press("Enter");
   await expect(page.locator(".af-app.af-kb-terminal")).toBeVisible();
 
-  // Escape detaches back to the rail, completing the round trip.
-  await page.keyboard.press("Escape");
+  // ctrl+] detaches back to the rail, completing the round trip.
+  await page.keyboard.press("Control+]");
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 });
 
+test("#2517: Escape interrupts the agent (forwards down the PTY) and never detaches; ctrl+] detaches without leaking", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The bug: Escape is the agents' interrupt key (#2070), but the web consumed it as a
+  // detach so a running agent could never be interrupted. Proof on the REAL browser +
+  // PTY: with the terminal focused, Escape emits exactly one OpInput carrying the ESC
+  // byte (0x1b) and the keyboard STAYS in terminal mode; ctrl+] is the detach and never
+  // reaches the PTY.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  const inputPayloads: number[][] = [];
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    await row(p, SESSION_A).click();
+    await expect(p.locator(".af-term-host .xterm")).toBeVisible();
+    await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+    await expect(p.locator(".af-app.af-kb-terminal")).toBeVisible();
+
+    // Escape FORWARDS to the agent as its interrupt, exactly like every other key.
+    inputPayloads.length = 0;
+    await p.keyboard.press("Escape");
+    await expect
+      .poll(() => inputPayloads.length, { message: "Escape must reach the agent — it is the interrupt key" })
+      .toBe(1);
+    expect(inputPayloads[0], "Escape forwards the ESC byte (0x1b) down the PTY").toEqual([0x1b]);
+    await expect(
+      p.locator(".af-app.af-kb-terminal"),
+      "Escape must NOT detach — focus stays in the terminal so the user can keep driving the agent",
+    ).toBeVisible();
+
+    // ctrl+] is the sole keyboard detach; it is consumed by the app and never leaks a
+    // byte into the PTY.
+    inputPayloads.length = 0;
+    await p.keyboard.press("Control+]");
+    await expect(p.locator(".af-app.af-kb-rail"), "ctrl+] detaches back to the rail").toBeVisible();
+    await expect(row(p, SESSION_A)).toHaveClass(/af-row-selected/);
+    expect(inputPayloads, "the ctrl+] detach chord must not reach the agent").toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", REAL_FIXTURE, async () => {
-  // Rail mode from the previous flow. [ / ] cycle the top-level view; they fire in
-  // rail mode only (a modal or focused terminal would swallow them). After Escape
-  // the active element is document.body, so the document-level capture-phase keydown
-  // listener (index.ts) handles the press. The Projects view is gone (redesign PR2);
-  // the config view joins the cycle with the config editor.
+  // Rail mode from the previous flow (the prior test ended by detaching with ctrl+]).
+  // [ / ] cycle the top-level view; they fire in rail mode only (a modal or focused
+  // terminal would swallow them). In rail mode the active element is document.body, so
+  // the document-level capture-phase keydown listener (index.ts) handles the press. The
+  // Projects view is gone (redesign PR2); the config view joins the cycle with the
+  // config editor.
   const active = (view: string) =>
     expect(page.locator(`.af-viewtab[data-view="${view}"]`)).toHaveClass(/af-viewtab-active/);
   await active("sessions");
@@ -1552,9 +1611,9 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   await page.keyboard.press("Enter");
   await expect(page.locator(".af-term-host")).toContainText("AF_TAB_OUTPUT_OK", { timeout: 15_000 });
 
-  // 1-9 switch tabs in rail nav mode: Escape back to the rail, then 1 selects the
-  // agent tab and 2 the shell tab — the active highlight follows the digit.
-  await page.keyboard.press("Escape");
+  // 1-9 switch tabs in rail nav mode: ctrl+] back to the rail (#2517), then 1 selects
+  // the agent tab and 2 the shell tab — the active highlight follows the digit.
+  await page.keyboard.press("Control+]");
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
   await page.keyboard.press("1");
   await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
@@ -3568,7 +3627,7 @@ test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a 
   // session the user cannot see in the rail, with no row highlighted.
   await setFilter(page, "archived", false);
   await row(page, SESSION_A).click();
-  await page.keyboard.press("Escape"); // hand the keyboard back to the rail
+  await page.keyboard.press("Control+]"); // hand the keyboard back to the rail (#2517)
 
   const visited: string[] = [];
   const rows = await page.locator(".af-rail-list .af-row").count();
@@ -5694,10 +5753,10 @@ test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and se
   // is an iframe with no xterm, so there is nothing to attach to. Before the
   // SplitView.focus() boolean contract, focusTerminal() committed the app to
   // focus:"terminal" anyway and the xterm focus silently no-opped, leaving nav.ts
-  // resolving every non-Escape key to {kind:"none"}: j/k/digits/t/w reached neither a
-  // terminal nor the rail handler, so the user was stuck until they pressed Escape.
-  // (The same trap predates VS Code — it applies to any web tab opened from the tab
-  // bar — which is why the fallback lives in focusTerminal rather than this path.)
+  // resolving every key but the ctrl+] detach to {kind:"none"}: j/k/digits/t/w reached
+  // neither a terminal nor the rail handler, so the user was stuck until they pressed
+  // ctrl+] (#2517). (The same trap predates VS Code — it applies to any web tab opened
+  // from the tab bar — which is why the fallback lives in focusTerminal rather than here.)
   await expect(
     page.locator(".af-app.af-kb-rail"),
     "creating a tab with no terminal must fall back to rail mode, not claim terminal mode",
