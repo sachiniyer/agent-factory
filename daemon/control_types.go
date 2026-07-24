@@ -182,10 +182,19 @@ type RegisterProjectRequest struct {
 }
 
 // RegisterProjectResponse carries the durable identity the registration
-// resolved to. The project appears in ListProjects and, once #2456's UI slices
-// land, as an empty row in the project switcher until a session is created into
-// it. OK is always true on a nil error (a redundant flag kept for wire symmetry
-// with the other project RPCs).
+// resolved to. The project is now in the registry ON THE DAEMON HOST, and once
+// #2456's UI slices land it shows as an empty row in that daemon's project
+// switcher until a session is created into it.
+//
+// Scope caveat for a REMOTE daemon: `af projects list` and `af projects rebind`
+// still run in-process against the CLIENT's local registry, so they will not see
+// a project that `add` just wrote to the daemon's registry. For the common
+// local daemon the two registries are the same store, so it round-trips as
+// expected. Routing list/rebind through the daemon too is the follow-up needed
+// for full remote parity (#2491).
+//
+// OK is always true on a nil error (a redundant flag kept for wire symmetry with
+// the other project RPCs).
 type RegisterProjectResponse struct {
 	OK      bool           `json:"ok"`
 	Project config.Project `json:"project"`
