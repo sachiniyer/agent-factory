@@ -29,11 +29,17 @@ type tabMutationLabels struct {
 	op string
 }
 
-// errTabMutationArchived is the refusal an in-place tab mutation returns for an
-// archived session. It is shared by tabMutationTarget's pre-lock fast path and
-// its post-lock gate so a mutation that LOSES the race to an archive is
+// errTabMutationArchived is the refusal a mutation of a session's record returns
+// for an archived session. It is shared by tabMutationTarget's pre-lock fast path
+// and its post-lock gate so a mutation that LOSES the race to an archive is
 // indistinguishable — to a CLI user or the web UI — from one that arrived after
 // it: same refusal, same advice, roster intact.
+//
+// SetPRInfo (daemon/manager_tabs.go) is the third caller and not a tab mutation
+// at all; it takes this refusal because the user-facing goal is one consistent
+// message and remedy for every mutation an archive turns away, whatever it was
+// trying to change. The name has stayed narrower than the use — worth widening
+// the day a fourth non-tab caller appears.
 func errTabMutationArchived(action, title string) error {
 	return fmt.Errorf("cannot %s on archived session %q; restore it first (af sessions restore)", action, title)
 }
