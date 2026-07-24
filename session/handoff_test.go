@@ -265,7 +265,11 @@ func TestMissionBrief_DirtyWorkIncludesWorkingTreeCommands(t *testing.T) {
 		},
 	}
 	rendered := brief.Render()
-	for _, command := range []string{"git diff abc123...HEAD", "git status --short", "git diff HEAD"} {
+	// The status command MUST carry --untracked-files=all: bare `git status
+	// --short` honours status.showUntrackedFiles, so under `no` it would show an
+	// empty tree while the brief just said "3 uncommitted files" — the incoming
+	// agent concludes the count is stale and starts over (#2512).
+	for _, command := range []string{"git diff abc123...HEAD", "git status --short --untracked-files=all", "git diff HEAD"} {
 		if !strings.Contains(rendered, command) {
 			t.Fatalf("dirty handoff brief omits %q; the incoming agent would see only committed work:\n%s", command, rendered)
 		}
@@ -285,10 +289,44 @@ func TestMissionBrief_UnbornDirtyWorkDoesNotReferenceHEAD(t *testing.T) {
 	if strings.Contains(rendered, "git diff HEAD") {
 		t.Fatalf("unborn-branch brief tells the incoming agent to diff nonexistent HEAD:\n%s", rendered)
 	}
-	for _, command := range []string{"git status --short", "git diff --cached", "git diff"} {
+	for _, command := range []string{"git status --short --untracked-files=all", "git diff --cached", "git diff"} {
 		if !strings.Contains(rendered, command) {
 			t.Fatalf("unborn dirty-work brief omits %q:\n%s", command, rendered)
 		}
+	}
+}
+
+// TestMissionBrief_ReviewCommandRevealsUntrackedFiles is the #2512 P2 lock: the
+// count is only HALF the fix. On both the born and unborn branches, the brief's
+// own remediation command must carry --untracked-files=all, or under
+// status.showUntrackedFiles=no it hands the incoming agent a command that
+// displays an empty tree while the brief just reported N uncommitted files. A
+// bare `git status --short` (no flag) anywhere in the dirty-work section is the
+// defect.
+func TestMissionBrief_ReviewCommandRevealsUntrackedFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		work git.WorkSummary
+	}{
+		{"born branch", git.WorkSummary{Branch: "agent/x", BaseSHA: "abc123", Commits: 2, DirtyFiles: 3}},
+		{"unborn branch", git.WorkSummary{Branch: "unborn", DirtyFiles: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rendered := MissionBrief{From: tmux.ProgramClaude, To: tmux.ProgramCodex, Work: tc.work}.Render()
+			// Every `git status --short` in the brief must carry the flag. Split on
+			// the command and check each occurrence is followed by the flag before a
+			// newline or separator.
+			for _, line := range strings.Split(rendered, "\n") {
+				if !strings.Contains(line, "git status --short") {
+					continue
+				}
+				if !strings.Contains(line, "git status --short --untracked-files=all") {
+					t.Fatalf("brief line hands over a `git status --short` WITHOUT --untracked-files=all; "+
+						"under status.showUntrackedFiles=no it shows nothing while the count says %d files (#2512):\n  %s",
+						tc.work.DirtyFiles, line)
+				}
+			}
+		})
 	}
 }
 

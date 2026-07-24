@@ -110,13 +110,22 @@ func (m MissionBrief) Render() string {
 				b.WriteString("  Review committed work:  git log\n")
 			}
 			if m.Work.DirtyFiles > 0 {
+				// --untracked-files=all on the status command, matching the flag the
+				// DirtyFiles count itself uses (#2502): bare `git status --short --untracked-files=all`
+				// honours status.showUntrackedFiles, so under `no` — the exact config
+				// this fix is about — it shows an EMPTY tree while the brief just said
+				// "N uncommitted files". Handing the agent a command that displays
+				// nothing makes it conclude the count is stale and start over: the same
+				// data-loss shape, one hop later. The diff forms never show untracked
+				// by construction, so status is the only line that can, and it must be
+				// told to. `all` (not `normal`) so its output matches the exact count.
 				if strings.TrimSpace(m.Work.HeadSHA) == "" && m.Work.Commits == 0 {
-					// An unborn branch has no HEAD to diff. Status is what exposes
-					// untracked work; the two HEAD-less diffs cover staged and
-					// unstaged tracked changes without manufacturing a bad revision.
-					b.WriteString("  Review uncommitted work:  git status --short  ·  git diff --cached  ·  git diff\n")
+					// An unborn branch has no HEAD to diff. The two HEAD-less diffs cover
+					// staged and unstaged tracked changes without manufacturing a bad
+					// revision; status --untracked-files=all covers the untracked ones.
+					b.WriteString("  Review uncommitted work:  git status --short --untracked-files=all  ·  git diff --cached  ·  git diff\n")
 				} else {
-					b.WriteString("  Review uncommitted work:  git status --short  ·  git diff HEAD\n")
+					b.WriteString("  Review uncommitted work:  git status --short --untracked-files=all  ·  git diff HEAD\n")
 				}
 			}
 		}

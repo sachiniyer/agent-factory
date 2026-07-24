@@ -72,7 +72,21 @@ func (g *GitWorktree) WorkSummary() (WorkSummary, error) {
 		// unavailable.
 	}
 
-	if out, sErr := g.runGitCommand(path, "status", "--porcelain"); sErr == nil {
+	// --untracked-files is load-bearing here (#2101/#2502): bare `git status
+	// --porcelain` honours status.showUntrackedFiles, and a worktree shares
+	// .git/config with its main repo, so a user who set that to `no` made this
+	// count read a tree full of untracked work as clean. That count feeds the
+	// handoff brief (#2013), which told the receiving agent "0 uncommitted files"
+	// — or, on an unborn branch, "the working tree is clean" — while the tree was
+	// not. The flag overrides the config so the brief never mis-reports.
+	//
+	// `all`, NOT `normal`, at THIS call site specifically: the brief renders
+	// DirtyFiles as an EXACT number ("50 uncommitted files"), not a boolean, and
+	// `normal` collapses an untracked directory to one `?? dir/` entry — so a new
+	// untracked package of 50 files would report "1 uncommitted file". The sibling
+	// gates in worktree_push.go and kill_confirm.go stay on `normal`: they only
+	// need "is there anything?", where the one-entry collapse is the right answer.
+	if out, sErr := g.runGitCommand(path, "status", "--porcelain", "--untracked-files=all"); sErr == nil {
 		summary.DirtyFiles = countNonEmptyLines(out)
 	}
 
