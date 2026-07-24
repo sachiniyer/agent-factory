@@ -169,6 +169,41 @@ type DeleteProjectResponse struct {
 	KilledCount int `json:"killed_count"`
 }
 
+// RegisterProjectRequest asks the daemon to register a git checkout as a durable,
+// sessionless project in the #2355 registry (#2456). Path names a directory on
+// the DAEMON's filesystem; the daemon expands ~, resolves symlinks, and walks to
+// the git checkout's canonical main-repo root, then validates it.
+//
+// Path must already be absolute (or ~-prefixed) — the daemon has no access to the
+// caller's working directory, so a relative path would resolve against the
+// daemon's own cwd, which is not the caller's. Callers whose input can be
+// relative resolve it against the user's cwd BEFORE sending: the CLI's
+// `af projects add` does this (see api/projects.go), and the web only ever
+// supplies daemon-host paths. Registration is idempotent: a known checkout is a
+// no-op success that returns the existing identity.
+type RegisterProjectRequest struct {
+	Path string `json:"path"`
+}
+
+// RegisterProjectResponse carries the durable identity the registration
+// resolved to. The project is now in the registry ON THE DAEMON HOST, and once
+// #2456's UI slices land it shows as an empty row in that daemon's project
+// switcher until a session is created into it.
+//
+// Scope caveat for a REMOTE daemon: `af projects list` and `af projects rebind`
+// still run in-process against the CLIENT's local registry, so they will not see
+// a project that `add` just wrote to the daemon's registry. For the common
+// local daemon the two registries are the same store, so it round-trips as
+// expected. Routing list/rebind through the daemon too is the follow-up needed
+// for full remote parity (#2491).
+//
+// OK is always true on a nil error (a redundant flag kept for wire symmetry with
+// the other project RPCs).
+type RegisterProjectResponse struct {
+	OK      bool           `json:"ok"`
+	Project config.Project `json:"project"`
+}
+
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`

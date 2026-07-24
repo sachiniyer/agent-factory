@@ -631,11 +631,11 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsRegisterCmd"
+        "pointer": "api/projects.go newProjectsAddCmd (af projects add, register alias) → daemon RegisterProject RPC"
       },
       "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI now explicitly registers a sessionless project by path in the durable registry. The TUI's existing row persists a legacy root_agents entry instead of the new identity, and the web has no registration action; the later #2216 UI/RPC slice will build on the registry rather than create another one."
+      "issue": "#2456",
+      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject) and routes `af projects add` (register is a deprecated alias) through it, so the checkout is resolved on the daemon's filesystem and the single writer owns the registry. TUI/web adds land in the follow-up slices of #2456: the TUI row still persists a legacy root_agents entry, and the web has no registration action yet — this becomes parity once those rewire to the same RPC and the project list unions derived + registry + root_agents."
     },
     {
       "id": "project.rebind",
@@ -1377,10 +1377,10 @@
       "af help": "meta.discovery",
       "af hook-guard-tmux": "internal.hook-guard-tmux",
       "af keys": "meta.discovery",
+      "af projects add": "project.add",
       "af projects delete": "project.delete",
       "af projects list": "project.list",
       "af projects rebind": "project.rebind",
-      "af projects register": "project.add",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
       "af sessions attach": "session.attach",
@@ -1430,6 +1430,7 @@
       "POST /v1/ListBackends": "backend.list",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/RegisterProject": "project.add",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",
@@ -1582,10 +1583,10 @@
       "af keys --help": "meta.discovery",
       "af projects --help": "meta.discovery",
       "af projects --json": "cli.json-envelope",
+      "af projects add --help": "meta.discovery",
       "af projects delete --help": "meta.discovery",
       "af projects list --help": "meta.discovery",
       "af projects rebind --help": "meta.discovery",
-      "af projects register --help": "meta.discovery",
       "af reset --force": "install.reset",
       "af reset --help": "meta.discovery",
       "af reset --yes": "install.reset",

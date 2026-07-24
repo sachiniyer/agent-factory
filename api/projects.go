@@ -34,29 +34,59 @@ claim that a new checkout at a reused path has the registered identity.`,
 	},
 }
 
-var projectsRegisterCmd = &cobra.Command{
-	Use:   "register <path>",
-	Short: "Register a project with a stable local identity",
-	Long: `Register a project directory with a stable, machine-local identity.
+// registerProjectViaDaemon is the daemon seam, overridable in tests.
+var registerProjectViaDaemon = daemon.RegisterProject
+
+func newProjectsAddCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "add <path>",
+		Aliases: []string{"register"},
+		Short:   "Add a project: register a repo by path with a stable local identity",
+		Long: `Add a project by registering a git checkout with a stable, machine-local
+identity, so it appears as an (initially sessionless) project you can create
+sessions into.
+
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — so 'af projects add .' registers the repo you are standing in.
+The daemon then walks to the checkout's canonical main-repo root and validates
+it is a git repository (an actionable error otherwise). Any directory inside a
+checkout resolves to that root. Registration is idempotent: adding a known
+checkout is a no-op success that returns its existing identity.
 
 The returned project id survives an explicit rebind after the checkout moves.
-Two clones remain separate projects. Any directory inside a checkout resolves
-to that checkout's canonical main-repo root, and registration is idempotent for
-the same checkout. Identity is anchored in an AF-home-scoped
+Two clones remain separate projects. Identity is anchored in an AF-home-scoped
 agent-factory/checkout-id-<home-id> marker under the Git common directory, so
 one AF home's reset cannot remove another home's identity. No working-tree file
-is created.`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
+is created, and adding a project does NOT start an always-on agent for it.
 
-		project, err := config.RegisterProject(args[0])
-		if err != nil {
-			return jsonError(err)
-		}
-		return jsonOut(project)
-	},
+'register' is a deprecated alias for 'add'.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			log.Initialize(false)
+			defer log.Close()
+
+			// Resolve the path CLIENT-SIDE, against the user's shell cwd, BEFORE
+			// forwarding — mirroring resolveProjectDeleteTarget. daemon.RegisterProject
+			// goes over the LOCAL control socket (callDaemon, which does not honor
+			// --daemon-url; see resolveRepoID), so the daemon shares this filesystem
+			// but NOT this working directory: an ad-hoc daemon inherits its spawner's
+			// cwd and a systemd daemon runs from /. Forwarding a raw relative path
+			// would make `af projects add .` resolve against the daemon's cwd — the
+			// wrong repo silently, or a confusing "not a git repository" when the
+			// daemon runs from /. The daemon still expands ~/validates; passing it an
+			// absolute path only fixes WHICH directory a relative input names.
+			resolved, err := config.ResolveUserPath(args[0])
+			if err != nil {
+				return jsonError(fmt.Errorf("failed to resolve project path %q: %w", args[0], err))
+			}
+			project, err := registerProjectViaDaemon(daemon.RegisterProjectRequest{Path: resolved})
+			if err != nil {
+				return jsonError(err)
+			}
+			return jsonOut(project)
+		},
+	}
 }
 
 var projectsRebindCmd = &cobra.Command{

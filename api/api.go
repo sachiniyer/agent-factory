@@ -688,7 +688,7 @@ func init() {
 	// Projects (repo groupings, #1735)
 	ProjectsCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, jsonFlagUsage)
 	ProjectsCmd.AddCommand(projectsListCmd)
-	ProjectsCmd.AddCommand(projectsRegisterCmd)
+	ProjectsCmd.AddCommand(newProjectsAddCmd())
 	ProjectsCmd.AddCommand(projectsRebindCmd)
 	ProjectsCmd.AddCommand(projectsDeleteCmd)
 

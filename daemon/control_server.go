@@ -648,6 +648,37 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	return nil
 }
 
+// RegisterProject records a git checkout as a durable, sessionless project in
+// the #2355 registry (#2456). The daemon is the single writer (#960): the CLI,
+// web, and TUI all route their add-project action here rather than writing the
+// registry in-process, so one process owns the store and — for a web or remote
+// client — the path is resolved on the daemon's filesystem, not the caller's.
+//
+// config.RegisterProject does the work (expand ~, resolve the git root,
+// validate, persist, idempotent) under its own file lock, so this handler adds
+// only the admission gate and the projects-changed publish. It does NOT take a
+// manager lock: the registry is independent of the session roster, and
+// RegisterProject's own lock already serializes concurrent registrations.
+//
+// The publish rides the same EventProjectsChanged signal DeleteProject uses, so
+// a client showing a projects view re-fetches and the new empty project appears
+// without a manual refresh. It is emitted only on a successful, genuinely new or
+// re-confirmed registration — an error returns before it, and an idempotent
+// re-registration still publishes (harmless: the re-fetch is a no-op diff).
+func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *RegisterProjectResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	project, err := config.RegisterProject(req.Path)
+	if err != nil {
+		return err
+	}
+	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	resp.OK = true
+	resp.Project = project
+	return nil
+}
+
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through

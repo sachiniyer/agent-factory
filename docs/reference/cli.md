@@ -33,10 +33,10 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
+- [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
 - [`af projects delete`](#af-projects-delete) — Archive and remove a project's sessions (reversibly)
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
-- [`af projects register`](#af-projects-register) — Register a project with a stable local identity
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
@@ -969,10 +969,10 @@ af projects
 
 **Subcommands**
 
+- [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
 - [`af projects delete`](#af-projects-delete) — Archive and remove a project's sessions (reversibly)
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
-- [`af projects register`](#af-projects-register) — Register a project with a stable local identity
 
 **Flags**
 
@@ -985,6 +985,44 @@ af projects
 | Flag | Type | Description |
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af projects add
+
+Add a project: register a repo by path with a stable local identity
+
+Add a project by registering a git checkout with a stable, machine-local
+identity, so it appears as an (initially sessionless) project you can create
+sessions into.
+
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — so 'af projects add .' registers the repo you are standing in.
+The daemon then walks to the checkout's canonical main-repo root and validates
+it is a git repository (an actionable error otherwise). Any directory inside a
+checkout resolves to that root. Registration is idempotent: adding a known
+checkout is a no-op success that returns its existing identity.
+
+The returned project id survives an explicit rebind after the checkout moves.
+Two clones remain separate projects. Identity is anchored in an AF-home-scoped
+agent-factory/checkout-id-<home-id> marker under the Git common directory, so
+one AF home's reset cannot remove another home's identity. No working-tree file
+is created, and adding a project does NOT start an always-on agent for it.
+
+'register' is a deprecated alias for 'add'.
+
+```
+af projects add <path>
+```
+
+**Aliases:** `register`
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af projects delete
@@ -1054,32 +1092,6 @@ another registered project.
 
 ```
 af projects rebind <project-id> <path>
-```
-
-**Global flags**
-
-| Flag | Type | Description |
-|------|------|-------------|
-| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
-| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
-| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
-
-## af projects register
-
-Register a project with a stable local identity
-
-Register a project directory with a stable, machine-local identity.
-
-The returned project id survives an explicit rebind after the checkout moves.
-Two clones remain separate projects. Any directory inside a checkout resolves
-to that checkout's canonical main-repo root, and registration is idempotent for
-the same checkout. Identity is anchored in an AF-home-scoped
-agent-factory/checkout-id-<home-id> marker under the Git common directory, so
-one AF home's reset cannot remove another home's identity. No working-tree file
-is created.
-
-```
-af projects register <path>
 ```
 
 **Global flags**
