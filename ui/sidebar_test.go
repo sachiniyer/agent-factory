@@ -285,6 +285,34 @@ func TestSidebarRender(t *testing.T) {
 	assert.NotEmpty(t, rendered)
 }
 
+// TestSidebar_RootSeparator pins the #2513 demarcation: a subtle rule sits between
+// the pinned root agent and the rest, but only when a root is present AND a non-root
+// row follows it — a root-only or root-less list draws no dangling rule.
+func TestSidebar_RootSeparator(t *testing.T) {
+	rule := strings.Repeat("─", 10) // a run long enough not to collide with any glyph
+	mk := func(title string) *session.Instance {
+		inst, _ := session.NewInstance(session.InstanceOptions{
+			Title: title, Path: t.TempDir(), Program: "test",
+		})
+		return inst
+	}
+	build := func(titles ...string) string {
+		s := NewSidebar(store.NewProjection())
+		s.SetSize(40, 24)
+		for _, tt := range titles {
+			addTestInstance(s, mk(tt))
+		}
+		return s.String()
+	}
+
+	assert.Contains(t, build("root", "my-feature"), rule,
+		"root + a non-root session must draw the demarcation rule (#2513)")
+	assert.NotContains(t, build("root"), rule,
+		"a root-only list must draw no dangling rule (#2513)")
+	assert.NotContains(t, build("alpha", "beta"), rule,
+		"a list with no root must draw no rule (#2513)")
+}
+
 // indicatorArrows reports which "▲/▼ N more" scroll-indicator rows are present
 // in the rendered output. Detection keys on the "more" text because expanded
 // section headers also use a "▼ " arrow.

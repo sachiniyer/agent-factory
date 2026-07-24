@@ -981,6 +981,17 @@ body {
   flex: 1;
 }
 
+/* The hairline under the pinned root agent (#2513): a dim rule matching the rail's
+ * own borders (--af-border) so root reads as its own zone, never a heavy divider.
+ * Pure demarcation — aria-hidden, not a navigable row, and rendered only when a
+ * non-root row follows root. Mirrors the TUI sidebar's subtle rule. */
+.af-rail-sep {
+  height: 0;
+  margin: var(--af-sp-1) var(--af-sp-2);
+  border-top: 1px solid var(--af-border);
+  list-style: none;
+}
+
 .af-rail-empty {
   padding: var(--af-sp-4) var(--af-sp-3);
   color: var(--af-text-2);

@@ -7585,12 +7585,21 @@ function isLimitReached(s) {
 function canHandoff(s) {
   return s.can_handoff === true;
 }
+var ROOT_SESSION_TITLE = "root";
+function isRootSession(s) {
+  return s.title.trim().toLowerCase() === ROOT_SESSION_TITLE;
+}
 function compareSessionsForRail(a, b) {
   const aArchived = isArchived(a);
   const aa = aArchived ? 1 : 0;
   const bb = isArchived(b) ? 1 : 0;
   if (aa !== bb) {
     return aa - bb;
+  }
+  const ar = isRootSession(a) ? 0 : 1;
+  const br = isRootSession(b) ? 0 : 1;
+  if (ar !== br) {
+    return ar - br;
   }
   const at = a.created_at ?? "";
   const bt = b.created_at ?? "";
@@ -11481,6 +11490,9 @@ var AppShell = class {
         (target) => this.rowActions(target, selected)
       );
     });
+    if (visible.length > 1 && isRootSession(visible[0])) {
+      rows.splice(1, 0, h2("li", { class: "af-rail-sep", ariaHidden: "true" }));
+    }
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...notice ? [notice, ...rows] : rows);
   }

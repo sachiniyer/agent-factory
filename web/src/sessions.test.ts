@@ -174,6 +174,26 @@ test("orderedSessions: title breaks a created_at tie in the archived group (tota
   assert.deepEqual(orderedSessions(list).map((s) => s.title), ["arch-a", "arch-b"]);
 });
 
+test("orderedSessions: the reserved root agent pins to the top despite a newest created_at (#2513)", () => {
+  const list = [
+    sess("beta", { created_at: "2026-01-01T00:00:00Z" }),
+    // Newest created_at — would sort LAST among live rows without the root pin.
+    sess("root", { created_at: "2026-06-01T00:00:00Z" }),
+    sess("alpha", { created_at: "2026-01-02T00:00:00Z" }),
+  ];
+  // Root leads by IDENTITY, not by age — mirroring the TUI's LessInstanceOrder so a
+  // root re-ensure with a fresh created_at still leads; the rest keep oldest-first.
+  assert.deepEqual(orderedSessions(list).map((s) => s.title), ["root", "beta", "alpha"]);
+});
+
+test("orderedSessions: the root pin is case-insensitive on the trimmed title, like IsReservedTitle (#2513)", () => {
+  const list = [
+    sess("worker", { created_at: "2026-01-01T00:00:00Z" }),
+    sess(" Root ", { created_at: "2026-06-01T00:00:00Z" }),
+  ];
+  assert.deepEqual(orderedSessions(list).map((s) => s.title), [" Root ", "worker"]);
+});
+
 // --- tabToKeepOnClose: a pane follows a TAB, never a slot -------------------
 //
 // The post-merge Codex finding on #1815. closeSessionTab used to re-point the pane

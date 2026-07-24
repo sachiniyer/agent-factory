@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
@@ -32,6 +33,15 @@ func (s *Sidebar) String() string {
 	rows := make([]string, len(s.visibleItems))
 	heights := make([]int, len(s.visibleItems))
 	totalLines := 0
+	// Demarcate the pinned root agent from the rest with a subtle rule (#2513).
+	// Root sorts first (LessInstanceOrder, #1144), so the rule is drawn as a LEADING
+	// line on the first non-root INSTANCE row after it. Doing it in the rendered
+	// string keeps s.visibleItems, s.selectedIdx, and the window math untouched — the
+	// rule is display-only — and it appears only when a root row is followed by a
+	// non-root one, so a root-only or root-less list gets no dangling rule.
+	instances := s.proj.GetInstances()
+	rootSeen := false
+	sepDrawn := false
 	for i, item := range s.visibleItems {
 		isSelected := i == s.selectedIdx
 		if item.IsHeader {
@@ -42,7 +52,15 @@ func (s *Sidebar) String() string {
 				if item.IsTab {
 					rows[i] = s.renderTabRow(item, isSelected)
 				} else {
-					rows[i] = s.renderInstance(item.ItemIndex, isSelected)
+					row := s.renderInstance(item.ItemIndex, isSelected)
+					if item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
+						session.IsReservedTitle(instances[item.ItemIndex].Title) {
+						rootSeen = true
+					} else if rootSeen && !sepDrawn {
+						row = s.renderRootSeparator() + "\n" + row
+						sepDrawn = true
+					}
+					rows[i] = row
 				}
 			case SectionArchived:
 				// Archived rows are flat instance rows (#1028) — no tab children.
@@ -313,6 +331,19 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	}
 	return style.Padding(0, narrowAwarePad(w)).Render(
 		lipgloss.Place(w, 1, lipgloss.Left, lipgloss.Center, text))
+}
+
+// renderRootSeparator is the subtle hairline demarcating the pinned root agent
+// from the rest of the sessions (#2513). It reuses the menu's dim sepStyle and the
+// box-drawing rule glyph so it reads as a hairline consistent with the rest of the
+// chrome — never a heavy divider — and carries no text. String() draws it only as
+// a leading line on the first non-root instance row, so it never dangles.
+func (s *Sidebar) renderRootSeparator() string {
+	w := s.contentWidth()
+	if w < 1 {
+		return ""
+	}
+	return sepStyle.Render(strings.Repeat("─", w))
 }
 
 func (s *Sidebar) renderInstance(idx int, selected bool) string {

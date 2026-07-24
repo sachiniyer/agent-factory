@@ -39,6 +39,7 @@ import {
   isArchived,
   isCreating,
   isLimitReached,
+  isRootSession,
   type RowKind,
   rowStatus,
   rowTitle,
@@ -1244,6 +1245,13 @@ export class AppShell {
         (target) => this.rowActions(target, selected),
       );
     });
+    // A subtle hairline under the pinned root agent (#2513), matching the TUI. Only
+    // when root actually leads the visible list AND a non-root row follows it, so
+    // there's never a dangling rule on an empty or root-only list. Root sorts first
+    // (compareSessionsForRail) and is unique, so it is visible[0] whenever present.
+    if (visible.length > 1 && isRootSession(visible[0])) {
+      rows.splice(1, 0, h("li", { class: "af-rail-sep", ariaHidden: "true" }));
+    }
     const notice = this.railNotice(state, scoped, visible);
     list.replaceChildren(...(notice ? [notice, ...rows] : rows));
   }

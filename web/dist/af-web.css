@@ -771,6 +771,12 @@ body {
   overscroll-behavior: contain;
   flex: 1;
 }
+.af-rail-sep {
+  height: 0;
+  margin: var(--af-sp-1) var(--af-sp-2);
+  border-top: 1px solid var(--af-border);
+  list-style: none;
+}
 .af-rail-empty {
   padding: var(--af-sp-4) var(--af-sp-3);
   color: var(--af-text-2);
