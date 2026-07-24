@@ -945,11 +945,13 @@ Add a project by registering a git checkout with a stable, machine-local
 identity, so it appears as an (initially sessionless) project you can create
 sessions into.
 
-The path may be absolute or start with ~; the daemon expands and resolves it on
-its OWN filesystem, walks to the checkout's canonical main-repo root, and
-validates it is a git repository (an actionable error otherwise). Any directory
-inside a checkout resolves to that root. Registration is idempotent: adding a
-known checkout is a no-op success that returns its existing identity.
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — so 'af projects add .' registers the repo you are standing in.
+The daemon then walks to the checkout's canonical main-repo root and validates
+it is a git repository (an actionable error otherwise). Any directory inside a
+checkout resolves to that root. Registration is idempotent: adding a known
+checkout is a no-op success that returns its existing identity.
 
 The returned project id survives an explicit rebind after the checkout moves.
 Two clones remain separate projects. Identity is anchored in an AF-home-scoped

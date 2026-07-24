@@ -39,25 +39,65 @@ func TestProjectsRegistryCommandsRegistered(t *testing.T) {
 
 // TestProjectsAddRoutesThroughDaemon proves `af projects add` performs the
 // registration through the daemon RegisterProject RPC — the single-writer path
-// (#2456), not an in-process config write — forwarding the raw path (the daemon
-// resolves it on its own filesystem) and printing the returned project.
+// (#2456), not an in-process config write — and PRINTS the returned project.
 func TestProjectsAddRoutesThroughDaemon(t *testing.T) {
-	var gotReq daemon.RegisterProjectRequest
 	restore := registerProjectViaDaemon
-	registerProjectViaDaemon = func(req daemon.RegisterProjectRequest) (config.Project, error) {
-		gotReq = req
+	registerProjectViaDaemon = func(daemon.RegisterProjectRequest) (config.Project, error) {
 		return config.Project{ID: "prj_00000000000000000000000000000000", Root: "/resolved/root"}, nil
 	}
 	t.Cleanup(func() { registerProjectViaDaemon = restore })
 
 	add := findSubcommand(t, "add")
-	out := captureJSON(t, func() error { return add.RunE(add, []string{"~/some/path"}) })
-	require.Equal(t, "~/some/path", gotReq.Path,
-		"the raw path is forwarded to the daemon, which resolves it on its own filesystem")
+	out := captureJSON(t, func() error { return add.RunE(add, []string{"/some/abs/repo"}) })
 
 	var project config.Project
 	require.NoError(t, json.Unmarshal(out, &project))
 	require.Equal(t, "/resolved/root", project.Root, "the resolved project is printed back")
+}
+
+// TestProjectsAddResolvesPathAgainstClientCwd is the #2456 wrong-repo foot-gun
+// regression: `af projects add` must resolve a relative path (and '~') against
+// the USER's shell cwd before sending, NOT forward it raw. daemon.RegisterProject
+// goes over the LOCAL control socket, and the daemon does not share the caller's
+// working directory (an ad-hoc daemon inherits its spawner's cwd; a systemd one
+// runs from /), so a raw '.' would register the daemon's cwd repo — the wrong
+// project silently, or a confusing "not a git repository" from /. This mirrors
+// what `af projects delete` already does (resolveProjectDeleteTarget).
+func TestProjectsAddResolvesPathAgainstClientCwd(t *testing.T) {
+	var gotPath string
+	restore := registerProjectViaDaemon
+	registerProjectViaDaemon = func(req daemon.RegisterProjectRequest) (config.Project, error) {
+		gotPath = req.Path
+		return config.Project{ID: "prj_00000000000000000000000000000000", Root: gotPath}, nil
+	}
+	t.Cleanup(func() { registerProjectViaDaemon = restore })
+
+	add := findSubcommand(t, "add")
+
+	for _, input := range []string{".", "nested/sub", "~/somewhere"} {
+		gotPath = ""
+		_ = captureJSON(t, func() error { return add.RunE(add, []string{input}) })
+
+		require.True(t, filepath.IsAbs(gotPath),
+			"input %q must be forwarded as an absolute path, got %q", input, gotPath)
+		require.NotContains(t, gotPath, "~", "a leading ~ must be expanded before sending, got %q", gotPath)
+
+		want, err := config.ResolveUserPath(input)
+		require.NoError(t, err)
+		require.Equal(t, want, gotPath,
+			"input %q must resolve against the client's cwd (or home), not be forwarded raw", input)
+	}
+
+	// The load-bearing case named in the bug report: `af projects add .` from the
+	// current working directory forwards THIS directory, not "." for the daemon to
+	// mis-resolve.
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	gotPath = ""
+	_ = captureJSON(t, func() error { return add.RunE(add, []string{"."}) })
+	wantCwd, err := filepath.Abs(cwd)
+	require.NoError(t, err)
+	require.Equal(t, wantCwd, gotPath, "`af projects add .` must register the client's cwd repo")
 }
 
 // TestProjectsAddSurfacesDaemonError: a daemon-side rejection (not a git repo,

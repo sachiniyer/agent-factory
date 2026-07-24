@@ -170,13 +170,17 @@ type DeleteProjectResponse struct {
 }
 
 // RegisterProjectRequest asks the daemon to register a git checkout as a durable,
-// sessionless project in the #2355 registry (#2456). Path is a user-supplied
-// path — an absolute path, or one with a leading ~ — that the DAEMON resolves on
-// its own filesystem: it expands ~, resolves symlinks, and walks to the git
-// checkout's canonical main-repo root. Resolving daemon-side is what makes the
-// web/remote path correct — the path names a directory on the daemon host, not
-// the client's. Registration is idempotent: a known checkout is a no-op success
-// that returns the existing identity.
+// sessionless project in the #2355 registry (#2456). Path names a directory on
+// the DAEMON's filesystem; the daemon expands ~, resolves symlinks, and walks to
+// the git checkout's canonical main-repo root, then validates it.
+//
+// Path must already be absolute (or ~-prefixed) — the daemon has no access to the
+// caller's working directory, so a relative path would resolve against the
+// daemon's own cwd, which is not the caller's. Callers whose input can be
+// relative resolve it against the user's cwd BEFORE sending: the CLI's
+// `af projects add` does this (see api/projects.go), and the web only ever
+// supplies daemon-host paths. Registration is idempotent: a known checkout is a
+// no-op success that returns the existing identity.
 type RegisterProjectRequest struct {
 	Path string `json:"path"`
 }
