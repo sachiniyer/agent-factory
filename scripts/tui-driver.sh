@@ -42,6 +42,21 @@
 : "${AF_DRIVER_DETACH_KEY:=C-w}"                 # tmux key that detaches attach
 : "${AF_DRIVER_STATE_DIR:=${TMPDIR:-/tmp}/af-driver}"  # cross-call scratch
 : "${AF_DRIVER_SEND_LINE_ATTEMPTS:=4}"           # af_send_line paste retries
+# help_screens_seen af_boot writes before launching. The default 15 marks every
+# one-time overlay seen, which is what makes ordinary scenarios deterministic.
+# Clear a bit to drive a FIRST-RUN overlay on purpose — e.g.
+# AF_DRIVER_HELP_SEEN=7 boots into the first-run interactive help, the only way
+# to reach that screen from a driver scenario (#2413).
+#
+# The bits are app/help.go's mask() methods, and they are NOT in the order this
+# file used to claim ("1 start | 2 attach | 4 interactive"): general is 1<<0,
+# instance-start 1<<1, instance-attach 1<<2, interactive 1<<3. Nothing depended
+# on the wrong list while the value was a hardcoded 15 — every bit was set
+# either way — but it is load-bearing the moment a caller clears one.
+#
+#   1  general help (?)          4  instance-attach help (o)
+#   2  instance-start help (n)   8  interactive-pane help (enter)
+: "${AF_DRIVER_HELP_SEEN:=15}"                   # one-time overlays pre-marked seen
 : "${AGENT_FACTORY_AUTO_UPDATE:=false}"          # disable startup auto-update: a
                                                  # branch binary built behind the
                                                  # latest release would try to
@@ -519,9 +534,9 @@ af_boot() {
         sleep 1
     done
 
-    # Suppress every first-time help overlay (bits: 1 start | 2 attach |
-    # 4 interactive, plus the general help bit) BEFORE the TUI reads state.
-    printf '{\n  "help_screens_seen": 15\n}\n' > "$AGENT_FACTORY_HOME/state.json"
+    # Suppress every first-time help overlay BEFORE the TUI reads state (see
+    # AF_DRIVER_HELP_SEEN above for the bits, and for clearing one on purpose).
+    printf '{\n  "help_screens_seen": %s\n}\n' "$AF_DRIVER_HELP_SEEN" > "$AGENT_FACTORY_HOME/state.json"
 
     # Fresh driver session. Kill ONLY our own named session — never the
     # server (the container hosts the daemon's sessions too).

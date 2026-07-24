@@ -506,6 +506,36 @@ selftest)
     fi
     exit "$rc"
     ;;
+scenario)
+    # Run ONE driver scenario script in an ephemeral sandbox — the same fence
+    # `selftest` uses, but for a script the caller names instead of the fixed
+    # acceptance scenario.
+    #
+    # This exists because there was no way to run a one-off real-TUI gate: the
+    # only options were the shared selftest (which a per-bug case should not be
+    # bolted onto, since destabilizing the acceptance gate is worse than the bug
+    # it guards) or `drive`, which attaches a human. A regression scenario for a
+    # specific fix needs neither.
+    #
+    #   scripts/testbox.sh scenario scripts/tui-2413-scenario.sh
+    #
+    # The path is repo-relative; the repo is mounted read-only at /src.
+    scenario_rel="${1:-}"
+    [ -n "$scenario_rel" ] || { echo "testbox: scenario needs a script path (repo-relative)" >&2; exit 2; }
+    [ -f "$REPO_ROOT/$scenario_rel" ] || { echo "testbox: no such scenario script: $scenario_rel" >&2; exit 2; }
+    if [ -n "${AF_SELFTEST_NAME:-}" ]; then
+        PLAYTEST_NAME="$AF_SELFTEST_NAME"; teardown=no
+    else
+        PLAYTEST_NAME="af-driver-scenario-$(_uniq)"; teardown=yes
+    fi
+    ensure_playtest_up
+    rc=0
+    "$ENGINE" exec "$PLAYTEST_NAME" bash "/src/$scenario_rel" || rc=$?
+    if [ "$teardown" = yes ]; then
+        "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
+    fi
+    exit "$rc"
+    ;;
 drive)
     # Bring up a uniquely-named sandbox (#1171), boot af through the driver,
     # then attach you interactively to the live driver session so you can
