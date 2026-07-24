@@ -64,8 +64,18 @@ func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
 	wantTab := -1
 	if s.lastCursorTitle == target.Title {
 		tabs := target.GetTabs()
-		replacedSession := s.lastCursorInstanceID != "" && target.ID != "" &&
-			s.lastCursorInstanceID != target.ID
+		// A replacement is any same-title swap to a different instance identity:
+		// a kill/recreate mints an entirely new session whose tab ids all differ
+		// by construction, so the cursor must follow the equivalent tab by NAME,
+		// exactly as the pane reconcile does for replacedSessionTabs (see
+		// app/handle_panes.go) — otherwise the tree selection and the panes
+		// disagree about which tab is "the same tab". The stable instance ID is
+		// that identity: a legacy pre-#1195 row carries ID "", so a legacy→new
+		// swap ("" → a real id) is a replacement too (#2498). The differing-ID
+		// test already excludes "both empty", so a re-selected legacy row
+		// (unchanged "" == "") is correctly NOT a replacement and keeps the
+		// same-session tab-ID rule below, where a vanished id means a vanished tab.
+		replacedSession := s.lastCursorInstanceID != target.ID
 		switch {
 		case replacedSession:
 			// A same-title kill/recreate mints fresh tab IDs. Preserve the

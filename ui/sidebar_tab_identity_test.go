@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestSidebarTreeRepinTracksTabIdentityAcrossReorder is the row-1 regression
@@ -94,4 +96,70 @@ func TestSidebarTreeRepinAgentUsesNameAcrossIDHealing(t *testing.T) {
 	sel := s.GetSelection()
 	require.True(t, sel.IsTab, "the re-pin keeps the agent tab across its ID heal")
 	assert.Equal(t, 0, sel.TabIndex)
+}
+
+// TestSidebarTreeRepinFollowsLegacyToNewSwap is the #2498 regression. A legacy
+// pre-#1195 row carries no stable instance ID (ID ""), while restoreLocalTabs
+// backfills non-empty IDs onto its tabs. When a kill/recreate swaps that row for
+// a freshly built session (a real instance ID, freshly minted tab IDs), the
+// sidebar cursor must follow its tab onto the equivalent slot of the
+// replacement — the same name-domain rebind the pane reconcile applies for
+// replacedSessionTabs (app/handle_panes.go), so the tree selection and the panes
+// never disagree about which tab is "the same tab".
+//
+// The bug: moveCursorToInstance's replacedSession predicate required BOTH the
+// stored and the target instance ID to be non-empty, so the legacy "" → new-id
+// swap read as a same-session tab change. It then keyed on the stale backfilled
+// tab ID, which no freshly minted tab carries, found nothing, and dropped the
+// cursor to the instance row — losing the tab highlight. Against master this
+// test lands on the instance row (sel.IsTab is false).
+func TestSidebarTreeRepinFollowsLegacyToNewSwap(t *testing.T) {
+	s := newTreeSidebar(t, 0)
+	dir := t.TempDir()
+
+	// A legacy record: no instance ID, tabs [agent, a, b] whose shell rows carry
+	// the non-empty IDs restoreLocalTabs backfills onto pre-#1738 tabs.
+	legacy, err := session.NewInstance(session.InstanceOptions{
+		Title: "t-00", Path: dir, Program: "test",
+	})
+	require.NoError(t, err)
+	legacy.ID = ""
+	legacy.AddTabForTest("agent", session.TabKindAgent)
+	legacy.AddTabForTest("a", session.TabKindShell)
+	legacy.AddTabForTest("b", session.TabKindShell)
+	legacy.GetTabs()[1].ID = "backfilled-a"
+	legacy.GetTabs()[2].ID = "backfilled-b"
+	addTestInstance(s, legacy)
+
+	s.SetSelectedInstance(0)
+	s.SelectTabRow(legacy.Title, 1) // rest the cursor on tab "a"
+	require.Equal(t, "a", legacy.GetTabs()[s.GetSelection().TabIndex].Name,
+		"precondition: the cursor rests on the legacy row's tab a")
+
+	// The recreated session: a real minted instance ID, freshly minted tab IDs,
+	// and a reordered roster so a slot-keyed re-pin would land on the wrong tab.
+	recreated, err := session.NewInstance(session.InstanceOptions{
+		Title: "t-00", Path: dir, Program: "test",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, recreated.ID, "precondition: a rebuilt session carries a stable ID")
+	recreated.AddTabForTest("agent", session.TabKindAgent)
+	recreated.AddTabForTest("b", session.TabKindShell)
+	recreated.AddTabForTest("a", session.TabKindShell)
+	recreated.GetTabs()[1].ID = "fresh-b"
+	recreated.GetTabs()[2].ID = "fresh-a"
+
+	// Swap the corpse for the live session, then fire the reconcile's #969 re-pin
+	// assertion — exactly what swapInstanceFromSnapshot + reconcileSnapshot do.
+	require.True(t, s.proj.ReplaceInstanceByTitle("t-00", recreated))
+	s.proj.SelectInstance(recreated)
+
+	sel := s.GetSelection()
+	require.True(t, sel.IsTab,
+		"the highlight follows the legacy→new swap onto a tab row, not the instance row (#2498)")
+	got := recreated.GetTabs()[sel.TabIndex]
+	assert.Equal(t, "a", got.Name,
+		"the cursor lands on the equivalent replacement tab by name, matching the pane reconcile")
+	assert.Equal(t, 2, sel.TabIndex,
+		"tab a moved to slot 2 in the recreated roster; the re-pin follows its identity, not the stale ordinal")
 }
