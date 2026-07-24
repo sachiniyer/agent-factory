@@ -21,6 +21,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
+- [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
 - [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
@@ -456,6 +457,7 @@ af config
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
+- [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 
 **Global flags**
 
@@ -561,7 +563,9 @@ Settable keys:
   global_agent_skills        true | false
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
-cors_allowed_origins list are not settable here — edit config.toml directly.
+session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
+so they are not settable here. Ask the config assistant to change them (it edits
+the file and validates), or edit config.toml directly and run "af config validate".
 Changes apply on the next af / daemon start.
 
 Examples:
@@ -571,6 +575,39 @@ Examples:
 
 ```
 af config set <key> <value> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af config validate
+
+Check that the global config parses and validates
+
+Read the global config (~/.agent-factory/config.toml) exactly as af and the
+daemon do at startup and report whether it loads. It writes nothing and
+materializes nothing — a read-only check.
+
+This is the companion to a hand-edit. Most keys go through "af config set",
+which validates before it writes and so can never leave a broken file; but the
+structured settings (theme, the [keys] rebinds, root_agents, and the
+session_env_passthrough / cors_allowed_origins lists) are edited in the file
+directly, and a broken edit there is a hard startup failure with no fallback to
+defaults. Run this after such an edit: exit 0 means the next start will load it,
+a non-zero exit names what is wrong so it can be fixed before restarting.
+
+```
+af config validate [flags]
 ```
 
 **Flags**

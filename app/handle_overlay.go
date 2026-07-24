@@ -395,6 +395,14 @@ func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.configPane.HandleKeyPress(msg)
 	if !m.configPane.HasFocus() {
 		m.state = stateDefault
+		// The pane released focus. If that was the assistant button (C), open the
+		// config assistant now: the overlay is already closing, so the full-screen
+		// takeover has a clean terminal to attach to, and on return the user lands
+		// back at the default view with a freshly reloaded config (#2453). Taking
+		// the request consumes it, so a later close cannot re-fire it.
+		if m.configPane.TakeAssistantRequest() {
+			return m.handleConfigAgent()
+		}
 		return m, nil
 	}
 	return m, nil

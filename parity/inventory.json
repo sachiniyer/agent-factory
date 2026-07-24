@@ -875,6 +875,24 @@
       "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation."
     },
     {
+      "id": "config.validate",
+      "title": "Check that the global config parses and validates",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configcmd.go config validate (LoadConfigReadOnly)"
+      },
+      "verdict": "deliberate",
+      "notes": "#2453/#2454: a read-only check that config.toml loads, the companion to a hand-edit and the config assistant's validate-after step. n/a on the TUI and web because their edits go through the validated SetGlobalConfigValue/manifest path and so can never produce an unloadable file — there is nothing for a validate affordance to catch. The config assistant, which does hand-edit the structured keys, runs `af config validate` itself."
+    },
+    {
       "id": "config.write",
       "title": "Set a global config key",
       "tui": {
@@ -1327,6 +1345,7 @@
       "af config get": "config.read",
       "af config list": "config.read",
       "af config set": "config.write",
+      "af config validate": "config.validate",
       "af daemon install": "daemon.lifecycle",
       "af daemon restart": "daemon.lifecycle",
       "af daemon status": "daemon.lifecycle",
@@ -1516,6 +1535,8 @@
       "af config list --project": "config.read-project",
       "af config set --help": "meta.discovery",
       "af config set --json": "cli.json-envelope",
+      "af config validate --help": "meta.discovery",
+      "af config validate --json": "cli.json-envelope",
       "af daemon --help": "meta.discovery",
       "af daemon install --help": "meta.discovery",
       "af daemon restart --help": "meta.discovery",

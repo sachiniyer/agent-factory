@@ -314,18 +314,33 @@ func TestDynamicFamiliesAreNotEditableAndSayHow(t *testing.T) {
 	}
 }
 
-// TestStructuralKeysSayTheyAreHandEdited pins the other read-only case: there is
-// genuinely no command for theme/[keys]/root_agents, so the hint says so.
-func TestStructuralKeysSayTheyAreHandEdited(t *testing.T) {
+// TestStructuralKeysPointAtTheAssistant pins the other read-only case. There is
+// no single-scalar `af config set` shape for theme/[keys]/root_agents/the lists,
+// but "hand-edit the file yourself" is no longer the answer we give: the hint
+// points at the config assistant, which edits these in the file for the user
+// (#2453 / #2454).
+//
+// The old assertion required the exact string "hand-edited in config.toml", which
+// was the whole concept #2454 removed — so it is inverted here: no read-only key
+// may still send the user to a text editor.
+func TestStructuralKeysPointAtTheAssistant(t *testing.T) {
+	checked := 0
 	for _, e := range ManifestWithValues(DefaultConfig()) {
 		if e.Settable {
 			continue
 		}
+		checked++
 		if e.Editable {
 			t.Errorf("%s is not settable at all; it must not be editable", e.Key)
 		}
-		if e.EditHint != "hand-edited in config.toml" {
-			t.Errorf("%s: got hint %q", e.Key, e.EditHint)
+		if e.EditHint != assistantEditHint {
+			t.Errorf("%s: hint is %q, want the assistant hint %q", e.Key, e.EditHint, assistantEditHint)
 		}
+		if strings.Contains(e.EditHint, "hand-edit") {
+			t.Errorf("%s: the hint still tells the user to hand-edit the file (%q) — #2454 removed that", e.Key, e.EditHint)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no read-only structural keys found — this test is asserting nothing")
 	}
 }
