@@ -30,7 +30,7 @@ TUI was in*. Get this right and the rest follows.
 
 | Mode | What the keyboard does | Menu bar shows | How you got here |
 |------|------------------------|----------------|------------------|
-| **Nav** | Keys are TUI commands (`n` new, `s` open pane, `t` new tab, `j`/`k` move the tree cursor, …) | context hints (`n new • …`, `↵ interact • …`) | default; `Ctrl-]` from interactive |
+| **Nav** | Keys are TUI commands (`n` new, `s` open pane, `t` new tab, `j`/`k` move the tree cursor, …) | context hints (`n new · …`, `↵ interact · …`) | default; `Ctrl-]` from interactive |
 | **Interactive** | *Every* key — including Tab — forwards to the focused pane's shell/agent | only `ctrl+] nav mode` | `Enter` on a focused pane |
 | **Attached (full-screen)** | tmux owns the terminal; the TUI chrome is gone | the tmux status line (`[af_…`) | `o` on a selected instance |
 
@@ -45,9 +45,9 @@ In nav mode, `Tab`/`Shift-Tab` cycle **ring focus** across regions: the
 **instances tree** → each open **pane** → the **automations** strip → the **projects** section → back.
 The menu bar is context-sensitive and follows focus:
 
-- **tree** focused → `n new • …` (plus instance verbs when a row is selected)
-- **pane** focused → `↵ interact • o attach • ← prev pane • → next pane • … • s open pane • x hide pane`
-- **automations** focused → `enter manage • …`
+- **tree** focused → `n new · …` (plus instance verbs when a row is selected)
+- **pane** focused → `↵ interact · o attach · ← prev pane · → next pane · … · s open pane · x hide pane`
+- **automations** focused → `enter manage · …`
 - **projects** focused → `↵ switch · / search │ tab focus · ? help · q quit`
 
 `af_focus_tree` walks the ring (checking *before* it presses, so it never
@@ -67,7 +67,7 @@ text-greppable selection signal the driver asserts on:
 ```
 
 On a cold boot the cursor sits on the **section header** (no instance selected
-— menu shows the plain `n new • N new remote` set); the first `j` moves the
+— menu shows the plain `n new · N new remote` set); the first `j` moves the
 cursor down onto the first instance. `af_select` is robust to any starting
 position: it anchors at the top (`k` is idempotent there), then steps down
 with `j` until the target row shows `▾` **and** the tree cursor is actually on

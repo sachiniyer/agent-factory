@@ -279,6 +279,66 @@ func TestMenuNewInstancePromptHintSwapsAndDoesNotAlias(t *testing.T) {
 // like a local one. The "remote omits unsupported tab keys" behavior it guarded
 // no longer exists.
 
+// #2399: the hint row joins fragments on one line, so it takes the repo-wide
+// " · " separator (CLAUDE.md copy conventions) rather than the " • " it used to
+// render. Asserted on the real rendered row, not on the package var, so a future
+// renderer that stops using `separator` cannot quietly reintroduce a bullet.
+//
+// The bullet check is scoped to what the menu itself emits: a hint's own DESC
+// could legitimately contain one, and this row is the only thing under test.
+func TestMenuJoinsHintsWithMiddleDot(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetSize(100, 1)
+
+	out := m.String()
+	if !strings.Contains(out, " · ") {
+		t.Fatalf("hint row must join fragments with the middle dot separator:\n%s", out)
+	}
+	if strings.Contains(out, "•") {
+		t.Fatalf("hint row still renders a bullet separator (#2399):\n%s", out)
+	}
+}
+
+// The hint row is shed by WIDTH (hintDropOrder), so the separator's cell cost is
+// load-bearing: one cell wider and some terminal size silently loses a hint that
+// used to fit. U+00B7 and U+2022 are both East Asian Ambiguous and measure one
+// cell, so the swap is free — but "measures the same" is exactly the kind of
+// assumption that is true until a width table changes, so it is pinned here
+// rather than reasoned about in a comment alone.
+func TestMenuSeparatorIsWidthNeutral(t *testing.T) {
+	if got := lipgloss.Width(separator); got != 3 {
+		t.Fatalf("separator measures %d cells, want 3 — a wider separator sheds hints "+
+			"at widths that used to fit (#2399/#1083)", got)
+	}
+	if got, want := lipgloss.Width(separator), lipgloss.Width(" • "); got != want {
+		t.Fatalf("separator is %d cells but the bullet it replaced was %d; the drop order "+
+			"was tuned against the old width", got, want)
+	}
+}
+
+// The narrowest supported terminal is where a width regression would show first,
+// so the row is checked there too: it must still fit its bar, and must not have
+// been pushed onto the bullet-free path by simply dropping every hint.
+func TestMenuMiddleDotFitsAtEightyColumns(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetSize(80, 1)
+
+	out := m.String()
+	if !strings.Contains(out, " · ") {
+		t.Fatalf("80-column hint row must still join fragments with the middle dot:\n%s", out)
+	}
+	if strings.Contains(out, "•") {
+		t.Fatalf("80-column hint row still renders a bullet separator (#2399):\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > 80 {
+			t.Fatalf("hint row overflows an 80-column bar at %d cells:\n%s", w, out)
+		}
+	}
+}
+
 func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(readyUIInstance())

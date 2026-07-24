@@ -313,9 +313,9 @@ _expect_af_select_open_pane() {
             if [ "$_AF_OPENPANE_JCOUNT" -lt 5 ]; then
                 printf '%s\n' ' ▸ target                       │ menu: n new'
             elif [ "$_AF_OPENPANE_FOCUS" = pane ]; then
-                printf '%s\n' ' ▾ target                       │ ← prev pane • → next pane │ s open pane • x hide pane'
+                printf '%s\n' ' ▾ target                       │ ← prev pane · → next pane │ s open pane · x hide pane'
             else
-                printf '%s\n' ' ▾ target                       │ menu: n new • D kill'
+                printf '%s\n' ' ▾ target                       │ menu: n new · D kill'
             fi
         }
         af_select target
@@ -671,7 +671,7 @@ _expect_scrolled_rail_reads_as_booted() {
                       │                                        │
     └ 1 ◆ Agent *     │                                        │
                       ╰────────────────────────────────────────╯
-     n new • D kill │ t new tab • w close tab │ ? help • q quit
+     n new · D kill │ t new tab · w close tab │ ? help · q quit
 SCREEN
         }
         # Premise: the frame really is missing the header, or this is just

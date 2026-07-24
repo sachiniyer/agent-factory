@@ -20,7 +20,20 @@ var sepStyle = lipgloss.NewStyle().Foreground(activeTheme.BackgroundSubtle)
 
 var actionGroupStyle = lipgloss.NewStyle().Foreground(AccentColor)
 
-var separator = " • "
+// separator joins hints WITHIN a group; verticalSeparator divides the groups.
+//
+// " · " is the repo-wide separator for fragments on one line (CLAUDE.md copy
+// conventions); this row rendered " • " instead (#2399). Because this is the
+// SHARED menu renderer rather than one overlay, the drift showed up throughout
+// ordinary navigation, which is why it was worth a change to a load-bearing
+// string.
+//
+// It is width-neutral, and that is not incidental — the hint row is clamped and
+// shed by width (hintDropOrder), so a separator one cell wider would silently
+// drop a hint at some terminal size. U+00B7 and U+2022 are both East Asian
+// Ambiguous, which lipgloss.Width counts as one cell each, so the row measures
+// identically. TestMenuSeparatorIsWidthNeutral pins that rather than trusting it.
+var separator = " · "
 var verticalSeparator = " │ "
 
 var menuStyle = lipgloss.NewStyle().
