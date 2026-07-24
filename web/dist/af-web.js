@@ -10908,29 +10908,12 @@ function noAuthLoginView(state, actions2) {
   }
   return h2("main", { class: "af-login" }, h2("div", { class: "af-card" }, ...children));
 }
-function termStatusLabel(s) {
-  switch (s) {
-    case "open":
-      return "Live";
-    case "connecting":
-      return "Connecting\u2026";
-    case "reconnecting":
-      return "Reconnecting\u2026";
-    case "exited":
-      return "Agent exited";
-  }
-}
 var AppShell = class {
   constructor(actions2, termHost2, modalHost2, installEl) {
     this.actions = actions2;
     this.termHost = termHost2;
     this.modalHost = modalHost2;
     this.installEl = installEl;
-    this.pip = h2("span", { class: "af-live-pip" });
-    this.pip.setAttribute("aria-hidden", "true");
-    this.pipLabel = h2("span", { class: "af-live-label" });
-    const live = h2("span", { class: "af-live" }, this.pip, this.pipLabel);
-    live.setAttribute("role", "status");
     const disconnect2 = h2("button", { type: "button", class: "af-ghost" }, "Disconnect");
     disconnect2.setAttribute("title", "Disconnect and forget the saved token");
     const themeToggle = h2("div", { class: "af-theme-toggle" });
@@ -10991,7 +10974,6 @@ var AppShell = class {
     const appbarTools = h2(
       "div",
       { class: "af-appbar-tools", id: "af-appbar-tools" },
-      live,
       ...this.installEl ? [this.installEl] : [],
       themeToggle,
       disconnect2
@@ -11119,8 +11101,6 @@ var AppShell = class {
     this.el = h2("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
   }
   el;
-  pip;
-  pipLabel;
   railCount;
   railList;
   main;
@@ -11172,7 +11152,6 @@ var AppShell = class {
   lastStatusFilter = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
-  headMeta = null;
   // The selected visible rail row's archive/restore control and daemon-owned verb it
   // currently shows (#1932, #2186, #2234). Every actionable row owns controls now
   // (#2223), but a session can flip archive⇄restore WITHOUT a selection change, so
@@ -11302,8 +11281,7 @@ var AppShell = class {
     }
     if (this.lastLive !== state.live) {
       this.lastLive = state.live;
-      this.pip.className = `af-live-pip af-live-${state.live}`;
-      this.pipLabel.textContent = state.live === "open" ? "Live" : state.live === "connecting" ? "Connecting\u2026" : "Reconnecting\u2026";
+      this.el.dataset.live = state.live;
     }
     if (this.lastView !== state.view) {
       this.lastView = state.view;
@@ -11783,13 +11761,13 @@ var AppShell = class {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
-      this.headMeta = null;
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
+      delete this.main.dataset.termStatus;
       this.main.replaceChildren(
         h2("p", { class: "af-empty-title" }, "Select a session"),
         h2("p", { class: "af-empty-hint" }, "Pick a session in the rail to attach its terminal.")
@@ -11797,8 +11775,7 @@ var AppShell = class {
       return;
     }
     this.headTitle = h2("span", { class: "af-term-title" }, selected.title);
-    this.headMeta = h2("span", { class: "af-term-meta" });
-    const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle, this.headMeta);
+    const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle);
     const retryBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
     retryBtn.title = "Resume this session from its usage-limit wall";
     retryBtn.addEventListener("click", () => this.actions.retryLimit());
@@ -12040,16 +12017,11 @@ var AppShell = class {
   }
   patchMainHead(state) {
     const selected = selectedSession(state);
-    if (!selected || !this.headTitle || !this.headMeta) {
+    if (!selected || !this.headTitle) {
       return;
     }
     this.headTitle.textContent = selected.title;
-    const parts = [termStatusLabel(state.termStatus)];
-    if (selected.branch) {
-      parts.push(selected.branch);
-    }
-    this.headMeta.textContent = parts.join(" \xB7 ");
-    this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
+    this.main.dataset.termStatus = state.termStatus;
     this.patchHeadActions(state, selected);
     const nowAction = selected.lifecycle_action ?? null;
     if (this.lifecycleBtn && nowAction && nowAction !== this.lifecycleAction) {

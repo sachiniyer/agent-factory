@@ -14,7 +14,7 @@
 // pane holds a stateful, focused xterm: a full rebuild on each session.* event
 // would detach the terminal's <textarea> and steal keyboard focus mid-type. So the
 // shell keeps ONE persistent terminal-host node and only re-touches the parts that
-// actually changed — the rail list, the live pip, the pane header — leaving the
+// actually changed — the rail list, the pane header — leaving the
 // terminal host (and its focus/scrollback) untouched except when the SELECTED
 // session changes (a deliberate user act that rebuilds the terminal anyway).
 
@@ -566,20 +566,6 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
   return h("main", { class: "af-login" }, h("div", { class: "af-card" }, ...children));
 }
 
-/** The label a terminal status reads as in the pane header. */
-function termStatusLabel(s: TerminalStatus): string {
-  switch (s) {
-    case "open":
-      return "Live";
-    case "connecting":
-      return "Connecting…";
-    case "reconnecting":
-      return "Reconnecting…";
-    case "exited":
-      return "Agent exited";
-  }
-}
-
 /**
  * The authed-app DOM, built once and patched in place. index.ts constructs one of
  * these when the login succeeds, appends `.el` to #app, and calls update(state) on
@@ -589,8 +575,6 @@ function termStatusLabel(s: TerminalStatus): string {
  */
 export class AppShell {
   readonly el: HTMLElement;
-  private readonly pip: HTMLElement;
-  private readonly pipLabel: HTMLElement;
   private readonly railCount: HTMLElement;
   private readonly railList: HTMLElement;
   private readonly main: HTMLElement;
@@ -646,7 +630,6 @@ export class AppShell {
 
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
-  private headMeta: HTMLElement | null = null;
   // The selected visible rail row's archive/restore control and daemon-owned verb it
   // currently shows (#1932, #2186, #2234). Every actionable row owns controls now
   // (#2223), but a session can flip archive⇄restore WITHOUT a selection change, so
@@ -732,12 +715,6 @@ export class AppShell {
      *  install (a harness) can leave it out. */
     private readonly installEl?: HTMLElement,
   ) {
-    this.pip = h("span", { class: "af-live-pip" });
-    this.pip.setAttribute("aria-hidden", "true");
-    this.pipLabel = h("span", { class: "af-live-label" });
-    const live = h("span", { class: "af-live" }, this.pip, this.pipLabel);
-    live.setAttribute("role", "status");
-
     // Disconnect doubles as "forget the saved token": the credential persists across
     // visits now, so this button is the only way back to the login prompt on a shared
     // machine or after a rotation. The title says so — the label alone reads as a
@@ -826,7 +803,6 @@ export class AppShell {
     const appbarTools = h(
       "div",
       { class: "af-appbar-tools", id: "af-appbar-tools" },
-      live,
       ...(this.installEl ? [this.installEl] : []),
       themeToggle,
       disconnect,
@@ -1048,11 +1024,20 @@ export class AppShell {
       this.toast.classList.toggle("af-toast-show", state.tabError !== null);
     }
 
+    // The event-stream state is tracked and published, but no longer DRAWN: the
+    // "Live / Connecting… / Reconnecting…" pip beside the project selector was
+    // removed as chrome nobody wanted to look at (#2458). Only the indicator went
+    // — the reconnect machinery behind it is untouched, and the state it produces
+    // stays observable here as a data attribute.
+    //
+    // Not merely dead state kept alive for its own sake. The reconnect behaviour is
+    // otherwise invisible from outside the app, so deleting its last observable
+    // would have meant deleting the selftest that proves a blocked events endpoint
+    // actually drives the client into `reconnecting` — greening the suite by
+    // removing the only thing watching it.
     if (this.lastLive !== state.live) {
       this.lastLive = state.live;
-      this.pip.className = `af-live-pip af-live-${state.live}`;
-      this.pipLabel.textContent =
-        state.live === "open" ? "Live" : state.live === "connecting" ? "Connecting…" : "Reconnecting…";
+      this.el.dataset.live = state.live;
     }
 
     // View switching: show the active view's body, hide the other, and highlight its
@@ -1135,8 +1120,8 @@ export class AppShell {
 
     // The main pane's STRUCTURE only changes when the selected session changes (or on
     // the very first update, which lays down the initial empty-state placeholder);
-    // otherwise we just patch its header text (status/title/branch), leaving the
-    // terminal host — and its focus and scrollback — in place.
+    // otherwise we just patch its header (title, actions, published status), leaving
+    // the terminal host — and its focus and scrollback — in place.
     if (selectionChanged || !this.mainRendered) {
       this.mainRendered = true;
       this.renderMain(state);
@@ -1657,7 +1642,6 @@ export class AppShell {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
-      this.headMeta = null;
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
@@ -1665,6 +1649,10 @@ export class AppShell {
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
+      // Dropped rather than left at its last value: with no session attached there is
+      // no terminal for a status to describe, and a stale "open" here would let a
+      // selftest wait on the PREVIOUS attach and call it the new one.
+      delete this.main.dataset.termStatus;
       this.main.replaceChildren(
         h("p", { class: "af-empty-title" }, "Select a session"),
         h("p", { class: "af-empty-hint" }, "Pick a session in the rail to attach its terminal."),
@@ -1672,8 +1660,11 @@ export class AppShell {
       return;
     }
     this.headTitle = h("span", { class: "af-term-title" }, selected.title);
-    this.headMeta = h("span", { class: "af-term-meta" });
-    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle, this.headMeta);
+    // Title only. The "Live · master" meta that used to sit beside it — terminal
+    // connection state joined to the session's branch — was removed as chrome
+    // nobody wanted to look at (#2458). The wrapper stays: it owns the header's
+    // layout, and the tab bar beside it flexes against it.
+    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
 
     // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
     // that state — ◆ glyph, "Limit reached" label, "[limit] resets …" title prefix
@@ -2031,16 +2022,15 @@ export class AppShell {
 
   private patchMainHead(state: AppState): void {
     const selected = selectedSession(state);
-    if (!selected || !this.headTitle || !this.headMeta) {
+    if (!selected || !this.headTitle) {
       return;
     }
     this.headTitle.textContent = selected.title;
-    const parts = [termStatusLabel(state.termStatus)];
-    if (selected.branch) {
-      parts.push(selected.branch);
-    }
-    this.headMeta.textContent = parts.join(" · ");
-    this.headMeta.className = `af-term-meta af-term-${state.termStatus}`;
+    // The terminal's connection state is published without being drawn, for the same
+    // reason as the event stream above (#2458): the pane header no longer shows
+    // "Live · master", but the status still has to be observable for the selftests
+    // that wait on a real attach rather than on a sleep.
+    this.main.dataset.termStatus = state.termStatus;
 
     this.patchHeadActions(state, selected);
 

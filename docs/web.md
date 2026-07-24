@@ -256,9 +256,9 @@ the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│  Agent Factory   [ Sessions ]  Tasks       project ▾   ● Live   Disconnect│  ← app bar
+│  Agent Factory   [ Sessions ]  Tasks           project ▾   Disconnect │  ← app bar
 ├──────────────────────┬────────────────────────────────────────────────┤
-│ Sessions      3 ▼ +New│ fix-login-flow · Live │ Agent │ Terminal │ + │  ← title + tabs
+│ Sessions      3 ▼ +New│ fix-login-flow │ Agent │ Terminal │ + │  ← title + tabs
 │                       │ ┌────────────────────────────────────────────┐ │
 │ ● fix-login-flow      │ │                                            │ │
 │   ⎇ fix/login         │ │                                            │ │
@@ -273,15 +273,17 @@ the top bar, the **project switcher** (top-right), or the `[` / `]` keys:
 The **app bar** carries, left to right: the **Agent Factory** brand, the two
 **view tabs** (Sessions / Tasks), the **project switcher** (top-right; lists
 every project with per-project session + working counts, and scopes the rail and
-Tasks view to the selected project), a **Live** pip showing the daemon
-event-stream state (`Live` / `Connecting…` / `Reconnecting…`), and
-**Disconnect**.
+Tasks view to the selected project), and **Disconnect**.
+
+The client keeps a live WebSocket to the daemon's event stream and reconnects on
+its own, but does not draw a connection indicator: the rail simply keeps up to
+date. A dropped stream shows as the rail going quiet rather than as a badge.
 
 On a phone, width is assigned by function rather than desktop shrink behavior. With
 no session selected, the session-drawer toggle and view tabs share one aligned row in
 their keyboard order; the current **project** gets the wide slot on the next row beside
 one **More** button. Long project names end in an ellipsis. The decorative brand
-disappears, while Live status, install, theme, and Disconnect remain available as
+disappears, while install, theme, and Disconnect remain available as
 comfortable touch targets inside **More** instead of being squeezed or removed.
 Selecting a session collapses the app bar to just the hamburger — the pane's tab row
 takes the whole top — and those project/view/**More** controls move into the drawer
@@ -352,10 +354,14 @@ tapping the dimmed scrim dismisses the drawer directly.
 
 The main pane hosts a real terminal (xterm.js) streaming the agent's live output
 over the daemon's WebSocket PTY plane — the same bytes the TUI paints. One pane-header
-row holds the session title, terminal connection state (`Live` / `Connecting…` /
-`Reconnecting…` / `Agent exited`), horizontally scrolling tabs, and the conditional
+row holds the session title, horizontally scrolling tabs, and the conditional
 **Retry** escape. The title keeps a useful minimum and ellipsizes; Retry never shrinks;
 the tab strip owns the remaining width and scrolls rather than wrapping.
+
+The header shows the title alone. It used to carry the terminal's connection state
+joined to the session's branch (`Live · master`); both were removed as chrome that
+earned no attention. The terminal still reconnects on its own — what changed is that
+it does so without narrating it.
 
 #### Per-session actions
 
