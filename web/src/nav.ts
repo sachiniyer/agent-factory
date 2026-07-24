@@ -83,11 +83,14 @@ export type NavAction =
   | { kind: "closePane" };
 
 /** Modifier flags the keybinds read. Alt gates the split-pane chords; Ctrl gates
- *  the ctrl+] detach. Shift and Meta are ignored so the chords never shadow a
- *  browser/OS shortcut. */
+ *  the ctrl+] detach. altGraph is `getModifierState("AltGraph")`: it excludes an
+ *  AltGr-produced "]" (an AltGr key on many EU layouts) from the detach chord, since
+ *  Chromium on Linux signals AltGr this way rather than via ctrlKey. Shift and Meta
+ *  are ignored so the chords never shadow a browser/OS shortcut. */
 export interface KeyMods {
   alt?: boolean;
   ctrl?: boolean;
+  altGraph?: boolean;
 }
 
 /** The next selected id after moving `delta` rows, clamped to the ends. From no
@@ -139,15 +142,27 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
     }
     return { kind: "closePane" };
   }
-  // The terminal owns the keyboard: EVERY key goes to the agent, Escape included.
-  // Escape is the agents' INTERRUPT key (#2070) — swallowing it here (as a detach)
-  // meant a running agent could never be interrupted from the web at all (#2517). The
-  // one hatch back to the rail is ctrl+], mirroring the TUI's tea.KeyCtrlCloseBracket
-  // (app/interactive.go), a chord the agent never needs. A bare "]" still forwards —
-  // only the ctrl chord detaches. (An open menu/modal still owns Escape: the modal
-  // branch above, and each menu's own capture listener in ui.ts, run first.)
+  // ctrl+] is the terminal-detach chord (#2517), mirroring the TUI's
+  // tea.KeyCtrlCloseBracket (app/interactive.go). It is guarded against Alt/AltGr: on
+  // Windows AltGr arrives as ctrl+alt, and "]" is an AltGr key on many EU layouts
+  // (German AltGr+9, Spanish, French, Italian, …), so a "]" typed via AltGr must NOT
+  // be read as the chord — it has to reach the agent. Both altKey and the AltGraph
+  // modifier are excluded (Chromium on Linux signals AltGr through the latter, not
+  // ctrlKey), matching clipboard.ts's Ctrl-chord guard. Handled before BOTH the
+  // terminal branch (so it detaches) and the rail-mode [ / ] view cycle below (so a
+  // habitual repeat after detaching is inert, not a view switch); its toRail is a
+  // no-op when already on the rail.
+  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
+    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
+  }
+  // The terminal owns the keyboard: EVERY OTHER key goes to the agent, Escape
+  // included. Escape is the agents' INTERRUPT key (#2070) — swallowing it here (as a
+  // detach) meant a running agent could never be interrupted from the web at all
+  // (#2517). Only the ctrl+] chord above is ours; everything else forwards. (An open
+  // menu/modal still owns Escape: the modal branch above, and each menu's own capture
+  // listener in ui.ts, run first.)
   if (ctx.focus === "terminal") {
-    return mods.ctrl === true && key === "]" ? { kind: "toRail" } : { kind: "none" };
+    return { kind: "none" };
   }
   // View switching: [ / ] cycle the top-level view (sessions ⇄ tasks). Rail-mode
   // ONLY — a modal owns the keyboard (handled above) and a focused terminal forwards

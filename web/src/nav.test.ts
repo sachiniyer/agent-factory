@@ -69,6 +69,26 @@ test("terminal mode: every key reaches the agent, Escape included; only ctrl+] r
   assert.deepEqual(decideKey("]", t, { ctrl: true }), { kind: "toRail" }, "ctrl+] detaches back to the rail");
   // A BARE "]" still forwards — the agent needs it; only the ctrl chord detaches.
   assert.deepEqual(decideKey("]", t), { kind: "none" }, "a bare ] reaches the agent");
+  // AltGr guard (#2517 review P2): on Windows AltGr is delivered as ctrl+alt, and "]"
+  // is an AltGr key on many EU layouts (German AltGr+9, Spanish, French, …). An
+  // AltGr-typed "]" must FORWARD to the agent, never be mistaken for the detach chord.
+  assert.deepEqual(
+    decideKey("]", t, { ctrl: true, alt: true }),
+    { kind: "none" },
+    "ctrl+alt (AltGr on Windows) ] forwards to the agent, it is not the detach chord",
+  );
+  assert.deepEqual(
+    decideKey("]", t, { ctrl: true, altGraph: true }),
+    { kind: "none" },
+    "an AltGraph-signalled ] (Chromium/Linux) forwards too",
+  );
+});
+
+test("rail mode: ctrl+] is inert, never a view cycle (#2517 review P3)", () => {
+  // After detaching with ctrl+], a habitual second press in rail mode must NOT fall
+  // through to the [ / ] view cycle and lose the rail. A bare ] still cycles.
+  assert.deepEqual(decideKey("]", ctx(), { ctrl: true }), { kind: "none" }, "ctrl+] in rail is inert");
+  assert.deepEqual(decideKey("]", ctx()), { kind: "switchView", view: "tasks" }, "a bare ] still cycles the view");
 });
 
 test("modal mode: the modal owns the keyboard — only Escape (to cancel) is ours", () => {

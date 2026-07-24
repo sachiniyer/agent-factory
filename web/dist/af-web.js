@@ -7422,8 +7422,11 @@ function decideKey(key, ctx, mods = {}) {
     }
     return { kind: "closePane" };
   }
+  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
+    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
+  }
   if (ctx.focus === "terminal") {
-    return mods.ctrl === true && key === "]" ? { kind: "toRail" } : { kind: "none" };
+    return { kind: "none" };
   }
   if (key === "[") {
     return { kind: "switchView", view: cycleView(ctx.view, -1) };
@@ -13169,7 +13172,7 @@ function onKeydown(e) {
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false
     },
-    { alt: e.altKey, ctrl: e.ctrlKey }
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") }
   );
   if (action.kind === "none") {
     return;

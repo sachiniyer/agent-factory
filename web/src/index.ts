@@ -1658,7 +1658,7 @@ function onKeydown(e: KeyboardEvent): void {
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
     },
-    { alt: e.altKey, ctrl: e.ctrlKey },
+    { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") },
   );
   if (action.kind === "none") {
     // Not ours — including Escape while a terminal is focused, which now FORWARDS to

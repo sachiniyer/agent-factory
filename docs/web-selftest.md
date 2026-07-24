@@ -60,7 +60,7 @@ Against the live SPA served over the daemon's plain-HTTP listener:
 | **Login** | Pasting the daemon token into the login form renders the authed app. |
 | **Sidebar** | The rail lists the seeded sessions from the Snapshot/events plane, and the client reports an open event stream (`.af-app[data-live="open"]`). |
 | **Attach** | Click-to-attach opens the xterm terminal and shows the fake agent's live output (a real binary PTY frame decoded by the TS codec and painted in the browser). |
-| **Keyboard (#1694)** | In the sessions view's rail mode `j`/`k` navigate the rail; `Enter` attaches the selection; `Escape` returns to the rail. |
+| **Keyboard (#1694/#2517)** | In the sessions view's rail mode `j`/`k` navigate the rail; `Enter` attaches the selection; `ctrl+]` returns to the rail; `Escape` forwards to the agent as its interrupt (the ESC byte reaches the PTY and focus stays in the terminal). |
 | **View cycling (#1694/PR8)** | In rail mode `]` cycles the top-level view forward (sessions → tasks) and `[` cycles it back (tasks → sessions), the active view tab following each step. |
 | **Tabs (#1592 PR7)** | The tab bar creates a shell tab (`+` / `t`), switches to it (click / `1`-`9`) and shows its distinct PTY output, and closes it (`×` / `w`) — the agent tab stays unclosable. |
 | **Create** | The **+ New** modal creates a session and its row appears in the rail. |
