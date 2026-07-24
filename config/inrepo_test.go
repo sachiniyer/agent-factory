@@ -110,11 +110,52 @@ func TestLoadInRepoConfigEmptyValueIsSet(t *testing.T) {
 	assert.False(t, cfg.IsSet("remote_hooks"))
 }
 
+// TestInRepoGlobalOnlyKeysAreExactlyTheManifestsGlobalOnlyKeys pins the
+// invariant that makes the rejection sound, and it is the structural half
+// TestLoadInRepoConfigRejectsGlobalOnlyKeys cannot cover.
+//
+// That test iterates inRepoGlobalOnlyKeys, so it proves every key IN the map
+// yields the actionable error — but it is blind to a key that SHOULD be
+// global-only and is MISSING from the map: an absent key is never iterated, so
+// it is never checked. That blindness is exactly how #1817 shipped, when the map
+// was a hand-copied literal and vscode_server_binary quietly fell out of it, and
+// it is the drift this new key (preview_listen_addr, #1856) could have repeated.
+//
+// inRepoGlobalOnlyKeys = manifestGlobalOnlyKeySet() closes that: the map cannot
+// fall behind the manifest because it IS the manifest's global-only projection.
+// This test guards that derivation. It recomputes the expected set INDEPENDENTLY
+// from configManifest — a global-scoped key that is not repo-shared — rather than
+// calling the same helper, so a future change that replaces the derivation with a
+// stale hand-maintained literal (dropping a key) fails here instead of silently
+// misrouting that key to the generic "unknown key" error.
+func TestInRepoGlobalOnlyKeysAreExactlyTheManifestsGlobalOnlyKeys(t *testing.T) {
+	want := map[string]bool{}
+	for _, entry := range configManifest {
+		if entry.Sources.Has(SourceGlobal) && !entry.Sources.Has(SourceRepoShared) {
+			want[entry.Key] = true
+		}
+	}
+	require.NotEmpty(t, want, "the manifest must declare at least one global-only key, or this test proves nothing")
+
+	// Named explicitly so preview_listen_addr's global-only membership is pinned by
+	// this test, not merely implied by the set comparison — the reviewer's P3 was
+	// precisely "is this new key in the global-only set?".
+	require.True(t, want["preview_listen_addr"],
+		"preview_listen_addr is sourceGlobalOnly in the manifest, so it must count as a global-only key")
+
+	assert.Equal(t, want, inRepoGlobalOnlyKeys,
+		"inRepoGlobalOnlyKeys must be EXACTLY the manifest's global-only keys. If this fails the map has drifted "+
+			"from the manifest — most likely someone replaced the manifestGlobalOnlyKeySet() derivation with a "+
+			"hand-maintained literal that fell behind (the #1817 class). Keep it derived.")
+}
+
 // TestLoadInRepoConfigRejectsGlobalOnlyKeys drives every key in
 // inRepoGlobalOnlyKeys through a real in-repo load and pins the rejection
 // message. It iterates the map itself rather than a hand-copied list so a key
 // added to the map can never go unpinned — the drift that left
-// vscode_server_binary out of the map in the first place (#1817). The written
+// vscode_server_binary out of the map in the first place (#1817). The
+// complementary direction — that no global-only key is MISSING from the map — is
+// TestInRepoGlobalOnlyKeysAreExactlyTheManifestsGlobalOnlyKeys above. The written
 // value is always "x": the global-only check scans raw keys before any
 // unmarshal, so the declared type of the key is irrelevant here.
 func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
