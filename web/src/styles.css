@@ -210,7 +210,13 @@
 
 body {
   margin: 0;
+  /* Two-line fallback so the document height matches the VISIBLE viewport on mobile,
+   * exactly as .af-app does. Without the dvh line the body stays pinned to the
+   * tallest (URL-bar-hidden) viewport while .af-app sizes to the visible one, so the
+   * document is taller than the viewport, the page rubber-bands, and toggling the URL
+   * bar refits the terminal mid-gesture (#2493). dvh collapses to vh on desktop. */
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--af-bg-canvas);
   color: var(--af-text);
   /* The shell is a fixed-height flex layout whose inner regions own their own
@@ -218,6 +224,10 @@ body {
    * the PAGE itself sideways, so clamp horizontal overflow at the root. Vertical
    * scroll is unaffected, and fixed-position layers (the toast) are not clipped. */
   overflow-x: hidden;
+  /* A scroll that reaches the document edge must not rubber-band or trigger
+   * pull-to-refresh: both toggle the mobile URL bar, which resizes .af-app and refits
+   * the terminal mid-gesture. Collapses to the default (auto) on desktop (#2493). */
+  overscroll-behavior: none;
 }
 
 /* Themed scrollbars so the inner scroll regions match the active theme rather than
@@ -268,7 +278,10 @@ body {
 }
 
 #app {
+  /* Match .af-app / body: size to the VISIBLE viewport on mobile so the shell's
+   * ancestor can't be taller than the viewport (#2493). vh fallback for desktop. */
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* All interface icons are inline Lucide SVGs. One sizing primitive keeps their
@@ -283,7 +296,9 @@ body {
 
 /* Login view */
 .af-login {
+  /* Same visible-viewport fallback as .af-app / body / #app (#2493). */
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -960,6 +975,9 @@ body {
   margin: 0;
   padding: 0.35rem;
   overflow-y: auto;
+  /* Keep a scroll that reaches this list's edge from chaining into the document
+   * (rubber-band / pull-to-refresh) on mobile. Inert on desktop (#2493). */
+  overscroll-behavior: contain;
   flex: 1;
 }
 
@@ -1281,6 +1299,8 @@ body {
   background: transparent;
   border: 0;
   overflow-x: auto;
+  /* Don't chain a horizontal scroll past this tab strip into the page (#2493). */
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   /* The containing block for the reorder insertion indicator (#1813), which is
    * absolutely positioned into the gap a drop would land in. */
@@ -1532,6 +1552,19 @@ body {
   display: flex;
   background: var(--af-bg-term);
   overflow: hidden;
+}
+
+/* The terminal's own scroll surface (xterm owns the element and its overflow). On
+ * mobile a touch drag inside the terminal must scroll the TERMINAL, not chain out
+ * into the document — a chained scroll toggles the URL bar, which resizes .af-app and
+ * refits the terminal mid-gesture so the scroll never sticks (#2493, Sachin's exact
+ * symptom). overscroll-behavior:contain keeps the scroll inside the viewport.
+ * touch-action is deliberately left at the default (auto) so xterm's native vertical
+ * AND horizontal touch-scroll both work; nothing in web/src sets it to none. Additive
+ * over xterm.css (which declares neither property) and inert on desktop. Scoped under
+ * .af-term-host so it wins regardless of the bundle's CSS order. */
+.af-term-host .xterm-viewport {
+  overscroll-behavior: contain;
 }
 
 /* A split node: two children laid out along its axis with a divider between them.
@@ -1954,6 +1987,8 @@ body {
   max-width: 30rem;
   max-height: 90vh;
   overflow-y: auto;
+  /* Keep a scroll inside the modal from chaining into the page behind it (#2493). */
+  overscroll-behavior: contain;
   background: var(--af-bg-raised);
   border: 1px solid var(--af-border);
   border-radius: var(--af-r-lg);
@@ -2223,6 +2258,8 @@ body {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* Don't chain this view's scroll into the document (#2493). */
+  overscroll-behavior: contain;
 }
 
 .af-tasks-head {
@@ -2722,6 +2759,8 @@ body {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* Don't chain this view's scroll into the document (#2493). */
+  overscroll-behavior: contain;
 }
 
 .af-config-head {

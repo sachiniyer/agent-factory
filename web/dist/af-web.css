@@ -185,9 +185,11 @@
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--af-bg-canvas);
   color: var(--af-text);
   overflow-x: hidden;
+  overscroll-behavior: none;
 }
 * {
   scrollbar-width: thin;
@@ -227,6 +229,7 @@ body {
 }
 #app {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 .af-icon {
   display: block;
@@ -237,6 +240,7 @@ body {
 }
 .af-login {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -764,6 +768,7 @@ body {
   margin: 0;
   padding: 0.35rem;
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1;
 }
 .af-rail-empty {
@@ -1004,6 +1009,7 @@ body {
   background: transparent;
   border: 0;
   overflow-x: auto;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   position: relative;
 }
@@ -1193,6 +1199,9 @@ body {
   display: flex;
   background: var(--af-bg-term);
   overflow: hidden;
+}
+.af-term-host .xterm-viewport {
+  overscroll-behavior: contain;
 }
 .af-split {
   display: flex;
@@ -1481,6 +1490,7 @@ body {
   max-width: 30rem;
   max-height: 90vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--af-bg-raised);
   border: 1px solid var(--af-border);
   border-radius: var(--af-r-lg);
@@ -1686,6 +1696,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .af-tasks-head {
   display: flex;
@@ -2044,6 +2055,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .af-config-head {
   display: flex;
