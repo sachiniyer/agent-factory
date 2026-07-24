@@ -192,7 +192,7 @@ func NewSidebar(proj *store.Projection) *Sidebar {
 	s := &Sidebar{
 		proj: proj,
 		sections: []SidebarSection{
-			{Kind: SectionInstances, Title: "Instances", Expanded: true},
+			{Kind: SectionInstances, Title: "Sessions", Expanded: true},
 			// Archived (#1028): pinned last, collapsed by default. Rendered only
 			// when it holds archived sessions (rebuildVisibleItems skips the empty
 			// folder).

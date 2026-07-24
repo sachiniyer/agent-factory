@@ -639,7 +639,7 @@ _expect_live_attach_send_line() {
 # stubbed captures (no live TUI) so all three polarities are deterministic.
 #
 # 1. POSITIVE: the exact first frame from the report — three sessions at 80x24
-#    with a lower one restored, so the rail has scrolled `Instances (N)` out of
+#    with a lower one restored, so the rail has scrolled `Sessions (N)` out of
 #    the window and drew `▲ 2 more` in its place. af_boot waited 35s for the
 #    header, never saw it, and reported a boot failure for a TUI that had booted
 #    fine with every session alive.
@@ -676,8 +676,8 @@ SCREEN
         }
         # Premise: the frame really is missing the header, or this is just
         # re-testing the case that always worked.
-        if af_capture | grep -qE -- 'Instances \('; then
-            _af_fail "#2148 stub is not reproducing the shape: the scrolled frame still shows the Instances header"
+        if af_capture | grep -qE -- 'Sessions \('; then
+            _af_fail "#2148 stub is not reproducing the shape: the scrolled frame still shows the Sessions header"
             return 1
         fi
         if ! af_wait_for "$_AF_RAIL_MARKER" 3 'scrolled rail reads as booted (#2148)' >/dev/null 2>&1; then
@@ -726,7 +726,7 @@ _expect_scrolled_rail_relaunch() {
             if ! af_capture | grep -qE -- '^[[:space:]]*▲ [0-9]+ more'; then
                 _af_log "#2148 premise not met: the 80x24 rail did NOT scroll, so this step proves nothing"
                 rc=1
-            elif af_capture | grep -qE -- 'Instances \('; then
+            elif af_capture | grep -qE -- 'Sessions \('; then
                 _af_log "#2148 premise not met: the header is still visible, so the old gate would have passed too"
                 rc=1
             fi
@@ -752,7 +752,7 @@ step "reset sandbox to a clean state"                       af_reset_sandbox
 step "boot af at ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}"        af_boot
 step "af_resize fails loudly on an impossible resize"       _expect_resize_rejected
 # --- #2148 regression: the boot gate must survive a scrolled rail ---
-# The `Instances (N)` header is the rail's first windowed ROW, not chrome, so a
+# The `Sessions (N)` header is the rail's first windowed ROW, not chrome, so a
 # scrolled rail hides it behind `▲ N more` and a header-only gate false-times-out
 # on a TUI that booted fine. Deterministic stub proof — both polarities.
 step "a scrolled rail still reads as booted (#2148)"        _expect_scrolled_rail_reads_as_booted

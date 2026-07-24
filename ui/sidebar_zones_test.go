@@ -66,7 +66,7 @@ func TestSidebarRegistersRowZones(t *testing.T) {
 	// The section header row renders the section title on its zone's row.
 	header, ok := reg.Find(zones.TreeHeader)
 	require.True(t, ok, "header zone must be registered")
-	assert.Contains(t, lineAt(t, lines, rect, header.Y), "Instances",
+	assert.Contains(t, lineAt(t, lines, rect, header.Y), "Sessions",
 		"the header zone must sit on the rendered header row")
 
 	// Every instance row has a zone whose block contains its title.

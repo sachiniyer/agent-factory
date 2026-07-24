@@ -515,7 +515,7 @@ af_reset_sandbox() {
 # preceded on its row by the sidebar columns and the pane's own border. `▲` is
 # matched as a literal byte sequence rather than inside a bracket expression,
 # which the sandbox's C/POSIX locale would match byte-wise (#1994).
-: "${_AF_RAIL_MARKER:=Instances \(|^[[:space:]]*▲ [0-9]+ more}"
+: "${_AF_RAIL_MARKER:=Sessions \(|^[[:space:]]*▲ [0-9]+ more}"
 
 # af_boot — launch af at a fixed size in a fresh driver session and wait for
 # the first frame. Pre-seeds help_screens_seen so the one-time overlays

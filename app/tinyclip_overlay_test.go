@@ -115,7 +115,7 @@ func TestTinyClipTasksOverlayFits(t *testing.T) {
 // section headers, and an instance row's title. None of them appear in the task
 // overlay's own chrome, so finding one in a full-screen frame means the rail
 // bled through.
-var railFragments = []string{"Agent Factory", "Instances", "Automations", "Projects", "rail-inst"}
+var railFragments = []string{"Agent Factory", "Sessions", "Automations", "Projects", "rail-inst"}
 
 // TestTasksOverlayNarrowIsFullScreenWithoutRailBleed is the #1821 regression.
 //

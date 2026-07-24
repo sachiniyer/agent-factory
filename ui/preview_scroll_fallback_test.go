@@ -104,7 +104,7 @@ func TestPreviewScrollModeThenNilInstanceFallback(t *testing.T) {
 		"stale viewport content must be cleared on fallback")
 
 	rendered := p.String()
-	require.Contains(t, rendered, "No agents running yet",
+	require.Contains(t, rendered, "No sessions yet",
 		"rendered frame must show the welcome fallback, not stale scroll content")
 	require.NotContains(t, rendered, staleScrollMarker)
 }

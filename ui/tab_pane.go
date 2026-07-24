@@ -489,7 +489,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	p.dropStaleView(instance, 0)
 	switch {
 	case instance == nil:
-		p.setFallbackState("No agents running yet. Spin up a new instance with 'n' to get started!")
+		p.setFallbackState("No sessions yet — press n to create one.")
 		p.mu.Unlock()
 		return nil
 	case instance.IsCreating():
@@ -557,7 +557,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	// Always update with content, even if empty, so a newly created instance
 	// displays immediately.
 	if len(snapshot.Content) == 0 && !instance.Started() {
-		p.setFallbackState("Please enter a name for the instance.")
+		p.setFallbackState("Please enter a name for the session.")
 	} else {
 		p.publishContent(tabContentState{fallback: false, text: snapshot.Content})
 	}
@@ -603,7 +603,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	}
 	p.dropStaleView(instance, activeTab)
 	if instance == nil {
-		p.setFallbackState("Select an instance to open a terminal")
+		p.setFallbackState("Select a session to open a terminal")
 		p.mu.Unlock()
 		return nil
 	}
@@ -616,7 +616,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		return nil
 	}
 	if !instance.Started() {
-		p.setFallbackState("Instance is not started yet.")
+		p.setFallbackState("Session is not started yet.")
 		p.mu.Unlock()
 		return nil
 	}

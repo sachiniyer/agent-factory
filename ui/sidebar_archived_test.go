@@ -114,7 +114,7 @@ func TestSidebar_ArchivedPartitionedIntoFolder(t *testing.T) {
 
 	// Header labels carry the partitioned counts.
 	view := s.View()
-	assert.Contains(t, view, "Instances (1)", "Instances counts only live sessions")
+	assert.Contains(t, view, "Sessions (1)", "the header counts only live sessions")
 	assert.Contains(t, view, "Archived (1)")
 }
 
@@ -137,8 +137,8 @@ func TestSidebar_RestoringRowRehomedToInstances(t *testing.T) {
 	require.False(t, restoring.ShownArchived(), "a mid-restore row is not shown as archived")
 
 	view := s.View()
-	assert.Contains(t, view, "Instances (2)",
-		"a mid-restore row counts under Instances, not Archived (#1210)")
+	assert.Contains(t, view, "Sessions (2)",
+		"a mid-restore row counts under the live Sessions section, not Archived (#1210)")
 	assert.NotContains(t, view, "Archived (",
 		"the Archived folder is absent while the only archived-liveness row is restoring")
 }

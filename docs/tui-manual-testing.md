@@ -166,7 +166,7 @@ compose across `docker exec` invocations.
 | Function | Keys | Completion marker |
 |----------|------|-------------------|
 | `af_reset_sandbox` | — | wipes instances/branches for a deterministic rerun (sandbox-scoped, fails closed) |
-| `af_boot` | launch `af` | `Agent Factory` frame + the instance rail painted — `Instances (` **or** the scrolled `▲ N more` the rail shows in its place (#2148) |
+| `af_boot` | launch `af` | `Agent Factory` frame + the session rail painted — `Sessions (` **or** the scrolled `▲ N more` the rail shows in its place (#2148) |
 | `af_new_instance <name>` | `n`,text,`Enter` | the row shows `<name> … ●` (ready) |
 | `af_select <name>` | `k`×,`j`× | `<name>`'s row shows `▾` |
 | `af_open_pane` | `s` | pane-focus menu (`x hide pane`) |
@@ -428,7 +428,7 @@ af_new_instance a
 af_select a; af_expect_selected a             # selection still works when narrow
 
 af_resize 40 10                               # squeeze to 40x10 mid-run
-af_assert_screen 'Instances'                  # header must survive the squeeze
+af_assert_screen 'Sessions'                   # header must survive the squeeze
 ```
 
 ---
@@ -472,5 +472,5 @@ teardown is `docker rm -f`. The driver reinforces this:
 - `af_reset_sandbox` **fails closed**: it refuses to wipe anything unless
   `AGENT_FACTORY_HOME` and the mock repo are sandbox paths, so it can never
   touch a real `~/.agent-factory`.
-- Instances run the cheap `bash` program (the sandbox's `config.toml`
+- Sessions run the cheap `bash` program (the sandbox's `config.toml`
   override), never a real agent or an unbounded generator.

@@ -286,8 +286,10 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	live, archived := partitionByArchived(s.proj.GetInstances())
 	switch kind {
 	case SectionInstances:
-		// Count live sessions only — archived ones live under their own folder.
-		label = fmt.Sprintf("Instances (%d)", len(live))
+		// "Sessions" is the one user-facing noun (#1993) — the empty state, help,
+		// search, and actions all say session. Count live ones only; archived
+		// sessions live under their own folder.
+		label = fmt.Sprintf("Sessions (%d)", len(live))
 	case SectionArchived:
 		label = fmt.Sprintf("Archived (%d)", len(archived))
 	}
