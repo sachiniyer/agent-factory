@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -247,6 +248,15 @@ func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent str
 	// killed, so the guarantee above is untouched.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	runErr := cmd.Run()
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// The context deadline killed the script mid-run, so whatever it was doing
+		// to the remote workspace is UNKNOWN. exec surfaces this as a bare
+		// "signal: killed" that does NOT wrap context.DeadlineExceeded, so wrap it
+		// here — that is the only place the ctx is in scope — letting callers (reap
+		// in particular) tell a timeout from a script that answered, and retain the
+		// record instead of trusting a success that never happened (#2529).
+		runErr = fmt.Errorf("%w: %w", context.DeadlineExceeded, runErr)
+	}
 
 	out, readErr := os.ReadFile(f.Name())
 	if readErr != nil && runErr == nil {
@@ -464,6 +474,15 @@ func (p *hookProvisioner) reap() error {
 			p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, "--name", p.slug)
 		if err != nil {
 			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
+			if errors.Is(err, context.DeadlineExceeded) {
+				// A timeout is proof of NOTHING: delete_cmd was killed mid-reap, so
+				// the remote workspace may still be running. Mark it unknown-state so
+				// deleteSessionRecord RETAINS the record for retry rather than deleting
+				// it and leaking the workspace with no handle — the same classification
+				// the docker backend applies (#2529). A delete_cmd that ANSWERS with an
+				// error stays known-state (it told us something), so the record may go.
+				reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+			}
 			log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
 			return
 		}

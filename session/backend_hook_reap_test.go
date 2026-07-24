@@ -336,6 +336,42 @@ func TestHookReapIsBounded(t *testing.T) {
 	}
 }
 
+// TestHookReapTimeoutIsUnknownState is the #2529 regression: a delete_cmd killed
+// at its timeout is proof of NOTHING — the remote workspace may still be running.
+// So the reap error must be classified as unknown-state (wrap ErrWorkspaceStateUnknown)
+// exactly as the docker backend does, so deleteSessionRecord RETAINS the record and
+// the workspace stays reap-able. A plain error lets the record be deleted, leaking
+// the workspace with nothing pointing at it — the #2440/#1955 false-success disease.
+//
+// Against master this FAILS: the timeout surfaces as "signal: killed", which reap
+// wraps as a plain error, so TeardownStateUnknown is false and the record is deleted.
+func TestHookReapTimeoutIsUnknownState(t *testing.T) {
+	// delete_cmd wedges past its own short bound, so the reap is killed by the
+	// timeout rather than answering.
+	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond)
+	h := newHookState(t, "exit 0\n", "sleep 5\n")
+	p := newHookProvisioner(h, "wedged delete unknown state")
+	p.launchStarted = true
+
+	err := p.reap()
+	require.Error(t, err, "a delete_cmd killed at its timeout is a failed reap")
+	assert.True(t, TeardownStateUnknown(err),
+		"a timed-out delete_cmd leaves the workspace state UNKNOWN — the record must be retained, not deleted")
+	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"the reap error must wrap ErrWorkspaceStateUnknown so deleteSessionRecord refuses to delete the record")
+	// The orphan the user needs to know about is still named.
+	assert.Contains(t, err.Error(), p.slug, "the failure must still name the orphaned sandbox")
+	// And a delete_cmd that ANSWERS with an error stays known-state (record may go),
+	// mirroring docker — only the timeout is unknown-state.
+	h2 := newHookState(t, "exit 0\n", "echo 'nope' >&2\nexit 9\n")
+	p2 := newHookProvisioner(h2, "answered failure known state")
+	p2.launchStarted = true
+	err2 := p2.reap()
+	require.Error(t, err2)
+	assert.False(t, TeardownStateUnknown(err2),
+		"a delete_cmd that answered with an error TOLD us something — it is known-state, not unknown")
+}
+
 // TestHookReapUnaffectedByCancelledCaller locks the one subtlety that would
 // silently un-fix #1955: reap runs on the failure path, where the launch context
 // is ALREADY expired. If reap's context were ever derived from that dead parent
