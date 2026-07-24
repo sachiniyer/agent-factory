@@ -197,7 +197,13 @@ func (i *Instance) ArchivedBranchForReclaim() (string, bool) {
 	if i.liveness != LiveArchived {
 		return "", false
 	}
-	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
+	// capabilitiesLocked, NOT Capabilities: this method already holds i.mu.RLock,
+	// and Capabilities re-takes it. sync.RWMutex is not reentrant, so a nested
+	// RLock deadlocks against a queued writer (#2006) — and this runs on the
+	// m.mu-held create path (reserveCreate -> reclaimArchivedBranchLocked), so the
+	// wedge would take the whole daemon create path with it. capabilitiesLocked is
+	// the lock-holder variant that exists for exactly this.
+	if i.capabilitiesLocked().Workspace != WorkspaceLocalWorktree {
 		return "", false
 	}
 	gw := i.gitWorktree
