@@ -143,29 +143,40 @@ type ptyBroker struct {
 	// short-circuits and no new capture is ever dialled (#2438). Set by readLoop
 	// under mu BEFORE it closes `done`, so anything that joins the loop sees it.
 	//
-	// Read it ONLY together with `capturing`, never alone. The one read that
-	// exists — ensureCaptureStartedLocked's `capturing && !captureEnded` — is the
-	// contract: the pair means "a capture is installed, and it is spent". With
-	// `capturing` false this flag says NOTHING, and in particular does not mean a
-	// fresh capture; the reconcile clears it on the way to dialling one.
+	// Read it ONLY together with `capturing`, never alone. The reads that decide
+	// whether to dial a fresh capture — ensureCaptureStartedLocked, recoverCapture,
+	// and redialLoop — all test `capturing && !captureEnded`: the pair means "a
+	// capture is installed, and it is spent". With `capturing` false the flag says
+	// NOTHING, and in particular does not mean a fresh capture; the reconcile
+	// clears it on the way to dialling one. (stopCapture also reads it alone, but
+	// only to pick a log level — #2450 item 3 — not to gate anything.)
 	//
-	// No teardown clears it, and the two cases are worth separating because they
-	// fail differently:
+	// No teardown clears it. Whether a clear WOULD be undone by the join or stick
+	// turns on whether the readLoop is still alive when the teardown runs — NOT on
+	// which teardown it is:
 	//
-	//   - A teardown that HAS a capture to release ends by joining the readLoop
-	//     (`<-done` inside stopCapture), and the loop's last act before closing
-	//     `done` is to latch this flag. So a clear placed before that join is
-	//     undone by it — #2438 shipped exactly that in three sites, and it did
-	//     nothing.
-	//   - A teardown that has NOTHING to release (it found `capturing` already
-	//     false, so stopCapture was nil and no join happened) could clear the flag
-	//     and make it stick. But there is nothing left to describe by then: the
-	//     capture it referred to is gone.
+	//   - Stopping a genuinely LIVE capture ends by joining the readLoop (`<-done`
+	//     inside stopCapture), and the loop's last act before closing `done` is to
+	//     latch this flag — so a clear placed before that join is undone by it.
+	//     The common case.
+	//   - When the readLoop has ALREADY exited, the join is a no-op (or never
+	//     happens) and a clear would instead STICK. Two ways in: a teardown that
+	//     found `capturing` already false (stopCapture was nil, no join at all);
+	//     and, since #2450, the spontaneous-death path, where the readLoop latched
+	//     this flag and closed `done` on its OWN while leaving `capturing` true. A
+	//     teardown guarded on `capturing` — maybeStopCapture included — still
+	//     admits that dead-but-not-yet-reconciled capture, calls stop(), and rides
+	//     its already-closed `<-done`, so its clear sticks too. maybeStopCapture is
+	//     NOT special here; harmless all the same, same as resetCapture/shutdown.
 	//
-	// Either way the residue is unobservable, because the sole reader is guarded
-	// by `capturing`, which every teardown has already cleared. So the clears were
-	// removed rather than moved after the join: moving them would add a second
-	// b.mu section on three teardown paths to change nothing.
+	// #2438 shipped clears at all three teardowns. Removing them is safe because
+	// the residue — undone or stuck — never reaches the reads that gate dialling:
+	// those all test `capturing && !captureEnded`, and every teardown clears
+	// `capturing` first, so the pair reads false regardless of the captureEnded
+	// bit. Moving the clears after the join instead would add a second b.mu section
+	// on three teardown paths for a residue those reads never see anyway. The
+	// dead-loop stick is pinned by
+	// TestPTYBrokerMaybeStopCaptureTearsDownADeadLoop.
 	captureEnded bool
 	// captureStarted is when the CURRENT capture was installed. It exists only to
 	// decide whether a death is a fresh incident or a continuation of one: a

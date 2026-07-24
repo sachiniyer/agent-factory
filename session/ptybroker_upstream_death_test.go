@@ -326,10 +326,11 @@ func TestPTYBrokerUpstreamDeathDoesNotResurrectAClosedBroker(t *testing.T) {
 // Asserting the residue directly is the point — it stops the next reader from
 // "fixing" a latch that is not a bug.
 //
-// Note this test cannot fail-first on the code change it accompanies: removing
-// three writes that were already being undone has no observable effect, which is
-// the change's own thesis. It is a doc-lock, and the assertion it protects is
-// the one #2438's comment got wrong.
+// Note this test cannot fail-first on the code change it accompanies: the three
+// removed writes were unobservable — undone by the join where a capture was
+// joined, stuck-but-meaningless where none was (see the field doc) — so removing
+// them has no observable effect, which is the change's own thesis. It is a
+// doc-lock, and the assertion it protects is the one #2438's comment got wrong.
 func TestPTYBrokerCaptureEndedIsOnlyMeaningfulWithCapturing(t *testing.T) {
 	state := func(b *ptyBroker) (capturing, ended bool) {
 		b.mu.Lock()
@@ -360,8 +361,8 @@ func TestPTYBrokerCaptureEndedIsOnlyMeaningfulWithCapturing(t *testing.T) {
 	}
 	if !ended {
 		t.Fatal("captureEnded = false after a teardown joined the readLoop.\n\n" +
-			"If this ever passes, the join stopped latching the flag — re-read the field doc, " +
-			"because it says a teardown CANNOT clear it and that is why no teardown tries.")
+			"If this ever passes, the join stopped latching the flag — re-read the field doc: a " +
+			"teardown that joins the readLoop cannot clear this flag, because the join re-latches it.")
 	}
 
 	// And the residue is harmless: the next bring-up reconciles it away and dials
