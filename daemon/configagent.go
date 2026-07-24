@@ -96,6 +96,17 @@ func (c *configAgentSupervisor) track(name string, ts *tmux.TmuxSession) bool {
 	return true
 }
 
+// session returns the live tmux session tracked under name, or nil if none is (an
+// unknown name, or one already reaped). The web config-assistant stream (#2467)
+// uses it to wrap a just-spawned config agent's bare tmux session in a
+// session.BareSessionStreamer without threading the *tmux.TmuxSession back out
+// through SpawnConfigAgent's name+socket return.
+func (c *configAgentSupervisor) session(name string) *tmux.TmuxSession {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessions[name]
+}
+
 // reap kills one config-agent session and forgets it. Unknown names are a no-op
 // success: reap is called on a best-effort path (the TUI returning from the
 // takeover), and a session already gone is the desired end state either way.

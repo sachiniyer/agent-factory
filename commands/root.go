@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/app"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/configagent"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
@@ -56,6 +57,17 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				if err != nil {
 					return err
 				}
+				// Wire the web config-assistant's spawn-request builder (#2467). The
+				// briefing/program resolution lives in configagent, which imports the
+				// daemon, so the daemon cannot import it back — it is injected here, the
+				// one layer that can import both. The web POST carries no body: the
+				// request (resolved program + briefing) is built entirely from the
+				// daemon's own config, so an authenticated client cannot smuggle an
+				// arbitrary program past the auth gate. ModeChange (an always-available
+				// helper, not first-run onboarding) and the global config (no repo).
+				daemon.SetConfigAssistantRequestBuilder(func() (daemon.SpawnConfigAgentRequest, error) {
+					return configagent.BuildSpawnRequest(configagent.Options{Mode: configagent.ModeChange})
+				})
 				err = daemon.RunDaemon(cfg)
 				if err != nil {
 					log.ErrorLog.Printf("failed to start daemon %v", err)

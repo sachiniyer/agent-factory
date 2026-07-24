@@ -132,6 +132,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// this repo has already been bitten by. Registered at construction so the
 	// warm-up exit paths (SIGTERM, the Shutdown RPC) cannot skip it.
 	defer manager.configAgents.Stop()
+	// Tear the web config-assistant stream down before its tmux session is reaped
+	// above, so the clientless capture goroutine ends cleanly. stop() closes the
+	// streamer only; configAgents.Stop() owns killing the tmux (#2467). Deferred
+	// after configAgents.Stop() so it runs BEFORE it (LIFO): the capture stops, then
+	// the pane it was reading is torn down.
+	defer manager.configAssistants.stop()
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisor()

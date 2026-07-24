@@ -131,6 +131,29 @@ var resolveConfigForRepo = config.ResolveConfig
 // briefing: an instruction, not a sandbox. That is the honest posture, and it is
 // why the fence is worded as forcefully as it is.
 func Spawn(opts Options) (string, string, error) {
+	req, err := BuildSpawnRequest(opts)
+	if err != nil {
+		return "", "", err
+	}
+	name, socketPath, err := spawnViaDaemon(req)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to start the config agent: %w", err)
+	}
+	return name, socketPath, nil
+}
+
+// BuildSpawnRequest resolves the program and renders the briefing for a config
+// agent, returning the daemon spawn request WITHOUT spawning. Spawn calls it and
+// then the daemon round trip; the daemon's web config-assistant route (#2467)
+// calls it directly, injected at startup, because it cannot import this package
+// (this package imports the daemon). Building the request here — not in the daemon,
+// and not from the browser — is what keeps the resolved program server-side: the
+// web POST carries no body, so an authenticated client cannot smuggle an arbitrary
+// program past the auth gate.
+//
+// A missing binary returns ProgramUnavailableError and builds nothing, so no caller
+// spawns a program that would only hang to a readiness timeout.
+func BuildSpawnRequest(opts Options) (daemon.SpawnConfigAgentRequest, error) {
 	// The briefing describes the GLOBAL config, because that is what `af config
 	// set`/`get` read and write — briefing the agent on a repo-resolved view
 	// would show it values it cannot write. The PROGRAM comes from the resolved
@@ -138,7 +161,7 @@ func Spawn(opts Options) (string, string, error) {
 	// gets in this repo.
 	globalCfg, err := config.LoadConfig()
 	if err != nil {
-		return "", "", fmt.Errorf("cannot read the global config to brief the config agent: %w", err)
+		return daemon.SpawnConfigAgentRequest{}, fmt.Errorf("cannot read the global config to brief the config agent: %w", err)
 	}
 	configPath, pathErr := config.GlobalConfigPath()
 	if pathErr != nil {
@@ -166,7 +189,7 @@ func Spawn(opts Options) (string, string, error) {
 	// command BEFORE the trust flag is appended below, so an unavailable-program
 	// error names the command the user configured, not one with an af flag on it.
 	if _, perr := preflight.CheckProgram(agentCfg, agent); perr != nil {
-		return "", "", &ProgramUnavailableError{
+		return daemon.SpawnConfigAgentRequest{}, &ProgramUnavailableError{
 			Agent:   agent,
 			Command: command,
 			Err:     preflight.ProgramError(agent, command, perr),
@@ -182,12 +205,8 @@ func Spawn(opts Options) (string, string, error) {
 	// is returned unchanged.
 	command = tmux.EnsureDevinWorkspaceTrustSuppressed(command)
 
-	name, socketPath, err := spawnViaDaemon(daemon.SpawnConfigAgentRequest{
+	return daemon.SpawnConfigAgentRequest{
 		Program: command,
 		Prompt:  BuildBriefing(opts.Mode, globalCfg, configPath),
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("failed to start the config agent: %w", err)
-	}
-	return name, socketPath, nil
+	}, nil
 }

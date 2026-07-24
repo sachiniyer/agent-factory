@@ -218,7 +218,12 @@ func applyCORSPolicy(w http.ResponseWriter, r *http.Request, allowedOrigins []st
 	// The response varies by Origin (we echo it conditionally), so caches must
 	// not serve one origin's response to another.
 	h.Add("Vary", "Origin")
-	h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	// DELETE is advertised for /v1/config-assistant (#2467), the first non-GET/POST
+	// route: without it a cross-origin client from a configured cors_origins entry
+	// gets a preflight that omits DELETE and the browser blocks the reap — the only
+	// escape hatch from an assistant left running. Harmless for the same-origin SPA
+	// default (which does no preflight), which is why nothing else surfaced it.
+	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 }
 
