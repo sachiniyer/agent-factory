@@ -35,6 +35,11 @@ func (c *ConfirmationOverlay) RegisterZones(reg *zones.Registry, origin layout.P
 		return
 	}
 	yesNeedle := c.ConfirmKey + " to confirm"
+	if c.enterConfirms() {
+		// The full hint advertises enter as a confirm alias (#2405); the zone must
+		// cover the same words the renderer wrote, or the click target goes stale.
+		yesNeedle = c.ConfirmKey + "/enter to confirm"
+	}
 	noNeedle := c.CancelKey + " or esc to cancel"
 	compactYesNeedle := c.ConfirmKey + " confirm"
 	compactNoNeedle := c.CancelKey + "/esc cancel"

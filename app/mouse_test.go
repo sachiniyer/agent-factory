@@ -826,7 +826,7 @@ func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state, "clicking n cancels the dialog")
 	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "cancel must not kill")
 
-	// Re-open and click "y to confirm".
+	// Re-open and click "y/enter to confirm".
 	clock.advance(time.Second)
 	_, _ = h.handleKill()
 	require.Equal(t, stateConfirm, h.state)

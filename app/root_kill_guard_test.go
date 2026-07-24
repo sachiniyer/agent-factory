@@ -111,3 +111,53 @@ func TestHandleKill_NonReservedKeepsOrdinaryConfirm(t *testing.T) {
 	require.NotNil(t, cmd)
 	assert.Equal(t, session.Deleting, inst.GetStatus())
 }
+
+// TestHandleKill_NonReservedEnterConfirms pins #2405 at the app level: on an
+// ordinary scratch kill, pressing Enter confirms exactly like 'y' — a reflexive
+// Enter no longer sits on an unmoving dialog.
+func TestHandleKill_NonReservedEnterConfirms(t *testing.T) {
+	h := newTestHome(t)
+	inst := newKillableInstance(t, "scratch-1")
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	model, _ := h.handleKill()
+	hm := model.(*home)
+	require.Equal(t, stateConfirm, hm.state)
+	require.Equal(t, "y", hm.confirmationOverlay.ConfirmKey,
+		"scratch kill must use the ordinary confirm key for enter to alias it")
+
+	model, cmd := hm.handleStateConfirm(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, stateDefault, model.(*home).state, "enter must confirm a scratch kill")
+	require.NotNil(t, cmd, "enter must forward the start-kill message like 'y'")
+	assert.Equal(t, session.Deleting, inst.GetStatus())
+}
+
+// TestHandleKill_RootIgnoresEnter is the #2405 safety guard: the escalated root
+// kill dialog must reject Enter just as it rejects a reflexive 'y' (#1238). If
+// Enter dispatched here, D+Enter would decapitate root's event pipeline — the
+// exact muscle-memory failure the distinct confirm key exists to stop.
+func TestHandleKill_RootIgnoresEnter(t *testing.T) {
+	h := newTestHome(t)
+	root := newKillableInstance(t, session.RootSessionTitle)
+	h.store.AddInstance(root)
+	h.sidebar.SetSelectedInstance(0)
+
+	model, _ := h.handleKill()
+	hm := model.(*home)
+	require.Equal(t, stateConfirm, hm.state)
+	require.Equal(t, rootKillConfirmKey, hm.confirmationOverlay.ConfirmKey)
+
+	model, cmd := hm.handleStateConfirm(tea.KeyMsg{Type: tea.KeyEnter})
+	hm = model.(*home)
+	assert.Equal(t, stateConfirm, hm.state, "enter must not confirm a root kill")
+	assert.NotNil(t, hm.confirmationOverlay, "dialog must stay open after a rejected enter")
+	assert.Nil(t, cmd, "no kill must be dispatched by enter")
+	assert.NotEqual(t, session.Deleting, root.GetStatus(), "root must not be marked Deleting")
+
+	// The named key still confirms, proving enter's rejection is targeted.
+	model, cmd = hm.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(rootKillConfirmKey)})
+	assert.Equal(t, stateDefault, model.(*home).state, "the named key must still confirm")
+	require.NotNil(t, cmd)
+	assert.Equal(t, session.Deleting, root.GetStatus())
+}

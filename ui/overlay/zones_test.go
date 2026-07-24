@@ -59,8 +59,8 @@ func TestConfirmationOverlayRegistersYesNoZones(t *testing.T) {
 
 	assert.Equal(t, yes.Y, no.Y, "both buttons sit on the instruction line")
 	line := lines[yes.Y-origin.Y]
-	assert.Equal(t, "y to confirm", cellSliceAt(line, yes.X-origin.X, yes.W),
-		"the yes zone covers exactly its rendered words")
+	assert.Equal(t, "y/enter to confirm", cellSliceAt(line, yes.X-origin.X, yes.W),
+		"the yes zone covers exactly its rendered words, including the enter alias (#2405)")
 	assert.Equal(t, "n or esc to cancel", cellSliceAt(line, no.X-origin.X, no.W),
 		"the no zone covers exactly its rendered words")
 
