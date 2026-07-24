@@ -1,9 +1,12 @@
 package sessionenv
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // operatorCloudEnvironment is one operator's ambient environment holding cloud
@@ -69,8 +72,22 @@ func TestAgentSwapCannotReachCloudCredentials(t *testing.T) {
 		"GOOGLE_APPLICATION_CREDENTIALS",
 	}
 
-	// Every agent a repo can name, because the swap target is the repo's choice.
-	for _, agent := range []string{"claude", "codex", "gemini", "amp", "aider", "opencode"} {
+	// Every agent that can receive per-agent credentials, DERIVED from the real
+	// allowlist rather than copied from it. The swap target is the repo's choice,
+	// so the guard has to cover whatever the map holds — and supportedAgent keys
+	// off exactly this map, so its key set IS the set of nameable swap targets.
+	//
+	// Deriving is the point. This PR's sibling test learned the same lesson one
+	// layer down: TestInRepoCloudCredentialRefusalNamesEveryProvider hardcoded
+	// Claude's three selectors, #2462 guarded Gemini's two, and the copy went
+	// stale silently — which is why that test now enumerates GuardedSelectors().
+	// A hardcoded agent list here fails the same way, and worse: a new agent
+	// added with a cloud group would not be uncovered loudly, it would simply
+	// never be tested.
+	agents := slices.Sorted(maps.Keys(agentNames))
+	require.NotEmpty(t, agents, "no agents in the allowlist — this test would pass vacuously")
+
+	for _, agent := range agents {
 		t.Run(agent, func(t *testing.T) {
 			got := namesOf(FilterForCommand(operatorCloudEnvironment(), agent, agent, nil))
 			for _, secret := range cloudSecrets {
