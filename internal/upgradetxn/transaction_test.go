@@ -11,6 +11,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// IsRollbackRestore must be true for exactly the phases in which the recovery
+// actor restarts/validates the previous daemon, so the daemon-bind gate lets
+// that daemon bind. The forward candidate-start phases must be excluded — an
+// ordinary daemon must not bind a rival over a live candidate.
+func TestPhaseIsRollbackRestore(t *testing.T) {
+	for _, p := range []Phase{
+		PhaseRollbackRestored, PhasePreviousStarting, PhasePreviousValidating, PhaseRolledBack,
+	} {
+		require.Truef(t, p.IsRollbackRestore(), "%s should be a rollback-restore phase", p)
+	}
+	for _, p := range []Phase{
+		PhasePrepared, PhaseSupervisorReady, PhaseDaemonStopping, PhaseDaemonStopped,
+		PhaseCandidateInstalled, PhaseCandidateStarting, PhaseCandidateValidating,
+		PhaseCommitted, PhaseAborted, PhaseRollingBack, PhaseRollbackFailed,
+	} {
+		require.Falsef(t, p.IsRollbackRestore(), "%s must not be a rollback-restore phase", p)
+	}
+}
+
 func prepareFixture(t *testing.T) (*Transaction, string, string) {
 	t.Helper()
 	home := t.TempDir()

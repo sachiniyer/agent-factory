@@ -116,12 +116,16 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 		return nil
 	}
 	// #2212 R1: before spawning a daemon, defer to an in-progress upgrade rather
-	// than racing its recovery actor with a rival daemon. Fail-open — only a
-	// provably live upgrade stops the spawn, as a typed retryable error; a stale,
-	// corrupt, or absent journal proceeds. The gate is bounded, so a bad journal
-	// can never wedge this launch path (which fronts every af invocation).
+	// than racing its recovery actor with a rival daemon. A client defers to BOTH
+	// a forward upgrade and a rollback restoring the previous daemon — in the
+	// latter it must not stop and replace the very daemon the actor is validating.
+	// Fail-open — only a provably live upgrade stops the spawn, as a typed
+	// retryable error; a stale, corrupt, or absent journal proceeds. The gate is
+	// bounded, so a bad journal can never wedge this launch path (which fronts
+	// every af invocation).
 	if homeDir, ok := configHomeDir(); ok {
-		if decision, gateErr := checkUpgradeGate(homeDir); decision == upgradeGateInProgress {
+		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		case upgradeGateInProgress, upgradeGateRestoringPrevious:
 			return gateErr
 		}
 	}

@@ -17,13 +17,19 @@ import (
 // — a live actor, a stale actor that never takes over, a half-written journal,
 // or a wedged systemctl — can exceed it.
 //
+// It is kept within the SMALLEST daemon-spawn caller budget
+// (ensureUnitStartTimeout, 2s) so the gate can never overrun a caller's
+// readiness window and churn a fallback spawn (#2212). Only the CLIENT entrypoint
+// (EnsureDaemon) ever spends this budget, and only on a stale journal: the
+// daemon-BIND path (RunDaemon) skips the wake/wait entirely, so it never waits.
+//
 // This bound is the whole point of the gate's placement (#2212 R1). The gate
 // sits on the daemon-spawn path, which is in front of every af launch. A daemon
 // that will not start is recoverable; an af binary that hangs on every command
 // is not. So the gate is fail-OPEN: only a provably live, in-progress upgrade
 // stops a launch, and it does so with an immediate typed error rather than a
 // wait. Every other outcome proceeds. Package var so tests can shorten it.
-var upgradeGateTimeout = 6 * time.Second
+var upgradeGateTimeout = 2 * time.Second
 
 // upgradeGateDecision is what checkUpgradeGate tells a daemon-spawn caller.
 type upgradeGateDecision int
@@ -35,51 +41,66 @@ const (
 	// breaker, or any probe failure — anything but a provably live upgrade.
 	upgradeGateProceed upgradeGateDecision = iota
 	// upgradeGateInProgress means a live recovery actor provably owns an active
-	// upgrade transaction. The accompanying error is the typed, retryable
-	// "daemon is upgrading" message; the caller must NOT spawn a rival daemon.
+	// FORWARD upgrade. The accompanying error is the typed, retryable "daemon is
+	// upgrading" message; NO caller may start a rival daemon over the supervisor.
 	upgradeGateInProgress
+	// upgradeGateRestoringPrevious means a live recovery actor is rolling back and
+	// restarting the PREVIOUS daemon right now (a rollback-restore phase). The
+	// daemon-BIND path (RunDaemon) must PROCEED — it IS that previous daemon, and
+	// deferring would deadlock the rollback (the actor is waiting for exactly this
+	// daemon to answer). A client must still DEFER: it must not stop and replace
+	// the daemon the actor is validating.
+	upgradeGateRestoringPrevious
 )
 
-// checkUpgradeGate runs the transaction entrypoint gate fail-open. It returns
-// upgradeGateInProgress ONLY when a live recovery actor provably owns an active
-// transaction (an immediate, non-blocking result). Every other outcome returns
-// upgradeGateProceed:
-//
-//   - no journal on disk (the overwhelmingly common case) — a stat plus one
-//     ErrNoActiveTransaction load, so a healthy cold start is effectively free;
-//   - a corrupt, partial, or otherwise unparseable journal — treated as no
-//     transaction, never as a fatal error and never as an unbounded wait;
-//   - a stale/orphaned journal whose actor died and never re-took the lock
-//     within upgradeGateTimeout — the gate wakes the recovery job, waits at most
-//     the deadline, then proceeds;
-//   - the rollback_failed circuit breaker, or any service-manager/probe error.
-//
-// The context deadline is the hard bound over the ENTIRE call, including the
-// service-manager exec that Wake runs, so a wedged systemctl cannot hang the
-// launch. Nothing here blocks longer than upgradeGateTimeout.
 // runEntrypointGate is the actual gate probe, indirected so the fail-open
 // classification can be tested against every EntrypointGate.Check outcome
-// without constructing each on-disk journal state. Production wires the real
-// bounded gate.
-var runEntrypointGate = func(ctx context.Context, homeDir string) error {
-	gate := upgradetxn.EntrypointGate{TakeoverTimeout: upgradeGateTimeout}
+// without constructing each on-disk journal state. skipWake selects the
+// non-waking daemon-bind variant. Production wires the real bounded gate.
+var runEntrypointGate = func(ctx context.Context, homeDir string, skipWake bool) error {
+	gate := upgradetxn.EntrypointGate{TakeoverTimeout: upgradeGateTimeout, SkipWake: skipWake}
 	return gate.Check(ctx, homeDir)
 }
 
-func checkUpgradeGate(homeDir string) (upgradeGateDecision, error) {
+// checkUpgradeGate runs the transaction entrypoint gate fail-open and classifies
+// the result for a daemon-spawn caller.
+//
+// skipWake=false is the CLIENT variant (EnsureDaemon): on a stale journal it may
+// wake the recovery job and wait for takeover, bounded by upgradeGateTimeout.
+// skipWake=true is the daemon-BIND variant (RunDaemon): non-waking and fast — it
+// only reports a live actor to defer to and never waits, so it cannot overrun the
+// caller's bind budget.
+//
+// It returns:
+//   - upgradeGateProceed for no journal (the common case — a stat plus one
+//     ErrNoActiveTransaction load), a corrupt/partial journal, a stale/dead-actor
+//     journal, the rollback_failed breaker, or any probe error. Fail-open: a bad
+//     journal never blocks a launch;
+//   - upgradeGateInProgress for a live FORWARD upgrade — every caller must defer;
+//   - upgradeGateRestoringPrevious for a live ROLLBACK restoring the previous
+//     daemon — the bind path proceeds, a client defers.
+//
+// The context deadline is the hard bound over the ENTIRE call, including the
+// service-manager exec that Wake runs, so a wedged systemctl cannot hang the
+// launch.
+func checkUpgradeGate(homeDir string, skipWake bool) (upgradeGateDecision, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), upgradeGateTimeout)
 	defer cancel()
 
-	err := runEntrypointGate(ctx, homeDir)
+	err := runEntrypointGate(ctx, homeDir, skipWake)
 	if err == nil {
 		return upgradeGateProceed, nil
 	}
 
 	var inProgress *upgradetxn.UpgradeInProgressError
 	if errors.As(err, &inProgress) {
-		// A live recovery actor owns the transaction. Report it so the caller
-		// surfaces "daemon is upgrading; retry shortly" instead of spawning a
-		// rival over the supervisor. Immediate — never a wait.
+		// A live recovery actor owns the transaction. During a rollback-restore
+		// phase it is starting the previous daemon, which the bind path must be
+		// allowed to become; otherwise defer so no rival is spawned over the
+		// supervisor. Immediate either way — never a wait.
+		if inProgress.Phase.IsRollbackRestore() {
+			return upgradeGateRestoringPrevious, err
+		}
 		return upgradeGateInProgress, err
 	}
 

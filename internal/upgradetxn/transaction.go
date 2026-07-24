@@ -73,6 +73,28 @@ const (
 	PhaseRollbackFailed      Phase = "rollback_failed"
 )
 
+// IsRollbackRestore reports whether the previous daemon is being restored and
+// (re)started under this phase — the window in which the recovery actor calls
+// StartPrevious/ValidatePrevious (supervisor.go). A daemon starting during these
+// phases IS the previous daemon the actor is bringing back, so a daemon-bind
+// entrypoint gate must let it bind rather than defer to the very actor waiting
+// on it — otherwise automatic rollback deadlocks and dead-ends in rollback_failed
+// with no daemon running.
+//
+// The canonical executable has been restored to the previous binary by
+// rollback_restored, so a bind here is the correct previous version. The forward
+// candidate-start phases are deliberately excluded: an ordinary daemon must NOT
+// bind a rival over a live candidate — the candidate is started through the
+// transaction-id probation path, not this gate.
+func (p Phase) IsRollbackRestore() bool {
+	switch p {
+	case PhaseRollbackRestored, PhasePreviousStarting, PhasePreviousValidating, PhaseRolledBack:
+		return true
+	default:
+		return false
+	}
+}
+
 // RollbackProgress makes restoration resumable at file granularity. A
 // checkpoint is persisted only after its atomic write/removal completes, so a
 // crash before the checkpoint safely repeats that one idempotent operation.

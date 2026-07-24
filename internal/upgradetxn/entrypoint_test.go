@@ -115,6 +115,21 @@ func TestEntrypointGateWakesPreviousBinaryAfterKernelProvesActorDeath(t *testing
 	require.Equal(t, txn.Journal().ID, inProgress.TransactionID)
 }
 
+// The daemon-BIND gate sets SkipWake: it only defers to a LIVE actor and must
+// never wake a dead recovery job or wait for takeover, because it runs inside a
+// caller's bind budget (#2212). A free flock therefore resolves immediately to
+// proceed, with no wake.
+func TestEntrypointGateSkipWakeProceedsWithoutWakingADeadActor(t *testing.T) {
+	_, home, _ := prepareFixture(t)
+	wakeCalls := 0
+	gate := EntrypointGate{
+		SkipWake:     true,
+		WakeRecovery: func(context.Context, *Transaction) error { wakeCalls++; return nil },
+	}
+	require.NoError(t, gate.Check(context.Background(), home))
+	require.Equal(t, 0, wakeCalls, "the daemon-bind gate must not wake a dead recovery job")
+}
+
 func TestEntrypointGateLosingTakeoverRaceObservesWinner(t *testing.T) {
 	_, home, _ := prepareFixture(t)
 	var winner *RecoveryLease

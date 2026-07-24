@@ -31,10 +31,15 @@ var (
 	upgradeValidatePoll  = 100 * time.Millisecond
 )
 
-// upgradeRecoveryHealthFn is the no-spawn health probe validatePreviousDaemon
-// polls; indirected so tests can drive the readiness sequence without a real
-// daemon.
-var upgradeRecoveryHealthFn = Health
+// Indirection points so the recovery/rollback operations can be exercised
+// without a real service manager, a spawned daemon, or a live control socket.
+// upgradeRecoveryHealthFn drives validatePreviousDaemon's readiness sequence;
+// the start hooks let startPreviousDaemon's owner dispatch be tested hermetically.
+var (
+	upgradeRecoveryHealthFn = Health
+	startPreviousViaUnitFn  = RestartAutostartUnit
+	startPreviousAdHocFn    = launchDaemonProcessAt
+)
 
 // HandleUpgradeRecoveryExec consumes the internal __upgrade-recovery invocation
 // before normal Cobra startup, mirroring sessionenv.HandleInternalExec. On an
@@ -126,12 +131,12 @@ func startPreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error 
 	_ = ctx
 	switch journal.Daemon.Owner.Kind {
 	case upgradetxn.SupervisionSystemd, upgradetxn.SupervisionLaunchd:
-		if err := RestartAutostartUnit(); err != nil {
+		if err := startPreviousViaUnitFn(); err != nil {
 			return fmt.Errorf("restart previous daemon under its %s unit: %w", journal.Daemon.Owner.Kind, err)
 		}
 		return nil
 	default:
-		if err := launchDaemonProcessAt(journal.ExecutablePath); err != nil {
+		if err := startPreviousAdHocFn(journal.ExecutablePath); err != nil {
 			return fmt.Errorf("spawn previous ad-hoc daemon %s: %w", journal.ExecutablePath, err)
 		}
 		return nil
