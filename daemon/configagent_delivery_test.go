@@ -77,28 +77,55 @@ func TestConfigAgentCodexTrustModalSubmitsBriefing(t *testing.T) {
 	}
 }
 
-func TestConfigAgentCodexMissingReceiptFailsSpawn(t *testing.T) {
+// TestConfigAgentUnconfirmedReceiptStillAttaches is #2483. A receiver that never
+// records the briefing turn within the confirmation window is exactly what a
+// slow or degraded Codex looks like — and it is what broke the assistant on
+// Sachin's box, where the 5s window hard-closed the session. The paste+Enter
+// already succeeded, so an unconfirmed receipt is not proof of a failed
+// delivery: the spawn must attach a live session anyway, matching the
+// send-and-attach every normal session does, rather than reaping the operator's
+// only path to configuring af.
+//
+// The "drop" fixture is the reproduction: it accepts trust and reveals the
+// composer but never writes a user turn to its rollout, so WaitForPromptReceipt
+// runs out its budget and returns ErrPromptReceiptNotObserved — the exact error
+// from the report.
+func TestConfigAgentUnconfirmedReceiptStillAttaches(t *testing.T) {
 	testguard.IsolateTmux(t)
-	manager, program, _ := newConfigAgentCodexFixture(t, "drop")
+	manager, program, rollout := newConfigAgentCodexFixture(t, "drop")
 
 	oldTimeout := configAgentPromptReceiptTimeout
 	configAgentPromptReceiptTimeout = 250 * time.Millisecond
 	t.Cleanup(func() { configAgentPromptReceiptTimeout = oldTimeout })
 
+	const prompt = "briefing the receiver never records as a turn"
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
 		Program: program,
-		Prompt:  "briefing deliberately dropped by receiver",
+		Prompt:  prompt,
 	})
-	if err == nil {
-		if sessionName != "" {
-			_ = manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName})
-		}
-		t.Fatal("a config agent whose receiver recorded no briefing turn reported success")
+	if err != nil {
+		t.Fatalf("an unconfirmed briefing receipt closed the config agent instead of attaching it (#2483): %v", err)
 	}
-	if !strings.Contains(err.Error(), "could not verify that Codex accepted the briefing") {
-		t.Fatalf("missing receiver receipt returned an unactionable error: %v", err)
+	if sessionName == "" {
+		t.Fatal("spawn returned no session name, so there is nothing to attach to")
+	}
+	t.Cleanup(func() {
+		if rerr := manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName}); rerr != nil {
+			t.Errorf("reap unconfirmed-receipt config agent: %v", rerr)
+		}
+	})
+
+	// Prove we attached WITHOUT a confirmed receipt: the receiver recorded only
+	// its session_meta, never the briefing turn. If this ever contains the prompt
+	// the fixture stopped modelling the degraded case and the test is vacuous.
+	data, err := os.ReadFile(rollout)
+	if err != nil {
+		t.Fatalf("read fake Codex rollout: %v", err)
+	}
+	if strings.Contains(string(data), prompt) {
+		t.Fatalf("the drop fixture unexpectedly recorded the briefing turn, so this no longer exercises an unconfirmed receipt:\n%s", data)
 	}
 }
 

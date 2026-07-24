@@ -44,11 +44,22 @@ const configAgentSessionPrefix = "af-config-"
 // user closes one and presses C again).
 var configAgentSeq atomic.Uint64
 
-// configAgentPromptReceiptTimeout bounds the receiver-side acknowledgement
-// after tmux submission. Codex writes its user turn locally before model work
-// begins, so this is startup I/O, not an API-response budget. A missing receipt
-// closes and fails the config agent instead of attaching the user to an empty
-// composer (#2220). A var keeps the deliberate-drop regression fast.
+// configAgentPromptReceiptTimeout bounds how long the spawn WAITS to CONFIRM
+// that Codex recorded the briefing as a user turn before it hands the terminal
+// over. Codex writes its user turn locally before model work begins, so on a
+// healthy box the confirmation lands in well under a second; this is startup
+// I/O, not an API-response budget.
+//
+// Its expiry is deliberately NOT fatal (#2483). The receipt is a POSITIVE
+// signal — its absence within the window does not prove the briefing failed to
+// land (the tmux paste+Enter already succeeded, and a slow or degraded Codex
+// simply records the turn after the window). Reaping the session on that
+// inferred negative left an operator on a degraded default agent unable to
+// configure af at all, which is strictly worse than the send-and-attach every
+// normal session does (task.WaitForReadyAndSendPrompt). So an unconfirmed
+// receipt attaches anyway and logs why; only a cancelled spawn tears down.
+//
+// A var keeps the receipt regressions fast.
 var configAgentPromptReceiptTimeout = 5 * time.Second
 
 // configAgentSupervisor owns every bare tmux session this daemon spawned for a
@@ -279,17 +290,29 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 		if err := ts.SendKeysCommand(req.Prompt); err != nil {
 			return fail(fmt.Errorf("config agent: failed to deliver the briefing: %w", err))
 		}
-		// A successful tmux send is not a delivery receipt. In the #2220
-		// reproduction every load/paste/Enter command succeeded against Codex's
-		// directory-trust modal; Enter merely selected "Yes", Codex opened a bare
-		// composer, and the briefing never became a user turn. Codex's rollout is
-		// the receiver-owned boundary: do not report "started" until that exact
-		// prompt is recorded there. Pane pixels cannot substitute — real Codex
-		// renders the same `› [Pasted Content …]` for both a pending paste and a
-		// submitted user message.
+		// A successful tmux send is not a delivery receipt, so we try to CONFIRM
+		// one. In the #2220 reproduction every load/paste/Enter command succeeded
+		// against Codex's directory-trust modal; Enter merely selected "Yes", Codex
+		// opened a bare composer, and the briefing never became a user turn. Codex's
+		// rollout is the receiver-owned boundary, and a confirmed turn there is the
+		// only thing that proves the briefing landed. Pane pixels cannot substitute
+		// — real Codex renders the same `› [Pasted Content …]` for both a pending
+		// paste and a submitted user message.
+		//
+		// But a confirmation we could not get within the window is not proof the
+		// briefing failed (#2483): the paste+Enter already succeeded, and a slow or
+		// degraded Codex records the turn just after our budget. Reaping on that
+		// inferred negative broke the assistant on a degraded default agent
+		// entirely. So an unconfirmed receipt attaches anyway and records why —
+		// matching the send-and-attach every normal session does — and only a
+		// cancelled spawn (the client/daemon is going away) tears the session down,
+		// as every other step on this context does.
 		if agent == tmux.ProgramCodex {
 			if err := session.WaitForPromptReceipt(ctx, agent, promptReceipt, req.Prompt, configAgentPromptReceiptTimeout); err != nil {
-				return fail(fmt.Errorf("config agent: could not verify that Codex accepted the briefing as a turn; the uncertain session was closed: %w", err))
+				if ctx.Err() != nil {
+					return fail(fmt.Errorf("config agent: spawn cancelled while awaiting the briefing receipt: %w", err))
+				}
+				log.WarningLog.Printf("config agent: %s started but the briefing receipt was not confirmed within %s (%v); attaching anyway — the briefing was delivered to Codex's composer and it may record the turn shortly", sessionName, configAgentPromptReceiptTimeout, err)
 			}
 		}
 	}
