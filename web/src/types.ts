@@ -101,6 +101,16 @@ export interface SessionData {
   /** Daemon-owned explicit teardown capability. True means the row has a stable
    *  non-creating target; absence/false fails closed. */
   can_kill?: boolean;
+  /** Daemon-owned agent-swap capability (#2013). True means this session can be
+   *  handed off to a different agent in place — a local-worktree session in a
+   *  runtime state that admits the swap. The web consumes this decision instead of
+   *  re-deriving the TUI's handoff policy from backend/liveness fields; absence/false
+   *  fails closed. */
+  can_handoff?: boolean;
+  /** The agent enum this session is treated AS (session.CurrentAgentName): the
+   *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
+   *  when unknowable. */
+  current_agent?: string;
   /** Live, projection-only model diagnostic; never restored from instances.json. */
   model_change?: AgentModelChange;
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */

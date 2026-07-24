@@ -94,3 +94,29 @@ export function programChoices(catalog: ProgramCatalog | null, keep = ""): Progr
   }
   return choices;
 }
+
+/**
+ * The concrete agents a session can be handed off to (#2013): the catalog's
+ * programs minus the one already running (`current`).
+ *
+ * Unlike programChoices there is deliberately NO "repo default" row — a handoff
+ * must name a concrete target, which is exactly what the daemon's `to` requires.
+ * The current agent is dropped for the same reason the TUI's handoffAgentChoices
+ * drops it: the daemon's same-agent guard rejects a self-handoff, so offering it
+ * would only produce an error.
+ *
+ * Built entirely from the daemon's response — the same "THE WEB KNOWS NO AGENT
+ * NAMES" rule the rest of this file holds — so a new agent is offered here with no
+ * change to this file.
+ */
+export function handoffAgentChoices(catalog: ProgramCatalog | null, current: string): ProgramChoice[] {
+  const cur = current.trim();
+  const choices: ProgramChoice[] = [];
+  for (const opt of catalog?.programs ?? []) {
+    if (opt.name === cur) {
+      continue;
+    }
+    choices.push({ value: opt.name, label: opt.name });
+  }
+  return choices;
+}

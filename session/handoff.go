@@ -173,6 +173,20 @@ func (i *Instance) CurrentAgentName() string {
 	return i.currentAgentNameLocked()
 }
 
+// canHandoffLocked reports whether this session's agent can be handed off in
+// place right now (#2013), reading the SAME two predicates the TUI's handoff gate
+// uses (app/handle_handoff.go handleHandoff): the backend's Handoff capability and
+// a runtime state that admits the swap. It is projected as InstanceData.CanHandoff
+// so browser clients — which cannot run these Go predicates — render the daemon's
+// decision rather than re-deriving the rule and drifting from it. Caller holds
+// i.mu (ToInstanceData reads it inside toInstanceDataLocked); the two predicates
+// resolve under that one hold, so the capability cannot disagree with the liveness
+// axes it was read beside.
+func (i *Instance) canHandoffLocked() bool {
+	return i.capabilitiesLocked().Handoff &&
+		i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff) == nil
+}
+
 // currentAgentNameLocked is CurrentAgentName's already-locked half, for callers
 // holding i.mu (SwapAgentProgram builds the ledger entry inside its write lock,
 // and sync.RWMutex is not reentrant). TmuxSession.Program takes only the tmux

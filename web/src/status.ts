@@ -170,6 +170,20 @@ export function isLimitReached(s: SessionData): boolean {
   return livenessOf(s) === Liveness.LimitReached;
 }
 
+/** True when this session's agent can be handed off to a different one in place
+ *  (#2013) — the state that gates the Handoff action, mirroring the TUI, which
+ *  advertises `F` only for a handoff-capable selection (app/handle_handoff.go) and
+ *  refuses it with an explanatory error otherwise.
+ *
+ *  Reads the daemon-projected `can_handoff` decision (a local-worktree session in a
+ *  runtime state that admits the swap) rather than re-deriving it from
+ *  backend_type/liveness here: a second copy of the handoff rule in the browser is
+ *  how the picker's "who can be replaced" drifts from the daemon's same-agent guard.
+ *  Fails closed — `=== true`, so an older daemon that omits the field offers nothing. */
+export function canHandoff(s: SessionData): boolean {
+  return s.can_handoff === true;
+}
+
 /**
  * The rail's session comparator, a line-for-line mirror of the TUI sidebar
  * (ui/sidebar_model.go partitionByArchived, #1605): live rows first, then the

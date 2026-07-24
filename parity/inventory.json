@@ -299,16 +299,16 @@
         "pointer": "keys/keys.go (F, handoff) -> app/handle_handoff.go -> app/session_control.go handoffSessionThroughDaemon"
       },
       "web": {
-        "status": "no",
-        "pointer": "no handoffSession() in web/src/api.ts (derived)"
+        "status": "yes",
+        "pointer": "web/src/api.ts handoffSession -> HandoffSession; web/src/ui.ts Handoff action (shown on a handoff-capable selection via canHandoff); picker web/src/modals.ts handoffModal"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions_handoff.go (af sessions handoff <title> --to <agent>)"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#2013",
-      "notes": "Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action is deferred to that issue's follow-up. Recorded as a real gap rather than a deliberate one, and #2084 is why: it just gave the web a way OUT of a limit-blocked session (closing #1934), so the web now surfaces the exact state that motivates a handoff and offers only one of the two answers to it - wait, but not switch. The agent picker the modal needs already exists (web/src/modals.ts programSelect), and HandoffSession is a public route, so this is a client-side addition rather than new plumbing."
+      "notes": "Closed across all three surfaces. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web now calls the existing HandoffSession public route through the same daemon path the TUI/CLI use — no parallel recovery logic — and renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSession.brief)."
     },
     {
       "id": "session.attach",
@@ -1501,6 +1501,7 @@
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
       "GetConfig": "config.read",
+      "HandoffSession": "session.handoff",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
       "ListPrograms": "enum.agent-programs",
@@ -1978,6 +1979,11 @@
         },
         "port": {
           "gap": "session.tab.create.web"
+        }
+      },
+      "HandoffSession": {
+        "brief": {
+          "ok": "Deliberate, mirroring the TUI's brief=ok: the web handoff is pick-agent-then-confirm, and the incoming agent's mission defaults to the session's stored prompt (which the web can set at create time and change via the live terminal). Putting a free-text mission field inside a one-decision confirm is a different interaction; `af sessions handoff --brief` is the surface for overriding the mission inline. The web sends id (the all-project client's collision-proof key, resolved first so a duplicate title cannot misroute the swap), title, repo_id, and to."
         }
       },
       "UpdateTask": {

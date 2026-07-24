@@ -18,7 +18,7 @@
 
 import type { CreateSessionInput } from "./api.js";
 import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, backendNotice, backendSelectable } from "./backends.js";
-import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
+import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, handoffAgentChoices, programChoices } from "./programs.js";
 
 /** A live modal: its root element plus in-place patch controls index.ts drives
  *  around the async submit. close() removes it from the DOM. */
@@ -376,6 +376,86 @@ export function promptModal(
   });
 
   queueMicrotask(() => area.focus());
+  return handle;
+}
+
+/** The handoff modal (#2013): pick the agent to continue the session under — the
+ *  web half of the TUI's `F`. It collapses the TUI's pick-then-confirm into one
+ *  dialog: a web modal already gates the swap behind an explicit submit, and the
+ *  explanatory line IS the confirmation the TUI shows after the picker.
+ *
+ *  The agent list comes from the daemon (loadPrograms), never a list here, and
+ *  excludes the running agent — the daemon's same-agent guard would reject it. If
+ *  the catalog can't be reached or offers no other agent, Hand off stays disabled
+ *  with an explanation, so the modal degrades to "you can't from here" rather than
+ *  to a submit that always errors. */
+export function handoffModal(
+  sessionTitle: string,
+  currentAgent: string,
+  callbacks: {
+    onSubmit: (target: string) => void;
+    onCancel: () => void;
+    loadPrograms: () => Promise<ProgramCatalog>;
+  },
+): ModalHandle {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: `Hand off ${sessionTitle}`,
+    confirmLabel: "Hand off",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel,
+  });
+
+  const agentSelect = h("select", { class: "af-input" });
+  agentSelect.setAttribute("aria-label", "New agent");
+  // Nothing to pick until the catalog lands; Hand off is disabled until it does.
+  confirmBtn.disabled = true;
+
+  const renderChoices = (choices: ProgramChoice[]): void => {
+    agentSelect.replaceChildren();
+    for (const choice of choices) {
+      agentSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    confirmBtn.disabled = choices.length === 0;
+  };
+
+  body.append(
+    field("New agent", agentSelect),
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "The new agent starts fresh with a summary of the work so far. Same worktree and branch — nothing is discarded.",
+    ),
+  );
+
+  void callbacks
+    .loadPrograms()
+    .then((catalog) => {
+      const choices = handoffAgentChoices(catalog, currentAgent);
+      renderChoices(choices);
+      if (choices.length === 0) {
+        handle.setError("No other agent is available to hand off to.");
+      }
+    })
+    .catch(() => {
+      // A handoff needs a concrete target and the web cannot read the enum itself —
+      // that is the whole reason ListPrograms is served — so an unreachable catalog
+      // means the picker can't be offered. Say so rather than submit an empty `to`.
+      renderChoices([]);
+      handle.setError("Could not load the agent list. Try again.");
+    });
+
+  const card = handle.el.firstElementChild as HTMLElement;
+  asForm(card, () => {
+    const target = agentSelect.value;
+    if (target === "") {
+      handle.setError("Pick an agent to hand off to.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(target);
+  });
+
+  queueMicrotask(() => agentSelect.focus());
   return handle;
 }
 

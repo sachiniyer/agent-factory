@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { IconName } from "./icon.js";
-import { type DotKind, isArchived, isCreating, isLimitReached, isWorking, rowStatus, rowTitle } from "./status.js";
+import { canHandoff, type DotKind, isArchived, isCreating, isLimitReached, isWorking, rowStatus, rowTitle } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
@@ -157,6 +157,27 @@ test("isLimitReached ignores limit_reset_at, which outlives the state it describ
     isLimitReached(sess({ liveness: Liveness.Ready, limit_reset_at: "2026-07-18T15:04:00Z" })),
     false,
     "a resumed session carrying a stale reset time must not offer Retry",
+  );
+});
+
+// canHandoff gates the web's Handoff action (#2013). It reads the daemon-projected
+// can_handoff decision rather than re-deriving the handoff rule from
+// backend_type/liveness — a second copy of that rule in the browser is how the
+// picker's "who can be replaced" would drift from the daemon's same-agent guard.
+test("canHandoff reads the daemon's projected decision, so the button appears exactly when the daemon allows it", () => {
+  assert.equal(canHandoff(sess({ can_handoff: true })), true);
+  assert.equal(canHandoff(sess({ can_handoff: false })), false);
+});
+
+// Fails CLOSED, like can_kill: an older daemon that omits the field, or any
+// projection without it, offers no Handoff — never a button that submits to a
+// daemon that cannot service it.
+test("canHandoff fails closed when the projection omits the field", () => {
+  assert.equal(canHandoff(sess()), false, "no can_handoff field must offer nothing, not everything");
+  assert.equal(
+    canHandoff(sess({ liveness: Liveness.Ready })),
+    false,
+    "the web must not INFER handoff-capability from liveness — that is the daemon's decision to project",
   );
 });
 

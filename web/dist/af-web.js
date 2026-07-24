@@ -6292,6 +6292,9 @@ async function resumeFromLimit(id, title, token2) {
     throw new Error(result.reason || "resume was not performed");
   }
 }
+async function handoffSession(id, title, to, token2) {
+  return af("HandoffSession", { id, title, repo_id: "", to }, token2);
+}
 async function deleteProject(root2, token2) {
   return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
 }
@@ -6449,6 +6452,17 @@ function programChoices(catalog, keep = "") {
   const extra = keep.trim();
   if (extra !== "" && !choices.some((c) => c.value === extra)) {
     choices.push({ value: extra, label: extra });
+  }
+  return choices;
+}
+function handoffAgentChoices(catalog, current) {
+  const cur = current.trim();
+  const choices = [];
+  for (const opt of catalog?.programs ?? []) {
+    if (opt.name === cur) {
+      continue;
+    }
+    choices.push({ value: opt.name, label: opt.name });
   }
   return choices;
 }
@@ -6652,6 +6666,54 @@ function newSessionModal(projects, defaultProject2, callbacks) {
     });
   });
   queueMicrotask(() => titleInput.focus());
+  return handle;
+}
+function handoffModal(sessionTitle, currentAgent, callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: `Hand off ${sessionTitle}`,
+    confirmLabel: "Hand off",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const agentSelect = h("select", { class: "af-input" });
+  agentSelect.setAttribute("aria-label", "New agent");
+  confirmBtn.disabled = true;
+  const renderChoices = (choices) => {
+    agentSelect.replaceChildren();
+    for (const choice of choices) {
+      agentSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    confirmBtn.disabled = choices.length === 0;
+  };
+  body.append(
+    field("New agent", agentSelect),
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "The new agent starts fresh with a summary of the work so far. Same worktree and branch \u2014 nothing is discarded."
+    )
+  );
+  void callbacks.loadPrograms().then((catalog) => {
+    const choices = handoffAgentChoices(catalog, currentAgent);
+    renderChoices(choices);
+    if (choices.length === 0) {
+      handle.setError("No other agent is available to hand off to.");
+    }
+  }).catch(() => {
+    renderChoices([]);
+    handle.setError("Could not load the agent list. Try again.");
+  });
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const target = agentSelect.value;
+    if (target === "") {
+      handle.setError("Pick an agent to hand off to.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(target);
+  });
+  queueMicrotask(() => agentSelect.focus());
   return handle;
 }
 function confirmModal(opts) {
@@ -7519,6 +7581,9 @@ function isArchived(s) {
 }
 function isLimitReached(s) {
   return livenessOf(s) === Liveness.LimitReached;
+}
+function canHandoff(s) {
+  return s.can_handoff === true;
 }
 function compareSessionsForRail(a, b) {
   const aArchived = isArchived(a);
@@ -11174,6 +11239,12 @@ var AppShell = class {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   retryBtn = null;
   retryVisible = false;
+  // The Handoff button and whether it is currently shown (#2013). Same in-place
+  // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
+  // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
+  // change, so patchMainHead toggles it rather than deciding once at build time.
+  handoffBtn = null;
+  handoffVisible = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -11785,6 +11856,12 @@ var AppShell = class {
     this.retryBtn = retryBtn;
     this.retryVisible = isLimitReached(selected);
     retryBtn.hidden = !this.retryVisible;
+    const handoffBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Handoff");
+    handoffBtn.title = "Continue this session under a different agent";
+    handoffBtn.addEventListener("click", () => this.actions.handoff());
+    this.handoffBtn = handoffBtn;
+    this.handoffVisible = canHandoff(selected);
+    handoffBtn.hidden = !this.handoffVisible;
     const headActions = h2("div", { class: "af-term-actions" });
     headActions.hidden = true;
     this.headActions = headActions;
@@ -11799,7 +11876,7 @@ var AppShell = class {
     this.tabInsert.setAttribute("aria-hidden", "true");
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
-    const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, retryBtn);
+    const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
     this.main.className = "af-main af-main-term";
     this.main.replaceChildren(head, this.termHost);
     this.renderTabBar(state);
@@ -12035,6 +12112,11 @@ var AppShell = class {
     if (this.retryBtn && nowLimited !== this.retryVisible) {
       this.retryVisible = nowLimited;
       this.retryBtn.hidden = !nowLimited;
+    }
+    const nowHandoff = canHandoff(selected);
+    if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
+      this.handoffVisible = nowHandoff;
+      this.handoffBtn.hidden = !nowHandoff;
     }
   }
   /** Keeps management reachable when the selected session's rail row is filtered
@@ -12842,6 +12924,32 @@ function doRetryLimit() {
   }
   void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
 }
+function doHandoff() {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id || !canHandoff(sel)) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    handoffModal(sel.title, sel.current_agent ?? "", {
+      // The agent enum is global (#1970), so the picker asks with no repo scope.
+      loadPrograms: () => loadPrograms(""),
+      onSubmit: (to) => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void handoffSession(target.id, target.title, to, tok).then(closeModal).catch((e) => {
+          m.setBusy(false);
+          m.setError(describeError(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
 function doRemoveTask(task) {
   const tok = token;
   if (tok === null) {
@@ -12885,6 +12993,7 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
   openTab,

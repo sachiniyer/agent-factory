@@ -433,6 +433,34 @@ export async function resumeFromLimit(id: string, title: string, token: string):
   }
 }
 
+/** The daemon's HandoffSession response (daemon.HandoffSessionResponse): the
+ *  outgoing and incoming agents, echoed so the toast can name the swap without
+ *  re-reading the snapshot. */
+export interface HandoffResult {
+  from: string;
+  to: string;
+}
+
+/** Continues a session under a different agent, in place (#2013) — the web half of
+ *  the TUI's `F`. The daemon swaps the agent program, keeps the worktree and
+ *  branch, and delivers a mission brief to the incoming agent; the resulting
+ *  session.updated event repaints the rail. `to` is a supported agent enum name
+ *  from ListPrograms, never the current one (the daemon's same-agent guard rejects
+ *  that, and the picker already excludes it).
+ *
+ *  Sends `id` like kill/archive/resumeFromLimit, NOT title-only: a handoff STOPS a
+ *  live agent and starts another, so resolving a duplicate title across repos to
+ *  the wrong session would tear down an unrelated agent. `brief` is deliberately
+ *  not sent — the mission defaults to the session's stored prompt, and inline
+ *  override is `af sessions handoff --brief`'s surface (see docs/surface-parity.md,
+ *  field_coverage HandoffSession.brief).
+ *
+ *  A failed handoff (not found, busy, unsupported backend, same agent) comes back
+ *  as an envelope error and throws ApiError, so callers share one error path. */
+export async function handoffSession(id: string, title: string, to: string, token: string): Promise<HandoffResult> {
+  return af<HandoffResult>("HandoffSession", { id, title, repo_id: "", to }, token);
+}
+
 /** The daemon's DeleteProject response: how many sessions it archived vs tore
  *  down (in-place ones that can't be archived). */
 export interface DeleteProjectResult {

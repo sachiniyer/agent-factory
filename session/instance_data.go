@@ -44,6 +44,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		InFlightOp:            i.inFlightOp,
 		LifecycleAction:       lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown),
 		CanKill:               canKillFor(i.ID, i.inFlightOp),
+		CanHandoff:            i.canHandoffLocked(),
+		CurrentAgent:          i.currentAgentNameLocked(),
 		ModelChange:           agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		Height:                i.Height,
 		Width:                 i.Width,

@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, programChoices } from "./programs.js";
+import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, handoffAgentChoices, programChoices } from "./programs.js";
 
 /** A catalog in the daemon's own shape: canonical (append-only) order, plus the
  *  program an unspecified create resolves to. */
@@ -125,4 +125,43 @@ test("a seeded program survives an unavailable catalog", () => {
   const choices = programChoices(null, "aider");
 
   assert.deepEqual(choices.map((c) => c.value), [PROGRAM_REPO_DEFAULT, "aider"]);
+});
+
+// The handoff picker (#2013) is the same served-enum design one screen over: it
+// lists the daemon's agents, so a new agent is offered with no web change — but it
+// has NO "repo default" row (a handoff must name a concrete target) and it drops
+// the running agent (the daemon's same-agent guard rejects a self-handoff).
+test("handoffAgentChoices offers the daemon's agents minus the current one, with no repo-default row", () => {
+  const choices = handoffAgentChoices(catalog(), "claude");
+
+  assert.deepEqual(
+    choices.map((c) => c.value),
+    ["codex", "aider", "gemini", "amp", "opencode"],
+    "the running agent is excluded and there is no repo-default sentinel",
+  );
+  assert.equal(
+    choices.some((c) => c.value === PROGRAM_REPO_DEFAULT),
+    false,
+    "a handoff must name a concrete target, so the empty repo-default value is never offered",
+  );
+});
+
+test("handoffAgentChoices offers a never-heard-of agent with no web change, like the create picker", () => {
+  const choices = handoffAgentChoices(catalog({ programs: [{ name: "claude" }, { name: "cursor" }] }), "claude");
+
+  assert.deepEqual(choices.map((c) => c.value), ["cursor"], "a newly supported agent is a valid handoff target with no web edit");
+});
+
+// If the daemon reports no agents, or an empty/unknown current agent leaves nothing
+// to exclude, the caller (the modal) sees an empty list and disables the action —
+// it must never fabricate a choice.
+test("handoffAgentChoices returns nothing to offer when the catalog is empty or null", () => {
+  assert.deepEqual(handoffAgentChoices(catalog({ programs: [] }), "claude"), []);
+  assert.deepEqual(handoffAgentChoices(null, "claude"), []);
+});
+
+test("handoffAgentChoices with an unknown current agent excludes nothing and keeps the full list", () => {
+  const choices = handoffAgentChoices(catalog({ programs: [{ name: "claude" }, { name: "codex" }] }), "");
+
+  assert.deepEqual(choices.map((c) => c.value), ["claude", "codex"], "an empty current agent drops nothing");
 });

@@ -55,6 +55,21 @@ type InstanceData struct {
 	// vetoes runtime reuse but must remain explicitly removable. Like
 	// LifecycleAction, this is derived live and scrubbed before disk persistence.
 	CanKill bool `json:"can_kill,omitempty"`
+	// CanHandoff is the projection-only agent-swap capability shared by the TUI and
+	// web (#2013): true when this session's agent can be handed off in place — a
+	// local-worktree backend (Capabilities().Handoff) in a runtime state that admits
+	// the swap (ValidateRuntimeAction(RuntimeActionHandoff)). It is derived live by
+	// ToInstanceData from the SAME two predicates the TUI's handoff gate reads
+	// (app/handle_handoff.go), so a browser — which cannot run those Go predicates —
+	// renders the daemon's decision instead of re-deriving the rule. Scrubbed before
+	// disk persistence like LifecycleAction/CanKill.
+	CanHandoff bool `json:"can_handoff,omitempty"`
+	// CurrentAgent is the agent enum this session is treated AS
+	// (session.CurrentAgentName). Projection-only, carried so a client's handoff
+	// picker can exclude the running agent exactly as the daemon's same-agent guard
+	// does (session/handoff.go) — filtering on Program instead would drift from the
+	// guard on a wrapper-script session. Derived live and scrubbed before disk.
+	CurrentAgent string `json:"current_agent,omitempty"`
 	// ModelChange is the projection-only agent diagnostic carried to the CLI,
 	// TUI, and web row. It is derived from the live runtime's Observation and
 	// scrubbed by ForStorage so a resolved or replaced process cannot inherit a
@@ -155,6 +170,8 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.InFlightOp = OpNone
 	d.LifecycleAction = LifecycleActionNone
 	d.CanKill = false
+	d.CanHandoff = false
+	d.CurrentAgent = ""
 	d.ModelChange = nil
 	switch {
 	case lv == LiveArchived:

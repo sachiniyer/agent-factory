@@ -34,6 +34,7 @@ import {
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import {
+  canHandoff,
   compareSessionsForRail,
   isArchived,
   isCreating,
@@ -182,6 +183,12 @@ export interface Actions {
    *  TUI: it is not destructive (it re-delivers the prompt the session was already
    *  going to run) and it is the obvious next step for a session that is stuck. */
   retryLimit(): void;
+  /** Hands the current selection off to a different agent (#2013) — the web's
+   *  analogue of the TUI's `F`. Opens the agent picker; on confirm it swaps the
+   *  agent in place, keeping the worktree and branch. Offered only for a
+   *  handoff-capable selection (canHandoff), and DOES confirm (via the picker
+   *  modal) because it stops a working agent, unlike the no-confirm Retry. */
+  handoff(): void;
   /** Switches the selected session's active tab WITHOUT attaching — the keyboard
    *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
   switchTab(index: number): void;
@@ -649,6 +656,12 @@ export class AppShell {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   private retryBtn: HTMLElement | null = null;
   private retryVisible = false;
+  // The Handoff button and whether it is currently shown (#2013). Same in-place
+  // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
+  // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
+  // change, so patchMainHead toggles it rather than deciding once at build time.
+  private handoffBtn: HTMLElement | null = null;
+  private handoffVisible = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1687,6 +1700,18 @@ export class AppShell {
     this.retryVisible = isLimitReached(selected);
     retryBtn.hidden = !this.retryVisible;
 
+    // Handoff, for continuing a session under a different agent (#2013) — the web
+    // half of the TUI's `F`. A limit-blocked session now shows BOTH exits the ledger
+    // called for: Retry (wait for the window) and Handoff (switch agents); a normal
+    // local session shows Handoff alone. Same build-once / patch-in-place treatment
+    // as Retry — gated by the daemon-projected can_handoff, toggled in patchMainHead.
+    const handoffBtn = h("button", { type: "button", class: "af-ghost af-term-action" }, "Handoff");
+    handoffBtn.title = "Continue this session under a different agent";
+    handoffBtn.addEventListener("click", () => this.actions.handoff());
+    this.handoffBtn = handoffBtn;
+    this.handoffVisible = canHandoff(selected);
+    handoffBtn.hidden = !this.handoffVisible;
+
     // Empty while the selected row is visible; patchMainHead fills it only when the
     // shared rail derivation says filtering/scoping removed that row. Keeping the
     // container stable avoids touching the terminal host as that condition flips.
@@ -1723,7 +1748,7 @@ export class AppShell {
     // Retry and the filtered-selection fallback are fixed pane-level actions. Their
     // hidden containers create no flex items on the common path, while visible
     // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, retryBtn);
+    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
 
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
@@ -2054,6 +2079,16 @@ export class AppShell {
     if (this.retryBtn && nowLimited !== this.retryVisible) {
       this.retryVisible = nowLimited;
       this.retryBtn.hidden = !nowLimited;
+    }
+
+    // Show/hide Handoff as the selected session becomes (or stops being)
+    // handoff-capable without a selection change (#2013): a fresh session finishing
+    // startup, or one archived/killed from another client, flips can_handoff while it
+    // stays selected — the same in-place path Retry above uses, for the same reason.
+    const nowHandoff = canHandoff(selected);
+    if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
+      this.handoffVisible = nowHandoff;
+      this.handoffBtn.hidden = !nowHandoff;
     }
   }
 

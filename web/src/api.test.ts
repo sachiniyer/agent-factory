@@ -15,6 +15,7 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  handoffSession,
   isMutationCommittedError,
   killSession,
   listBackends,
@@ -133,6 +134,24 @@ test("resumeFromLimit rejects the daemon's no-op outcome", async () => {
     /another operation owns the retry/,
     "a successful HTTP envelope must not turn a daemon no-op into a successful web action",
   );
+});
+
+// #2013: a handoff STOPS a live agent and starts another, so it must key by stable
+// id like kill/archive — a title-resolved misroute would tear down an unrelated
+// repo's agent. `brief` is deliberately never sent from the web (the mission
+// defaults to the session's stored prompt; `af sessions handoff --brief` is the
+// inline-override surface), so this pins its ABSENCE as much as the id's presence.
+test("handoffSession posts the stable id and target agent, and never a brief", async () => {
+  const cap = stubFetch();
+  await handoffSession("id-repoB", "feature", "gemini", "tok");
+
+  assert.equal(cap.url, "/v1/HandoffSession");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.body.id, "id-repoB", "the daemon resolves by id first, so a duplicate title cannot misroute the swap");
+  assert.equal(cap.body.title, "feature", "the title rides along for the event and the title-only fallback");
+  assert.equal(cap.body.to, "gemini", "the picked agent is the incoming program");
+  assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
+  assert.equal("brief" in cap.body, false, "the web never sends a brief — the mission defaults to the stored prompt");
 });
 
 test("listPrograms asks the daemon for the agent catalog (#1970)", async () => {

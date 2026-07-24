@@ -27,6 +27,7 @@ import {
   killSession,
   getConfig,
   isMutationCommittedError,
+  handoffSession,
   listBackends,
   listPrograms,
   listTasks,
@@ -46,7 +47,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue } from "./config.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
-import { confirmDeleteProjectModal, confirmModal, type ModalHandle, newSessionModal } from "./modals.js";
+import { confirmDeleteProjectModal, confirmModal, handoffModal, type ModalHandle, newSessionModal } from "./modals.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
@@ -60,7 +61,7 @@ import {
   upsertSession,
 } from "./sessions.js";
 import { SplitView } from "./split.js";
-import { isArchived, type RowKind } from "./status.js";
+import { canHandoff, isArchived, type RowKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -1268,6 +1269,48 @@ function doRetryLimit(): void {
   void resumeFromLimit(sel.id, sel.title, tok).catch((e) => surfaceTabError(e));
 }
 
+/**
+ * Hands the selected session off to a different agent (#2013) — the web's analogue
+ * of the TUI's `F`. Opens the agent picker (excluding the running agent); on confirm
+ * it swaps the agent in place via HandoffSession, keeping the worktree and branch,
+ * and the resulting session.updated event repaints the rail.
+ *
+ * Gated on the daemon-projected `can_handoff` — the button that calls this only
+ * appears for a handoff-capable selection — and re-checked here, so a stale click
+ * still surfaces the daemon's error rather than acting. Unlike Retry this DOES
+ * confirm: the picker modal is the confirmation, matching the TUI, because a handoff
+ * stops a working agent and starts another. Uses the FULL projection (id + current
+ * agent), which the id/title-only selectedSession() omits. */
+function doHandoff(): void {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id || !canHandoff(sel)) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    handoffModal(sel.title, sel.current_agent ?? "", {
+      // The agent enum is global (#1970), so the picker asks with no repo scope.
+      loadPrograms: () => loadPrograms(""),
+      onSubmit: (to: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void handoffSession(target.id, target.title, to, tok)
+          .then(closeModal)
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(describeError(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
 /** Removes a task (RemoveTask), then refetches. Keys off the stable id. */
 function doRemoveTask(task: TaskData): void {
   const tok = token;
@@ -1328,6 +1371,7 @@ const actions = {
   archive: (session: ActionableSession) => openConfirm("archive", session),
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
   openTab,
