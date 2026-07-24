@@ -148,14 +148,23 @@ type ptyBroker struct {
 	// `capturing` false this flag says NOTHING, and in particular does not mean a
 	// fresh capture; the reconcile clears it on the way to dialling one.
 	//
-	// It deliberately survives a teardown, because it CANNOT be cleared by one.
-	// Every teardown ends by joining the readLoop (`<-done` inside stopCapture),
-	// and the loop's last act before closing `done` is to latch this flag — so a
-	// teardown that clears it first has it set again by the join, every time. An
-	// attempt to clear it in those three sites shipped in #2438 and did exactly
-	// nothing; it was removed rather than moved after the join, because the state
-	// it was chasing is unobservable: the sole reader is guarded by `capturing`,
-	// which the same teardown already cleared.
+	// No teardown clears it, and the two cases are worth separating because they
+	// fail differently:
+	//
+	//   - A teardown that HAS a capture to release ends by joining the readLoop
+	//     (`<-done` inside stopCapture), and the loop's last act before closing
+	//     `done` is to latch this flag. So a clear placed before that join is
+	//     undone by it — #2438 shipped exactly that in three sites, and it did
+	//     nothing.
+	//   - A teardown that has NOTHING to release (it found `capturing` already
+	//     false, so stopCapture was nil and no join happened) could clear the flag
+	//     and make it stick. But there is nothing left to describe by then: the
+	//     capture it referred to is gone.
+	//
+	// Either way the residue is unobservable, because the sole reader is guarded
+	// by `capturing`, which every teardown has already cleared. So the clears were
+	// removed rather than moved after the join: moving them would add a second
+	// b.mu section on three teardown paths to change nothing.
 	captureEnded bool
 	closed       bool
 	// tabClosed records that this broker was shut down because ITS TAB was closed

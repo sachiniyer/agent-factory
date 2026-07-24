@@ -262,16 +262,23 @@ func TestPTYBrokerUpstreamDeathDoesNotResurrectAClosedBroker(t *testing.T) {
 // actually promises, because #2438 shipped a change that assumed the opposite
 // and did nothing.
 //
-// A teardown CANNOT clear this flag. Every teardown ends by joining the readLoop
-// (`<-done` inside stopCapture), and the loop's last act before closing `done`
-// is to latch the flag — so a teardown that clears it first has it set again by
-// the join, every single time. Clearing it there was a no-op, and the field doc
-// that claimed the flag "can never out-live the capture it describes" was false.
+// This exercises the teardown that HAS a capture to release — the case #2438's
+// clears were written for, and the case they could not serve. Such a teardown
+// ends by joining the readLoop (`<-done` inside stopCapture), and the loop's
+// last act before closing `done` is to latch the flag, so a clear placed before
+// that join is simply undone by it. (A teardown that finds `capturing` already
+// false joins nothing and could clear it — but by then there is no capture left
+// to describe. See the field doc.)
 //
-// What is actually true, and what this locks: the flag is meaningless once
-// `capturing` is false, and the next bring-up dials a fresh capture regardless
-// of the residue. Asserting the residue directly is the point — it stops the
-// next reader from "fixing" a latch that cannot be fixed and is not a bug.
+// What this locks is the contract: the flag is meaningless once `capturing` is
+// false, and the next bring-up dials a fresh capture regardless of the residue.
+// Asserting the residue directly is the point — it stops the next reader from
+// "fixing" a latch that is not a bug.
+//
+// Note this test cannot fail-first on the code change it accompanies: removing
+// three writes that were already being undone has no observable effect, which is
+// the change's own thesis. It is a doc-lock, and the assertion it protects is
+// the one #2438's comment got wrong.
 func TestPTYBrokerCaptureEndedIsOnlyMeaningfulWithCapturing(t *testing.T) {
 	state := func(b *ptyBroker) (capturing, ended bool) {
 		b.mu.Lock()
