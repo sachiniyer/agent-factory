@@ -264,7 +264,7 @@ func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey str
 	killedLine := fmt.Sprintf("%d in-place %s torn down — not restorable.", inPlace, sessionWord(inPlace))
 	archivedLine := fmt.Sprintf("%d %s archived — restorable.", archived, sessionWord(archived))
 	gone := "Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone."
-	restore := fmt.Sprintf("Restore an archived session (%s, or `af sessions restore`) to bring the project back.", restoreKey)
+	restore := fmt.Sprintf("Restore an archived session (%s) to bring the project back.", restoreKey)
 	repoSafe := "Your real git repository is untouched."
 
 	switch {

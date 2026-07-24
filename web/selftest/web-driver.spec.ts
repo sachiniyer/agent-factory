@@ -3670,6 +3670,9 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
   // as designed rather than a broken/blank shell.
   await expect(page.locator(".af-app")).toBeVisible();
   await expect(page.locator(".af-rail-empty")).toContainText("No sessions yet");
+  // #2479: the global empty state offers an in-UI New button, not a shell command.
+  await expect(page.locator(".af-rail-empty .af-rail-empty-new")).toBeVisible();
+  await expect(page.locator(".af-rail-empty")).not.toContainText("af sessions create");
   await expect(page.locator(".af-rail-count")).toHaveText("0");
   // With nothing selected the main pane is the "Select a session" placeholder.
   await expect(page.locator(".af-main-empty")).toContainText("Select a session");

@@ -11390,15 +11390,14 @@ var AppShell = class {
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
     if (!state.selectedProject) {
-      list.replaceChildren(
-        h2(
-          "li",
-          { class: "af-rail-empty" },
-          "No sessions yet \u2014 create one in the TUI or with ",
-          h2("code", {}, "af sessions create"),
-          "."
-        )
+      const newBtn = h2(
+        "button",
+        { type: "button", class: "af-rail-empty-new", title: "New session" },
+        icon("plus"),
+        "New"
       );
+      newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
+      list.replaceChildren(h2("li", { class: "af-rail-empty" }, "No sessions yet \u2014 ", newBtn));
       return;
     }
     const rows = visible.map((s) => {

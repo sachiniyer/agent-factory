@@ -1209,17 +1209,19 @@ export class AppShell {
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
     // No project selected ⇒ there are no projects at all (nothing has been created):
-    // the global empty rail, its copy pointing at how to create the first session.
+    // the global empty rail. It offers the SAME in-UI New button the per-project
+    // empty state (railNotice) uses, rather than telling the user to drop to the
+    // TUI or a shell — the interface runs the create, it does not prescribe a CLI
+    // command (#2479).
     if (!state.selectedProject) {
-      list.replaceChildren(
-        h(
-          "li",
-          { class: "af-rail-empty" },
-          "No sessions yet — create one in the TUI or with ",
-          h("code", {}, "af sessions create"),
-          ".",
-        ),
+      const newBtn = h(
+        "button",
+        { type: "button", class: "af-rail-empty-new", title: "New session" },
+        icon("plus"),
+        "New",
       );
+      newBtn.addEventListener("click", () => this.runRailExit(() => this.actions.newSession()));
+      list.replaceChildren(h("li", { class: "af-rail-empty" }, "No sessions yet — ", newBtn));
       return;
     }
     const rows = visible.map((s) => {
