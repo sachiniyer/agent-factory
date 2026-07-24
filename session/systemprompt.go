@@ -18,18 +18,22 @@ import (
 // text is delivered to TWO audiences whose framing differs (#2172):
 //
 //   - an agent af itself launched, which IS a session (afUsageIntroInside,
-//     afUsageOutroInside), and
+//     afUsageDispatched, afUsageOutroInside), and
 //   - an agent that installed the af plugin/skill on its own and is NOT running
 //     inside af (afUsageIntroPlugin, afUsageOutroPlugin) — see
 //     AfPluginUsageReference.
 //
 // Everything that is true for both — every command group, every scoping rule —
 // lives in the shared afUsageBody, so editing af's usage guidance changes both
-// audiences at once and neither can drift. Only the framing is swapped; the
+// audiences at once and neither can drift. The dispatched-parent escalation
+// guidance (afUsageDispatched) is inside-only: an agent that installed the plugin
+// is a CALLER of af, not a sub-instance a parent dispatched, so it appears in
+// afUsageReference but never in AfPluginUsageReference. Only the framing is
+// swapped otherwise; the
 // generated plugin artifacts must never carry a verbatim copy of the "you are
 // running inside af" opening, which is false for the audience that installed
 // them.
-const afUsageReference = afUsageIntroInside + " " + afUsageBody + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
+const afUsageReference = afUsageIntroInside + "\n\n" + afUsageDispatched + "\n\n" + afUsageBody + "\n\n" + afUsageOutroInside + "\n\n" + afUsageOutro
 
 // AfPluginUsageReference is afUsageReference reframed for an agent that is NOT
 // running inside af: the same body and the same command reference, but an
@@ -39,8 +43,27 @@ const afUsageReference = afUsageIntroInside + " " + afUsageBody + "\n\n" + afUsa
 // artifacts carry (see `af gen-docs --plugin-root`).
 const AfPluginUsageReference = afUsageIntroPlugin + " " + afUsageBody + "\n\n" + afUsageOutroPlugin + "\n\n" + afUsageOutro
 
-// afUsageIntroInside frames the body for an agent af launched: it IS a session.
-const afUsageIntroInside = `You are running inside Agent Factory (af), a terminal multiplexer that runs each AI coding agent in an isolated git worktree. Manage sessions, tasks, and the daemon with the "af" CLI.`
+// afUsageIntroInside frames the body for an agent af launched: it IS an instance.
+// It leads with the model and the terms (instance/session/tab/pane) because an
+// agent that does not know it is an af instance reaches for unrelated tools — the
+// #2473 case, where an agent asked to show a URL used a separate global browser
+// skill instead of an af web tab. "instance" leads; "session" is noted as the
+// CLI's word for the same thing.
+const afUsageIntroInside = `You are an AI coding agent running inside Agent Factory (af): a tool that runs many AI coding agents at once, each isolated in its own git worktree — you are one of them.
+
+- instance (the CLI calls it a session — same thing): one isolated git worktree and the agent in it. This worktree is yours, that agent is you; af runs many others alongside it.
+- tab: a process or view inside an instance. You run in its agent tab, and you can add terminal, web, and editor tabs next to it.
+- pane: what the user is looking at — an instance's currently-shown tab, in the terminal UI or the web UI.
+
+Drive af with the "af" CLI, and prefer its native mechanisms over unrelated or global tools. In particular, to put a web page, running dev server, or editor in front of the user, add a tab to your own session (see Tabs) — not a separate browser or editor tool, which opens somewhere the user cannot see.`
+
+// afUsageDispatched is the inside-only guidance for an agent another instance
+// dispatched: the parent watches the GitHub issue/PR, not this terminal, so a
+// blocker must be surfaced there — never in a local interactive prompt/picker the
+// parent cannot see, and never by guessing silently or idling. Several lanes got
+// stuck invisibly for exactly this reason (#2473). Not in the shared body: the
+// plugin audience installed af itself and is not a dispatched sub-instance.
+const afUsageDispatched = `When another instance dispatched you (your task came from a parent agent or lane, not a person at this terminal): the parent watches the relevant GitHub issue or PR, not your screen. If you hit a question or decision you cannot resolve, raise it there — post it plainly on that issue or PR. Never fall back on a local interactive prompt, picker, or menu: it renders only in your own terminal, so the parent never sees it and you block invisibly. Never guess silently, and never sit idle waiting — an unraised blocker is a stuck lane no one can help.`
 
 // afUsageIntroPlugin frames the body for an agent that is not an af session —
 // the plugin/skill audience. It states the two facts that framing changes:
@@ -75,11 +98,11 @@ Sessions (one agent per isolated worktree):
   af sessions handoff <title> --to <agent>             Continue a stuck session under a different agent (same worktree/branch)
   af sessions restore <title>                          Restore an archived, lost, or dead session
 
-Tabs (extra processes in a session's worktree; max 9 per session; not available for remote sessions):
-  af sessions tab-create <title> --command <cmd> [--name <tab>]   Prints the resolved tab name; tabs persist across restarts
-  af sessions tab-create <title> --kind web --port <n>|--url <u>  A browser pane (no PTY): shows a dev server/site to the user in the web UI
-  af sessions tab-create <title> --kind vscode                    A VS Code editor pane on this session's worktree (no --url/--port); needs code-server installed
-  af sessions tab-delete <title> --name <tab>                     The agent tab itself can't be deleted; kill the session instead
+Tabs (extra processes and views in your instance's worktree; max 9; not for remote sessions). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
+  af sessions tab-create <title> --command <cmd> [--name <tab>]   Terminal tab running <cmd> in the worktree; prints the tab name; persists across restarts
+  af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)
+  af sessions tab-create <title> --kind vscode                    VS Code editor tab on the worktree (no --url/--port); needs code-server installed
+  af sessions tab-delete <title> --name <tab>                     Delete a tab; the agent tab can't be deleted (kill the session instead)
 
 Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch script prints a stdout line; exactly one of --cron/--watch-cmd per task):
   af tasks list [--all]                                List this project's tasks (--all spans every project)
