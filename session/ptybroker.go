@@ -142,13 +142,20 @@ type ptyBroker struct {
 	// short-circuits and no new capture is ever dialled (#2438). Set by readLoop
 	// under mu BEFORE it closes `done`, so anything that joins the loop sees it.
 	//
-	// It is meaningful ONLY while `capturing` is true — the pair reads as "a
-	// capture is installed, and it is spent". Every site that clears `capturing`
-	// clears this too, in the same critical section, so the flag can never
-	// out-live the capture it describes and be read as a claim about the NEXT
-	// one. (Leaving it latched would be harmless today, since `capturing == false`
-	// already routes to the reconcile that clears it — but it would make the
-	// field a lie to anyone who reads it on its own.)
+	// Read it ONLY together with `capturing`, never alone. The one read that
+	// exists — ensureCaptureStartedLocked's `capturing && !captureEnded` — is the
+	// contract: the pair means "a capture is installed, and it is spent". With
+	// `capturing` false this flag says NOTHING, and in particular does not mean a
+	// fresh capture; the reconcile clears it on the way to dialling one.
+	//
+	// It deliberately survives a teardown, because it CANNOT be cleared by one.
+	// Every teardown ends by joining the readLoop (`<-done` inside stopCapture),
+	// and the loop's last act before closing `done` is to latch this flag — so a
+	// teardown that clears it first has it set again by the join, every time. An
+	// attempt to clear it in those three sites shipped in #2438 and did exactly
+	// nothing; it was removed rather than moved after the join, because the state
+	// it was chasing is unobservable: the sole reader is guarded by `capturing`,
+	// which the same teardown already cleared.
 	captureEnded bool
 	closed       bool
 	// tabClosed records that this broker was shut down because ITS TAB was closed
@@ -413,7 +420,6 @@ func (b *ptyBroker) maybeStopCapture() {
 	stop := b.stopCapture
 	b.capturing = false
 	b.stopCapture = nil
-	b.captureEnded = false
 	b.mu.Unlock()
 
 	if stop != nil {
@@ -472,7 +478,6 @@ func (b *ptyBroker) resetCapture() {
 		b.capturing = false
 		b.stopCapture = nil
 	}
-	b.captureEnded = false
 	b.mu.Unlock()
 
 	// The barrier MUST be lifted on EVERY path out — a failed restart, a Snapshot
@@ -744,7 +749,6 @@ func (b *ptyBroker) shutdown(tabClosed bool) {
 		b.capturing = false
 		b.stopCapture = nil
 	}
-	b.captureEnded = false
 	b.mu.Unlock()
 	if stop != nil {
 		stop()

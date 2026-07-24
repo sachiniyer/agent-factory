@@ -257,3 +257,69 @@ func TestPTYBrokerUpstreamDeathDoesNotResurrectAClosedBroker(t *testing.T) {
 		t.Fatalf("StartCapture calls = %d, want 1 (a closed broker must never re-dial)", starts)
 	}
 }
+
+// TestPTYBrokerCaptureEndedIsOnlyMeaningfulWithCapturing pins what captureEnded
+// actually promises, because #2438 shipped a change that assumed the opposite
+// and did nothing.
+//
+// A teardown CANNOT clear this flag. Every teardown ends by joining the readLoop
+// (`<-done` inside stopCapture), and the loop's last act before closing `done`
+// is to latch the flag — so a teardown that clears it first has it set again by
+// the join, every single time. Clearing it there was a no-op, and the field doc
+// that claimed the flag "can never out-live the capture it describes" was false.
+//
+// What is actually true, and what this locks: the flag is meaningless once
+// `capturing` is false, and the next bring-up dials a fresh capture regardless
+// of the residue. Asserting the residue directly is the point — it stops the
+// next reader from "fixing" a latch that cannot be fixed and is not a bug.
+func TestPTYBrokerCaptureEndedIsOnlyMeaningfulWithCapturing(t *testing.T) {
+	state := func(b *ptyBroker) (capturing, ended bool) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.capturing, b.captureEnded
+	}
+
+	ch := &singleSocketChannel{snapshot: []byte("SCREEN")}
+	br := newPTYBroker(ch)
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN")
+	if capturing, ended := state(br); !capturing || ended {
+		t.Fatalf("live capture = {capturing:%v ended:%v}, want {true false}", capturing, ended)
+	}
+
+	// The last subscriber leaves: maybeStopCapture tears the capture down and
+	// JOINS the readLoop, whose defer latches the flag on its way out.
+	if err := a.Close(); err != nil {
+		t.Fatalf("close A: %v", err)
+	}
+	capturing, ended := state(br)
+	if capturing {
+		t.Fatalf("capturing = true after the last subscriber left, want false")
+	}
+	if !ended {
+		t.Fatal("captureEnded = false after a teardown joined the readLoop.\n\n" +
+			"If this ever passes, the join stopped latching the flag — re-read the field doc, " +
+			"because it says a teardown CANNOT clear it and that is why no teardown tries.")
+	}
+
+	// And the residue is harmless: the next bring-up reconciles it away and dials
+	// a genuinely fresh capture. This is the only property any caller depends on.
+	b, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe after teardown: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+	if capturing, ended := state(br); !capturing || ended {
+		t.Fatalf("re-armed capture = {capturing:%v ended:%v}, want {true false}", capturing, ended)
+	}
+	if starts, _ := ch.counts(); starts != 2 {
+		t.Fatalf("StartCapture calls = %d, want 2 (the teardown's residue must not block a fresh dial)", starts)
+	}
+	mustRepaintContains(t, b, "SCREEN")
+	ch.emit(t, []byte("after-teardown"))
+	mustData(t, b, "after-teardown")
+}
