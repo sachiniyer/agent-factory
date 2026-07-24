@@ -96,19 +96,47 @@ only needs the workspace tooling:
   runs through `sh`.
 - **`dd`** — used to stream the live PTY (present in both busybox and coreutils).
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
-- A libc/architecture compatible with the daemon's `af` binary. A **static**
-  `af` build (`CGO_ENABLED=0`) runs on any base (musl/alpine included); a
-  dynamically-linked `af` needs a matching glibc base (e.g. `debian:slim`).
+- A libc/architecture compatible with the daemon's `af` binary. The copied-in
+  binary is the **daemon's own executable**, and release builds are a plain
+  `go build` (cgo on) on `ubuntu-latest` — i.e. **dynamically linked against
+  glibc**. So your base must be **glibc, and its glibc must be ≥ the daemon
+  build's** (`ubuntu-latest` is glibc 2.39 today): `debian:trixie`/`ubuntu:24.04`
+  work, `debian:bookworm` (2.36) is too old, and a musl base (alpine) will not run
+  the binary at all. If you rebuild the daemon on a newer-glibc distro, rebuild the
+  image on a matching-or-newer base. (A **static** `af`, `CGO_ENABLED=0`, would run
+  on any base including alpine — but that is not how release builds are produced;
+  the integration test force-builds a static `af` precisely so it can use an alpine
+  test image.)
 
 The container's internal agent-server port is `8000`; avoid binding it in your
 image.
 
-A minimal example Dockerfile:
+#### The image this repo ships
+
+This repo carries a starting-point image so a docker-backed session works out of
+the box — build it with:
+
+```bash
+make session-image        # builds af-session:local from scripts/container/Dockerfile.session
+```
+
+It is based on `node:22-trixie-slim` (glibc 2.41; Node 22 for the codex CLI) and
+**includes `claude` and `codex`** — the two agents this repo's sessions use. The
+Dockerfile carries commented, one-uncomment install lines for the other agents
+(`gemini`, `amp`, `opencode`, `aider`); `devin` is not installed because af
+forwards it no per-agent credentials. Override the tag with
+`make session-image SESSION_IMAGE=my-org/af-runtime:latest`, then set that in the
+repo's `docker.image`. There is no registry step (bring-your-own, built locally).
+
+A minimal hand-rolled example, if you would rather not use the shipped one:
 
 ```dockerfile
-FROM alpine:3.20
-RUN apk add --no-cache git tmux bash
-# add the agent CLIs your sessions need, e.g. claude / codex / aider
+FROM node:22-trixie-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git tmux ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
+# a musl base (alpine) works only if the daemon's af is a static (CGO_ENABLED=0) build
 ```
 
 ### Operations
