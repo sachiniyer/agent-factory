@@ -1476,10 +1476,12 @@ test("config: the editor renders from the manifest and writes through the real p
   await expect(overrides.locator("input, select")).toHaveCount(0);
   await expect(overrides.locator(".af-config-readonly")).toContainText("af config set program_overrides.<name>");
 
-  // A hand-edited key is shown but never offered as a field whose save could only
-  // be refused.
+  // A structured key with no `af config set` scalar form is shown but never
+  // offered as a field whose save could only be refused. Its hint points at the
+  // config assistant, which edits these in the file — #2454 retired the old
+  // "hand-edit the file yourself" copy, and this assertion moves with it.
   const readOnly = pane.locator('.af-config-row[data-key="theme"] .af-config-readonly');
-  await expect(readOnly).toHaveText(/hand-edited/);
+  await expect(readOnly).toHaveText(/config assistant/);
   await expect(page.locator('.af-config-row[data-key="theme"] input')).toHaveCount(0);
 
   // Back to the sessions view for the flows that follow.

@@ -140,8 +140,10 @@ test("the control for a key is decided by the manifest, so an unknown key still 
   assert.equal(controlFor(entry({ type: "string", enum: ["stable", "preview"] })), "select");
   assert.equal(controlFor(entry({ type: "string" })), "text");
   assert.equal(controlFor(entry({ type: "int" })), "text");
-  // A hand-edited key is never offered as a field: the write would be refused,
-  // so an editable-looking control would be a dead end.
+  // A structured key with no scalar `af config set` form is never offered as a
+  // field: the write would be refused, so an editable-looking control would be a
+  // dead end. Its hint points at the config assistant (#2454), but the CONTROL is
+  // still read-only regardless of the copy.
   assert.equal(controlFor(entry({ settable: false, editable: false, type: "table" })), "readonly");
   // A DYNAMIC FAMILY is the subtle one, and the reason the control reads
   // `editable` rather than `settable`. program_overrides is settable — its
