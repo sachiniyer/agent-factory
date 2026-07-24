@@ -231,12 +231,7 @@ func buildDockerRoundTripImage(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the round-trip image failed (needs network on first run): %v\n%s", err, out)
-	}
+	buildDockerImageOrSkip(t, tag, dir, "the docker round-trip image")
 	return tag
 }
 
