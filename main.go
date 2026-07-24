@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/sachiniyer/agent-factory/commands"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -19,6 +20,10 @@ var (
 
 func main() {
 	sessionenv.HandleInternalExec()
+	// Consume the internal __upgrade-recovery invocation (the persistent recovery
+	// job execs the preserved previous binary this way) before Cobra, exactly as
+	// the session exec protocol above. An ordinary invocation returns immediately.
+	daemon.HandleUpgradeRecoveryExec()
 	rootCmd := rootCommand(commands.Options{Version: version})
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

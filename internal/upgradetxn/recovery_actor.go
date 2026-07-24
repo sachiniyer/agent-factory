@@ -36,10 +36,21 @@ func ParseRecoveryInvocation(args []string) (invocation RecoveryInvocation, matc
 	return RecoveryInvocation{HomeDir: home, TransactionID: args[4]}, true, nil
 }
 
-// runRecoveryActorWith is the runner core for the later production entrypoint
-// binding. The binding must supply TryAcquireRecovery (which derives identity
-// from os.Executable) and Supervisor.Run together; keeping that wrapper out of
-// this production-disabled slice avoids publishing an unreachable API.
+// RunRecoveryActor is the production entrypoint binding that runRecoveryActorWith
+// deferred: it supplies the real recovery-authority acquisition
+// ((*Transaction).TryAcquireRecovery, which derives identity from os.Executable)
+// together with the caller's supervisor. main.go routes the internal
+// __upgrade-recovery invocation here after ParseRecoveryInvocation, so the
+// preserved previous binary — never a candidate — runs the recovery/rollback
+// state machine. The supervisor's SupervisorOperations are injected by the
+// daemon package, which cannot be imported here without a cycle.
+func RunRecoveryActor(ctx context.Context, invocation RecoveryInvocation, supervisor Supervisor) error {
+	return runRecoveryActorWith(ctx, invocation, (*Transaction).TryAcquireRecovery, supervisor.Run)
+}
+
+// runRecoveryActorWith is the runner core for the production entrypoint binding
+// above. The binding supplies TryAcquireRecovery (which derives identity from
+// os.Executable) and Supervisor.Run together.
 func runRecoveryActorWith(
 	ctx context.Context,
 	invocation RecoveryInvocation,

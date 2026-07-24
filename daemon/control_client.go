@@ -115,6 +115,16 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 	if err := pingDaemon(); err == nil {
 		return nil
 	}
+	// #2212 R1: before spawning a daemon, defer to an in-progress upgrade rather
+	// than racing its recovery actor with a rival daemon. Fail-open — only a
+	// provably live upgrade stops the spawn, as a typed retryable error; a stale,
+	// corrupt, or absent journal proceeds. The gate is bounded, so a bad journal
+	// can never wedge this launch path (which fronts every af invocation).
+	if homeDir, ok := configHomeDir(); ok {
+		if decision, gateErr := checkUpgradeGate(homeDir); decision == upgradeGateInProgress {
+			return gateErr
+		}
+	}
 	if preferUnit {
 		configDir, configErr := config.GetConfigDir()
 		if configErr != nil {
