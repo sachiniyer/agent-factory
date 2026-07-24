@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // This file implements `af config set` (#1192). It writes a single scalar key
@@ -323,6 +325,183 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	return result, nil
 }
 
+// SetProjectConfigValue is the per-project counterpart of SetGlobalConfigValue
+// (#2216 Phase 5). It resolves selector (a prj_ id or a repository path) to a
+// registered project, validates key against BOTH the settable-key allowlist and
+// the manifest's personal-project scope, then surgically writes the value into
+// that project's machine-local config.toml under a file lock — the same
+// validated, comment/order-preserving writer, aimed at a different destination.
+// A key that is settable but does not admit the personal layer (a global-only or
+// repo-contract key) is rejected with an actionable message, never written.
+func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
+	if key == "auto_yes" {
+		return nil, RemovedAutoYesError()
+	}
+	project, err := ResolveProjectSelector(selector)
+	if err != nil {
+		return nil, err
+	}
+	section, leaf, spec, err := resolveProjectSettable(key)
+	if err != nil {
+		return nil, err
+	}
+
+	canonical, encoded, err := canonicalizeScalar(spec.kind, rawValue)
+	if err != nil {
+		return nil, fmt.Errorf("invalid value for %s: %w", key, err)
+	}
+	if spec.validate != nil {
+		if err := spec.validate(leaf, canonical); err != nil {
+			return nil, err
+		}
+	}
+
+	path, err := ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		return nil, err
+	}
+	prettyPath := prettyHomePath(path)
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded}
+
+	var result *SetResult
+	writeErr := WithFileLock(path, func() error {
+		var err error
+		result, err = write.applyProject(path, prettyPath)
+		return err
+	})
+	if writeErr != nil {
+		return nil, writeErr
+	}
+	return result, nil
+}
+
+// UnsetResult reports a successful `af config unset --project`. Removed is false
+// when there was no override to clear — the command is a clean no-op then, not an
+// error.
+type UnsetResult struct {
+	Key             string `json:"key"`
+	Path            string `json:"path"`
+	Removed         bool   `json:"removed"`
+	RequiresRestart bool   `json:"requires_restart"`
+}
+
+// UnsetProjectConfigValue removes key's personal override for a project so the
+// value falls back to the lower layers again (#2216 Phase 5). Clearing an
+// override is deliberately distinct from setting a value equal to the lower
+// layer, which would still be a present, winning override. Unsetting a key that
+// is not present is a clean no-op. It is scoped to a project: there is no global
+// unset today (remove the line from config.toml by hand, or set a new value).
+func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
+	if key == "auto_yes" {
+		return nil, RemovedAutoYesError()
+	}
+	project, err := ResolveProjectSelector(selector)
+	if err != nil {
+		return nil, err
+	}
+	section, leaf, _, err := resolveProjectSettable(key)
+	if err != nil {
+		return nil, err
+	}
+	path, err := ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		return nil, err
+	}
+	prettyPath := prettyHomePath(path)
+
+	var result *UnsetResult
+	writeErr := WithFileLock(path, func() error {
+		var err error
+		result, err = applyProjectUnset(path, prettyPath, section, leaf, key)
+		return err
+	})
+	if writeErr != nil {
+		return nil, writeErr
+	}
+	return result, nil
+}
+
+// resolveProjectSettable maps a user key to its settable spec AND enforces that
+// the key admits the personal-project layer in the manifest. The manifest is the
+// single authority on which keys may live where, so the write path checks it
+// before editing rather than maintaining a second per-project allowlist.
+func resolveProjectSettable(key string) (section, leaf string, spec settableKeySpec, err error) {
+	section, leaf, spec, ok := resolveSettable(key)
+	if !ok {
+		return "", "", settableKeySpec{}, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+
+			"Structural keys (root_agents, [theme], [keys] rebinds) are edited directly in config.toml",
+			key, strings.Join(SettableKeys(), ", "))
+	}
+	scopeKey := key
+	if spec.dynamic {
+		scopeKey = section
+	}
+	if !isProjectPersonalKey(scopeKey) {
+		return "", "", settableKeySpec{}, projectScopeError(scopeKey)
+	}
+	return section, leaf, spec, nil
+}
+
+// projectScopeError explains why a settable key cannot be a per-project personal
+// override, pointing the user at the location that key actually admits.
+func projectScopeError(key string) error {
+	if manifestGlobalOnlyKeySet()[key] {
+		return fmt.Errorf("%q is a global setting and cannot be set per project; set it globally with `af config set %s <value>`", key, key)
+	}
+	return fmt.Errorf("%q describes the repository and cannot be a personal per-project override; set it in the repository's %s file",
+		key, filepath.Join(InRepoConfigDirName, TomlConfigFileName))
+}
+
+// applyProjectUnset removes the target key line from a project's config.toml
+// under the caller-held lock. A missing file or absent key is a clean no-op. If
+// the removal empties the file it is deleted, so the project falls fully back to
+// the lower layers rather than leaving a contentless file the loader rejects.
+func applyProjectUnset(path, prettyPath, section, leaf, key string) (*UnsetResult, error) {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &UnsetResult{Key: key, Path: path, Removed: false}, nil
+		}
+		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+	}
+	updated, removed := deleteTOMLScalar(string(current), section, leaf)
+	if !removed {
+		return &UnsetResult{Key: key, Path: path, Removed: false}, nil
+	}
+	if projectConfigHasNoTopLevelKeys(updated) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to remove emptied %s: %w", prettyPath, err)
+		}
+		return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: true}, nil
+	}
+	// The edited bytes must still parse and validate exactly as a read would, so
+	// unset can never leave an unloadable personal config.
+	if _, err := parseProjectConfig([]byte(updated), path); err != nil {
+		return nil, fmt.Errorf("internal error: edited personal project config would not load (no changes written): %w", err)
+	}
+	if err := AtomicWriteFile(path, []byte(updated), 0644); err != nil {
+		return nil, err
+	}
+	return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: true}, nil
+}
+
+// projectConfigHasNoTopLevelKeys reports whether content decodes to zero
+// top-level keys (blank, comments-only, or whitespace). An emptied [section]
+// header still counts as a key and keeps the file, which is harmless: a
+// present-but-empty table contributes no leaves to resolution.
+func projectConfigHasNoTopLevelKeys(content string) bool {
+	if strings.TrimSpace(content) == "" {
+		return true
+	}
+	var shape map[string]any
+	if err := toml.Unmarshal([]byte(content), &shape); err != nil {
+		// Leave the decision to the caller's parse gate rather than deleting a
+		// file we could not understand.
+		return false
+	}
+	return len(shape) == 0
+}
+
 // scalarWrite is one validated, canonicalized `config set` edit, ready to apply
 // to config.toml.
 type scalarWrite struct {
@@ -391,6 +570,28 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 		result.Warnings = append(result.Warnings, warn)
 	}
 	return result, nil
+}
+
+// applyProject is the personal-project counterpart of apply. It reuses the same
+// surgical setTOMLScalar edit and re-parse-before-write discipline, but against
+// a project's config.toml: it does NOT inject the global schema_version marker
+// (that is global bookkeeping), gates on the personal-project loader rather than
+// the global one, and produces no listener-exposure warning (network-surface
+// keys are global-only and can never reach this path). Callers must hold the
+// project config file lock.
+func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
+	current, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
+	}
+	updated := setTOMLScalar(string(current), w.section, w.leaf, w.encoded)
+	if _, err := parseProjectConfig([]byte(updated), path); err != nil {
+		return nil, fmt.Errorf("internal error: edited personal project config would not load (no changes written): %w", err)
+	}
+	if err := AtomicWriteFile(path, []byte(updated), 0644); err != nil {
+		return nil, err
+	}
+	return &SetResult{Key: w.key, Value: w.canonical, Path: path, RequiresRestart: true}, nil
 }
 
 // canonicalizeScalar parses rawValue per kind and returns both the canonical
@@ -577,6 +778,63 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 		}
 	}
 	return rebuild()
+}
+
+// deleteTOMLScalar removes the [section] leaf line from content, changing only
+// that one line and preserving every other comment, blank line, and key. It is
+// the inverse of setTOMLScalar and recognizes the same two spellings of a table
+// entry — a leaf under a [section] header AND a top-level dotted key
+// (section.leaf = …) — removing whichever is present. section == "" targets a
+// root-block key. Returns the edited content and whether a line was removed; an
+// absent key leaves content untouched and reports false. An emptied [section]
+// header is left in place (a present-but-empty table resolves to no leaves).
+func deleteTOMLScalar(content, section, leaf string) (string, bool) {
+	if strings.TrimSpace(content) == "" {
+		return content, false
+	}
+
+	hadTrailingNewline := strings.HasSuffix(content, "\n")
+	ls := strings.Split(content, "\n")
+	if hadTrailingNewline && len(ls) > 0 && ls[len(ls)-1] == "" {
+		ls = ls[:len(ls)-1]
+	}
+
+	keyRe := regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+	var dottedKeyRe *regexp.Regexp
+	if section != "" {
+		dottedKeyRe = regexp.MustCompile(`^(\s*` + regexp.QuoteMeta(section) + `\s*\.\s*` + regexp.QuoteMeta(leaf) + `\s*=\s*)(.*)$`)
+	}
+
+	curSection := ""
+	removeAt := -1
+	for i, line := range ls {
+		if m := tomlHeaderRe.FindStringSubmatch(line); m != nil {
+			curSection = strings.TrimSpace(m[1])
+			continue
+		}
+		// Top-level dotted form (section.leaf = …), valid only at the root.
+		if dottedKeyRe != nil && curSection == "" && dottedKeyRe.MatchString(line) {
+			removeAt = i
+			break
+		}
+		if curSection != section {
+			continue
+		}
+		if keyRe.MatchString(line) {
+			removeAt = i
+			break
+		}
+	}
+	if removeAt < 0 {
+		return content, false
+	}
+
+	ls = append(ls[:removeAt], ls[removeAt+1:]...)
+	out := strings.Join(ls, "\n")
+	if hadTrailingNewline && out != "" {
+		out += "\n"
+	}
+	return out, true
 }
 
 // splitTrailingComment separates a TOML value from a trailing inline comment,

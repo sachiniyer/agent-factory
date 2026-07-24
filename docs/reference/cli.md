@@ -21,6 +21,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
+- [`af config unset`](#af-config-unset) — Clear a per-project config override
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af daemon adopt`](#af-daemon-adopt) — Hand a detached daemon back to the installed autostart unit
@@ -440,14 +441,17 @@ Read and write keys in the global config (~/.agent-factory/config.toml).
 
 "get"/"list" print the effective global config with defaults applied — what a
 session gets before any in-repo .agent-factory/config.toml override is layered
-on. Pass --project <repository-path> to inspect the existing global, legacy,
-and checked-in layers for that project. --explain shows every candidate and why
-it did or did not supply the effective value.
+on. Pass --project <repository-path> to inspect the existing global, checked-in,
+and personal per-project layers for that project. --explain shows every
+candidate and why it did or did not supply the effective value.
 
-"set" remains global-only: it writes a single settable key, editing only that
-value in place so all comments and ordering in config.toml are preserved.
-Changes apply the same way a hand-edit does: af and the daemon read config.toml
-at startup, so restart them to pick up a change.
+"set"/"unset" write config. Without --project they edit the global config,
+changing a single settable key in place so all comments and ordering are
+preserved. With --project <id-or-path> they edit that registered project's
+machine-local override instead (built-in < global < in-repo < personal project),
+which is never checked into the repository. Changes apply the same way a
+hand-edit does: af and the daemon read config at startup, so restart them to
+pick up a change.
 
 ```
 af config
@@ -458,6 +462,7 @@ af config
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
+- [`af config unset`](#af-config-unset) — Clear a per-project config override
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 
 **Global flags**
@@ -569,10 +574,20 @@ so they are not settable here. Ask the config assistant to change them (it edits
 the file and validates), or edit config.toml directly and run "af config validate".
 Changes apply on the next af / daemon start.
 
+With --project <id-or-path> the value is written to a registered project's
+machine-local config instead of the global file, as a personal override that
+beats the checked-in in-repo value on this machine and is never committed. Only
+the preference keys the manifest admits per project are accepted there
+(default_program, program_overrides.<agent>, branch_prefix); a global-only key
+is rejected with the location it actually belongs to. Clear an override with
+'af config unset <key> --project <id-or-path>'.
+
 Examples:
   af config set default_program codex
   af config set auto_update false
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
+  af config set default_program codex --project ~/work/myrepo
+  af config unset default_program --project ~/work/myrepo
 
 ```
 af config set <key> <value> [flags]
@@ -583,6 +598,41 @@ af config set <key> <value> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
+| `--project` | `string` | Write to this project's machine-local config instead of the global config (a prj_ id or a repository path) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af config unset
+
+Clear a per-project config override
+
+Remove one key's personal override for a project so the value falls back to
+the lower layers again (built-in < global < in-repo). Clearing an override is
+deliberately different from setting a value equal to the lower layer, which is
+still a present, winning override.
+
+--project <id-or-path> is required: unset targets a project's machine-local
+config (a prj_ id from 'af projects list', or a path inside a registered
+repository). It edits only the target key, preserving every other comment and
+value, and is a clean no-op when there is no override to clear. There is no
+global unset — remove a line from config.toml by hand, or 'af config set' a new
+value. Changes apply on the next af / daemon start.
+
+```
+af config unset <key> --project <id-or-path> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
+| `--project` | `string` | The project whose override to clear (a prj_ id or a repository path) |
 
 **Global flags**
 

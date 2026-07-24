@@ -145,14 +145,84 @@ func TestConfigGetExplainJSONCarriesContextAndCompleteTrace(t *testing.T) {
 	assert.Equal(t, "claude", envelope.Data.Default)
 	require.NotNil(t, envelope.Data.Winner)
 	assert.Equal(t, config.SourceRepoShared.String(), envelope.Data.Winner.Layer)
-	assert.Len(t, envelope.Data.Candidates, 4)
+	// built-in, global, legacy repo, repo-shared, and — since #2216 Phase 5 —
+	// the personal-project layer default_program now admits. This repo is not a
+	// registered project, so its personal candidate is allowed but absent.
+	assert.Len(t, envelope.Data.Candidates, 5)
+	var sawPersonal bool
 	for _, candidate := range envelope.Data.Candidates {
 		assert.NotEmpty(t, candidate.Result)
 		assert.NotEmpty(t, candidate.Reason)
 		if candidate.Layer == config.SourceRepoShared.String() {
 			assert.Equal(t, "TOML", candidate.Format)
 		}
+		if candidate.Layer == config.SourceProjectPersonal.String() {
+			sawPersonal = true
+			assert.True(t, candidate.Allowed, "default_program admits the personal layer")
+			assert.False(t, candidate.Present, "an unregistered repo has no personal override")
+			assert.Equal(t, "absent", candidate.Result)
+		}
 	}
+	assert.True(t, sawPersonal, "the trace must include the personal-project candidate")
+}
+
+// TestConfigSetUnsetProjectRoundTrip drives the per-project write path through
+// cobra: --project routes set/unset to the project's machine-local config, the
+// value resolves above the checked-in in-repo layer, and unset clears it.
+func TestConfigSetUnsetProjectRoundTrip(t *testing.T) {
+	home, repoRoot := setupConfigExplainCommandTest(t, "default_program = \"codex\"\n")
+	writeCommandTestInRepoConfig(t, repoRoot, "default_program = \"aider\"\n")
+	project, err := config.RegisterProject(repoRoot)
+	require.NoError(t, err)
+
+	oldSet, oldUnset := configSetProjectFlag, configUnsetProjectFlag
+	t.Cleanup(func() { configSetProjectFlag, configUnsetProjectFlag = oldSet, oldUnset })
+
+	configSetProjectFlag = project.ID
+	setCmd := &cobra.Command{}
+	var setOut bytes.Buffer
+	setCmd.SetOut(&setOut)
+	require.NoError(t, setCmd.ParseFlags(nil))
+	require.NoError(t, configSetCmd.RunE(setCmd, []string{"default_program", "gemini"}))
+	assert.Contains(t, setOut.String(), "for project "+project.ID)
+
+	personalPath, err := config.ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	require.FileExists(t, personalPath)
+
+	// The personal value now wins over the checked-in in-repo aider.
+	setConfigGetReadFlags(t, repoRoot, false, false)
+	got, err := runConfigGetForTest(t, "default_program")
+	require.NoError(t, err)
+	assert.Equal(t, "gemini\n", got)
+
+	configSetProjectFlag = ""
+	configUnsetProjectFlag = project.ID
+	unsetCmd := &cobra.Command{}
+	var unsetOut bytes.Buffer
+	unsetCmd.SetOut(&unsetOut)
+	require.NoError(t, configUnsetCmd.RunE(unsetCmd, []string{"default_program"}))
+	assert.Contains(t, unsetOut.String(), "cleared default_program")
+	require.NoFileExists(t, personalPath, "the last override cleared removes the personal file")
+
+	// Cleared: the effective value falls back to the in-repo aider again.
+	got, err = runConfigGetForTest(t, "default_program")
+	require.NoError(t, err)
+	assert.Equal(t, "aider\n", got)
+	_ = home
+}
+
+func TestConfigUnsetRequiresProject(t *testing.T) {
+	tempAFHome(t)
+	oldUnset := configUnsetProjectFlag
+	t.Cleanup(func() { configUnsetProjectFlag = oldUnset })
+	configUnsetProjectFlag = ""
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	err := configUnsetCmd.RunE(cmd, []string{"default_program"})
+	require.Error(t, err, "there is no global unset")
+	require.Contains(t, err.Error(), "--project")
 }
 
 func TestConfigGetDottedLeafUsesResolvedProvenance(t *testing.T) {

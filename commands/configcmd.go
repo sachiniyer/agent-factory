@@ -52,10 +52,12 @@ func jsonWrapError(cmd *cobra.Command, jsonMode bool, err error) error {
 var configJSONFlag bool
 
 var (
-	configGetExplainFlag  bool
-	configGetProjectFlag  string
-	configListExplainFlag bool
-	configListProjectFlag string
+	configGetExplainFlag   bool
+	configGetProjectFlag   string
+	configListExplainFlag  bool
+	configListProjectFlag  string
+	configSetProjectFlag   string
+	configUnsetProjectFlag string
 )
 
 // configEntry is one config key and its effective value. Value is
@@ -142,14 +144,17 @@ var configCmd = &cobra.Command{
 
 "get"/"list" print the effective global config with defaults applied — what a
 session gets before any in-repo .agent-factory/config.toml override is layered
-on. Pass --project <repository-path> to inspect the existing global, legacy,
-and checked-in layers for that project. --explain shows every candidate and why
-it did or did not supply the effective value.
+on. Pass --project <repository-path> to inspect the existing global, checked-in,
+and personal per-project layers for that project. --explain shows every
+candidate and why it did or did not supply the effective value.
 
-"set" remains global-only: it writes a single settable key, editing only that
-value in place so all comments and ordering in config.toml are preserved.
-Changes apply the same way a hand-edit does: af and the daemon read config.toml
-at startup, so restart them to pick up a change.`,
+"set"/"unset" write config. Without --project they edit the global config,
+changing a single settable key in place so all comments and ordering are
+preserved. With --project <id-or-path> they edit that registered project's
+machine-local override instead (built-in < global < in-repo < personal project),
+which is never checked into the repository. Changes apply the same way a
+hand-edit does: af and the daemon read config at startup, so restart them to
+pick up a change.`,
 }
 
 var configGetCmd = &cobra.Command{
@@ -313,14 +318,41 @@ so they are not settable here. Ask the config assistant to change them (it edits
 the file and validates), or edit config.toml directly and run "af config validate".
 Changes apply on the next af / daemon start.
 
+With --project <id-or-path> the value is written to a registered project's
+machine-local config instead of the global file, as a personal override that
+beats the checked-in in-repo value on this machine and is never committed. Only
+the preference keys the manifest admits per project are accepted there
+(default_program, program_overrides.<agent>, branch_prefix); a global-only key
+is rejected with the location it actually belongs to. Clear an override with
+'af config unset <key> --project <id-or-path>'.
+
 Examples:
   af config set default_program codex
   af config set auto_update false
-  af config set program_overrides.claude "/usr/local/bin/claude --verbose"`, tmux.SupportedProgramsString()),
+  af config set program_overrides.claude "/usr/local/bin/claude --verbose"
+  af config set default_program codex --project ~/work/myrepo
+  af config unset default_program --project ~/work/myrepo`, tmux.SupportedProgramsString()),
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		if configSetProjectFlag != "" {
+			res, err := config.SetProjectConfigValue(configSetProjectFlag, args[0], args[1])
+			if err != nil {
+				return jsonWrapError(cmd, configJSONFlag, err)
+			}
+			if configJSONFlag {
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
+				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
+			if res.RequiresRestart {
+				fmt.Fprintln(cmd.OutOrStdout(),
+					"note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)")
+			}
+			return nil
+		}
 
 		res, err := config.SetGlobalConfigValue(args[0], args[1])
 		if err != nil {
@@ -392,6 +424,50 @@ a non-zero exit names what is wrong so it can be fixed before restarting.`,
 	},
 }
 
+var configUnsetCmd = &cobra.Command{
+	Use:   "unset <key> --project <id-or-path>",
+	Short: "Clear a per-project config override",
+	Long: `Remove one key's personal override for a project so the value falls back to
+the lower layers again (built-in < global < in-repo). Clearing an override is
+deliberately different from setting a value equal to the lower layer, which is
+still a present, winning override.
+
+--project <id-or-path> is required: unset targets a project's machine-local
+config (a prj_ id from 'af projects list', or a path inside a registered
+repository). It edits only the target key, preserving every other comment and
+value, and is a clean no-op when there is no override to clear. There is no
+global unset — remove a line from config.toml by hand, or 'af config set' a new
+value. Changes apply on the next af / daemon start.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		if configUnsetProjectFlag == "" {
+			return jsonWrapError(cmd, configJSONFlag,
+				fmt.Errorf("unset requires --project <id-or-path>; there is no global unset (edit config.toml by hand or `af config set` a new value)"))
+		}
+		res, err := config.UnsetProjectConfigValue(configUnsetProjectFlag, args[0])
+		if err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
+		if configJSONFlag {
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+		}
+		if !res.Removed {
+			fmt.Fprintf(cmd.OutOrStdout(), "no %s override to clear for project %s\n", res.Key, configUnsetProjectFlag)
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
+			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
+		if res.RequiresRestart {
+			fmt.Fprintln(cmd.OutOrStdout(),
+				"note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)")
+		}
+		return nil
+	},
+}
+
 // echoValue renders a just-set value for the `set <key> = <value>` echo. An
 // empty string renders as `""` rather than as nothing: `set listen_addr =  in
 // …` is ambiguous (did it clear the value, or did the echo break?), and the
@@ -429,9 +505,15 @@ func init() {
 	configListCmd.Flags().StringVar(&configListProjectFlag, "project", "",
 		"Resolve config for the project at this repository path")
 	configSetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
+	configSetCmd.Flags().StringVar(&configSetProjectFlag, "project", "",
+		"Write to this project's machine-local config instead of the global config (a prj_ id or a repository path)")
 	configValidateCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
+	configUnsetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
+	configUnsetCmd.Flags().StringVar(&configUnsetProjectFlag, "project", "",
+		"The project whose override to clear (a prj_ id or a repository path)")
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configSetCmd)
 	configCmd.AddCommand(configValidateCmd)
+	configCmd.AddCommand(configUnsetCmd)
 }

@@ -70,6 +70,19 @@ const (
 	sourceGlobalOnly SourceSet = SourceSet(1) << SourceGlobal
 	sourceRepoOnly   SourceSet = SourceSet(1) << SourceRepoShared
 	sourceGlobalRepo SourceSet = sourceGlobalOnly | sourceRepoOnly
+
+	// sourcePersonalOnly is the machine-local per-project layer on its own. It is
+	// never used alone (a key that admits personal always also admits global),
+	// but naming the bit keeps the composed sets below readable.
+	sourcePersonalOnly SourceSet = SourceSet(1) << SourceProjectPersonal
+	// sourceGlobalPersonal admits a key globally and as a per-project personal
+	// override, with no checked-in in-repo layer (a pure preference key such as
+	// branch_prefix that a repository has no business dictating).
+	sourceGlobalPersonal SourceSet = sourceGlobalOnly | sourcePersonalOnly
+	// sourceGlobalRepoPersonal admits a key globally, in-repo (shared), and as a
+	// per-project personal override — the full preference chain for keys such as
+	// default_program and program_overrides.
+	sourceGlobalRepoPersonal SourceSet = sourceGlobalRepo | sourcePersonalOnly
 )
 
 // MergePolicy says how successively higher-precedence present values combine.
@@ -152,4 +165,13 @@ var (
 	precedenceGlobalRepo = []ConfigSource{SourceBuiltIn, SourceGlobal, SourceRepoShared}
 	precedenceRepo       = []ConfigSource{SourceBuiltIn, SourceRepoShared}
 	precedenceLegacyRepo = []ConfigSource{SourceBuiltIn, SourceLegacyRepo, SourceRepoShared}
+	// precedenceGlobalPersonal and precedenceGlobalRepoPersonal place the
+	// personal-project layer directly ABOVE the checked-in in-repo value: the
+	// shared file is the team default, and the whole point of a machine-local
+	// per-project override is to be able to beat it on this machine. The resolver
+	// sorts documents by ConfigSource ordinal, so SourceProjectPersonal (which is
+	// defined after SourceRepoShared) lands in exactly this position regardless of
+	// append order; these slices only have to name the layers.
+	precedenceGlobalPersonal     = []ConfigSource{SourceBuiltIn, SourceGlobal, SourceProjectPersonal}
+	precedenceGlobalRepoPersonal = []ConfigSource{SourceBuiltIn, SourceGlobal, SourceRepoShared, SourceProjectPersonal}
 )

@@ -911,6 +911,25 @@
       "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. (The TUI writes config directly in-process rather than via the SetConfigValue RPC — same capability, different transport, like session.send-prompt.)"
     },
     {
+      "id": "config.write-project",
+      "title": "Set or clear a personal per-project config override",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configcmd.go config set/unset --project (config.SetProjectConfigValue/UnsetProjectConfigValue)"
+      },
+      "verdict": "real-gap",
+      "issue": "#2216",
+      "notes": "Stage 5 of #2216 adds CLI per-project writes: `af config set <key> --project <id-or-path>` and `af config unset <key> --project`. The value lands in the project's machine-local ~/.agent-factory/.agent-factory-projects/<id>/config.toml, above the checked-in in-repo layer, and only for the preference keys the manifest admits per project. TUI/web target selection, source badge, and Clear-override are intentionally scheduled for #2216 stage 7 after the durable project model and personal layers exist."
+    },
+    {
       "id": "worktree.hooks.edit",
       "title": "Edit a repo's post-worktree hooks",
       "tui": {
@@ -1345,6 +1364,7 @@
       "af config get": "config.read",
       "af config list": "config.read",
       "af config set": "config.write",
+      "af config unset": "config.write-project",
       "af config validate": "config.validate",
       "af daemon adopt": "daemon.lifecycle",
       "af daemon install": "daemon.lifecycle",
@@ -1536,6 +1556,10 @@
       "af config list --project": "config.read-project",
       "af config set --help": "meta.discovery",
       "af config set --json": "cli.json-envelope",
+      "af config set --project": "config.write-project",
+      "af config unset --help": "meta.discovery",
+      "af config unset --json": "cli.json-envelope",
+      "af config unset --project": "config.write-project",
       "af config validate --help": "meta.discovery",
       "af config validate --json": "cli.json-envelope",
       "af daemon --help": "meta.discovery",
