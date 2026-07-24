@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
@@ -33,39 +32,21 @@ func (s *Sidebar) String() string {
 	rows := make([]string, len(s.visibleItems))
 	heights := make([]int, len(s.visibleItems))
 	totalLines := 0
-	// Demarcate the pinned root agent from the rest with a subtle rule (#2513).
-	// Root sorts first (LessInstanceOrder, #1144), so the rule is drawn as a LEADING
-	// line on the first non-root INSTANCE row after it. Doing it in the rendered
-	// string keeps s.visibleItems, s.selectedIdx, and the window math untouched — the
-	// rule is display-only — and it appears only when a root row is followed by a
-	// non-root one, so a root-only or root-less list gets no dangling rule.
-	instances := s.proj.GetInstances()
-	rootSeen := false
-	sepDrawn := false
 	for i, item := range s.visibleItems {
 		isSelected := i == s.selectedIdx
-		if item.IsHeader {
+		switch {
+		case item.IsHeader:
 			rows[i] = s.renderHeader(item.Kind, isSelected)
-		} else {
-			switch item.Kind {
-			case SectionInstances:
-				if item.IsTab {
-					rows[i] = s.renderTabRow(item, isSelected)
-				} else {
-					row := s.renderInstance(item.ItemIndex, isSelected)
-					if item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
-						session.IsReservedTitle(instances[item.ItemIndex].Title) {
-						rootSeen = true
-					} else if rootSeen && !sepDrawn {
-						row = s.renderRootSeparator() + "\n" + row
-						sepDrawn = true
-					}
-					rows[i] = row
-				}
-			case SectionArchived:
-				// Archived rows are flat instance rows (#1028) — no tab children.
-				rows[i] = s.renderInstance(item.ItemIndex, isSelected)
-			}
+		case item.IsRootSep:
+			// The display-only demarcation rule under the pinned root agent (#2513),
+			// its own item so heights/zones account for it (registerZones skips it).
+			rows[i] = s.renderRootSeparator()
+		case item.Kind == SectionInstances && item.IsTab:
+			rows[i] = s.renderTabRow(item, isSelected)
+		default:
+			// An instance row — live (SectionInstances) or archived (SectionArchived,
+			// flat #1028). Both index GetInstances() by ItemIndex.
+			rows[i] = s.renderInstance(item.ItemIndex, isSelected)
 		}
 		heights[i] = lipgloss.Height(rows[i])
 		totalLines += heights[i]
@@ -77,6 +58,14 @@ func (s *Sidebar) String() string {
 	if s.height > 0 && totalLines > avail {
 		s.scrollToSelection(heights, avail)
 		start = s.scrollOffset
+		// The root demarcation rule has no row above it to set off once root scrolls
+		// out of the window, so skip it when it would be the first rendered row —
+		// otherwise a scrolled window opens with a dangling hairline directly under
+		// the "▲ N more" indicator (#2513, P3-1). The selection sits below the rule,
+		// so advancing past it never scrolls the selection out of view.
+		if start < len(s.visibleItems) && s.visibleItems[start].IsRootSep {
+			start++
+		}
 		end, _, _ = fitWindow(heights, start, avail)
 		hiddenAbove = start
 		hiddenBelow = len(rows) - end

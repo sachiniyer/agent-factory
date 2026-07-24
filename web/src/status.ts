@@ -184,19 +184,16 @@ export function canHandoff(s: SessionData): boolean {
   return s.can_handoff === true;
 }
 
-/** The reserved root-agent title, mirroring session.RootSessionTitle (Go,
- *  session/reserved.go). */
-export const ROOT_SESSION_TITLE = "root";
-
 /**
- * Whether a session is the reserved root agent — a mirror of Go's
- * session.IsReservedTitle (session/reserved.go): case-insensitive on the trimmed
- * title. Root has no dedicated projected flag; its identity IS its reserved
- * title, so both rails test it the same way rather than the UI inventing a new
- * predicate (#2513).
+ * Whether a session is the reserved root agent (#2513). The web CONSUMES the
+ * daemon-projected `is_root` decision (InstanceData.IsRoot — the daemon's own
+ * session.IsReservedTitle, scrubbed by ForStorage) rather than re-deriving the
+ * reserved-title rule in the browser, the same "consume the decision, don't
+ * re-implement it" discipline as can_kill/can_handoff/lifecycle_action. Absence or
+ * false fails closed (treated as not root).
  */
 export function isRootSession(s: SessionData): boolean {
-  return s.title.trim().toLowerCase() === ROOT_SESSION_TITLE;
+  return s.is_root === true;
 }
 
 /**

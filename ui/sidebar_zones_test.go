@@ -9,8 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
+	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
 // ----------------------------------------------------------------------------
@@ -122,6 +124,50 @@ func TestSidebarArrowZoneMatchesRenderedGlyph(t *testing.T) {
 	id, _, ok = reg.Resolve(r.X+3, r.Y)
 	require.True(t, ok)
 	assert.Equal(t, zones.TreeInstance("t-00"), id)
+}
+
+// TestSidebar_RootSeparatorKeepsArrowZoneAligned pins the #2513 P2 mouse bug: the
+// demarcation rule under the pinned root is its OWN visibleItem, so the arrow
+// hit-zone on the first NON-ROOT row still lands on the rendered ▸/▾ glyph. When
+// the rule was instead welded into that row's string it shifted every line of the
+// block down one, but sidebar_zones.go registered the arrow at the un-shifted Y —
+// the visible arrow fell outside its 1x1 rect, so a click missed it and a
+// double-click fell through to attach. The expected cell is read from the RENDERED
+// output (not the registry), so a registry-derived click could not hide the drift.
+func TestSidebar_RootSeparatorKeepsArrowZoneAligned(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	dir := t.TempDir()
+	mkTabbed := func(title string) {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: dir, Program: "test"})
+		require.NoError(t, err)
+		addAgentShellTabs(inst)
+		addTestInstance(s, inst)
+	}
+	mkTabbed("root")
+	mkTabbed("worker")
+
+	reg := zones.NewRegistry()
+	s.SetZoneRegistry(reg)
+	rect := layout.Rect{X: 4, Y: 2, W: 38, H: 24}
+	s.SetRect(rect)
+	s.SetSelectedInstance(1) // worker (root sorts first) — expands to ▾, rule sits above it.
+
+	reg.Reset()
+	lines := plainLines(s.String())
+
+	require.Contains(t, s.String(), strings.Repeat("─", 10),
+		"root + a non-root must draw the demarcation rule")
+
+	r, ok := reg.Find(zones.TreeArrow("worker"))
+	require.True(t, ok, "arrow zone for the first non-root instance")
+	assert.Equal(t, '▾', runeAtCell(lineAt(t, lines, rect, r.Y), r.X-rect.X),
+		"the arrow zone must cover the rendered ▾ glyph on the row below the rule (#2513 P2)")
+
+	// Resolving the arrow cell hits the arrow, so a click toggles rather than
+	// falling through to TreeInstance -> select/attach.
+	id, _, ok := reg.Resolve(r.X, r.Y)
+	require.True(t, ok)
+	assert.Equal(t, zones.TreeArrow("worker"), id)
 }
 
 // TestSidebarZonesClippedToRect: rows scrolled out of the window register no

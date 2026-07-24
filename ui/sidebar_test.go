@@ -313,6 +313,48 @@ func TestSidebar_RootSeparator(t *testing.T) {
 		"a list with no root must draw no rule (#2513)")
 }
 
+// TestSidebar_RootSeparatorNoDanglingRuleWhenScrolled pins #2513 P3-1: because the
+// rule is its own visibleItem, a scrolled window that pushes root above the fold
+// skips a leading rule rather than opening with a dangling hairline under the
+// "▲ N more" indicator. The invariant checked: wherever a rule line renders, root
+// is directly above it — it never leads the window.
+func TestSidebar_RootSeparatorNoDanglingRuleWhenScrolled(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	dir := t.TempDir()
+	for _, title := range []string{"root", "alpha", "beta", "gamma"} {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: dir, Program: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		addAgentShellTabs(inst)
+		addTestInstance(s, inst)
+	}
+	// A short window with a lower row selected forces a scroll that pushes root off
+	// (the reviewer's exact repro: select beta in root+alpha+beta+gamma at ~12 rows).
+	s.SetSize(30, 12)
+	s.SetSelectedInstance(2) // beta
+
+	isRule := func(l string) bool {
+		tr := strings.TrimSpace(l)
+		return tr != "" && strings.Trim(tr, "─") == ""
+	}
+	lines := plainLines(s.String())
+	for i, l := range lines {
+		if !isRule(l) {
+			continue
+		}
+		above := ""
+		for j := i - 1; j >= 0; j-- {
+			if strings.TrimSpace(lines[j]) != "" {
+				above = lines[j]
+				break
+			}
+		}
+		assert.Contains(t, above, "root",
+			"the demarcation rule must sit directly under root, never dangle at the window top (#2513 P3-1)")
+	}
+}
+
 // indicatorArrows reports which "▲/▼ N more" scroll-indicator rows are present
 // in the rendered output. Detection keys on the "more" text because expanded
 // section headers also use a "▼ " arrow.

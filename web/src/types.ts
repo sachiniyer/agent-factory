@@ -111,6 +111,11 @@ export interface SessionData {
    *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
    *  when unknowable. */
   current_agent?: string;
+  /** Daemon-owned reserved-root decision (#2513): true for the always-on root
+   *  agent. The web pins root to the top of the rail and draws the demarcation rule
+   *  by CONSUMING this decision (session.IsReservedTitle, projected) rather than
+   *  re-matching the title in the browser; absence/false fails closed (not root). */
+  is_root?: boolean;
   /** Live, projection-only model diagnostic; never restored from instances.json. */
   model_change?: AgentModelChange;
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */

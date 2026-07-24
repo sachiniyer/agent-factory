@@ -44,6 +44,12 @@ type SidebarItem struct {
 	ItemIndex int // index within the section's children (instances/tasks)
 	IsTab     bool
 	TabIndex  int // 0-based tab slot; meaningful only when IsTab
+	// IsRootSep marks the display-only hairline that demarcates the pinned root
+	// agent from the rest (#2513). It is its OWN item — never welded into a row —
+	// so the window math and mouse hit-zones account for its height; it carries
+	// ItemIndex -1 and is neither a nav stop nor an instance row (isInstanceRow),
+	// so every cursor/zone/selection loop skips it by construction.
+	IsRootSep bool
 }
 
 // SidebarSection holds state for one collapsible section.
@@ -57,7 +63,7 @@ type SidebarSection struct {
 // row in either the Instances or Archived section (#1028). Both carry a
 // projection ItemIndex; the difference is only which folder they render under.
 func isInstanceRow(item SidebarItem) bool {
-	return !item.IsHeader && (item.Kind == SectionInstances || item.Kind == SectionArchived)
+	return !item.IsHeader && !item.IsRootSep && (item.Kind == SectionInstances || item.Kind == SectionArchived)
 }
 
 // partitionByArchived splits projection indices into live and archived (#1028).

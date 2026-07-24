@@ -46,6 +46,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		CanKill:               canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:            i.canHandoffLocked(),
 		CurrentAgent:          i.currentAgentNameLocked(),
+		IsRoot:                IsReservedTitle(i.Title),
 		ModelChange:           agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		Height:                i.Height,
 		Width:                 i.Width,

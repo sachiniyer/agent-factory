@@ -7585,9 +7585,8 @@ function isLimitReached(s) {
 function canHandoff(s) {
   return s.can_handoff === true;
 }
-var ROOT_SESSION_TITLE = "root";
 function isRootSession(s) {
-  return s.title.trim().toLowerCase() === ROOT_SESSION_TITLE;
+  return s.is_root === true;
 }
 function compareSessionsForRail(a, b) {
   const aArchived = isArchived(a);

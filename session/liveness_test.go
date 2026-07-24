@@ -168,6 +168,29 @@ func TestLifecycleActionIsProjectionOnly(t *testing.T) {
 		"instances.json must not persist a UI capability derived from live state")
 }
 
+// TestIsRootIsSharedAcrossInstanceAndProjection pins #2513's cross-surface
+// contract: the reserved-root decision the web consumes (InstanceData.IsRoot) is
+// exactly the daemon's own session.IsReservedTitle, so the browser never
+// re-derives the reserved-title rule (and cannot drift from its case-insensitive,
+// trimmed spelling). It is projection-only — scrubbed before disk like CanKill.
+func TestIsRootIsSharedAcrossInstanceAndProjection(t *testing.T) {
+	for _, title := range []string{"root", "Root", "  root  ", "worker", ""} {
+		data := (&Instance{ID: "id", Title: title, liveness: LiveReady}).ToInstanceData()
+		require.Equal(t, IsReservedTitle(title), data.IsRoot,
+			"projected IsRoot must equal session.IsReservedTitle for %q", title)
+	}
+
+	rootData := (&Instance{ID: "root-id", Title: "root", liveness: LiveReady}).ToInstanceData()
+	require.True(t, rootData.IsRoot)
+
+	stored := rootData.ForStorage()
+	require.False(t, stored.IsRoot, "IsRoot is derived live, never persisted")
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "is_root",
+		"instances.json must not persist a UI decision derived from the live title")
+}
+
 func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

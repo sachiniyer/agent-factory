@@ -178,7 +178,7 @@ test("orderedSessions: the reserved root agent pins to the top despite a newest 
   const list = [
     sess("beta", { created_at: "2026-01-01T00:00:00Z" }),
     // Newest created_at — would sort LAST among live rows without the root pin.
-    sess("root", { created_at: "2026-06-01T00:00:00Z" }),
+    sess("root", { is_root: true, created_at: "2026-06-01T00:00:00Z" }),
     sess("alpha", { created_at: "2026-01-02T00:00:00Z" }),
   ];
   // Root leads by IDENTITY, not by age — mirroring the TUI's LessInstanceOrder so a
@@ -186,12 +186,19 @@ test("orderedSessions: the reserved root agent pins to the top despite a newest 
   assert.deepEqual(orderedSessions(list).map((s) => s.title), ["root", "beta", "alpha"]);
 });
 
-test("orderedSessions: the root pin is case-insensitive on the trimmed title, like IsReservedTitle (#2513)", () => {
+test("orderedSessions: the root pin follows the projected is_root flag, not the title text (#2513)", () => {
+  // The web CONSUMES the daemon's reserved-root decision (InstanceData.IsRoot,
+  // session.IsReservedTitle) rather than re-matching the title, so the daemon owns
+  // the case-insensitive/trimmed rule and the browser cannot drift from it.
   const list = [
     sess("worker", { created_at: "2026-01-01T00:00:00Z" }),
-    sess(" Root ", { created_at: "2026-06-01T00:00:00Z" }),
+    // Flagged root pins regardless of how its title is spelled.
+    sess("primary", { is_root: true, created_at: "2026-06-01T00:00:00Z" }),
+    // A title that merely LOOKS like root but was not flagged does NOT pin — the
+    // web fails closed on the projection, it does not second-guess it from the text.
+    sess("root", { created_at: "2026-02-01T00:00:00Z" }),
   ];
-  assert.deepEqual(orderedSessions(list).map((s) => s.title), [" Root ", "worker"]);
+  assert.deepEqual(orderedSessions(list).map((s) => s.title), ["primary", "worker", "root"]);
 });
 
 // --- tabToKeepOnClose: a pane follows a TAB, never a slot -------------------

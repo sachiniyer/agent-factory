@@ -264,8 +264,21 @@ func (s *Sidebar) rebuildVisibleItems() {
 			rows := tree.Flatten(len(live),
 				func(i int) bool { return s.instanceExpanded(instances[live[i]]) },
 				func(i int) int { return len(tree.TabLabels(instances[live[i]])) })
+			// The reserved root agent sorts first (LessInstanceOrder, #1144), so
+			// live[0] is root when one exists. Emit the demarcation rule as its OWN
+			// item just before the first non-root INSTANCE row — and only then, so a
+			// root-only or root-less list gets no dangling rule (#2513). Its own item
+			// (not a line welded into a row) keeps the window math and the mouse
+			// hit-zones correct.
+			rootPresent := len(live) > 0 && session.IsReservedTitle(instances[live[0]].Title)
+			sepDone := false
 			for _, r := range rows {
-				item := SidebarItem{Kind: SectionInstances, ItemIndex: live[r.InstanceIndex]}
+				idx := live[r.InstanceIndex]
+				if rootPresent && !sepDone && !r.IsTab() && !session.IsReservedTitle(instances[idx].Title) {
+					items = append(items, SidebarItem{Kind: SectionInstances, IsRootSep: true, ItemIndex: -1})
+					sepDone = true
+				}
+				item := SidebarItem{Kind: SectionInstances, ItemIndex: idx}
 				if r.IsTab() {
 					item.IsTab = true
 					item.TabIndex = r.TabIndex
