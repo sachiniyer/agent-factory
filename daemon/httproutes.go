@@ -143,6 +143,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/RegisterProject",
+		Description:   "Register a git checkout as a durable, sessionless project by path (expand ~, resolve the git root, validate, persist to the registry) — resolved on the daemon's filesystem, idempotent for a known checkout.",
+		RequestFields: jsonFields(reflect.TypeOf(RegisterProjectRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterProject) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/DeliverPrompt",
 		Description:   "Deliver a prompt to a session, auto-creating it if it does not exist yet.",
 		RequestFields: jsonFields(reflect.TypeOf(DeliverPromptRequest{})),

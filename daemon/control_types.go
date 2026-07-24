@@ -169,6 +169,28 @@ type DeleteProjectResponse struct {
 	KilledCount int `json:"killed_count"`
 }
 
+// RegisterProjectRequest asks the daemon to register a git checkout as a durable,
+// sessionless project in the #2355 registry (#2456). Path is a user-supplied
+// path — an absolute path, or one with a leading ~ — that the DAEMON resolves on
+// its own filesystem: it expands ~, resolves symlinks, and walks to the git
+// checkout's canonical main-repo root. Resolving daemon-side is what makes the
+// web/remote path correct — the path names a directory on the daemon host, not
+// the client's. Registration is idempotent: a known checkout is a no-op success
+// that returns the existing identity.
+type RegisterProjectRequest struct {
+	Path string `json:"path"`
+}
+
+// RegisterProjectResponse carries the durable identity the registration
+// resolved to. The project appears in ListProjects and, once #2456's UI slices
+// land, as an empty row in the project switcher until a session is created into
+// it. OK is always true on a nil error (a redundant flag kept for wire symmetry
+// with the other project RPCs).
+type RegisterProjectResponse struct {
+	OK      bool           `json:"ok"`
+	Project config.Project `json:"project"`
+}
+
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`

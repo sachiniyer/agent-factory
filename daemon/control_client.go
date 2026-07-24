@@ -434,6 +434,19 @@ func DeleteProject(req DeleteProjectRequest) (DeleteProjectResponse, error) {
 	return resp, nil
 }
 
+// RegisterProject asks the daemon to register a git checkout as a durable,
+// sessionless project (#2456). The daemon resolves req.Path on its OWN
+// filesystem (expand ~, git root, validate) and persists to the #2355 registry;
+// registering a known checkout is an idempotent success. Returns the resolved
+// durable identity.
+func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
+	var resp RegisterProjectResponse
+	if err := callDaemon("RegisterProject", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // SendPrompt asks the daemon to send a prompt to an existing session.
 func SendPrompt(req SendPromptRequest) error {
 	var resp SendPromptResponse

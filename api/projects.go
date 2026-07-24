@@ -34,29 +34,43 @@ claim that a new checkout at a reused path has the registered identity.`,
 	},
 }
 
-var projectsRegisterCmd = &cobra.Command{
-	Use:   "register <path>",
-	Short: "Register a project with a stable local identity",
-	Long: `Register a project directory with a stable, machine-local identity.
+// registerProjectViaDaemon is the daemon seam, overridable in tests.
+var registerProjectViaDaemon = daemon.RegisterProject
+
+func newProjectsAddCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "add <path>",
+		Aliases: []string{"register"},
+		Short:   "Add a project: register a repo by path with a stable local identity",
+		Long: `Add a project by registering a git checkout with a stable, machine-local
+identity, so it appears as an (initially sessionless) project you can create
+sessions into.
+
+The path may be absolute or start with ~; the daemon expands and resolves it on
+its OWN filesystem, walks to the checkout's canonical main-repo root, and
+validates it is a git repository (an actionable error otherwise). Any directory
+inside a checkout resolves to that root. Registration is idempotent: adding a
+known checkout is a no-op success that returns its existing identity.
 
 The returned project id survives an explicit rebind after the checkout moves.
-Two clones remain separate projects. Any directory inside a checkout resolves
-to that checkout's canonical main-repo root, and registration is idempotent for
-the same checkout. Identity is anchored in an AF-home-scoped
+Two clones remain separate projects. Identity is anchored in an AF-home-scoped
 agent-factory/checkout-id-<home-id> marker under the Git common directory, so
 one AF home's reset cannot remove another home's identity. No working-tree file
-is created.`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		log.Initialize(false)
-		defer log.Close()
+is created, and adding a project does NOT start an always-on agent for it.
 
-		project, err := config.RegisterProject(args[0])
-		if err != nil {
-			return jsonError(err)
-		}
-		return jsonOut(project)
-	},
+'register' is a deprecated alias for 'add'.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			log.Initialize(false)
+			defer log.Close()
+
+			project, err := registerProjectViaDaemon(daemon.RegisterProjectRequest{Path: args[0]})
+			if err != nil {
+				return jsonError(err)
+			}
+			return jsonOut(project)
+		},
+	}
 }
 
 var projectsRebindCmd = &cobra.Command{
