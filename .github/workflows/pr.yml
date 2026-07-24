@@ -118,8 +118,34 @@ jobs:
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
 
+      # Warm the base image the integration docker/ssh round-trip tests build
+      # (FROM alpine:3.20) ONCE, with retry, so each per-test `docker build`
+      # resolves it from the local cache instead of hammering Docker Hub. A
+      # registry blip there reddened master twice in an hour (#2521); warming
+      # removes most of that exposure, and the in-test bounded-retry + narrow,
+      # loud SKIP (integration/image_build_test.go) covers the residual.
+      # Best-effort: a persistently-unreachable registry falls through to the
+      # tests' skip rather than failing the job here — the tests are the ones
+      # that must decide skip-vs-fail, not this warm step.
+      - name: Warm the integration base image (alpine:3.20)
+        run: |
+          for i in 1 2 3 4 5; do
+            if docker pull alpine:3.20; then
+              echo "warmed alpine:3.20 on attempt $i"
+              exit 0
+            fi
+            echo "::warning::alpine:3.20 pull attempt $i failed; retrying"
+            sleep $((i * 5))
+          done
+          echo "::warning::could not warm alpine:3.20 after 5 attempts; integration docker builds will retry and may skip (#2521)"
+
+      # -timeout is explicit (was the implicit 10m default): the integration
+      # package's docker builds now retry a transient registry failure, and this
+      # bounds the whole suite's wall clock regardless. The per-build retry is
+      # itself capped by a total wall-clock budget in image_build_test.go, so this
+      # is headroom, not a crutch.
       - name: Run tests
-        run: go test -v -race -count=1 ./...
+        run: go test -v -race -count=1 -timeout=15m ./...
 
   # KillMode=process is the compatibility fence that keeps pre-scope tmux
   # servers alive, so the daemon's abrupt-failure cleanup cannot be proven by

@@ -68,6 +68,20 @@ const outputMissingCopyInput = `#6 [3/5] COPY entrypoint.sh /entrypoint.sh
 #6 ERROR: failed to calculate checksum of ref: "/entrypoint.sh": not found
 ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref: "/entrypoint.sh": not found`
 
+// a RUN step whose `apk add` is 429'd by the ALPINE PACKAGE MIRROR — NOT the
+// container registry. This is the #2521 P2-a trap: a bare 429 short-circuit would
+// skip it, but the base image resolved fine (DONE) and no docker-registry host
+// appears, so it must FAIL — an apk 429 can equally be a Dockerfile/mirror problem
+// we must see, and a rate limit is durable, so skipping it would silently drop the
+// docker/ssh backend coverage for hours.
+const outputApkMirrorRateLimit = `#2 [internal] load metadata for docker.io/library/alpine:3.20
+#2 DONE 0.3s
+#5 [2/2] RUN apk add --no-cache git tmux bash
+#5 1.402 fetch https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz
+#5 1.905 ERROR: https://dl-cdn.alpinelinux.org/alpine/v3.20/main: 429 Too Many Requests
+#5 ERROR: process "/bin/sh -c apk add --no-cache git tmux bash" did not complete successfully: exit code: 1
+ERROR: failed to build: failed to solve: process "/bin/sh -c apk add --no-cache git tmux bash" did not complete successfully: exit code: 1`
+
 func TestDockerBuildRegistryUnreachable_SkipsOnlyRegistryFailures(t *testing.T) {
 	skip := []struct {
 		name   string
@@ -96,6 +110,7 @@ func TestDockerBuildRegistryUnreachable_SkipsOnlyRegistryFailures(t *testing.T) 
 	}{
 		{"RUN unable to select packages (Dockerfile bug)", outputRunUnableToSelectPackages},
 		{"RUN apk MIRROR network timeout (transient but not the registry)", outputRunApkMirrorTimeout},
+		{"RUN apk MIRROR 429 (the P2-a trap: a 429 from a NON-registry host must NOT skip)", outputApkMirrorRateLimit},
 		{"missing COPY input (build-context bug)", outputMissingCopyInput},
 		{"empty output", ""},
 		{"a bare successful-looking log", "#2 [internal] load metadata for docker.io/library/alpine:3.20\n#2 DONE 0.2s"},
@@ -123,6 +138,8 @@ func TestDockerBuildFailover_Policy(t *testing.T) {
 		{"registry 429, exhausted → skip", outputRegistryRateLimit, false, actionSkipRegistry},
 		{"apk mirror timeout, attempts left → retry", outputRunApkMirrorTimeout, true, actionRetry},
 		{"apk mirror timeout, exhausted → FAIL (not skip)", outputRunApkMirrorTimeout, false, actionFailTransient},
+		{"apk mirror 429, attempts left → retry", outputApkMirrorRateLimit, true, actionRetry},
+		{"apk mirror 429, exhausted → FAIL (not skip)", outputApkMirrorRateLimit, false, actionFailTransient},
 		{"Dockerfile bug, attempts left → fail now (no retry)", outputRunUnableToSelectPackages, true, actionFailDeterministic},
 		{"Dockerfile bug, exhausted → fail now", outputRunUnableToSelectPackages, false, actionFailDeterministic},
 		{"missing COPY input → fail now", outputMissingCopyInput, true, actionFailDeterministic},
@@ -140,7 +157,7 @@ func TestDockerBuildFailover_Policy(t *testing.T) {
 // looks transient — the property that keeps a real bug from being retried into a
 // skip.
 func TestDockerBuildLooksTransient_GatesRetry(t *testing.T) {
-	transient := []string{outputRegistryIOTimeout, outputRegistryRateLimit, outputRegistryDNSFailure, outputRegistryTLSTimeout, outputRunApkMirrorTimeout}
+	transient := []string{outputRegistryIOTimeout, outputRegistryRateLimit, outputRegistryDNSFailure, outputRegistryTLSTimeout, outputRunApkMirrorTimeout, outputApkMirrorRateLimit}
 	for _, out := range transient {
 		if !dockerBuildLooksTransient(out) {
 			t.Errorf("transient output was not recognized as retryable:\n%s", out)
