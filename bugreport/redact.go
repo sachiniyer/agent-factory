@@ -126,11 +126,26 @@ func newRedactor() *redactor {
 	return &redactor{home: home, users: users}
 }
 
-// appendUserToken adds a username token to the scrub list, skipping empties,
-// path-ish junk, and tokens under 3 chars (too short to replace safely without
-// mangling unrelated substrings).
+// appendUserToken adds a username token to the scrub list — BOTH the raw form and,
+// when they differ, its lowercased form. The username scrub matches byte-exact, but
+// the branch stored in instances.json is strings.ToLower(username)
+// (config.BranchPrefix), so a mixed-case account ("Sachin.Iyer") would otherwise
+// ship its lowercased branch prefix ("sachin.iyer/…") verbatim — the home-to-tilde
+// collapse cannot catch it (different case, not a path). Registering both closes
+// that leak for the same class as the non-word-boundary one (#2533).
 func appendUserToken(users []string, name string) []string {
 	name = strings.TrimSpace(name)
+	users = addUserVariant(users, name)
+	if lower := strings.ToLower(name); lower != name {
+		users = addUserVariant(users, lower)
+	}
+	return users
+}
+
+// addUserVariant adds one username spelling to the scrub list, skipping empties,
+// path-ish junk, and tokens under 3 chars (too short to replace safely without
+// mangling unrelated substrings), and deduping.
+func addUserVariant(users []string, name string) []string {
 	if len(name) < 3 || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		return users
 	}
@@ -161,7 +176,22 @@ func (r *redactor) scrub(s string) string {
 	// when the username ends in a non-word rune (an OS username like "test-"), so
 	// "test-/fix-login-bug" in a branch leaked the username unredacted — a silent
 	// redaction failure in a bundle meant to be safe to share (#2533).
-	for _, name := range r.users {
+	//
+	// Longest-first, exactly as scrubSessionTitles orders titles and for the same
+	// reason: a shorter username can be a prefix of a longer one (a raw "jdoe" vs a
+	// home basename "jdoe.admin"), and redacting the prefix first destroys the only
+	// exact match for the longer token and strands its suffix. The manual boundary
+	// makes that prefix-shadowing easier to hit than `\b` did, so the ordering is
+	// part of the privacy invariant, not a nicety. Sort a copy so scrub stays a pure
+	// read of r.users.
+	names := append([]string(nil), r.users...)
+	sort.Slice(names, func(i, j int) bool {
+		if len(names[i]) != len(names[j]) {
+			return len(names[i]) > len(names[j])
+		}
+		return names[i] < names[j]
+	})
+	for _, name := range names {
 		s = replaceBareToken(s, name, userMarker)
 	}
 	return s
