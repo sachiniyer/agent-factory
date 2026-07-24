@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -63,58 +64,82 @@ func TestHandleEnter_DeadSessionShowsError(t *testing.T) {
 		"the error must name the offending session")
 }
 
-// TestHandleEnter_LostSessionShowsError pins the #1108 × #1089-PR-2
-// interaction: Enter on a Lost session must take the explicit lost-error path
-// — never enter interactive mode on a dead binding, and never the generic
-// dead-tmux message (Lost is checked before TmuxAlive in interactiveGuard so
-// the specific "expected back" wording wins).
-func TestHandleEnter_LostSessionShowsError(t *testing.T) {
-	h := newTestHome(t)
+// TestHandleEnter_RestingRowRestores pins #2489: Enter on a resting
+// (Lost/Dead/archived) row restores it in place — the intuitive off-ramp — rather
+// than surfacing interactiveGuard's "press <key> to restore" message. It raises
+// the optimistic OpRestoring and dispatches the restore RPC, exactly as the `r`
+// verb does, with no confirmation and no interactive-mode entry on a dead binding.
+//
+// Distinct from the #935 case above: there the liveness is still live (Ready) and
+// only tmux vanished, so LifecycleAction()==Archive and Enter correctly errors;
+// here the daemon has settled the row into a resting liveness, which IS restorable.
+func TestHandleEnter_RestingRowRestores(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{"lost", session.Lost},
+		{"dead", session.Dead},
+		{"archived", session.Archived},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := newDeadInstance(t, "resting-session", tc.status)
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
 
-	inst := newDeadInstance(t, "lost-session", session.Lost)
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
+			var gotRequest daemon.RestoreSessionRequest
+			prev := restoreSessionThroughDaemon
+			restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {
+				gotRequest = request
+				return "/worktree/path", nil
+			}
+			t.Cleanup(func() { restoreSessionThroughDaemon = prev })
 
-	model, cmd := h.handleEnter()
-	h = model.(*home)
+			model, cmd := h.handleEnter()
+			h = model.(*home)
 
-	require.Equal(t, stateDefault, h.state, "a lost session must not open any overlay")
-	require.Nil(t, h.textOverlay, "no help overlay should be installed for a lost session")
-	require.False(t, h.interactive, "Enter on a lost session must not enter interactive mode")
+			require.Equal(t, stateDefault, h.state, "restoring a resting row must not open any overlay")
+			require.Nil(t, h.textOverlay, "no help overlay should be installed")
+			require.False(t, h.interactive, "Enter on a resting row must restore, not enter interactive mode")
+			require.Equal(t, session.OpRestoring, inst.GetInFlightOp(),
+				"Enter restores the row (#2489), raising the optimistic restore op")
 
-	require.NotNil(t, cmd, "handleEnter must return the error-hide command, not a silent nil")
-	h.errBox.SetSize(200, 1)
-	require.Contains(t, h.errBox.String(), "was lost",
-		"the error must say the session was lost, not the generic dead message")
-	require.Contains(t, h.errBox.String(), "lost-session",
-		"the error must name the offending session")
+			// No "press r" guard message: the gesture ACTS on the restore.
+			h.errBox.SetSize(200, 1)
+			require.NotContains(t, h.errBox.String(), "press",
+				"Enter must act on the restore, not name the restore key")
+
+			require.NotNil(t, cmd, "the restore must dispatch its daemon command")
+			done, ok := cmd().(instanceRestoredMsg)
+			require.True(t, ok, "the command must emit instanceRestoredMsg")
+			require.NoError(t, done.err)
+			require.Equal(t, daemon.RestoreSessionRequest{ID: inst.ID, Title: "resting-session", RepoID: h.repoID}, gotRequest,
+				"the restore RPC carries the row's stable identity")
+		})
+	}
 }
 
-// TestHandleEnter_ArchivedSessionShowsError (#1028): Enter on an archived
-// session must take the explicit archived-error path — not interactive mode,
-// not the generic dead-tmux message — and must point the user at `restore` as
-// the off-ramp. Archived is checked before TmuxAlive in interactiveGuard so the
-// specific wording wins.
-func TestHandleEnter_ArchivedSessionShowsError(t *testing.T) {
+// TestHandleAttach_RestingRowRestores is the #2489 attach twin: `o` on a resting
+// row restores it too, not just Enter — the two verbs share restoreIfResting.
+func TestHandleAttach_RestingRowRestores(t *testing.T) {
 	h := newTestHome(t)
-
-	inst := newDeadInstance(t, "archived-session", session.Archived)
+	inst := newDeadInstance(t, "resting-session", session.Archived)
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	model, cmd := h.handleEnter()
+	called := false
+	prev := restoreSessionThroughDaemon
+	restoreSessionThroughDaemon = func(daemon.RestoreSessionRequest) (string, error) { called = true; return "/p", nil }
+	t.Cleanup(func() { restoreSessionThroughDaemon = prev })
+
+	model, cmd := h.handleAttach()
 	h = model.(*home)
 
-	require.Equal(t, stateDefault, h.state, "an archived session must not open any overlay")
-	require.Nil(t, h.textOverlay, "no help overlay should be installed for an archived session")
-	require.False(t, h.interactive, "Enter on an archived session must not enter interactive mode")
-
-	require.NotNil(t, cmd, "handleEnter must return the error-hide command, not a silent nil")
-	h.errBox.SetSize(200, 1)
-	require.Contains(t, h.errBox.String(), "is archived",
-		"the error must say the session is archived, not the generic dead message")
-	require.Contains(t, h.errBox.String(), "restore",
-		"the error must point at restore as the off-ramp")
-	require.Contains(t, h.errBox.String(), "archived-session",
-		"the error must name the offending session")
+	require.Equal(t, session.OpRestoring, inst.GetInFlightOp(), "`o` on a resting row restores it (#2489)")
+	require.False(t, h.attached.Load(), "`o` on a resting row must restore, not start an attach")
+	require.NotNil(t, cmd, "the restore must dispatch its daemon command")
+	_, ok := cmd().(instanceRestoredMsg)
+	require.True(t, ok, "the command must emit instanceRestoredMsg")
+	require.True(t, called, "the restore RPC must fire")
 }

@@ -413,6 +413,34 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 	return m, m.restoreInstanceCmd(target)
 }
 
+// restoreIfResting turns an Enter/`o` on a resting (Lost/Dead/archived) row into
+// a restore instead of interactiveGuard's "press <key> to restore" error: the
+// gesture the user already made expresses the intent, so acting on it is more
+// intuitive than naming another key (#2489). It delegates to handleRestore — the
+// single owner of the restore transition and its own already-restoring guard — so
+// there is one restore code path, and reports whether it took the row.
+//
+// LifecycleActionRestore is true for EXACTLY the resting states interactiveGuard
+// fences (LiveLost/LiveDead/LiveArchived, with a stable id and no teardown/replace
+// op), so a live, tearing-down, id-less, or startup-unknown row returns false and
+// falls through to the guard's own message unchanged. Restore is non-destructive
+// (worktree move + agent re-spawn), matching `r`, so — like `r` — it needs no
+// confirmation.
+//
+// Scope: the tree ROW verbs (handleEnter/handleAttach). The pane-entry guards
+// (activateInteractive, handleEnterPane) are a distinct, rarer interaction — a
+// focused pane whose session went Lost out from under it — on the delicate
+// deferred-activation path; they keep the guard message, and selecting a resting
+// session lands the cursor on its instance row, so the row verbs cover the case
+// the issue describes.
+func (m *home) restoreIfResting(selected *session.Instance) (tea.Cmd, bool) {
+	if selected == nil || selected.LifecycleAction() != session.LifecycleActionRestore {
+		return nil, false
+	}
+	_, cmd := m.handleRestore()
+	return cmd, true
+}
+
 // archiveInstanceCmd runs the daemon archive (tmux teardown + worktree move) off
 // the event loop (#1028), mirroring killInstanceCmd — the RPC blocks for the
 // whole operation, so it must not run on the Update goroutine.
@@ -629,11 +657,15 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Instance selected — in either the Instances tree or the Archived folder
-	// (#1028). An archived row is not embeddable: interactiveGuard surfaces the
-	// "restore it first" error before any pane/attach path is reached.
+	// (#1028). A resting (Lost/Dead/archived) row is not embeddable: rather than
+	// naming the restore key, Enter restores it in place (#2489). Any other
+	// non-embeddable state still surfaces interactiveGuard's error.
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil || selected.IsCreating() {
 		return m, nil
+	}
+	if cmd, handled := m.restoreIfResting(selected); handled {
+		return m, cmd
 	}
 	if err := interactiveGuard(selected); err != nil {
 		return m, m.handleError(err)
@@ -709,15 +741,19 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 		return m.handleEnterPane(p)
 	}
 	sel := m.sidebar.GetSelection()
-	// Accept both the Instances tree and the Archived folder (#1028): an
-	// archived row is non-attachable, and interactiveGuard surfaces the
-	// "restore it first" error rather than a silent no-op.
+	// Accept both the Instances tree and the Archived folder (#1028): a resting
+	// (Lost/Dead/archived) row is non-attachable, so `o` restores it in place
+	// rather than naming the restore key (#2489); any other non-attachable state
+	// surfaces interactiveGuard's error rather than a silent no-op.
 	if sel.IsHeader || (sel.Kind != ui.SectionInstances && sel.Kind != ui.SectionArchived) {
 		return m, nil
 	}
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil || selected.IsCreating() {
 		return m, nil
+	}
+	if cmd, handled := m.restoreIfResting(selected); handled {
+		return m, cmd
 	}
 	if err := interactiveGuard(selected); err != nil {
 		return m, m.handleError(err)
