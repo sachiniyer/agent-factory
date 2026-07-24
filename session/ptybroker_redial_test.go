@@ -39,6 +39,103 @@ func waitForStarts(t *testing.T, ch *singleSocketChannel, want int, within time.
 // with a single client attached over a healthy daemon-browser WebSocket, nothing
 // ever re-subscribes and the capture stays dead indefinitely.
 //
+// TestPTYBrokerMaybeStopCaptureTearsDownADeadLoop pins the state the captureEnded
+// field doc describes, because the doc chain this belongs to (#2438 → #2452 →
+// #2481) exists precisely because unenforced claims about this flag keep shipping
+// false. A #2481 review pass caught the claim "maybeStopCapture only reaches its
+// clear with a live capture, so its clear was always undone by the join" — an
+// overstatement. This is the enforcement.
+//
+// The claim is false because of the #2450 spontaneous-death path: the readLoop
+// latches captureEnded and closes `done` on its OWN while leaving `capturing`
+// true, so `capturing` no longer implies a live loop. maybeStopCapture's guard is
+// `capturing`, so it admits that dead-but-not-reconciled capture and tears it
+// down; its stop() rides an already-closed `<-done` (a no-op join, not a
+// re-latch). So a clear placed there would STICK, not be undone — exactly like
+// resetCapture/shutdown on the capturing-false path.
+//
+// What is asserted is the reachable state: maybeStopCapture running its teardown
+// while captureEnded is already true. That directly refutes "only reaches its
+// clear with a live capture", and it cannot go stale the way the prose did.
+func TestPTYBrokerMaybeStopCaptureTearsDownADeadLoop(t *testing.T) {
+	// The re-dial backoff must exceed this test's own deadlines. redialLoop's
+	// recoverCapture would ALSO release the dead socket once its backoff fires, so
+	// a shorter backoff would let the test pass on that release and prove nothing
+	// about maybeStopCapture — it did, in an earlier draft, at exactly the 2s
+	// deadline. With the backoff parked far past the 2s deadlines below, the only
+	// thing that can release the socket in-window is maybeStopCapture, so the
+	// assertion isolates it. (The test does not wait the backoff out: br.close()
+	// wakes redialLoop off closedCh at the end.)
+	const isolatingBackoff = 30 * time.Second
+	defer setRedialTimingForTest(isolatingBackoff)()
+
+	state := func(b *ptyBroker) (capturing, ended bool) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.capturing, b.captureEnded
+	}
+
+	ch := &singleSocketChannel{snapshot: []byte("SCREEN")}
+	br := newPTYBroker(ch)
+	defer br.close()
+
+	a, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe A: %v", err)
+	}
+	mustRepaintContains(t, a, "SCREEN")
+
+	// The upstream dies on its own. readLoop's defer latches captureEnded and
+	// closes `done`, but does NOT clear capturing — the #2450 spontaneous-death
+	// state. Wait until we actually observe it, so the assertion is about that
+	// state and not a race with it.
+	ch.dropUpstream()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		capturing, ended := state(br)
+		if capturing && ended {
+			break // dead loop, capturing still true — the state under test
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("never reached {capturing:true captureEnded:true}; got {%v %v}.\n\n"+
+				"The spontaneous-death path is supposed to latch captureEnded while leaving "+
+				"capturing true — without that state the doc's dead-loop case is unreachable.",
+				capturing, ended)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Last subscriber leaves. remove() → maybeStopCapture, whose `capturing` guard
+	// passes over the ALREADY-DEAD loop. It must tear the capture down (release the
+	// socket, join the finished readLoop as a no-op) — the state the doc calls out.
+	if _, stops := ch.counts(); stops != 0 {
+		t.Fatalf("StopCapture already called %d times before the teardown under test", stops)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("close A: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for ch.isHeld() {
+		if time.Now().After(deadline) {
+			starts, stops := ch.counts()
+			t.Fatalf("maybeStopCapture did not release the dead capture: still held, starts=%d stops=%d.\n\n"+
+				"Its guard is `capturing`, which the spontaneous death left true, so it must admit "+
+				"and tear down the dead loop.", starts, stops)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// It ran exactly one teardown, and did not spuriously re-dial: the point is a
+	// no-op join over a finished loop, not a fresh capture.
+	if starts, stops := ch.counts(); starts != 1 || stops != 1 {
+		t.Fatalf("StartCapture=%d StopCapture=%d, want 1/1 (one dead-loop teardown, no re-dial)", starts, stops)
+	}
+	if capturing, _ := state(br); capturing {
+		t.Fatal("capturing is still true after the dead-loop teardown, want false")
+	}
+}
+
 // The broker must recover from the readLoop's own exit instead, so the pane comes
 // back without the user refreshing.
 func TestPTYBrokerReDialsWithoutANewSubscribe(t *testing.T) {
