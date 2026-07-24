@@ -92,8 +92,8 @@ func TestFirstRunHelpTitlesUseSentenceCase(t *testing.T) {
 		want    string
 		old     string
 	}{
-		{"instance created", helpStart(local).toContent(), "Instance created", "Instance Created"},
-		{"attach", helpTypeInstanceAttach{}.toContent(), "Attaching to instance", "Attaching to Instance"},
+		{"instance created", helpStart(local).toContent(), "Session created", "Session Created"},
+		{"attach", helpTypeInstanceAttach{}.toContent(), "Attaching to session", "Attaching to Session"},
 		{"interactive pane", helpTypeInteractive{}.toContent(), "Interactive pane", "Interactive Pane"},
 	}
 	for _, tc := range tests {

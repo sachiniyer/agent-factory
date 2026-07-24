@@ -1215,7 +1215,7 @@ export class AppShell {
         h(
           "li",
           { class: "af-rail-empty" },
-          "No sessions yet. Create one in the TUI or with ",
+          "No sessions yet — create one in the TUI or with ",
           h("code", {}, "af sessions create"),
           ".",
         ),

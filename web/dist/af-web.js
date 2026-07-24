@@ -11391,7 +11391,7 @@ var AppShell = class {
         h2(
           "li",
           { class: "af-rail-empty" },
-          "No sessions yet. Create one in the TUI or with ",
+          "No sessions yet \u2014 create one in the TUI or with ",
           h2("code", {}, "af sessions create"),
           "."
         )

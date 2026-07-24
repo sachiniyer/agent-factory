@@ -165,9 +165,9 @@ func (h helpTypeGeneral) toContent() string {
 			{helpKey(keys.KeySplitPane), "Commit the current preview as another pane"},
 			{helpKey(keys.KeyHidePane), "Hide the focused pane (the tab keeps running)"},
 			{helpKey(keys.KeyPanePrev) + "/" + helpKey(keys.KeyPaneNext), "Move focus between open panes"},
-			{navKeys, "Navigate the tree (instances and their tabs)"},
-			{helpKey(keys.KeyLeft), "Collapse the selected instance's tabs"},
-			{helpKey(keys.KeyRight), "Expand the selected instance's tabs"},
+			{navKeys, "Navigate the tree (sessions and their tabs)"},
+			{helpKey(keys.KeyLeft), "Collapse the selected session's tabs"},
+			{helpKey(keys.KeyRight), "Expand the selected session's tabs"},
 		}},
 		{title: "Configuration:", rows: []helpRow{
 			{helpKey(keys.KeyConfigAgent), "Open the config agent to change your settings"},
@@ -206,7 +206,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; tabs live in the tree)", openPane))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("Instance created"),
+		titleStyle.Render("Session created"),
 		"",
 		descStyle.Render("New session created:"),
 		descStyle.Render(fmt.Sprintf("• Git branch: %s (isolated worktree)",
@@ -228,7 +228,7 @@ func (h helpTypeInstanceStart) toContent() string {
 
 func (h helpTypeInstanceAttach) toContent() string {
 	lines := []string{
-		titleStyle.Render("Attaching to instance"),
+		titleStyle.Render("Attaching to session"),
 		"",
 		descStyle.Render("The attached program owns input and scrolling."),
 		descStyle.Render("AF's ") + keyStyle.Render(helpKey(keys.KeyShiftUp)+"/"+helpKey(keys.KeyShiftDown)) + descStyle.Render(" preview scrolling works only in navigation mode."),
@@ -250,7 +250,7 @@ func (h helpTypeInteractive) toContent() string {
 		"",
 		descStyle.Render("You are typing into this pane's terminal: every key — including tab —"),
 		descStyle.Render("goes to the agent/shell. The pane's frame turns green while it has the"),
-		descStyle.Render("keyboard, and the instances rail stays visible."),
+		descStyle.Render("keyboard, and the sessions rail stays visible."),
 		"",
 		descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to return to navigation."),
 		descStyle.Render("Full-screen attach is still available on ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" (from nav mode)."),

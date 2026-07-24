@@ -281,7 +281,7 @@ func TestSidebarRender(t *testing.T) {
 	addTestInstance(s, inst)
 
 	rendered := s.String()
-	assert.Contains(t, rendered, "Instances (1)")
+	assert.Contains(t, rendered, "Sessions (1)")
 	assert.NotEmpty(t, rendered)
 }
 
@@ -335,7 +335,7 @@ func TestSidebarWindowsLongInstanceListToAllocation(t *testing.T) {
 		sel     func(s *Sidebar)
 		visible string
 	}{
-		{"top (Instances header)", func(s *Sidebar) {}, "Instances (25)"},
+		{"top (Sessions header)", func(s *Sidebar) {}, "Sessions (25)"},
 		{"middle instance", func(s *Sidebar) { s.SetSelectedInstance(12) }, "win-12"},
 		{"bottom instance", func(s *Sidebar) { s.SetSelectedInstance(24) }, "win-24"},
 		{"trailing tab row", func(s *Sidebar) {

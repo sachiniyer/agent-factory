@@ -16,13 +16,12 @@ func EmptyWorkspace(r layout.Rect) string {
 
 // FirstRunWorkspace renders the zero-session onboarding state. It is distinct
 // from EmptyWorkspace because there is no selected tab yet, so the useful next
-// action is session creation, not opening a pane.
+// action is session creation, not opening a pane. One punchy line (#1993): the
+// footer already carries `? help` and `n new`, so the old four-line block only
+// repeated chrome and buried the one thing to do.
 func FirstRunWorkspace(r layout.Rect) string {
 	return emptyWorkspaceContent(r, []string{
-		"No sessions yet",
-		"Press n to create a local session",
-		"Press ? for all keys",
-		"Setup check: run af doctor --setup",
+		"No sessions yet — press n to create one.",
 	})
 }
 

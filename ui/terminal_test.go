@@ -138,7 +138,7 @@ func TestTabPaneShellFallbackStates(t *testing.T) {
 		require.NoError(t, p.UpdateContent(nil, 1))
 		p.mu.Lock()
 		require.True(t, p.content.fallback)
-		require.Contains(t, p.content.text, "Select an instance")
+		require.Contains(t, p.content.text, "Select a session")
 		p.mu.Unlock()
 	})
 
@@ -234,7 +234,7 @@ func TestTabPaneShellFallbackResetsScrollMode(t *testing.T) {
 		p.mu.Unlock()
 
 		rendered := p.String()
-		require.Contains(t, rendered, "Select an instance")
+		require.Contains(t, rendered, "Select a session")
 		require.NotContains(t, rendered, priorContent)
 	})
 

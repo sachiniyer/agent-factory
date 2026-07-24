@@ -100,7 +100,7 @@ func TestTerminalFallbackMatchesNormalModeHeight(t *testing.T) {
 	for _, h := range []int{20, 25, 30, 50} {
 		fb := NewTabPane(previewFromInstance)
 		fb.SetSize(80, h)
-		fb.setFallbackState("Select an instance to open a terminal")
+		fb.setFallbackState("Select a session to open a terminal")
 		require.Equal(t, h, renderedLineCount(fb.String()),
 			"height=%d: fallback must render exactly the allocated height", h)
 

@@ -97,9 +97,11 @@ func TestFirstRunWorkspaceEmptyState(t *testing.T) {
 	view := h.View()
 
 	assert.Contains(t, view, "No sessions yet")
-	assert.Contains(t, view, "Press n to create a local session")
-	assert.Contains(t, view, "Press ? for all keys")
-	assert.Contains(t, view, "af doctor --setup")
+	assert.Contains(t, view, "press n to create one")
+	// The onboarding block is a single punchy line now (#1993 / empty-state
+	// polish): the help and setup lines that duplicated the footer are gone.
+	assert.NotContains(t, view, "Press ? for all keys")
+	assert.NotContains(t, view, "af doctor --setup")
 	assert.NotContains(t, view, "s opens the selected tab")
 }
 
