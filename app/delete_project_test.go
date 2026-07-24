@@ -110,7 +110,10 @@ func TestDeleteProjectConfirmStatesRealSplit(t *testing.T) {
 
 		assert.Contains(t, dialog, "2 sessions archived — restorable",
 			"a project of ordinary sessions is fully restorable and must say so")
-		assert.Contains(t, dialog, "af sessions restore")
+		assert.Contains(t, dialog, "Restore an archived session",
+			"the dialog must offer the in-TUI restore affordance")
+		assert.NotContains(t, dialog, "af sessions restore",
+			"restore is a key in this interface — do not send the user to a shell (#2479)")
 		assert.NotContains(t, dialog, "not restorable",
 			"nothing is killed here — the dialog must not invent a scary split")
 		assert.NotContains(t, dialog, "in-place")

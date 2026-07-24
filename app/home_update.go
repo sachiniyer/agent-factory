@@ -300,6 +300,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.killInstanceCmd(msg.target)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
+	case daemonRestartRequestedMsg:
+		// The restart confirm was accepted; run it off the event loop (it stops a
+		// daemon and respawns one), mirroring the kill/archive async dispatch.
+		return m, m.restartDaemonCmd()
+	case daemonRestartedMsg:
+		return m.handleDaemonRestarted(msg)
 	case startArchiveMsg:
 		// Archive confirmed; run the daemon teardown+move off the event loop
 		// (#1028), mirroring the kill dispatch.

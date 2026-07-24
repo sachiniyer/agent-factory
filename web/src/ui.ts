@@ -1208,16 +1208,19 @@ export class AppShell {
     this.railCount.textContent = String(visible.length);
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
-    // No project selected ⇒ there are no projects at all (nothing has been created):
-    // the global empty rail, its copy pointing at how to create the first session.
+    // No project selected ⇒ af is managing no projects at all. An honest,
+    // action-free state: it names no CLI command (the #2479 bar), and it does NOT
+    // offer a New-session button — with zero projects that modal's Create is
+    // disabled, so the button would dead-end. The web cannot yet add the first
+    // project; when the add-project affordance lands (#2456) it wires a real
+    // "+ Add project" button HERE, which is the one coherent action for this
+    // state. Until then, a plain hint that promises nothing it cannot deliver.
     if (!state.selectedProject) {
       list.replaceChildren(
         h(
           "li",
           { class: "af-rail-empty" },
-          "No sessions yet — create one in the TUI or with ",
-          h("code", {}, "af sessions create"),
-          ".",
+          "No projects yet. A project appears here once af is managing a repo for you.",
         ),
       );
       return;

@@ -11394,9 +11394,7 @@ var AppShell = class {
         h2(
           "li",
           { class: "af-rail-empty" },
-          "No sessions yet \u2014 create one in the TUI or with ",
-          h2("code", {}, "af sessions create"),
-          "."
+          "No projects yet. A project appears here once af is managing a repo for you."
         )
       );
       return;
