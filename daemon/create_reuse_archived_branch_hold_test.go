@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -11,74 +12,159 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestReserveCreate_HeldArchivedBranchRefusesBeforeRename is the #2127
-// regression lock.
+// TestReserveCreate_HeldArchivedBranchIsReclaimed is the #2127 durable fix — the
+// FULL-RECLAIM path.
 //
 // The rot: `af sessions create --name foo` over an archived "foo" renamed the
 // archived session to "foo (archived)" to free the TITLE, then failed anyway at
 // `git worktree add` — because archiving relocates a worktree rather than
 // removing it (#2013), so the archived session still had <prefix>foo checked
-// out, and the new session derives exactly that branch. The user was left with
-// a create that failed AND an archived session renamed out of the way for it:
-// the state reserveCreate's own admission comment promises never to produce ("a
-// refusal never leaves an archived session renamed for a create that then did
-// not happen").
+// out, and the new session derives exactly that branch.
 //
-// This seeds the shape archiving actually produces — branch still held — and
-// pins the honest failure: refuse up front, rename nothing, and say what is
-// blocking and how to clear it.
-func TestReserveCreate_HeldArchivedBranchRefusesBeforeRename(t *testing.T) {
+// #2129 shipped the interim guard: refuse up front so the create at least stops
+// leaving an archived session renamed for a create that never happened. That made
+// the failure honest, but reuse-archived-name still never WORKED for a local
+// session — it refused every time, because per #2013 the branch is always held.
+//
+// The durable fix moves the BRANCH aside with the title, so the reclaim is
+// complete: the create succeeds, and the archived session keeps its work under a
+// name that matches its new title.
+func TestReserveCreate_HeldArchivedBranchIsReclaimed(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	archived, id := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
 	branch := manager.branchForTitle("foo")
 
-	// The precondition the old fixture never established: git positively reports
-	// the archived worktree as holding the branch this create would derive.
+	// The precondition: git positively reports the archived worktree as holding
+	// the branch this create would derive. Without it this test proves nothing —
+	// it would be exercising the freed-branch path, which already worked.
 	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, herr)
 	require.Contains(t, held, branch,
 		"the archived worktree must still hold the derived branch; without that this test proves nothing")
+
+	_, title, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "foo", Program: "claude"})
+	if release != nil {
+		defer release()
+	}
+
+	require.NoError(t, err, "the create must now SUCCEED: the archived branch is moved aside with the title")
+	assert.Equal(t, "foo", title, "the new session takes the reclaimed title verbatim")
+	require.NotNil(t, renamed, "the archived session must have been renamed to free the name")
+	assert.Equal(t, "foo (archived)", renamed.Title)
+
+	// The reclaim, and the whole point: the branch the new session derives is FREE.
+	// This is the assertion that fails against the interim guard and against the
+	// original bug alike — the first because no create happens at all, the second
+	// because the branch stays held.
+	held, herr = sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, herr)
+	assert.NotContains(t, held, branch,
+		"the derived branch must be released, or the create this title was granted for still cannot build its worktree")
+
+	// And it is free in the way that matters: the real `git worktree add` the
+	// create runs now succeeds on it. Only running the add can tell a released
+	// branch from one that merely looks released.
+	dest := filepath.Join(t.TempDir(), "new-session")
+	out, addErr := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, dest).CombinedOutput()
+	require.NoError(t, addErr, "the granted title %q must be usable by the create it was granted for: %s", title, string(out))
+	out, rmErr := exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", dest).CombinedOutput()
+	require.NoError(t, rmErr, string(out))
+
+	// The archived session did not lose anything: its work moved to a branch that
+	// matches its new title, its record followed, and it still restores.
+	archivedBranch := manager.branchForTitle("foo (archived)")
+	assert.Equal(t, archivedBranch, archived.GetBranch(),
+		"the archived session's recorded branch must move with it, or its record and git disagree")
+	held, herr = sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, herr)
+	holder, stillHeld := held[archivedBranch]
+	assert.True(t, stillHeld, "the archived worktree must still be on its (renamed) branch")
+	assert.Contains(t, holder, "(archived)", "and that worktree is the relocated archive")
+
+	rec := recordFor(t, repoID, "foo (archived)")
+	require.NotNil(t, rec, "the renamed archived record must be persisted under its new title")
+	assert.Equal(t, id, rec.ID, "the archived session keeps its stable id across the reclaim")
+	assert.Equal(t, archivedBranch, rec.Branch, "the persisted branch must match the renamed one")
+
+	_, _, rerr := manager.RestoreArchived(RestoreArchivedRequest{Title: "foo (archived)", RepoID: repoID})
+	require.NoError(t, rerr, "the archived session must still restore after its branch moved")
+}
+
+// The reclaim is not unconditional, and this is the case it declines: a PUBLISHED
+// branch. Renaming one desyncs its local name from the remote it tracks and from
+// any open PR, which is a worse outcome than not creating the session — so the
+// #2129 refusal stays in force, and says so.
+func TestReserveCreate_PublishedArchivedBranchStillRefuses(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
+	branch := manager.branchForTitle("foo")
+
+	// A real upstream, built without a network: a bare repo added as a remote,
+	// pushed to, and set as the branch's tracking ref.
+	remote := t.TempDir()
+	out, err := exec.Command("git", "-C", remote, "init", "-q", "--bare", "-b", "main").CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", repoPath, "remote", "add", "origin", remote).CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", repoPath, "push", "-q", "origin", branch).CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", repoPath, "branch", "--set-upstream-to=origin/"+branch, branch).CombinedOutput()
+	require.NoError(t, err, string(out))
 
 	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "foo", Program: "claude"})
 	if release != nil {
 		release()
 	}
 
-	require.Error(t, err, "the create must be refused: freeing the name would not free the branch it needs")
+	require.Error(t, err, "a published archived branch must not be renamed behind the user's back")
 	assert.Nil(t, renamed, "no archived rename may happen for a create that cannot succeed")
-
-	// Actionable: name the blocking branch, where it is held, and a way out.
 	msg := err.Error()
 	assert.Contains(t, msg, branch, "the error must name the branch that blocks the create")
+	assert.Contains(t, msg, "published", "the error must say WHY the branch could not be moved aside")
 	assert.Contains(t, msg, "af sessions kill", "the error must offer a way to release the branch")
-	assert.Contains(t, msg, "different name", "the error must offer the non-destructive alternative")
 
-	// The invariant, asserted on every surface that could carry the rename:
-	// in-memory title, manager key, on-disk record, and the archive directory.
+	// And nothing moved: the refusal is still side-effect-free.
 	assert.Equal(t, "foo", archived.Title, "the archived session must keep its name after a refusal")
-	manager.mu.Lock()
-	_, origKeyed := manager.instances[daemonInstanceKey(repoID, "foo")]
-	_, renamedKeyed := manager.instances[daemonInstanceKey(repoID, "foo (archived)")]
-	manager.mu.Unlock()
-	assert.True(t, origKeyed, "the archived row must stay keyed under its original name")
-	assert.False(t, renamedKeyed, "no row may be keyed under the disambiguated name")
-
-	rec := recordFor(t, repoID, "foo")
-	require.NotNil(t, rec, "the archived record must survive the refusal under its original name")
-	assert.Equal(t, id, rec.ID, "the archived session must be untouched, stable id and all")
 	assert.Nil(t, recordFor(t, repoID, "foo (archived)"), "no renamed record may be persisted for a refused create")
+	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, herr)
+	assert.Contains(t, held, branch, "the published branch must be exactly where it was")
+}
 
-	origDir, derr := archivedWorktreePath(repoID, "foo")
-	require.NoError(t, derr)
-	newDir, derr := archivedWorktreePath(repoID, "foo (archived)")
-	require.NoError(t, derr)
-	assert.True(t, exists(origDir), "the archived worktree must stay at its original path")
-	assert.False(t, exists(newDir), "no relocation may have happened")
+// The reclaim's target name must be genuinely free, not merely un-checked-out
+// (the P3 on #2465). If a plain branch already holds the disambiguated name
+// "<prefix>foo-archived", `git branch -m` would refuse the rename — so the reclaim
+// must decline and let the create refuse up front, rather than promise a name it
+// cannot deliver and then fail mid-rename with a misleading message.
+func TestReserveCreate_ReclaimDeclinesWhenTargetBranchExists(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
+	branch := manager.branchForTitle("foo")
 
-	// And the archived session is still restorable — the refusal cost the user
-	// nothing, which is the difference between this and the pre-fix behavior.
-	_, _, rerr := manager.RestoreArchived(RestoreArchivedRequest{Title: "foo", RepoID: repoID})
-	require.NoError(t, rerr, "the untouched archived session must still restore under its own name")
+	// The name the reclaim would rename onto already exists as a plain, idle branch
+	// — checked out nowhere, so the checked-out map does not see it.
+	target := manager.branchForTitle("foo (archived)")
+	out, err := exec.Command("git", "-C", repoPath, "branch", target).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "foo", Program: "claude"})
+	if release != nil {
+		release()
+	}
+
+	require.Error(t, err, "the reclaim target is taken, so the create cannot succeed and must refuse up front")
+	assert.NotContains(t, err.Error(), "failed to relocate its worktree",
+		"a taken branch name must not be reported as a worktree-relocation failure")
+	assert.Nil(t, renamed, "no archived rename may happen for a create that cannot succeed")
+
+	// Side-effect-free: neither the archived branch nor the pre-existing target moved.
+	assert.Equal(t, "foo", archived.Title, "the archived session must keep its name after a refusal")
+	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, herr)
+	assert.Contains(t, held, branch, "the archived branch must be exactly where it was")
+	out, err = exec.Command("git", "-C", repoPath, "branch", "--list", target).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), target, "the pre-existing target branch must be untouched")
 }
 
 // TestReserveCreate_HeldBranchWithoutArchivedCollisionIsUnguarded keeps the
@@ -163,23 +249,23 @@ func TestReserveCreate_InPlaceCreateIgnoresBranchHold(t *testing.T) {
 	assert.NotNil(t, recordFor(t, repoID, "foo (archived)"))
 }
 
-// TestReserveCreate_ArchivedBranchHoldSurvivesTheRename is the fact the guard
-// exists because of, pinned directly rather than inferred: renaming an archived
-// session does NOT release its branch. If this ever stops being true — option 1
-// or 2 on #2127 — the guard becomes dead weight and this test says so by
-// failing, rather than the guard quietly refusing creates that would now work.
-func TestReserveCreate_ArchivedBranchHoldSurvivesTheRename(t *testing.T) {
+// TestReserveCreate_ArchivedBranchMovesWithTheRename pins the rename's own
+// contract, one level below reserveCreate: renaming an archived session now
+// releases its branch as well as its title.
+//
+// This test previously asserted the OPPOSITE — that the branch survived the
+// rename — because that was the fact #2129's guard existed because of. Its own
+// comment said it would fail if option 1 or 2 on #2127 ever landed, "rather than
+// the guard quietly refusing creates that would now work". Option 2 landed; this
+// is that prediction being honoured rather than a lock being weakened.
+func TestReserveCreate_ArchivedBranchMovesWithTheRename(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo", "foo")
+	seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
 	branch := manager.branchForTitle("foo")
 
-	// Re-attach the branch so the rename runs with it held, the way archiving
-	// leaves it. (Seeded freed first only so the guard lets the rename happen —
-	// this test is about what the rename does to the hold, not about the guard.)
-	archivedPath, err := archivedWorktreePath(repoID, "foo")
-	require.NoError(t, err)
-	out, err := exec.Command("git", "-C", archivedPath, "checkout", branch).CombinedOutput()
-	require.NoError(t, err, string(out))
+	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, herr)
+	require.Contains(t, held, branch, "the archived worktree must hold the branch for this test to say anything")
 
 	manager.mu.Lock()
 	diskData, lerr := loadRepoInstanceData(repoID)
@@ -189,11 +275,16 @@ func TestReserveCreate_ArchivedBranchHoldSurvivesTheRename(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, renamed, "the rename must have run for this test to say anything")
 
-	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
+	held, herr = sessiongit.BranchesHeldByWorktrees(repoPath)
 	require.NoError(t, herr)
-	holder, stillHeld := held[branch]
-	assert.True(t, stillHeld,
-		"renaming an archived session frees its TITLE but not its BRANCH — the premise of #2127's guard")
+	assert.NotContains(t, held, branch,
+		"renaming an archived session must now free its BRANCH as well as its title (#2127)")
+
+	archivedBranch := manager.branchForTitle("foo (archived)")
+	holder, stillHeld := held[archivedBranch]
+	assert.True(t, stillHeld, "the archived worktree must be on the renamed branch, not detached")
 	assert.Contains(t, holder, "(archived)",
 		"the branch follows the relocated archived worktree to its new path")
+	assert.Equal(t, archivedBranch, renamed.Branch,
+		"the event published for the rename must carry the branch it actually has")
 }

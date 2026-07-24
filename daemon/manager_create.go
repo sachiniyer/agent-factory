@@ -435,9 +435,79 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	if !held {
 		return nil
 	}
-	return fmt.Errorf("cannot create session %q: the archived session %q still has branch %q checked out at %s, and the new session would derive that same branch. Renaming the archived session aside frees its name but not its branch, so the create would fail at `git worktree add` — permanently delete the archived session to release both (%s), or create this session under a different name",
+	// The branch is held — but as of #2127 the rename can often take it with it,
+	// which is the whole point of the durable fix. Refuse only when it cannot.
+	//
+	// This asks the same question renameArchivedForReuseLocked will act on, rather
+	// than a cheaper approximation of it: if the two could disagree, the guard
+	// would either refuse a reuse that would have worked, or wave through one that
+	// then failed at `git worktree add` with the archived session already renamed —
+	// the exact state this function exists to prevent.
+	newTitle, terr := m.uniqueArchivedTitleLocked(repoID, repoPath, archived.Title, archived.Program, namespace, diskData)
+	if terr == nil && m.reclaimArchivedBranchLocked(repoPath, archived, newTitle) != "" {
+		return nil
+	}
+	return fmt.Errorf("cannot create session %q: the archived session %q still has branch %q checked out at %s, and the new session would derive that same branch. Its branch cannot be moved aside automatically (it is published, externally owned, or its state could not be determined), so freeing the name would not free the branch and the create would fail at `git worktree add` — permanently delete the archived session to release both (%s), or create this session under a different name",
 		title, archived.Title, branch, config.ShellQuotePath(holder),
 		shellsuggest.Command("af", "sessions", "kill", archived.Title))
+}
+
+// reclaimArchivedBranchLocked decides the branch name the archived session moves
+// to when its title is reused, or "" for "leave the branch where it is" (#2127).
+//
+// This is the durable half of the fix. #2129 shipped an honest refusal because
+// freeing a title never freed the branch; moving the branch aside WITH the title
+// makes the reclaim complete, so reuse-archived-name actually works for a local
+// session instead of always refusing.
+//
+// Instance.ArchivedBranchForReclaim owns whether the archived session's branch may
+// be touched at all (not local, external, published, or unknown — it declines, and
+// its doc comment carries the reasoning). This adds the two questions that are the
+// daemon's to answer: what the new name should be, and whether it is free.
+//
+// Deriving the new branch from the new TITLE rather than suffixing the old branch
+// keeps the archived row internally coherent: after the move its title, worktree
+// directory, and branch all say the same thing, which is what a later restore
+// presents to the user.
+func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session.Instance, newTitle string) string {
+	current, ok := archived.ArchivedBranchForReclaim()
+	if !ok {
+		return ""
+	}
+	candidate := m.branchForTitle(newTitle)
+	if candidate == "" || candidate == current {
+		return ""
+	}
+	held := m.worktreeHeldBranchesLocked(repoPath, false)
+	// Only move a branch that is actually BLOCKING, and this narrowness is the
+	// point rather than caution. A freed archived branch (its worktree detached, as
+	// after a `git checkout --detach`) is not in anyone's way: `git worktree add
+	// <path> <branch>` attaches the new session to it, which is the shipped
+	// behaviour where reuse-archived-name already completes and where the new
+	// session deliberately continues the archived branch's history.
+	//
+	// Renaming there would change that outcome — the new session would get a fresh
+	// branch off base and the old history would move to a name nobody asked for —
+	// which is a semantic change #2127 never asked for. #2127 is about the case
+	// where the branch is HELD and the create therefore CANNOT proceed at all.
+	if _, blocking := held[current]; !blocking {
+		return ""
+	}
+	// The candidate name must be genuinely FREE, and "not checked out" is not the
+	// same as "free": `git branch -m` refuses to rename onto ANY existing branch,
+	// idle or held. Checking only the checked-out map (the P3 on #2465) let a plain
+	// branch of the candidate's name through the guard, after which the rename
+	// failed with exit 128 — the guard having promised a name it had not actually
+	// cleared. BranchExists closes that, and its unknown answer declines, because a
+	// name that cannot be ruled out must be treated as taken rather than renamed
+	// onto.
+	if _, taken := held[candidate]; taken {
+		return ""
+	}
+	if !archived.ArchivedCandidateBranchIsFree(candidate) {
+		return ""
+	}
+	return candidate
 }
 
 // refuseUnclaimableTitleReuseLocked refuses an explicit-title create BEFORE the
@@ -526,9 +596,25 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 		return nil, err
 	}
 
-	// Relocate the archived worktree + update the title atomically on the instance.
-	if err := archived.RenameArchived(newTitle, newDest); err != nil {
-		return nil, fmt.Errorf("cannot free the archived name %q for reuse: failed to relocate its worktree: %w", oldTitle, err)
+	// The branch moves aside with the title (#2127). Freeing the title alone left
+	// the archived session holding <prefix><oldTitle>, which is exactly the branch
+	// the new session derives — so the create the rename enabled then failed at
+	// `git worktree add`, having already renamed the archived session for nothing.
+	//
+	// Empty when there is nothing safe to move, and reclaimArchivedBranchLocked
+	// owns that judgement; RenameArchived treats empty as "leave the branch alone",
+	// which is also the right answer for a workspace that has no local branch.
+	origBranch := archived.GetBranch()
+	newBranch := m.reclaimArchivedBranchLocked(repoPath, archived, newTitle)
+
+	// Relocate the archived worktree + move its branch + update the title
+	// atomically on the instance. The wrapper names neither the worktree nor the
+	// branch as the culprit — RenameArchived does either step and reports which one
+	// failed in the wrapped error, so a fixed "failed to relocate its worktree"
+	// prefix would mislabel a branch-rename failure as a worktree one (the P3 on
+	// #2465).
+	if err := archived.RenameArchived(newTitle, newDest, newBranch); err != nil {
+		return nil, fmt.Errorf("cannot free the archived name %q for reuse: %w", oldTitle, err)
 	}
 	// Re-key the manager map so the archived row is addressable under its new title.
 	newKey := daemonInstanceKey(repoID, newTitle)
@@ -541,7 +627,11 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// longer exists, stranding the archive after a daemon restart.
 	renamed := archived.ToInstanceData()
 	if perr := reuseArchivedRenamePersist(repoID, oldTitle, renamed); perr != nil {
-		if rbErr := archived.RenameArchived(oldTitle, origDest); rbErr != nil {
+		// The rollback puts the BRANCH back too, or the archived row would be
+		// restored to its old title and path while still holding the moved-aside
+		// branch — the split state this rollback exists to prevent, just relocated
+		// from the worktree to the branch.
+		if rbErr := archived.RenameArchived(oldTitle, origDest, origBranch); rbErr != nil {
 			// Could not move the worktree home: leave it re-keyed under the new title
 			// (the bytes live at newDest) and surface both failures so the operator can
 			// recover it. The new session create aborts.
