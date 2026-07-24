@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
@@ -66,21 +67,31 @@ is created, and adding a project does NOT start an always-on agent for it.
 			log.Initialize(false)
 			defer log.Close()
 
-			// Resolve the path CLIENT-SIDE, against the user's shell cwd, BEFORE
-			// forwarding — mirroring resolveProjectDeleteTarget. daemon.RegisterProject
-			// goes over the LOCAL control socket (callDaemon, which does not honor
-			// --daemon-url; see resolveRepoID), so the daemon shares this filesystem
-			// but NOT this working directory: an ad-hoc daemon inherits its spawner's
-			// cwd and a systemd daemon runs from /. Forwarding a raw relative path
-			// would make `af projects add .` resolve against the daemon's cwd — the
-			// wrong repo silently, or a confusing "not a git repository" when the
-			// daemon runs from /. The daemon still expands ~/validates; passing it an
-			// absolute path only fixes WHICH directory a relative input names.
-			resolved, err := config.ResolveUserPath(args[0])
-			if err != nil {
-				return jsonError(fmt.Errorf("failed to resolve project path %q: %w", args[0], err))
+			// Resolve the path against the USER's shell cwd before forwarding when
+			// the daemon is LOCAL — mirroring resolveProjectDeleteTarget. A local
+			// daemon shares this filesystem but NOT this working directory (an ad-hoc
+			// daemon inherits its spawner's cwd; a systemd one runs from /), so a raw
+			// relative path would make `af projects add .` resolve against the
+			// daemon's cwd — the wrong repo silently, or a confusing "not a git
+			// repository" when the daemon runs from /. The daemon still expands
+			// ~/validates; resolving here only fixes WHICH directory a relative input
+			// names.
+			//
+			// When --daemon-url targets a remote daemon the path names a directory on
+			// the REMOTE host, so resolving it against this client's cwd is
+			// meaningless — forward it raw and let the daemon resolve it. (Register's
+			// transport is still the local control socket today, so a remote target
+			// does not yet actually reach a remote daemon; #2491 tracks routing the
+			// registry verbs remotely — at which point this branch is already correct.)
+			path := args[0]
+			if !apiclient.IsRemoteTarget() {
+				resolved, err := config.ResolveUserPath(args[0])
+				if err != nil {
+					return jsonError(fmt.Errorf("failed to resolve project path %q: %w", args[0], err))
+				}
+				path = resolved
 			}
-			project, err := registerProjectViaDaemon(daemon.RegisterProjectRequest{Path: resolved})
+			project, err := registerProjectViaDaemon(daemon.RegisterProjectRequest{Path: path})
 			if err != nil {
 				return jsonError(err)
 			}

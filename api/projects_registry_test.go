@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 )
@@ -64,6 +65,9 @@ func TestProjectsAddRoutesThroughDaemon(t *testing.T) {
 // project silently, or a confusing "not a git repository" from /. This mirrors
 // what `af projects delete` already does (resolveProjectDeleteTarget).
 func TestProjectsAddResolvesPathAgainstClientCwd(t *testing.T) {
+	t.Setenv("AF_DAEMON_URL", "") // force a LOCAL target regardless of the ambient env
+	require.False(t, apiclient.IsRemoteTarget(), "precondition: the target must read as local")
+
 	var gotPath string
 	restore := registerProjectViaDaemon
 	registerProjectViaDaemon = func(req daemon.RegisterProjectRequest) (config.Project, error) {
@@ -98,6 +102,29 @@ func TestProjectsAddResolvesPathAgainstClientCwd(t *testing.T) {
 	wantCwd, err := filepath.Abs(cwd)
 	require.NoError(t, err)
 	require.Equal(t, wantCwd, gotPath, "`af projects add .` must register the client's cwd repo")
+}
+
+// TestProjectsAddForwardsRawPathForRemoteTarget is the other half of the branch:
+// with --daemon-url set, the path names a directory on the REMOTE host, so
+// resolving it against this client's cwd is meaningless — it must be forwarded
+// raw for the daemon to resolve. Guards against a future change that resolves
+// unconditionally and would corrupt a remote path with the client's cwd.
+func TestProjectsAddForwardsRawPathForRemoteTarget(t *testing.T) {
+	t.Setenv("AF_DAEMON_URL", "http://remote.example:8443")
+	require.True(t, apiclient.IsRemoteTarget(), "precondition: the target must read as remote")
+
+	var gotPath string
+	restore := registerProjectViaDaemon
+	registerProjectViaDaemon = func(req daemon.RegisterProjectRequest) (config.Project, error) {
+		gotPath = req.Path
+		return config.Project{ID: "prj_00000000000000000000000000000000", Root: gotPath}, nil
+	}
+	t.Cleanup(func() { registerProjectViaDaemon = restore })
+
+	add := findSubcommand(t, "add")
+	_ = captureJSON(t, func() error { return add.RunE(add, []string{"./on/the/remote"}) })
+	require.Equal(t, "./on/the/remote", gotPath,
+		"against a remote target the raw path must be forwarded, not resolved against the local cwd")
 }
 
 // TestProjectsAddSurfacesDaemonError: a daemon-side rejection (not a git repo,
