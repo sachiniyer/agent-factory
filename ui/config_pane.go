@@ -67,6 +67,14 @@ type ConfigPane struct {
 	// (NewConfigPane wires it); a test that swaps it is testing the pane's
 	// plumbing, not inventing a second writer.
 	save func(key, value string) (*config.SetResult, error)
+
+	// assistantRequested is set when the user presses the assistant key in normal
+	// mode. The pane cannot spawn the config agent itself — that is a daemon round
+	// trip owned by the app package — so it records the intent and the app reads it
+	// through TakeAssistantRequest after routing the key (#2453). It is a request,
+	// not a mode: the pane never enters an assistant state, it just asks the host
+	// to open one and closes.
+	assistantRequested bool
 }
 
 // configRow is one line of the flattened view: either a tier heading or an
@@ -157,7 +165,21 @@ func (c *ConfigPane) SetFocus(focus bool) {
 	if !focus {
 		c.cancelEdit()
 		c.clearStatus()
+		// A pending request is consumed the moment the app opens the assistant, so
+		// one that survives to a close was never taken (the pane was dismissed
+		// another way). Drop it so the next open cannot inherit a stale intent.
+		c.assistantRequested = false
 	}
+}
+
+// TakeAssistantRequest reports whether the user asked to open the config
+// assistant since the last call, clearing the flag. The app calls it after
+// routing a key to the pane: a true here means close this overlay and spawn the
+// assistant (#2453). Read-and-clear so the request fires exactly once.
+func (c *ConfigPane) TakeAssistantRequest() bool {
+	req := c.assistantRequested
+	c.assistantRequested = false
+	return req
 }
 
 // rebuildRows flattens the manifest into the visible list, honoring the
@@ -261,6 +283,21 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	case "a":
 		c.showAdvanced = !c.showAdvanced
 		c.rebuildRows()
+		return true
+	case "C":
+		// Ask the host to open the config assistant. Uppercase C matches the global
+		// hotkey the assistant already has (keys.KeyConfigAgent), and it is free
+		// here because value text is only typed in edit mode, which this switch does
+		// not reach. The pane records the request and closes; the app spawns the
+		// agent (see TakeAssistantRequest). This is the "button" #2453 asks for —
+		// the always-available way into the assistant from the config surface, so a
+		// user editing config never has to know the global shortcut exists.
+		//
+		// Drop focus FIRST — SetFocus(false) clears a pending request as part of its
+		// reset — then record this one, so closing the overlay does not wipe the
+		// intent that is closing it.
+		c.SetFocus(false)
+		c.assistantRequested = true
 		return true
 	case "enter":
 		c.beginEdit()
@@ -661,7 +698,22 @@ func (c *ConfigPane) renderHints() string {
 	if c.showAdvanced {
 		advanced = "a hide advanced"
 	}
-	return "\n" + configHintStyle.Render("↑/↓ move · ↵ edit · "+advanced+" · esc close") + "\n"
+	// "C assistant" is the button #2453 adds: the discoverable way to open the
+	// config assistant from the config surface. It sits before "esc close" so the
+	// exit stays last, where a reader looks for it.
+	//
+	// Adding a hint is a WIDTH change (#1936). With the assistant hint the full row
+	// is ~1 column past the 64-wide box's inner width, so at the real geometries it
+	// would wrap "esc close" onto a second line. Rather than wrap, shed the most
+	// droppable hint when the row will not fit: the advanced toggle, because `a`
+	// still works and pressing it reveals the tier — whereas the assistant button
+	// and the exit must always show. This is the hintDropOrder pattern, scoped to
+	// the one optional hint this row has.
+	full := "↑/↓ move · ↵ edit · " + advanced + " · C assistant · esc close"
+	if c.width > 0 && lipgloss.Width(full) > c.width {
+		full = "↑/↓ move · ↵ edit · C assistant · esc close"
+	}
+	return "\n" + configHintStyle.Render(full) + "\n"
 }
 
 // SetEditValueForTest and EditValueForTest expose the value field's buffer to

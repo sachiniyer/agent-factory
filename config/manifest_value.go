@@ -191,17 +191,28 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 //     bare key is NOT settable, but its leaves are — so the honest hint names
 //     the command that works, rather than sending someone to a text editor for
 //     something af can do for them.
-//   - A structural key (theme, root_agents, keys, cors_allowed_origins) is
-//     hand-edited by design. There is no command; say so.
+//   - A structural key (theme, root_agents, keys, session_env_passthrough,
+//     cors_allowed_origins) has no single-scalar `af config set` shape. The hint
+//     points at the config assistant, which edits these in the file for the user
+//     — the whole reason "hand-edit the file yourself" is no longer the answer
+//     (#2453 / #2454).
+//
+// assistantEditHint is the one string for that second case, so both editor
+// surfaces (TUI pane, web pane) say the same thing and TestStructuralKeysPointAtTheAssistant
+// pins it. It is surface-neutral on purpose: the TUI opens the assistant with a
+// key and the web with a button, so the hint names neither and describes the
+// capability instead.
+const assistantEditHint = "the config assistant can change this for you"
+
 func editability(e ManifestEntry) (editable bool, hint string) {
 	if !e.Settable {
-		return false, "hand-edited in config.toml"
+		return false, assistantEditHint
 	}
 	spec, ok := settableKeySpecs[e.Key]
 	if !ok {
 		// Unreachable while TestManifestAgreesWithSettableKeys passes; fail
 		// closed rather than offer a field the writer has no spec for.
-		return false, "hand-edited in config.toml"
+		return false, assistantEditHint
 	}
 	if spec.dynamic {
 		return false, "set one entry: af config set " + e.Key + ".<name> <value>"

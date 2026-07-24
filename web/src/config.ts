@@ -295,7 +295,10 @@ export class ConfigPane {
         "div",
         { class: "af-config-control" },
         h("code", { class: "af-config-value" }, e.value),
-        h("span", { class: "af-config-readonly" }, e.edit_hint ?? "hand-edited in config.toml"),
+        // edit_hint is always populated for a read-only row (the manifest's
+        // assistantEditHint since #2454); the fallback only guards a malformed
+        // payload and must not resurrect the retired "hand-edit the file" copy.
+        h("span", { class: "af-config-readonly" }, e.edit_hint ?? "the config assistant can change this for you"),
       );
     }
 

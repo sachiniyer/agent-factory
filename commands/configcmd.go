@@ -308,7 +308,9 @@ Settable keys:
   global_agent_skills        true | false
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
-cors_allowed_origins list are not settable here — edit config.toml directly.
+session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
+so they are not settable here. Ask the config assistant to change them (it edits
+the file and validates), or edit config.toml directly and run "af config validate".
 Changes apply on the next af / daemon start.
 
 Examples:
@@ -337,6 +339,55 @@ Examples:
 			fmt.Fprintln(cmd.OutOrStdout(),
 				"note: af and the daemon read config.toml at startup — restart them to apply (same as a hand-edit)")
 		}
+		return nil
+	},
+}
+
+// configValidateResult is the machine-readable answer of `af config validate`:
+// whether the current global config parses and validates, and the file it
+// checked. The value is deliberately not returned — the point is the verdict,
+// and a config that fails to load has no value to report.
+type configValidateResult struct {
+	OK   bool   `json:"ok"`
+	Path string `json:"path"`
+}
+
+var configValidateCmd = &cobra.Command{
+	Use:   "validate",
+	Short: "Check that the global config parses and validates",
+	Long: `Read the global config (~/.agent-factory/config.toml) exactly as af and the
+daemon do at startup and report whether it loads. It writes nothing and
+materializes nothing — a read-only check.
+
+This is the companion to a hand-edit. Most keys go through "af config set",
+which validates before it writes and so can never leave a broken file; but the
+structured settings (theme, the [keys] rebinds, root_agents, and the
+session_env_passthrough / cors_allowed_origins lists) are edited in the file
+directly, and a broken edit there is a hard startup failure with no fallback to
+defaults. Run this after such an edit: exit 0 means the next start will load it,
+a non-zero exit names what is wrong so it can be fixed before restarting.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		log.Initialize(false)
+		defer log.Close()
+
+		// LoadConfigReadOnly is the same parse+validate af runs at startup, minus
+		// the materialize/convert/secure side effects LoadConfig has — so validate
+		// can never itself change the thing it is checking. A missing file is not a
+		// failure: first run has no config yet, and af materializes defaults then.
+		loaded, err := config.LoadConfigReadOnly()
+		if err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
+		if configJSONFlag {
+			return apiproto.WriteEnvelope(cmd.OutOrStdout(),
+				apiproto.Success(configValidateResult{OK: true, Path: loaded.Path}))
+		}
+		if loaded.Missing {
+			fmt.Fprintln(cmd.OutOrStdout(), "config OK: no config file yet — af will write defaults on first start")
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s loads\n", prettyPath(loaded.Path))
 		return nil
 	},
 }
@@ -378,7 +429,9 @@ func init() {
 	configListCmd.Flags().StringVar(&configListProjectFlag, "project", "",
 		"Resolve config for the project at this repository path")
 	configSetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
+	configValidateCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configSetCmd)
+	configCmd.AddCommand(configValidateCmd)
 }
