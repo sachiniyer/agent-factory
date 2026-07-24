@@ -338,6 +338,12 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	// *exec.Error check would read "never ran" as "ran" and fire delete_cmd for a
 	// typo'd path.
 	p.launchStarted = cmd != nil && cmd.Process != nil
+	// Assigned unconditionally, INCLUDING the zero: launchPgid must describe the
+	// launch that just returned and nothing earlier. Leaving a previous attempt's
+	// value in place when this one never spawned would let quiesceLaunchGroup
+	// signal a group that is long gone — and whose id the kernel may since have
+	// handed to an unrelated process.
+	p.launchPgid = 0
 	if p.launchStarted {
 		// Setpgid made the child its own group leader, so the group id IS its pid.
 		p.launchPgid = cmd.Process.Pid
@@ -434,15 +440,28 @@ func (p *hookProvisioner) reap() error {
 //   - Those paths rebuild the provisioner from the stored cleanup handle
 //     (runtime_cleanup.go), which has no pgid to begin with — so the guard below
 //     already makes them no-ops. This comment records why that must stay true.
+//
+// Freshness is ENFORCED, not merely relied on, because "the caller builds a new
+// provisioner each time" is an invariant a future caller can silently break and
+// the failure mode is signalling a stranger's process group. Two mechanics hold
+// it: launch assigns launchPgid on every attempt including the zero, so it can
+// never describe an earlier launch; and this function consumes the value, so the
+// right to signal a given group is spent exactly once.
 func (p *hookProvisioner) quiesceLaunchGroup() {
 	if p.launchPgid == 0 {
 		return
 	}
+	// Consume it. A pgid is safe to signal only while the launch that led it has
+	// just returned, so the right to signal this one is spent here — a second
+	// call can never reach the syscall with a value that has since gone stale.
+	pgid := p.launchPgid
+	p.launchPgid = 0
+
 	// A negative pid targets the whole group led by launch_cmd. Any error means
 	// there is nothing left to wait for: ESRCH is the group already being empty,
 	// which is the common case (the script exited and spawned nothing that
 	// outlived it) and not a failure.
-	if err := syscall.Kill(-p.launchPgid, syscall.SIGKILL); err != nil {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
 		return
 	}
 	// SIGKILL cannot be caught, so this only covers the descheduling window
@@ -454,7 +473,7 @@ func (p *hookProvisioner) quiesceLaunchGroup() {
 	for time.Now().Before(deadline) {
 		// Signal 0 tests whether the group still has members without delivering
 		// anything; an error (ESRCH) means it has drained.
-		if err := syscall.Kill(-p.launchPgid, 0); err != nil {
+		if err := syscall.Kill(-pgid, 0); err != nil {
 			return
 		}
 		time.Sleep(hookQuiescePoll)

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -397,6 +398,56 @@ echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
 				"delete_cmd reported success, so this sandbox now bills with nothing pointing at it", sandbox)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestHookQuiesceNeverSignalsAStalePgid pins the other half of the process-group
+// kill: it may only ever target a group THIS attempt established.
+//
+// quiesceLaunchGroup runs on any provisioning failure, and its only guard is a
+// non-zero launchPgid. If a provisioner could carry a pgid from an earlier
+// launch into an attempt that never spawned, it would signal a group that is
+// long gone — and whose id the kernel may since have handed to an unrelated
+// process. Today no production path reuses a provisioner (hookRuntime.Provision
+// builds a fresh one per call), so this is a latent hazard rather than a live
+// bug; it is pinned because "the caller always builds a new one" is an invariant
+// a future caller can break silently, and the failure mode is SIGKILLing a
+// stranger's process tree.
+//
+// The sentinel below leads its OWN process group. That is not incidental: a kill
+// aimed at the test runner's group would take the test process with it.
+func TestHookQuiesceNeverSignalsAStalePgid(t *testing.T) {
+	shrinkHookTimeouts(t, 50*time.Millisecond, 5*time.Second)
+
+	// Stands in for whatever now owns a recycled pgid.
+	sentinel := exec.Command("sleep", "30")
+	sentinel.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, sentinel.Start())
+	stalePgid := sentinel.Process.Pid
+	exited := make(chan error, 1)
+	go func() { exited <- sentinel.Wait() }()
+	t.Cleanup(func() { _ = sentinel.Process.Kill() })
+
+	h := newHookState(t, "", "")
+	p := newHookProvisioner(h, "stale pgid")
+	// A pgid left behind by an earlier launch on this provisioner.
+	p.launchPgid = stalePgid
+	// …and an attempt that never spawns, so it establishes no group of its own
+	// and must not inherit the right to signal that one.
+	p.hooks.LaunchCmd = filepath.Join(h.dir, "does-not-exist.sh")
+
+	_, err := p.provisionOrReap()
+	require.Error(t, err, "a launch_cmd that cannot be executed must fail the provision")
+
+	assert.Zero(t, p.launchPgid,
+		"a launch that never spawned must clear launchPgid, not inherit the previous attempt's")
+
+	select {
+	case werr := <-exited:
+		t.Fatalf("quiesceLaunchGroup signalled a process group this attempt never established (%v); "+
+			"on a real box that pgid may belong to an unrelated process tree", werr)
+	case <-time.After(300 * time.Millisecond):
+		// Still running — the stale pgid was never signalled.
 	}
 }
 
