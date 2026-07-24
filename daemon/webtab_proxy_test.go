@@ -638,38 +638,86 @@ func TestWebTabProxy_QueryTokenIsOnlyABootstrapCredential(t *testing.T) {
 	}
 }
 
-// TestWebTabProxy_StripsPreviewTokenFromUpstreamQuery is the #1856 P1 query half.
-// af_preview_token shares the app origin's cookie jar and /v1/webtab/ path scope
-// (cookies are not port-scoped, RFC 6265 §8.5), so a request here can carry it —
-// and it must be stripped before the query is forwarded to the untrusted dev
-// server, exactly as af_webtab_token is. Otherwise a single GLOBAL preview
-// credential leaks upstream, handing one session's dev server access to every
-// other session's preview.
+// TestWebTabProxy_StripsPreviewTokenFromUpstreamQuery pins the #1856 invariant that no
+// af credential — the app's own af_webtab_token OR the foreign af_preview_token that
+// rides along via the shared cookie jar (cookies are not port-scoped, RFC 6265 §8.5) —
+// ever survives where an untrusted dev server could read it. It proves BOTH halves of
+// P2-a's interaction with the clean-before-render bootstrap:
+//
+//  1. Rendered URL: a request ARRIVING with both credential params is cleaned by a 307
+//     to a URL carrying NEITHER, before any upstream forward — strictly stronger than
+//     stripping on the way upstream, since the credential never enters window.location.
+//     The app origin adopts only its OWN credential as a cookie; it strips the foreign
+//     preview token, it does not adopt it.
+//  2. Proxied request: the post-bootstrap request (credentials in cookies) forwards the
+//     app's own query with NO af param, and forwardAppCookies strips BOTH af cookies so
+//     neither reaches the dev server.
 func TestWebTabProxy_StripsPreviewTokenFromUpstreamQuery(t *testing.T) {
+	var upstreamCalls atomic.Int32
 	seenQuery := make(chan string, 1)
+	seenCookie := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
 		seenQuery <- r.URL.RawQuery
+		seenCookie <- r.Header.Get("Cookie")
 		fmt.Fprint(w, "ok")
 	}))
 	defer upstream.Close()
 	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
 
-	// A clean sub-resource request: it carries NO af_webtab_token (so no bootstrap
-	// redirect fires) but DOES carry af_preview_token in the query.
+	// Arrives with BOTH credentials: af_webtab_token (its own, authorizes) and
+	// af_preview_token (foreign, rides along). The bootstrap strips every af param.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet,
-		fmt.Sprintf("/v1/webtab/%s/%s/asset.js?real=1&af_preview_token=leak", id, tabID), nil)
+		fmt.Sprintf("/v1/webtab/%s/%s/asset.js?real=1&af_webtab_token=fixture-token&af_preview_token=leak", id, tabID), nil)
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want 307 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("the credential-bearing request reached the dev server %d time(s), want 0", got)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, "real=1") {
+		t.Fatalf("redirect Location = %q, want the app's own param preserved", location)
+	}
+	for _, leak := range []string{"af_preview_token", "leak", "af_webtab_token", "fixture-token"} {
+		if strings.Contains(location, leak) {
+			t.Fatalf("redirect Location = %q must carry NO af credential (%q survived) — none may enter window.location", location, leak)
+		}
+	}
+	if c := cookieNamed(rec, previewTokenCookie); c != nil {
+		t.Fatalf("app origin set the preview cookie %+v; it must strip the foreign preview token, not adopt it", c)
+	}
+	ownCookie := cookieNamed(rec, webtabTokenCookie)
+	if ownCookie == nil || !ownCookie.HttpOnly {
+		t.Fatalf("app origin cookie = %+v, want its own HttpOnly af_webtab_token", ownCookie)
 	}
 
+	// The proxied follow-up: credentials now in cookies (the preview one riding along via
+	// the shared jar). The upstream sees the app's own query and NO af cookie.
+	clean := httptest.NewRecorder()
+	cleanReq := httptest.NewRequest(http.MethodGet, location, nil)
+	cleanReq.AddCookie(ownCookie)
+	cleanReq.AddCookie(&http.Cookie{Name: previewTokenCookie, Value: "leak"})
+	mux.ServeHTTP(clean, cleanReq)
+	if clean.Code != http.StatusOK {
+		t.Fatalf("clean follow-up status = %d, want 200 (body: %s)", clean.Code, clean.Body.String())
+	}
 	got := <-seenQuery
 	if !strings.Contains(got, "real=1") {
 		t.Fatalf("upstream RawQuery = %q, want the app's own param preserved", got)
 	}
-	if strings.Contains(got, "af_preview_token") || strings.Contains(got, "leak") {
-		t.Fatalf("upstream RawQuery = %q must not carry af_preview_token — a global preview credential must never reach the dev server", got)
+	for _, leak := range []string{"af_preview_token", "leak", "af_webtab_token", "fixture-token"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("upstream RawQuery = %q must carry NO af credential (%q reached the dev server)", got, leak)
+		}
+	}
+	gotCookie := <-seenCookie
+	for _, leak := range []string{"af_preview_token", "leak", "af_webtab_token", "fixture-token"} {
+		if strings.Contains(gotCookie, leak) {
+			t.Fatalf("upstream Cookie = %q must carry NO af credential (%q survived) — forwardAppCookies must strip both", gotCookie, leak)
+		}
 	}
 }
 
