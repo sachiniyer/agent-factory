@@ -210,6 +210,27 @@ func (i *Instance) ArchivedBranchForReclaim() (string, bool) {
 	return gw.GetBranchName(), true
 }
 
+// ArchivedCandidateBranchIsFree reports whether `candidate` is a branch name the
+// archived session's worktree can be renamed ONTO — free, and confirmed free
+// (#2127, P3 on #2465). It exists for the same reason as ArchivedBranchForReclaim:
+// the archived worktree is not reachable through GetGitWorktree, so the daemon
+// cannot run the check itself.
+//
+// free is false BOTH when a branch of that name already exists (git refuses to
+// rename onto it) and when existence could not be determined — an unknown answer
+// is treated as taken, so the reclaim declines rather than renaming onto a name it
+// could not rule out.
+func (i *Instance) ArchivedCandidateBranchIsFree(candidate string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	gw := i.gitWorktree
+	if gw == nil {
+		return false
+	}
+	exists, ok := gw.BranchExists(candidate)
+	return ok && !exists
+}
+
 // RenameArchived atomically relocates an archived instance's worktree to dest (a
 // new title-keyed archive dir) and updates its Title, so a fresh session can reuse
 // the archived session's name (feat: reuse archived name). Both mutations happen

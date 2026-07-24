@@ -493,9 +493,18 @@ func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session
 	if _, blocking := held[current]; !blocking {
 		return ""
 	}
-	// A free name, or nothing: renaming onto an existing branch is a git error,
-	// and taking a name some other session holds would be worse than the refusal.
+	// The candidate name must be genuinely FREE, and "not checked out" is not the
+	// same as "free": `git branch -m` refuses to rename onto ANY existing branch,
+	// idle or held. Checking only the checked-out map (the P3 on #2465) let a plain
+	// branch of the candidate's name through the guard, after which the rename
+	// failed with exit 128 — the guard having promised a name it had not actually
+	// cleared. BranchExists closes that, and its unknown answer declines, because a
+	// name that cannot be ruled out must be treated as taken rather than renamed
+	// onto.
 	if _, taken := held[candidate]; taken {
+		return ""
+	}
+	if !archived.ArchivedCandidateBranchIsFree(candidate) {
 		return ""
 	}
 	return candidate
@@ -599,9 +608,13 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	newBranch := m.reclaimArchivedBranchLocked(repoPath, archived, newTitle)
 
 	// Relocate the archived worktree + move its branch + update the title
-	// atomically on the instance.
+	// atomically on the instance. The wrapper names neither the worktree nor the
+	// branch as the culprit — RenameArchived does either step and reports which one
+	// failed in the wrapped error, so a fixed "failed to relocate its worktree"
+	// prefix would mislabel a branch-rename failure as a worktree one (the P3 on
+	// #2465).
 	if err := archived.RenameArchived(newTitle, newDest, newBranch); err != nil {
-		return nil, fmt.Errorf("cannot free the archived name %q for reuse: failed to relocate its worktree: %w", oldTitle, err)
+		return nil, fmt.Errorf("cannot free the archived name %q for reuse: %w", oldTitle, err)
 	}
 	// Re-key the manager map so the archived row is addressable under its new title.
 	newKey := daemonInstanceKey(repoID, newTitle)

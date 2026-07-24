@@ -46,6 +46,36 @@ func (g *GitWorktree) RenameBranch(newName string) error {
 	return nil
 }
 
+// BranchExists reports whether a local branch of the given name exists in this
+// repo, regardless of whether it is checked out anywhere.
+//
+// It answers the question the checked-out-branches map cannot: `git branch -m`
+// refuses to rename ONTO any existing branch, checked out or not, so a reclaim
+// that only avoided checked-out target names could still pick a name that a plain,
+// idle branch already holds — and then fail at the rename with exit 128 after the
+// guard had promised the name was free (the P3 on #2465).
+//
+// ok is false when the question could not be answered (a broken repo), so a caller
+// choosing a rename target treats "cannot tell" as "assume taken" and declines,
+// rather than renaming onto a name it could not rule out.
+func (g *GitWorktree) BranchExists(name string) (exists bool, ok bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, true
+	}
+	// --verify exits 0 iff the exact ref resolves; --quiet suppresses the "not a
+	// valid ref" stderr for the ordinary absent case. A non-zero exit is the ANSWER
+	// "no such branch", not a failure to ask — but this level cannot tell that apart
+	// from a genuinely broken repo, so for-each-ref is used instead, which prints
+	// the ref name on a hit and nothing on a miss and exits 0 for both.
+	out, err := g.runGitCommand(g.repoPath, "for-each-ref",
+		"--format=%(refname:short)", "refs/heads/"+name)
+	if err != nil {
+		return false, false
+	}
+	return strings.TrimSpace(out) != "", true
+}
+
 // BranchIsPublished reports whether this worktree's branch has an upstream — it
 // has been pushed, and may carry an open PR.
 //
@@ -56,6 +86,18 @@ func (g *GitWorktree) RenameBranch(newName string) error {
 // as "local": that is the fabricated-negative shape this repo keeps paying for —
 // a probe that cannot know, answering anyway, and the fake answer authorizing the
 // riskier action.
+//
+// "Published" is two independent facts, and it is enough for EITHER to hold:
+//
+//   - A configured upstream (%(upstream)). The branch tracks a remote ref.
+//   - A remote-tracking ref (refs/remotes/*/<branch>). The branch has been pushed.
+//
+// The two are not the same, and reading only the first was a real safety hole
+// (the P2 on #2465). `git push origin dev/foo` — no -u — and several push.default
+// settings create the remote ref WITHOUT the upstream config, so an
+// upstream-only probe answers "local, safe to rename" for a branch that is on the
+// remote and may have an open PR. Renaming it is exactly the desync this function
+// exists to refuse.
 func (g *GitWorktree) BranchIsPublished() (published bool, known bool) {
 	if g.branchName == "" {
 		return false, false
@@ -75,12 +117,27 @@ func (g *GitWorktree) BranchIsPublished() (published bool, known bool) {
 	}
 	row := strings.TrimSpace(out)
 	if row == "" {
-		// The branch is not there. Nothing true can be said about its upstream.
+		// The branch is not there. Nothing true can be said about it.
 		return false, false
 	}
 	_, upstream, ok := strings.Cut(row, "|")
 	if !ok {
 		return false, false
 	}
-	return strings.TrimSpace(upstream) != "", true
+	if strings.TrimSpace(upstream) != "" {
+		return true, true
+	}
+	// No upstream config — but the branch may still be on a remote, pushed without
+	// -u. A matching refs/remotes/*/<branch> is the direct evidence of that, and
+	// covers every remote (not just origin) with one query. Any row at all means a
+	// remote-tracking ref exists.
+	remotes, err := g.runGitCommand(g.repoPath, "for-each-ref",
+		"--format=%(refname:short)", "refs/remotes/*/"+g.branchName)
+	if err != nil {
+		// The branch exists (proven above), but whether it is on a remote could
+		// not be determined — so this is UNKNOWN, and unknown never authorizes the
+		// rename. Same polarity as the missing-branch case.
+		return false, false
+	}
+	return strings.TrimSpace(remotes) != "", true
 }

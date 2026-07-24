@@ -131,6 +131,42 @@ func TestReserveCreate_PublishedArchivedBranchStillRefuses(t *testing.T) {
 	assert.Contains(t, held, branch, "the published branch must be exactly where it was")
 }
 
+// The reclaim's target name must be genuinely free, not merely un-checked-out
+// (the P3 on #2465). If a plain branch already holds the disambiguated name
+// "<prefix>foo-archived", `git branch -m` would refuse the rename — so the reclaim
+// must decline and let the create refuse up front, rather than promise a name it
+// cannot deliver and then fail mid-rename with a misleading message.
+func TestReserveCreate_ReclaimDeclinesWhenTargetBranchExists(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSession(t, manager, repoID, repoPath, "foo", "foo")
+	branch := manager.branchForTitle("foo")
+
+	// The name the reclaim would rename onto already exists as a plain, idle branch
+	// — checked out nowhere, so the checked-out map does not see it.
+	target := manager.branchForTitle("foo (archived)")
+	out, err := exec.Command("git", "-C", repoPath, "branch", target).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "foo", Program: "claude"})
+	if release != nil {
+		release()
+	}
+
+	require.Error(t, err, "the reclaim target is taken, so the create cannot succeed and must refuse up front")
+	assert.NotContains(t, err.Error(), "failed to relocate its worktree",
+		"a taken branch name must not be reported as a worktree-relocation failure")
+	assert.Nil(t, renamed, "no archived rename may happen for a create that cannot succeed")
+
+	// Side-effect-free: neither the archived branch nor the pre-existing target moved.
+	assert.Equal(t, "foo", archived.Title, "the archived session must keep its name after a refusal")
+	held, herr := sessiongit.BranchesHeldByWorktrees(repoPath)
+	require.NoError(t, herr)
+	assert.Contains(t, held, branch, "the archived branch must be exactly where it was")
+	out, err = exec.Command("git", "-C", repoPath, "branch", "--list", target).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), target, "the pre-existing target branch must be untouched")
+}
+
 // TestReserveCreate_HeldBranchWithoutArchivedCollisionIsUnguarded keeps the
 // guard as narrow as the invariant it protects. A held branch with NO archived
 // session to rename triggers no rename, so there is nothing to leave orphaned —
