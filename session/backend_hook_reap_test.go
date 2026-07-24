@@ -50,6 +50,18 @@ func (h hookState) deleteRan(t *testing.T) bool {
 	return err == nil
 }
 
+// deleteRunCount is how many times delete_cmd actually ran: it appends one line
+// per invocation BEFORE any wedge/sleep, so a growing count proves a reap
+// re-invoked delete_cmd rather than short-circuiting on a latch.
+func (h hookState) deleteRunCount(t *testing.T) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(h.dir, "delete-ran.log"))
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(data), "\n")
+}
+
 // writeHookScript writes an executable bash script and returns its path. Paths
 // are interpolated single-quoted, so the script never depends on cwd or $HOME.
 func writeHookScript(t *testing.T, path, body string) string {
@@ -361,15 +373,75 @@ func TestHookReapTimeoutIsUnknownState(t *testing.T) {
 		"the reap error must wrap ErrWorkspaceStateUnknown so deleteSessionRecord refuses to delete the record")
 	// The orphan the user needs to know about is still named.
 	assert.Contains(t, err.Error(), p.slug, "the failure must still name the orphaned sandbox")
-	// And a delete_cmd that ANSWERS with an error stays known-state (record may go),
-	// mirroring docker — only the timeout is unknown-state.
-	h2 := newHookState(t, "exit 0\n", "echo 'nope' >&2\nexit 9\n")
-	p2 := newHookProvisioner(h2, "answered failure known state")
-	p2.launchStarted = true
-	err2 := p2.reap()
-	require.Error(t, err2)
-	assert.False(t, TeardownStateUnknown(err2),
+}
+
+// TestHookReapTimeoutIsReRunnable is the #2529-review guard: a timed-out reap must
+// NOT latch. The daemon's finishUserKill re-invokes reap() on the SAME provisioner
+// every poll for a retained (unknown-state) record. sync.Once latched the timeout
+// too, so the second reap skipped the closure and returned nil — deleteSessionRecord
+// then deleted the record and the workspace leaked exactly one poll later, the same
+// leak as master, one tick delayed. A second reap while delete_cmd is still wedged
+// must (i) ACTUALLY re-run delete_cmd and (ii) keep returning the unknown sentinel.
+func TestHookReapTimeoutIsReRunnable(t *testing.T) {
+	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond)
+	h := newHookState(t, "exit 0\n", "sleep 5\n") // logs one line, then wedges
+	p := newHookProvisioner(h, "re-runnable wedged reap")
+	p.launchStarted = true
+
+	first := p.reap()
+	require.True(t, errors.Is(first, ErrWorkspaceStateUnknown), "first timed-out reap must be unknown-state")
+	require.Equal(t, 1, h.deleteRunCount(t), "delete_cmd ran once")
+
+	second := p.reap()
+	require.Error(t, second,
+		"a second reap while delete_cmd is still wedged must not return nil — a nil would let deleteSessionRecord delete the record and orphan the workspace one poll later")
+	require.True(t, errors.Is(second, ErrWorkspaceStateUnknown),
+		"a re-run timed-out reap must keep returning ErrWorkspaceStateUnknown")
+	require.Equal(t, 2, h.deleteRunCount(t),
+		"the second reap must ACTUALLY re-invoke delete_cmd (the log line count grows), not skip it via a latch")
+}
+
+// TestHookReapAnsweredErrorIsKnownStateAndLatches is the other half: a delete_cmd
+// that ANSWERS with a non-zero exit told us something, so it is known-state (the
+// record may go) AND it latches — a second reap returns the cached error without
+// re-running a delete that already reported. A GENEROUS delete timeout keeps a slow
+// script spawn under load from being misread as a timeout (which would be
+// unknown-state) — only the wedged tests above need the short bound (#2529 review).
+func TestHookReapAnsweredErrorIsKnownStateAndLatches(t *testing.T) {
+	shrinkHookTimeouts(t, 5*time.Second, 5*time.Second)
+	h := newHookState(t, "exit 0\n", "echo 'nope' >&2\nexit 9\n")
+	p := newHookProvisioner(h, "answered failure known state")
+	p.launchStarted = true
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.False(t, TeardownStateUnknown(err),
 		"a delete_cmd that answered with an error TOLD us something — it is known-state, not unknown")
+	require.Equal(t, 1, h.deleteRunCount(t), "delete_cmd ran once")
+
+	err2 := p.reap()
+	require.Error(t, err2, "the latched known-state error is returned again")
+	assert.Equal(t, 1, h.deleteRunCount(t),
+		"an answered-error reap latches — delete_cmd is not re-run")
+}
+
+// TestHookProvisionFailureWithReapTimeoutPreservesUnknownSentinel locks #2529
+// review P3-a: when provisioning fails AND the reap then times out, the provision
+// error must keep reapErr's ErrWorkspaceStateUnknown sentinel classifiable
+// (errors.Join, not flattened into %s text) — the hook/docker/ssh unknown-state
+// parity this fix is about, matching ssh's reapProvisionFailure.
+func TestHookProvisionFailureWithReapTimeoutPreservesUnknownSentinel(t *testing.T) {
+	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond)
+	h := newHookState(t, "echo 'provisioned then died' >&2\nexit 4\n", "sleep 5\n")
+	p := newHookProvisioner(h, "create then wedged reap")
+
+	_, err := p.provisionOrReap()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"the provision error must keep the reap's unknown-state sentinel classifiable (#2529 review P3-a)")
+	// The original launch failure and the human-actionable orphan warning survive too.
+	assert.Contains(t, err.Error(), "launch_cmd failed", "the provisioning error is not swallowed")
+	assert.Contains(t, err.Error(), "may still be running on your infrastructure")
 }
 
 // TestHookReapUnaffectedByCancelledCaller locks the one subtlety that would
