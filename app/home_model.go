@@ -426,7 +426,15 @@ type home struct {
 }
 
 func newHome(ctx context.Context, program string, repo *config.RepoContext) *home {
-	repoID := repo.ID
+	// repo is nil when af was launched outside a git repository (#2477): the TUI
+	// opens in registry mode with no active project, and the user selects one
+	// from the Projects section. An empty repoID makes the cold-start snapshot an
+	// all-repos fetch, and an empty repoRoot skips the repo-scoped config below.
+	var repoID, repoRoot string
+	if repo != nil {
+		repoID = repo.ID
+		repoRoot = repo.Root
+	}
 	// Load application config
 	appConfig, err := config.LoadConfig()
 	if err != nil {
@@ -479,7 +487,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		appConfig:        appConfig,
 		program:          program,
 		repoID:           repoID,
-		repoRoot:         repo.Root,
+		repoRoot:         repoRoot,
 		state:            stateDefault,
 		appState:         appState,
 	}
@@ -488,15 +496,35 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	// No panes are open at startup: the focus ring is tree → automations →
 	// projects until the first pane opens (relayout rebuilds the ring's pane
 	// entries thereafter; the first instance selection auto-opens its pane).
+	//
+	// In registry mode (launched outside a repo, #2477) the session tree is empty
+	// — there is no active project — so land focus on the Projects section, the
+	// surface the user picks a project from, rather than the empty tree. The ring
+	// position survives the first relayout (RegionProjects stays visible), and
+	// there is no saved view state to restore over it (repoID is empty).
+	if repoRoot == "" {
+		h.ring.Focus(layout.RegionProjects)
+	}
 	h.syncFocus()
 
 	// Cold-start the projection from the daemon's authoritative Snapshot (#960 PR 6).
 	// The TUI no longer reads instances.json — the daemon is the sole writer/owner
 	// of session state, so startup mirrors the same projection the refresh tick
 	// reconciles against. A warming daemon (#829) is waited out, not raced.
-	if err := h.coldStartFromSnapshot(); err != nil {
-		fmt.Printf("Failed to load sessions from daemon: %v\n", err)
-		os.Exit(1)
+	//
+	// Skipped in registry mode (launched outside a repo, #2477): with no active
+	// project the session rail is intentionally empty until one is selected.
+	// Cold-starting here would use an empty repoID, which the daemon answers with
+	// the CROSS-REPO snapshot — listing sessions the empty active scope cannot act
+	// on, because every per-session op is keyed to m.repoID and would silently
+	// no-op (resolveSessionActionTarget requires target.repoID == m.repoID). An
+	// empty rail keeps the mode coherent; switchProject cold-starts the chosen
+	// project's sessions when one is selected.
+	if repoRoot != "" {
+		if err := h.coldStartFromSnapshot(); err != nil {
+			fmt.Printf("Failed to load sessions from daemon: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	h.restoreTUIViewStateOnLaunch()
@@ -504,27 +532,36 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	// renders (collapsed) at launch with the active project marked.
 	h.refreshSidebarProjects()
 
-	// Load tasks for sidebar display
-	tasks, err := task.LoadTasksForCurrentRepo()
-	if err != nil {
-		log.WarningLog.Printf("failed to load tasks: %v", err)
-	} else {
-		h.store.SetTasks(tasks)
-	}
-
-	// Load tasks into the automations strip's task manager
-	if len(tasks) > 0 {
-		h.automations.TaskPane().SetTasks(tasks)
+	// Load tasks for sidebar display. Skipped in registry mode (#2477): tasks are
+	// per-project and LoadTasksForCurrentRepo needs a cwd repo, so with no active
+	// project the automations strip stays empty — not errored — until one is
+	// selected, matching the empty session rail. switchProject loads the chosen
+	// project's tasks then.
+	if repoRoot != "" {
+		tasks, err := task.LoadTasksForCurrentRepo()
+		if err != nil {
+			log.WarningLog.Printf("failed to load tasks: %v", err)
+		} else {
+			h.store.SetTasks(tasks)
+			// Load tasks into the automations strip's task manager.
+			if len(tasks) > 0 {
+				h.automations.TaskPane().SetTasks(tasks)
+			}
+		}
 	}
 
 	// Load hooks for the hooks overlay. ResolveConfig applies the in-repo
-	// .agent-factory/config.json over the legacy per-repo file.
-	repoCfg, err := config.ResolveConfig(repo.Root)
-	if err != nil {
-		log.WarningLog.Printf("failed to resolve repo config: %v", err)
-	} else {
-		h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
-		h.hooksPane.SetCommands(repoCfg.PostWorktreeCommands)
+	// .agent-factory/config.json over the legacy per-repo file. Skipped in
+	// registry mode (no active repo, #2477): there are no repo-scoped hooks to
+	// show until a project is selected, and switchProject re-resolves them then.
+	if repoRoot != "" {
+		repoCfg, err := config.ResolveConfig(repoRoot)
+		if err != nil {
+			log.WarningLog.Printf("failed to resolve repo config: %v", err)
+		} else {
+			h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
+			h.hooksPane.SetCommands(repoCfg.PostWorktreeCommands)
+		}
 	}
 
 	return h
