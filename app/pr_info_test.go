@@ -621,6 +621,120 @@ func TestFetchPRInfoCmd_StampsRepoIDAtKickoff(t *testing.T) {
 	assert.Equal(t, msg.branch, msg.info.Branch)
 }
 
+// TestPrInfoUpdatedMsg_TearingDownTargetDropsUpdate is the TUI half of #2437,
+// and covers the case that actually fires.
+//
+// A TUI archive raises OpArchiving OPTIMISTICALLY and does not flip liveness
+// until the daemon RPC returns, so across the whole teardown+move IsArchived is
+// still false. A settled-liveness check alone would therefore cover only the
+// rare case. OpKilling is dropped for its own reason: a record about to be
+// deleted has no use for PR info.
+//
+// The companion TestPrInfoUpdatedMsg_SettledLiveTargetStillApplies, and the
+// pre-existing TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp (which
+// drives a LOADING instance, i.e. OpCreating), are what keep this from being
+// widened to HasInFlightOp — a session that is merely creating or restoring is
+// coming back live and still wants its badge.
+func TestPrInfoUpdatedMsg_TearingDownTargetDropsUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		begin func() session.TransitionEvent
+	}{
+		{"archive in flight", session.BeginArchive},
+		{"kill in flight", session.BeginKill},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+
+			inst := newStartedInstanceWithWorktreeBranch(t, "worker", "feature/x")
+			h.store.AddInstance(inst)
+			require.NoError(t, inst.Transition(tc.begin()))
+			require.False(t, inst.IsArchived(),
+				"premise: an optimistic op leaves liveness live, so a liveness check cannot see it")
+			require.True(t, inst.IsTearingDown(), "premise: the op axis is what carries this state")
+
+			var persisted bool
+			restore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
+				persisted = true
+				return nil
+			})
+			defer restore()
+
+			_, cmd := h.Update(prInfoUpdatedMsg{
+				target: captureSessionActionTarget(inst, h.repoID), branch: "feature/x",
+				info: &git.PRInfo{Number: 42, Title: "raced the op", State: "OPEN"},
+			})
+
+			assert.Nil(t, cmd)
+			assert.False(t, persisted,
+				"the daemon will refuse this once the archive commits, and the write would park "+
+					"on the op-lock it holds meanwhile")
+			assert.Nil(t, inst.GetPRInfo(),
+				"a session being torn down must not take a PR-info projection")
+		})
+	}
+}
+
+// TestPrInfoUpdatedMsg_ArchivedTargetDropsUpdate covers the settled case: a
+// session already archived when the result lands. The daemon refuses this
+// outright (#2437), so sending it would only produce a logged "failure" for
+// ordinary, correct behaviour.
+func TestPrInfoUpdatedMsg_ArchivedTargetDropsUpdate(t *testing.T) {
+	h := newTestHome(t)
+
+	inst := newStartedInstanceWithWorktreeBranch(t, "worker", "feature/x")
+	h.store.AddInstance(inst)
+	inst.SetStatusForTest(session.Archived)
+	require.True(t, inst.IsArchived(), "premise: a settled archive shows on the liveness axis")
+
+	var persisted bool
+	restore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
+		persisted = true
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.Update(prInfoUpdatedMsg{
+		target: captureSessionActionTarget(inst, h.repoID), branch: "feature/x",
+		info: &git.PRInfo{Number: 42, Title: "raced the archive", State: "OPEN"},
+	})
+
+	assert.Nil(t, cmd)
+	assert.False(t, persisted, "the daemon refuses PR info for an archived session")
+	assert.Nil(t, inst.GetPRInfo(),
+		"applying to the in-memory copy diverges it from the record the archive preserved")
+}
+
+// TestPrInfoUpdatedMsg_SettledLiveTargetStillApplies pins what the guards must
+// NOT take away: a settled, live session still applies and still persists. A
+// guard that dropped everything would satisfy both tests above.
+func TestPrInfoUpdatedMsg_SettledLiveTargetStillApplies(t *testing.T) {
+	h := newTestHome(t)
+
+	inst := newStartedInstanceWithWorktreeBranch(t, "worker", "feature/x")
+	h.store.AddInstance(inst)
+	require.False(t, inst.HasInFlightOp(), "premise: nothing in flight")
+
+	var persisted bool
+	restore := SetPRInfoSetterForTest(func(req daemon.SetPRInfoRequest) error {
+		persisted = true
+		assert.Equal(t, 42, req.PRInfo.Number)
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.Update(prInfoUpdatedMsg{
+		target: captureSessionActionTarget(inst, h.repoID), branch: "feature/x",
+		info: &git.PRInfo{Number: 42, Title: "live", State: "OPEN"},
+	})
+
+	assert.Nil(t, cmd)
+	assert.True(t, persisted, "a settled live session must still persist its fetched PR info")
+	got := inst.GetPRInfo()
+	require.NotNil(t, got, "a settled live session must still show the badge immediately")
+	assert.Equal(t, 42, got.Number)
+}
+
 // sanity: exercise config.DefaultConfig / AppState wiring so a compile
 // regression in newTestHome stays within this package.
 func TestNewTestHome_BuildsSuccessfully(t *testing.T) {

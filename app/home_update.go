@@ -101,6 +101,45 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if target.GetWorktreeBranch() != msg.branch {
 			return m, nil
 		}
+		// Drop a result for a session that is archived, or on its way to being
+		// archived or killed. The fetch is kicked off from a target captured before
+		// any of that could begin, so it routinely outlives the state it was
+		// resolved against.
+		//
+		// Both halves are needed, and neither covers the other:
+		//
+		//   - IsArchived is the settled case, which the daemon now refuses outright
+		//     (#2437/#1809). Sending it would only earn a logged "failure" for
+		//     ordinary, correct behaviour.
+		//   - IsTearingDown is the in-flight case, and it is the one that actually
+		//     fires. IsArchived reads the liveness axis ALONE and is settled-state
+		//     only, while a TUI archive raises OpArchiving OPTIMISTICALLY and does
+		//     not flip liveness until the RPC returns — so for the whole
+		//     teardown+move the session is invisible to a liveness check. OpKilling
+		//     rides along for its own reason: a record about to be deleted has no
+		//     use for PR info.
+		//
+		// Deliberately NOT the wider HasInFlightOp, tempting as that is: the same
+		// op-lock is held by every long daemon op, so a wider gate would also
+		// suppress the badge for a session that is merely CREATING (OpCreating) or
+		// RESTORING — both of which are coming back live and want their result. A
+		// loading session getting its PR badge is normal, and is covered by
+		// TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp.
+		//
+		// That leaves a real residual, stated plainly rather than papered over:
+		// setPRInfoThroughDaemon below runs INLINE on the Update goroutine, so a
+		// result landing during a restore still parks the TUI event loop on that
+		// session's op-lock until the restore finishes. This guard narrows that
+		// window to the ops whose results are worthless anyway; it does not close
+		// it. Closing it means not making a blocking RPC from the event loop at
+		// all, which is a different change.
+		//
+		// Dropping costs at most a stale badge: fetchPRInfoCmd already called
+		// MarkPRInfoFetched at kickoff, so nothing retries in a tight loop, and the
+		// next tick re-fetches with force.
+		if target.IsArchived() || target.IsTearingDown() {
+			return m, nil
+		}
 		if msg.err != nil {
 			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.target.title, msg.err)
 			// Mark as fetched anyway so we don't thrash retries on every

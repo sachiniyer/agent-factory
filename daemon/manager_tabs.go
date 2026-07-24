@@ -292,8 +292,10 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 // Without the op-lock and stale-instance check, a SetPRInfo racing a
 // KillSession+CreateSession cycle could write the old instance's data (including
 // its stale stable id) over the new instance's disk record, corrupting the
-// persisted identity (#1723). This is the daemon-side write used by the TUI's
-// async PR-info fetch (#921).
+// persisted identity (#1723). It also refuses an archived session under that
+// same lock, which the stale-instance check cannot substitute for (#2437 — see
+// the gate below). This is the daemon-side write used by the TUI's async PR-info
+// fetch (#921).
 func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
@@ -318,6 +320,29 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	m.mu.Unlock()
 	if current != instance || instance.UserKilled() {
 		return fmt.Errorf("session %q changed state before PR info could be recorded", title)
+	}
+	// Archived sessions are refused here, UNDER the op-lock, for the reason
+	// tabMutationTarget spells out: the two checks above cannot see an archive.
+	// ArchiveSession holds this SAME op-lock, commits LiveArchived under it, and
+	// leaves the same instance tracked (an archived row stays listed and
+	// restorable) — so a SetPRInfo that resolved a live session and then queued
+	// behind an archive arrives with current == instance and UserKilled() false,
+	// passes both, and overwrites the PR info the archive just preserved, then
+	// persists the loss. Archive is inert in BOTH directions (#1809); this was the
+	// last mutation of the instance record still missing that gate (#2437).
+	//
+	// The window is not theoretical: the TUI starts `gh pr view` against a target
+	// captured before an archive can begin and sends the result whenever it lands,
+	// so the request routinely outlives the state it was resolved against.
+	//
+	// It deliberately reuses the tab verbs' refusal so a user who archived a
+	// session gets ONE consistent message and remedy no matter which mutation lost
+	// the race. There is no pre-lock fast path: it would key on IsArchived, which
+	// is settled-state only, so an archive actually IN FLIGHT reads as live and
+	// parks on the op-lock either way — a fast path would buy nothing the
+	// post-lock gate does not already do correctly.
+	if instance.IsArchived() {
+		return errTabMutationArchived("record PR info", title)
 	}
 
 	repoStartLock := m.startLockForRepo(repoID)
