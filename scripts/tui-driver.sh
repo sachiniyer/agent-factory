@@ -918,11 +918,19 @@ _af_tab_count() {
 #   * LEFT — `(^|[^[:alnum:]])`: the `r` must start a token (line start, or a
 #     non-alphanumeric like the frame padding / a `• ` separator before it), so
 #     the trailing `r` of a word does NOT count ("serve`r run` •", "you`r run`").
-#   * RIGHT — ` •` (U+2022): the run action is ALWAYS followed by the menu's
-#     space-and-bullet separator (`r run now • …` / `r run • …`), which no shell
-#     output line ("no longe`r run`ning.", "you`r run` finished") carries.
+#   * RIGHT — ` •` (U+2022): the run action is ALWAYS followed by the TASK
+#     OVERLAY's space-and-bullet separator (`r run now • …` / `r run • …`), which
+#     no shell output line ("no longe`r run`ning.", "you`r run` finished")
+#     carries.
 # The bullet is matched as a literal byte sequence, not a bracket expression, so
 # it works under the sandbox's C/POSIX locale (cf. _af_tab_count).
+#
+# This bullet is the TASK OVERLAY's (ui/task_pane.go), NOT the root status
+# menu's. Those are different rows built by different renderers, and the status
+# menu moved to the repo-standard ` · ` in #2399 while the overlay hints did not
+# — so do not "fix" this to a middle dot to match the status bar. If the overlay
+# hints are converted later, this anchor moves with them, and the tests in
+# ui/menu_test.go are what pin the status menu's own separator.
 : "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? •}"
 
 # af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
