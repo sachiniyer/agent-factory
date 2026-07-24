@@ -32,6 +32,15 @@ type startArchiveMsg struct {
 	target sessionActionTarget
 }
 
+// startRestoreMsg is emitted by the reprovisioning-restore confirmation (#2489);
+// its handler dispatches restoreInstanceCmd off the event loop, mirroring
+// startArchiveMsg → archiveInstanceCmd. Only the remote-sandbox restore that could
+// discard unpushed work is gated behind a confirm; a safe restore dispatches the
+// command immediately via handleRestore.
+type startRestoreMsg struct {
+	target sessionActionTarget
+}
+
 // startDeleteProjectMsg is emitted by the delete-project confirmation (#1735);
 // its handler dispatches deleteProjectCmd to run the daemon archive-then-remove
 // off the event loop, mirroring startArchiveMsg → archiveInstanceCmd.

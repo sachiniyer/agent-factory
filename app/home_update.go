@@ -304,6 +304,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Archive confirmed; run the daemon teardown+move off the event loop
 		// (#1028), mirroring the kill dispatch.
 		return m, m.archiveInstanceCmd(msg.target)
+	case startRestoreMsg:
+		// Reprovisioning restore confirmed (#2489); run the daemon restore off the
+		// event loop, mirroring the archive dispatch.
+		return m, m.restoreInstanceCmd(msg.target)
 	case instanceArchivedMsg:
 		return m.handleInstanceArchived(msg)
 	case startHandoffMsg:

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -19,6 +20,15 @@ type deadBackend struct {
 }
 
 func (b *deadBackend) IsAlive(*session.Instance) (bool, error) { return false, nil }
+
+// reprovisioningBackend is a FakeBackend that reports a sandbox runtime type, so
+// Instance.RestoreWouldDiscardUnpushedWork() sees a Lost/Dead restore that would
+// re-provision a fresh sandbox — the case #2489 fences behind a confirmation.
+type reprovisioningBackend struct {
+	*session.FakeBackend
+}
+
+func (b *reprovisioningBackend) Type() string { return "docker" }
 
 // newDeadInstance returns a started instance backed by deadBackend with the
 // given starting status. It does not spin up tmux/git, so it is hermetic.
@@ -105,10 +115,11 @@ func TestHandleEnter_RestingRowRestores(t *testing.T) {
 			require.Equal(t, session.OpRestoring, inst.GetInFlightOp(),
 				"Enter restores the row (#2489), raising the optimistic restore op")
 
-			// No "press r" guard message: the gesture ACTS on the restore.
+			// No guard message: the gesture ACTS on the restore. This fails if the
+			// fix regresses to interactiveGuard, which emits "restore it first".
 			h.errBox.SetSize(200, 1)
-			require.NotContains(t, h.errBox.String(), "press",
-				"Enter must act on the restore, not name the restore key")
+			require.NotContains(t, h.errBox.String(), "restore it first",
+				"Enter must act on the restore, not surface the guard error")
 
 			require.NotNil(t, cmd, "the restore must dispatch its daemon command")
 			done, ok := cmd().(instanceRestoredMsg)
@@ -142,4 +153,101 @@ func TestHandleAttach_RestingRowRestores(t *testing.T) {
 	_, ok := cmd().(instanceRestoredMsg)
 	require.True(t, ok, "the command must emit instanceRestoredMsg")
 	require.True(t, called, "the restore RPC must fire")
+}
+
+// TestHandleEnter_RemoteLostRowConfirmsBeforeReprovision is the #2489 review's P2
+// data-loss guard: a Lost/Dead REMOTE session's restore re-provisions a fresh
+// sandbox when the old one can't be reached, discarding any unpushed work (#1794).
+// So Enter must CONFIRM before restoring it — never re-provision silently from a
+// keystroke (or a mouse double-click, which also routes through handleEnter).
+func TestHandleEnter_RemoteLostRowConfirmsBeforeReprovision(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{"lost", session.Lost},
+		{"dead", session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := newDeadInstance(t, "remote-resting", tc.status)
+			inst.SetBackend(&reprovisioningBackend{FakeBackend: session.NewFakeBackend()})
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+
+			called := false
+			prev := restoreSessionThroughDaemon
+			restoreSessionThroughDaemon = func(daemon.RestoreSessionRequest) (string, error) { called = true; return "/p", nil }
+			t.Cleanup(func() { restoreSessionThroughDaemon = prev })
+
+			model, _ := h.handleEnter()
+			h = model.(*home)
+
+			require.Equal(t, stateConfirm, h.state, "a remote Lost/Dead restore must confirm before re-provisioning")
+			require.NotNil(t, h.confirmationOverlay)
+			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "no restore starts before the user confirms")
+			require.False(t, called, "the restore RPC must not fire before confirmation")
+
+			rendered := strings.Join(strings.Fields(h.confirmationOverlay.Render()), " ")
+			require.Contains(t, rendered, "never pushed", "the confirmation names the unpushed-work risk")
+
+			// Confirming raises the optimistic op and dispatches the restore off the
+			// event loop via startRestoreMsg (mirrors handleStateConfirm forwarding).
+			h.confirmationOverlay.OnConfirm()
+			require.Equal(t, session.OpRestoring, inst.GetInFlightOp(), "confirm raises the optimistic restore op")
+			start, ok := h.pendingConfirmMsg.(startRestoreMsg)
+			require.True(t, ok, "confirm emits startRestoreMsg")
+			_, cmd := h.Update(start)
+			require.NotNil(t, cmd, "the forwarded startRestoreMsg dispatches the restore")
+			_, ok = cmd().(instanceRestoredMsg)
+			require.True(t, ok)
+			require.True(t, called, "the confirmed restore fires the RPC")
+		})
+	}
+}
+
+// TestHandleEnter_RemoteArchivedRowRestoresImmediately is the safe-side companion:
+// an archived row restores from the branch the archive already pushed, so nothing
+// unpushed is at risk and it restores at once — even on a remote backend.
+func TestHandleEnter_RemoteArchivedRowRestoresImmediately(t *testing.T) {
+	h := newTestHome(t)
+	inst := newDeadInstance(t, "remote-archived", session.Archived)
+	inst.SetBackend(&reprovisioningBackend{FakeBackend: session.NewFakeBackend()})
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	prev := restoreSessionThroughDaemon
+	restoreSessionThroughDaemon = func(daemon.RestoreSessionRequest) (string, error) { return "/p", nil }
+	t.Cleanup(func() { restoreSessionThroughDaemon = prev })
+
+	model, cmd := h.handleEnter()
+	h = model.(*home)
+
+	require.Equal(t, stateDefault, h.state, "an archived restore needs no confirmation")
+	require.Equal(t, session.OpRestoring, inst.GetInFlightOp(), "the archived row restores immediately")
+	require.NotNil(t, cmd)
+}
+
+// TestInteractiveGuard_RestingRowsNameTheRestoreCommand keeps coverage for the
+// guard copy after #2489 moved the row verbs off it: the "restore it first"
+// message is still live for the paths that do NOT restore — an id-less row, an
+// OpReplacing row, and the focused-pane guards (interactive.go / handle_panes.go).
+func TestInteractiveGuard_RestingRowsNameTheRestoreCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  session.Status
+		wantMsg string
+	}{
+		{"lost", session.Lost, "was lost"},
+		{"dead", session.Dead, "no longer running"},
+		{"archived", session.Archived, "is archived"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := newDeadInstance(t, "guarded", tc.status)
+			err := interactiveGuard(inst)
+			require.Error(t, err, "a resting row still fences the non-restoring guard paths")
+			require.Contains(t, err.Error(), tc.wantMsg)
+			require.Contains(t, err.Error(), "restore it first", "the guard names the restore off-ramp")
+		})
+	}
 }

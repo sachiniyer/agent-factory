@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -739,45 +740,69 @@ func TestPanePreviewTabDismissesAndAdvances(t *testing.T) {
 	assert.NotContains(t, h.View(), "Preview")
 }
 
+// TestPanePreviewEnterBlocksUncommittableTargets: a row that is NOT restorable —
+// one mid-teardown (OpKilling), whose LifecycleAction is None — still blocks the
+// preview commit with its in-flight error. #2489's restore intercept fires only
+// for genuinely resting rows (Lost/Dead/archived); the Lost/Dead pane-open case is
+// covered by TestPanePreviewEnterRestoresRestingTarget below.
 func TestPanePreviewEnterBlocksUncommittableTargets(t *testing.T) {
+	h := paneTestHome(t)
+	alpha := h.store.GetInstanceByTitle("alpha")
+	beta := h.store.GetInstanceByTitle("beta")
+	beta.SetInFlightOpForTest(session.OpKilling)
+
+	pressKey(t, h, "s")
+	paneA := h.store.OpenPanes()[0]
+	h.sidebar.SetSelectedInstance(1)
+	_ = h.selectionChanged()
+	require.NotNil(t, h.panePreviewTxn, "preview remains allowed for a blocked commit target")
+
+	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+
+	require.NotNil(t, h.panePreviewTxn, "a blocked commit keeps the preview active")
+	assert.Same(t, alpha, paneA.Instance())
+	assert.Contains(t, h.errBox.String(), "operation in flight")
+}
+
+// TestPanePreviewEnterRestoresRestingTarget is the #2489 review P1 regression:
+// with a workspace pane open (the steady state, since #1088 auto-opens one),
+// selectionChanged builds a preview txn for the cursor's instance with no liveness
+// gate, so Enter on a Lost/Dead row lands in the preview-commit branch — which must
+// RESTORE the row, not surface the guard error. This is exactly the case the
+// pane-less handler tests missed.
+func TestPanePreviewEnterRestoresRestingTarget(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		configure func(*session.Instance)
-		wantErr   string
+		name     string
+		liveness session.Liveness
 	}{
-		{
-			name:      "dead",
-			configure: func(inst *session.Instance) { _ = inst.Transition(session.ObserveLiveness(session.LiveDead)) },
-			wantErr:   "no longer running",
-		},
-		{
-			name:      "lost",
-			configure: func(inst *session.Instance) { _ = inst.Transition(session.ObserveLiveness(session.LiveLost)) },
-			wantErr:   "was lost",
-		},
-		{
-			name:      "in-flight",
-			configure: func(inst *session.Instance) { inst.SetInFlightOpForTest(session.OpKilling) },
-			wantErr:   "operation in flight",
-		},
+		{"lost", session.LiveLost},
+		{"dead", session.LiveDead},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := paneTestHome(t)
-			alpha := h.store.GetInstanceByTitle("alpha")
 			beta := h.store.GetInstanceByTitle("beta")
-			tc.configure(beta)
+			_ = beta.Transition(session.ObserveLiveness(tc.liveness))
 
-			pressKey(t, h, "s")
-			paneA := h.store.OpenPanes()[0]
+			called := false
+			prev := restoreSessionThroughDaemon
+			restoreSessionThroughDaemon = func(daemon.RestoreSessionRequest) (string, error) { called = true; return "/p", nil }
+			t.Cleanup(func() { restoreSessionThroughDaemon = prev })
+
+			pressKey(t, h, "s") // open a workspace pane — the pane-open steady state
 			h.sidebar.SetSelectedInstance(1)
 			_ = h.selectionChanged()
-			require.NotNil(t, h.panePreviewTxn, "preview remains allowed for blocked commit targets")
+			require.NotNil(t, h.panePreviewTxn, "precondition: a preview txn is built for the resting row")
 
-			_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+			_, cmd := h.handleEnter()
 
-			require.NotNil(t, h.panePreviewTxn, "blocked commit should keep the preview active")
-			assert.Same(t, alpha, paneA.Instance())
-			assert.Contains(t, h.errBox.String(), tc.wantErr)
+			require.Equal(t, session.OpRestoring, beta.GetInFlightOp(),
+				"Enter on a resting row with a pane open must RESTORE it, not commit the preview (#2489 P1)")
+			require.Nil(t, h.panePreviewTxn, "the restore resolves the preview txn")
+			h.errBox.SetSize(200, 1)
+			require.NotContains(t, h.errBox.String(), "restore it first", "no guard error on the restore path")
+			require.NotNil(t, cmd)
+			_ = cmd()
+			require.True(t, called, "the restore RPC fires")
 		})
 	}
 }

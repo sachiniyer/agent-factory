@@ -282,3 +282,36 @@ func backendKindForType(t string) (BackendKind, error) {
 		return "", fmt.Errorf("backend %q is not a re-provisionable sandbox runtime", t)
 	}
 }
+
+// RestoreReprovisionsSandbox reports whether a Lost/Dead restore of this session
+// re-provisions a FRESH off-box sandbox (cloning the last pushed commit) rather
+// than re-spawning it in place. Only the sandbox runtimes (docker/ssh/hook) route
+// their Recover through recoverSandbox → reprovisionRemote; a local session
+// re-spawns its tmux in the same worktree. A backend-less instance is treated as
+// local. This is the backend primitive — RestoreWouldDiscardUnpushedWork gates it
+// on the liveness that actually takes the re-provision path.
+func (i *Instance) RestoreReprovisionsSandbox() bool {
+	b := i.currentBackend()
+	if b == nil {
+		return false
+	}
+	_, err := backendKindForType(b.Type())
+	return err == nil
+}
+
+// RestoreWouldDiscardUnpushedWork reports whether restoring this row re-provisions
+// a fresh sandbox and thereby risks discarding work that was never pushed off the
+// old one (#1794). It is true only for a Lost/Dead REMOTE session: the daemon's
+// restore re-provisions a fresh sandbox when the old one can't be reached
+// (daemon/restore.go), losing anything unpushed. A local session re-spawns in
+// place, and an archived session (any backend) restores from the branch the
+// archive already pushed — neither loses anything. Interactive clients confirm a
+// restore for which this is true before triggering it.
+func (i *Instance) RestoreWouldDiscardUnpushedWork() bool {
+	switch i.GetLiveness() {
+	case LiveLost, LiveDead:
+		return i.RestoreReprovisionsSandbox()
+	default:
+		return false
+	}
+}
