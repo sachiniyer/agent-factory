@@ -63,25 +63,36 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				return err
 			}
 
-			// Check if we're in a git repository
+			// The project context comes from the CWD when it is inside a git
+			// repo, but being in one is a convenience, not a requirement
+			// (#2477): outside a repo af still launches, opening on the project
+			// registry so a project can be selected. git itself is still
+			// required — af's worktrees and sessions are built on it.
 			currentDir, err := filepath.Abs(".")
 			if err != nil {
 				return fmt.Errorf("failed to get current directory: %w", err)
 			}
-
-			if err := git.EnsureRepo(currentDir); err != nil {
+			if err := git.EnsureGitInstalled(); err != nil {
 				return err
 			}
 
-			repo, err := config.CurrentRepo()
-			if err != nil {
-				return fmt.Errorf("failed to determine project context: %w", err)
+			var repo *config.RepoContext
+			if git.IsGitRepo(currentDir) {
+				repo, err = config.CurrentRepo()
+				if err != nil {
+					return fmt.Errorf("failed to determine project context: %w", err)
+				}
 			}
 
-			// Resolve the effective config for this repo: app defaults ->
-			// global ~/.agent-factory/config.json -> the repo's own
-			// .agent-factory/config.json (#800).
-			cfg, err := config.ResolveConfig(repo.Root)
+			// Resolve the effective config: repo-scoped (app defaults -> global
+			// -> the repo's own .agent-factory config, #800) when the CWD is a
+			// repo, else the global config alone for a registry-mode launch.
+			var cfg *config.ResolvedConfig
+			if repo != nil {
+				cfg, err = config.ResolveConfig(repo.Root)
+			} else {
+				cfg, err = config.ResolveGlobalConfig()
+			}
 			if err != nil {
 				return err
 			}

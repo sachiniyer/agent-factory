@@ -164,14 +164,25 @@ func IsGitRepo(path string) bool {
 	return cmd.Run() == nil
 }
 
+// EnsureGitInstalled returns an actionable error when the git binary is not on
+// PATH. Split out of EnsureRepo so a caller that tolerates running outside a
+// repository — the registry-mode TUI launch (#2477) — can still require git
+// itself, which af's worktrees and sessions are built on.
+func EnsureGitInstalled() error {
+	if !IsGitInstalled() {
+		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
+	}
+	return nil
+}
+
 // EnsureRepo verifies that git is installed and that path is within a git
 // repository, returning an actionable error that distinguishes the two failure
 // modes. IsGitRepo collapses both into a bare false, which previously produced
 // a misleading "must be run from within a git repository" message for users
 // who simply did not have git installed (issue #737).
 func EnsureRepo(path string) error {
-	if !IsGitInstalled() {
-		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
+	if err := EnsureGitInstalled(); err != nil {
+		return err
 	}
 	if !IsGitRepo(path) {
 		return fmt.Errorf("agent-factory must be run from within a git repository")

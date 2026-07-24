@@ -426,7 +426,15 @@ type home struct {
 }
 
 func newHome(ctx context.Context, program string, repo *config.RepoContext) *home {
-	repoID := repo.ID
+	// repo is nil when af was launched outside a git repository (#2477): the TUI
+	// opens in registry mode with no active project, and the user selects one
+	// from the Projects section. An empty repoID makes the cold-start snapshot an
+	// all-repos fetch, and an empty repoRoot skips the repo-scoped config below.
+	var repoID, repoRoot string
+	if repo != nil {
+		repoID = repo.ID
+		repoRoot = repo.Root
+	}
 	// Load application config
 	appConfig, err := config.LoadConfig()
 	if err != nil {
@@ -479,7 +487,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		appConfig:        appConfig,
 		program:          program,
 		repoID:           repoID,
-		repoRoot:         repo.Root,
+		repoRoot:         repoRoot,
 		state:            stateDefault,
 		appState:         appState,
 	}
@@ -518,13 +526,17 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	}
 
 	// Load hooks for the hooks overlay. ResolveConfig applies the in-repo
-	// .agent-factory/config.json over the legacy per-repo file.
-	repoCfg, err := config.ResolveConfig(repo.Root)
-	if err != nil {
-		log.WarningLog.Printf("failed to resolve repo config: %v", err)
-	} else {
-		h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
-		h.hooksPane.SetCommands(repoCfg.PostWorktreeCommands)
+	// .agent-factory/config.json over the legacy per-repo file. Skipped in
+	// registry mode (no active repo, #2477): there are no repo-scoped hooks to
+	// show until a project is selected, and switchProject re-resolves them then.
+	if repoRoot != "" {
+		repoCfg, err := config.ResolveConfig(repoRoot)
+		if err != nil {
+			log.WarningLog.Printf("failed to resolve repo config: %v", err)
+		} else {
+			h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
+			h.hooksPane.SetCommands(repoCfg.PostWorktreeCommands)
+		}
 	}
 
 	return h
