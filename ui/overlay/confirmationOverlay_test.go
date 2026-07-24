@@ -159,6 +159,74 @@ func TestConfirmationOverlay_HandleKeyPress_OtherKey(t *testing.T) {
 	assert.False(t, confirmCalled, "OnConfirm should not be called")
 }
 
+// TestConfirmationOverlay_HandleKeyPress_EnterConfirmsDefault pins #2405: on an
+// ordinary (un-escalated) confirmation, enter is an affirmative alias for the
+// confirm key. Before the fix enter fell through to the ignore branch, so a
+// user's reflexive Enter left the dialog sitting open with no visible effect.
+func TestConfirmationOverlay_HandleKeyPress_EnterConfirmsDefault(t *testing.T) {
+	overlay := NewConfirmationOverlay("Test confirmation")
+
+	confirmCalled := false
+	overlay.OnConfirm = func() { confirmCalled = true }
+	cancelCalled := false
+	overlay.OnCancel = func() { cancelCalled = true }
+
+	shouldClose := overlay.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.True(t, shouldClose, "enter should confirm an ordinary dialog")
+	assert.True(t, overlay.Dismissed, "overlay should be dismissed")
+	assert.True(t, confirmCalled, "OnConfirm should be called for enter")
+	assert.False(t, cancelCalled, "OnCancel should not be called for enter")
+}
+
+// TestConfirmationOverlay_HandleKeyPress_EnterIgnoredWhenEscalated pins the
+// safety half of #2405: a dialog that escalated to a distinct confirm key (root
+// #1238, unmerged #2022) must NOT accept enter, or the exact D+enter reflex the
+// escalation defends against would dispatch the irreversible action. The named
+// key must still confirm.
+func TestConfirmationOverlay_HandleKeyPress_EnterIgnoredWhenEscalated(t *testing.T) {
+	overlay := NewConfirmationOverlay("[!] Kill session 'root'?")
+	overlay.SetConfirmKey("k")
+
+	confirmCalled := false
+	overlay.OnConfirm = func() { confirmCalled = true }
+	cancelCalled := false
+	overlay.OnCancel = func() { cancelCalled = true }
+
+	shouldClose := overlay.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.False(t, shouldClose, "enter must be ignored on an escalated dialog")
+	assert.False(t, overlay.Dismissed, "overlay must stay open")
+	assert.False(t, confirmCalled, "OnConfirm must not be called by enter")
+	assert.False(t, cancelCalled, "OnCancel must not be called by enter")
+
+	shouldClose = overlay.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	assert.True(t, shouldClose, "the escalated key must still confirm")
+	assert.True(t, confirmCalled, "OnConfirm should be called for the named key")
+}
+
+// TestConfirmationOverlay_Instruction_AdvertisesEnterOnlyWhenAccepted pins the
+// prompt copy: an ordinary dialog advertises enter as a confirm alias, while an
+// escalated dialog names only its distinct key so the copy never promises an
+// enter it will refuse.
+func TestConfirmationOverlay_Instruction_AdvertisesEnterOnlyWhenAccepted(t *testing.T) {
+	def := NewConfirmationOverlay("[!] Kill session 'alpha'?")
+	def.SetWidth(50)
+	def.SetMaxSize(80, 24)
+	assert.Contains(t, overlayProse(def.Render()), "y/enter to confirm",
+		"an ordinary dialog must advertise enter as a confirm alias")
+
+	esc := NewConfirmationOverlay("[!] Kill session 'root'?")
+	esc.SetConfirmKey("k")
+	esc.SetWidth(50)
+	esc.SetMaxSize(80, 24)
+	rendered := overlayProse(esc.Render())
+	assert.Contains(t, rendered, "k to confirm",
+		"an escalated dialog still names its distinct key")
+	assert.NotContains(t, rendered, "enter",
+		"an escalated dialog must not offer enter")
+}
+
 // overlayProse reduces a rendered overlay to the prose inside it, so a multi-word
 // assertion matches content rather than failing on the wrap.
 //

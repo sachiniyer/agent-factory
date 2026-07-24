@@ -16,6 +16,13 @@ const (
 	confirmationOverlayVerticalPadding   = 1
 )
 
+// defaultConfirmKey is the confirm key an un-escalated confirmation uses. A
+// dialog that keeps it (ordinary kill, delete-project, handoff, …) also accepts
+// enter as an affirmative alias (#2405). A dialog that escalates to a distinct
+// key (root #1238, unmerged #2022) does so precisely to require a deliberate,
+// non-reflex keystroke, so enter is NOT aliased there.
+const defaultConfirmKey = "y"
+
 // ConfirmationOverlay represents a confirmation dialog overlay
 type ConfirmationOverlay struct {
 	// Whether the overlay has been dismissed
@@ -51,7 +58,7 @@ func NewConfirmationOverlay(message string) *ConfirmationOverlay {
 		Dismissed:   false,
 		message:     message,
 		width:       50, // Default width
-		ConfirmKey:  "y",
+		ConfirmKey:  defaultConfirmKey,
 		CancelKey:   "n",
 		borderColor: ui.CurrentTheme().Error,
 	}
@@ -72,10 +79,16 @@ func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 			c.OnCancel()
 		}
 		return true
-	case strings.ToLower(c.ConfirmKey):
+	}
+
+	// The named confirm key always confirms; enter is an affirmative alias only
+	// for an un-escalated dialog (see enterConfirms). An escalated dialog (root
+	// #1238, unmerged #2022) must not be dispatchable by the D+enter reflex — the
+	// same reason it already rejects a reflexive 'y' (#2405).
+	if key == strings.ToLower(c.ConfirmKey) || (key == "enter" && c.enterConfirms()) {
 		// A guarded overlay too small to show its consequences must not collect a
 		// confirm (#1973). Refusing here — not merely rendering a warning — is
-		// what makes the guarantee real: the render and the key agree, so a 'y'
+		// what makes the guarantee real: the render and the key agree, so a confirm
 		// typed blind against an unreadable dialog does nothing. The dialog stays
 		// open (esc still cancels) so the user can resize and read it.
 		rect := c.textRect()
@@ -87,10 +100,18 @@ func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 			c.OnConfirm()
 		}
 		return true
-	default:
-		// Ignore other keys in confirmation state
-		return false
 	}
+
+	// Ignore other keys in confirmation state
+	return false
+}
+
+// enterConfirms reports whether enter acts as an alias for the confirm key. It
+// does only while the confirm key is the un-escalated default: escalating to a
+// distinct key is the signal that easy affirmatives (a reflexive 'y', enter)
+// must not dispatch the action (#1238/#2022/#2405).
+func (c *ConfirmationOverlay) enterConfirms() bool {
+	return strings.EqualFold(strings.TrimSpace(c.ConfirmKey), defaultConfirmKey)
 }
 
 // frameStyle is the overlay's border+padding style, shared by every path that
@@ -341,7 +362,13 @@ func (c *ConfirmationOverlay) instruction(compact bool) string {
 		return bold(c.ConfirmKey) + " confirm • " +
 			bold(c.CancelKey) + "/" + bold("esc") + " cancel"
 	}
-	return "Press " + bold(c.ConfirmKey) + " to confirm, " +
+	confirmKeys := bold(c.ConfirmKey)
+	if c.enterConfirms() {
+		// "/enter" mirrors the compact "n/esc" idiom and keeps the full hint on one
+		// line at the confirmation's fixed width, so its click zone survives (#2405).
+		confirmKeys += "/" + bold("enter")
+	}
+	return "Press " + confirmKeys + " to confirm, " +
 		bold(c.CancelKey) + " or " + bold("esc") + " to cancel"
 }
 
