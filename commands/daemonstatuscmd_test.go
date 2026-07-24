@@ -262,6 +262,8 @@ func TestPrintDaemonStatusHumanNamesPIDMismatchAndStaleConfig(t *testing.T) {
 	got := out.String()
 	require.Contains(t, got, "responding daemon pid 42 is not supervised")
 	require.Contains(t, got, "installed unit, which owns pid 99")
+	require.Contains(t, got, "af daemon adopt",
+		"a responder the unit does not own is exactly what adopt fixes")
 	require.Contains(t, got, "config on disk differs from the running daemon")
 	require.Contains(t, got, "restart the daemon to apply it")
 }

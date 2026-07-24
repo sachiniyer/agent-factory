@@ -304,12 +304,12 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 			case !info.AutostartUnit:
 				fmt.Fprintln(w, "  warning:        responding daemon is not supervised because no autostart unit serves this home")
 			case info.AutostartActive == "no" || info.AutostartActive == "not-found":
-				fmt.Fprintln(w, "  warning:        daemon is responding, but the installed unit is not running it — the responder is not supervised")
+				fmt.Fprintln(w, "  warning:        daemon is responding, but the installed unit is not running it — the responder is not supervised; run `af daemon adopt` to hand it back")
 			case info.UnitPID > 0:
-				fmt.Fprintf(w, "  warning:        responding daemon pid %d is not supervised by the installed unit, which owns pid %d\n",
+				fmt.Fprintf(w, "  warning:        responding daemon pid %d is not supervised by the installed unit, which owns pid %d; run `af daemon adopt` to hand it back\n",
 					info.ServingPID, info.UnitPID)
 			default:
-				fmt.Fprintln(w, "  warning:        responding daemon is not supervised by the installed unit")
+				fmt.Fprintln(w, "  warning:        responding daemon is not supervised by the installed unit; run `af daemon adopt` to hand it back")
 			}
 		default:
 			detail := info.SupervisionDetail
