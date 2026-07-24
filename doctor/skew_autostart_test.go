@@ -387,6 +387,8 @@ func TestAutostartSupervision_RespondingDaemonWithInactiveUnitNamesUnsupervised(
 	require.Equal(t, StatusWarn, c.Status)
 	require.Contains(t, c.Detail, "daemon is responding")
 	require.Contains(t, c.Detail, "not supervised")
+	require.Contains(t, c.Remediation, "af daemon adopt",
+		"the incident's fix is to hand the responder back to the unit, not to reinstall it")
 	require.True(t, c.Problem)
 }
 
@@ -422,12 +424,13 @@ func TestAutostartSupervision_OlderResponderWithoutPIDIsUnknown(t *testing.T) {
 // existing enablement warning must not hide that the responder is unsupervised.
 func TestAutostartSupervision_DisabledActiveUnitStillReportsOwnership(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		unitPID int
-		want    string
+		name       string
+		unitPID    int
+		want       string
+		wantRemedy string
 	}{
-		{name: "different responder", unitPID: 99, want: "not supervised"},
-		{name: "same responder", unitPID: 42, want: "owns responding daemon pid 42"},
+		{name: "different responder", unitPID: 99, want: "not supervised", wantRemedy: "af daemon adopt"},
+		{name: "same responder", unitPID: 42, want: "owns responding daemon pid 42", wantRemedy: "af daemon install"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testguard.IsolateTmux(t)
@@ -452,6 +455,7 @@ func TestAutostartSupervision_DisabledActiveUnitStillReportsOwnership(t *testing
 			require.Contains(t, c.Detail, "responding daemon pid 42")
 			require.Contains(t, c.Detail, tc.want)
 			require.Contains(t, c.Detail, "not enabled")
+			require.Contains(t, c.Remediation, tc.wantRemedy)
 			require.True(t, c.Problem)
 		})
 	}

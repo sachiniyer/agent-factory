@@ -23,6 +23,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config set`](#af-config-set) — Set a single settable global config key
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
+- [`af daemon adopt`](#af-daemon-adopt) — Hand a detached daemon back to the installed autostart unit
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
 - [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
 - [`af daemon status`](#af-daemon-status) — Report daemon liveness, config freshness, and supervision
@@ -672,10 +673,39 @@ af daemon
 
 **Subcommands**
 
+- [`af daemon adopt`](#af-daemon-adopt) — Hand a detached daemon back to the installed autostart unit
 - [`af daemon install`](#af-daemon-install) — Register the daemon to start automatically at login
 - [`af daemon restart`](#af-daemon-restart) — Restart the running daemon without stopping live sessions
 - [`af daemon status`](#af-daemon-status) — Report daemon liveness, config freshness, and supervision
 - [`af daemon uninstall`](#af-daemon-uninstall) — Remove the daemon autostart unit
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af daemon adopt
+
+Hand a detached daemon back to the installed autostart unit
+
+Reclaim supervision of the background daemon for the installed autostart unit.
+
+When a daemon is running detached from its unit — an ad-hoc child a live af
+spawned, which the service manager can no longer restart — adopt stops that
+daemon and starts the installed unit in its place, then verifies the unit now
+owns the process answering the control socket. Live sessions keep running in
+tmux; the new supervised daemon re-adopts persisted session state on startup,
+exactly as 'af daemon restart' does.
+
+It needs an installed unit that serves this home ('af daemon install'); with no
+such unit there is nothing to adopt the daemon into. If the installed unit
+already owns the running daemon, adopt reports that and changes nothing.
+
+```
+af daemon adopt
+```
 
 **Global flags**
 

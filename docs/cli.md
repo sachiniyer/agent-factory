@@ -159,6 +159,7 @@ The background daemon hosts task cron schedules, watch-task scripts, session mon
 ```bash
 af daemon install      # register autostart at login
 af daemon restart      # restart a running daemon and re-adopt live sessions
+af daemon adopt        # hand a detached daemon back to the installed autostart unit
 af daemon uninstall    # remove the autostart unit (the daemon still starts on demand)
 af daemon status       # read-only health, supervision, and config freshness (+ --json)
 ```
@@ -169,6 +170,15 @@ af daemon status       # read-only health, supervision, and config freshness (+ 
 running daemon to shut down cleanly, restarts the autostart unit when one is
 installed, otherwise starts an ad-hoc daemon from the current binary. If no
 daemon is running, it exits successfully without starting one.
+
+`af daemon adopt` reclaims supervision when a daemon is running detached from
+its unit — an ad-hoc child a live `af` spawned, which the service manager can no
+longer restart. It stops that daemon, starts the installed unit in its place,
+and verifies the unit now owns the process answering the control socket. Live
+sessions keep running; the new supervised daemon re-adopts persisted state on
+startup, exactly as `af daemon restart` does. It needs an installed unit that
+serves this home; if that unit already owns the running daemon, adopt reports so
+and changes nothing.
 
 ## `af config`
 

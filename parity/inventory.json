@@ -930,7 +930,7 @@
     },
     {
       "id": "daemon.lifecycle",
-      "title": "Install / uninstall / restart / status the daemon",
+      "title": "Install / uninstall / restart / status / adopt the daemon",
       "tui": {
         "status": "n/a",
         "pointer": ""
@@ -941,7 +941,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/daemoncmd.go:66,83,189,220"
+        "pointer": "commands/daemoncmd.go:66,83,189,220; commands/daemonadoptcmd.go:45"
       },
       "verdict": "deliberate",
       "notes": "Both UIs are clients OF the daemon: the web is served BY it (a web button to stop the daemon would kill the page), and the TUI needs it running to render. Host-lifecycle control belongs to the CLI."
@@ -1346,6 +1346,7 @@
       "af config list": "config.read",
       "af config set": "config.write",
       "af config validate": "config.validate",
+      "af daemon adopt": "daemon.lifecycle",
       "af daemon install": "daemon.lifecycle",
       "af daemon restart": "daemon.lifecycle",
       "af daemon status": "daemon.lifecycle",
@@ -1538,6 +1539,7 @@
       "af config validate --help": "meta.discovery",
       "af config validate --json": "cli.json-envelope",
       "af daemon --help": "meta.discovery",
+      "af daemon adopt --help": "meta.discovery",
       "af daemon install --help": "meta.discovery",
       "af daemon restart --help": "meta.discovery",
       "af daemon restart --quiet": "daemon.lifecycle",

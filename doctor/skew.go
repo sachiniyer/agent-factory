@@ -708,7 +708,7 @@ func supervisionActive(ctx *scanContext, report *Report, info daemon.Supervision
 					detail = "the installed unit is active but owns no daemon process; the responding daemon is not supervised by it"
 				}
 				report.Warn(sectionDaemon, "autostart supervision", detail+"; "+enablement,
-					"run `af daemon install` to hand the daemon back to the installed unit", true)
+					"run `af daemon adopt` to hand the daemon back to the installed unit", true)
 				handled = true
 			},
 			func() {
@@ -770,7 +770,7 @@ func supervisionNotRunning(report *Report, info daemon.SupervisionInfo, h daemon
 	if h.PingErr == nil {
 		report.Warn(sectionDaemon, "autostart supervision",
 			fmt.Sprintf("a daemon is responding, but the installed unit is not running it (%s); the responder is not supervised", info.Detail),
-			"run `af daemon install` to hand the daemon back to the installed unit", true)
+			"run `af daemon adopt` to hand the daemon back to the installed unit", true)
 		return
 	}
 	loadedButDead := false
