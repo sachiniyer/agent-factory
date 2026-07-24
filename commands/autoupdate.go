@@ -14,11 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-const (
-	lastCheckFile = autoupdate.CheckCacheFileName
-	autoUpdateEnv = autoupdate.EnvironmentVariable
-)
-
 // Timeouts differ by who is waiting. The launch check runs synchronously in
 // front of the TUI, so it is bounded hard enough that a black-holed network
 // costs a blink rather than a stall; `af upgrade` was asked for explicitly
@@ -298,25 +293,8 @@ func withUpdateCheckLock(fn func(cache *updateCheckCache, now time.Time) error) 
 	return nil
 }
 
-func readUpdateCheckCache(path string) *updateCheckCache {
-	return autoupdate.ReadCheckCache(path)
-}
-
-func shouldCheck(channel string) bool {
-	path := lastCheckPath()
-	if path == "" {
-		return true
-	}
-	cache := readUpdateCheckCache(path)
-	return updateCheckDue(cache, normalizeUpdateChannel(channel), strings.TrimPrefix(version, "v"), time.Now().UTC())
-}
-
 func updateCheckDue(cache *updateCheckCache, channel, currentVersion string, now time.Time) bool {
 	return cache.Due(channel, currentVersion, now)
-}
-
-func recordCheck(channel, lastSeenTag, currentVersion string) {
-	_ = autoupdate.RecordCheck(lastCheckPath(), channel, lastSeenTag, currentVersion)
 }
 
 func recordCheckLocked(cache *updateCheckCache, channel, lastSeenTag, currentVersion string, now time.Time) error {

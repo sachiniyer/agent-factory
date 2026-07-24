@@ -16,9 +16,15 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/internal/tmuxguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
+)
+
+const (
+	lastCheckFile = autoupdate.CheckCacheFileName
+	autoUpdateEnv = autoupdate.EnvironmentVariable
 )
 
 // captureLogs redirects InfoLog and ErrorLog to in-memory buffers for the
@@ -83,6 +89,21 @@ func TestMain(m *testing.M) {
 // autoUpdateOnLaunch instead.
 func runAutoUpdate() (string, error) {
 	return autoUpdateForChannel(config.UpdateChannelStable, autoUpdateCheckTimeout, autoUpdateDownloadBudget)
+}
+
+func updateCheckDueForTest(channel string) bool {
+	return autoupdate.ReadCheckCache(autoupdate.CheckCachePath()).Due(
+		channel,
+		strings.TrimPrefix(version, "v"),
+		time.Now().UTC(),
+	)
+}
+
+func recordCheckForTest(t *testing.T, channel, lastSeenTag, currentVersion string) {
+	t.Helper()
+	if err := autoupdate.RecordCheck(autoupdate.CheckCachePath(), channel, lastSeenTag, currentVersion); err != nil {
+		t.Fatalf("record update check: %v", err)
+	}
 }
 
 // withTestHome points config.GetConfigDir at a temp dir for the duration of
@@ -154,13 +175,13 @@ func TestAutoUpdateWindowsRecordsCheckWhenUpdateAvailable(t *testing.T) {
 	if fetchCalls != 0 {
 		t.Fatalf("fetchLatestReleaseTagFn called %d times on Windows; expected 0 (network must be skipped before the GitHub check)", fetchCalls)
 	}
-	// last_update_check must exist so shouldCheck() returns false.
+	// last_update_check must exist and close the throttle window.
 	if _, err := os.Stat(filepath.Join(dir, lastCheckFile)); err != nil {
 		t.Fatalf("expected %s to be written after Windows early-return, got: %v",
 			lastCheckFile, err)
 	}
-	if shouldCheck(config.UpdateChannelStable) {
-		t.Fatalf("shouldCheck() returned true after recordCheck(); throttle is broken")
+	if updateCheckDueForTest(config.UpdateChannelStable) {
+		t.Fatalf("update check is still due after the Windows decision was recorded; throttle is broken")
 	}
 	// Windows skips the actual update, so the misleading "updating from X to Y"
 	// line must not appear in any log stream (issue #519).
@@ -299,8 +320,8 @@ func TestAutoUpdateRecordsCheckOnFetchFailure(t *testing.T) {
 		t.Fatalf("expected %s to be written after fetch failure, got: %v",
 			lastCheckFile, err)
 	}
-	if shouldCheck(config.UpdateChannelStable) {
-		t.Fatalf("shouldCheck() returned true after a failed check; failures must close the throttle window so a broken network can't re-check on every launch (#459)")
+	if updateCheckDueForTest(config.UpdateChannelStable) {
+		t.Fatalf("update check is still due after a failed check; failures must close the throttle window so a broken network can't re-check on every launch (#459)")
 	}
 }
 
@@ -337,8 +358,8 @@ func TestAutoUpdateRecordsCheckOnDownloadFailure(t *testing.T) {
 		t.Fatalf("expected %s to be written after download failure, got: %v",
 			lastCheckFile, err)
 	}
-	if shouldCheck(config.UpdateChannelStable) {
-		t.Fatalf("shouldCheck() returned true after a failed download; failures must close the throttle window (#459)")
+	if updateCheckDueForTest(config.UpdateChannelStable) {
+		t.Fatalf("update check is still due after a failed download; failures must close the throttle window (#459)")
 	}
 }
 
@@ -888,11 +909,11 @@ func TestAutoUpdateThrottleIsChannelAware(t *testing.T) {
 	t.Cleanup(func() { version = prevVersion })
 	version = "1.0.0"
 
-	recordCheck(config.UpdateChannelStable, "v1.0.0", "1.0.0")
-	if shouldCheck(config.UpdateChannelStable) {
+	recordCheckForTest(t, config.UpdateChannelStable, "v1.0.0", "1.0.0")
+	if updateCheckDueForTest(config.UpdateChannelStable) {
 		t.Fatalf("stable channel should be throttled by its own fresh record")
 	}
-	if !shouldCheck(config.UpdateChannelPreview) {
+	if !updateCheckDueForTest(config.UpdateChannelPreview) {
 		t.Fatalf("preview channel must not be throttled by a stable-channel record")
 	}
 }
@@ -911,7 +932,7 @@ func TestAutoUpdatePreviewCheckRunsAfterStableThrottleRecord(t *testing.T) {
 
 	runtimeGOOS = "linux"
 	version = "1.0.0"
-	recordCheck(config.UpdateChannelStable, "v1.0.0", "1.0.0")
+	recordCheckForTest(t, config.UpdateChannelStable, "v1.0.0", "1.0.0")
 
 	var gotChannel string
 	fetchLatestReleaseTagFn = func(channel string, _ time.Duration) (string, error) {
@@ -934,16 +955,16 @@ func TestAutoUpdateChannelSwitchRechecksImmediately(t *testing.T) {
 	t.Cleanup(func() { version = prevVersion })
 	version = "1.0.0"
 
-	recordCheck(config.UpdateChannelPreview, "v1.0.1-preview-1", "1.0.0")
-	if shouldCheck(config.UpdateChannelPreview) {
+	recordCheckForTest(t, config.UpdateChannelPreview, "v1.0.1-preview-1", "1.0.0")
+	if updateCheckDueForTest(config.UpdateChannelPreview) {
 		t.Fatalf("preview channel should be throttled by its own fresh record")
 	}
 
-	recordCheck(config.UpdateChannelStable, "v1.0.0", "1.0.0")
-	if shouldCheck(config.UpdateChannelStable) {
+	recordCheckForTest(t, config.UpdateChannelStable, "v1.0.0", "1.0.0")
+	if updateCheckDueForTest(config.UpdateChannelStable) {
 		t.Fatalf("stable channel should be throttled after recording a stable check")
 	}
-	if !shouldCheck(config.UpdateChannelPreview) {
+	if !updateCheckDueForTest(config.UpdateChannelPreview) {
 		t.Fatalf("switching back to preview must re-check immediately, not reuse the older preview record")
 	}
 }
