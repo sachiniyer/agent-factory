@@ -142,13 +142,29 @@ type ptyBroker struct {
 	// short-circuits and no new capture is ever dialled (#2438). Set by readLoop
 	// under mu BEFORE it closes `done`, so anything that joins the loop sees it.
 	//
-	// It is meaningful ONLY while `capturing` is true — the pair reads as "a
-	// capture is installed, and it is spent". Every site that clears `capturing`
-	// clears this too, in the same critical section, so the flag can never
-	// out-live the capture it describes and be read as a claim about the NEXT
-	// one. (Leaving it latched would be harmless today, since `capturing == false`
-	// already routes to the reconcile that clears it — but it would make the
-	// field a lie to anyone who reads it on its own.)
+	// Read it ONLY together with `capturing`, never alone. The one read that
+	// exists — ensureCaptureStartedLocked's `capturing && !captureEnded` — is the
+	// contract: the pair means "a capture is installed, and it is spent". With
+	// `capturing` false this flag says NOTHING, and in particular does not mean a
+	// fresh capture; the reconcile clears it on the way to dialling one.
+	//
+	// No teardown clears it, and the two cases are worth separating because they
+	// fail differently:
+	//
+	//   - A teardown that HAS a capture to release ends by joining the readLoop
+	//     (`<-done` inside stopCapture), and the loop's last act before closing
+	//     `done` is to latch this flag. So a clear placed before that join is
+	//     undone by it — #2438 shipped exactly that in three sites, and it did
+	//     nothing.
+	//   - A teardown that has NOTHING to release (it found `capturing` already
+	//     false, so stopCapture was nil and no join happened) could clear the flag
+	//     and make it stick. But there is nothing left to describe by then: the
+	//     capture it referred to is gone.
+	//
+	// Either way the residue is unobservable, because the sole reader is guarded
+	// by `capturing`, which every teardown has already cleared. So the clears were
+	// removed rather than moved after the join: moving them would add a second
+	// b.mu section on three teardown paths to change nothing.
 	captureEnded bool
 	closed       bool
 	// tabClosed records that this broker was shut down because ITS TAB was closed
@@ -413,7 +429,6 @@ func (b *ptyBroker) maybeStopCapture() {
 	stop := b.stopCapture
 	b.capturing = false
 	b.stopCapture = nil
-	b.captureEnded = false
 	b.mu.Unlock()
 
 	if stop != nil {
@@ -472,7 +487,6 @@ func (b *ptyBroker) resetCapture() {
 		b.capturing = false
 		b.stopCapture = nil
 	}
-	b.captureEnded = false
 	b.mu.Unlock()
 
 	// The barrier MUST be lifted on EVERY path out — a failed restart, a Snapshot
@@ -744,7 +758,6 @@ func (b *ptyBroker) shutdown(tabClosed bool) {
 		b.capturing = false
 		b.stopCapture = nil
 	}
-	b.captureEnded = false
 	b.mu.Unlock()
 	if stop != nil {
 		stop()
