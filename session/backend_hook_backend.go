@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -59,10 +60,21 @@ import (
 //     provisioner.
 //
 // These bound the SCRIPT, and only the script. Nothing here bounds — or touches
-// — a process the script deliberately leaves running: see runHookScript.
+// — a process the script deliberately leaves running on the SUCCESS path: see
+// runHookScript. On the REAP path that changes, and deliberately so:
+// quiesceLaunchGroup tears the whole launch tree down under hookQuiesceTimeout
+// before delete_cmd runs, because a session being torn down has no product left
+// to protect (#2440).
 var (
 	hookLaunchTimeout = 5 * time.Minute
 	hookDeleteTimeout = 60 * time.Second
+
+	// hookQuiesceTimeout bounds the wait for a SIGKILLed launch group to leave
+	// the process table before delete_cmd runs. Short by design: the signal
+	// cannot be refused, so this covers descheduling only.
+	hookQuiesceTimeout = 2 * time.Second
+	// hookQuiescePoll is how often that drain is re-checked.
+	hookQuiescePoll = 5 * time.Millisecond
 )
 
 // hookRuntime provisions a session on user-provided infrastructure via the
@@ -90,6 +102,14 @@ func (p *hookProvisioner) provisionOrReap() (ProvisionResult, error) {
 	if err == nil {
 		return res, nil
 	}
+	// Stop anything launch_cmd left mid-provision BEFORE delete_cmd runs, so the
+	// reap is authoritative rather than a snapshot something can outlive (#2440).
+	// This belongs here and not in reap: it is sound only while the launch we are
+	// cleaning up after has JUST returned. reap also backs Kill and archive,
+	// where the launch ended long ago and its group id may since have been
+	// recycled onto an unrelated process.
+	p.quiesceLaunchGroup()
+
 	// launch_cmd may have provisioned a sandbox before failing to hand back a
 	// usable endpoint: it can exit 0 having printed no/bad JSON, exit non-zero
 	// after creating a VM, or be killed at the timeout mid-provision. Reap via
@@ -186,6 +206,11 @@ func runHookScript(timeout time.Duration, name string, args ...string) ([]byte, 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = f
 	cmd.Stderr = f
+	// Lead a process group so that a FAILED launch's descendants can be torn down
+	// as a TREE before delete_cmd reaps — see quiesceLaunchGroup. Setting the
+	// group signals nothing by itself: a successful launch_cmd's tunnel is never
+	// killed, so the guarantee above is untouched.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	runErr := cmd.Run()
 
 	out, readErr := os.ReadFile(f.Name())
@@ -208,7 +233,15 @@ type hookProvisioner struct {
 	// two claims: a launch that started and then failed may have provisioned
 	// infrastructure, and only delete_cmd can reap it (#1955).
 	launchStarted bool
-	reapOnce      sync.Once
+
+	// launchPgid is the process group launch_cmd led, which is its own pid
+	// (runHookScript sets Setpgid). It is what lets the reap tear down a failed
+	// launch's still-running descendants BEFORE delete_cmd runs — see
+	// quiesceLaunchGroup. Zero when launch_cmd never ran, or when this
+	// provisioner was rebuilt for a Kill/archive rather than the launch itself.
+	launchPgid int
+
+	reapOnce sync.Once
 }
 
 // hookEndpointJSON is the object launch_cmd echoes: the authed `af agent-server`
@@ -305,6 +338,16 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	// *exec.Error check would read "never ran" as "ran" and fire delete_cmd for a
 	// typo'd path.
 	p.launchStarted = cmd != nil && cmd.Process != nil
+	// Assigned unconditionally, INCLUDING the zero: launchPgid must describe the
+	// launch that just returned and nothing earlier. Leaving a previous attempt's
+	// value in place when this one never spawned would let quiesceLaunchGroup
+	// signal a group that is long gone — and whose id the kernel may since have
+	// handed to an unrelated process.
+	p.launchPgid = 0
+	if p.launchStarted {
+		// Setpgid made the child its own group leader, so the group id IS its pid.
+		p.launchPgid = cmd.Process.Pid
+	}
 
 	if err != nil {
 		// "launch_cmd failed" stays a contiguous phrase: #1955's reap tests
@@ -367,6 +410,74 @@ func (p *hookProvisioner) reap() error {
 		log.InfoLog.Printf("hook runtime: reaped remote session %q via delete_cmd", p.slug)
 	})
 	return reapErr
+}
+
+// quiesceLaunchGroup SIGKILLs launch_cmd's process group and waits for it to
+// drain, so delete_cmd runs against a world in which nothing can still be
+// provisioning.
+//
+// This closes #1955's leak through the door the TIMEOUT path left open (#2440).
+// runHookScript kills only the SCRIPT — no WaitDelay, output to a file so Wait
+// returns the instant the script dies — which is deliberate and right for a
+// launch that SUCCEEDED: its tunnel is the product, not garbage. But a launch
+// killed mid-provision leaves its `terraform`/`gcloud` child running, and that
+// child is not killed with the script. delete_cmd then reaps only what exists at
+// that instant, reports SUCCESS, and the orphan finishes creating the VM
+// afterwards. Provisioning failed, so af keeps no record of the session — and
+// orphanWarning never fires, because the reap did not fail. The resource bills
+// forever with nothing pointing at it, which is the exact harm #1955 was about.
+//
+// Only provisionOrReap calls this, and only on the failure of a launch that has
+// just returned. Every descendant of a launch being reaped seconds after it
+// failed is garbage by definition, so the "we stop listening; we kill nothing"
+// rule that governs the SUCCESS path does not apply — but it must not be
+// extended to the other reap paths, for two independent reasons:
+//
+//   - Kill and archive reap a launch that ended long ago. Its group is empty by
+//     then, so the group id may have been RECYCLED onto an unrelated process,
+//     and signalling it would kill a stranger's process tree. Freshness is what
+//     makes the pgid safe to signal, and only this call site has it.
+//   - Those paths rebuild the provisioner from the stored cleanup handle
+//     (runtime_cleanup.go), which has no pgid to begin with — so the guard below
+//     already makes them no-ops. This comment records why that must stay true.
+//
+// Freshness is ENFORCED, not merely relied on, because "the caller builds a new
+// provisioner each time" is an invariant a future caller can silently break and
+// the failure mode is signalling a stranger's process group. Two mechanics hold
+// it: launch assigns launchPgid on every attempt including the zero, so it can
+// never describe an earlier launch; and this function consumes the value, so the
+// right to signal a given group is spent exactly once.
+func (p *hookProvisioner) quiesceLaunchGroup() {
+	if p.launchPgid == 0 {
+		return
+	}
+	// Consume it. A pgid is safe to signal only while the launch that led it has
+	// just returned, so the right to signal this one is spent here — a second
+	// call can never reach the syscall with a value that has since gone stale.
+	pgid := p.launchPgid
+	p.launchPgid = 0
+
+	// A negative pid targets the whole group led by launch_cmd. Any error means
+	// there is nothing left to wait for: ESRCH is the group already being empty,
+	// which is the common case (the script exited and spawned nothing that
+	// outlived it) and not a failure.
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		return
+	}
+	// SIGKILL cannot be caught, so this only covers the descheduling window
+	// between delivery and the last member leaving the process table. Bounded
+	// because a reap that hangs here would strand the caller it is cleaning up
+	// after — the leak this prevents is worse than a straggler, but not worse
+	// than a wedge.
+	deadline := time.Now().Add(hookQuiesceTimeout)
+	for time.Now().Before(deadline) {
+		// Signal 0 tests whether the group still has members without delivering
+		// anything; an error (ESRCH) means it has drained.
+		if err := syscall.Kill(-pgid, 0); err != nil {
+			return
+		}
+		time.Sleep(hookQuiescePoll)
+	}
 }
 
 // HookBackend is the in-process Backend for a remote-hook session (#1592 Phase 4

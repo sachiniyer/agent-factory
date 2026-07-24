@@ -128,7 +128,9 @@ A script that exceeds its budget is killed and the operation fails.
 
 **A timed-out `launch_cmd` is reaped, not left running.** When the budget expires af kills the script, so it will never return an endpoint and af will never dial whatever it was building. Any sandbox it did create is already orphaned at that moment — leaving it alone would not preserve a resource you could still use, only one you would still pay for. So a timeout is treated as a failure that reaps.
 
-**af kills only the script itself, not the processes it spawned.** If your `launch_cmd` shells out to a provisioner that keeps running after the script is killed, that provisioner may still create infrastructure *after* `delete_cmd` has already run. af cannot close that race from the outside — it is another reason to make `delete_cmd` idempotent and safe to re-run, and to prefer a `launch_cmd` that cleans up after itself on `EXIT`/`TERM`.
+**A reap stops the whole launch tree first, then runs `delete_cmd`.** If your `launch_cmd` shells out to a provisioner (`terraform`, `gcloud`, `kubectl`) and is killed at its budget while that provisioner is still working, af kills the entire process group it started *before* running `delete_cmd`. Without that, the surviving provisioner would finish creating infrastructure **after** `delete_cmd` had already reaped and reported success — a resource that bills with nothing pointing at it, since a failed provision leaves af no record of the session.
+
+This applies only to a `launch_cmd` that **just failed**, where everything it started is garbage by definition. It never applies to one that succeeded — see [Backgrounding a tunnel](#backgrounding-a-tunnel-is-supported--you-need-do-nothing) — and it does not apply on kill or archive, where the launch ended long ago. Making `delete_cmd` idempotent is still worthwhile, and a `launch_cmd` that cleans up after itself on `EXIT`/`TERM` is still good practice.
 
 ### Backgrounding a tunnel is supported — you need do nothing
 
@@ -136,7 +138,7 @@ A script that exceeds its budget is killed and the operation fails.
 
 Many `launch_cmd`s must leave a process running to make the agent-server reachable — an `ssh -L` forward, a `kubectl port-forward`, a tunnel client. That process is not a leak: it is the thing af then dials. af treats it as **yours** and never touches it.
 
-- af bounds and kills **the script**, never anything the script left running.
+- af bounds and kills **the script**, never anything a script that **succeeded** left running. (A launch that *failed* is torn down as a tree — see [Script timeouts](#script-timeouts). If you want a process to survive even that, start it with `setsid`.)
 - The script's stdout/stderr go to a temporary **file**, not a pipe. A background process may inherit them and keep writing as long as it likes: af has already stopped reading, and there is no pipe whose closure could disturb it.
 - af stops reading when the **script** exits, and its **exit status** decides success.
 
