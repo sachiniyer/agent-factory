@@ -28,9 +28,13 @@ func setupResolveTest(t *testing.T, globalConfig string) string {
 	return t.TempDir()
 }
 
-// captureLog redirects the given project logger to a buffer for the test.
+// captureLog redirects the given project logger to a buffer for the test. It
+// also clears the once-per-source removed-key memo (#2496) so a test observing
+// the warning log sees the notice fire regardless of whether an earlier test in
+// the same process already warned for the same source string.
 func captureLog(t *testing.T, logger **stdlog.Logger) *bytes.Buffer {
 	t.Helper()
+	resetRemovedAutoYesWarnings()
 	var buf bytes.Buffer
 	old := *logger
 	*logger = stdlog.New(&buf, "", 0)
