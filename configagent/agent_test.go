@@ -2,6 +2,8 @@ package configagent
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -134,6 +136,43 @@ func TestSpawnMissingProgramReturnsTypedErrorAndCreatesNothing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not installed or not on PATH") {
 		t.Errorf("error should be preflight's actionable message, got: %v", err)
+	}
+}
+
+// TestSpawnSuppressesDevinWorkspaceTrust is the #2435 regression at the client
+// seam. A user whose default_program is devin got a config agent that launched
+// bare and hung on devin's first-run workspace-trust modal for the full readiness
+// timeout, then was reaped. The config-agent path deliberately does not run
+// injectSystemPrompt — it edits config, has no worktree, and must not inherit
+// skill/plugin injection — so the trust flag has to be applied on this path or
+// nowhere.
+//
+// The fixture is a real executable named "devin" that the override points at, the
+// same shape as a user's installed devin: preflight checks the binary exists, and
+// DetectAgentFromCommand keys on the "devin" basename to recognize it.
+func TestSpawnSuppressesDevinWorkspaceTrust(t *testing.T) {
+	tempAFHome(t)
+	devinPath := filepath.Join(t.TempDir(), "devin")
+	if err := os.WriteFile(devinPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write devin fixture: %v", err)
+	}
+	stubResolve(t, config.Config{
+		DefaultProgram:   "devin",
+		ProgramOverrides: map[string]string{"devin": devinPath},
+	})
+
+	var got daemon.SpawnConfigAgentRequest
+	stubSpawn(t, func(req daemon.SpawnConfigAgentRequest) (string, string, error) {
+		got = req
+		return "af-config-1", "", nil
+	})
+
+	if _, _, err := Spawn(Options{Mode: ModeOnboard, RepoPath: "/tmp/some-repo"}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	want := devinPath + " --respect-workspace-trust false"
+	if got.Program != want {
+		t.Errorf("config agent must launch devin with its workspace-trust modal suppressed, or it hangs on the modal and is reaped (#2435);\n got Program = %q\nwant Program = %q", got.Program, want)
 	}
 }
 

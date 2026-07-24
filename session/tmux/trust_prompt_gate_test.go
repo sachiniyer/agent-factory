@@ -1,6 +1,9 @@
 package tmux
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent is the drift lock
 // for #2416.
@@ -86,5 +89,64 @@ func TestProgramNeedsTrustDismissal_RejectsNonAgents(t *testing.T) {
 		if ProgramNeedsTrustDismissal(program) {
 			t.Errorf("ProgramNeedsTrustDismissal(%q) = true, want false for a non-agent", program)
 		}
+	}
+}
+
+// TestEnsureDevinWorkspaceTrustSuppressed is the shared-helper contract both
+// launch paths depend on (#2435): injectSystemPrompt for ordinary sessions and
+// the config-agent spawn both route devin's launch command through here so its
+// first-run workspace-trust modal never renders — and so the two can never drift
+// on how it is suppressed (the #729/#2097/#2416 class).
+//
+// The cases mirror what TestInjectSystemPrompt_Devin already pins for the session
+// path, asserted here against the function itself so the config-agent path is
+// covered by the same contract rather than a copy of it.
+func TestEnsureDevinWorkspaceTrustSuppressed(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"bare devin gets the flag", "devin", "devin --respect-workspace-trust false"},
+		{
+			"abs-path devin gets the flag",
+			"/home/u/.local/bin/devin",
+			"/home/u/.local/bin/devin --respect-workspace-trust false",
+		},
+		{
+			"a permission-mode override composes with the flag",
+			"devin --permission-mode accept-edits",
+			"devin --permission-mode accept-edits --respect-workspace-trust false",
+		},
+		// devin rejects a repeated --respect-workspace-trust ("cannot be used
+		// multiple times"), so an already-present flag must be left untouched — in
+		// either value form, so a user's explicit choice wins.
+		{
+			"already false is left alone",
+			"devin --respect-workspace-trust false",
+			"devin --respect-workspace-trust false",
+		},
+		{
+			"an explicit true wins",
+			"devin --respect-workspace-trust true",
+			"devin --respect-workspace-trust true",
+		},
+		// A program_overrides entry can point "devin" at another binary (#1116/#1131);
+		// appending a devin flag would make that binary exit on an unknown argument.
+		{"a non-devin command is unchanged", "bash", "bash"},
+		{"a claude command is unchanged", "claude --dangerously-skip-permissions", "claude --dangerously-skip-permissions"},
+		{"empty is unchanged", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EnsureDevinWorkspaceTrustSuppressed(tt.command); got != tt.want {
+				t.Errorf("EnsureDevinWorkspaceTrustSuppressed(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			// Whatever the path, the flag must never end up on the command twice —
+			// that is the launch crash the conditional exists to prevent.
+			if got := EnsureDevinWorkspaceTrustSuppressed(tt.command); strings.Count(got, devinWorkspaceTrustFlag) > 1 {
+				t.Errorf("EnsureDevinWorkspaceTrustSuppressed(%q) = %q carries %q more than once", tt.command, got, devinWorkspaceTrustFlag)
+			}
+		})
 	}
 }

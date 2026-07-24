@@ -7,6 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The config agent (phase 2): the user's own default agent, spawned as an
@@ -161,7 +162,9 @@ func Spawn(opts Options) (string, string, error) {
 	command := config.ResolveProgram(agentCfg, agent)
 
 	// Check the binary before spending a daemon round trip, a tmux session and a
-	// readiness wait on a program that cannot start.
+	// readiness wait on a program that cannot start. Checked against the resolved
+	// command BEFORE the trust flag is appended below, so an unavailable-program
+	// error names the command the user configured, not one with an af flag on it.
 	if _, perr := preflight.CheckProgram(agentCfg, agent); perr != nil {
 		return "", "", &ProgramUnavailableError{
 			Agent:   agent,
@@ -169,6 +172,15 @@ func Spawn(opts Options) (string, string, error) {
 			Err:     preflight.ProgramError(agent, command, perr),
 		}
 	}
+
+	// Suppress devin's first-run workspace-trust modal the same way an ordinary
+	// session does. This path never runs injectSystemPrompt — a config agent edits
+	// config, has no worktree, and must not inherit skill/plugin injection — but
+	// without the trust flag a devin config agent launches bare, hangs on the modal
+	// for the full readiness timeout, and is reaped (#2435). Scoped to the trust
+	// flag only, via the shared helper both launch paths call; a non-devin command
+	// is returned unchanged.
+	command = tmux.EnsureDevinWorkspaceTrustSuppressed(command)
 
 	name, socketPath, err := spawnViaDaemon(daemon.SpawnConfigAgentRequest{
 		Program: command,

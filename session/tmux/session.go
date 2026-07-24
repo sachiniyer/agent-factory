@@ -84,12 +84,14 @@ func IsSupportedProgram(name string) bool {
 // only the false-positive exposure above. #2410 declined to treat an unclearable
 // dialog as handled for the same reason, which is the #729 trap.
 //
-// This is NOT the claim that devin never shows the modal. Two paths arm it:
-// the config-agent spawn, which never calls injectSystemPrompt and so never gets
-// --respect-workspace-trust false (#2435); and any session whose
-// program_overrides.devin already carries the flag, since devinCarriesWorkspaceTrustFlag
-// deliberately lets a user's explicit value win. Closing those needs an anchored
-// devin predicate, not a change here.
+// This is NOT the claim that devin never shows the modal. af suppresses it on
+// every launch path it owns — ordinary sessions through injectSystemPrompt and the
+// config-agent spawn directly, both via EnsureDevinWorkspaceTrustSuppressed
+// (#2435). The one remaining way it renders is a program_overrides.devin that sets
+// --respect-workspace-trust true explicitly, which that helper deliberately leaves
+// alone so a user's own choice wins — opt-in, and not something af can silently
+// dismiss. Closing even that would need an anchored devin predicate, not a change
+// here.
 //
 // TestProgramNeedsTrustDismissal_ClassifiesEverySupportedAgent forces a new agent
 // to record which side it is on rather than defaulting quietly out of the set.
@@ -99,6 +101,44 @@ func ProgramNeedsTrustDismissal(program string) bool {
 		return true
 	}
 	return false
+}
+
+// devinWorkspaceTrustFlag is devin's interactive workspace-trust switch. af
+// created and owns the worktree it launches devin in, so devin is launched with
+// this flag set false — the trusted-workspace answer — rather than being asked.
+const devinWorkspaceTrustFlag = "--respect-workspace-trust"
+
+// EnsureDevinWorkspaceTrustSuppressed appends "--respect-workspace-trust false"
+// to a devin launch command so devin's first-run workspace-trust modal ("Do you
+// trust the authors of this directory?") never renders and the session reaches
+// ready with no human answering it (verified against devin 3000.2.17).
+//
+// This is the ONE place the suppression lives, and every path that launches devin
+// under af calls it. Ordinary worktree sessions reach it through
+// injectSystemPrompt; the config-agent spawn reaches it directly (#2435). That
+// path is deliberately OUTSIDE injectSystemPrompt's skill-injection seam — a
+// config agent edits config, it has no worktree and must not inherit plugin/skill
+// files — so before this it launched bare devin and hung on the modal for the full
+// readiness timeout before being reaped. Two launch paths each re-deriving the
+// flag is exactly the drift that produced #729/#2097/#2416; one function is how
+// they cannot disagree.
+//
+// Two conditions, both load-bearing:
+//   - A non-devin command is returned unchanged. A program_overrides entry can
+//     point "devin" at another binary (the #1116/#1131 class); appending a devin
+//     flag to it would make that binary exit on an unknown argument.
+//   - A command already carrying --respect-workspace-trust is left alone. devin
+//     rejects the flag given twice ("cannot be used multiple times", verified), so
+//     a second would crash the launch — and a user who set the flag explicitly
+//     (either value) must win.
+func EnsureDevinWorkspaceTrustSuppressed(command string) string {
+	if DetectAgentFromCommand(command) != ProgramDevin {
+		return command
+	}
+	if strings.Contains(command, devinWorkspaceTrustFlag) {
+		return command
+	}
+	return command + " " + devinWorkspaceTrustFlag + " false"
 }
 
 // TmuxSession represents a managed tmux session
