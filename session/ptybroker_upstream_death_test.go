@@ -30,18 +30,69 @@ type singleSocketChannel struct {
 	starts   int
 	stops    int
 	snapshot []byte
+	// dieOnStart makes every dialled socket drop immediately, modelling an
+	// endpoint that accepts the WebSocket and then loses it (a proxy flapping, a
+	// sandbox mid-restart). It is what turns a readLoop-driven re-dial into a
+	// feedback loop, so it is how the backoff bound is exercised.
+	dieOnStart bool
+	// failStarts is how many further StartCapture calls must fail outright,
+	// modelling an endpoint that is unreachable rather than flapping — the dial
+	// itself errors, so no socket is ever held and no readLoop is ever spawned.
+	// Each failure decrements it, so a test can have the endpoint come back.
+	failStarts int
+	// startGate, when non-nil, holds StartCapture until it is closed — standing in
+	// for the remote WebSocket handshake, which is bounded at ten seconds. It is
+	// what lets a test act (detach a subscriber, say) while a dial is genuinely
+	// in flight, which is a real and now-routine window rather than a contrived
+	// one. Read under mu; waited on WITHOUT mu so the gate cannot deadlock the fake.
+	startGate chan struct{}
+	// gateEntered is closed when a gated StartCapture reaches its gate. The dial's
+	// visible counter (starts) is incremented on the FAR side of the gate, so it
+	// cannot be used to detect that the dial is in flight — waiting on it would
+	// wait for the very thing the gate is holding.
+	gateEntered chan struct{}
+}
+
+// held reports whether the fake is still holding a capture socket. A capture
+// held with no subscriber attached is a leak: nothing will ever release it.
+func (c *singleSocketChannel) isHeld() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.held
 }
 
 func (c *singleSocketChannel) StartCapture() (io.ReadCloser, error) {
+	c.mu.Lock()
+	gate, entered := c.startGate, c.gateEntered
+	c.startGate, c.gateEntered = nil, nil
+	c.mu.Unlock()
+	if gate != nil {
+		if entered != nil {
+			close(entered)
+		}
+		<-gate
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.held {
 		return nil, fmt.Errorf("remote clientless capture already started")
 	}
+	if c.failStarts > 0 {
+		c.failStarts--
+		c.starts++
+		return nil, fmt.Errorf("dial sandbox agent-server: connection refused")
+	}
 	c.held = true
 	c.starts++
 	r, w := io.Pipe()
 	c.w = w
+	if c.dieOnStart {
+		// Close the write end straight away: the broker's readLoop gets EOF on its
+		// first Read, exactly as it would if the socket dropped mid-flight.
+		c.w = nil
+		_ = w.Close()
+	}
 	return r, nil
 }
 

@@ -620,6 +620,61 @@ func (c *remoteAgentClient) preview(tab int, full bool) (PreviewSnapshot, error)
 	}, nil
 }
 
+// accessTokenRedaction replaces the sandbox bearer token wherever a URL carrying
+// it would otherwise reach a log or an error surface.
+const accessTokenRedaction = "REDACTED"
+
+// redactAccessTokenInURL returns raw with the ?access_token= VALUE replaced.
+//
+// url.Redacted() is not a substitute and must not be reached for here: it
+// redacts USERINFO (the user:pass@ form) and leaves the query string untouched,
+// so an access_token query survives it completely.
+func redactAccessTokenInURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		// Unparseable: say nothing rather than risk echoing the credential.
+		return "[url redacted]"
+	}
+	q := parsed.Query()
+	if q.Get(agentproto.AccessTokenQueryParam) == "" {
+		return raw
+	}
+	q.Set(agentproto.AccessTokenQueryParam, accessTokenRedaction)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
+}
+
+// redactDialError strips the sandbox bearer token from a failed dial's error.
+//
+// The token rides the URL as ?access_token= (the browser-WS fallback the
+// agent-server also honours), and a failed dial surfaces as a *url.Error
+// carrying that whole URL — so wrapping the raw error puts the credential in
+// whatever renders it. That was survivable while the only failed-dial path was
+// subscribe(), whose error goes to an HTTP response; #2450 made the daemon retry
+// on a timer and LOG each failure, which would write the token to
+// agent-factory.log once per backoff for as long as a tab stays open.
+//
+// The *url.Error is mutated in place rather than replaced: it is freshly created
+// by this dial and unshared, and fixing it there cleans every wrapper that
+// renders it through %w, so errors.Is/As keep working on the chain.
+//
+// The substring check afterwards is a deliberate backstop, not redundancy: it
+// catches any failure shape that carried the credential somewhere other than a
+// *url.Error. If one ever does, the structure is dropped and the secret is not.
+func redactDialError(err error, token string) error {
+	if err == nil {
+		return nil
+	}
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		uerr.URL = redactAccessTokenInURL(uerr.URL)
+	}
+	if token != "" && strings.Contains(err.Error(), token) {
+		return errors.New(strings.ReplaceAll(err.Error(), token, accessTokenRedaction))
+	}
+	return err
+}
+
 // dialStream opens the WS PTY subscription to tab `tab` (from the live tail). The
 // token rides both the Authorization header and the ?access_token= query — the
 // agent-server honors either, and the query mirrors the browser WS path Phase 5
@@ -645,7 +700,7 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 	defer cancel()
 	conn, _, err := websocket.Dial(dialCtx, u, opts)
 	if err != nil {
-		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w", err)
+		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w", redactDialError(err, c.token))
 	}
 	conn.SetReadLimit(4 << 20)
 	return conn, nil
