@@ -1,17 +1,18 @@
 # Configuration
 
-Agent Factory reads two config files, merged field by field:
+Agent Factory reads config from several layers, merged field by field:
 
 1. **Global** — `~/.agent-factory/config.toml`: your personal defaults, applied everywhere.
 2. **In-repo** — `<repo-root>/.agent-factory/config.toml`: checked into a repository, applied whenever `af` runs in that repo.
+3. **Personal per-project** — `~/.agent-factory/.agent-factory-projects/<project-id>/config.toml`: your machine-local overrides for one registered project. Never checked in. See [Personal per-project config](#personal-per-project-config).
 
-Precedence is **app defaults → global config → in-repo config**: an in-repo field overrides the global value only when it is set, and `program_overrides` merges per key (an in-repo entry wins for that agent; global entries for other agents still apply).
+Precedence is **app defaults → global config → in-repo config → personal per-project**: a higher layer overrides a lower one only for a field it actually sets, and `program_overrides` merges per key (a higher entry wins for that agent; lower entries for other agents still apply). The personal per-project layer sits **above** the checked-in in-repo file on purpose — the shared file is the team default, and a machine-local override exists precisely to beat it on your machine — but only preference keys admit it; repo-contract keys (`backend`, `docker`, `ssh`, hooks) never do, so a personal override can never rewrite repository reality.
 
 Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you are upgrading from a version that used `config.json`, see [Migrating from JSON](#migrating-from-json) below; the change is automatic.
 
-You can also read and write the global config from the CLI. Bare `af config get <key>` / `af config list` keep their script-compatible global-only output. Add `--project <repository-path>` to read the effective value after that repository's current legacy and checked-in layers are applied, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --project . --explain` show the source of one merged-table leaf. The project path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
+You can also read and write config from the CLI. Bare `af config get <key>` / `af config list` keep their script-compatible global-only output. Add `--project <repository-path>` to read the effective value after that repository's checked-in and personal per-project layers are applied, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --project . --explain` show the source of one merged-table leaf. The project path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
 
-`af config set <key> <value>` remains global-only. It writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+`af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. Without `--project` it edits the global config; with `--project <id-or-path>` it writes a personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -487,6 +488,43 @@ Relative `remote_hooks` paths (like `./infra/launch.sh` above) resolve against t
 
 An in-repo config executes what it configures: `post_worktree_commands` run after each worktree is created, and `remote_hooks` and `program_overrides` values are invoked as shell commands. Cloning a repository and running `af` in it implies trusting that repo's in-repo config. The first time a config carrying such fields loads (and whenever its content changes), `af` records one log line naming the fields and the file's content hash.
 
+## Personal per-project config
+
+The global config applies everywhere and the in-repo config is checked in for everyone who clones a repository. Sometimes you want neither: a preference that is **yours**, on **this machine**, for **one project** — a different default agent for your work monorepo than your side projects, a project-specific `program_overrides` path, a branch prefix that matches a team convention. That is the personal per-project layer.
+
+It lives outside the repository, under your agent-factory home:
+
+```text
+~/.agent-factory/.agent-factory-projects/<project-id>/config.toml
+```
+
+so it is never committed and never imposed on collaborators. Because it is your own machine-local file — like the global config, and unlike a checked-in in-repo file — it may set the same keys the global config can, including a cloud-credential selector in a `program_overrides` value.
+
+**It attaches to a registered project, not a path.** A project has a durable, opaque id (`prj_…`) that survives the checkout moving or being cloned twice, so a personal override does not silently stop applying when you move a repo. Register a repository once:
+
+```bash
+af projects register ~/work/myrepo   # prints the project's prj_ id
+af projects list                     # every registered project
+```
+
+Then set and clear overrides. `--project` accepts either the `prj_` id or any path inside the registered repository:
+
+```bash
+af config set default_program codex --project ~/work/myrepo
+af config set program_overrides.claude "/opt/claude --verbose" --project prj_01234…
+af config unset default_program --project ~/work/myrepo   # fall back to the lower layers
+```
+
+Only preference keys admit this layer: **`default_program`**, **`program_overrides.<agent>`**, and **`branch_prefix`**. Setting a global-only key (`listen_addr`, daemon tuning, …) or a repo-contract key (`backend`, `docker`, `ssh`) per project is rejected with the location it actually belongs to. Setting a value **equal** to the lower layer is still a present, winning override — use `af config unset` to genuinely fall through again; it removes only the key you name (comments and other keys are preserved) and deletes the file once its last override is cleared.
+
+Precedence for a key that admits every layer is:
+
+```text
+app default → global → in-repo (shared) → personal per-project
+```
+
+Inspect exactly which layer wins, and why, with `af config get <key> --project <path> --explain` (or `af config list --project <path> --explain`): the trace shows the personal-project candidate alongside the others, marked won, shadowed, absent, or — for a key that cannot be overridden per project — disallowed. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+
 ## Migrating from JSON
 
 Earlier versions stored config as `config.json`. The move to TOML is **automatic and one-time** — you don't run anything:
@@ -506,6 +544,7 @@ All data (sessions, tasks) is scoped to the current git repository — the TUI s
 |------|----------|
 | `~/.agent-factory/config.toml` | Global config. |
 | `~/.agent-factory/config.json.bak` | Backup of your pre-TOML config, left by the one-time migration. Safe to delete. |
+| `~/.agent-factory/.agent-factory-projects/<project-id>/config.toml` | Personal per-project overrides for a registered project (see [Personal per-project config](#personal-per-project-config)). Machine-local, never checked in. |
 | `~/.agent-factory/instances/<repoID>/instances.json` | Persisted sessions, per repo. |
 | `~/.agent-factory/tasks.json` | Tasks (see [tasks.md](tasks.md)). |
 | `~/.agent-factory/logs/task-<id>.log` | Per-task watch-script logs. Rotated with the same `log_max_size_mb`/`log_max_backups` policy as the application log (`task-<id>.log.1`, `.2`). |

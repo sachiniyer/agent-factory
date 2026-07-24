@@ -16,6 +16,7 @@ func currentManifestSchemas() []manifestSchema {
 	return []manifestSchema{
 		{name: "Config", source: SourceGlobal, typeOf: reflect.TypeOf(Config{})},
 		{name: "InRepoConfig", source: SourceRepoShared, typeOf: reflect.TypeOf(InRepoConfig{})},
+		{name: "ProjectConfig", source: SourceProjectPersonal, typeOf: reflect.TypeOf(ProjectConfig{})},
 	}
 }
 
@@ -95,7 +96,7 @@ func TestManifestCoversEveryConfigKey(t *testing.T) {
 		}
 	}
 
-	knownSchemaSources := sourceGlobalOnly | sourceRepoOnly
+	knownSchemaSources := sourceGlobalOnly | sourceRepoOnly | sourcePersonalOnly
 	for _, entry := range AllManifest() {
 		if unsupported := entry.Sources &^ knownSchemaSources; unsupported != 0 {
 			t.Errorf("manifest entry %q claims source bits %#x with no schema in the union coverage test",
@@ -219,7 +220,9 @@ func expectedPrecedence(entry ManifestEntry) []ConfigSource {
 	case "post_worktree_commands", "remote_hooks":
 		return precedenceLegacyRepo
 	case "default_program", "program_overrides":
-		return precedenceGlobalRepo
+		return precedenceGlobalRepoPersonal
+	case "branch_prefix":
+		return precedenceGlobalPersonal
 	default:
 		if entry.Sources == sourceGlobalOnly {
 			return precedenceGlobal

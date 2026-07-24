@@ -151,6 +151,18 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 		schemas:  []any{inRepo},
 	})
 
+	// Personal per-project override layer (SourceProjectPersonal). The layer is
+	// always appended — an unregistered repo, or a registered one with no
+	// personal file, contributes an empty presence-only document — so
+	// resolveManifest's requireAllSources check always finds the candidate a
+	// personal-admitting key names in its precedence, exactly like the empty
+	// in-repo document above.
+	personalDoc, err := projectPersonalDocument(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	documents = append(documents, personalDoc)
+
 	res, err := materializeResolution(global, repoRoot, AllManifest(), documents, true)
 	if err != nil {
 		return nil, err
@@ -176,6 +188,64 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 
 	warnLegacyRepoConfig(repoID, repoRoot, legacy, inRepo)
 	return res, nil
+}
+
+// projectRegistryWarnOnce bounds the "registry unreadable" warning below to one
+// line per process, so a persistently corrupt registry alerts the operator
+// without spamming the log on every resolve.
+var projectRegistryWarnOnce sync.Once
+
+// emptyProjectPersonalDocument is the presence-only SourceProjectPersonal
+// document used whenever a repo contributes no personal override: not a
+// registered project, no personal file, or a registry we deliberately declined
+// to fail resolution over. It keeps the layer present for requireAllSources.
+func emptyProjectPersonalDocument() sourceDocument {
+	return sourceDocument{layer: SourceProjectPersonal, metadata: sourceMetadata{format: FormatTOML}}
+}
+
+// projectPersonalDocument builds the SourceProjectPersonal document for
+// repoRoot. It resolves the repo to a registered project read-only (no git, no
+// writes) and loads that project's machine-local config; a repo that is not a
+// registered project, or one with no personal file yet, yields an empty
+// presence-only document so the layer is always present for the resolver.
+//
+// A registry that cannot be listed (a corrupt or newer-schema record) degrades
+// to "no personal layer" with a one-time warning rather than failing config
+// resolution for every repo — including repos that have no personal config at
+// all. Before this layer existed, ResolveConfig never touched the registry, and
+// one bad project record must not now break session creation everywhere. The
+// explicit `af config --project` / `af projects` paths still surface the real
+// error, because they call the registry directly.
+func projectPersonalDocument(repoRoot string) (sourceDocument, error) {
+	project, found, err := projectForRoot(repoRoot)
+	if err != nil {
+		projectRegistryWarnOnce.Do(func() {
+			log.WarningLog.Printf("personal project config disabled: the project registry could not be read (%v); run `af projects list` to inspect it", err)
+		})
+		return emptyProjectPersonalDocument(), nil
+	}
+	if !found {
+		return emptyProjectPersonalDocument(), nil
+	}
+	path, err := ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		return sourceDocument{}, err
+	}
+	personal, err := LoadProjectConfig(project.ID)
+	if err != nil {
+		return sourceDocument{}, err
+	}
+	if personal == nil {
+		return sourceDocument{
+			layer:    SourceProjectPersonal,
+			metadata: sourceMetadata{path: path, format: FormatTOML},
+		}, nil
+	}
+	return sourceDocument{
+		layer:    SourceProjectPersonal,
+		metadata: personal.source,
+		schemas:  []any{personal},
+	}, nil
 }
 
 func globalResolutionDocuments(global *Config) ([]sourceDocument, error) {
