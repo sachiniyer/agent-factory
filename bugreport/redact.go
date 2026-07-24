@@ -156,9 +156,13 @@ func (r *redactor) scrub(s string) string {
 	if r.home != "" && r.home != "/" {
 		s = strings.ReplaceAll(s, r.home, "~")
 	}
+	// Blank bare username tokens with the SAME manual token boundary the title
+	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
+	// when the username ends in a non-word rune (an OS username like "test-"), so
+	// "test-/fix-login-bug" in a branch leaked the username unredacted — a silent
+	// redaction failure in a bundle meant to be safe to share (#2533).
 	for _, name := range r.users {
-		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-		s = re.ReplaceAllString(s, userMarker)
+		s = replaceBareToken(s, name, userMarker)
 	}
 	return s
 }
@@ -261,22 +265,36 @@ func redactAFTmuxTitle(match string) string {
 // of the title's own first/last character handles titles such as "client[prod]"
 // while refusing to match "." inside "1.2" or "/" inside "repo/path".
 func replaceBareTitle(s, title string) string {
-	if strings.TrimSpace(title) == "" || (!containsWordRune(title) && !strings.ContainsAny(title, "\r\n")) {
+	return replaceBareToken(s, title, redactedMarker)
+}
+
+// replaceBareToken replaces token with marker only where token occupies a
+// COMPLETE text token — start/end of text or a neighboring rune that is not a
+// letter, number, mark, or underscore. It is the manual-boundary replacement both
+// the title scrub and the username scrub use, because a `\b<token>\b` regex only
+// anchors at word↔non-word transitions: a token that itself ENDS (or starts) in a
+// non-word rune — a username like "test-", or a title like "client[prod]" — has no
+// `\b` after its trailing "-", so `\b` never matches it and it leaks (#2533). This
+// checks the actual neighboring runes instead, so "test-" is redacted in
+// "test-/fix-login-bug" (the "/" is a non-word boundary) but not inside a larger
+// word.
+func replaceBareToken(s, token, marker string) string {
+	if strings.TrimSpace(token) == "" || (!containsWordRune(token) && !strings.ContainsAny(token, "\r\n")) {
 		return s
 	}
 	var out strings.Builder
 	scan, copied := 0, 0
 	changed := false
-	for scan <= len(s)-len(title) {
-		rel := strings.Index(s[scan:], title)
+	for scan <= len(s)-len(token) {
+		rel := strings.Index(s[scan:], token)
 		if rel < 0 {
 			break
 		}
 		start := scan + rel
-		end := start + len(title)
+		end := start + len(token)
 		if titleTokenBoundary(s, start, end) && !insideRedactionMarker(s, start, end) {
 			out.WriteString(s[copied:start])
-			out.WriteString(redactedMarker)
+			out.WriteString(marker)
 			copied = end
 			scan = end
 			changed = true
