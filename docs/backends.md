@@ -205,8 +205,17 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 ### Operations
 
-- **List managed containers:** `docker ps -a --filter label=af.session`
-- **Reap a leaked container** (should never be needed — kill reaps automatically):
+- **List managed containers:** `docker ps -a --filter label=af.session`. Each also
+  carries `af.home=<AF home>`, the daemon (home) that created it.
+- **Automatic orphan reaping:** on daemon startup, af removes any leaked session
+  container **this home** created (`af.home` matches) that no live or
+  mid-provisioning session owns — the cases where a previous daemon died without
+  reaping, a session record was deleted, or a reap raced a create. It is scoped to
+  this AF home and to the currently-targeted Docker engine, so it never touches
+  another home's or another engine's containers, and a container with no `af.home`
+  label (created by a pre-upgrade af) is left alone. Kill still reaps synchronously;
+  this is only the backstop for the container that outlived its session.
+- **Reap a leaked container by hand** (should never be needed):
   `docker rm -f <id>`
 
 ### Requirements on the daemon host
@@ -227,6 +236,37 @@ kill. A second case commits real work on the session branch, **archives** it
 **restores** it (asserting a fresh container clones the branch back, the commit
 is present, and the session is drivable again). It skips cleanly where Docker is
 unavailable.
+
+### Making docker the default backend for a repo
+
+To run a repo's sessions in containers by default, set `backend = "docker"` in
+its `.agent-factory/config.json`. This is an operator decision, not a default af
+ships — the steps below must be done in order, because the flip does **not**
+degrade gracefully on an unprepared box:
+
+1. **Build the image:** `make session-image` (or point `docker.image` at your own
+   — see [Image requirements](#image-requirements-bring-your-own-image)).
+2. **Grant credentials (operator, global):**
+   `af config set docker_mount_agent_credentials true`, so the containerised agent
+   can authenticate (see [Agent credentials in a container](#agent-credentials-in-a-container)).
+   This is global-only on purpose and cannot be set from the repo config.
+3. **Set the repo default:** put `"backend": "docker"` and `"docker": {"image": …}`
+   in the repo's `.agent-factory/config.json`.
+
+Only after all three does a **new** session in that repo come up in a container. A
+flip with no image built, no reachable Docker daemon, or the grant unset does not
+fall back to local — it **fails session creation** with a backend error. So make
+docker the default only once the box is ready.
+
+**Existing sessions are unaffected by the flip.** A session's backend is recorded
+on its own row (`InstanceData.BackendType`, written from `backend.Type()`), and
+the daemon reconstructs each session from that **stored** discriminator on
+restart/restore — it never re-reads `backend` from config after create (which is
+consulted only when a session is first created). So a running local session comes
+back local regardless of the repo's new default; only new creates read it. This is
+pinned by `TestFromInstanceData_SandboxBackends`, so a future change that made
+restore re-resolve from config would fail a test rather than silently reinterpret
+someone's session.
 
 ---
 
