@@ -138,6 +138,16 @@ func rootAgentFromLegacy(rc RootAgentConfig) RootAgent {
 	return RootAgent{Enabled: true, Program: rc.Program}
 }
 
+// rootAgentNormLayer is one precedence layer normalized to the same shape (the
+// built-in base, a singleton layer, or the adapted legacy entry) so the fold and
+// the trace treat every source uniformly.
+type rootAgentNormLayer struct {
+	source     RootAgentSource
+	enabledSet bool
+	enabled    bool
+	program    string
+}
+
 // ResolveRootAgent layers the provided sources into one effective root-agent
 // profile and returns it with the full provenance trace.
 //
@@ -157,16 +167,6 @@ func rootAgentFromLegacy(rc RootAgentConfig) RootAgent {
 // set it (an explicit false counts) and `program` only if non-empty (empty =
 // unset). So an empty legacy entry enables the root without clobbering a global
 // program, and a personal profile can flip enabled or reprogram independently.
-// rootAgentNormLayer is one precedence layer normalized to the same shape (the
-// built-in base, a singleton layer, or the adapted legacy entry) so the fold and
-// the trace treat every source uniformly.
-type rootAgentNormLayer struct {
-	source     RootAgentSource
-	enabledSet bool
-	enabled    bool
-	program    string
-}
-
 func ResolveRootAgent(in RootAgentInputs) RootAgentResolution {
 	layers := []rootAgentNormLayer{{source: RootAgentSourceBuiltIn, enabledSet: true, enabled: false}}
 	if in.Global != nil {
