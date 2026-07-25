@@ -658,6 +658,15 @@ exit 0
 // above, pinned separately so a regression names its own cause: the capture must
 // not kill a process launch_cmd deliberately backgrounded. A heartbeat file is the
 // liveness probe — it keeps ticking only while the child lives.
+//
+// The child ticks for far longer than the polls below (300 * 50ms ≈ 15s), so its
+// liveness — never a race against its own natural exit — is what the assertions
+// measure. Liveness is asserted by POLLING for the heartbeat's mtime to advance,
+// not by comparing two fixed 250ms windows: a child the capture killed has a frozen
+// mtime that never advances no matter how long we wait, but a live child merely
+// DESCHEDULED under CI load can miss any single fixed window. The old two-window
+// form flaked exactly that way — a real non-deterministic false-negative, unrelated
+// to the reap path (launch exits 0 here, so no reap runs).
 func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 	shrinkHookTimeouts(t, 5*time.Second, 5*time.Second)
 	dir := t.TempDir()
@@ -665,7 +674,7 @@ func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 
 	h := hookState{dir: dir, launch: filepath.Join(dir, "launch.sh"), delete: filepath.Join(dir, "delete.sh")}
 	writeHookScript(t, h.launch, fmt.Sprintf(`
-( for i in $(seq 1 100); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
+( for i in $(seq 1 300); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, shellsuggest.Arg(hb)))
@@ -675,14 +684,25 @@ exit 0
 	_, err := p.provisionOrReap()
 	require.NoError(t, err)
 
-	// The child must still be ticking well after the script exited.
-	time.Sleep(250 * time.Millisecond)
-	first, err := os.Stat(hb)
-	require.NoError(t, err, "the backgrounded child never ran")
-	time.Sleep(250 * time.Millisecond)
-	second, err := os.Stat(hb)
-	require.NoError(t, err)
-	assert.True(t, second.ModTime().After(first.ModTime()),
+	// Baseline: the child has appended at least once (the file exists ⇒ it started).
+	// Poll rather than trust a single fixed delay, which starves under load.
+	var first os.FileInfo
+	require.Eventually(t, func() bool {
+		fi, statErr := os.Stat(hb)
+		if statErr != nil {
+			return false
+		}
+		first = fi
+		return true
+	}, 3*time.Second, 20*time.Millisecond, "the backgrounded child never ran")
+
+	// A live child keeps appending, so its mtime advances beyond the baseline; a
+	// killed child's mtime is frozen and never will. Poll generously so a child
+	// merely descheduled under load is not misread as a kill.
+	require.Eventually(t, func() bool {
+		fi, statErr := os.Stat(hb)
+		return statErr == nil && fi.ModTime().After(first.ModTime())
+	}, 4*time.Second, 20*time.Millisecond,
 		"the process launch_cmd backgrounded stopped writing — the output capture killed a child that was not ours to kill")
 }
 
