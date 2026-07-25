@@ -478,6 +478,32 @@ export async function deleteProject(root: string, token: string): Promise<Delete
   return af("DeleteProject", { repo_path: root, repo_id: "" }, token);
 }
 
+/** A durable project identity the daemon registered (the #2355 registry record). */
+export interface RegisteredProject {
+  id: string;
+  checkout_id: string;
+  root: string;
+  relative_root: string;
+  path_exists: boolean;
+}
+
+/** Registers a git checkout as a durable, sessionless project (mirrors
+ *  `af projects add`). `path` is a path ON THE DAEMON HOST — absolute or
+ *  ~-prefixed — which the daemon resolves on its own filesystem (expand ~, walk
+ *  to the git checkout's main-repo root, validate). It is sent VERBATIM: unlike
+ *  the CLI, a browser has no shared working directory to resolve a relative path
+ *  against, so the user supplies an absolute path and the daemon owns resolution.
+ *
+ *  Idempotent for a known checkout. On success the daemon emits projects.changed;
+ *  the repo shows as a project once a session is created into it (the derived
+ *  list), and surfacing the empty registration immediately awaits the
+ *  registry-union slice. A non-git or unreadable path throws an ApiError carrying
+ *  the daemon's actionable message, for inline display next to the input. */
+export async function registerProject(path: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RegisterProject", { path }, token);
+  return resp.project;
+}
+
 // --- tab mutations (#1592 Phase 5 PR7) -------------------------------------
 //
 // The web tab bar's write verbs, mirroring the TUI's `t`/`w` keys: `t` creates a

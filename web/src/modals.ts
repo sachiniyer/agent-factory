@@ -539,6 +539,62 @@ export function confirmDeleteProjectModal(
   return handle;
 }
 
+/** The add-project modal (#2456): a single path input that registers a git
+ *  checkout as a durable, sessionless project through the RegisterProject RPC.
+ *  The path names a directory ON THE DAEMON HOST (absolute, or ~-prefixed which
+ *  the daemon expands) — a browser has no shared cwd to resolve a relative path
+ *  against, so the daemon owns resolution and validation. A non-git or unreadable
+ *  path comes back as the daemon's actionable error, shown inline; on success the
+ *  modal closes (the repo shows as a project once a session is created into it —
+ *  surfacing the empty registration needs the registry-union slice).
+ *
+ *  onSubmit is async in index.ts, which drives setBusy/setError around it. */
+export function addProjectModal(callbacks: {
+  onSubmit: (path: string) => void;
+  onCancel: () => void;
+}): ModalHandle {
+  const { handle, body } = modalChrome({
+    title: "Add project",
+    confirmLabel: "Add project",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel,
+  });
+
+  const pathInput = h("input", {
+    type: "text",
+    class: "af-input",
+    placeholder: "/path/to/repo  or  ~/repo",
+    autocomplete: "off",
+  });
+  pathInput.setAttribute("aria-label", "Repository path");
+
+  body.append(
+    field("Repository path", pathInput),
+    h(
+      "p",
+      { class: "af-modal-hint" },
+      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into.",
+    ),
+  );
+
+  // Clear a stale validation/daemon error as the user edits, so the inline
+  // message always reflects the CURRENT input rather than the last rejected path.
+  pathInput.addEventListener("input", () => handle.setError(null));
+
+  const card = handle.el.firstElementChild as HTMLElement;
+  asForm(card, () => {
+    const path = pathInput.value.trim();
+    if (path === "") {
+      handle.setError("Enter a repository path.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(path);
+  });
+
+  return handle;
+}
+
 /** A labeled field row: a caption above its control. */
 export function field(label: string, control: HTMLElement): HTMLElement {
   return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);

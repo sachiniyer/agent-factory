@@ -21,6 +21,7 @@ import {
   listBackends,
   listPrograms,
   probeWebTab,
+  registerProject,
   removeTask,
   renameTab,
   reorderTab,
@@ -625,4 +626,59 @@ test("probeWebTab: the token rides the Authorization header, never the URL", asy
   await probeWebTab("/v1/webtab/s/t/", "secret-tok", 1000);
   assert.equal(seenAuth, "Bearer secret-tok", "the probe is the parent's request — header, not ?access_token");
   assert.ok(!seenUrl.includes("secret-tok"), "the token must never appear in the probe URL");
+});
+
+// --- registerProject: the web add-project affordance (#2456) -------------------
+//
+// The web is inherently the REMOTE client: the path names a directory on the
+// daemon host, which the daemon resolves and validates. So the client sends it
+// VERBATIM (no local resolution) and surfaces the daemon's rejection inline.
+
+test("registerProject sends the path verbatim to RegisterProject", async () => {
+  const cap = stubFetch();
+  await registerProject("~/repos/new", "tok");
+  assert.ok(cap.url.endsWith("/v1/RegisterProject"), `posted to ${cap.url}`);
+  assert.equal(cap.body.path, "~/repos/new", "the path is forwarded unchanged for the daemon to resolve");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("registerProject returns the daemon's resolved project", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        ok: true,
+        project: {
+          id: "prj_00000000000000000000000000000000",
+          checkout_id: "chk_00000000000000000000000000000000",
+          root: "/resolved/repo",
+          relative_root: ".",
+          path_exists: true,
+        },
+      },
+      error: null,
+    }),
+  });
+  const project = await registerProject("/some/repo", "tok");
+  assert.equal(project.id, "prj_00000000000000000000000000000000");
+  assert.equal(project.root, "/resolved/repo");
+  assert.equal(project.path_exists, true);
+});
+
+test("registerProject surfaces a non-git path error for inline display", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 400,
+    statusText: "Bad Request",
+    json: async () => ({ data: null, error: { message: "resolve git common directory: not a git repository" } }),
+  });
+  const err = await registerProject("/tmp/not-a-repo", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 400);
+  assert.match(err.message, /not a git repository/);
+  assert.doesNotMatch(err.message, /\[object Object\]/);
 });

@@ -626,8 +626,8 @@
         "pointer": "app/switch_project.go:196-216 (picker '+ Add project…' row)"
       },
       "web": {
-        "status": "no",
-        "pointer": "web/src/modals.ts:153-157 'No projects yet — create a session in the TUI first'"
+        "status": "yes",
+        "pointer": "web/src/ui.ts renderProjectSwitch '+ Add project' → web/src/modals.ts addProjectModal → api.ts registerProject (RegisterProject RPC)"
       },
       "cli": {
         "status": "yes",
@@ -635,7 +635,7 @@
       },
       "verdict": "real-gap",
       "issue": "#2456",
-      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject) and routes `af projects add` (register is a deprecated alias) through it, so the checkout is resolved on the daemon's filesystem and the single writer owns the registry. TUI/web adds land in the follow-up slices of #2456: the TUI row still persists a legacy root_agents entry, and the web has no registration action yet — this becomes parity once those rewire to the same RPC and the project list unions derived + registry + root_agents."
+      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); `af projects add` (register is a deprecated alias) and the web project switcher's '+ Add project' both route through it, so the checkout is resolved on the daemon's filesystem and the single writer owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Still real-gap because the TUI add persists a legacy root_agents entry rather than the registry; the remaining TUI slice rewires it and unions the project list (derived + registry + root_agents), which flips this to parity."
     },
     {
       "id": "project.rebind",
@@ -1507,6 +1507,7 @@
       "ListBackends": "backend.list",
       "ListPrograms": "enum.agent-programs",
       "ListTasks": "task.list",
+      "RegisterProject": "project.add",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
       "ReorderTab": "session.tab.reorder",

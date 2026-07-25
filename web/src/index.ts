@@ -22,6 +22,7 @@ import {
   createTab,
   createVSCodeTab,
   deleteProject,
+  registerProject,
   errorText,
   fetchSnapshot,
   killSession,
@@ -47,7 +48,14 @@ import {
 } from "./api.js";
 import { createKeyedQueue } from "./config.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
-import { confirmDeleteProjectModal, confirmModal, handoffModal, type ModalHandle, newSessionModal } from "./modals.js";
+import {
+  addProjectModal,
+  confirmDeleteProjectModal,
+  confirmModal,
+  handoffModal,
+  type ModalHandle,
+  newSessionModal,
+} from "./modals.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
@@ -672,6 +680,39 @@ function openDeleteProject(root: string, label: string, sessionCount: number): v
         const m = modal;
         m.setBusy(true);
         void deleteProject(root, tok)
+          .then(closeModal)
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(describeError(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** Opens the add-project modal (#2456): the user types a path to a git checkout
+ *  on the daemon host, and RegisterProject resolves+validates it. A rejection
+ *  (not a git repo, unreadable) is shown inline and the modal stays open to
+ *  correct; on success the modal closes.
+ *
+ *  The registered repo becomes a visible project once a session is created into
+ *  it (the switcher list derives from sessions, projectSummaries). Surfacing the
+ *  registered EMPTY project immediately needs the registry-union slice (read the
+ *  daemon's project registry and ∪ it into the derived list); until that lands,
+ *  register-then-create is the working path. */
+function openAddProject(): void {
+  openModal(
+    addProjectModal({
+      onSubmit: (path: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void registerProject(path, tok)
           .then(closeModal)
           .catch((e) => {
             m.setBusy(false);
@@ -1390,6 +1431,7 @@ const actions = {
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
+  addProject: openAddProject,
   setTheme,
 };
 

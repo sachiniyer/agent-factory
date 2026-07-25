@@ -3647,6 +3647,38 @@ test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a 
   }
 });
 
+test("add project (#2456): the switcher's + Add project drives the real RegisterProject round-trip", REAL_FIXTURE, async () => {
+  // The switcher is always openable now (the zero-projects dead end is gone), and
+  // its "+ Add project" footer action opens a path input that registers a repo
+  // through the REAL RegisterProject RPC. A non-git path is rejected by the daemon
+  // and the message shows INLINE while the modal stays open — proving this drives a
+  // real daemon round-trip, not a client-only stub.
+  await page.locator(".af-project-switch").click();
+  const add = page.locator(".af-project-menu .af-project-add");
+  await expect(add).toBeVisible();
+  await add.click();
+
+  const addModal = page.locator(".af-modal-card");
+  await expect(addModal).toBeVisible();
+  await expect(addModal.locator(".af-modal-title")).toHaveText("Add project");
+
+  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  await pathInput.fill("/work/definitely-not-a-git-repo");
+  await addModal.locator("button.af-primary").click();
+  // Rejected by the daemon: the error is shown inline and the modal stays open to
+  // correct — a failed submit does NOT dismiss it.
+  await expect(addModal.locator(".af-modal-error")).toBeVisible();
+  await expect(addModal).toBeVisible();
+
+  // Editing clears the stale error, and a VALID checkout path (mock-repo is a real
+  // git repo in the fixture; registering it is an idempotent success) submits and
+  // closes the modal.
+  await pathInput.fill("/work/mock-repo");
+  await expect(addModal.locator(".af-modal-error")).toBeHidden();
+  await addModal.locator("button.af-primary").click();
+  await expect(addModal).toBeHidden();
+});
+
 test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", REAL_FIXTURE, async () => {
   // Use the SECOND project (SESSION_C, no task): switch to it, then delete it from the
   // switcher menu footer. Delete archives its one live session; with no task left, the

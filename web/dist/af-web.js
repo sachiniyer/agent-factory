@@ -6298,6 +6298,10 @@ async function handoffSession(id, title, to, token2) {
 async function deleteProject(root2, token2) {
   return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
 }
+async function registerProject(path, token2) {
+  const resp = await af("RegisterProject", { path }, token2);
+  return resp.project;
+}
 function requireSessionID(id, action) {
   if (id === "") {
     throw new ApiError(0, `cannot ${action}: this session has no stable id to target safely`);
@@ -6770,6 +6774,41 @@ function confirmDeleteProjectModal(opts) {
   asForm(card, () => {
     handle.setError(null);
     opts.onConfirm();
+  });
+  return handle;
+}
+function addProjectModal(callbacks) {
+  const { handle, body } = modalChrome({
+    title: "Add project",
+    confirmLabel: "Add project",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const pathInput = h("input", {
+    type: "text",
+    class: "af-input",
+    placeholder: "/path/to/repo  or  ~/repo",
+    autocomplete: "off"
+  });
+  pathInput.setAttribute("aria-label", "Repository path");
+  body.append(
+    field("Repository path", pathInput),
+    h(
+      "p",
+      { class: "af-modal-hint" },
+      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into."
+    )
+  );
+  pathInput.addEventListener("input", () => handle.setError(null));
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const path = pathInput.value.trim();
+    if (path === "") {
+      handle.setError("Enter a repository path.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(path);
   });
   return handle;
 }
@@ -11664,14 +11703,23 @@ var AppShell = class {
     const summaries = projectSummaries(state.sessions, state.tasks);
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
-    this.projectSwitchBtn.disabled = summaries.length === 0;
+    this.projectSwitchBtn.disabled = false;
     const children = [h2("div", { class: "af-project-menu-label" }, "Switch project")];
     if (summaries.length === 0) {
-      children.push(h2("div", { class: "af-project-menu-empty" }, "No projects yet."));
+      children.push(h2("div", { class: "af-project-menu-empty" }, "No projects yet \u2014 add one below."));
     }
     for (const p of summaries) {
       children.push(this.projectItem(p, p.root === current));
     }
+    const footChildren = [];
+    const add = h2("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.actions.addProject();
+    });
+    footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h2("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
@@ -11689,8 +11737,9 @@ var AppShell = class {
           this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
         });
       }
-      children.push(h2("div", { class: "af-project-menu-foot" }, del));
+      footChildren.push(del);
     }
+    children.push(h2("div", { class: "af-project-menu-foot" }, ...footChildren));
     this.projectMenu.replaceChildren(...children);
   }
   /** One project row in the switcher menu: a check on the current project, the name +
@@ -12648,6 +12697,25 @@ function openDeleteProject(root2, label, sessionCount) {
     })
   );
 }
+function openAddProject() {
+  openModal(
+    addProjectModal({
+      onSubmit: (path) => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void registerProject(path, tok).then(closeModal).catch((e) => {
+          m.setBusy(false);
+          m.setError(describeError(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
 function selectedSessionData() {
   const { sessions, selectedId } = store.get();
   return sessions.find((s) => s.id === selectedId) ?? null;
@@ -13026,6 +13094,7 @@ var actions = {
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
+  addProject: openAddProject,
   setTheme
 };
 function syncSplit(state) {

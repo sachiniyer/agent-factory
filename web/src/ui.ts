@@ -271,6 +271,9 @@ export interface Actions {
   /** Opens the reversible delete-project confirm for a project row (#1735); on
    *  confirm index.ts calls DeleteProject, which archives its live sessions. */
   deleteProject(root: string, label: string, sessionCount: number): void;
+  /** Opens the add-project modal (#2456): register a git checkout by path via
+   *  RegisterProject so it appears as an empty project you can create into. */
+  addProject(): void;
   /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
    *  <html>, and re-themes the live terminals. */
   setTheme(choice: ThemeChoice): void;
@@ -1444,19 +1447,35 @@ export class AppShell {
     const summaries = projectSummaries(state.sessions, state.tasks);
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
-    // Disable the switcher when there are no projects to switch between.
-    this.projectSwitchBtn.disabled = summaries.length === 0;
+    // The switcher is ALWAYS openable, even with no projects (#2456): its menu now
+    // hosts "+ Add project", which is the coherent action for the zero-projects
+    // empty state. Disabling it here would restore the dead end where a fresh web
+    // user with no sessions has nowhere to register a repo.
+    this.projectSwitchBtn.disabled = false;
 
     const children: HTMLElement[] = [h("div", { class: "af-project-menu-label" }, "Switch project")];
     if (summaries.length === 0) {
-      children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet."));
+      children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet — add one below."));
     }
     for (const p of summaries) {
       children.push(this.projectItem(p, p.root === current));
     }
-    // The reversible delete-project control (#1735) lived on the old Projects view's
-    // header; with that view folded into the switcher it moves here, as a footer
-    // action on the CURRENT project (single-project IA). index.ts pops the confirm.
+
+    // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
+    // state's coherent action and a convenience when projects already exist. The
+    // reversible delete-project control (#1735) rides alongside it, but only for
+    // the CURRENT project (single-project IA).
+    const footChildren: HTMLElement[] = [];
+
+    const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.actions.addProject();
+    });
+    footChildren.push(add);
+
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
@@ -1479,8 +1498,10 @@ export class AppShell {
           this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
         });
       }
-      children.push(h("div", { class: "af-project-menu-foot" }, del));
+      footChildren.push(del);
     }
+
+    children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
     this.projectMenu.replaceChildren(...children);
   }
 
