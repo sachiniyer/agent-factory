@@ -3,6 +3,7 @@ package daemon
 import (
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,6 +73,37 @@ func TestNextAvailableTitle_UncontestedNameKeepsBareForm(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "sweep", title)
+}
+
+// TestNextAvailableTitle_LongTitleWalkConverges is the #2528 P3-b regression at
+// the daemon call site. A long base title whose derived branch is already held
+// used to make the walk NON-CONVERGENT: branch truncation collapsed every
+// suffixed rung ("base-2", "base-3", …) to the SAME branch as the held base, so
+// the walk skipped all 10,000 rungs under m.mu and failed with "could not find an
+// available title". Bounding the base so the suffix survives lets it resolve at a
+// low rung.
+func TestNextAvailableTitle_LongTitleWalkConverges(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	base := strings.Repeat("a", 300)
+	// Hold the base's derived branch exactly as an archived session would, so the
+	// bare base (rung 1) is taken and the walk must find a distinct suffix.
+	holdBranchInArchivedWorktree(t, repoPath, manager.branchForTitle(base), "held")
+
+	manager.mu.Lock()
+	title, err := manager.nextAvailableTitleLocked(repoID, repoPath, base, "claude", runtimeNamespaceLocalTmux, nil)
+	manager.mu.Unlock()
+	require.NoError(t, err, "the walk must converge, not exhaust 10,000 rungs")
+
+	require.NotEqual(t, base, title, "the held bare base must be skipped")
+	assert.NotEqual(t, manager.branchForTitle(base), manager.branchForTitle(title),
+		"the resolved title must derive a DISTINCT branch, not one truncation re-collides")
+
+	// The resolved branch is actually creatable — not merely unheld on paper.
+	dest := filepath.Join(t.TempDir(), "run")
+	out, addErr := exec.Command("git", "-C", repoPath, "worktree", "add", "-b",
+		manager.branchForTitle(title), dest).CombinedOutput()
+	require.NoError(t, addErr, "resolved title %q must be usable: %s", title, string(out))
 }
 
 // TestNextAvailableTitle_ExistingBranchIsNotAHold keeps the new check as narrow

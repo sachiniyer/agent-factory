@@ -281,17 +281,6 @@ func (i *Instance) tmuxLocked() *tmux.TmuxSession {
 	return i.Tabs[0].tmux
 }
 
-// shellTabLocked returns the instance's Shell-kind tab (the terminal tab), or
-// nil if it has none yet. Callers must hold i.mu (read or write).
-func (i *Instance) shellTabLocked() *Tab {
-	for _, t := range i.Tabs {
-		if t.Kind == TabKindShell {
-			return t
-		}
-	}
-	return nil
-}
-
 // GetTabs returns a snapshot of the instance's tab list under the instance
 // mutex. The returned slice is a copy, so callers (the UI tab bar) can iterate
 // it without racing concurrent tab mutation.

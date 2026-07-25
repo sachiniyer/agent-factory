@@ -62,6 +62,11 @@ type DockerConfig struct {
 	Image string `json:"image,omitempty" toml:"image,omitempty"`
 	// RunArgs are extra arguments appended verbatim to `docker run` (e.g. extra
 	// mounts, env, or resource limits). Optional.
+	//
+	// NOTE: mounting agent credentials into the container is NOT a docker key.
+	// It is the global-only `docker_mount_agent_credentials` operator grant
+	// (config.Config), deliberately kept out of this repo-owned table so a cloned
+	// repo cannot grant itself the operator's credentials (#2194). See that field.
 	RunArgs []string `json:"run_args,omitempty" toml:"run_args,omitempty"`
 }
 

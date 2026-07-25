@@ -19,14 +19,16 @@ import (
 // that hits a limit mid-flight. Keeping this layer pure and table-tested is
 // what lets those PRs build on a trusted detector.
 //
-// Scope of what we schedule against: only the subscription-plan agents
-// (claude, codex) stall at a dead prompt with a parseable reset window, so
-// only they get a matcher here. Other agents are API-key-metered or have no
-// known plan-reset banner — a "limit" there is a transient CLI/API failure
-// with no reset timestamp to schedule against — so isLimitContent returns
-// hit=false for them in v1. The matcher map is structured so a surface-only
-// entry for them (detect set, parseReset nil) drops in later without touching
-// the core.
+// Scope of what we schedule against: the subscription-plan agents (claude,
+// codex) stall at a dead prompt with a parseable reset window, so they get a
+// FULL matcher (detect + parseReset). devin gets a DETECT-ONLY matcher (#2411):
+// its exhaustion banner is recognizable but its reset format is uncharacterized,
+// so it surfaces the stall (badge + manual resume) with no reset time — the
+// surface-only shape (detect set, parseReset nil) this map was built to allow.
+// The remaining agents (gemini, aider, amp, opencode) have no matcher at all —
+// API-key-metered or no known plan-reset banner, a "limit" there being a
+// transient CLI/API failure with nothing to schedule against — so isLimitContent
+// returns hit=false for them.
 
 // agentLimitMatcher is the per-agent recipe for recognizing a usage-limit
 // banner and, when present, extracting its reset time.
@@ -42,7 +44,8 @@ type agentLimitMatcher struct {
 	// still stands. now is the injected clock used to resolve relative and
 	// time-of-day-only forms into an absolute instant — the tested path never
 	// calls time.Now() itself, so tests are deterministic. nil for a detect-only
-	// (surface-only) agent; there are none in v1.
+	// (surface-only) agent — devin (#2411), whose exhaustion banner is
+	// recognizable but whose reset format is uncharacterized.
 	parseReset func(content string, now time.Time) (time.Time, bool)
 }
 
@@ -63,6 +66,34 @@ var (
 	// again in…" (relative, openai/codex#3031) — so it is intentionally not
 	// anchored here.
 	codexLimitDetect = regexp.MustCompile(`You've hit your usage limit`)
+
+	// devinLimitDetect matches devin's usage-quota exhaustion banner (#2411).
+	//
+	// INFERRED FROM THE BINARY, NOT OBSERVED LIVE. #2410 gave devin no matcher
+	// because its exhausted-state pane was never captured (the account was not
+	// driven to exhaustion). This anchors on the INVARIANT half of that banner,
+	// verified against the devin 3000.2.17 binary: devin renders the exhaustion as
+	// "Quota exhausted: <message>" (an error-Display prefix) and also as a bare
+	// "Quota exhausted" heading in the rendered exhaustion UI (beside "Upgrade your
+	// plan or wait for your quota to reset"). The <message> is BACKEND-SUPPLIED and
+	// only falls back to the literal "usage quota has been exhausted" when the API
+	// response carries none — so anchoring on the message half (as this first did)
+	// would MISS every backend-worded exhaustion. "quota exhausted" is the prefix
+	// present in BOTH renderings and BOTH message cases, matched case-insensitively
+	// for display-casing resilience.
+	//
+	// It must NOT fire on devin's HEALTHY quota-status displays, which reuse the
+	// "quota" vocabulary — "59% remaining", "(resets in 3d)", "Quota used:",
+	// "Quota resets" — none of which contain "quota exhausted". Those non-matches
+	// are pinned in the tests.
+	//
+	// Detect-only, parseReset nil: the exhausted-state reset format is likewise
+	// uncharacterized, so this surfaces the stall (badge + manual resume) without
+	// claiming a reset time it cannot parse — the same posture claude/codex fall
+	// back to when their reset clause is unparseable. Auto-resume is deliberately
+	// NOT wired here; it needs a trustworthy reset time, which this does not have.
+	// When a real exhausted-state banner is captured, add a parseReset.
+	devinLimitDetect = regexp.MustCompile(`(?i)quota exhausted`)
 )
 
 // builtinLimitMatchers returns a fresh map of the shipped per-agent matchers.
@@ -72,18 +103,23 @@ func builtinLimitMatchers() map[string]agentLimitMatcher {
 	return map[string]agentLimitMatcher{
 		tmux.ProgramClaude: {detect: claudeLimitDetect, parseReset: parseClaudeReset},
 		tmux.ProgramCodex:  {detect: codexLimitDetect, parseReset: parseCodexReset},
+		// devin is DETECT-ONLY (#2411): its exhaustion banner is inferred from the
+		// binary (not captured live) and its reset format is uncharacterized — so no
+		// parseReset and no auto-resume. See devinLimitDetect.
+		tmux.ProgramDevin: {detect: devinLimitDetect, parseReset: nil},
 	}
 }
 
 // resolveLimitMatchers layers per-agent config overrides on top of the
 // built-in matchers: for each entry in overrides (agent name -> regexp
 // string), it replaces that agent's detect pattern while keeping the built-in
-// reset-time parser. An override for an agent with no built-in matcher
-// is ignored — there is no reset parser to pair it with yet, and
-// detection-only surfacing lands in a later PR. An uncompilable
-// pattern is logged and skipped so the built-in default stands; validateConfig
-// already drops such entries, so this is defense in depth for hand-built
-// configs and non-config callers.
+// reset-time parser (which stays nil for a detect-only built-in like devin, so
+// an override there swaps detection without inventing a reset time). An override
+// for an agent with no built-in matcher (gemini/aider/amp/opencode) is ignored:
+// af has not characterized a usage-limit posture for it, so there is nothing to
+// layer the override onto. An uncompilable pattern is logged and skipped so the
+// built-in default stands; validateConfig already drops such entries, so this is
+// defense in depth for hand-built configs and non-config callers.
 //
 // PR1 has no live call site; the daemon (PR2) will call this once with
 // cfg.LimitPatterns and reuse the result across poll ticks. Taking a plain
@@ -96,11 +132,11 @@ func resolveLimitMatchers(overrides map[string]string) map[string]agentLimitMatc
 		}
 		base, ok := matchers[agent]
 		if !ok {
-			// No built-in matcher (and thus no reset parser) for this agent
-			// yet; a detection override alone would surface as an unparseable
-			// hit with no scheduling value. Ignore until surface-only support
-			// exists.
-			log.WarningLog.Printf("limit_patterns override for %q ignored: no built-in usage-limit matcher for that agent yet", agent)
+			// No built-in matcher for this agent to layer the override onto. A
+			// detect-only built-in like devin's CAN be overridden — it has an
+			// entry; agents with no entry at all (gemini/aider/amp/opencode) are
+			// not surfaced from a bare, unvetted user regex. Ignore it.
+			log.WarningLog.Printf("limit_patterns override for %q ignored: no built-in usage-limit matcher for that agent", agent)
 			continue
 		}
 		re, err := regexp.Compile(pattern)
@@ -136,7 +172,7 @@ func NewLimitDetector(overrides map[string]string) LimitDetector {
 // present, the absolute UTC reset time — the return contract of isLimitContent.
 // now is the injected clock used to resolve time-of-day-only and relative reset
 // phrases into an absolute instant; the daemon passes time.Now(), tests a fixed
-// clock. Only claude/codex have matchers, so any other agent returns hit=false.
+// clock. An agent with no matcher (gemini/aider/amp/opencode) returns hit=false.
 func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool) {
 	return isLimitContent(content, agent, d.matchers, now)
 }
@@ -149,7 +185,7 @@ func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, re
 //
 // Return contract:
 //   - hit=false: no banner for this agent (or an agent with no matcher, e.g.
-//     any non-claude/codex agent in v1). resetAt/hasResetTime are zero.
+//     gemini/aider/amp/opencode). resetAt/hasResetTime are zero.
 //   - hit=true, hasResetTime=true: banner detected and a reset time parsed;
 //     resetAt is that time in UTC.
 //   - hit=true, hasResetTime=false: banner detected but the reset time was

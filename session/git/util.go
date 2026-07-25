@@ -48,6 +48,22 @@ func SanitizeBranchName(s string) string {
 	parts := strings.Split(s, "/")
 	filtered := make([]string, 0, len(parts))
 	for _, part := range parts {
+		// Bound the component BEFORE the leading-dot / trailing-".lock" cleanup
+		// below. Each component becomes a directory/file under .git/refs/heads (and
+		// the worktree's refs), so it is bound by NAME_MAX; a long title creatable
+		// via the CLI/API (no TUI 32-char cap) otherwise derived a component over the
+		// limit and failed with a cryptic "Unable to create ...: File name too long"
+		// (#2528). The subset here is ASCII, so a byte truncation is rune-safe.
+		//
+		// Truncating FIRST is load-bearing (#2528 review): the cut can land inside —
+		// or newly expose a trailing — ".lock", which git reserves on EVERY
+		// slash-separated component, not just the last. The cleanup that follows only
+		// removes it because it runs AFTER the cut; the whole-ref trimBranchNameEdges
+		// below repairs only the final component, so a re-exposed ".lock" on a
+		// non-final component would otherwise survive and git would reject the ref.
+		if len(part) > maxBranchComponentLen {
+			part = part[:maxBranchComponentLen]
+		}
 		part = strings.TrimLeft(part, ".")
 		for strings.HasSuffix(part, ".lock") {
 			part = strings.TrimSuffix(part, ".lock")
@@ -112,6 +128,11 @@ func BranchForTitle(branchPrefix, title string) string {
 // segment for AF-owned worktree directories. It preserves ordinary title case
 // for readability while removing separators/traversal and replacing whitespace
 // or shell-hostile punctuation with dashes.
+//
+// It does NOT bound the length: the worktree directory component is the JOINED
+// "<repoName>-<segment>", so the segment's NAME_MAX allowance depends on the repo
+// name and is applied by the caller at the join site (resolveWorktreePlacement),
+// where that prefix is known (#2528).
 func sanitizeWorktreePathSegment(title string) string {
 	s := reUnsafeWorktreePathSegment.ReplaceAllString(title, "-")
 	s = strings.ReplaceAll(s, "..", "")
@@ -121,6 +142,44 @@ func sanitizeWorktreePathSegment(title string) string {
 		return "session"
 	}
 	return s
+}
+
+// maxBranchComponentLen bounds a single title-derived git ref component. Linux
+// NAME_MAX is 255 bytes per path component; 200 is deliberately conservative,
+// leaving headroom for git's transient "<ref>.lock" and for the "-N" suffix a
+// worktree directory derived from the same name may carry (see worktree.go). A
+// branch ref component has no variable prefix eating into it — the branch prefix
+// is its own slash component — so this fixed budget is a real bound.
+const maxBranchComponentLen = 200
+
+// disambiguationSuffixReserve is the room BoundTitleForDisambiguation keeps free
+// within a branch component for a uniquifying suffix ("-2", " (archived 3)", …).
+// It comfortably exceeds the longest such suffix (" (archived 10000)").
+const disambiguationSuffixReserve = 32
+
+// BoundTitleForDisambiguation trims a base title so that appending a short
+// uniquifying suffix derives a DISTINCT branch instead of one that truncation
+// makes identical (#2528).
+//
+// The daemon's title walks (nextAvailableTitleLocked, uniqueArchivedTitleLocked)
+// append "-N" / " (archived N)" to a base title and decide availability on the
+// DERIVED branch. When the base is long, SanitizeBranchName truncates the suffix
+// away, so every rung derives the same branch as the taken base: the walk finds
+// nothing free and burns all 10,000 iterations under the manager lock before
+// failing. Bounding the base here keeps the suffix inside maxBranchComponentLen so
+// distinct suffixes stay injective and the walk converges at a low rung.
+//
+// Sanitization never lengthens a string (it only lowercases, replaces 1:1, and
+// removes), so bounding the base by RUNES to (budget - reserve) guarantees its
+// sanitized form leaves room for the suffix, and keeps the returned title valid
+// UTF-8.
+func BoundTitleForDisambiguation(base string) string {
+	limit := maxBranchComponentLen - disambiguationSuffixReserve
+	runes := []rune(base)
+	if len(runes) <= limit {
+		return base
+	}
+	return string(runes[:limit])
 }
 
 // TitlesCollide reports whether two session titles cannot coexist in the same
@@ -164,14 +223,25 @@ func IsGitRepo(path string) bool {
 	return cmd.Run() == nil
 }
 
+// EnsureGitInstalled returns an actionable error when the git binary is not on
+// PATH. Split out of EnsureRepo so a caller that tolerates running outside a
+// repository — the registry-mode TUI launch (#2477) — can still require git
+// itself, which af's worktrees and sessions are built on.
+func EnsureGitInstalled() error {
+	if !IsGitInstalled() {
+		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
+	}
+	return nil
+}
+
 // EnsureRepo verifies that git is installed and that path is within a git
 // repository, returning an actionable error that distinguishes the two failure
 // modes. IsGitRepo collapses both into a bare false, which previously produced
 // a misleading "must be run from within a git repository" message for users
 // who simply did not have git installed (issue #737).
 func EnsureRepo(path string) error {
-	if !IsGitInstalled() {
-		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
+	if err := EnsureGitInstalled(); err != nil {
+		return err
 	}
 	if !IsGitRepo(path) {
 		return fmt.Errorf("agent-factory must be run from within a git repository")

@@ -1,10 +1,10 @@
 # Usage limits
 
-Subscription-plan agents (`claude`, `codex`) can hit a **plan usage-limit
-wall**: the CLI stops working and prints a banner like *"Claude usage limit
-reached. Your limit will reset at 2pm (America/New_York)"* or *"You've hit your
-usage limit … try again at Jul 25th, 2026 5:55 PM"*. The agent is not dead — it
-is parked until its limit window resets.
+Subscription-plan agents (`claude`, `codex`, `devin`) can hit a **plan
+usage-limit wall**: the CLI stops working and prints a banner like *"Claude usage
+limit reached. Your limit will reset at 2pm (America/New_York)"* or *"You've hit
+your usage limit … try again at Jul 25th, 2026 5:55 PM"*. The agent is not dead —
+it is parked until its limit window resets.
 
 Agent Factory detects that state, surfaces it, and can bring the session back on
 its own once the window elapses. This page covers the whole flow end to end.
@@ -12,9 +12,15 @@ its own once the window elapses. This page covers the whole flow end to end.
 ## What is detected
 
 - **`claude` and `codex`** — their usage-limit banners are recognized, and when
-  the banner states a reset time it is parsed into an absolute instant. These
-  are the plan-metered agents that stall at a dead prompt with a reset window,
-  so they are the only ones that get auto-resume.
+  the banner states a reset time it is parsed into an absolute instant. These are
+  the plan-metered agents that stall at a dead prompt with a reset window, so they
+  are the ones whose reset time schedules a **timed** auto-resume.
+- **`devin`** — detected too (#2411), but **detect-only**. Its exhaustion banner
+  is inferred from the binary and docs rather than captured live, and it carries
+  **no reset time**, so a devin limit gets the badge and the manual `c` retry but
+  never a scheduled (timed) auto-resume — only the `limit_retry_interval` fallback
+  if `limit_auto_resume` is on. Its healthy `N% remaining` / `resets in …`
+  quota-status line is deliberately **not** treated as a limit.
 - **`gemini` and `aider`** — **not** detected. They are API-key-metered: a
   "limit" there is a transient HTTP 429 the CLI already retries, with no plan
   reset time to schedule against. They are surface-only in the sense that
@@ -30,10 +36,10 @@ can tune the detection regex per agent with
 
 ## The `[limit]` badge
 
-When the daemon's status poll sees a usage-limit banner for a `claude`/`codex`
-session, it marks the session **LimitReached**. In the sidebar the row shows a
-`[limit]` badge, and — when the banner carried a parseable reset time — when the
-limit resets:
+When the daemon's status poll sees a usage-limit banner for a `claude`, `codex`,
+or `devin` session, it marks the session **LimitReached**. In the sidebar the row
+shows a `[limit]` badge, and — when the banner carried a parseable reset time (not
+`devin`, which carries none) — when the limit resets:
 
 ```
 ▸ fix-auth-bug   [limit] resets 2:00 PM
@@ -71,7 +77,9 @@ The TUI's `c` binding is rebindable like any other via the `[keys]` table
 
 By default a limit is **surface-only**: the badge plus the manual retry. Set
 `limit_auto_resume = true` in your global config to let the **daemon** resume a
-parked `claude`/`codex` session on its own once its limit window elapses:
+parked `claude`/`codex` session on its own once its limit window elapses (a
+reset-less banner — including every `devin` limit — resumes on the
+`limit_retry_interval` fallback below instead):
 
 ```toml
 limit_auto_resume = true
@@ -179,15 +187,18 @@ failure even though nothing was actually wrong — you'd just hit your plan limi
 | `aider` | — | — | — | — | — | ✅ |
 | `amp` | — | — | — | — | — | ✅ |
 | `opencode` | — | — | — | — | — | ✅ |
-| `devin` | — | — | — | — | — | ✅ |
+| `devin` | ✅ | ✅ | ✅ | fallback | ✅ | ✅ |
 
-Auto-resume covers `claude`/`codex` because their banners carry a parseable
-reset window; other supported agents either do not expose a known plan-reset
-banner or are API-key-metered (transient 429s the CLI retries) with no plan
-window to schedule against.
+Auto-resume is **timed** for `claude`/`codex` because their banners carry a
+parseable reset window. `devin` is detected but carries no reset window, so it has
+no timed auto-resume — only the `limit_retry_interval` **fallback** cadence when
+`limit_auto_resume` is on (the same path a `claude`/`codex` banner with an
+unparseable reset time takes). The remaining agents are not detected: they expose
+no plan-reset banner, or are API-key-metered (transient 429s the CLI retries) with
+no plan window to schedule against.
 
 The last column runs the other way, and deliberately so. Detection answers "can
-af tell this agent hit a wall", which only `claude`/`codex` support — so only
+af tell this agent hit a wall", which `claude`/`codex`/`devin` support — so only
 they can be handed *from* on a limit. Being handed *to* needs nothing from the
 agent at all: af stops one process and starts another in the same worktree, so
 every supported agent is a valid destination.
@@ -205,6 +216,7 @@ codex  = "You've hit your usage limit"
 
 Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`,
 `opencode`, `devin`); an override for an agent with no built-in matcher
-(`aider`/`gemini`/`amp`/`opencode`/`devin` today) is ignored, and an uncompilable regex
-warns and falls back to the built-in default.
+(`aider`/`gemini`/`amp`/`opencode` today) is ignored, and an uncompilable regex
+warns and falls back to the built-in default. A `devin` override replaces its
+inferred detect pattern (still detect-only — there is no reset parser to keep).
 See [configuration.md](configuration.md#custom-usage-limit-detection-limit_patterns).

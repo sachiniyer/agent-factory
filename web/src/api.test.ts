@@ -20,12 +20,17 @@ import {
   killSession,
   listBackends,
   listPrograms,
+  listProjects,
   probeWebTab,
+  reapConfigAssistant,
+  registerProject,
   removeTask,
   renameTab,
   reorderTab,
   restoreSession,
   resumeFromLimit,
+  spawnConfigAssistant,
+  suggestSessionName,
   triggerTask,
   updateTask,
 } from "./api.js";
@@ -173,6 +178,19 @@ test("listPrograms works with no repo picked", async () => {
 
   assert.equal(cap.url, "/v1/ListPrograms");
   assert.equal(cap.body.repo_path, "");
+});
+
+// The autocreate-name suggestion (#2470). The daemon owns the wordlist, so the web
+// asks for one name and renders it; it sends no arguments (the suggestion is
+// repo-agnostic) and reads `name` out of the envelope.
+test("suggestSessionName asks the daemon and returns the name", async () => {
+  const cap = stubFetch(); // envelope data carries name: "shell"
+  const name = await suggestSessionName("tok");
+
+  assert.equal(cap.url, "/v1/SuggestSessionName");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.deepEqual(cap.body, {}, "the suggestion takes no arguments");
+  assert.equal(name, "shell", "the resolved name is read from the envelope");
 });
 
 test("killSession posts the stable id as the primary key alongside the title", async () => {
@@ -625,4 +643,197 @@ test("probeWebTab: the token rides the Authorization header, never the URL", asy
   await probeWebTab("/v1/webtab/s/t/", "secret-tok", 1000);
   assert.equal(seenAuth, "Bearer secret-tok", "the probe is the parent's request — header, not ?access_token");
   assert.ok(!seenUrl.includes("secret-tok"), "the token must never appear in the probe URL");
+});
+
+// --- registerProject: the web add-project affordance (#2456) -------------------
+//
+// The web is inherently the REMOTE client: the path names a directory on the
+// daemon host, which the daemon resolves and validates. So the client sends it
+// VERBATIM (no local resolution) and surfaces the daemon's rejection inline.
+
+test("registerProject sends the path verbatim to RegisterProject", async () => {
+  const cap = stubFetch();
+  await registerProject("~/repos/new", "tok");
+  assert.ok(cap.url.endsWith("/v1/RegisterProject"), `posted to ${cap.url}`);
+  assert.equal(cap.body.path, "~/repos/new", "the path is forwarded unchanged for the daemon to resolve");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("registerProject returns the daemon's resolved project", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        ok: true,
+        project: {
+          id: "prj_00000000000000000000000000000000",
+          checkout_id: "chk_00000000000000000000000000000000",
+          root: "/resolved/repo",
+          relative_root: ".",
+          path_exists: true,
+        },
+      },
+      error: null,
+    }),
+  });
+  const project = await registerProject("/some/repo", "tok");
+  assert.equal(project.id, "prj_00000000000000000000000000000000");
+  assert.equal(project.root, "/resolved/repo");
+  assert.equal(project.path_exists, true);
+});
+
+test("registerProject surfaces a non-git path error for inline display", async () => {
+  // Model the daemon's REAL status: a non-git path decodes fine as a body, so the
+  // failure comes from the HANDLER, which rpcHandler maps to 500 (only a malformed
+  // body is 400). The modal renders this via errorText — the daemon's own message,
+  // never the login-framed "Login failed:" (index.ts openAddProject, #2543 P1).
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "resolve git common directory: not a git repository" } }),
+  });
+  const err = await registerProject("/tmp/not-a-repo", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 500);
+  assert.match(err.message, /not a git repository/);
+  assert.doesNotMatch(err.message, /\[object Object\]/);
+  // The message the modal actually renders is the daemon's, NOT wrapped in a login
+  // prefix — the exact P1 regression #2543 fixed (describeError -> errorText).
+  assert.equal(errorText(err), "resolve git common directory: not a git repository");
+  assert.doesNotMatch(errorText(err), /Login failed/);
+});
+
+// --- listProjects: the registry read half of the #2456 union -------------------
+//
+// The client ∪s these roots with the projects it derives from live sessions + tasks,
+// so a registered-but-sessionless project still shows in the switcher and is
+// creatable-into. See project.test.ts for the union derivation itself.
+
+test("listProjects reads the registry with an empty body", async () => {
+  const cap = stubFetch();
+  await listProjects("tok");
+  assert.ok(cap.url.endsWith("/v1/ListProjects"), `posted to ${cap.url}`);
+  assert.deepEqual(cap.body, {}, "ListProjects takes no arguments — the body is empty");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("listProjects returns the daemon's registered projects", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        projects: [
+          { id: "prj_1", checkout_id: "chk_1", root: "/repos/a", relative_root: ".", path_exists: true },
+          { id: "prj_2", checkout_id: "chk_2", root: "/repos/b", relative_root: ".", path_exists: false },
+        ],
+      },
+      error: null,
+    }),
+  });
+  const projects = await listProjects("tok");
+  assert.equal(projects.length, 2);
+  assert.deepEqual(
+    projects.map((p) => p.root),
+    ["/repos/a", "/repos/b"],
+    "the roots the union consumes come back intact",
+  );
+  assert.equal(projects[1]!.path_exists, false, "a registered repo whose path is gone still reports");
+});
+
+test("listProjects tolerates a null/absent projects array", async () => {
+  // The daemon marshals an empty registry as `null` (a nil Go slice), so the client
+  // must read that as [] rather than crash the switcher's union on `null.map`.
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: { projects: null }, error: null }),
+  });
+  assert.deepEqual(await listProjects("tok"), [], "an empty registry is an empty list, not a throw");
+});
+
+// --- config assistant (#2467) ----------------------------------------------
+
+test("spawnConfigAssistant POSTs /v1/config-assistant with an empty body and the bearer token", async () => {
+  const cap = stubFetch();
+  await spawnConfigAssistant("tok-1");
+  assert.equal(cap.url, "/v1/config-assistant", "posts to the config-assistant route");
+  assert.deepEqual(cap.body, {}, "the body is empty — the daemon builds the whole request server-side");
+  assert.equal(cap.auth, "Bearer tok-1");
+});
+
+test("spawnConfigAssistant surfaces a 409 as a retryable ApiError (create raced a reap)", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 409,
+    statusText: "Conflict",
+    json: async () => ({ data: null, error: { message: "config assistant creation was aborted; retry" } }),
+  });
+  const err = await spawnConfigAssistant("tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 409, "the pane retries the POST on a 409, so the status must survive");
+});
+
+test("spawnConfigAssistant surfaces a 503 (assistant absent from this build)", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 503,
+    statusText: "Service Unavailable",
+    json: async () => ({ data: null, error: { message: "config assistant is not available in this build" } }),
+  });
+  const err = await spawnConfigAssistant("tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 503);
+});
+
+test("reapConfigAssistant issues a DELETE to /v1/config-assistant with the bearer token", async () => {
+  let method = "";
+  let url = "";
+  let auth: string | undefined;
+  (globalThis as { fetch: unknown }).fetch = async (u: string, init: RequestInit): Promise<Response> => {
+    method = String(init.method);
+    url = u;
+    auth = (init.headers as Record<string, string>).Authorization;
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: {}, error: null }) } as unknown as Response;
+  };
+  await reapConfigAssistant("tok-2");
+  assert.equal(method, "DELETE");
+  assert.equal(url, "/v1/config-assistant");
+  assert.equal(auth, "Bearer tok-2");
+});
+
+test("reapConfigAssistant throws ApiError on a non-2xx so a caller that cares can see it", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "reap failed" } }),
+  });
+  const err = await reapConfigAssistant("tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 500);
+});
+
+test("reapConfigAssistant omits the Authorization header for a tokenless client", async () => {
+  let hadAuth = true;
+  (globalThis as { fetch: unknown }).fetch = async (_u: string, init: RequestInit): Promise<Response> => {
+    hadAuth = "Authorization" in (init.headers as Record<string, string>);
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: {}, error: null }) } as unknown as Response;
+  };
+  await reapConfigAssistant("");
+  assert.equal(hadAuth, false, 'a tokenless ("") client sends no Authorization header (#1696)');
 });

@@ -72,12 +72,16 @@ func TestKillSessionThroughDaemon_WedgedDaemon_ReturnsActionableError(t *testing
 		if err == nil {
 			t.Fatal("want an error when the daemon never answers, got nil — the TUI would report a successful kill that never happened")
 		}
-		// The user must learn what to do. A bare "context deadline exceeded" is
-		// exactly the unactionable text this fix exists to replace.
-		for _, want := range []string{"did not respond", "af daemon restart"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("error %q must mention %q to be actionable", err.Error(), want)
-			}
+		// The error must say what happened — a bare "context deadline exceeded" is
+		// exactly the unactionable text this fix exists to replace — but it must
+		// NOT prescribe a shell command: the recovery is an in-interface restart
+		// offer keyed off errDaemonUnresponsive (#2479), so the kill handler needs
+		// to recognize the error, and the message must not send the user to a shell.
+		if !errors.Is(err, errDaemonUnresponsive) {
+			t.Fatalf("error %q must wrap errDaemonUnresponsive so the handler can offer the in-TUI restart", err.Error())
+		}
+		if strings.Contains(err.Error(), "af daemon restart") || strings.Contains(err.Error(), "af sessions list") {
+			t.Fatalf("error %q must not prescribe a shell command; the restart is offered in-interface (#2479)", err.Error())
 		}
 		// The daemon may still be tearing the session down; claiming the kill
 		// failed outright would be a lie the next snapshot contradicts.

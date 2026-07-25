@@ -6263,6 +6263,10 @@ async function listBackends(repoPath, token2) {
 async function listPrograms(repoPath, token2) {
   return af("ListPrograms", { repo_path: repoPath }, token2);
 }
+async function suggestSessionName(token2) {
+  const resp = await af("SuggestSessionName", {}, token2);
+  return resp?.name ?? "";
+}
 async function createSession(input, token2) {
   const body = {
     title_base: input.title,
@@ -6297,6 +6301,14 @@ async function handoffSession(id, title, to, token2) {
 }
 async function deleteProject(root2, token2) {
   return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
+}
+async function registerProject(path, token2) {
+  const resp = await af("RegisterProject", { path }, token2);
+  return resp.project;
+}
+async function listProjects(token2) {
+  const resp = await af("ListProjects", {}, token2);
+  return resp.projects ?? [];
 }
 function requireSessionID(id, action) {
   if (id === "") {
@@ -6394,6 +6406,33 @@ async function getConfig(token2) {
 }
 async function setConfigValue(key, value, token2) {
   return af("SetConfigValue", { key, value }, token2);
+}
+function spawnConfigAssistant(token2) {
+  return af("config-assistant", {}, token2);
+}
+async function reapConfigAssistant(token2) {
+  const headers = {};
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
+  let resp;
+  try {
+    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers });
+  } catch (e) {
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
+  }
+  if (!resp.ok) {
+    let env = null;
+    try {
+      env = await resp.json();
+    } catch {
+    }
+    throw new ApiError(
+      resp.status,
+      envelopeErrorText(env?.error, `${resp.status} ${resp.statusText}`.trim()),
+      envelopeErrorCode(env?.error)
+    );
+  }
 }
 
 // src/backends.ts
@@ -6545,10 +6584,11 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   });
   const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
   titleInput.setAttribute("aria-label", "Session title");
+  let suggestedName = "";
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
   if (projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet \u2014 create a session in the TUI first");
+    const opt = h("option", { value: "" }, "No projects yet \u2014 add one from the project switcher first");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
@@ -6647,11 +6687,23 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   renderPrograms();
   renderChoices();
   loadCatalogsFor(projectSelect.value);
+  void callbacks.suggestName().then((name) => {
+    if (name !== "") {
+      suggestedName = name;
+      titleInput.placeholder = name;
+    }
+  }).catch(() => {
+  });
   const card = handle.el.firstElementChild;
   asForm(card, () => {
-    const title = titleInput.value.trim();
-    if (title === "" || projectSelect.value === "") {
-      handle.setError("A title and a project are required.");
+    const typed = titleInput.value.trim();
+    const title = typed !== "" ? typed : suggestedName;
+    if (projectSelect.value === "") {
+      handle.setError("A project is required.");
+      return;
+    }
+    if (title === "") {
+      handle.setError("A title is required.");
       return;
     }
     handle.setError(null);
@@ -6759,18 +6811,49 @@ function confirmDeleteProjectModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(
-    h(
-      "p",
-      { class: "af-modal-text" },
-      `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`
-    )
-  );
+  const message = opts.sessionCount === 0 ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched \u2014 you can add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`;
+  body.append(h("p", { class: "af-modal-text" }, message));
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     handle.setError(null);
     opts.onConfirm();
   });
+  return handle;
+}
+function addProjectModal(callbacks) {
+  const { handle, body } = modalChrome({
+    title: "Add project",
+    confirmLabel: "Add project",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const pathInput = h("input", {
+    type: "text",
+    class: "af-input",
+    placeholder: "/path/to/repo  or  ~/repo",
+    autocomplete: "off"
+  });
+  pathInput.setAttribute("aria-label", "Repository path");
+  body.append(
+    field("Repository path", pathInput),
+    h(
+      "p",
+      { class: "af-modal-hint" },
+      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into."
+    )
+  );
+  pathInput.addEventListener("input", () => handle.setError(null));
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const path = pathInput.value.trim();
+    if (path === "") {
+      handle.setError("Enter a repository path.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(path);
+  });
+  queueMicrotask(() => pathInput.focus());
   return handle;
 }
 function field(label, control) {
@@ -6868,6 +6951,13 @@ var ConfigPane = class {
     if (this.path !== "") {
       head.append(h("span", { class: "af-config-path" }, this.path));
     }
+    const assistantBtn = h(
+      "button",
+      { type: "button", class: "af-ghost af-config-assistant-btn" },
+      "Configure with assistant"
+    );
+    assistantBtn.addEventListener("click", () => this.actions.openAssistant());
+    head.append(assistantBtn);
     const sections = [];
     for (const { tier, name } of tiersInOrder(this.entries)) {
       const inTier = this.entries.filter((e) => e.tier === tier);
@@ -6996,10 +7086,998 @@ var ConfigPane = class {
   }
 };
 
-// src/events.ts
+// src/stream_endpoint.ts
+function wsScheme() {
+  return window.location.protocol === "https:" ? "wss:" : "ws:";
+}
+function sessionStreamEndpoint(sessionId, tabId, tab) {
+  return {
+    composerNewline: tab === 0,
+    url(token2, since) {
+      const base = `${wsScheme()}//${window.location.host}/v1/sessions/${encodeURIComponent(sessionId)}/stream`;
+      const params = new URLSearchParams();
+      params.set("access_token", token2);
+      if (tabId !== "") {
+        params.set("tab_id", tabId);
+      } else if (tab > 0) {
+        params.set("tab", String(tab));
+      }
+      if (since !== null) {
+        params.set("since", since.toString());
+      }
+      return `${base}?${params.toString()}`;
+    }
+  };
+}
+function configAssistantStreamEndpoint() {
+  return {
+    composerNewline: true,
+    url(token2, since) {
+      const base = `${wsScheme()}//${window.location.host}/v1/config-assistant/stream`;
+      const params = new URLSearchParams();
+      params.set("access_token", token2);
+      if (since !== null) {
+        params.set("since", since.toString());
+      }
+      return `${base}?${params.toString()}`;
+    }
+  };
+}
+
+// src/terminal.ts
+var import_addon_fit = __toESM(require_addon_fit(), 1);
+var import_xterm = __toESM(require_xterm(), 1);
+
+// src/clipboard.ts
+var ETX = "";
+var LF = "\n";
+function handleClipboardKeydown(ev, deps) {
+  if (ev.type !== "keydown") {
+    return true;
+  }
+  if (deps.composerNewline && ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    deps.sendUserInput(LF);
+    return false;
+  }
+  if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
+    return true;
+  }
+  const key = ev.key.toLowerCase();
+  if (key === "v") {
+    return false;
+  }
+  if (key === "c") {
+    if (ev.shiftKey) {
+      ev.preventDefault();
+      if (deps.hasSelection()) {
+        deps.copy(deps.getSelection());
+      }
+      return false;
+    }
+    if (deps.hasSelection()) {
+      ev.preventDefault();
+      deps.copy(deps.getSelection());
+      deps.clearSelection();
+      return false;
+    }
+    ev.preventDefault();
+    deps.sendInput(ETX);
+    return false;
+  }
+  return true;
+}
+
+// src/frame.ts
+var RESIZE_PAYLOAD_LEN = 4;
+var HELLO_PAYLOAD_LEN = 8;
+var EMPTY = new Uint8Array(0);
+function makeFrame(f) {
+  return {
+    op: f.op,
+    data: f.data ?? EMPTY,
+    rows: f.rows ?? 0,
+    cols: f.cols ?? 0,
+    seq: f.seq ?? 0n
+  };
+}
+function inputFrame(data) {
+  return makeFrame({ op: 1 /* Input */, data });
+}
+function resizeFrame(rows, cols) {
+  return makeFrame({ op: 2 /* Resize */, rows, cols });
+}
+function encode(f) {
+  switch (f.op) {
+    case 2 /* Resize */: {
+      const out = new Uint8Array(1 + RESIZE_PAYLOAD_LEN);
+      out[0] = 2 /* Resize */;
+      const dv = new DataView(out.buffer);
+      dv.setUint16(1, f.rows, false);
+      dv.setUint16(3, f.cols, false);
+      return out;
+    }
+    case 4 /* Hello */: {
+      const out = new Uint8Array(1 + HELLO_PAYLOAD_LEN);
+      out[0] = 4 /* Hello */;
+      const dv = new DataView(out.buffer);
+      dv.setBigUint64(1, f.seq, false);
+      return out;
+    }
+    default: {
+      const out = new Uint8Array(1 + f.data.length);
+      out[0] = f.op;
+      out.set(f.data, 1);
+      return out;
+    }
+  }
+}
+function decode(raw) {
+  if (raw.length === 0) {
+    throw new Error("agentproto: empty binary frame");
+  }
+  const op = raw[0];
+  const body = raw.subarray(1);
+  switch (op) {
+    case 0 /* PTYOut */:
+    case 1 /* Input */:
+    case 3 /* Repaint */:
+      return makeFrame({ op, data: body.slice() });
+    case 2 /* Resize */: {
+      if (body.length !== RESIZE_PAYLOAD_LEN) {
+        throw new Error(`agentproto: RESIZE frame body is ${body.length} bytes, want ${RESIZE_PAYLOAD_LEN}`);
+      }
+      const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+      return makeFrame({ op, rows: dv.getUint16(0, false), cols: dv.getUint16(2, false) });
+    }
+    case 4 /* Hello */: {
+      if (body.length !== HELLO_PAYLOAD_LEN) {
+        throw new Error(`agentproto: HELLO frame body is ${body.length} bytes, want ${HELLO_PAYLOAD_LEN}`);
+      }
+      const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+      return makeFrame({ op, seq: dv.getBigUint64(0, false) });
+    }
+    default:
+      throw new Error(`agentproto: unknown opcode 0x${op.toString(16).padStart(2, "0")}`);
+  }
+}
+
+// src/terminal-geometry.ts
+function hasVisibleTerminalGeometry(host, proposed) {
+  return host.width > 0 && host.height > 0 && !!proposed && proposed.rows > 0 && proposed.cols > 0;
+}
+function shouldRefitVisibleTerminal(host, current, proposed) {
+  if (!hasVisibleTerminalGeometry(host, proposed)) {
+    return false;
+  }
+  return proposed.rows !== current.rows || proposed.cols !== current.cols;
+}
+function viewportMarkerOffset(position) {
+  return position.viewportY - (position.baseY + position.cursorY);
+}
+function viewportAnchorLine(anchor, baseY) {
+  if (anchor.atBottom) {
+    return baseY;
+  }
+  return anchor.markerLine !== null && anchor.markerLine >= 0 ? anchor.markerLine : anchor.fallbackLine;
+}
+function shouldRestoreViewport(intent) {
+  return intent.scheduledUserScroll === intent.currentUserScroll;
+}
+function terminalUserScrollPlan(source, hasScheduledVisibleFit) {
+  switch (source) {
+    case "wheel":
+    case "touch":
+    case "scrollbar":
+      return { cancelScheduledVisibleFit: hasScheduledVisibleFit };
+  }
+}
+
+// src/theme.ts
+var THEME_CHOICES = ["auto", "light", "dark"];
+var STORAGE_KEY = "af-theme";
+function isChoice(v) {
+  return v === "auto" || v === "light" || v === "dark";
+}
+function readThemeChoice() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (isChoice(raw)) {
+      return raw;
+    }
+  } catch {
+  }
+  return "auto";
+}
+function persistThemeChoice(choice) {
+  try {
+    localStorage.setItem(STORAGE_KEY, choice);
+  } catch {
+  }
+}
+var THEME_COLOR_LIGHT = "#ffffff";
+var THEME_COLOR_DARK = "#141a22";
+function themeColorMetaContents(choice) {
+  if (choice === "auto") {
+    return { light: THEME_COLOR_LIGHT, dark: THEME_COLOR_DARK };
+  }
+  const forced = choice === "dark" ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
+  return { light: forced, dark: forced };
+}
+function syncThemeColorMeta(choice) {
+  const { light, dark } = themeColorMetaContents(choice);
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    const isDark = (meta.getAttribute("media") ?? "").includes("dark");
+    meta.setAttribute("content", isDark ? dark : light);
+  }
+}
+function stampTheme(choice) {
+  const root2 = document.documentElement;
+  if (choice === "auto") {
+    root2.removeAttribute("data-theme");
+  } else {
+    root2.setAttribute("data-theme", choice);
+  }
+  syncThemeColorMeta(choice);
+}
+function bootStampTheme() {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+function prefersDark() {
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  } catch {
+    return false;
+  }
+}
+function currentMode() {
+  const attr = document.documentElement.getAttribute("data-theme");
+  if (attr === "light" || attr === "dark") {
+    return attr;
+  }
+  return prefersDark() ? "dark" : "light";
+}
+var DARK_XTERM = {
+  background: "#0c1016",
+  foreground: "#e7ecf3",
+  cursor: "#e7ecf3",
+  cursorAccent: "#0c1016",
+  selectionBackground: "rgba(122, 162, 247, 0.2)",
+  black: "#484f58",
+  red: "#ff7b72",
+  green: "#3fb950",
+  yellow: "#d29922",
+  blue: "#58a6ff",
+  magenta: "#bc8cff",
+  cyan: "#39c5cf",
+  white: "#b1bac4",
+  brightBlack: "#6e7681",
+  brightRed: "#ffa198",
+  brightGreen: "#56d364",
+  brightYellow: "#e3b341",
+  brightBlue: "#79c0ff",
+  brightMagenta: "#d2a8ff",
+  brightCyan: "#56d4dd",
+  brightWhite: "#f0f6fc"
+};
+var LIGHT_XTERM = {
+  background: "#fdfefe",
+  foreground: "#17202e",
+  cursor: "#17202e",
+  cursorAccent: "#fdfefe",
+  selectionBackground: "rgba(47, 95, 216, 0.16)",
+  black: "#24292f",
+  red: "#cf222e",
+  green: "#1a7f37",
+  yellow: "#9a6700",
+  blue: "#0969da",
+  magenta: "#8250df",
+  cyan: "#1b7c83",
+  white: "#6e7781",
+  brightBlack: "#57606a",
+  brightRed: "#a40e26",
+  brightGreen: "#116329",
+  brightYellow: "#7d4e00",
+  brightBlue: "#0550ae",
+  brightMagenta: "#6639ba",
+  brightCyan: "#3192aa",
+  brightWhite: "#8c959f"
+};
+function xtermTheme(mode) {
+  return mode === "dark" ? DARK_XTERM : LIGHT_XTERM;
+}
+function currentXtermTheme() {
+  return xtermTheme(currentMode());
+}
+
+// src/terminal.ts
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
-function wsScheme() {
+var RESIZE_DEBOUNCE_MS = 120;
+var AttachTerminal = class {
+  constructor(container, token2, endpoint, cb) {
+    this.container = container;
+    this.token = token2;
+    this.endpoint = endpoint;
+    this.cb = cb;
+    this.term = new import_xterm.Terminal({
+      allowProposedApi: true,
+      cursorBlink: true,
+      fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+      fontSize: 13,
+      // Born in the active theme (theme.ts derives the xterm palette from the same
+      // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
+      theme: currentXtermTheme(),
+      // The stream is the source of truth; local echo/scrollback beyond the ring is
+      // fine but the server never sees our convert-eol, so leave it raw.
+      scrollback: 5e3
+    });
+    this.fit = new import_addon_fit.FitAddon();
+    this.term.loadAddon(this.fit);
+    this.term.open(container);
+    const textarea = this.term.textarea;
+    if (textarea) {
+      textarea.addEventListener("focus", () => {
+        if (!this.stopped) {
+          this.cb.onFocusChange(true);
+        }
+      });
+      textarea.addEventListener("blur", () => {
+        if (!this.stopped) {
+          this.cb.onFocusChange(false);
+        }
+      });
+    }
+    this.term.onData((data) => this.sendInput(data));
+    this.term.attachCustomKeyEventHandler(
+      (ev) => handleClipboardKeydown(ev, {
+        composerNewline: this.endpoint.composerNewline,
+        hasSelection: () => this.term.hasSelection(),
+        getSelection: () => this.term.getSelection(),
+        clearSelection: () => this.term.clearSelection(),
+        copy: (text) => this.copyToClipboard(text),
+        sendInput: (text) => this.sendInput(text),
+        // Public Terminal.input(..., true) is xterm's genuine-user-input path:
+        // it scrolls to bottom and clears selection, then fires onData above.
+        sendUserInput: (text) => this.term.input(text, true)
+      })
+    );
+    this.ro = new ResizeObserver(() => this.scheduleFit());
+    this.ro.observe(container);
+    this.io = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.scheduleVisibleFit();
+      }
+    });
+    this.io.observe(container);
+    window.addEventListener("focus", this.onWindowFocus);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    container.addEventListener("pointerenter", this.onPointerEnter);
+    container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
+    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: true });
+    container.addEventListener("pointerdown", this.onPointerDown, true);
+    this.scheduleVisibleFit();
+  }
+  term;
+  fit;
+  enc = new TextEncoder();
+  ro;
+  io;
+  ws = null;
+  stopped = false;
+  everOpened = false;
+  retry = 0;
+  initialConnectStarted = false;
+  reconnectTimer = null;
+  resizeTimer = null;
+  visibleFitFrame = null;
+  viewportRestoreFrame = null;
+  // Incremented only by an actual user scroll input while a peer-owned anchor is
+  // pending. Output and resize reflows can move viewportY too, so position deltas
+  // alone do not prove that a user intended to override the saved reading line.
+  userScrollRevision = 0;
+  // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
+  // counts (never by OpRepaint). `seeded` gates whether a reconnect can pass a
+  // real ?since; the first connect omits it (live tail + a fresh-screen repaint).
+  cursor = 0n;
+  seeded = false;
+  // The last size we told the server, so we don't re-send an unchanged fit and so
+  // an authoritative echo that matches is a no-op.
+  lastRows = 0;
+  lastCols = 0;
+  // A peer resize can temporarily collapse this client's scrollback (for example,
+  // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
+  // not a one-time distance from the bottom: output can keep arriving while this
+  // client is inactive. Null means no peer-owned grid is pending reconciliation.
+  pendingViewport = null;
+  exited = false;
+  // A peer is allowed to resize the one shared PTY and every client obeys that
+  // authoritative echo. When this window becomes active again, its visible host
+  // becomes the local writer: refit once instead of leaving a peer-sized emulator in
+  // an unchanged container until the user physically resizes the window (#2347).
+  onWindowFocus = () => this.scheduleVisibleFit();
+  onVisibilityChange = () => {
+    if (document.visibilityState === "visible") {
+      this.scheduleVisibleFit();
+    }
+  };
+  // Entering a pane is the earliest reliable activation signal for side-by-side
+  // clients: reconcile before the wheel gesture arrives so xterm can consume that
+  // first gesture rather than making the user scroll twice.
+  onPointerEnter = () => this.fitVisibleHost();
+  // A scroll can target an already-focused window after another client resized the
+  // PTY without the pointer ever leaving this pane. Capture repairs that less-common
+  // path; pointer entry above handles the ordinary first gesture. The pending-peer
+  // gate makes every ordinary input a no-op before even measuring layout.
+  onWheel = () => this.handleUserScroll("wheel");
+  onTouchMove = () => this.handleUserScroll("touch");
+  onPointerDown = (event) => {
+    if (event.target === this.container.querySelector(".xterm-viewport")) {
+      this.handleUserScroll("scrollbar");
+    }
+  };
+  handleUserScroll(source) {
+    if (this.pendingViewport === null) {
+      return;
+    }
+    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
+    if (plan.cancelScheduledVisibleFit) {
+      this.cancelVisibleFitFrame();
+    }
+    this.fitVisibleHost();
+    this.userScrollRevision += 1;
+  }
+  /** Permanently closes the terminal: stops the reconnect loop, drops the socket,
+   *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
+  dispose() {
+    this.stopped = true;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.resizeTimer !== null) {
+      window.clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
+    this.cancelVisibleFitFrame();
+    this.clearPendingViewport();
+    this.ro.disconnect();
+    this.io.disconnect();
+    window.removeEventListener("focus", this.onWindowFocus);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.container.removeEventListener("pointerenter", this.onPointerEnter);
+    this.container.removeEventListener("wheel", this.onWheel, true);
+    this.container.removeEventListener("touchmove", this.onTouchMove, true);
+    this.container.removeEventListener("pointerdown", this.onPointerDown, true);
+    this.closeSocket();
+    this.term.dispose();
+  }
+  /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
+   *  keys reach the agent — the attach half of the #1693 nav/attach model. */
+  focus() {
+    this.fitVisibleHost();
+    this.term.focus();
+  }
+  /** Reconciles this terminal after an app-shell layout/visibility transition.
+   *  Coalesced onto the next painted frame so CSS has settled; the measurable-host
+   *  gate in fitVisibleHost keeps hidden or zero-sized panes inert. */
+  refit() {
+    this.scheduleVisibleFit();
+  }
+  /** Takes the keyboard away from the terminal (blurs it) so document-level rail
+   *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
+  blur() {
+    this.term.blur();
+  }
+  /** Re-applies an xterm palette live (a theme toggle): xterm repaints the canvas
+   *  from the new ITheme, so an open terminal switches light/dark without a
+   *  reconnect or losing scrollback. */
+  setTheme(theme) {
+    this.term.options.theme = theme;
+  }
+  // --- socket lifecycle ------------------------------------------------------
+  connect() {
+    if (this.stopped) {
+      return;
+    }
+    this.cb.onStatus(this.everOpened ? "reconnecting" : "connecting");
+    const url = this.endpoint.url(this.token, this.seeded ? this.cursor : null);
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    ws.onopen = () => {
+      this.retry = 0;
+      this.everOpened = true;
+      this.exited = false;
+      this.cb.onStatus("open");
+      this.sendResize(this.term.rows, this.term.cols, true);
+    };
+    ws.onmessage = (e) => this.onMessage(e.data);
+    ws.onclose = () => this.scheduleReconnect();
+    ws.onerror = () => {
+      try {
+        ws.close();
+      } catch {
+      }
+    };
+  }
+  /** Starts the first connection only after a real visible-host fit. Reconnects
+   * continue through connect() directly once this boundary has been crossed. */
+  connectAfterInitialFit() {
+    if (this.initialConnectStarted || this.stopped) {
+      return;
+    }
+    this.initialConnectStarted = true;
+    this.connect();
+  }
+  onMessage(data) {
+    if (typeof data === "string") {
+      this.onControl(data);
+      return;
+    }
+    if (!(data instanceof ArrayBuffer)) {
+      return;
+    }
+    let frame;
+    try {
+      frame = decode(new Uint8Array(data));
+    } catch {
+      return;
+    }
+    switch (frame.op) {
+      case 4 /* Hello */:
+        this.cursor = frame.seq;
+        this.seeded = true;
+        break;
+      case 0 /* PTYOut */:
+        this.term.write(frame.data);
+        this.cursor += BigInt(frame.data.length);
+        break;
+      case 3 /* Repaint */:
+        this.term.write(frame.data);
+        break;
+      default:
+        break;
+    }
+  }
+  onControl(text) {
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (msg.type === "resize" && typeof msg.rows === "number" && typeof msg.cols === "number") {
+      this.applyEchoedSize(msg.rows, msg.cols);
+    } else if (msg.type === "exit") {
+      this.exited = true;
+      const code = typeof msg.code === "number" ? msg.code : 0;
+      this.term.write(`\r
+\x1B[38;5;244m[agent exited (code ${code})]\x1B[0m\r
+`);
+      this.cb.onStatus("exited");
+      this.stopped = true;
+      this.closeSocket();
+    }
+  }
+  scheduleReconnect() {
+    if (this.stopped || this.reconnectTimer !== null) {
+      return;
+    }
+    this.ws = null;
+    this.cb.onStatus("reconnecting");
+    const delay2 = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    this.retry += 1;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay2);
+  }
+  closeSocket() {
+    const ws = this.ws;
+    if (!ws) {
+      return;
+    }
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    try {
+      ws.close();
+    } catch {
+    }
+    this.ws = null;
+  }
+  // --- resize ----------------------------------------------------------------
+  /** Fits on the next painted frame, after visibility/layout changes have settled.
+   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
+   *  this is not a time guess and never repeats on its own. */
+  scheduleVisibleFit() {
+    if (this.stopped || this.visibleFitFrame !== null) {
+      return;
+    }
+    this.visibleFitFrame = window.requestAnimationFrame(() => {
+      this.visibleFitFrame = null;
+      this.fitVisibleHost();
+    });
+  }
+  /** Drops activation work queued before a direct user scroll. Leaving that frame
+   * alive lets it run after the input fit and rebase the restore onto the new user
+   * revision, which makes the first gesture appear inert. */
+  cancelVisibleFitFrame() {
+    if (this.visibleFitFrame === null) {
+      return;
+    }
+    window.cancelAnimationFrame(this.visibleFitFrame);
+    this.visibleFitFrame = null;
+  }
+  /** Reconciles xterm's grid with this host only when the host is measurable and the
+   *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
+   *  while this client is inactive; activation/wheel makes this client the newest
+   *  writer once, without a resize-echo ping-pong between visible clients. */
+  fitVisibleHost() {
+    if (this.stopped) {
+      return;
+    }
+    let proposed;
+    try {
+      proposed = this.fit.proposeDimensions();
+    } catch {
+      return;
+    }
+    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    if (!hasVisibleTerminalGeometry(host, proposed)) {
+      return;
+    }
+    const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
+    if (needsFit) {
+      try {
+        this.fit.fit();
+      } catch {
+        return;
+      }
+      this.sendResize(this.term.rows, this.term.cols, false);
+    }
+    this.scheduleViewportRestore(this.term.rows, this.term.cols);
+    this.connectAfterInitialFit();
+  }
+  /** Restores the pre-peer reading position after xterm has rendered its new grid.
+   *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
+   *  still see the peer-collapsed zero. The next painted frame is the first settled
+   *  value. A newer peer grid cancels this frame and leaves the anchor pending for
+   *  the next local activation. */
+  scheduleViewportRestore(rows, cols) {
+    if (this.pendingViewport === null) {
+      return;
+    }
+    this.cancelViewportRestoreFrame();
+    const scheduledUserScroll = this.userScrollRevision;
+    this.viewportRestoreFrame = window.requestAnimationFrame(() => {
+      this.viewportRestoreFrame = null;
+      if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
+        return;
+      }
+      const anchor = this.pendingViewport;
+      if (anchor === null) {
+        return;
+      }
+      const buffer = this.term.buffer.active;
+      if (!shouldRestoreViewport({
+        scheduledUserScroll,
+        currentUserScroll: this.userScrollRevision
+      })) {
+        this.clearPendingViewport();
+        return;
+      }
+      const target = viewportAnchorLine(
+        {
+          atBottom: anchor.atBottom,
+          markerLine: anchor.marker?.line ?? null,
+          fallbackLine: anchor.line
+        },
+        buffer.baseY
+      );
+      this.clearPendingViewport();
+      this.term.scrollToLine(Math.max(0, target));
+    });
+  }
+  cancelViewportRestoreFrame() {
+    if (this.viewportRestoreFrame !== null) {
+      window.cancelAnimationFrame(this.viewportRestoreFrame);
+      this.viewportRestoreFrame = null;
+    }
+  }
+  clearPendingViewport() {
+    this.cancelViewportRestoreFrame();
+    this.pendingViewport?.marker?.dispose();
+    this.pendingViewport = null;
+  }
+  scheduleFit() {
+    if (this.resizeTimer !== null) {
+      window.clearTimeout(this.resizeTimer);
+    }
+    this.resizeTimer = window.setTimeout(() => {
+      this.resizeTimer = null;
+      if (this.stopped) {
+        return;
+      }
+      this.fitVisibleHost();
+    }, RESIZE_DEBOUNCE_MS);
+  }
+  /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
+   *  even an unchanged size (used on connect to (re)assert our size to the server). */
+  sendResize(rows, cols, force) {
+    if (rows <= 0 || cols <= 0) {
+      return;
+    }
+    if (!force && rows === this.lastRows && cols === this.lastCols) {
+      return;
+    }
+    this.lastRows = rows;
+    this.lastCols = cols;
+    this.send(encode(resizeFrame(rows, cols)));
+  }
+  /** Applies the server's authoritative size to xterm without echoing it back out
+   *  as an OpResize (which would ping-pong). Records it as our last-known size so a
+   *  later identical local fit doesn't re-send. */
+  applyEchoedSize(rows, cols) {
+    this.lastRows = rows;
+    this.lastCols = cols;
+    if (rows !== this.term.rows || cols !== this.term.cols) {
+      if (this.pendingViewport === null) {
+        const buffer = this.term.buffer.active;
+        const atBottom = buffer.viewportY >= buffer.baseY;
+        let marker = null;
+        if (!atBottom) {
+          try {
+            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
+          } catch {
+          }
+        }
+        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
+      }
+      this.cancelViewportRestoreFrame();
+      try {
+        this.term.resize(cols, rows);
+      } catch {
+      }
+    }
+  }
+  send(bytes) {
+    const ws = this.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(bytes);
+    }
+  }
+  // --- input & clipboard -----------------------------------------------------
+  /** Sends text to the PTY as OpInput — the single input path shared by typed
+   *  keys (onData) and the Ctrl+C interrupt (clipboard.ts). UTF-8 encoded so a
+   *  multibyte char reaches the PTY as the same bytes a real terminal would send. */
+  sendInput(text) {
+    this.send(encode(inputFrame(this.enc.encode(text))));
+  }
+  /** Copies text to the system clipboard, never silently. localhost is a secure
+   *  context, so navigator.clipboard.writeText works; but if it is missing (a
+   *  non-secure origin behind a proxy) or rejects, fall back to the legacy
+   *  execCommand path, and only if THAT fails surface a visible hint — a copy that
+   *  silently fails is worse than none (the user pastes stale content unaware). */
+  copyToClipboard(text) {
+    if (text === "") {
+      return;
+    }
+    const clip = navigator.clipboard;
+    if (clip && typeof clip.writeText === "function") {
+      clip.writeText(text).catch(() => {
+        if (!this.execCommandCopy(text)) {
+          this.flashCopyHint();
+        }
+      });
+      return;
+    }
+    if (!this.execCommandCopy(text)) {
+      this.flashCopyHint();
+    }
+  }
+  /** Legacy clipboard write via a throwaway off-screen textarea. Returns whether the
+   *  copy reported success. Requires a user gesture, which the key handler provides. */
+  execCommandCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "0";
+      ta.style.left = "0";
+      ta.style.width = "1px";
+      ta.style.height = "1px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      ta.remove();
+      this.term.focus();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+  /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never
+   *  silently dropped. An app-level "clipboard unavailable" condition (not
+   *  pane-specific), so it is a viewport-fixed toast appended to document.body —
+   *  matching the app's own af-toast pattern and, by living outside the pane tree,
+   *  never clipped by a split pane's overflow:hidden or anchored to a transformed
+   *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
+   *  element under the CSP. */
+  flashCopyHint() {
+    try {
+      const hint = document.createElement("div");
+      hint.textContent = "Copy failed \u2014 clipboard unavailable";
+      hint.setAttribute("role", "alert");
+      hint.style.position = "fixed";
+      hint.style.bottom = "12px";
+      hint.style.right = "12px";
+      hint.style.zIndex = "9999";
+      hint.style.padding = "4px 10px";
+      hint.style.borderRadius = "4px";
+      hint.style.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+      hint.style.background = "rgba(0, 0, 0, 0.82)";
+      hint.style.color = "#fff";
+      hint.style.pointerEvents = "none";
+      document.body.appendChild(hint);
+      window.setTimeout(() => hint.remove(), 2500);
+    } catch {
+    }
+  }
+};
+
+// src/config_assistant.ts
+var SPAWN_RETRY_LIMIT = 4;
+var SPAWN_RETRY_DELAY_MS = 250;
+var CLOSED = Symbol("config-assistant-closed");
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+function openConfigAssistant(opts) {
+  const { token: token2, mountHost, onClosed } = opts;
+  let closed = false;
+  let term = null;
+  const status = h("span", { class: "af-assistant-status" }, "Starting the assistant\u2026");
+  status.setAttribute("role", "status");
+  const closeBtn = h("button", { type: "button", class: "af-ghost af-assistant-close" }, "\xD7");
+  closeBtn.setAttribute("aria-label", "Close the config assistant");
+  const termHost2 = h("div", { class: "af-assistant-term" });
+  const errorLine = h("p", { class: "af-modal-error af-assistant-error", role: "alert" });
+  errorLine.hidden = true;
+  const card = h(
+    "div",
+    { class: "af-modal-card af-assistant-card", role: "dialog" },
+    h(
+      "div",
+      { class: "af-assistant-head" },
+      h("h2", { class: "af-modal-title" }, "Configure with assistant"),
+      status,
+      closeBtn
+    ),
+    termHost2,
+    errorLine
+  );
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-label", "Config assistant");
+  card.addEventListener("click", (e) => e.stopPropagation());
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => close());
+  const onKeydown2 = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  };
+  document.addEventListener("keydown", onKeydown2);
+  mountHost.append(backdrop);
+  function setStatus(text) {
+    status.textContent = text;
+  }
+  function setError(msg) {
+    errorLine.textContent = msg;
+    errorLine.hidden = false;
+  }
+  function terminalStatusText(s) {
+    switch (s) {
+      case "connecting":
+        return "Connecting\u2026";
+      case "open":
+        return "Connected";
+      case "reconnecting":
+        return "Reconnecting\u2026";
+      case "exited":
+        return "Assistant ended.";
+    }
+  }
+  function close() {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    document.removeEventListener("keydown", onKeydown2);
+    if (term) {
+      term.dispose();
+      term = null;
+    }
+    backdrop.remove();
+    void reapConfigAssistant(token2).catch(() => {
+    });
+    onClosed?.();
+  }
+  async function spawn() {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await spawnConfigAssistant(token2);
+        return;
+      } catch (e) {
+        if (closed) {
+          throw CLOSED;
+        }
+        const httpStatus = e instanceof ApiError ? e.status : -1;
+        if (httpStatus === 409 && attempt < SPAWN_RETRY_LIMIT) {
+          await delay(SPAWN_RETRY_DELAY_MS);
+          if (closed) {
+            throw CLOSED;
+          }
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
+  function attach() {
+    if (closed) {
+      return;
+    }
+    term = new AttachTerminal(termHost2, token2, configAssistantStreamEndpoint(), {
+      onStatus: (s) => {
+        if (!closed) {
+          setStatus(terminalStatusText(s));
+        }
+      },
+      // The assistant is a single pane; there is no nav/attach mode to keep in sync
+      // the way a session split does, so focus changes need no handling here.
+      onFocusChange: () => {
+      }
+    });
+    term.focus();
+  }
+  void spawn().then(() => attach()).catch((e) => {
+    if (e === CLOSED || closed) {
+      return;
+    }
+    const httpStatus = e instanceof ApiError ? e.status : -1;
+    if (httpStatus === 503) {
+      setStatus("Unavailable");
+      setError("The config assistant is not available in this daemon build.");
+    } else if (httpStatus === 0) {
+      setStatus("Offline");
+      setError("Could not reach the daemon. Close and try again.");
+    } else {
+      setStatus("Failed to start");
+      setError(e instanceof Error ? e.message : "Could not start the config assistant.");
+    }
+  });
+  return { close };
+}
+
+// src/events.ts
+var BACKOFF_BASE_MS2 = 500;
+var BACKOFF_MAX_MS2 = 1e4;
+function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
 var EventStream = class {
@@ -7035,7 +8113,7 @@ var EventStream = class {
   }
   open() {
     this.cb.onStatus(this.everOpened ? "reconnecting" : "connecting");
-    const url = `${wsScheme()}//${window.location.host}/v1/events?access_token=${encodeURIComponent(this.token)}`;
+    const url = `${wsScheme2()}//${window.location.host}/v1/events?access_token=${encodeURIComponent(this.token)}`;
     let ws;
     try {
       ws = new WebSocket(url);
@@ -7078,14 +8156,14 @@ var EventStream = class {
     }
     this.ws = null;
     this.cb.onStatus("reconnecting");
-    const delay = Math.min(BACKOFF_BASE_MS * 2 ** this.retry, BACKOFF_MAX_MS);
+    const delay2 = Math.min(BACKOFF_BASE_MS2 * 2 ** this.retry, BACKOFF_MAX_MS2);
     this.retry += 1;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.stopped) {
         this.open();
       }
-    }, delay);
+    }, delay2);
   }
 };
 
@@ -7246,7 +8324,7 @@ var SquareCheckBig = [
 var Square = [["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }]];
 
 // node_modules/lucide/dist/esm/icons/terminal.mjs
-var Terminal = [
+var Terminal2 = [
   ["path", { d: "M12 19h8" }],
   ["path", { d: "m4 17 6-6-6-6" }]
 ];
@@ -7280,7 +8358,7 @@ var ICONS = {
   reload: RefreshCw,
   square: Square,
   "square-check": SquareCheckBig,
-  terminal: Terminal,
+  terminal: Terminal2,
   x: X
 };
 function icon(name, className = "") {
@@ -7730,7 +8808,7 @@ function projectName(root2) {
   const parts = root2.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || root2;
 }
-function projectSummaries(sessions, tasks) {
+function projectSummaries(sessions, tasks, registeredRoots = []) {
   const byRoot = /* @__PURE__ */ new Map();
   for (const s of sessions) {
     const root2 = s.worktree?.repo_path;
@@ -7758,6 +8836,11 @@ function projectSummaries(sessions, tasks) {
   for (const root2 of taskCounts.keys()) {
     roots.add(root2);
   }
+  for (const root2 of registeredRoots) {
+    if (root2) {
+      roots.add(root2);
+    }
+  }
   return [...roots].sort().map((root2) => {
     const rows = byRoot.get(root2) ?? [];
     const live = rows.filter((s) => !isArchived(s));
@@ -7780,7 +8863,7 @@ function projectMeta(p) {
   const base = `${p.liveCount} session${p.liveCount === 1 ? "" : "s"}`;
   return p.workingCount > 0 ? `${base} \xB7 ${p.workingCount} working` : base;
 }
-function pickerProjects(sessions, tasks) {
+function pickerProjects(sessions, tasks, registeredRoots = []) {
   const roots = /* @__PURE__ */ new Set();
   for (const s of sessions) {
     const root2 = s.worktree?.repo_path;
@@ -7793,6 +8876,11 @@ function pickerProjects(sessions, tasks) {
       roots.add(t.project_path);
     }
   }
+  for (const root2 of registeredRoots) {
+    if (root2) {
+      roots.add(root2);
+    }
+  }
   return [...roots].sort();
 }
 function scopeToProject(sessions, root2) {
@@ -7801,11 +8889,11 @@ function scopeToProject(sessions, root2) {
   }
   return sessions.filter((s) => s.worktree?.repo_path === root2);
 }
-function validRoots(sessions, tasks) {
-  return new Set(projectSummaries(sessions, tasks).map((p) => p.root));
+function validRoots(sessions, tasks, registeredRoots = []) {
+  return new Set(projectSummaries(sessions, tasks, registeredRoots).map((p) => p.root));
 }
-function defaultProject(sessions, tasks) {
-  const summaries = projectSummaries(sessions, tasks);
+function defaultProject(sessions, tasks, registeredRoots = []) {
+  const summaries = projectSummaries(sessions, tasks, registeredRoots);
   if (summaries.length === 0) {
     return null;
   }
@@ -7834,15 +8922,15 @@ function defaultProject(sessions, tasks) {
   }
   return bestTask?.project_path ?? summaries[0]?.root ?? null;
 }
-function reconcileProject(sessions, tasks, persisted, current) {
-  const valid = validRoots(sessions, tasks);
+function reconcileProject(sessions, tasks, persisted, current, registeredRoots = []) {
+  const valid = validRoots(sessions, tasks, registeredRoots);
   if (current && valid.has(current)) {
     return current;
   }
   if (persisted && valid.has(persisted)) {
     return persisted;
   }
-  return defaultProject(sessions, tasks);
+  return defaultProject(sessions, tasks, registeredRoots);
 }
 function loadProjectChoice() {
   try {
@@ -8228,836 +9316,6 @@ function tabDisplayLabel(tab) {
 function isRenameableTab(kind) {
   return kind === TabKind.Web || kind === TabKind.Process || kind === TabKind.VSCode;
 }
-
-// src/terminal.ts
-var import_addon_fit = __toESM(require_addon_fit(), 1);
-var import_xterm = __toESM(require_xterm(), 1);
-
-// src/clipboard.ts
-var ETX = "";
-var LF = "\n";
-function handleClipboardKeydown(ev, deps) {
-  if (ev.type !== "keydown") {
-    return true;
-  }
-  if (deps.composerNewline && ev.key === "Enter" && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-    ev.preventDefault();
-    deps.sendUserInput(LF);
-    return false;
-  }
-  if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
-    return true;
-  }
-  const key = ev.key.toLowerCase();
-  if (key === "v") {
-    return false;
-  }
-  if (key === "c") {
-    if (ev.shiftKey) {
-      ev.preventDefault();
-      if (deps.hasSelection()) {
-        deps.copy(deps.getSelection());
-      }
-      return false;
-    }
-    if (deps.hasSelection()) {
-      ev.preventDefault();
-      deps.copy(deps.getSelection());
-      deps.clearSelection();
-      return false;
-    }
-    ev.preventDefault();
-    deps.sendInput(ETX);
-    return false;
-  }
-  return true;
-}
-
-// src/frame.ts
-var RESIZE_PAYLOAD_LEN = 4;
-var HELLO_PAYLOAD_LEN = 8;
-var EMPTY = new Uint8Array(0);
-function makeFrame(f) {
-  return {
-    op: f.op,
-    data: f.data ?? EMPTY,
-    rows: f.rows ?? 0,
-    cols: f.cols ?? 0,
-    seq: f.seq ?? 0n
-  };
-}
-function inputFrame(data) {
-  return makeFrame({ op: 1 /* Input */, data });
-}
-function resizeFrame(rows, cols) {
-  return makeFrame({ op: 2 /* Resize */, rows, cols });
-}
-function encode(f) {
-  switch (f.op) {
-    case 2 /* Resize */: {
-      const out = new Uint8Array(1 + RESIZE_PAYLOAD_LEN);
-      out[0] = 2 /* Resize */;
-      const dv = new DataView(out.buffer);
-      dv.setUint16(1, f.rows, false);
-      dv.setUint16(3, f.cols, false);
-      return out;
-    }
-    case 4 /* Hello */: {
-      const out = new Uint8Array(1 + HELLO_PAYLOAD_LEN);
-      out[0] = 4 /* Hello */;
-      const dv = new DataView(out.buffer);
-      dv.setBigUint64(1, f.seq, false);
-      return out;
-    }
-    default: {
-      const out = new Uint8Array(1 + f.data.length);
-      out[0] = f.op;
-      out.set(f.data, 1);
-      return out;
-    }
-  }
-}
-function decode(raw) {
-  if (raw.length === 0) {
-    throw new Error("agentproto: empty binary frame");
-  }
-  const op = raw[0];
-  const body = raw.subarray(1);
-  switch (op) {
-    case 0 /* PTYOut */:
-    case 1 /* Input */:
-    case 3 /* Repaint */:
-      return makeFrame({ op, data: body.slice() });
-    case 2 /* Resize */: {
-      if (body.length !== RESIZE_PAYLOAD_LEN) {
-        throw new Error(`agentproto: RESIZE frame body is ${body.length} bytes, want ${RESIZE_PAYLOAD_LEN}`);
-      }
-      const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
-      return makeFrame({ op, rows: dv.getUint16(0, false), cols: dv.getUint16(2, false) });
-    }
-    case 4 /* Hello */: {
-      if (body.length !== HELLO_PAYLOAD_LEN) {
-        throw new Error(`agentproto: HELLO frame body is ${body.length} bytes, want ${HELLO_PAYLOAD_LEN}`);
-      }
-      const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
-      return makeFrame({ op, seq: dv.getBigUint64(0, false) });
-    }
-    default:
-      throw new Error(`agentproto: unknown opcode 0x${op.toString(16).padStart(2, "0")}`);
-  }
-}
-
-// src/terminal-geometry.ts
-function hasVisibleTerminalGeometry(host, proposed) {
-  return host.width > 0 && host.height > 0 && !!proposed && proposed.rows > 0 && proposed.cols > 0;
-}
-function shouldRefitVisibleTerminal(host, current, proposed) {
-  if (!hasVisibleTerminalGeometry(host, proposed)) {
-    return false;
-  }
-  return proposed.rows !== current.rows || proposed.cols !== current.cols;
-}
-function viewportMarkerOffset(position) {
-  return position.viewportY - (position.baseY + position.cursorY);
-}
-function viewportAnchorLine(anchor, baseY) {
-  if (anchor.atBottom) {
-    return baseY;
-  }
-  return anchor.markerLine !== null && anchor.markerLine >= 0 ? anchor.markerLine : anchor.fallbackLine;
-}
-function shouldRestoreViewport(intent) {
-  return intent.scheduledUserScroll === intent.currentUserScroll;
-}
-function terminalUserScrollPlan(source, hasScheduledVisibleFit) {
-  switch (source) {
-    case "wheel":
-    case "touch":
-    case "scrollbar":
-      return { cancelScheduledVisibleFit: hasScheduledVisibleFit };
-  }
-}
-
-// src/theme.ts
-var THEME_CHOICES = ["auto", "light", "dark"];
-var STORAGE_KEY = "af-theme";
-function isChoice(v) {
-  return v === "auto" || v === "light" || v === "dark";
-}
-function readThemeChoice() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (isChoice(raw)) {
-      return raw;
-    }
-  } catch {
-  }
-  return "auto";
-}
-function persistThemeChoice(choice) {
-  try {
-    localStorage.setItem(STORAGE_KEY, choice);
-  } catch {
-  }
-}
-var THEME_COLOR_LIGHT = "#ffffff";
-var THEME_COLOR_DARK = "#141a22";
-function themeColorMetaContents(choice) {
-  if (choice === "auto") {
-    return { light: THEME_COLOR_LIGHT, dark: THEME_COLOR_DARK };
-  }
-  const forced = choice === "dark" ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
-  return { light: forced, dark: forced };
-}
-function syncThemeColorMeta(choice) {
-  const { light, dark } = themeColorMetaContents(choice);
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    const isDark = (meta.getAttribute("media") ?? "").includes("dark");
-    meta.setAttribute("content", isDark ? dark : light);
-  }
-}
-function stampTheme(choice) {
-  const root2 = document.documentElement;
-  if (choice === "auto") {
-    root2.removeAttribute("data-theme");
-  } else {
-    root2.setAttribute("data-theme", choice);
-  }
-  syncThemeColorMeta(choice);
-}
-function bootStampTheme() {
-  const choice = readThemeChoice();
-  stampTheme(choice);
-  return choice;
-}
-function prefersDark() {
-  try {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  } catch {
-    return false;
-  }
-}
-function currentMode() {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light" || attr === "dark") {
-    return attr;
-  }
-  return prefersDark() ? "dark" : "light";
-}
-var DARK_XTERM = {
-  background: "#0c1016",
-  foreground: "#e7ecf3",
-  cursor: "#e7ecf3",
-  cursorAccent: "#0c1016",
-  selectionBackground: "rgba(122, 162, 247, 0.2)",
-  black: "#484f58",
-  red: "#ff7b72",
-  green: "#3fb950",
-  yellow: "#d29922",
-  blue: "#58a6ff",
-  magenta: "#bc8cff",
-  cyan: "#39c5cf",
-  white: "#b1bac4",
-  brightBlack: "#6e7681",
-  brightRed: "#ffa198",
-  brightGreen: "#56d364",
-  brightYellow: "#e3b341",
-  brightBlue: "#79c0ff",
-  brightMagenta: "#d2a8ff",
-  brightCyan: "#56d4dd",
-  brightWhite: "#f0f6fc"
-};
-var LIGHT_XTERM = {
-  background: "#fdfefe",
-  foreground: "#17202e",
-  cursor: "#17202e",
-  cursorAccent: "#fdfefe",
-  selectionBackground: "rgba(47, 95, 216, 0.16)",
-  black: "#24292f",
-  red: "#cf222e",
-  green: "#1a7f37",
-  yellow: "#9a6700",
-  blue: "#0969da",
-  magenta: "#8250df",
-  cyan: "#1b7c83",
-  white: "#6e7781",
-  brightBlack: "#57606a",
-  brightRed: "#a40e26",
-  brightGreen: "#116329",
-  brightYellow: "#7d4e00",
-  brightBlue: "#0550ae",
-  brightMagenta: "#6639ba",
-  brightCyan: "#3192aa",
-  brightWhite: "#8c959f"
-};
-function xtermTheme(mode) {
-  return mode === "dark" ? DARK_XTERM : LIGHT_XTERM;
-}
-function currentXtermTheme() {
-  return xtermTheme(currentMode());
-}
-
-// src/terminal.ts
-var BACKOFF_BASE_MS2 = 500;
-var BACKOFF_MAX_MS2 = 1e4;
-var RESIZE_DEBOUNCE_MS = 120;
-function wsScheme2() {
-  return window.location.protocol === "https:" ? "wss:" : "ws:";
-}
-var AttachTerminal = class {
-  constructor(container, sessionId, token2, tabId, tab, cb) {
-    this.container = container;
-    this.sessionId = sessionId;
-    this.token = token2;
-    this.tabId = tabId;
-    this.tab = tab;
-    this.cb = cb;
-    this.term = new import_xterm.Terminal({
-      allowProposedApi: true,
-      cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 13,
-      // Born in the active theme (theme.ts derives the xterm palette from the same
-      // tokens as the CSS chrome); setTheme() re-applies live on a toggle.
-      theme: currentXtermTheme(),
-      // The stream is the source of truth; local echo/scrollback beyond the ring is
-      // fine but the server never sees our convert-eol, so leave it raw.
-      scrollback: 5e3
-    });
-    this.fit = new import_addon_fit.FitAddon();
-    this.term.loadAddon(this.fit);
-    this.term.open(container);
-    const textarea = this.term.textarea;
-    if (textarea) {
-      textarea.addEventListener("focus", () => {
-        if (!this.stopped) {
-          this.cb.onFocusChange(true);
-        }
-      });
-      textarea.addEventListener("blur", () => {
-        if (!this.stopped) {
-          this.cb.onFocusChange(false);
-        }
-      });
-    }
-    this.term.onData((data) => this.sendInput(data));
-    this.term.attachCustomKeyEventHandler(
-      (ev) => handleClipboardKeydown(ev, {
-        composerNewline: this.tab === 0,
-        hasSelection: () => this.term.hasSelection(),
-        getSelection: () => this.term.getSelection(),
-        clearSelection: () => this.term.clearSelection(),
-        copy: (text) => this.copyToClipboard(text),
-        sendInput: (text) => this.sendInput(text),
-        // Public Terminal.input(..., true) is xterm's genuine-user-input path:
-        // it scrolls to bottom and clears selection, then fires onData above.
-        sendUserInput: (text) => this.term.input(text, true)
-      })
-    );
-    this.ro = new ResizeObserver(() => this.scheduleFit());
-    this.ro.observe(container);
-    this.io = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
-        this.scheduleVisibleFit();
-      }
-    });
-    this.io.observe(container);
-    window.addEventListener("focus", this.onWindowFocus);
-    document.addEventListener("visibilitychange", this.onVisibilityChange);
-    container.addEventListener("pointerenter", this.onPointerEnter);
-    container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
-    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: true });
-    container.addEventListener("pointerdown", this.onPointerDown, true);
-    this.scheduleVisibleFit();
-  }
-  term;
-  fit;
-  enc = new TextEncoder();
-  ro;
-  io;
-  ws = null;
-  stopped = false;
-  everOpened = false;
-  retry = 0;
-  initialConnectStarted = false;
-  reconnectTimer = null;
-  resizeTimer = null;
-  visibleFitFrame = null;
-  viewportRestoreFrame = null;
-  // Incremented only by an actual user scroll input while a peer-owned anchor is
-  // pending. Output and resize reflows can move viewportY too, so position deltas
-  // alone do not prove that a user intended to override the saved reading line.
-  userScrollRevision = 0;
-  // The absolute replay cursor: seeded from OpHello, advanced by OpPTYOut byte
-  // counts (never by OpRepaint). `seeded` gates whether a reconnect can pass a
-  // real ?since; the first connect omits it (live tail + a fresh-screen repaint).
-  cursor = 0n;
-  seeded = false;
-  // The last size we told the server, so we don't re-send an unchanged fit and so
-  // an authoritative echo that matches is a no-op.
-  lastRows = 0;
-  lastCols = 0;
-  // A peer resize can temporarily collapse this client's scrollback (for example,
-  // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
-  // not a one-time distance from the bottom: output can keep arriving while this
-  // client is inactive. Null means no peer-owned grid is pending reconciliation.
-  pendingViewport = null;
-  exited = false;
-  // A peer is allowed to resize the one shared PTY and every client obeys that
-  // authoritative echo. When this window becomes active again, its visible host
-  // becomes the local writer: refit once instead of leaving a peer-sized emulator in
-  // an unchanged container until the user physically resizes the window (#2347).
-  onWindowFocus = () => this.scheduleVisibleFit();
-  onVisibilityChange = () => {
-    if (document.visibilityState === "visible") {
-      this.scheduleVisibleFit();
-    }
-  };
-  // Entering a pane is the earliest reliable activation signal for side-by-side
-  // clients: reconcile before the wheel gesture arrives so xterm can consume that
-  // first gesture rather than making the user scroll twice.
-  onPointerEnter = () => this.fitVisibleHost();
-  // A scroll can target an already-focused window after another client resized the
-  // PTY without the pointer ever leaving this pane. Capture repairs that less-common
-  // path; pointer entry above handles the ordinary first gesture. The pending-peer
-  // gate makes every ordinary input a no-op before even measuring layout.
-  onWheel = () => this.handleUserScroll("wheel");
-  onTouchMove = () => this.handleUserScroll("touch");
-  onPointerDown = (event) => {
-    if (event.target === this.container.querySelector(".xterm-viewport")) {
-      this.handleUserScroll("scrollbar");
-    }
-  };
-  handleUserScroll(source) {
-    if (this.pendingViewport === null) {
-      return;
-    }
-    const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
-    if (plan.cancelScheduledVisibleFit) {
-      this.cancelVisibleFitFrame();
-    }
-    this.fitVisibleHost();
-    this.userScrollRevision += 1;
-  }
-  /** Permanently closes the terminal: stops the reconnect loop, drops the socket,
-   *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
-  dispose() {
-    this.stopped = true;
-    if (this.reconnectTimer !== null) {
-      window.clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.resizeTimer !== null) {
-      window.clearTimeout(this.resizeTimer);
-      this.resizeTimer = null;
-    }
-    this.cancelVisibleFitFrame();
-    this.clearPendingViewport();
-    this.ro.disconnect();
-    this.io.disconnect();
-    window.removeEventListener("focus", this.onWindowFocus);
-    document.removeEventListener("visibilitychange", this.onVisibilityChange);
-    this.container.removeEventListener("pointerenter", this.onPointerEnter);
-    this.container.removeEventListener("wheel", this.onWheel, true);
-    this.container.removeEventListener("touchmove", this.onTouchMove, true);
-    this.container.removeEventListener("pointerdown", this.onPointerDown, true);
-    this.closeSocket();
-    this.term.dispose();
-  }
-  /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
-   *  keys reach the agent — the attach half of the #1693 nav/attach model. */
-  focus() {
-    this.fitVisibleHost();
-    this.term.focus();
-  }
-  /** Reconciles this terminal after an app-shell layout/visibility transition.
-   *  Coalesced onto the next painted frame so CSS has settled; the measurable-host
-   *  gate in fitVisibleHost keeps hidden or zero-sized panes inert. */
-  refit() {
-    this.scheduleVisibleFit();
-  }
-  /** Takes the keyboard away from the terminal (blurs it) so document-level rail
-   *  navigation gets the keys again — the Escape/back-to-nav half of #1693. */
-  blur() {
-    this.term.blur();
-  }
-  /** Re-applies an xterm palette live (a theme toggle): xterm repaints the canvas
-   *  from the new ITheme, so an open terminal switches light/dark without a
-   *  reconnect or losing scrollback. */
-  setTheme(theme) {
-    this.term.options.theme = theme;
-  }
-  // --- socket lifecycle ------------------------------------------------------
-  connect() {
-    if (this.stopped) {
-      return;
-    }
-    this.cb.onStatus(this.everOpened ? "reconnecting" : "connecting");
-    const base = `${wsScheme2()}//${window.location.host}/v1/sessions/${encodeURIComponent(this.sessionId)}/stream`;
-    const params = new URLSearchParams();
-    params.set("access_token", this.token);
-    if (this.tabId !== "") {
-      params.set("tab_id", this.tabId);
-    } else if (this.tab > 0) {
-      params.set("tab", String(this.tab));
-    }
-    if (this.seeded) {
-      params.set("since", this.cursor.toString());
-    }
-    let ws;
-    try {
-      ws = new WebSocket(`${base}?${params.toString()}`);
-    } catch {
-      this.scheduleReconnect();
-      return;
-    }
-    ws.binaryType = "arraybuffer";
-    this.ws = ws;
-    ws.onopen = () => {
-      this.retry = 0;
-      this.everOpened = true;
-      this.exited = false;
-      this.cb.onStatus("open");
-      this.sendResize(this.term.rows, this.term.cols, true);
-    };
-    ws.onmessage = (e) => this.onMessage(e.data);
-    ws.onclose = () => this.scheduleReconnect();
-    ws.onerror = () => {
-      try {
-        ws.close();
-      } catch {
-      }
-    };
-  }
-  /** Starts the first connection only after a real visible-host fit. Reconnects
-   * continue through connect() directly once this boundary has been crossed. */
-  connectAfterInitialFit() {
-    if (this.initialConnectStarted || this.stopped) {
-      return;
-    }
-    this.initialConnectStarted = true;
-    this.connect();
-  }
-  onMessage(data) {
-    if (typeof data === "string") {
-      this.onControl(data);
-      return;
-    }
-    if (!(data instanceof ArrayBuffer)) {
-      return;
-    }
-    let frame;
-    try {
-      frame = decode(new Uint8Array(data));
-    } catch {
-      return;
-    }
-    switch (frame.op) {
-      case 4 /* Hello */:
-        this.cursor = frame.seq;
-        this.seeded = true;
-        break;
-      case 0 /* PTYOut */:
-        this.term.write(frame.data);
-        this.cursor += BigInt(frame.data.length);
-        break;
-      case 3 /* Repaint */:
-        this.term.write(frame.data);
-        break;
-      default:
-        break;
-    }
-  }
-  onControl(text) {
-    let msg;
-    try {
-      msg = JSON.parse(text);
-    } catch {
-      return;
-    }
-    if (msg.type === "resize" && typeof msg.rows === "number" && typeof msg.cols === "number") {
-      this.applyEchoedSize(msg.rows, msg.cols);
-    } else if (msg.type === "exit") {
-      this.exited = true;
-      const code = typeof msg.code === "number" ? msg.code : 0;
-      this.term.write(`\r
-\x1B[38;5;244m[agent exited (code ${code})]\x1B[0m\r
-`);
-      this.cb.onStatus("exited");
-      this.stopped = true;
-      this.closeSocket();
-    }
-  }
-  scheduleReconnect() {
-    if (this.stopped || this.reconnectTimer !== null) {
-      return;
-    }
-    this.ws = null;
-    this.cb.onStatus("reconnecting");
-    const delay = Math.min(BACKOFF_BASE_MS2 * 2 ** this.retry, BACKOFF_MAX_MS2);
-    this.retry += 1;
-    this.reconnectTimer = window.setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connect();
-    }, delay);
-  }
-  closeSocket() {
-    const ws = this.ws;
-    if (!ws) {
-      return;
-    }
-    ws.onopen = null;
-    ws.onmessage = null;
-    ws.onclose = null;
-    ws.onerror = null;
-    try {
-      ws.close();
-    } catch {
-    }
-    this.ws = null;
-  }
-  // --- resize ----------------------------------------------------------------
-  /** Fits on the next painted frame, after visibility/layout changes have settled.
-   *  Repeated activation signals coalesce into one frame; unlike the resize debounce,
-   *  this is not a time guess and never repeats on its own. */
-  scheduleVisibleFit() {
-    if (this.stopped || this.visibleFitFrame !== null) {
-      return;
-    }
-    this.visibleFitFrame = window.requestAnimationFrame(() => {
-      this.visibleFitFrame = null;
-      this.fitVisibleHost();
-    });
-  }
-  /** Drops activation work queued before a direct user scroll. Leaving that frame
-   * alive lets it run after the input fit and rebase the restore onto the new user
-   * revision, which makes the first gesture appear inert. */
-  cancelVisibleFitFrame() {
-    if (this.visibleFitFrame === null) {
-      return;
-    }
-    window.cancelAnimationFrame(this.visibleFitFrame);
-    this.visibleFitFrame = null;
-  }
-  /** Reconciles xterm's grid with this host only when the host is measurable and the
-   *  FitAddon proposes a real change. A peer-owned MsgResize remains authoritative
-   *  while this client is inactive; activation/wheel makes this client the newest
-   *  writer once, without a resize-echo ping-pong between visible clients. */
-  fitVisibleHost() {
-    if (this.stopped) {
-      return;
-    }
-    let proposed;
-    try {
-      proposed = this.fit.proposeDimensions();
-    } catch {
-      return;
-    }
-    const host = { width: this.container.clientWidth, height: this.container.clientHeight };
-    if (!hasVisibleTerminalGeometry(host, proposed)) {
-      return;
-    }
-    const needsFit = shouldRefitVisibleTerminal(host, { rows: this.term.rows, cols: this.term.cols }, proposed);
-    if (needsFit) {
-      try {
-        this.fit.fit();
-      } catch {
-        return;
-      }
-      this.sendResize(this.term.rows, this.term.cols, false);
-    }
-    this.scheduleViewportRestore(this.term.rows, this.term.cols);
-    this.connectAfterInitialFit();
-  }
-  /** Restores the pre-peer reading position after xterm has rendered its new grid.
-   *  resize() schedules the buffer reflow: reading baseY synchronously after fit can
-   *  still see the peer-collapsed zero. The next painted frame is the first settled
-   *  value. A newer peer grid cancels this frame and leaves the anchor pending for
-   *  the next local activation. */
-  scheduleViewportRestore(rows, cols) {
-    if (this.pendingViewport === null) {
-      return;
-    }
-    this.cancelViewportRestoreFrame();
-    const scheduledUserScroll = this.userScrollRevision;
-    this.viewportRestoreFrame = window.requestAnimationFrame(() => {
-      this.viewportRestoreFrame = null;
-      if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
-        return;
-      }
-      const anchor = this.pendingViewport;
-      if (anchor === null) {
-        return;
-      }
-      const buffer = this.term.buffer.active;
-      if (!shouldRestoreViewport({
-        scheduledUserScroll,
-        currentUserScroll: this.userScrollRevision
-      })) {
-        this.clearPendingViewport();
-        return;
-      }
-      const target = viewportAnchorLine(
-        {
-          atBottom: anchor.atBottom,
-          markerLine: anchor.marker?.line ?? null,
-          fallbackLine: anchor.line
-        },
-        buffer.baseY
-      );
-      this.clearPendingViewport();
-      this.term.scrollToLine(Math.max(0, target));
-    });
-  }
-  cancelViewportRestoreFrame() {
-    if (this.viewportRestoreFrame !== null) {
-      window.cancelAnimationFrame(this.viewportRestoreFrame);
-      this.viewportRestoreFrame = null;
-    }
-  }
-  clearPendingViewport() {
-    this.cancelViewportRestoreFrame();
-    this.pendingViewport?.marker?.dispose();
-    this.pendingViewport = null;
-  }
-  scheduleFit() {
-    if (this.resizeTimer !== null) {
-      window.clearTimeout(this.resizeTimer);
-    }
-    this.resizeTimer = window.setTimeout(() => {
-      this.resizeTimer = null;
-      if (this.stopped) {
-        return;
-      }
-      this.fitVisibleHost();
-    }, RESIZE_DEBOUNCE_MS);
-  }
-  /** Sends an OpResize for the given size unless it's unchanged. `force` re-sends
-   *  even an unchanged size (used on connect to (re)assert our size to the server). */
-  sendResize(rows, cols, force) {
-    if (rows <= 0 || cols <= 0) {
-      return;
-    }
-    if (!force && rows === this.lastRows && cols === this.lastCols) {
-      return;
-    }
-    this.lastRows = rows;
-    this.lastCols = cols;
-    this.send(encode(resizeFrame(rows, cols)));
-  }
-  /** Applies the server's authoritative size to xterm without echoing it back out
-   *  as an OpResize (which would ping-pong). Records it as our last-known size so a
-   *  later identical local fit doesn't re-send. */
-  applyEchoedSize(rows, cols) {
-    this.lastRows = rows;
-    this.lastCols = cols;
-    if (rows !== this.term.rows || cols !== this.term.cols) {
-      if (this.pendingViewport === null) {
-        const buffer = this.term.buffer.active;
-        const atBottom = buffer.viewportY >= buffer.baseY;
-        let marker = null;
-        if (!atBottom) {
-          try {
-            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
-          } catch {
-          }
-        }
-        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
-      }
-      this.cancelViewportRestoreFrame();
-      try {
-        this.term.resize(cols, rows);
-      } catch {
-      }
-    }
-  }
-  send(bytes) {
-    const ws = this.ws;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(bytes);
-    }
-  }
-  // --- input & clipboard -----------------------------------------------------
-  /** Sends text to the PTY as OpInput — the single input path shared by typed
-   *  keys (onData) and the Ctrl+C interrupt (clipboard.ts). UTF-8 encoded so a
-   *  multibyte char reaches the PTY as the same bytes a real terminal would send. */
-  sendInput(text) {
-    this.send(encode(inputFrame(this.enc.encode(text))));
-  }
-  /** Copies text to the system clipboard, never silently. localhost is a secure
-   *  context, so navigator.clipboard.writeText works; but if it is missing (a
-   *  non-secure origin behind a proxy) or rejects, fall back to the legacy
-   *  execCommand path, and only if THAT fails surface a visible hint — a copy that
-   *  silently fails is worse than none (the user pastes stale content unaware). */
-  copyToClipboard(text) {
-    if (text === "") {
-      return;
-    }
-    const clip = navigator.clipboard;
-    if (clip && typeof clip.writeText === "function") {
-      clip.writeText(text).catch(() => {
-        if (!this.execCommandCopy(text)) {
-          this.flashCopyHint();
-        }
-      });
-      return;
-    }
-    if (!this.execCommandCopy(text)) {
-      this.flashCopyHint();
-    }
-  }
-  /** Legacy clipboard write via a throwaway off-screen textarea. Returns whether the
-   *  copy reported success. Requires a user gesture, which the key handler provides. */
-  execCommandCopy(text) {
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.setAttribute("readonly", "");
-      ta.style.position = "fixed";
-      ta.style.top = "0";
-      ta.style.left = "0";
-      ta.style.width = "1px";
-      ta.style.height = "1px";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      ta.setSelectionRange(0, text.length);
-      const ok = document.execCommand("copy");
-      ta.remove();
-      this.term.focus();
-      return ok;
-    } catch {
-      return false;
-    }
-  }
-  /** Last-resort visible cue when BOTH clipboard paths fail, so the copy is never
-   *  silently dropped. An app-level "clipboard unavailable" condition (not
-   *  pane-specific), so it is a viewport-fixed toast appended to document.body —
-   *  matching the app's own af-toast pattern and, by living outside the pane tree,
-   *  never clipped by a split pane's overflow:hidden or anchored to a transformed
-   *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
-   *  element under the CSP. */
-  flashCopyHint() {
-    try {
-      const hint = document.createElement("div");
-      hint.textContent = "Copy failed \u2014 clipboard unavailable";
-      hint.setAttribute("role", "alert");
-      hint.style.position = "fixed";
-      hint.style.bottom = "12px";
-      hint.style.right = "12px";
-      hint.style.zIndex = "9999";
-      hint.style.padding = "4px 10px";
-      hint.style.borderRadius = "4px";
-      hint.style.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-      hint.style.background = "rgba(0, 0, 0, 0.82)";
-      hint.style.color = "#fff";
-      hint.style.pointerEvents = "none";
-      document.body.appendChild(hint);
-      window.setTimeout(() => hint.remove(), 2500);
-    } catch {
-    }
-  }
-};
 
 // src/split.ts
 var EDGE_BAND = 0.3;
@@ -9473,10 +9731,15 @@ var SplitView = class {
         pane.tab = leaf.tab;
         pane.identity = identity;
         pane.status = "connecting";
-        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, realId, leaf.tab, {
-          onStatus: (s) => this.onPaneStatus(leaf.id, s),
-          onFocusChange: (f) => this.onPaneFocus(leaf.id, f)
-        });
+        pane.term = new AttachTerminal(
+          pane.host,
+          this.token,
+          sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
+          {
+            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onFocusChange: (f) => this.onPaneFocus(leaf.id, f)
+          }
+        );
       } else if (moved) {
         pane.tab = leaf.tab;
       }
@@ -10628,7 +10891,7 @@ function taskFormModal(opts) {
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
   if (opts.projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet \u2014 create a session first");
+    const opt = h("option", { value: "" }, "No projects yet \u2014 add one from the project switcher first");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
@@ -11172,7 +11435,8 @@ var AppShell = class {
       remove: (task) => this.actions.removeTask(task)
     });
     this.configPane = new ConfigPane({
-      save: (key, value) => this.actions.setConfigValue(key, value)
+      save: (key, value) => this.actions.setConfigValue(key, value),
+      openAssistant: () => this.actions.openConfigAssistant()
     });
     const viewport = h2("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
     this.toast = h2("div", { class: "af-toast" });
@@ -11218,6 +11482,7 @@ var AppShell = class {
   // highlight; the task set can add/drop a task-only project).
   lastProjectSessions = null;
   lastProjectTasks = null;
+  lastRegisteredProjects = null;
   lastSelectedProject = null;
   // The rail's status filter control (feat: hide archived by default): a rail-head
   // button + a checkbox menu, one row per session state. Same imperative treatment as
@@ -11400,9 +11665,10 @@ var AppShell = class {
     if (selectionChanged && state.selectedId) {
       this.setNav(false);
     }
-    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
+    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || this.lastRegisteredProjects !== state.registeredProjects || projectChanged) {
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
+      this.lastRegisteredProjects = state.registeredProjects;
       this.lastSelectedProject = state.selectedProject;
       this.renderProjectSwitch(state);
     }
@@ -11473,13 +11739,7 @@ var AppShell = class {
     const list = this.railList;
     if (!state.selectedProject) {
       list.replaceChildren(
-        h2(
-          "li",
-          { class: "af-rail-empty" },
-          "No sessions yet \u2014 create one in the TUI or with ",
-          h2("code", {}, "af sessions create"),
-          "."
-        )
+        h2("li", { class: "af-rail-empty" }, "No projects yet \u2014 add one from the project switcher to get started.")
       );
       return;
     }
@@ -11661,36 +11921,50 @@ var AppShell = class {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   renderProjectSwitch(state) {
-    const summaries = projectSummaries(state.sessions, state.tasks);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
-    this.projectSwitchBtn.disabled = summaries.length === 0;
+    this.projectSwitchBtn.disabled = false;
     const children = [h2("div", { class: "af-project-menu-label" }, "Switch project")];
     if (summaries.length === 0) {
-      children.push(h2("div", { class: "af-project-menu-empty" }, "No projects yet."));
+      children.push(h2("div", { class: "af-project-menu-empty" }, "No projects yet \u2014 add one below."));
     }
     for (const p of summaries) {
       children.push(this.projectItem(p, p.root === current));
     }
+    const footChildren = [];
+    const add = h2("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.actions.addProject();
+    });
+    footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h2("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
-      if (currentSummary.liveCount === 0) {
+      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
         del.setAttribute(
           "title",
           `No live sessions in ${currentSummary.name} to archive \u2014 remove its tasks from the Tasks view to clear it`
         );
       } else {
-        del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+        del.setAttribute(
+          "title",
+          currentSummary.liveCount > 0 ? `Delete project ${currentSummary.name} (archives its sessions, restorable)` : `Delete project ${currentSummary.name} (removes the empty project)`
+        );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
           this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
         });
       }
-      children.push(h2("div", { class: "af-project-menu-foot" }, del));
+      footChildren.push(del);
     }
+    children.push(h2("div", { class: "af-project-menu-foot" }, ...footChildren));
     this.projectMenu.replaceChildren(...children);
   }
   /** One project row in the switcher menu: a check on the current project, the name +
@@ -12329,6 +12603,7 @@ var store = new Store({
   shownTabs: [0],
   tabError: null,
   tasks: [],
+  registeredProjects: [],
   themeChoice: initialThemeChoice,
   // Resume the persisted filter (feat: hide archived by default) before first paint,
   // for the same reason the theme is boot-stamped: rendering the default set first
@@ -12343,6 +12618,7 @@ var resyncTimer = null;
 var sessionEventGeneration = 0;
 var resyncRequestGeneration = 0;
 var taskResyncTimer = null;
+var projectsResyncTimer = null;
 var tabErrorTimer = null;
 var TAB_ERROR_MS = 6e3;
 var shell = null;
@@ -12351,6 +12627,7 @@ termHost.className = "af-term-host";
 var modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 var modal = null;
+var configAssistant = null;
 var installAffordance = new InstallAffordance();
 var splitView = new SplitView(termHost, {
   onStatus: (s) => store.set({ termStatus: s }),
@@ -12406,6 +12683,7 @@ function rerender() {
     }
     disposeSplit();
     closeModal();
+    closeConfigAssistant();
     renderLogin(root, state, actions);
     return;
   }
@@ -12436,7 +12714,8 @@ async function connect(candidate) {
   } catch {
     tasks = [];
   }
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null);
+  const registeredProjects = await fetchRegisteredProjects(candidate);
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   store.set({
     phase: "app",
     view: "sessions",
@@ -12450,13 +12729,22 @@ async function connect(candidate) {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
-    tasks
+    tasks,
+    registeredProjects
   });
   startStream(candidate);
+}
+async function fetchRegisteredProjects(tok) {
+  try {
+    return (await listProjects(tok)).map((p) => p.root);
+  } catch {
+    return [];
+  }
 }
 function disconnect() {
   stopStream();
   closeModal();
+  closeConfigAssistant();
   token = null;
   clearToken();
   store.set({
@@ -12472,7 +12760,8 @@ function disconnect() {
     activeTab: 0,
     shownTabs: [0],
     tabError: null,
-    tasks: []
+    tasks: [],
+    registeredProjects: []
   });
 }
 function tabIdsOf(list, id) {
@@ -12565,13 +12854,35 @@ function closeModal() {
     modal = null;
   }
 }
+function closeConfigAssistant() {
+  if (configAssistant) {
+    configAssistant.close();
+    configAssistant = null;
+  }
+}
 function openModal(m) {
   closeModal();
+  closeConfigAssistant();
   modal = m;
   modalHost.replaceChildren(m.el);
 }
+function doOpenConfigAssistant() {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  closeModal();
+  closeConfigAssistant();
+  configAssistant = openConfigAssistant({
+    token: tok,
+    mountHost: modalHost,
+    onClosed: () => {
+      configAssistant = null;
+    }
+  });
+}
 function newSession() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -12581,6 +12892,9 @@ function newSession() {
       loadBackends: (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token),
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
+      // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
+      // the web asks rather than generating a name of its own.
+      suggestName: () => token === null ? Promise.reject(new Error("not authorized")) : suggestSessionName(token),
       onSubmit: (values) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -12620,7 +12934,7 @@ function openConfirm(action, session) {
         const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.id, target.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
-          m.setError(describeError(e));
+          m.setError(errorText(e));
         });
       },
       onCancel: closeModal
@@ -12641,7 +12955,26 @@ function openDeleteProject(root2, label, sessionCount) {
         m.setBusy(true);
         void deleteProject(root2, tok).then(closeModal).catch((e) => {
           m.setBusy(false);
-          m.setError(describeError(e));
+          m.setError(errorText(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
+function openAddProject() {
+  openModal(
+    addProjectModal({
+      onSubmit: (path) => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void registerProject(path, tok).then(closeModal).catch((e) => {
+          m.setBusy(false);
+          m.setError(errorText(e));
         });
       },
       onCancel: closeModal
@@ -12831,7 +13164,13 @@ function refreshTasks() {
     return;
   }
   void listTasks(tok).then((tasks) => {
-    const selectedProject = reconcileProject(store.get().sessions, tasks, loadProjectChoice(), store.get().selectedProject);
+    const selectedProject = reconcileProject(
+      store.get().sessions,
+      tasks,
+      loadProjectChoice(),
+      store.get().selectedProject,
+      store.get().registeredProjects
+    );
     store.set({ tasks, selectedProject });
   }).catch(() => {
   });
@@ -12845,8 +13184,35 @@ function requestTaskResync() {
     refreshTasks();
   }, 150);
 }
+function refreshRegisteredProjects() {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  void listProjects(tok).then((projects) => {
+    const registeredProjects = projects.map((p) => p.root);
+    const selectedProject = reconcileProject(
+      store.get().sessions,
+      store.get().tasks,
+      loadProjectChoice(),
+      store.get().selectedProject,
+      registeredProjects
+    );
+    store.set({ registeredProjects, selectedProject });
+  }).catch(() => {
+  });
+}
+function requestProjectsResync() {
+  if (projectsResyncTimer !== null) {
+    return;
+  }
+  projectsResyncTimer = window.setTimeout(() => {
+    projectsResyncTimer = null;
+    refreshRegisteredProjects();
+  }, 150);
+}
 function openAddTask() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -12862,7 +13228,7 @@ function openAddTask() {
           refreshTasks();
         }).catch((e) => {
           m.setBusy(false);
-          m.setError(describeError(e));
+          m.setError(errorText(e));
         });
       },
       onCancel: closeModal
@@ -12870,7 +13236,7 @@ function openAddTask() {
   );
 }
 function openEditTask(task) {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -12904,7 +13270,7 @@ function openEditTask(task) {
             return;
           }
           m.setBusy(false);
-          m.setError(describeError(e));
+          m.setError(errorText(e));
         });
       },
       onCancel: closeModal
@@ -12957,7 +13323,7 @@ function doHandoff() {
         m.setBusy(true);
         void handoffSession(target.id, target.title, to, tok).then(closeModal).catch((e) => {
           m.setBusy(false);
-          m.setError(describeError(e));
+          m.setError(errorText(e));
         });
       },
       onCancel: closeModal
@@ -13017,6 +13383,7 @@ var actions = {
   reorderTab: reorderSessionTab,
   switchView,
   setConfigValue: applyConfigValue,
+  openConfigAssistant: doOpenConfigAssistant,
   switchProject,
   setStatusFilter,
   resetStatusFilter,
@@ -13026,6 +13393,7 @@ var actions = {
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
+  addProject: openAddProject,
   setTheme
 };
 function syncSplit(state) {
@@ -13076,6 +13444,10 @@ function stopStream() {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
   }
+  if (projectsResyncTimer !== null) {
+    window.clearTimeout(projectsResyncTimer);
+    projectsResyncTimer = null;
+  }
   if (stream) {
     stream.stop();
     stream = null;
@@ -13086,6 +13458,9 @@ function onEvent(ev) {
     requestTaskResync();
     return;
   }
+  if (ev.type === "projects.changed") {
+    requestProjectsResync();
+  }
   sessionEventGeneration += 1;
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
   applySessions(sessions);
@@ -13095,7 +13470,13 @@ function onEvent(ev) {
 }
 function applySessions(sessions) {
   const prevSel = store.get().selectedId;
-  const selectedProject = reconcileProject(sessions, store.get().tasks, loadProjectChoice(), store.get().selectedProject);
+  const selectedProject = reconcileProject(
+    sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    store.get().registeredProjects
+  );
   let selectedId = pickSelection(sessions, prevSel);
   if (selectedId) {
     const sel = sessions.find((s) => s.id === selectedId);

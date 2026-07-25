@@ -16,11 +16,13 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
-// The web-tab preview origin's auth (#1856 step 2). The listener opens the auth
-// handshake — its own ephemeral credential plus the #2400 clean-before-render
+// The web-tab preview origin's auth (#1856 steps 2-3a). The listener opens the auth
+// handshake — a PER-TAB credential (previewTabToken) plus the #2400 clean-before-render
 // bootstrap — but serves no content yet. These tests pin the credential SEPARATION
-// (the daemon bearer never authorizes the preview origin, and vice-versa), the
-// bootstrap's clean-before-render behavior, and the retrieval endpoint.
+// (the daemon bearer never authorizes the preview origin, and vice-versa), the PER-TAB
+// scoping (tab A's token never authenticates tab B's route, the cookie is scoped to the
+// tab's own path), the bootstrap's clean-before-render behavior, and the retrieval
+// endpoint.
 
 // startPreviewDaemon brings up a daemon with the preview listener enabled on an
 // ephemeral port and returns the manager, the preview bound address, and the
@@ -59,7 +61,8 @@ func TestPreviewBootstrap_CleanBeforeRender(t *testing.T) {
 	m, previewAddr, _ := startPreviewDaemon(t)
 	client := noRedirectClient()
 
-	url := "http://" + previewAddr + "/v1/webtab/s1/t1/?doc=1&af_preview_token=" + m.previewToken
+	tok := previewTabToken(m.previewSecret, "s1", "t1")
+	url := "http://" + previewAddr + "/v1/webtab/s1/t1/?doc=1&af_preview_token=" + tok
 	resp, err := client.Get(url)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
@@ -78,11 +81,11 @@ func TestPreviewBootstrap_CleanBeforeRender(t *testing.T) {
 		}
 	}
 	require.NotNil(t, cookie, "the bootstrap must set the preview-token cookie")
-	require.Equal(t, m.previewToken, cookie.Value)
+	require.Equal(t, tok, cookie.Value)
 	require.True(t, cookie.HttpOnly, "the credential cookie must be HttpOnly so app JS cannot read it")
 	require.Equal(t, http.SameSiteStrictMode, cookie.SameSite)
-	require.Equal(t, webtabPathPrefix, cookie.Path,
-		"the cookie is scoped to the preview content path, not the whole origin's root")
+	require.Equal(t, "/v1/webtab/s1/t1/", cookie.Path,
+		"the cookie is scoped to THIS tab's path, so it is never sent on another tab's route (#1856 step 3a)")
 }
 
 // TestPreviewBootstrap_ScrubsEveryAfCredential pins P2-a: the clean-before-render
@@ -97,7 +100,8 @@ func TestPreviewBootstrap_ScrubsEveryAfCredential(t *testing.T) {
 	m, previewAddr, _ := startPreviewDaemon(t)
 	client := noRedirectClient()
 
-	url := "http://" + previewAddr + "/v1/webtab/s1/t1/?doc=1&af_preview_token=" + m.previewToken + "&af_webtab_token=daemon-bearer-value"
+	tok := previewTabToken(m.previewSecret, "s1", "t1")
+	url := "http://" + previewAddr + "/v1/webtab/s1/t1/?doc=1&af_preview_token=" + tok + "&af_webtab_token=daemon-bearer-value"
 	resp, err := client.Get(url)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
@@ -116,7 +120,7 @@ func TestPreviewBootstrap_ScrubsEveryAfCredential(t *testing.T) {
 		}
 	}
 	require.NotNil(t, previewCookie, "the preview flow sets its own credential cookie")
-	require.Equal(t, m.previewToken, previewCookie.Value)
+	require.Equal(t, tok, previewCookie.Value)
 	require.Nil(t, webtabCookie,
 		"the preview flow must NOT mint the daemon-bearer cookie — it strips that param, it does not adopt it")
 }
@@ -129,12 +133,13 @@ func TestPreviewGate_CookieAuthenticatesFollowUpAndRejectsOthers(t *testing.T) {
 	m, previewAddr, _ := startPreviewDaemon(t)
 	client := previewHTTPClient()
 	assetURL := "http://" + previewAddr + "/v1/webtab/s1/t1/asset.js"
+	tok := previewTabToken(m.previewSecret, "s1", "t1")
 
-	// A sub-resource GET carrying the preview cookie is authenticated — and only
-	// then finds no content (404), never a 401.
+	// A sub-resource GET carrying this tab's preview cookie is authenticated — and
+	// only then finds no content (404), never a 401.
 	withCookie, err := http.NewRequest(http.MethodGet, assetURL, nil)
 	require.NoError(t, err)
-	withCookie.AddCookie(&http.Cookie{Name: previewTokenCookie, Value: m.previewToken})
+	withCookie.AddCookie(&http.Cookie{Name: previewTokenCookie, Value: tok})
 	resp, err := client.Do(withCookie)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
@@ -148,6 +153,37 @@ func TestPreviewGate_CookieAuthenticatesFollowUpAndRejectsOthers(t *testing.T) {
 	// No credential at all is rejected — the preview origin is not loopback-exempt.
 	require.Equal(t, http.StatusUnauthorized, previewGet(t, client, assetURL, ""),
 		"the preview origin requires its credential from every peer, loopback included")
+}
+
+// TestPreviewGate_RejectsAnotherTabsToken is the per-tab isolation core (#1856
+// step 3a): a request carrying tab A's credential to tab B's ROUTE must be refused.
+// The gate derives the expected token from the sid/tid in the path, so B's route
+// only ever accepts B's token — a leaked or observed token for one tab authorizes
+// exactly that tab, never a sibling. Presented on the header, the query, and the
+// cookie, since all three are extractor inputs.
+func TestPreviewGate_RejectsAnotherTabsToken(t *testing.T) {
+	m, previewAddr, _ := startPreviewDaemon(t)
+	client := previewHTTPClient()
+
+	tabAToken := previewTabToken(m.previewSecret, "sA", "tA")
+	tabBToken := previewTabToken(m.previewSecret, "sB", "tB")
+	require.NotEqual(t, tabAToken, tabBToken, "per-tab tokens must differ, or there is no isolation to test")
+
+	bURL := "http://" + previewAddr + "/v1/webtab/sB/tB/asset.js"
+
+	// Tab A's token on tab B's route: refused on every transport.
+	require.Equal(t, http.StatusUnauthorized, previewGet(t, client, bURL, tabAToken),
+		"tab A's token (Authorization) must NOT authenticate tab B's route")
+	require.Equal(t, http.StatusUnauthorized, previewGetWithCookie(t, client, bURL, tabAToken),
+		"tab A's token (cookie) must NOT authenticate tab B's route")
+	aTokOnBQuery := "http://" + previewAddr + "/v1/webtab/sB/tB/asset.js?af_preview_token=" + tabAToken
+	require.Equal(t, http.StatusUnauthorized, previewGet(t, client, aTokOnBQuery, ""),
+		"tab A's token (query) must NOT authenticate tab B's route")
+
+	// Sanity: tab B's OWN token authenticates tab B's route (so the 401s above are
+	// isolation, not a dead route).
+	require.Equal(t, http.StatusNotFound, previewGet(t, client, bURL, tabBToken),
+		"tab B's own token authenticates tab B's route (no content yet ⇒ 404)")
 }
 
 // TestPreviewCredentialSeparation_BothDirections is the security core: the daemon
@@ -177,13 +213,14 @@ func TestPreviewCredentialSeparation_BothDirections(t *testing.T) {
 
 	daemonToken, err := LoadToken(mustTokenPath(t))
 	require.NoError(t, err)
-	require.NotEqual(t, daemonToken, m.previewToken, "the two credentials must differ")
+	tok := previewTabToken(m.previewSecret, "s1", "t1")
+	require.NotEqual(t, daemonToken, tok, "the two credentials must differ")
 
 	// Sanity: each credential DOES authorize its own surface, so a 401 below is
 	// separation, not a broken listener.
 	require.Equal(t, http.StatusNotFound,
-		previewGet(t, client, "http://"+previewAddr+"/v1/webtab/s1/t1/asset.js", m.previewToken),
-		"the preview token authenticates the preview origin (no content ⇒ 404)")
+		previewGet(t, client, "http://"+previewAddr+"/v1/webtab/s1/t1/asset.js", tok),
+		"the tab's preview token authenticates the preview origin (no content ⇒ 404)")
 	require.Equal(t, http.StatusOK,
 		previewGet(t, client, "http://"+controlAddr+"/v1/health", daemonToken),
 		"the daemon token authenticates the control plane")
@@ -196,7 +233,7 @@ func TestPreviewCredentialSeparation_BothDirections(t *testing.T) {
 	// Preview token → control plane, presented on the daemon's own webtab query
 	// transport on the webtab path: the control gate wants the daemon token, so it
 	// 401s.
-	previewAsWebtab := "http://" + controlAddr + "/v1/webtab/s1/t1/?af_webtab_token=" + m.previewToken
+	previewAsWebtab := "http://" + controlAddr + "/v1/webtab/s1/t1/?af_webtab_token=" + tok
 	require.Equal(t, http.StatusUnauthorized, previewGet(t, client, previewAsWebtab, ""),
 		"the preview token must NOT authenticate the control plane")
 }
@@ -221,13 +258,13 @@ func TestPreviewAuthEndpoint_RequiresAuthThenReturnsToken(t *testing.T) {
 
 	controlAddr := m.lifecycle.snapshot().listeners.TCPBoundAddr
 	client := previewHTTPClient()
-	url := "http://" + controlAddr + "/v1/preview-auth"
+	url := "http://" + controlAddr + "/v1/preview-auth?session=s1&tab=t1"
 
 	// No credential → 401 (the negative test the endpoint lacked).
 	require.Equal(t, http.StatusUnauthorized, previewGet(t, client, url, ""),
 		"the credential-vending endpoint must require control-plane auth")
 
-	// Daemon token → 200 with the preview token, and no-store.
+	// Daemon token → 200 with THIS tab's preview token, and no-store.
 	daemonToken, err := LoadToken(mustTokenPath(t))
 	require.NoError(t, err)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -244,8 +281,13 @@ func TestPreviewAuthEndpoint_RequiresAuthThenReturnsToken(t *testing.T) {
 		Data previewAuthResponse `json:"data"`
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
-	require.Equal(t, m.previewToken, env.Data.Token,
-		"an authenticated control-plane client must be able to fetch the preview token")
+	require.Equal(t, previewTabToken(m.previewSecret, "s1", "t1"), env.Data.Token,
+		"an authenticated control-plane client must be able to fetch the requested tab's preview token")
+
+	// A missing selector is a 400, never a token that authenticates more than one tab.
+	require.Equal(t, http.StatusBadRequest,
+		previewGet(t, client, "http://"+controlAddr+"/v1/preview-auth", daemonToken),
+		"the endpoint must require a session/tab selector")
 }
 
 // TestPreviewAuthEndpoint_WithholdsTokenUnlessBound pins that the token is vended
@@ -291,12 +333,13 @@ func TestPreviewAuthEndpoint_WithholdsTokenUnlessBound(t *testing.T) {
 	})
 }
 
-// fetchPreviewAuthToken calls GET /v1/preview-auth on m's control listener (over
-// its own unix-socket-trust loopback default) and returns the vended token.
+// fetchPreviewAuthToken calls GET /v1/preview-auth?session=&tab= on m's control
+// listener (over its own unix-socket-trust loopback default) and returns the vended
+// per-tab token (empty when the preview listener is not bound).
 func fetchPreviewAuthToken(t *testing.T, m *Manager) string {
 	t.Helper()
 	controlAddr := m.lifecycle.snapshot().listeners.TCPBoundAddr
-	resp, err := previewHTTPClient().Get("http://" + controlAddr + "/v1/preview-auth")
+	resp, err := previewHTTPClient().Get("http://" + controlAddr + "/v1/preview-auth?session=s1&tab=t1")
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -307,10 +350,11 @@ func fetchPreviewAuthToken(t *testing.T, m *Manager) string {
 	return env.Data.Token
 }
 
-// TestPreviewToken_EphemeralAndNeverOnDisk pins the two properties of the
-// credential: it differs between daemon lifetimes (rotates on restart) and it is
-// never written to the AF home.
-func TestPreviewToken_EphemeralAndNeverOnDisk(t *testing.T) {
+// TestPreviewSecret_EphemeralAndNeverOnDisk pins the two properties of the per-tab
+// HMAC secret: it differs between daemon lifetimes (rotates on restart) and it is
+// never written to the AF home. The secret is the root from which every tab token
+// derives, so it matters more than any single token that it never lands on disk.
+func TestPreviewSecret_EphemeralAndNeverOnDisk(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	cfg := config.DefaultConfig()
@@ -320,11 +364,11 @@ func TestPreviewToken_EphemeralAndNeverOnDisk(t *testing.T) {
 	m2, err := NewManager(cfg)
 	require.NoError(t, err)
 
-	require.NotEmpty(t, m1.previewToken)
-	require.NotEqual(t, m1.previewToken, m2.previewToken,
-		"the preview token must be freshly minted per daemon, not persisted and reused")
+	require.NotEmpty(t, m1.previewSecret)
+	require.NotEqual(t, m1.previewSecret, m2.previewSecret,
+		"the preview secret must be freshly minted per daemon, not persisted and reused")
 
-	// The token value must appear in no file under the AF home.
+	// The secret value must appear in no file under the AF home.
 	require.NoError(t, filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -333,10 +377,60 @@ func TestPreviewToken_EphemeralAndNeverOnDisk(t *testing.T) {
 		if readErr != nil {
 			return nil // unreadable/special file — not where a secret would be
 		}
-		require.NotContains(t, string(data), m1.previewToken,
-			"the preview token must never be written to disk (found in %s)", path)
+		require.NotContains(t, string(data), m1.previewSecret,
+			"the preview secret must never be written to disk (found in %s)", path)
 		return nil
 	}))
+}
+
+// TestPreviewTabToken_Derivation pins the per-tab derivation: deterministic, distinct
+// per tab and per secret, and — critically — the NUL separator makes the (sid, tid)
+// pair unambiguous so no two different pairs that concatenate to the same string can
+// share a token. Without the separator, ("ab","c") and ("a","bc") would collide and
+// one tab's token would authenticate another.
+func TestPreviewTabToken_Derivation(t *testing.T) {
+	const secret = "secret-key-material"
+
+	require.Equal(t, previewTabToken(secret, "s1", "t1"), previewTabToken(secret, "s1", "t1"),
+		"derivation must be deterministic")
+	require.NotEqual(t, previewTabToken(secret, "s1", "t1"), previewTabToken(secret, "s1", "t2"),
+		"different tabs in the same session must derive different tokens")
+	require.NotEqual(t, previewTabToken(secret, "s1", "t1"), previewTabToken(secret, "s2", "t1"),
+		"the same tab id in different sessions must derive different tokens")
+	require.NotEqual(t, previewTabToken(secret, "ab", "c"), previewTabToken(secret, "a", "bc"),
+		"the separator must prevent a concatenation collision between distinct (sid, tid) pairs")
+	require.NotEqual(t, previewTabToken(secret, "s1", "t1"), previewTabToken("other-secret", "s1", "t1"),
+		"a different secret must derive a different token (rotation on restart)")
+	require.NotEmpty(t, previewTabToken(secret, "s1", "t1"))
+}
+
+// TestParsePreviewTabPath pins the gate's path parse: a two-segment tab route yields
+// its ids, a percent-encoded segment is unescaped exactly once (matching PathValue),
+// and anything that is not a tab route is a fail-closed miss.
+func TestParsePreviewTabPath(t *testing.T) {
+	sid, tid, ok := parsePreviewTabPath("/v1/webtab/s1/t1/asset.js")
+	require.True(t, ok)
+	require.Equal(t, "s1", sid)
+	require.Equal(t, "t1", tid)
+
+	// A percent-encoded segment decodes to ONE id, not two segments.
+	sid, tid, ok = parsePreviewTabPath("/v1/webtab/a%2Fb/t1/")
+	require.True(t, ok)
+	require.Equal(t, "a/b", sid, "an encoded slash is part of the id, not a segment boundary")
+	require.Equal(t, "t1", tid)
+
+	for _, miss := range []string{
+		"/v1/webtab/",     // bare prefix, no tab
+		"/v1/webtab/s1/",  // session only, no tab
+		"/v1/webtab/s1",   // no trailing structure
+		"/v1/Snapshot",    // not a webtab path at all
+		"/",               // root
+		"/v1/webtab//t1/", // empty session segment
+		"/v1/webtab/s1//", // empty tab segment
+	} {
+		_, _, ok := parsePreviewTabPath(miss)
+		require.False(t, ok, "%q is not a tab route and must be a fail-closed miss", miss)
+	}
 }
 
 // previewGetWithCookie issues a GET carrying the preview cookie and returns the

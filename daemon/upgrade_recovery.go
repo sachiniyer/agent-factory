@@ -8,21 +8,10 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/log"
 )
-
-// ErrUpgradeActivationNotEnabled is returned by every FORWARD-activation
-// SupervisorOperation in this slice (#2212 R1). R1 wires the entrypoint takeover
-// gate and the persistent recovery-job launcher, and implements the
-// recovery/rollback-side operations — but it deliberately does NOT implement the
-// operations that quiesce or replace a live daemon (StopPrevious, StartCandidate,
-// ValidateCandidate, ApproveCandidate, AwaitActivation). Those land with the
-// daemon quiesce/probation slice (R2). Binding them fail-closed makes "quiesce or
-// replace a live daemon" structurally impossible here: nothing in this build
-// creates a transaction, and even if one existed the supervisor could never drive
-// a forward activation.
-var ErrUpgradeActivationNotEnabled = errors.New("daemon upgrade activation is not enabled in this build")
 
 // upgradeValidateGrace bounds how long ValidatePrevious waits for the restored
 // previous daemon to answer Ping at the expected version with its recorded
@@ -40,6 +29,14 @@ var (
 	upgradeRecoveryHealthFn = Health
 	startPreviousViaUnitFn  = RestartAutostartUnit
 	startPreviousAdHocFn    = launchDaemonProcessAt
+	runRecoveryActorFn      = upgradetxn.RunRecoveryActor
+	// The stop is seamed separately from the health probe so a test's stop actually
+	// changes what the health probe then reports (the daemon going quiet). Bound to
+	// the real primitives, StopConfirmed hinges on WaitForShutdownCompletion
+	// OBSERVING the socket close — the fabricated-confirmation guard these ops exist
+	// to hold — so the seam must preserve that observe-then-confirm ordering.
+	stopDaemonFn      = StopDaemon
+	waitForShutdownFn = WaitForShutdownCompletion
 )
 
 // HandleUpgradeRecoveryExec consumes the internal __upgrade-recovery invocation
@@ -83,27 +80,63 @@ func HandleUpgradeRecoveryExec() {
 // upgradetxn cannot import without a cycle; SupervisorOperations is injectable
 // precisely to cross that boundary.
 func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.RecoveryInvocation) error {
+	// Capture, BEFORE the supervisor runs, whether OUR transaction (id-matched, not
+	// a foreign or stale one that happens to be active) is the one recovering, and
+	// the canonical path its committed candidate occupies — a successful commit
+	// removes the journal during Cleanup, taking both with it. EVERY owner needs the
+	// post-commit hand-off, not just unit-owned homes: the candidate ran ad-hoc
+	// through probation and is parked in runDaemon's probation branch, so on an
+	// ad-hoc home the parked process would otherwise be the permanent post-upgrade
+	// daemon with its scheduler/watchers/session-restore never armed (#2212 R2a).
+	ourTransaction := false
+	var canonicalExecPath string
+	if txn, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
+		journal := txn.Journal()
+		if journal.ID == invocation.TransactionID {
+			ourTransaction = true
+			canonicalExecPath = journal.ExecutablePath
+		}
+	}
+
 	supervisor := upgradetxn.Supervisor{Operations: productionSupervisorOperations()}
-	return upgradetxn.RunRecoveryActor(ctx, invocation, supervisor)
+	if err := runRecoveryActorFn(ctx, invocation, supervisor); err != nil {
+		return err
+	}
+
+	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil for
+	// a clean stand-down (a foreign/stale transaction we had no authority over),
+	// ErrRecoveryActive, and a terminal rollback (which restores the previous daemon
+	// under its own owner). Hand off ONLY on a positive commit signal — this was OUR
+	// transaction AND its journal is now gone (Cleanup ran). rollback_failed
+	// deliberately RETAINS the journal, and a newer transaction leaves a different one
+	// — both leave a journal, so both are excluded here. The hand-off is additionally
+	// id-guarded so it can only ever stop our own committed candidate.
+	if !ourTransaction {
+		return nil
+	}
+	if _, loadErr := upgradetxn.Load(invocation.HomeDir); !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
+		return nil // a journal is still present — not a completed commit of our transaction
+	}
+	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
+		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
+	}
+	return nil
 }
 
-// productionSupervisorOperations wires the recovery/rollback-side operations to
-// the daemon's real lifecycle primitives and binds the forward-activation
-// operations to ErrUpgradeActivationNotEnabled (R1; see that error's doc).
+// productionSupervisorOperations wires every SupervisorOperation to the daemon's
+// real lifecycle primitives. R1 shipped the recovery/rollback ops and stubbed the
+// forward ops as ErrUpgradeActivationNotEnabled; R2 makes the forward ops live so
+// a candidate is actually launched, validated, committed, or rolled back. Every
+// destructive op (both directions) is home-bound and fails closed.
 func productionSupervisorOperations() upgradetxn.SupervisorOperations {
-	notEnabled := func(context.Context, upgradetxn.Journal) error {
-		return ErrUpgradeActivationNotEnabled
-	}
 	return upgradetxn.SupervisorOperations{
-		// Forward activation — not in this slice.
-		AwaitActivation: notEnabled,
-		StopPrevious: func(context.Context, upgradetxn.Journal) (upgradetxn.StopOutcome, error) {
-			return upgradetxn.StopUnknown, ErrUpgradeActivationNotEnabled
-		},
-		StartCandidate:    notEnabled,
-		ValidateCandidate: notEnabled,
-		ApproveCandidate:  notEnabled,
-		// Recovery / rollback — real, reusing the #2168 daemon lifecycle.
+		// Forward activation (#2212 R2).
+		AwaitActivation:   awaitOldDaemonActivation,
+		StopPrevious:      stopPreviousDaemon,
+		StartCandidate:    startCandidateDaemon,
+		ValidateCandidate: validateCandidateDaemon,
+		ApproveCandidate:  approveCandidateDaemon,
+		// Recovery / rollback (#2212 R1), reusing the #2168 daemon lifecycle.
 		StopCandidate:      stopCandidateDaemon,
 		StartPrevious:      startPreviousDaemon,
 		ValidatePrevious:   validatePreviousDaemon,
@@ -123,7 +156,17 @@ func recoveryHomeGuard(journal upgradetxn.Journal) error {
 	if err != nil {
 		return fmt.Errorf("resolve AF home for upgrade recovery: %w", err)
 	}
-	if dir != journal.HomeDir {
+	// Compare home IDENTITY, not string spelling. config.GetConfigDir returns
+	// AGENT_FACTORY_HOME verbatim (no symlink resolution), while upgradetxn.Prepare
+	// stored journal.HomeDir in its symlink-resolved form (canonicalExistingDir). A
+	// user whose home traverses a symlink — a symlinked home dir, or macOS
+	// /var -> /private/var — would otherwise spell the same home two ways and have
+	// EVERY op refused (StopUnknown), failing that box's upgrades closed forever with
+	// a baffling message. pathutil.ResolveForCompare canonicalizes both sides (incl.
+	// the missing-leaf case, #2110), so equal homes compare equal regardless of
+	// spelling. Today the actor's home is argv-pinned to the resolved journal.HomeDir
+	// so the raw compare happened to hold, but this removes the latent trap.
+	if pathutil.ResolveForCompare(dir) != pathutil.ResolveForCompare(journal.HomeDir) {
 		return fmt.Errorf(
 			"upgrade recovery is bound to AF home %q but the transaction recovers %q; refusing to act on the wrong daemon",
 			dir, journal.HomeDir)
@@ -139,22 +182,29 @@ func recoveryHomeGuard(journal upgradetxn.Journal) error {
 // reports no daemon and the socket is already quiet — StopConfirmed.
 func stopCandidateDaemon(ctx context.Context, journal upgradetxn.Journal) (upgradetxn.StopOutcome, error) {
 	_ = ctx
+	return stopDaemonForRecovery(journal, "candidate")
+}
+
+// stopDaemonForRecovery stops THIS home's serving daemon (the candidate on
+// rollback, or the previous daemon on forward activation) and only reports
+// StopConfirmed on positive proof the socket is gone. Both directions carry the
+// same destructive authority: a fabricated StopConfirmed lets the supervisor
+// swap a binary or restore metadata under a live daemon, so it fails closed on a
+// home mismatch (StopUnknown) and never upgrades an unobserved stop to confirmed.
+func stopDaemonForRecovery(journal upgradetxn.Journal, role string) (upgradetxn.StopOutcome, error) {
 	// Fail closed if this process is not resolved to the home being recovered:
 	// StopDaemon/WaitForShutdownCompletion act on config.GetConfigDir()'s home, so
-	// a mismatch would report StopConfirmed while the transaction's candidate is
-	// still alive — the destructive lie this op must never tell. StopUnknown, not
-	// StopConfirmed, so the supervisor never restores the previous binary under a
-	// live candidate.
+	// a mismatch would report StopConfirmed while the transaction's daemon is still
+	// alive — the destructive lie this op must never tell.
 	if err := recoveryHomeGuard(journal); err != nil {
 		return upgradetxn.StopUnknown, err
 	}
-	if _, err := StopDaemon(); err != nil {
-		return upgradetxn.StopUnknown, fmt.Errorf("stop upgrade candidate daemon: %w", err)
+	if _, err := stopDaemonFn(); err != nil {
+		return upgradetxn.StopUnknown, fmt.Errorf("stop upgrade %s daemon: %w", role, err)
 	}
-	if err := WaitForShutdownCompletion(); err != nil {
+	if err := waitForShutdownFn(); err != nil {
 		// The socket is still answering at the deadline. Report it as still
-		// running rather than confirming a stop we could not observe — restoring
-		// the previous binary under a live candidate would be destructive.
+		// running rather than confirming a stop we could not observe.
 		return upgradetxn.StopStillRunning, nil
 	}
 	return upgradetxn.StopConfirmed, nil
@@ -192,6 +242,32 @@ func startPreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error 
 // no-spawn health probe within a bounded grace; a wrong version, a missing
 // listener, or no answer by the deadline is a rollback validation failure.
 func validatePreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error {
+	return awaitDaemonIdentity(ctx, journal, previousDaemonIdentity(journal))
+}
+
+// previousDaemonIdentity is what the restored previous daemon must be: FromVersion,
+// an EMPTY transaction id (an ordinary daemon, never a surviving probation
+// candidate — #1947), and every listener the journal recorded healthy. Production
+// (validatePreviousDaemon) and its table test both build the identity through THIS
+// one constructor, so the require-vs-reject-id polarity lives in exactly one place:
+// a change that wrongly required the id — catastrophic when FromVersion == ToVersion
+// (dev-install / re-published tag), where a surviving candidate would pass as the
+// restored previous daemon — fails the test instead of silently regressing a
+// byte-identical duplicate the test never exercised.
+func previousDaemonIdentity(journal upgradetxn.Journal) daemonIdentity {
+	return daemonIdentity{
+		role:      "previous",
+		version:   journal.FromVersion,
+		listeners: journal.Daemon.Listeners,
+	}
+}
+
+// awaitDaemonIdentity is the shared bounded poll for both directions: it holds
+// the responding daemon to a required identity (version, transaction-id polarity,
+// listeners) within upgradeValidateGrace. It is home-bound — a home mismatch
+// means the health probe would inspect a DIFFERENT daemon, so it refuses rather
+// than validate the wrong process.
+func awaitDaemonIdentity(ctx context.Context, journal upgradetxn.Journal, want daemonIdentity) error {
 	if err := recoveryHomeGuard(journal); err != nil {
 		return err
 	}
@@ -201,49 +277,62 @@ func validatePreviousDaemon(ctx context.Context, journal upgradetxn.Journal) err
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		h := upgradeRecoveryHealthFn()
-		lastErr = previousDaemonHealthy(h, journal)
+		lastErr = daemonMatchesIdentity(upgradeRecoveryHealthFn(), want)
 		if lastErr == nil {
 			return nil
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("restored previous daemon did not become healthy at version %s within %s: %w",
-				journal.FromVersion, upgradeValidateGrace, lastErr)
+			return fmt.Errorf("%s daemon did not become healthy at version %s within %s: %w",
+				want.role, want.version, upgradeValidateGrace, lastErr)
 		}
 		time.Sleep(upgradeValidatePoll)
 	}
 }
 
-// previousDaemonHealthy is the single readiness predicate for validatePreviousDaemon,
-// factored so it is testable without real time. It requires a live responder, the
-// exact FromVersion, and every listener the journal recorded as healthy.
-func previousDaemonHealthy(h HealthStatus, journal upgradetxn.Journal) error {
+// daemonIdentity is what a validated responder must be. requireTransactionID
+// distinguishes the two directions this predicate serves and is the load-bearing
+// difference between them: the restored PREVIOUS daemon is an ordinary daemon
+// (empty id), while a probation CANDIDATE carries its transaction id for its
+// whole boot precisely so a supervisor can tell them apart (#1947). Getting this
+// backwards either passes a surviving candidate off as a rollback, or blesses a
+// stale previous daemon as a validated candidate — both catastrophic when
+// FromVersion == ToVersion (the normal rebuild/reinstall shape).
+type daemonIdentity struct {
+	role                 string // "previous"/"candidate", for messages only
+	version              string
+	requireTransactionID string // "" means the responder MUST report an empty id; non-empty means it MUST match
+	listeners            upgradetxn.ListenerExpectation
+}
+
+// daemonMatchesIdentity is the single readiness predicate shared by
+// validatePreviousDaemon and validateCandidateDaemon, factored so it is testable
+// without real time and so the require-vs-reject-id polarity lives in exactly one
+// place. It requires a live responder at the exact version, the expected
+// transaction-id polarity, and every listener the journal recorded as healthy.
+func daemonMatchesIdentity(h HealthStatus, want daemonIdentity) error {
 	if h.PingErr != nil {
-		return fmt.Errorf("previous daemon is not answering: %w", h.PingErr)
+		return fmt.Errorf("%s daemon is not answering: %w", want.role, h.PingErr)
 	}
-	// A non-empty transaction id is the tell of an upgrade CANDIDATE in probation
-	// (runDaemon carries it; an ordinary daemon reports empty). The restored
-	// previous daemon is an ordinary daemon, so a responder still carrying a
-	// transaction id is the candidate that never went away — not proof of a
-	// restart. Ping retains this field for the full candidate boot exactly so a
-	// supervisor can reject it (#1947). Without this check a rebuild/reinstall
-	// where from==to (dev-install, a re-published tag) would let a surviving
-	// candidate satisfy every version/listener test and pass off as rolled back.
-	if h.TransactionID != "" {
-		return fmt.Errorf("responder is an upgrade candidate (transaction %s), not the restored previous daemon", h.TransactionID)
+	if want.requireTransactionID == "" {
+		if h.TransactionID != "" {
+			return fmt.Errorf("responder is an upgrade candidate (transaction %s), not the restored %s daemon",
+				h.TransactionID, want.role)
+		}
+	} else if h.TransactionID != want.requireTransactionID {
+		return fmt.Errorf("responder carries transaction %q, want the %s candidate for %q",
+			h.TransactionID, want.role, want.requireTransactionID)
 	}
 	if h.DaemonVersion == "" {
-		return errors.New("previous daemon answered but did not report its version")
+		return fmt.Errorf("%s daemon answered but did not report its version", want.role)
 	}
-	if h.DaemonVersion != journal.FromVersion {
-		return fmt.Errorf("previous daemon reports version %s, want %s", h.DaemonVersion, journal.FromVersion)
+	if h.DaemonVersion != want.version {
+		return fmt.Errorf("%s daemon reports version %s, want %s", want.role, h.DaemonVersion, want.version)
 	}
-	want := journal.Daemon.Listeners
-	if want.HTTPUnixBound && !h.Listeners.HTTPUnixBound {
-		return errors.New("previous daemon has not rebound the HTTP control listener")
+	if want.listeners.HTTPUnixBound && !h.Listeners.HTTPUnixBound {
+		return fmt.Errorf("%s daemon has not bound the HTTP control listener", want.role)
 	}
-	if want.TCPConfigured && want.TCPBound && !h.Listeners.TCPBound {
-		return errors.New("previous daemon has not rebound the configured TCP listener")
+	if want.listeners.TCPConfigured && want.listeners.TCPBound && !h.Listeners.TCPBound {
+		return fmt.Errorf("%s daemon has not bound the configured TCP listener", want.role)
 	}
 	return nil
 }

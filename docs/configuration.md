@@ -12,7 +12,7 @@ Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you 
 
 You can also read and write config from the CLI. Bare `af config get <key>` / `af config list` keep their script-compatible global-only output. Add `--project <repository-path>` to read the effective value after that repository's checked-in and personal per-project layers are applied, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --project . --explain` show the source of one merged-table leaf. The project path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
 
-`af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `preview_listen_addr`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. Without `--project` it edits the global config; with `--project <id-or-path>` it writes a personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+`af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `preview_listen_addr`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`, `docker_mount_agent_credentials`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. Without `--project` it edits the global config; with `--project <id-or-path>` it writes a personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -81,6 +81,7 @@ pane_border_preview = "#DC8CC3"
 | `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
 | `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
 | `global_agent_skills` | Opt in to af writing its `agent-factory` skill file into your **global** codex/gemini/amp/devin config directories so those agents discover af's CLI guidance (default: `false`). See [Agent guidance and your global agent config](#agent-guidance-and-your-global-agent-config). |
+| `docker_mount_agent_credentials` | Opt in to a `backend = "docker"` session bind-mounting the operator's on-disk credential file for **that session's own agent** (only), read-only, so a containerised agent can authenticate (default: `false`). Global-only: a repo selects the docker image, but only the operator grants it credential access. See [backends.md → Agent credentials in a container](backends.md#agent-credentials-in-a-container). |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
 | `theme` | Optional TUI color table. Defaults to a Zenburn-derived palette and validates each value as `#RRGGBB`; invalid values fall back to the corresponding default with a warning. See [Theme colors](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
@@ -309,7 +310,7 @@ Because the default profile skips permission prompts, only opt in repositories w
 
 > This section covers the two auto-resume config keys. For the whole usage-limit feature end to end — detection, the `[limit]` badge, manual retry, auto-resume, and task park-don't-fail — see [docs/usage-limits.md](usage-limits.md).
 
-When a `claude` or `codex` session hits a plan usage-limit wall, af marks it with a `[limit]` badge in the sidebar and — when the banner states a reset time — shows when the limit resets. By default the row stays there until you resume it yourself (the `c` key on the session).
+When a `claude`, `codex`, or `devin` session hits a plan usage-limit wall, af marks it with a `[limit]` badge in the sidebar and — when the banner states a reset time — shows when the limit resets (`devin` is detect-only and carries no reset time). By default the row stays there until you resume it yourself (the `c` key on the session).
 
 `limit_auto_resume = true` opts the **daemon** into resuming such a session on its own once the limit window has elapsed:
 
@@ -330,10 +331,11 @@ Resuming re-delivers the session's stored task prompt (task-driven sessions resu
 
 ### Custom usage-limit detection (`limit_patterns`)
 
-The built-in usage-limit detection recognizes the shipped `claude`/`codex`
-banners. If an agent reworded its banner, override the **detection** regex per
-agent with `limit_patterns`; the built-in reset-time parser is kept, so a custom
-detect pattern still schedules auto-resume against the parsed reset time.
+The built-in usage-limit detection recognizes the shipped `claude`, `codex`, and
+`devin` banners. If an agent reworded its banner, override the **detection** regex
+per agent with `limit_patterns`; the built-in reset-time parser (where the agent
+has one) is kept, so a custom detect pattern still schedules auto-resume against
+the parsed reset time.
 
 ```toml
 [limit_patterns]
@@ -342,7 +344,8 @@ codex  = "You've hit your usage limit"
 ```
 
 - Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`).
-- An override for an agent with no built-in matcher (`aider`/`gemini`/`amp`/`opencode`/`devin` today) is ignored with a warning — af ships built-in reset-banner matchers only for `claude`/`codex`. (`devin` tracks its own separate quota and shows a persistent "N% remaining" line, but af does not yet parse a devin limit-reached banner.)
+- An override for an agent with no built-in matcher (`aider`/`gemini`/`amp`/`opencode` today) is ignored with a warning — af ships built-in matchers for `claude`, `codex`, and `devin` only.
+- `devin` is **detect-only**: it gets the `[limit]` badge but no reset time (its exhaustion banner is inferred from the binary and docs rather than captured live, and its reset format is uncharacterized), so it never auto-resumes on a parsed time — it waits for your manual `c` retry, or the `limit_retry_interval` fallback if `limit_auto_resume` is on. Its healthy `N% remaining` / `resets in …` quota-status line is not treated as a limit.
 - An uncompilable regex warns and falls back to the built-in default, so a typo can never disable detection.
 - `limit_patterns` is a detection tweak, not a behavior switch: it is honored everywhere the built-in detector runs (the daemon status poll, and the task-run startup park path).
 
@@ -439,7 +442,7 @@ delete_cmd = "./infra/delete.sh"
 | `default_program`, `program_overrides` | Valid globally **and** in-repo (in-repo wins). |
 | `post_worktree_commands`, `remote_hooks` | **In-repo only.** The legacy `~/.agent-factory/repos/<repoID>/config.json` location keeps working for one more release (a deprecation warning in the log points at the new file) and is shadowed whenever the in-repo file sets the same key — including by an explicit empty value like `post_worktree_commands = []`. |
 | `backend`, `docker`, `ssh` | **In-repo only.** Select the runtime a repo's sessions run on. |
-| `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `preview_listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `session_env_passthrough` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `preview_listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `session_env_passthrough` is global-only so a cloned repo cannot request credentials from the daemon environment. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
+| `auto_update`, `require_token`, `require_loopback_token`, `listen_addr`, `preview_listen_addr`, `cors_allowed_origins`, `daemon_poll_interval`, `branch_prefix`, `worktree_root`, `detach_keys`, `log_max_size_mb`, `log_max_backups`, `update_channel`, `keys`, `theme`, `root_agents`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns`, `vscode_server_binary`, `global_agent_skills`, `docker_mount_agent_credentials`, `session_env_passthrough` | Global only. Setting them in-repo is rejected with an error naming the key. The daemon network-surface keys (`require_token`, `listen_addr`, `preview_listen_addr`, `cors_allowed_origins`) are global-only so a cloned repo can never open a port, widen CORS, or disable auth. `session_env_passthrough` and `docker_mount_agent_credentials` are global-only so a cloned repo cannot grant its own docker image access to the daemon environment or the operator's on-disk agent credentials — a repo selects the image, only the operator grants it credentials. `vscode_server_binary` is global-only for the same reason: it names a binary the daemon executes. See [remote-http-auth.md](remote-http-auth.md). |
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 

@@ -89,18 +89,28 @@ func TestStartHTTPServer_PreviewBindsButServesNothing(t *testing.T) {
 	// the preview surface at all.
 	daemonToken, err := LoadToken(mustTokenPath(t))
 	require.NoError(t, err)
-	require.NotEqual(t, daemonToken, m.previewToken, "the preview credential must be distinct from the daemon bearer")
+	tok := previewTabToken(m.previewSecret, "s1", "t1")
+	require.NotEqual(t, daemonToken, tok, "the preview credential must be distinct from the daemon bearer")
 
 	snapWithDaemon := previewGet(t, client, "http://"+previewAddr+"/v1/Snapshot", daemonToken)
 	require.Equal(t, http.StatusUnauthorized, snapWithDaemon,
 		"the daemon token must NOT authorize the preview origin — the credentials are separate")
 
-	// The PREVIEW token authenticates, and only then do we learn there is no content
-	// and no control API: /v1/Snapshot resolves to the preview mux's 404, never a
-	// dispatch.
-	snapWithPreview := previewGet(t, client, "http://"+previewAddr+"/v1/Snapshot", m.previewToken)
-	require.Equal(t, http.StatusNotFound, snapWithPreview,
-		"authenticated, the preview origin still serves no control API — /v1/Snapshot must 404, not dispatch")
+	// A control-API path on the preview origin has NO tab identity, so the per-tab
+	// gate can derive no expected token and rejects it outright — the preview origin
+	// exposes no control API, and /v1/Snapshot never even reaches a dispatch. Even a
+	// real per-tab token cannot reach it: the token authenticates a TAB's route, and
+	// /v1/Snapshot is not one.
+	snapWithPreview := previewGet(t, client, "http://"+previewAddr+"/v1/Snapshot", tok)
+	require.Equal(t, http.StatusUnauthorized, snapWithPreview,
+		"a non-tab /v1 path on the preview origin has no per-tab credential — it must 401, never dispatch")
+
+	// A real tab route, authenticated with that tab's token, is the ONLY thing that
+	// gets past the gate — and finds no content yet (404), proving the gate works and
+	// the origin still serves nothing.
+	assetWithPreview := previewGet(t, client, "http://"+previewAddr+"/v1/webtab/s1/t1/asset.js", tok)
+	require.Equal(t, http.StatusNotFound, assetWithPreview,
+		"authenticated on its own tab route, the preview origin still serves no content (404, not a dispatch)")
 
 	// The non-/v1 404 sits OUTSIDE the gate (previewShell answers a root request
 	// UNAUTHENTICATED, before the token is consulted — so this deliberately sends no

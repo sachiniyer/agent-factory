@@ -93,6 +93,19 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Proje
 		}
 	}
 
+	// The #2456 union: derived (live sessions above) ∪ registry ∪ root_agents. The
+	// registry (config.ListProjects, the #2355 durable project store the daemon writes
+	// via RegisterProject) is what NEW adds land in; the root_agents opt-in is kept in
+	// the union for repos registered before the add-verb rewire, so an existing opt-in
+	// keeps its switcher entry. Both are on-disk config read in-process here, exactly
+	// as the counts above come from the daemon's session snapshot passed in.
+	if projects, err := config.ListProjects(); err == nil {
+		for _, p := range projects {
+			seen(p.Root)
+		}
+	} else {
+		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
+	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
 			if repo, err := config.RepoFromPath(config.ExpandTilde(path)); err == nil {
@@ -202,9 +215,9 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAddProject validates a user-entered repo path, registers it in the
-// global root_agents opt-in list (so it persists in the picker), and switches to
-// it. A path that is not a git repository keeps the overlay open with an inline
+// handleAddProject validates a user-entered repo path, switches to it immediately,
+// and registers it in the #2355 project registry through the daemon OFF the event
+// loop. A path that is not a git repository keeps the overlay open with an inline
 // error rather than dismissing the user's typing.
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 	repo, err := config.RepoFromPath(config.ExpandTilde(path))
@@ -212,20 +225,42 @@ func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 		m.projectPickerOverlay.SetAddError(fmt.Sprintf("not a git repository: %s", path))
 		return m, nil
 	}
-	if _, err := config.RegisterRootAgent(repo.Root); err != nil {
-		// Non-fatal: the switch still works this session; it just won't be
-		// remembered for the next launch.
-		log.WarningLog.Printf("failed to register project %s in root_agents: %v", repo.Root, err)
-	} else if m.appConfig != nil {
-		if m.appConfig.RootAgents == nil {
-			m.appConfig.RootAgents = map[string]config.RootAgentConfig{}
-		}
-		if _, ok := m.appConfig.RootAgents[repo.Root]; !ok {
-			m.appConfig.RootAgents[repo.Root] = config.RootAgentConfig{}
-		}
-	}
 	m.closeProjectPicker()
-	return m.switchProject(repo)
+	// Switch NOW (local + fast), and register through the daemon off the event loop —
+	// mirroring deleteProjectCmd (#1735). RegisterProject is a daemon round-trip that
+	// blocks on the admission-retry window while the daemon warms, so running it inline
+	// (as the pre-#2456 root_agents file write did) would freeze the TUI on this
+	// keystroke. The switch does not depend on the write: the active project already
+	// shows (buildProjectListFrom seeds it from m.repoRoot); the registry write only
+	// has to persist for the switcher union and the next launch, and handleProjectAdded
+	// refreshes the section when it lands.
+	model, switchCmd := m.switchProject(repo)
+	return model, tea.Batch(switchCmd, m.addProjectCmd(repo.Root))
+}
+
+// addProjectCmd registers a project through the daemon — the single writer (#960) —
+// off the event loop (#2456), mirroring deleteProjectCmd, and reports completion. It
+// forwards the LOCALLY-resolved absolute root, not the raw input, so a relative path
+// cannot re-resolve against the daemon's cwd (#2491). The receiver is unused (like
+// deleteProjectCmd's), kept for symmetry with the sibling verb.
+func (m *home) addProjectCmd(root string) tea.Cmd {
+	return func() tea.Msg {
+		return projectAddedMsg{root: root, err: registerProjectThroughDaemon(root)}
+	}
+}
+
+// handleProjectAdded finalizes an async add-project (#2456). On success it refreshes
+// the Projects section so the newly-registered project appears in the switcher union
+// even when the repo has no sessions. A failure is NON-FATAL — the switch already
+// happened; the registration just won't persist for the next launch — and is surfaced
+// as a warning rather than an error box, matching the pre-#2456 best-effort write.
+func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		log.WarningLog.Printf("failed to register project %s in the registry: %v", msg.root, msg.err)
+		return m, nil
+	}
+	m.refreshSidebarProjects()
+	return m, nil
 }
 
 // sessionWord pluralizes "session" for the delete-project copy.
@@ -264,7 +299,7 @@ func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey str
 	killedLine := fmt.Sprintf("%d in-place %s torn down — not restorable.", inPlace, sessionWord(inPlace))
 	archivedLine := fmt.Sprintf("%d %s archived — restorable.", archived, sessionWord(archived))
 	gone := "Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone."
-	restore := fmt.Sprintf("Restore an archived session (%s, or `af sessions restore`) to bring the project back.", restoreKey)
+	restore := fmt.Sprintf("Restore an archived session (%s) to bring the project back.", restoreKey)
 	repoSafe := "Your real git repository is untouched."
 
 	switch {

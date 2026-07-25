@@ -92,7 +92,16 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 		// Remove the worktree FIRST (git refuses to delete a branch checked out in a
 		// worktree). Fall back to a manual directory removal if git can't (e.g. the
 		// worktree was relocated to the archive and is no longer registered).
-		if err := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).Run(); err != nil {
+		//
+		// CombinedOutput, not Run: the shared ownership gate below (mayDeleteWorktreeDir)
+		// classifies on git's "validation failed:" message, which git writes to STDERR.
+		// Run discards stderr — (*exec.ExitError).Error() is only "exit status N" — so
+		// the gate NEVER matched here, silently disabling the #726 corrupted-pointer
+		// allowance for the factory reset (it matched for Cleanup, which folds stderr via
+		// runGitCommandContext) and leaving the os.RemoveAll fallback below unreachable.
+		// Fold stderr into the error so both callers see the same evidence (#2531 review).
+		if out, runErr := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).CombinedOutput(); runErr != nil {
+			err := fmt.Errorf("git worktree remove failed: %s (%w)", strings.TrimSpace(string(out)), runErr)
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", worktreePath, err)
 
 			// Ownership check, restored from Cleanup (#2110). The reset's fallback
@@ -110,7 +119,15 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 				return false, worktreeStillRegisteredError(repoRoot, worktreePath, err)
 			}
 			if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
-				return false, fmt.Errorf("remove worktree dir %s: %w", worktreePath, rmErr)
+				// The directory is still on disk, and we reached this fallback via the
+				// "validation failed" gate — git's own remove FAILED, so it may still
+				// own the worktree (registered, or its registration undetermined). A
+				// plain error here classifies as known-state and reset DELETES the
+				// session record, orphaning a git-registered worktree and its branch with
+				// no record left to plan a re-run from (#2531). Classify it so reset
+				// RETAINS the record instead. A confirmed-deregistered path is a plain
+				// filesystem orphan, not a lost registration, so it stays a plain error.
+				return false, classifyRemoveAllFailure(worktreePath, registered, probeErr, rmErr)
 			}
 		}
 		removed = true
@@ -138,6 +155,22 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 		return removed, worktreeStillRegisteredError(repoRoot, worktreePath, nil)
 	}
 	return removed, nil
+}
+
+// classifyRemoveAllFailure reports a failed os.RemoveAll of a worktree directory to
+// the caller (the factory reset). When git may still own the path — the worktree is
+// registered, or its registration could not be determined — it wraps
+// ErrWorktreeStillRegistered so reset RETAINS the session record and a re-run can
+// finish the removal, rather than dropping the record and orphaning a git-registered
+// worktree and its branch (#2531). A CONFIRMED-deregistered path (registered==false
+// with the probe answered) is a plain filesystem orphan with no registration to
+// recover, so it stays an ordinary error.
+func classifyRemoveAllFailure(worktreePath string, registered bool, probeErr, rmErr error) error {
+	if registered || probeErr != nil {
+		return fmt.Errorf("%w: worktree %s could not be removed and git may still own it: %w",
+			ErrWorktreeStillRegistered, worktreePath, rmErr)
+	}
+	return fmt.Errorf("remove worktree dir %s: %w", worktreePath, rmErr)
 }
 
 // repoRegistersNothing reports whether repoRoot definitively cannot hold a

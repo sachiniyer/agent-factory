@@ -159,6 +159,52 @@ func ResetProjectRegistry() error {
 	})
 }
 
+// DeregisterProject removes the single durable registry record whose last-known
+// root matches path (compared with sameProjectPath: clean/symlink/SameFile aware),
+// and reports whether one was removed. It is the symmetric counterpart to
+// RegisterProject that DeleteProject calls (#2456): without it a registered project
+// could never leave the switcher, since ListProjects would keep re-adding it.
+//
+// Unlike ResetProjectRegistry it leaves the checkout marker in place — removing one
+// project must never disturb another home's identity for the same checkout, and a
+// later re-add simply mints a fresh project id. A path that matches no record is a
+// (false, nil) no-op: deleting a session- or task-derived project that was never
+// registered removes nothing here, exactly as intended.
+func DeregisterProject(path string) (bool, error) {
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect project registry: %w", err)
+	}
+	removed := false
+	err = WithFileLock(projectRegistryLockPath(dir), func() error {
+		records, err := loadProjectRecords(dir)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			if !sameProjectPath(record.Root, path) {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(dir, record.ID)); err != nil {
+				return fmt.Errorf("remove project record %s: %w", record.ID, err)
+			}
+			removed = true
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("deregister project: %w", err)
+	}
+	return removed, nil
+}
+
 // RegisterProject records path as a project and returns its opaque identity.
 // Registering the same checkout again is idempotent, including when path names
 // a subdirectory: registration resolves it to the canonical main repo root. A

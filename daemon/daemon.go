@@ -42,6 +42,19 @@ func RunDaemon(cfg *config.Config) error {
 	return runDaemon(cfg, "")
 }
 
+// RunDaemonForUpgrade runs the daemon as an upgrade CANDIDATE in probation for
+// transactionID (#2212 R2). Carrying the id makes the daemon (a) enter
+// DaemonPhaseUpgradeProbation — restoring state but refusing mutating RPCs until
+// its supervisor validates and releases it — and (b) skip the entrypoint gate,
+// which a plain start would trip (the candidate's own live transaction would
+// defer it). Only the recovery actor's StartCandidate reaches this path.
+func RunDaemonForUpgrade(cfg *config.Config, transactionID string) error {
+	if transactionID == "" {
+		return fmt.Errorf("upgrade daemon requires a transaction id")
+	}
+	return runDaemon(cfg, transactionID)
+}
+
 // runDaemon carries the transaction identity used by the probation machinery.
 // The public daemon entrypoint deliberately supplies no transaction: only the
 // durable transaction layer may eventually select the unexported non-empty
@@ -152,6 +165,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// this repo has already been bitten by. Registered at construction so the
 	// warm-up exit paths (SIGTERM, the Shutdown RPC) cannot skip it.
 	defer manager.configAgents.Stop()
+	// Tear the web config-assistant stream down before its tmux session is reaped
+	// above, so the clientless capture goroutine ends cleanly. stop() closes the
+	// streamer only; configAgents.Stop() owns killing the tmux (#2467). Deferred
+	// after configAgents.Stop() so it runs BEFORE it (LIFO): the capture stops, then
+	// the pane it was reading is torn down.
+	defer manager.configAssistants.stop()
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisor()
@@ -642,11 +661,13 @@ func launchDaemonProcessAt(execPath string) error {
 	return nil
 }
 
-// startDaemonChild starts execPath --daemon detached from the parent and
-// returns its PID. Split from launchDaemonProcess so tests can spawn a
-// short-lived stub instead of re-executing the real binary with --daemon.
-func startDaemonChild(execPath string) (int, error) {
-	cmd := exec.Command(execPath, "--daemon")
+// startDaemonChild starts execPath --daemon (plus any extraArgs) detached from
+// the parent and returns its PID. Split from launchDaemonProcess so tests can
+// spawn a short-lived stub instead of re-executing the real binary with --daemon.
+// extraArgs carries the upgrade-candidate probation flag (#2212 R2); ordinary
+// spawns pass none.
+func startDaemonChild(execPath string, extraArgs ...string) (int, error) {
+	cmd := exec.Command(execPath, append([]string{"--daemon"}, extraArgs...)...)
 
 	// Detach the process from the parent
 	cmd.Stdin = nil

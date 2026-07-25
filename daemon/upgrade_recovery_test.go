@@ -42,10 +42,13 @@ func journalAt(home, fromVersion string, listeners upgradetxn.ListenerExpectatio
 	}
 }
 
-// previousDaemonHealthy is the rollback readiness gate: "something answered" is
+// previousDaemonIdentity is the rollback readiness gate: "something answered" is
 // not health (#1947). It must require the exact FromVersion, every listener that
 // was healthy before the upgrade, and — critically — that the responder is NOT a
-// surviving upgrade candidate (which carries a transaction id).
+// surviving upgrade candidate (which carries a transaction id). This drives the
+// SAME constructor validatePreviousDaemon uses in production (via
+// daemonMatchesIdentity), so the require-vs-reject-id polarity cannot regress here
+// while a byte-identical duplicate keeps the test green.
 func TestPreviousDaemonHealthy(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -106,7 +109,7 @@ func TestPreviousDaemonHealthy(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := previousDaemonHealthy(tc.health, tc.journal)
+			err := daemonMatchesIdentity(tc.health, previousDaemonIdentity(tc.journal))
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected an unhealthy verdict, got nil")
 			}
@@ -117,34 +120,18 @@ func TestPreviousDaemonHealthy(t *testing.T) {
 	}
 }
 
-// The forward-activation operations are fail-closed in R1: this build can never
-// quiesce or replace a live daemon, so an interrupted transaction can only ever
-// resolve toward rollback, never forward.
-func TestForwardActivationOpsAreNotEnabled(t *testing.T) {
+// R2 makes every SupervisorOperation live — both the R1 rollback ops and the
+// forward-activation ops. Supervisor.Run refuses to start with any nil op, so a
+// missing wiring must fail loudly here rather than at activation time.
+func TestAllSupervisorOpsAreWired(t *testing.T) {
 	ops := productionSupervisorOperations()
-	journal := upgradetxn.Journal{}
-	ctx := context.Background()
-
-	forward := map[string]func() error{
-		"AwaitActivation":   func() error { return ops.AwaitActivation(ctx, journal) },
-		"StartCandidate":    func() error { return ops.StartCandidate(ctx, journal) },
-		"ValidateCandidate": func() error { return ops.ValidateCandidate(ctx, journal) },
-		"ApproveCandidate":  func() error { return ops.ApproveCandidate(ctx, journal) },
-		"StopPrevious": func() error {
-			_, err := ops.StopPrevious(ctx, journal)
-			return err
-		},
+	if ops.AwaitActivation == nil || ops.StopPrevious == nil || ops.StartCandidate == nil ||
+		ops.ValidateCandidate == nil || ops.ApproveCandidate == nil {
+		t.Fatal("forward-activation operations must be wired in R2")
 	}
-	for name, call := range forward {
-		if err := call(); !errors.Is(err, ErrUpgradeActivationNotEnabled) {
-			t.Fatalf("%s must be fail-closed in R1; got %v", name, err)
-		}
-	}
-
-	// The recovery-side operations must NOT be the not-enabled sentinel — they are
-	// the real path this slice delivers.
-	if ops.StopCandidate == nil || ops.StartPrevious == nil || ops.ValidatePrevious == nil || ops.DisableRecoveryJob == nil {
-		t.Fatal("recovery-side operations must be wired in R1")
+	if ops.StopCandidate == nil || ops.StartPrevious == nil || ops.ValidatePrevious == nil ||
+		ops.DisableRecoveryJob == nil {
+		t.Fatal("recovery/rollback operations must remain wired")
 	}
 }
 

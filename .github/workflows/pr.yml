@@ -118,6 +118,31 @@ jobs:
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
 
+      # Warm the base image the integration docker/ssh round-trip tests build
+      # (FROM alpine:3.20) ONCE, with retry, so each per-test `docker build`
+      # resolves it from the local cache instead of hammering Docker Hub. A
+      # registry blip there reddened master twice in an hour (#2521); warming
+      # absorbs the transient blips that caused that. Each pull is bounded by
+      # `timeout` so a black-holed registry cannot hang the step; there is no
+      # sleep after the final attempt. Best-effort: if the registry stays down
+      # for the whole warm window the step still succeeds, and the test build
+      # then fails loudly on the real registry error rather than being silently
+      # skipped — a sustained outage is rare and honest, a misclassified skip is
+      # not.
+      - name: Warm the integration base image (alpine:3.20)
+        run: |
+          for i in 1 2 3 4 5; do
+            if timeout 120 docker pull alpine:3.20; then
+              echo "warmed alpine:3.20 on attempt $i"
+              exit 0
+            fi
+            if [ "$i" -lt 5 ]; then
+              echo "::warning::alpine:3.20 pull attempt $i failed; retrying"
+              sleep $((i * 5))
+            fi
+          done
+          echo "::warning::could not warm alpine:3.20 after 5 attempts; the integration docker builds will fail loudly if the registry stays unreachable (#2521)"
+
       - name: Run tests
         run: go test -v -race -count=1 ./...
 

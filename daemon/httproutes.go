@@ -74,6 +74,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/SuggestSessionName",
+		Description:   "Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder.",
+		RequestFields: jsonFields(reflect.TypeOf(SuggestSessionNameRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SuggestSessionName) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/Snapshot",
 		Description:   "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
 		RequestFields: jsonFields(reflect.TypeOf(SnapshotRequest{})),
@@ -140,6 +147,20 @@ var httpRoutes = []HTTPRoute{
 		Description:   "Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched.",
 		RequestFields: jsonFields(reflect.TypeOf(DeleteProjectRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeleteProject) },
+	},
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/RegisterProject",
+		Description:   "Register a git checkout as a durable, sessionless project by path (expand ~, resolve the git root, validate, persist to the registry) — resolved on the daemon's filesystem, idempotent for a known checkout.",
+		RequestFields: jsonFields(reflect.TypeOf(RegisterProjectRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterProject) },
+	},
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/ListProjects",
+		Description:   "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
+		RequestFields: jsonFields(reflect.TypeOf(ListProjectsRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProjects) },
 	},
 	{
 		Method:        http.MethodPost,

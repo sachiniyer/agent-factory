@@ -643,97 +643,133 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 	}
 
 	// Reconnect every persisted non-agent tab that carries a session (Tabs[0] is
-	// the agent tab, already restored by Start). Track whether a persisted shell
-	// tab exists at all, and whether at least one is live, to decide if the
-	// dead-shell replacement below applies.
-	hasShellTab := false
-	hasLiveShell := false
-	var replacementShell *Tab
+	// the agent tab, already restored by Start), then replace EACH shell tab that
+	// did not come back live with a fresh sibling session. Per-shell, NOT a single
+	// hasLiveShell flag: with multiple shell tabs, one live shell used to suppress
+	// replacement of every dead one, and the all-dead path replaced only the first —
+	// so restoring stranded the user on "Terminal session not available" for every
+	// shell but one (#2527).
+	var deadShells []*Tab
 	for idx, tab := range tabs {
 		if idx == 0 {
 			continue
 		}
-		if tab.Kind == TabKindShell {
-			hasShellTab = true
-			if replacementShell == nil {
-				replacementShell = tab
+		if tab.tmux != nil {
+			if err := tab.tmux.Restore(worktreePath); err != nil {
+				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 			}
 		}
-		if tab.tmux == nil {
+		if tab.Kind != TabKindShell {
 			continue
 		}
-		if err := tab.tmux.Restore(worktreePath); err != nil {
-			log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
-		}
-		// Only count a shell tab as live when a has-session probe ANSWERED that its
-		// tmux session exists server-side after Restore. Restore (and its re-spawn)
-		// can fail — e.g. the worktree was removed so `tmux new-session -c $workdir`
-		// errors — leaving a dead shell tab. Gating on presence alone suppressed the
-		// fresh-shell fallback below and stranded the user with a dead terminal
-		// (#991).
-		//
-		// Existence is EVIDENCE here, so probe the tri-state instead of the lossy
-		// bool (#1962): only known && exists counts as live. A wedged/timed-out
-		// has-session reports "exists" through ExistsOrUnknown, which would suppress
-		// the fallback and re-strand the user with a dead/wedged terminal — the exact
-		// #991 regression. Treating !known as "not confirmed live" means a merely-
-		// wedged server may cost a redundant fresh-shell spawn; a spare shell tab is
-		// strictly better than a dead one, so this is the deliberate tradeoff.
-		if tab.Kind == TabKindShell {
+		// Existence is EVIDENCE: only a has-session probe that ANSWERED "exists"
+		// counts a shell live. Restore (and its #386 re-spawn) can fail — e.g. the
+		// worktree was removed so `tmux new-session -c $workdir` errors — leaving a
+		// dead shell tab. Probe the tri-state, not the lossy bool (#1962): a
+		// wedged/timed-out has-session reports "exists" via ExistsOrUnknown, which
+		// would suppress replacement and re-strand the user with a dead/wedged
+		// terminal (the #991 regression). Treating !known as "not confirmed live"
+		// costs at most a redundant fresh-shell spawn — strictly better than a dead
+		// one, the deliberate tradeoff.
+		live := false
+		if tab.tmux != nil {
 			if exists, known := tab.tmux.ProbeSession(); known && exists {
-				hasLiveShell = true
+				live = true
+			}
+		}
+		if !live {
+			deadShells = append(deadShells, tab)
+		}
+	}
+	if len(deadShells) == 0 {
+		// A fresh instance (or one whose user closed every shell tab), or every
+		// persisted shell came back live: a terminal tab is never auto-created
+		// (#1100), and there is nothing to replace.
+		return
+	}
+
+	// Create a fresh sibling session for each dead shell so it inherits the agent's
+	// PTY factory / executor — real in production, mock in tests — keeping the
+	// create path hermetic. Reuse the dead tab's OWN persisted tmux name rather than
+	// re-deriving from its display name (#1957): the session it names is dead, so
+	// retaking it is free, and it cannot collide with a renamed tab's live session.
+	// uniqueTabTmuxName covers only a legacy single-shell row whose TmuxName predates
+	// that field. Names derived this pass are RESERVED as they are chosen — not
+	// recomputed against the stale snapshot, which never learns them — so two
+	// nil-TmuxName dead shells cannot resolve to the same token and collide on the
+	// second Start (#2527 review).
+	prefix := agentTmux.SanitizedName() + tmuxTabSeparator
+	reserved := make(map[string]bool, len(tabs))
+	for _, t := range tabs {
+		if token := tabTmuxToken(prefix, t); token != "" {
+			reserved[token] = true
+		}
+	}
+	type shellBinding struct {
+		id    string
+		tmux  *tmux.TmuxSession
+		bound bool
+	}
+	var bindings []shellBinding
+	for _, tab := range deadShells {
+		name := shellTabName
+		if tab.Name != "" {
+			name = tab.Name
+		}
+		tmuxName := ""
+		if tab.tmux != nil {
+			// The dead shell's own token is already in reserved (seeded from tabs).
+			tmuxName = tab.tmux.SanitizedName()
+		}
+		if tmuxName == "" {
+			token := firstFreeName(reserved, name)
+			reserved[token] = true
+			tmuxName = prefix + token
+		}
+		shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
+		if err := shellTmux.Start(worktreePath); err != nil {
+			log.WarningLog.Printf("start shell tab %q for %q failed: %v", name, i.Title, err)
+			continue
+		}
+		bindings = append(bindings, shellBinding{id: tab.ID, tmux: shellTmux})
+	}
+	if len(bindings) == 0 {
+		return
+	}
+
+	// Bind the fresh sessions under one lock, re-finding each tab by its STABLE ID,
+	// never its pointer: replaceTabFieldLocked copy-on-writes a tab to a NEW *Tab for
+	// the same logical tab, so a pointer captured before the unlock window (N Restores
+	// + probes + spawns ago) can be stale — the #1987 resolution keys on the live
+	// roster, not a captured pointer. restoreLocalTabs backfills a non-empty ID on
+	// every restored tab, so the id is a reliable key.
+	i.mu.Lock()
+	for k := range bindings {
+		for _, t := range i.Tabs {
+			if t.ID == bindings[k].id {
+				t.tmux = bindings[k].tmux
+				bindings[k].bound = true
+				break
 			}
 		}
 	}
-	// No persisted shell tab means a fresh instance (or one whose user closed
-	// every shell tab): come up with just the agent tab — a terminal tab is
-	// never auto-created (#1100). With a live shell there is nothing to replace.
-	if !hasShellTab || hasLiveShell {
-		return
-	}
-
-	// A persisted shell tab restored dead (#991): create a fresh shell session
-	// as a sibling of the agent session so it inherits the agent's PTY factory /
-	// executor — real in production, mock in tests — keeping the create path
-	// hermetic.
-	//
-	// Reuse the dead tab's OWN persisted tmux name rather than re-deriving one
-	// from its display name. Re-deriving is unsafe now that the two namespaces are
-	// independent (#1957, see tab_names.go): a shell tab named "shell" may hold the
-	// session "…__shell-2" because a renamed tab still owns "…__shell", and
-	// re-deriving would have this replacement collide with that live session. Its
-	// own name is also the right answer on its merits — the session it names is
-	// dead, so retaking it is free, and the tab keeps the session name already
-	// persisted against it. uniqueTabTmuxName covers the no-persisted-name case
-	// (no shell tab to inherit from, or a legacy row with an empty TmuxName).
-	replacementShellName := shellTabName
-	replacementTmuxName := ""
-	if replacementShell != nil {
-		if replacementShell.Name != "" {
-			replacementShellName = replacementShell.Name
-		}
-		if replacementShell.tmux != nil {
-			replacementTmuxName = replacementShell.tmux.SanitizedName()
-		}
-	}
-	if replacementTmuxName == "" {
-		replacementTmuxName = uniqueTabTmuxName(tabs, agentTmux.SanitizedName(), replacementShellName)
-	}
-	shellTmux := agentTmux.NewSiblingSession(replacementTmuxName, defaultShell())
-	if err := shellTmux.Start(worktreePath); err != nil {
-		log.WarningLog.Printf("start shell tab for %q failed: %v", i.Title, err)
-		return
-	}
-
-	i.mu.Lock()
-	if existing := i.shellTabLocked(); existing != nil {
-		existing.tmux = shellTmux
-	} else {
-		tab := newShellTab(shellTmux)
-		tab.Name = replacementShellName
-		i.Tabs = append(i.Tabs, tab)
-	}
 	i.mu.Unlock()
+
+	// A binding whose tab vanished (a concurrent close) must NOT be silently dropped:
+	// Start already spawned a real detached tmux running a login shell with cwd in the
+	// worktree. Left on no tab, teardownTabs never kills it, so it outlives the
+	// session, holds the worktree open against removal (#2025/#2440), and squats the
+	// tab's persisted tmux name. Close it (kill-session) — NOT CloseAttachOnly, which
+	// is a no-op for a session we SPAWNED rather than attached to (unlike
+	// AttachShellTab's #990 attach-only path).
+	for _, bnd := range bindings {
+		if bnd.bound {
+			continue
+		}
+		if _, cerr := bnd.tmux.Close(); cerr != nil {
+			log.WarningLog.Printf("setup shell tab for %q: releasing an orphaned replacement session whose tab vanished: %v", i.Title, cerr)
+		}
+	}
 }
 
 // Kill is best-effort: each cleanup step runs independently and a failure in

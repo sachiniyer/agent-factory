@@ -2,6 +2,7 @@ package upgradetxn
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,47 @@ import (
 	"path/filepath"
 	"time"
 )
+
+// awaitSupervisorReadyPoll is the cadence AwaitSupervisorReady re-checks the
+// recovery actor's readiness proof. Package var so tests can shorten the path.
+var awaitSupervisorReadyPoll = 100 * time.Millisecond
+
+// AwaitSupervisorReady blocks until the previous-binary recovery actor has
+// POSITIVELY proven it reached supervisor_ready, or the bounded deadline elapses.
+// It runs validateActivationRecoveryProof — the recovery lock is held (the actor is
+// alive), its readiness lock is published, its status reports PhaseSupervisorReady,
+// and that proof's deadline is still in the future — but publishes nothing. That is
+// the actor-liveness-and-readiness half of what AuthorizeActivation checks;
+// AuthorizeActivation additionally requires the active JOURNAL phase to be
+// PhaseSupervisorReady and the transaction id/nonce to match before it publishes,
+// and it re-runs this same proof — so the authorizing caller still gets the full
+// check. This is the observation the old-daemon trigger makes BEFORE the single
+// AuthorizeActivation, so "the trigger fired" means the actor took the lease and
+// reached supervisor_ready, never that InstallAndStart returned. A missing, stale,
+// or dead-actor proof keeps polling; the deadline turns an unobservable readiness
+// into a loud error, never an assumed success.
+func AwaitSupervisorReady(ctx context.Context, homeDir string, deadline time.Time) error {
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if txn, err := Load(homeDir); err != nil {
+			lastErr = err
+		} else if _, err := validateActivationRecoveryProof(txn.Journal(), time.Now().UTC()); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			if lastErr == nil {
+				lastErr = errors.New("supervisor_ready deadline elapsed before the recovery actor could be probed")
+			}
+			return fmt.Errorf("upgrade recovery actor did not reach supervisor_ready by the deadline: %w", lastErr)
+		}
+		time.Sleep(awaitSupervisorReadyPoll)
+	}
+}
 
 type activationApproval struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -67,6 +109,34 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 	}
 	t.journal = current
 	return nil
+}
+
+// ActivationApproved reports whether the old process has published an activation
+// approval for the currently active transaction. It is the lease-free check the
+// recovery actor's AwaitActivation waits on; the authoritative, actor-bound
+// validation remains RecoveryLease.ActivationAuthorized, which the supervisor
+// runs immediately afterwards. A missing approval is (false, nil), not an error.
+func ActivationApproved(homeDir string) (bool, error) {
+	txn, err := Load(homeDir)
+	if err != nil {
+		return false, err
+	}
+	journal := txn.Journal()
+	path := filepath.Join(transactionDir(journal.HomeDir, journal.ID), "activation.approved")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read upgrade activation approval: %w", err)
+	}
+	var approval activationApproval
+	if err := json.Unmarshal(data, &approval); err != nil {
+		return false, fmt.Errorf("decode upgrade activation approval: %w", err)
+	}
+	return approval.SchemaVersion == journalSchemaVersion &&
+		approval.TransactionID == journal.ID &&
+		approval.Nonce == journal.RecoveryNonce, nil
 }
 
 func publishActivationApproval(path string, data []byte) error {

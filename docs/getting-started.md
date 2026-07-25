@@ -36,13 +36,18 @@ needs Go).
 
 ## Your first session
 
-`af` operates on a git repository, so start inside one:
+Sessions run in git worktrees, so most of the time you'll start inside a
+repository — that repo becomes the default project:
 
 ```bash
-cd your-project    # must be a git repo
+cd your-project    # a git repo
 af doctor --setup  # optional but recommended on first run
-af                 # launch the TUI
+af                 # launch the TUI, scoped to this project
 ```
+
+You can also run `af` from anywhere: outside a git repository it opens on your
+project registry so you can pick a known project (or add one). Being in a repo
+just picks that repo for you.
 
 Press **`Ctrl-p`** from the TUI (when you're not attached to a session pane) to
 switch projects without restarting. If you're attached to a pane, `Ctrl-p` goes

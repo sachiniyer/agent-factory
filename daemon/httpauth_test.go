@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -363,8 +364,14 @@ func TestCORSAllowList(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://af.example.com" {
 		t.Fatalf("allowed origin ACAO = %q, want it echoed", got)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
-		t.Fatalf("allowed origin missing Access-Control-Allow-Methods")
+	// Every method the API actually serves must be advertised, or a cross-origin
+	// browser's preflight blocks it. DELETE is the /v1/config-assistant reap (#2467);
+	// its omission would silently block the only escape hatch from a running assistant.
+	methods := rec.Header().Get("Access-Control-Allow-Methods")
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions} {
+		if !strings.Contains(methods, m) {
+			t.Fatalf("Access-Control-Allow-Methods = %q, missing %s", methods, m)
+		}
 	}
 	if got := rec.Header().Get("Vary"); got != "Origin" {
 		t.Fatalf("allowed origin Vary = %q, want Origin", got)

@@ -376,6 +376,12 @@ func renderSystemdRecoveryUnit(journal Journal) string {
 	for index, argument := range command {
 		quoted[index] = systemdQuoteArgument(argument)
 	}
+	// KillMode=process, like the main daemon unit (#2176): the recovery actor
+	// spawns the upgrade candidate (a detached child in this unit's cgroup), and
+	// the default control-group KillMode would SIGKILL that candidate the moment
+	// the actor exits — destroying a just-committed daemon the moment recovery
+	// finishes, or any candidate left when a hand-off could not complete. Signal
+	// only the actor; leave its spawned daemon alone.
 	return fmt.Sprintf(`[Unit]
 Description=Agent Factory upgrade recovery (%s)
 Before=%s
@@ -384,6 +390,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
+KillMode=process
 ExecStart=%s
 Restart=on-failure
 RestartSec=2

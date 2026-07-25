@@ -57,7 +57,7 @@ func createdTaskStatus(data session.InstanceData) string {
 
 // resolveIdleLiveness settles a session whose pane DID NOT CHANGE this tick
 // (#1146): it sets LimitReached when the captured content shows a usage-limit
-// banner for the resolved agent (only claude/codex ever match), else Running when
+// banner for the resolved agent (claude/codex/devin have matchers), else Running when
 // the agent is visibly still mid-turn, else the plain Ready liveness. A limit
 // session must never render Ready, which is why the detector runs before the
 // Ready fallback. Self-recovery (the banner scrolls away) or resumed work (the

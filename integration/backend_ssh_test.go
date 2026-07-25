@@ -246,11 +246,16 @@ func buildSSHDRoundTripImage(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "entrypoint.sh"), []byte(entrypoint), 0644); err != nil {
 		t.Fatalf("write entrypoint.sh: %v", err)
 	}
+	// The base image (FROM alpine:3.20) is pre-pulled by CI's warm step (pr.yml)
+	// with retry, so this build normally resolves it from the local cache and
+	// never touches the registry (#2521). A failure here therefore means either a
+	// real image/Dockerfile problem or the registry stayed unreachable for the
+	// whole run — both loud, neither silently skipped.
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the sshd round-trip image failed (needs network on first run): %v\n%s", err, out)
+		t.Fatalf("building the sshd round-trip image failed (base image is pre-pulled by CI; a failure here is a real build error or a registry unreachable for the whole run): %v\n%s", err, out)
 	}
 	return tag
 }

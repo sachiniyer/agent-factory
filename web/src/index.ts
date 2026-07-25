@@ -22,6 +22,7 @@ import {
   createTab,
   createVSCodeTab,
   deleteProject,
+  registerProject,
   errorText,
   fetchSnapshot,
   killSession,
@@ -29,7 +30,9 @@ import {
   isMutationCommittedError,
   handoffSession,
   listBackends,
+  listProjects,
   listPrograms,
+  suggestSessionName,
   listTasks,
   setConfigValue,
   loadToken,
@@ -46,8 +49,16 @@ import {
   updateTask,
 } from "./api.js";
 import { createKeyedQueue } from "./config.js";
+import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
-import { confirmDeleteProjectModal, confirmModal, handoffModal, type ModalHandle, newSessionModal } from "./modals.js";
+import {
+  addProjectModal,
+  confirmDeleteProjectModal,
+  confirmModal,
+  handoffModal,
+  type ModalHandle,
+  newSessionModal,
+} from "./modals.js";
 import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
@@ -120,6 +131,7 @@ const store = new Store<AppState>({
   shownTabs: [0],
   tabError: null,
   tasks: [],
+  registeredProjects: [],
   themeChoice: initialThemeChoice,
   // Resume the persisted filter (feat: hide archived by default) before first paint,
   // for the same reason the theme is boot-stamped: rendering the default set first
@@ -162,6 +174,9 @@ let resyncRequestGeneration = 0;
 // Debounces the ListTasks refetch that task.* events trigger (#1592 Phase 5 PR8),
 // so a burst of task deltas collapses into one authoritative refetch.
 let taskResyncTimer: number | null = null;
+// Debounces the ListProjects refetch that projects.changed events trigger (#2456
+// union), so a burst of registrations/deletes collapses into one refetch.
+let projectsResyncTimer: number | null = null;
 // The auto-dismiss timer for the operation-error toast, and how long it shows.
 let tabErrorTimer: number | null = null;
 const TAB_ERROR_MS = 6000;
@@ -182,6 +197,10 @@ termHost.className = "af-term-host";
 const modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 let modal: ModalHandle | null = null;
+// The open config-assistant chat overlay (#2467), if any. Tracked alongside `modal`
+// so any overlay-open or teardown path reaps it — an orphaned controller would keep a
+// hidden terminal streaming and never fire its close-time DELETE.
+let configAssistant: ConfigAssistantController | null = null;
 
 // The appbar's "Install app" affordance (feat: PWA). Built ONCE here, for the same
 // reason termHost and modalHost are: rerender() drops `shell` on logout and builds a
@@ -278,6 +297,7 @@ function rerender(): void {
     }
     disposeSplit();
     closeModal();
+    closeConfigAssistant();
     renderLogin(root, state, actions);
     return;
   }
@@ -326,9 +346,14 @@ async function connect(candidate: string): Promise<void> {
   } catch {
     tasks = [];
   }
+  // Fetch the registered projects too (the #2456 union): the reconcile must see a
+  // registered-but-sessionless project as a real, restorable selection, or a persisted
+  // choice on an empty registered repo would fall back on connect. Degrades to none on
+  // a transport failure — the projects.changed resync refetches it.
+  const registeredProjects = await fetchRegisteredProjects(candidate);
   // Scope to a project on connect: resume the persisted choice if it is still a real
-  // project (session- OR task-derived), else the most-recently-active default.
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null);
+  // project (session-, task-, OR registry-derived), else the most-recently-active default.
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   store.set({
     phase: "app",
     view: "sessions",
@@ -343,8 +368,22 @@ async function connect(candidate: string): Promise<void> {
     shownTabs: [0],
     tabError: null,
     tasks,
+    registeredProjects,
   });
   startStream(candidate);
+}
+
+/** Fetches the daemon's registered-project roots for the #2456 union, degrading to
+ *  none on a transport failure (like the tasks fetch): the union is additive, so a
+ *  missing registry just means the derived-from-sessions list until the next
+ *  projects.changed resync. Maps the registry records to their roots — the only field
+ *  the switcher/picker union consumes. */
+async function fetchRegisteredProjects(tok: string): Promise<string[]> {
+  try {
+    return (await listProjects(tok)).map((p) => p.root);
+  } catch {
+    return [];
+  }
 }
 
 /** Forgets the token — in memory AND in storage — tears down the push stream +
@@ -354,6 +393,7 @@ async function connect(candidate: string): Promise<void> {
 function disconnect(): void {
   stopStream();
   closeModal();
+  closeConfigAssistant();
   token = null;
   clearToken();
   store.set({
@@ -370,6 +410,7 @@ function disconnect(): void {
     shownTabs: [0],
     tabError: null,
     tasks: [],
+    registeredProjects: [],
   });
 }
 
@@ -555,11 +596,42 @@ function closeModal(): void {
   }
 }
 
-/** Mounts a fresh modal, replacing any currently open one. */
+/** Closes the open config-assistant overlay, if any: disposes its terminal and reaps
+ *  the assistant. Idempotent — the controller's own close() latches. */
+function closeConfigAssistant(): void {
+  if (configAssistant) {
+    configAssistant.close();
+    configAssistant = null;
+  }
+}
+
+/** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
+ *  config-assistant chat) — one overlay at a time, and the assistant is torn down
+ *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
 function openModal(m: ModalHandle): void {
   closeModal();
+  closeConfigAssistant();
   modal = m;
   modalHost.replaceChildren(m.el);
+}
+
+/** Opens the conversational config assistant (#2467): spawn-or-reuse, stream into a
+ *  chat overlay, reap on close. Needs a token (a tokenless "" client is authorized —
+ *  only a null token, "not authorized yet", is refused). One at a time. */
+function doOpenConfigAssistant(): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  closeModal();
+  closeConfigAssistant();
+  configAssistant = openConfigAssistant({
+    token: tok,
+    mountHost: modalHost,
+    onClosed: () => {
+      configAssistant = null;
+    },
+  });
 }
 
 /** Opens the new-session modal, its picker seeded from the live projects. Submit
@@ -568,7 +640,7 @@ function openModal(m: ModalHandle): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -578,6 +650,9 @@ function newSession(): void {
       loadBackends: (repoPath: string) => (token === null ? Promise.reject(new Error("not authorized")) : listBackends(repoPath, token)),
       // The agent catalog, same contract (#1970): the daemon owns the enum.
       loadPrograms,
+      // The autocreate-name suggestion (#2470): the daemon owns the wordlist, so
+      // the web asks rather than generating a name of its own.
+      suggestName: () => (token === null ? Promise.reject(new Error("not authorized")) : suggestSessionName(token)),
       onSubmit: (values: CreateSessionInput) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
@@ -647,7 +722,7 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
               : restoreSession(target.id, target.title, tok);
         void run.then(closeModal).catch((e) => {
           m.setBusy(false);
-          m.setError(describeError(e));
+          m.setError(errorText(e));
         });
       },
       onCancel: closeModal,
@@ -675,7 +750,42 @@ function openDeleteProject(root: string, label: string, sessionCount: number): v
           .then(closeModal)
           .catch((e) => {
             m.setBusy(false);
-            m.setError(describeError(e));
+            m.setError(errorText(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** Opens the add-project modal (#2456): the user types a path to a git checkout
+ *  on the daemon host, and RegisterProject resolves+validates it. A rejection
+ *  (not a git repo, unreadable) is shown inline (the daemon's own message, via
+ *  errorText — NOT the login-framed describeError) and the modal stays open to
+ *  correct; on success the modal closes.
+ *
+ *  The registered repo appears in the switcher and is selectable in the New session
+ *  picker IMMEDIATELY — no session required (the #2456 union: projectSummaries /
+ *  pickerProjects ∪ the daemon's registry, listProjects). The write closes the modal;
+ *  the daemon's echoed projects.changed event drives refreshRegisteredProjects, which
+ *  refetches the registry and surfaces the new project — so the add is observable
+ *  without a reload. */
+function openAddProject(): void {
+  openModal(
+    addProjectModal({
+      onSubmit: (path: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void registerProject(path, tok)
+          .then(closeModal)
+          .catch((e) => {
+            m.setBusy(false);
+            m.setError(errorText(e));
           });
       },
       onCancel: closeModal,
@@ -1095,7 +1205,13 @@ function refreshTasks(): void {
       // task-only project appears once its tasks load, and drops when its last task
       // is removed (if it also has no live sessions). This is what makes a task-only
       // repo reachable in the switcher and its tasks scoped to it.
-      const selectedProject = reconcileProject(store.get().sessions, tasks, loadProjectChoice(), store.get().selectedProject);
+      const selectedProject = reconcileProject(
+        store.get().sessions,
+        tasks,
+        loadProjectChoice(),
+        store.get().selectedProject,
+        store.get().registeredProjects,
+      );
       store.set({ tasks, selectedProject });
     })
     .catch(() => {
@@ -1115,6 +1231,51 @@ function requestTaskResync(): void {
   }, 150);
 }
 
+/** Refetches the daemon's registered projects and commits them (#2456 union),
+ *  reconciling the scope so a just-registered project is a valid selection. This is
+ *  what makes the "+ Add project" affordance observable: openAddProject writes via
+ *  RegisterProject and closes the modal, and the resulting projects.changed event
+ *  lands here to surface the new project in the switcher — no reload, no session
+ *  required. Mirrors refreshTasks; a transport failure leaves the last-known list up. */
+function refreshRegisteredProjects(): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  // Call listProjects directly (NOT fetchRegisteredProjects, which degrades to [] for
+  // the initial connect): on a resync a transport blip must LEAVE the last-known list
+  // up, exactly as refreshTasks does — blanking it to [] would drop a registered
+  // project out of the switcher on a transient failure.
+  void listProjects(tok)
+    .then((projects) => {
+      const registeredProjects = projects.map((p) => p.root);
+      const selectedProject = reconcileProject(
+        store.get().sessions,
+        store.get().tasks,
+        loadProjectChoice(),
+        store.get().selectedProject,
+        registeredProjects,
+      );
+      store.set({ registeredProjects, selectedProject });
+    })
+    .catch(() => {
+      // Transport/auth failure: keep the last-known registry up; the next
+      // projects.changed event or reconnect refetches. Never blank the union on a blip.
+    });
+}
+
+/** Debounced registry refetch for a burst of projects.changed events, mirroring
+ *  requestTaskResync. */
+function requestProjectsResync(): void {
+  if (projectsResyncTimer !== null) {
+    return;
+  }
+  projectsResyncTimer = window.setTimeout(() => {
+    projectsResyncTimer = null;
+    refreshRegisteredProjects();
+  }, 150);
+}
+
 /** Opens the add-task modal, its project picker seeded from the live projects. On
  *  submit it builds a task.Task (a fresh id, exactly one trigger) and POSTs AddTask;
  *  the created task also arrives via a task.created event, and a refetch reconciles.
@@ -1124,7 +1285,7 @@ function openAddTask(): void {
   // follow-on Fix 1), so a TASK-ONLY project is selectable and the default lands on
   // the currently-scoped project — adding a task targets ITS repo, and is never
   // blocked by the absence of a session.
-  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -1143,7 +1304,7 @@ function openAddTask(): void {
           })
           .catch((e) => {
             m.setBusy(false);
-            m.setError(describeError(e));
+            m.setError(errorText(e));
           });
       },
       onCancel: closeModal,
@@ -1163,7 +1324,7 @@ function openAddTask(): void {
  *  must appear at this exact call site. The unused trigger is cleared to "" — safe on
  *  the HTTP/JSON path, which (unlike the CLI's gob socket) never elides "" to nil. */
 function openEditTask(task: TaskData): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -1200,7 +1361,7 @@ function openEditTask(task: TaskData): void {
               return;
             }
             m.setBusy(false);
-            m.setError(describeError(e));
+            m.setError(errorText(e));
           });
       },
       onCancel: closeModal,
@@ -1303,7 +1464,7 @@ function doHandoff(): void {
           .then(closeModal)
           .catch((e) => {
             m.setBusy(false);
-            m.setError(describeError(e));
+            m.setError(errorText(e));
           });
       },
       onCancel: closeModal,
@@ -1381,6 +1542,7 @@ const actions = {
   reorderTab: reorderSessionTab,
   switchView,
   setConfigValue: applyConfigValue,
+  openConfigAssistant: doOpenConfigAssistant,
   switchProject,
   setStatusFilter,
   resetStatusFilter,
@@ -1390,6 +1552,7 @@ const actions = {
   triggerTask: doTriggerTask,
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
+  addProject: openAddProject,
   setTheme,
 };
 
@@ -1482,6 +1645,10 @@ function stopStream(): void {
     window.clearTimeout(taskResyncTimer);
     taskResyncTimer = null;
   }
+  if (projectsResyncTimer !== null) {
+    window.clearTimeout(projectsResyncTimer);
+    projectsResyncTimer = null;
+  }
   if (stream) {
     stream.stop();
     stream = null;
@@ -1505,6 +1672,17 @@ function onEvent(ev: WireEvent): void {
     requestTaskResync();
     return;
   }
+  // A projects.changed delta (#2456 union) — a project registered or deleted, here or
+  // by another client / the CLI / the TUI — refetches the registry so the switcher's
+  // union reflects it. This is the mechanism that makes THIS client's own "+ Add
+  // project" observable (openAddProject writes and closes; the echoed event surfaces
+  // it). It then FALLS THROUGH to the session reducer, whose projects.changed case
+  // (sessions.ts) requests a Snapshot resync so the derived-from-sessions half of the
+  // project view (and any dropped root_agents opt-in) also settles against
+  // authoritative state after a delete — without the fall-through that branch is dead.
+  if (ev.type === "projects.changed") {
+    requestProjectsResync();
+  }
   sessionEventGeneration += 1;
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);
   applySessions(sessions);
@@ -1524,7 +1702,13 @@ function applySessions(sessions: SessionData[]): void {
   // Reconcile the project scope against the new session set (redesign PR2): a project
   // that vanished (its last session gone) falls back gracefully to the persisted/
   // default one, so the rail is never pinned to a dead root.
-  const selectedProject = reconcileProject(sessions, store.get().tasks, loadProjectChoice(), store.get().selectedProject);
+  const selectedProject = reconcileProject(
+    sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    store.get().registeredProjects,
+  );
   let selectedId = pickSelection(sessions, prevSel);
   // Drop a selection that no longer belongs to the scoped project, so the terminal
   // never stays attached to a session hidden from the (now re-scoped) rail.
@@ -1708,10 +1892,14 @@ function onKeydown(e: KeyboardEvent): void {
   }
 }
 
-/** Turns a probe failure into a message that tells the operator what to fix. All
- *  branches route the underlying value through errorText(), so a thrown non-Error
- *  (or an envelope error object) still renders as readable text rather than
- *  "[object Object]" or "undefined". */
+/** Turns a LOGIN-PROBE failure into a message that tells the operator what to fix —
+ *  its "That token was rejected…/Couldn't reach the daemon…/Login failed:…" framing
+ *  is specific to authenticating, so it has exactly one caller (the login view). A
+ *  modal OPERATION that fails (create, delete, add-project, task edit, handoff) is
+ *  not a login and must NOT wear that prefix — those handlers render errorText(e),
+ *  the daemon's own message, exactly as surfaceTabError does. All branches here route
+ *  the underlying value through errorText(), so a thrown non-Error (or an envelope
+ *  error object) still renders as readable text rather than "[object Object]". */
 function describeError(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.status === 401) {

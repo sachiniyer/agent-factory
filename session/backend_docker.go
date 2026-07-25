@@ -60,6 +60,11 @@ const (
 	// agent-server runs against it (--repo), and its LOCAL backend creates the
 	// session's git worktree + branch off it, just like a local session.
 	dockerWorkspaceDir = "/workspace"
+	// dockerContainerHome is the HOME the container runs with (set via `-e
+	// HOME=…`). Agent credential mounts (agentCredentialMounts) and the agent's
+	// own config land under it; a constant keeps those mount targets in lockstep
+	// with the runContainer env so the two never drift.
+	dockerContainerHome = "/root"
 	// dockerAfBinaryPath is where the daemon's `af` binary is copied in the
 	// container so `af agent-server` is on PATH for the exec below.
 	dockerAfBinaryPath = "/usr/local/bin/af"
@@ -208,6 +213,16 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		afBin:   afBin,
 		program: resolvedProgram,
 	}
+	// docker_mount_agent_credentials is a GLOBAL-only operator grant (config.Config,
+	// resolved from the global layer here — a repo cannot set it: the key is absent
+	// from InRepoConfig, so a repo that tries hits the standard per-repo hard error).
+	// When on, mount ONLY this session's own agent's credential file, read-only, so a
+	// repo-selected image never sees another agent's credential or anything else the
+	// operator did not grant. Resolved here in the host process (it stats the daemon
+	// user's home) so runContainer's argv assembly stays pure.
+	if cfg.DockerMountAgentCredentials {
+		p.credentialMounts = resolveAgentCredentialMounts(p.agentName())
+	}
 	res, err := p.provision()
 	if err != nil {
 		// Reap anything the failed provision left running so a container never
@@ -226,8 +241,12 @@ type dockerProvisioner struct {
 	spec    ProvisionSpec
 	image   string
 	runArgs []string
-	afBin   string
-	program string
+	// credentialMounts are the read-only `-v host:container:ro` agent-credential
+	// bind mounts (docker.mount_agent_credentials, #2194), resolved once in
+	// Provision and appended to the `docker run` argv before runArgs.
+	credentialMounts []string
+	afBin            string
+	program          string
 
 	containerID        string
 	engineID           string
@@ -309,7 +328,7 @@ func (p *dockerProvisioner) runContainer() error {
 	args := []string{
 		"run", "-d",
 		"--label", dockerSessionLabel + "=" + Slugify(p.spec.Title),
-		"-e", "HOME=/root",
+		"-e", "HOME=" + dockerContainerHome,
 		"-p", "127.0.0.1::" + dockerAgentPort,
 	}
 	for _, name := range p.containerEnvironmentNames() {
@@ -317,6 +336,9 @@ func (p *dockerProvisioner) runContainer() error {
 		// only the name appears in argv, logs, and test captures.
 		args = append(args, "-e", name)
 	}
+	// Read-only agent credential mounts (docker.mount_agent_credentials, #2194) go
+	// before run_args so an operator's own run_args can still be appended after.
+	args = append(args, p.credentialMounts...)
 	args = append(args, p.runArgs...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 

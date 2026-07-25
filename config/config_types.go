@@ -148,6 +148,17 @@ type Config struct {
 	// daemon's environment. Values are looked up only when a session starts and
 	// are never written to config, argv, or logs.
 	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty" toml:"session_env_passthrough,omitempty"`
+	// DockerMountAgentCredentials, when true, lets a docker-backend session
+	// bind-mount the daemon user's on-disk credential file for THAT session's
+	// agent (only) read-only into the container, so a containerised agent can
+	// authenticate (#2194). It is deliberately global-only, the sibling of
+	// SessionEnvPassthrough: a repository selects the docker image, but only the
+	// operator decides whether that image may see their agent credentials. A
+	// cloned repo that sets it hits the standard per-repo hard error (the key is
+	// simply absent from InRepoConfig — source scoping, not a trust gate). Off by
+	// default; containment stays partial by design when on (the boundary still
+	// blocks everything else — this one credential file is the named exception).
+	DockerMountAgentCredentials bool `json:"docker_mount_agent_credentials,omitempty" toml:"docker_mount_agent_credentials,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.

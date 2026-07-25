@@ -38,6 +38,9 @@ MOCK2=/work/mock-repo-2
 # switcher and its tasks stay reachable (the Tasks view scopes to it, the rail is the
 # empty state). It has no session, so it is never the most-recently-active default.
 MOCK3=/work/mock-repo-3
+# A real git repo that is deliberately given NO sessions and NO tasks, so it is a
+# project ONLY once registered (#2456): the add/delete-registered-empty selftest.
+MOCK_EMPTY=/work/mock-repo-empty
 BIN=/work/bin/af
 LISTEN=127.0.0.1:8899
 BASE_URL="http://${LISTEN}"
@@ -161,7 +164,7 @@ cat >"$HOME_DIR/config.json" <<EOF
 EOF
 
 # --- mock project repos (never real repos) ----------------------------------
-for repo in "$MOCK" "$MOCK2" "$MOCK3"; do
+for repo in "$MOCK" "$MOCK2" "$MOCK3" "$MOCK_EMPTY"; do
     if [ ! -d "$repo" ]; then
         mkdir -p "$repo"
         (
@@ -684,5 +687,6 @@ export AF_WEBTAB_NOURL_NAME="$NOURL_TAB"
 # above, so the CLI resolves the same throwaway home as the daemon under test.
 export AF_BIN="$BIN"
 export AF_MOCK_REPO="$MOCK"
+export AF_MOCK_REPO_EMPTY="$MOCK_EMPTY"
 
 npx playwright test

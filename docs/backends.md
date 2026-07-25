@@ -65,6 +65,10 @@ clones the branch back (see [Archive & restore](#archive--restore)).
 | `docker.image` | yes | The container image the session runs in (see requirements below). |
 | `docker.run_args` | no | Extra arguments appended verbatim to `docker run` (mounts, env, resource limits). |
 
+Letting a containerised agent authenticate is **not** a `docker` key — it is the
+global-only, operator-owned `docker_mount_agent_credentials` grant. See
+[Agent credentials in a container](#agent-credentials-in-a-container).
+
 The Docker runtime does not copy the daemon's whole environment into the
 container. Because repository config selects the image and its binaries, af
 does not automatically grant that image the built-in agent, GitHub, proxy, or
@@ -81,8 +85,68 @@ session using environment-backed credentials may explicitly list
 `GH_TOKEN` and `OPENAI_API_KEY`; that keeps clone, `gh`, HTTPS push, and Codex
 authentication working after the operator has made that trust decision. If you
 use stored credentials instead, mount only the relevant config or
-credential-helper resources deliberately with `docker.run_args`; host paths and
-native keyrings are not implicitly mounted into a container.
+credential-helper resources deliberately with `docker.run_args`, or set the
+global `docker_mount_agent_credentials` grant (below); host paths and native
+keyrings are not implicitly mounted into a container.
+
+### Agent credentials in a container
+
+Most agents authenticate from a **file in the daemon user's home** (an OAuth
+token or an API key on disk), not from an environment variable — so the
+default-deny env boundary above, on its own, leaves a containerised agent
+unauthenticated.
+
+The **operator** (not a repo) opts in by setting the global
+`docker_mount_agent_credentials`:
+
+```bash
+af config set docker_mount_agent_credentials true
+```
+
+When it is on, a docker session bind-mounts **read-only** the credential file
+for **that session's own agent** — and only that agent. The mapping is:
+
+| The session's agent | Host file(s) mounted read-only → container path under `/root` |
+|---------------------|---------------------------------------------------------------|
+| claude | `~/.claude/.credentials.json` |
+| codex | `~/.codex/auth.json` |
+| gemini | `~/.gemini/{oauth_creds,gemini-credentials,google_accounts}.json` (whichever exist) |
+| amp | `~/.config/amp/settings.json` |
+| opencode | `~/.local/share/opencode/auth.json` |
+| aider | *(none — authenticates via API-key env vars; name it in `session_env_passthrough`)* |
+| devin | `~/.config/devin/config.json` *(no effect unless your image also carries the devin CLI)* |
+
+**Exactly one row applies per session** — the one for the session's resolved
+agent. A codex session is never handed the Claude token, and vice versa (a docker
+session's agent is fixed for its life). af resolves the file under the daemon
+user's real home and mounts it only if it exists, so:
+
+- **Minimum surface, per agent.** It mounts the credential **file, not the whole
+  config directory**: an agent writes state and refreshes its token inside that
+  directory at runtime, so a read-only whole-dir mount would break it, and some of
+  those dirs reach **gigabytes** of history (`~/.codex`, `~/.local/share/opencode`).
+  `~/.claude.json` is deliberately **not** mounted — it is the config/privacy blob
+  (MCP server tokens, every project path and prompt history, account and machine
+  ids), not the credential; `~/.claude/.credentials.json` is what authenticates.
+- **Read-only.** The agent authenticates but cannot refresh or rewrite the host
+  credential (a session-lifetime token still works; the disposable container
+  discards its own writes on kill regardless).
+
+!!! warning "A global, operator-owned grant — and a deliberate partial hole"
+    `docker_mount_agent_credentials` is **global-only**: a repository selects the
+    docker image, but only the **operator** decides whether that image may see
+    their credentials. This is enforced by *source scoping*, not a trust gate —
+    the key simply is not a repo key, so a cloned `.agent-factory/config.json`
+    that sets it hits the standard "global setting, cannot be set per-repo" error
+    (the same model as `session_env_passthrough`). Were it repo-settable, a cloned
+    third-party repo could grant **itself** the operator's credentials by shipping
+    `backend=docker` + its own image + this flag — which is exactly what the
+    default-deny boundary (#2329) exists to prevent.
+
+    When on, it **re-exposes one credential file to the configured image** — the
+    named exception to the boundary, not a relaxation of it: everything else stays
+    blocked, so containment is **partial by design**. Turn it on only for images
+    you trust with read access to that agent's credential.
 
 ### Image requirements (bring-your-own image)
 

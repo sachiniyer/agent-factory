@@ -34,6 +34,10 @@ import type { ConfigEntry } from "./types.js";
  *  outcome it is handed back. */
 export interface ConfigActions {
   save: (key: string, value: string) => void;
+  /** Opens the conversational config assistant (#2467) — the web analogue of the
+   *  TUI's config-agent takeover. The shell owns the token and the modal host, so
+   *  the pane only reports the intent. */
+  openAssistant: () => void;
 }
 
 /** The outcome of the last save, as the shell learned it from the daemon. */
@@ -213,6 +217,16 @@ export class ConfigPane {
       // guessing which config.toml this is.
       head.append(h("span", { class: "af-config-path" }, this.path));
     }
+    // The conversational assistant (#2467): a chat that helps configure the service,
+    // the web counterpart of the TUI's config-agent takeover. Opening it is the
+    // shell's job (it owns the token + modal host), so the button only reports intent.
+    const assistantBtn = h(
+      "button",
+      { type: "button", class: "af-ghost af-config-assistant-btn" },
+      "Configure with assistant",
+    );
+    assistantBtn.addEventListener("click", () => this.actions.openAssistant());
+    head.append(assistantBtn);
 
     const sections: HTMLElement[] = [];
     for (const { tier, name } of tiersInOrder(this.entries)) {

@@ -106,9 +106,10 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// and a binary that may not exist yet — so there is nothing to validate here
 	// that would not reject a legitimate value. The executability check belongs
 	// where the binary is actually run, and already lives there.
-	"vscode_server_binary": {kind: cfgString},
-	"limit_auto_resume":    {kind: cfgBool},
-	"global_agent_skills":  {kind: cfgBool},
+	"vscode_server_binary":           {kind: cfgString},
+	"limit_auto_resume":              {kind: cfgBool},
+	"global_agent_skills":            {kind: cfgBool},
+	"docker_mount_agent_credentials": {kind: cfgBool},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},

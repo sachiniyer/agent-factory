@@ -126,11 +126,26 @@ func newRedactor() *redactor {
 	return &redactor{home: home, users: users}
 }
 
-// appendUserToken adds a username token to the scrub list, skipping empties,
-// path-ish junk, and tokens under 3 chars (too short to replace safely without
-// mangling unrelated substrings).
+// appendUserToken adds a username token to the scrub list — BOTH the raw form and,
+// when they differ, its lowercased form. The username scrub matches byte-exact, but
+// the branch stored in instances.json is strings.ToLower(username)
+// (config.BranchPrefix), so a mixed-case account ("Sachin.Iyer") would otherwise
+// ship its lowercased branch prefix ("sachin.iyer/…") verbatim — the home-to-tilde
+// collapse cannot catch it (different case, not a path). Registering both closes
+// that leak for the same class as the non-word-boundary one (#2533).
 func appendUserToken(users []string, name string) []string {
 	name = strings.TrimSpace(name)
+	users = addUserVariant(users, name)
+	if lower := strings.ToLower(name); lower != name {
+		users = addUserVariant(users, lower)
+	}
+	return users
+}
+
+// addUserVariant adds one username spelling to the scrub list, skipping empties,
+// path-ish junk, and tokens under 3 chars (too short to replace safely without
+// mangling unrelated substrings), and deduping.
+func addUserVariant(users []string, name string) []string {
 	if len(name) < 3 || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		return users
 	}
@@ -156,9 +171,28 @@ func (r *redactor) scrub(s string) string {
 	if r.home != "" && r.home != "/" {
 		s = strings.ReplaceAll(s, r.home, "~")
 	}
-	for _, name := range r.users {
-		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-		s = re.ReplaceAllString(s, userMarker)
+	// Blank bare username tokens with the SAME manual token boundary the title
+	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
+	// when the username ends in a non-word rune (an OS username like "test-"), so
+	// "test-/fix-login-bug" in a branch leaked the username unredacted — a silent
+	// redaction failure in a bundle meant to be safe to share (#2533).
+	//
+	// Longest-first, exactly as scrubSessionTitles orders titles and for the same
+	// reason: a shorter username can be a prefix of a longer one (a raw "jdoe" vs a
+	// home basename "jdoe.admin"), and redacting the prefix first destroys the only
+	// exact match for the longer token and strands its suffix. The manual boundary
+	// makes that prefix-shadowing easier to hit than `\b` did, so the ordering is
+	// part of the privacy invariant, not a nicety. Sort a copy so scrub stays a pure
+	// read of r.users.
+	names := append([]string(nil), r.users...)
+	sort.Slice(names, func(i, j int) bool {
+		if len(names[i]) != len(names[j]) {
+			return len(names[i]) > len(names[j])
+		}
+		return names[i] < names[j]
+	})
+	for _, name := range names {
+		s = replaceBareToken(s, name, userMarker)
 	}
 	return s
 }
@@ -261,22 +295,36 @@ func redactAFTmuxTitle(match string) string {
 // of the title's own first/last character handles titles such as "client[prod]"
 // while refusing to match "." inside "1.2" or "/" inside "repo/path".
 func replaceBareTitle(s, title string) string {
-	if strings.TrimSpace(title) == "" || (!containsWordRune(title) && !strings.ContainsAny(title, "\r\n")) {
+	return replaceBareToken(s, title, redactedMarker)
+}
+
+// replaceBareToken replaces token with marker only where token occupies a
+// COMPLETE text token — start/end of text or a neighboring rune that is not a
+// letter, number, mark, or underscore. It is the manual-boundary replacement both
+// the title scrub and the username scrub use, because a `\b<token>\b` regex only
+// anchors at word↔non-word transitions: a token that itself ENDS (or starts) in a
+// non-word rune — a username like "test-", or a title like "client[prod]" — has no
+// `\b` after its trailing "-", so `\b` never matches it and it leaks (#2533). This
+// checks the actual neighboring runes instead, so "test-" is redacted in
+// "test-/fix-login-bug" (the "/" is a non-word boundary) but not inside a larger
+// word.
+func replaceBareToken(s, token, marker string) string {
+	if strings.TrimSpace(token) == "" || (!containsWordRune(token) && !strings.ContainsAny(token, "\r\n")) {
 		return s
 	}
 	var out strings.Builder
 	scan, copied := 0, 0
 	changed := false
-	for scan <= len(s)-len(title) {
-		rel := strings.Index(s[scan:], title)
+	for scan <= len(s)-len(token) {
+		rel := strings.Index(s[scan:], token)
 		if rel < 0 {
 			break
 		}
 		start := scan + rel
-		end := start + len(title)
+		end := start + len(token)
 		if titleTokenBoundary(s, start, end) && !insideRedactionMarker(s, start, end) {
 			out.WriteString(s[copied:start])
-			out.WriteString(redactedMarker)
+			out.WriteString(marker)
 			copied = end
 			scan = end
 			changed = true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -183,4 +184,25 @@ func (c *Client) SnapshotWithAlarms(req daemon.SnapshotRequest) (daemon.Snapshot
 		return daemon.SnapshotResponse{}, err
 	}
 	return resp, nil
+}
+
+// There is deliberately no ListProjects here. The web reads the registry over HTTP
+// (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
+// but the two GO consumers read it in-process: the TUI's switcher union
+// (app/switch_project.go buildProjectListFrom) and the CLI's `af projects list`
+// (api/projects.go) both call config.ListProjects(), the same file-locked read the
+// daemon writes through — a read of on-disk config needs no round trip. A wrapper
+// here would be dead code whose only caller was its own test. RegisterProject stays
+// because it is a WRITE, which must go through the daemon (the single writer, #960).
+
+// RegisterProject registers a git checkout as a durable project through the
+// daemon (#2456) — the single-writer path the TUI's add-project action routes
+// through, replacing the legacy in-process root_agents write. The path is
+// resolved on the daemon's filesystem. HTTP twin of RegisterProject.
+func (c *Client) RegisterProject(path string) (config.Project, error) {
+	var resp daemon.RegisterProjectResponse
+	if err := c.call("RegisterProject", daemon.RegisterProjectRequest{Path: path}, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
 }

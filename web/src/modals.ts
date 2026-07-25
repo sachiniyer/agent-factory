@@ -152,6 +152,9 @@ export function newSessionModal(
     onCancel: () => void;
     loadBackends: (repoPath: string) => Promise<BackendCatalog>;
     loadPrograms: (repoPath: string) => Promise<ProgramCatalog>;
+    // #2470: fetch a random, readable session name from the daemon (the wordlist
+    // is Go-only) to show as shadow text; an empty submit adopts it.
+    suggestName: () => Promise<string>;
   },
 ): ModalHandle {
   const { handle, body, confirmBtn } = modalChrome({
@@ -163,11 +166,19 @@ export function newSessionModal(
 
   const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
   titleInput.setAttribute("aria-label", "Session title");
+  // #2470: the daemon-suggested autocreate name. Shown as the title placeholder
+  // (shadow text that clears the instant the user types) and, when the field is
+  // submitted empty, used as the session name. "" until the fetch lands or if it
+  // fails — in which case the field falls back to requiring a typed title.
+  let suggestedName = "";
 
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
   if (projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet — create a session in the TUI first");
+    // Post-#2456 the coherent zero-projects action is the switcher's "+ Add project",
+    // not the TUI: once a repo is registered it appears here (pickerProjects ∪ the
+    // registry), so point the user at it rather than at a different surface.
+    const opt = h("option", { value: "" }, "No projects yet — add one from the project switcher first");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
@@ -325,11 +336,35 @@ export function newSessionModal(
   renderChoices();
   loadCatalogsFor(projectSelect.value);
 
+  // Ask for the autocreate name once, on open. Repo-agnostic (the daemon avoids
+  // every live title), so it needs no re-fetch on a project change. A failure is
+  // silent: the field keeps its static placeholder and simply requires a typed
+  // title, exactly as before this feature.
+  void callbacks
+    .suggestName()
+    .then((name) => {
+      if (name !== "") {
+        suggestedName = name;
+        titleInput.placeholder = name;
+      }
+    })
+    .catch(() => {
+      /* no suggestion — leave the static placeholder and the typed-title requirement */
+    });
+
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
-    const title = titleInput.value.trim();
-    if (title === "" || projectSelect.value === "") {
-      handle.setError("A title and a project are required.");
+    // #2470: an empty field adopts the suggested name (the shadow text). The
+    // placeholder already equals suggestedName, so submitting untouched creates
+    // exactly the name the user saw.
+    const typed = titleInput.value.trim();
+    const title = typed !== "" ? typed : suggestedName;
+    if (projectSelect.value === "") {
+      handle.setError("A project is required.");
+      return;
+    }
+    if (title === "") {
+      handle.setError("A title is required.");
       return;
     }
     handle.setError(null);
@@ -522,13 +557,13 @@ export function confirmDeleteProjectModal(
     onCancel: opts.onCancel,
   });
 
-  body.append(
-    h(
-      "p",
-      { class: "af-modal-text" },
-      `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`,
-    ),
-  );
+  // A registered project with no live sessions (#2456) has nothing to archive — the
+  // delete just drops its registry record. Say so, rather than "Archive 0 sessions".
+  const message =
+    opts.sessionCount === 0
+      ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched — you can add it again anytime."
+      : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`;
+  body.append(h("p", { class: "af-modal-text" }, message));
 
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
@@ -536,6 +571,65 @@ export function confirmDeleteProjectModal(
     opts.onConfirm();
   });
 
+  return handle;
+}
+
+/** The add-project modal (#2456): a single path input that registers a git
+ *  checkout as a durable, sessionless project through the RegisterProject RPC.
+ *  The path names a directory ON THE DAEMON HOST (absolute, or ~-prefixed which
+ *  the daemon expands) — a browser has no shared cwd to resolve a relative path
+ *  against, so the daemon owns resolution and validation. A non-git or unreadable
+ *  path comes back as the daemon's actionable error, shown inline; on success the
+ *  modal closes and the repo appears in the switcher immediately (the #2456 union:
+ *  the derived project list ∪ the daemon's registry), no session required.
+ *
+ *  onSubmit is async in index.ts, which drives setBusy/setError around it. */
+export function addProjectModal(callbacks: {
+  onSubmit: (path: string) => void;
+  onCancel: () => void;
+}): ModalHandle {
+  const { handle, body } = modalChrome({
+    title: "Add project",
+    confirmLabel: "Add project",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel,
+  });
+
+  const pathInput = h("input", {
+    type: "text",
+    class: "af-input",
+    placeholder: "/path/to/repo  or  ~/repo",
+    autocomplete: "off",
+  });
+  pathInput.setAttribute("aria-label", "Repository path");
+
+  body.append(
+    field("Repository path", pathInput),
+    h(
+      "p",
+      { class: "af-modal-hint" },
+      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into.",
+    ),
+  );
+
+  // Clear a stale validation/daemon error as the user edits, so the inline
+  // message always reflects the CURRENT input rather than the last rejected path.
+  pathInput.addEventListener("input", () => handle.setError(null));
+
+  const card = handle.el.firstElementChild as HTMLElement;
+  asForm(card, () => {
+    const path = pathInput.value.trim();
+    if (path === "") {
+      handle.setError("Enter a repository path.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(path);
+  });
+
+  // Focus the sole input so the user can type immediately, matching every other
+  // input modal (add-task, create-session, …) — no click required.
+  queueMicrotask(() => pathInput.focus());
   return handle;
 }
 

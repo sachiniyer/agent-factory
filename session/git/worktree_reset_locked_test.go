@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestClassifyRemoveAllFailure pins the #2531 three-way decision directly. When
+// os.RemoveAll of a worktree directory fails and git may still own the path — the
+// worktree is registered, or its registration could not be determined — the error
+// must wrap ErrWorktreeStillRegistered so the factory reset RETAINS the session
+// record for a re-run rather than dropping it and orphaning a git-registered
+// worktree and branch. Only a confirmed-deregistered path stays a plain error. The
+// end-to-end TestRemoveWorktreeDir_CorruptedPointer* tests prove this branch is
+// actually reachable from production (it was dead code until stderr was captured).
+func TestClassifyRemoveAllFailure(t *testing.T) {
+	rmErr := errors.New("permission denied")
+	const wt = "/x/wt-orphan"
+
+	// Registered → retain (wrap the sentinel).
+	if err := classifyRemoveAllFailure(wt, true, nil, rmErr); !errors.Is(err, ErrWorktreeStillRegistered) {
+		t.Errorf("a registered worktree whose removal failed must be retained, got %v", err)
+	}
+	// Registration undetermined (probe errored) → retain.
+	if err := classifyRemoveAllFailure(wt, false, errors.New("probe failed"), rmErr); !errors.Is(err, ErrWorktreeStillRegistered) {
+		t.Errorf("an undetermined registration whose removal failed must be retained, got %v", err)
+	}
+	// Confirmed deregistered → plain error (a filesystem orphan, not a lost registration).
+	err := classifyRemoveAllFailure(wt, false, nil, rmErr)
+	if errors.Is(err, ErrWorktreeStillRegistered) {
+		t.Errorf("a confirmed-deregistered path must not be reported as still-registered, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), wt) {
+		t.Errorf("the error must still name the worktree, got %v", err)
+	}
+	// The underlying os.RemoveAll error is preserved in every case.
+	if !errors.Is(classifyRemoveAllFailure(wt, true, nil, rmErr), rmErr) {
+		t.Error("the underlying os.RemoveAll error must be preserved for the sentinel case")
+	}
+	if !errors.Is(classifyRemoveAllFailure(wt, false, nil, rmErr), rmErr) {
+		t.Error("the underlying os.RemoveAll error must be preserved for the plain case")
+	}
+}
 
 // resetRepoWithWorktree builds a THROWAWAY repo in t.TempDir() with one linked
 // worktree on its own branch, and returns (repoRoot, worktreePath, branch).
@@ -276,4 +314,66 @@ func TestRemoveWorktreeDir_MissingDirAndMetadataIsCleanNoOp(t *testing.T) {
 	removed, err = RemoveWorktreeDir(repoRoot, worktreePath)
 	require.NoError(t, err, "a second removal must be a clean no-op")
 	assert.False(t, removed)
+}
+
+// corruptWorktreePointer overwrites a linked worktree's .git file with garbage so
+// `git worktree remove -f` fails with "validation failed" — the #726 corrupted-
+// pointer case the shared ownership gate is meant to let AF clean up. Its
+// registration in the main repo's .git/worktrees survives, so git still LISTS it.
+func corruptWorktreePointer(t *testing.T, worktreePath string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".git"), []byte("garbage: not a gitdir pointer\n"), 0o644))
+}
+
+// TestRemoveWorktreeDir_CorruptedPointerIsCleanedNotDeadEnded is the #2531-review
+// P1-b regression: reset ran `git worktree remove` via .Run(), discarding the
+// stderr the shared ownership gate classifies on, so the #726 corrupted-pointer
+// allowance NEVER fired for reset. The corrupted worktree then dead-ended on the
+// unactionable "unlock a locked worktree" advice (it is not locked) with no way to
+// clear it — the #2110 class through a different door. With stderr captured, reset
+// cleans it up like Cleanup does.
+func TestRemoveWorktreeDir_CorruptedPointerIsCleanedNotDeadEnded(t *testing.T) {
+	repoRoot, worktreePath, _ := resetRepoWithWorktree(t, "corrupt")
+	corruptWorktreePointer(t, worktreePath)
+
+	removed, err := RemoveWorktreeDir(repoRoot, worktreePath)
+	require.NoError(t, err,
+		"a corrupted-pointer worktree must be cleaned up, not dead-ended on unlock advice (#2531 review)")
+	assert.True(t, removed)
+	_, statErr := os.Stat(worktreePath)
+	assert.True(t, os.IsNotExist(statErr), "the corrupted worktree directory must be removed")
+}
+
+// TestRemoveWorktreeDir_CorruptedPointerRemovalFailureRetainsRecord is the #2531
+// end-to-end lock — the scenario the direct-helper unit test could not prove
+// reachable. A corrupted pointer routes to the os.RemoveAll fallback (reachable only
+// once stderr is captured); a read-only subdir makes that os.RemoveAll fail EACCES,
+// so the removal cannot complete and reset must RETAIN the record for a re-run.
+func TestRemoveWorktreeDir_CorruptedPointerRemovalFailureRetainsRecord(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based EACCES is bypassed by root; this scenario needs a non-root uid")
+	}
+	repoRoot, worktreePath, _ := resetRepoWithWorktree(t, "corrupt-blocked")
+
+	// A file inside a read-only subdir: os.RemoveAll cannot unlink the child, so the
+	// whole removal fails EACCES.
+	blocked := filepath.Join(worktreePath, "blocked")
+	require.NoError(t, os.MkdirAll(blocked, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blocked, "keep.txt"), []byte("x"), 0o644))
+	corruptWorktreePointer(t, worktreePath)
+	require.NoError(t, os.Chmod(blocked, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) }) // let t.TempDir teardown succeed
+
+	removed, err := RemoveWorktreeDir(repoRoot, worktreePath)
+	require.Error(t, err, "a removal that could not complete must not be reported as done")
+	assert.False(t, removed)
+	require.ErrorIs(t, err, ErrWorktreeStillRegistered,
+		"reset must RETAIN the record so a re-run can finish the removal (#2531)")
+	// Prove it reached the os.RemoveAll fallback (only reachable after the stderr
+	// fix), not the pre-existing early return — the message is about the failed
+	// removal, never the wrong locked-worktree "unlock" advice.
+	assert.NotContains(t, err.Error(), "unlock",
+		"a corrupted pointer must not be reported as a locked worktree")
+	_, statErr := os.Stat(worktreePath)
+	assert.NoError(t, statErr, "the directory really is still there — the failure is not crying wolf")
 }

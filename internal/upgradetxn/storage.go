@@ -505,14 +505,25 @@ func terminalPhase(phase Phase) bool {
 	return phase == PhaseCommitted || phase == PhaseRolledBack || phase == PhaseAborted
 }
 
+// validateDirectoryNoSymlink verifies that the directory an upgrade op is about to
+// write to, create, or remove under is a REAL directory whose final component is not
+// a symlink — the check that stops a swapped leaf from redirecting the operation
+// outside the home. It deliberately does NOT reject symlinks in the ANCESTORS.
+//
+// Every path passed here is package-constructed under the AF home (upgradeRoot,
+// transactionDir, activeJournalPath, …), so "the target is within the home" holds by
+// construction; the runtime risk is a directory being swapped for a symlink, which
+// the os.Lstat leaf check below catches on the validated directory itself. The old
+// "reject any symlink anywhere in the path" form (EvalSymlinks(path) != path) added
+// nothing over that for a constructed path but failed closed whenever the home was
+// reached through a symlink — every macOS TMPDIR (/var -> /private/var), a symlinked
+// $HOME or AGENT_FACTORY_HOME, an NFS/dotfiles home — which made the ENTIRE upgrade
+// engine (all 14 call sites), including the rollback that rescues a failed upgrade,
+// refuse on those boxes. os.Lstat resolves ancestor symlinks to reach the target and
+// then reports the target's own type, so a symlinked ancestor is fine while a
+// symlinked leaf is still rejected. ErrNotExist propagates unchanged for the callers
+// that treat a missing directory as a create/skip signal.
 func validateDirectoryNoSymlink(path string) error {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return err
-	}
-	if filepath.Clean(resolved) != filepath.Clean(path) {
-		return errors.New("directory path contains a symlink")
-	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/namegen"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -27,6 +28,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateDefault
 		m.namingInstance = nil
+		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
@@ -41,18 +43,37 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Type {
 	case tea.KeyEnter:
-		// Reject whitespace-only titles too: len()/== "" pass a "   " title
-		// through to session creation, producing an invisible name in the
-		// sidebar (#973). TrimSpace mirrors the daemon's validateTitleAvailableLocked.
-		if strings.TrimSpace(instance.Title) == "" {
+		// Resolve the effective title into a LOCAL and run every naming gate against
+		// it, committing it to the instance only AFTER they all pass (#2470 review).
+		//
+		// An EXACT-empty field (nothing typed) adopts the shadow placeholder shown in
+		// its row — the "autocreate". The match with the renderer is deliberate: the
+		// row paints the placeholder only when the title is exactly empty
+		// (ui/tree/render.go), so adopting on exact-empty too means enter creates
+		// precisely the name the user could see. A whitespace-only field is NOT that —
+		// its shadow text is already gone — so it stays the #973 error, not a silent
+		// adopt of an off-screen name. TrimSpace mirrors the daemon's
+		// validateTitleAvailableLocked.
+		//
+		// Writing the title before the gates (the first cut of this feature) left a
+		// FAILED gate — a reserved/colliding name, or a missing agent binary at
+		// preflight — with the suggestion permanently stamped as a real, full-contrast
+		// title the user never chose and had to backspace out by hand. Keeping it a
+		// local until every gate passes leaves the row showing the shadow placeholder,
+		// retryable, on any failure.
+		title := instance.Title
+		if title == "" {
+			title = m.namingPlaceholder
+		}
+		if strings.TrimSpace(title) == "" {
 			return m, m.handleError(fmt.Errorf("title cannot be empty"))
 		}
 		// "root" is reserved for the daemon-managed root agent (#1106). The
 		// daemon's reserveCreate is the authoritative gate; rejecting here
 		// keeps the user in the naming overlay instead of surfacing the
 		// error after submit, mirroring the #936 collision pre-check below.
-		if session.IsReservedTitle(instance.Title) {
-			return m, m.handleError(fmt.Errorf("title %q is reserved for the daemon-managed root agent; pick another name", instance.Title))
+		if session.IsReservedTitle(title) {
+			return m, m.handleError(fmt.Errorf("title %q is reserved for the daemon-managed root agent; pick another name", title))
 		}
 		for _, other := range m.store.GetInstances() {
 			if other == instance {
@@ -63,8 +84,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// flow rejects what the daemon would reject after submit, instead of
 			// only catching exact duplicates and deferring case/branch variants
 			// to a post-Start error (#936).
-			if git.TitlesCollide(other.Title, instance.Title, m.appConfig.BranchPrefix) {
-				return m, m.handleError(fmt.Errorf("a session titled %q conflicts with existing session %q", instance.Title, other.Title))
+			if git.TitlesCollide(other.Title, title, m.appConfig.BranchPrefix) {
+				return m, m.handleError(fmt.Errorf("a session titled %q conflicts with existing session %q", title, other.Title))
 			}
 		}
 		if instance.Capabilities().Workspace == session.WorkspaceRemote {
@@ -75,14 +96,20 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				existing = append(existing, other)
 			}
-			if dup := session.FindSlugCollision(instance.Title, existing); dup != "" {
+			if dup := session.FindSlugCollision(title, existing); dup != "" {
 				return m, m.handleError(fmt.Errorf(
 					"a remote session titled %q already maps to hook name %q",
-					dup, session.Slugify(instance.Title),
+					dup, session.Slugify(title),
 				))
 			}
 		}
+		// preflightSessionCreate reads only the backend/program, not the title, so it
+		// runs before the title is committed.
 		if err := m.preflightSessionCreate(instance); err != nil {
+			return m, m.handleError(err)
+		}
+		// Every gate passed — commit the resolved title exactly once.
+		if err := instance.SetTitle(title); err != nil {
 			return m, m.handleError(err)
 		}
 
@@ -99,6 +126,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		prompt := strings.TrimSpace(m.pendingPrompt)
 		m.pendingPrompt = ""
 		m.namingInstance = nil
+		m.clearNamingPlaceholder()
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
 
@@ -183,6 +211,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
 		m.namingInstance = nil
+		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.state = stateDefault
 		cmd := m.selectionChanged()
@@ -253,8 +282,47 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.store.AddInstance(instance)
 	m.sidebar.SelectInstance(instance)
 	m.namingInstance = instance
+	// #2470: generate the autocreate-name suggestion and show it as shadow text on
+	// the naming row. Pressing enter on the untouched field adopts it.
+	m.namingPlaceholder = m.suggestSessionName(instance)
+	m.sidebar.SetNamingPlaceholder(instance, m.namingPlaceholder)
 	m.state = stateNew
 	m.menu.SetNamingHasPrompt(false)
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
+}
+
+// suggestSessionName picks a readable random "adjective-noun" name for the
+// naming placeholder (#2470) that the naming flow would not itself reject: it
+// avoids the reserved root title and any existing title git.TitlesCollide flags
+// — the exact rule the enter handler enforces — so accepting the placeholder on
+// an empty submit passes those same checks. A residual collision (a session
+// created during naming) is still caught at submit and, authoritatively, by the
+// daemon.
+func (m *home) suggestSessionName(naming *session.Instance) string {
+	prefix := ""
+	if m.appConfig != nil {
+		prefix = m.appConfig.BranchPrefix
+	}
+	return namegen.Suggest(func(name string) bool {
+		if session.IsReservedTitle(name) {
+			return true
+		}
+		for _, other := range m.store.GetInstances() {
+			if other == naming {
+				continue
+			}
+			if git.TitlesCollide(other.Title, name, prefix) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// clearNamingPlaceholder drops the autocreate-name shadow text (#2470) from both
+// the model and the sidebar renderer when a naming session ends by any route.
+func (m *home) clearNamingPlaceholder() {
+	m.namingPlaceholder = ""
+	m.sidebar.SetNamingPlaceholder(nil, "")
 }

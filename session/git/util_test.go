@@ -1,8 +1,12 @@
 package git
 
 import (
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 func TestSanitizeBranchName(t *testing.T) {
@@ -185,6 +189,105 @@ func TestBranchForTitle(t *testing.T) {
 	}
 	if ar := BranchForTitle("af-", "مرحبا"); jp == ar {
 		t.Errorf("distinct unicode-only titles produced the same branch %q", jp)
+	}
+}
+
+// TestBranchAndWorktreeNamesBoundLongTitles is the #2528 regression: a long title
+// (creatable via the CLI/API, no TUI 32-char cap) must not derive a branch ref or
+// worktree path component that overruns NAME_MAX and fails with "File name too
+// long". Against master these are 500+ chars.
+func TestBranchAndWorktreeNamesBoundLongTitles(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	// The invariant: every derived filesystem/ref component stays under Linux
+	// NAME_MAX (255), with margin for git's transient "<ref>.lock". Asserting the
+	// real limit, not the impl bound, so this fails on master (500 chars).
+	const safeMax = 255 - len(".lock")
+
+	branch := BranchForTitle("af-jdoe/", long)
+	for _, part := range strings.Split(branch, "/") {
+		if len(part) > safeMax {
+			t.Errorf("branch component %q is %d bytes, over the %d NAME_MAX budget", part, len(part), safeMax)
+		}
+	}
+
+	// The default local placement is sibling mode (config.DefaultConfig), where the
+	// worktree DIRECTORY name is the JOINED "<repoName>-<segment>" component — the
+	// real thing that must fit NAME_MAX. A realistic repo name eats into the budget,
+	// so capping the segment alone (as the first #2528 cut did) still overruns:
+	// 60-byte repo name + a 200-byte segment cap = a 261-byte component. Assert the
+	// joined component at the join site, not the segment proxy (#2528 review).
+	repoBase := strings.Repeat("r", 60) // a plausible long repo directory name
+	repoRoot := filepath.Join(t.TempDir(), repoBase)
+	worktreeDir := t.TempDir()
+	cfg := &config.Config{WorktreeRoot: config.WorktreeRootSibling}
+	p, err := resolveWorktreePlacement(cfg, repoRoot, worktreeDir, long, branch)
+	if err != nil {
+		t.Fatalf("resolveWorktreePlacement: %v", err)
+	}
+	comp := filepath.Base(p)
+	if len(comp) > 255 {
+		t.Errorf("worktree dir component is %d bytes, over NAME_MAX 255", len(comp))
+	}
+	if !strings.HasPrefix(comp, repoBase+"-") {
+		t.Errorf("worktree dir component lost its %q- repo-name prefix", repoBase)
+	}
+
+	// Short titles are unaffected.
+	if got := BranchForTitle("af-", "MyApp"); got != "af-myapp" {
+		t.Errorf("short title branch changed: %q", got)
+	}
+}
+
+// TestSanitizeBranchName_TruncationCannotReexposeDotLock is the #2528 P3-a
+// regression: truncating a long component must run BEFORE the ".lock" cleanup, so
+// a cut that lands on — or newly exposes — a ".lock" suffix cannot leave it on a
+// NON-final component. git reserves ".lock" on every slash-separated component,
+// and trimBranchNameEdges only repairs the final one.
+func TestSanitizeBranchName_TruncationCannotReexposeDotLock(t *testing.T) {
+	// Component 0 is 195 'a's + ".lock" + filler, so a 200-byte cut lands exactly
+	// after the ".lock"; the trailing "/tail" keeps it a NON-final component. Under
+	// the old strip-then-truncate order the cut re-exposed ".lock" and nothing
+	// removed it.
+	title := strings.Repeat("a", 195) + ".lock" + strings.Repeat("b", 50) + "/tail"
+	branch := SanitizeBranchName(title)
+
+	for _, part := range strings.Split(branch, "/") {
+		if strings.HasSuffix(part, ".lock") {
+			t.Errorf("branch component %q ends in .lock — truncation re-exposed it", part)
+		}
+	}
+	// Ground truth: git itself must accept the ref.
+	if out, err := exec.Command("git", "check-ref-format", "refs/heads/"+branch).CombinedOutput(); err != nil {
+		t.Errorf("git check-ref-format rejected %q: %v\n%s", branch, err, out)
+	}
+}
+
+// TestBoundTitleForDisambiguation_KeepsSuffixesInjective is the #2528 P3-b
+// mechanism lock. The daemon's uniquifying walks append "-N" / " (archived N)" to
+// a base title and judge availability on the DERIVED branch. For a long base,
+// truncation makes every suffixed rung derive the SAME branch as the base — a
+// non-convergent walk. Bounding the base keeps distinct suffixes distinct.
+func TestBoundTitleForDisambiguation_KeepsSuffixesInjective(t *testing.T) {
+	const prefix = "jdoe/"
+	long := strings.Repeat("a", 300)
+
+	// Precondition (the bug): a RAW long base+suffix derives the same truncated
+	// branch as the base, so the reserve is load-bearing.
+	if BranchForTitle(prefix, long+"-2") != BranchForTitle(prefix, long) {
+		t.Fatal("precondition changed: a raw long base+suffix no longer collides")
+	}
+
+	bounded := BoundTitleForDisambiguation(long)
+	base := BranchForTitle(prefix, long)
+	b2 := BranchForTitle(prefix, bounded+"-2")
+	b3 := BranchForTitle(prefix, bounded+"-3")
+	if b2 == base || b3 == base || b2 == b3 {
+		t.Errorf("bounded suffixes must derive distinct branches: base=%q -2=%q -3=%q", base, b2, b3)
+	}
+
+	// Short titles pass through untouched.
+	if got := BoundTitleForDisambiguation("myapp"); got != "myapp" {
+		t.Errorf("short base was altered: %q", got)
 	}
 }
 

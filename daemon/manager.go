@@ -33,17 +33,20 @@ type Manager struct {
 	// blocks on the poll loop.
 	pollReloadCh chan struct{}
 
-	// previewToken is the ephemeral bearer credential for the web-tab PREVIEW
-	// listener (#1856 step 2). It is minted once, in memory, at daemon start
-	// (crypto/rand) and never written to disk — so it rotates on every restart and
-	// leaves no persistent secret. It is DELIBERATELY distinct from the daemon
-	// bearer token: the preview origin serves untrusted, repo/agent-controlled
-	// content, so a credential that leaked from there must authorize preview
-	// serving ONLY, never the control API (DeliverPrompt et al.). The preview
-	// listener's gate compares against this; an authenticated control-plane client
-	// learns it via GET /v1/preview-auth. Immutable after construction, read
-	// lock-free.
-	previewToken string
+	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
+	// a PER-TAB credential (#1856 step 3): the token for (sessionID, tabID) is
+	// previewTabToken(previewSecret, sid, tid). It is minted once, in memory, at
+	// daemon start (crypto/rand, 256 bits) and never written to disk — so it rotates
+	// on every restart and leaves no persistent secret. It is DELIBERATELY distinct
+	// from the daemon bearer token: the preview origin serves untrusted,
+	// repo/agent-controlled content, so a credential that leaked from there must
+	// authorize preview serving of ITS OWN TAB only, never another tab and never the
+	// control API (DeliverPrompt et al.). The preview listener's gate derives the
+	// expected token from the sid/tid in the request and compares; an authenticated
+	// control-plane client obtains a tab's token via GET /v1/preview-auth?session=&tab=.
+	// The secret itself is NEVER vended or logged — only the per-tab derivations are.
+	// Immutable after construction, read lock-free.
+	previewSecret string
 
 	// limitDetector is the resolved usage-limit matcher set (#1146), built from
 	// cfg.LimitPatterns (it compiles the override regexes) and reused across poll
@@ -229,6 +232,10 @@ type Manager struct {
 	// have no Instance and so appear in no roster; this is the only thing that
 	// knows they exist, which is why its Stop() is wired into daemon teardown.
 	configAgents *configAgentSupervisor
+	// configAssistants owns the single web config-assistant stream (#2467): the
+	// spawn-or-reuse singleton, its bare-session broker, and the last-detach grace
+	// reaper. Its stop() is wired into daemon teardown alongside configAgents.Stop().
+	configAssistants *configAssistantHub
 }
 
 // NewManager constructs a manager and synchronously restores all persisted
@@ -267,12 +274,13 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	if err != nil {
 		return nil, err
 	}
-	// Mint the ephemeral preview credential (#1856 step 2). In memory only, so it
+	// Mint the ephemeral preview HMAC secret (#1856 step 3). In memory only, so it
 	// never touches disk and rotates on restart; generateToken is the same 256-bit
-	// crypto/rand source the daemon bearer uses.
-	previewToken, err := generateToken()
+	// crypto/rand source the daemon bearer uses. Per-tab tokens are derived from it
+	// (previewTabToken); the secret itself is never vended or logged.
+	previewSecret, err := generateToken()
 	if err != nil {
-		return nil, fmt.Errorf("mint preview token: %w", err)
+		return nil, fmt.Errorf("mint preview secret: %w", err)
 	}
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, "")
@@ -283,7 +291,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	configAgents := newConfigAgentSupervisor()
 	mgr := &Manager{
 		cfg:                 cfg,
-		previewToken:        previewToken,
+		previewSecret:       previewSecret,
 		pollReloadCh:        make(chan struct{}, 1),
 		ready:               make(chan struct{}),
 		lifecycle:           lifecycle,
@@ -329,6 +337,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		}
 		return ""
 	}
+	mgr.configAssistants = newConfigAssistantHub(mgr)
 	return mgr, nil
 }
 

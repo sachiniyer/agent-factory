@@ -275,6 +275,16 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	mux.HandleFunc("GET /v1/sessions/{id}/stream-info", cs.streamInfoHandler)
 	mux.HandleFunc("GET /v1/events", cs.eventsHandler)
 
+	// The web config-assistant stream (#2467): a bare-session PTY WebSocket for the
+	// daemon-owned config assistant, which has no Instance and so is unreachable
+	// through the session stream route above. The path names no session — the daemon
+	// resolves THE assistant itself — so, like the stream routes, these are not
+	// REST/RPC mirrors and register here rather than in the httpRoutes catalog. POST
+	// spawns-or-reuses, GET streams, DELETE reaps; all behind the same auth/CORS seam.
+	mux.HandleFunc("POST /v1/config-assistant", cs.configAssistantHandler)
+	mux.HandleFunc("GET /v1/config-assistant/stream", cs.configAssistantStreamHandler)
+	mux.HandleFunc("DELETE /v1/config-assistant", cs.configAssistantDeleteHandler)
+
 	// The web-tab preview credential (#1856 step 2): an authenticated control-plane
 	// client fetches the preview origin's ephemeral token here, then delivers it to
 	// the preview iframe (step 3). Internal, not an `af api` RPC — like the stream

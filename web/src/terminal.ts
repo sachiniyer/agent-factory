@@ -50,6 +50,7 @@ import {
   viewportAnchorLine,
   viewportMarkerOffset,
 } from "./terminal-geometry.js";
+import type { StreamEndpoint } from "./stream_endpoint.js";
 import { currentXtermTheme } from "./theme.js";
 
 /** The attach terminal's connection state, surfaced for a small status line. */
@@ -79,22 +80,16 @@ interface PendingViewportAnchor {
   atBottom: boolean;
 }
 
-/** ws: matching the page origin — the daemon serves the SPA over plain HTTP, so
- *  this is normally ws:. If a reverse proxy fronts the daemon and serves the page
- *  over https:, it becomes wss: so the stream rides the same proxied transport. */
-function wsScheme(): string {
-  return window.location.protocol === "https:" ? "wss:" : "ws:";
-}
 
 /**
  * One live attach terminal bound to a container element. Construct it with the
- * bearer token, a session id, and a tab index, and it owns everything from there:
- * the xterm instance, the WS to `/v1/sessions/{id}/stream?tab=<idx>`, the
+ * bearer token and a StreamEndpoint (which daemon PTY to render), and it owns
+ * everything from there: the xterm instance, the WS to the endpoint's URL, the
  * fit/resize wiring, and a self-healing reconnect loop. Call dispose() to tear it
- * all down (on selection/tab change or logout). One instance per attached
- * (session, tab) — selecting a different session OR switching tabs disposes this
- * and builds a fresh one, so scrollback and the replay cursor (which are per-tab
- * on the broker) never bleed across tabs (#1592 Phase 5 PR7).
+ * all down (on selection/tab change, logout, or closing the config-assistant pane).
+ * One instance per attached endpoint — selecting a different session OR switching
+ * tabs disposes this and builds a fresh one, so scrollback and the replay cursor
+ * (which are per-tab on the broker) never bleed across tabs (#1592 Phase 5 PR7).
  */
 export class AttachTerminal {
   private readonly term: Terminal;
@@ -179,10 +174,8 @@ export class AttachTerminal {
 
   constructor(
     private readonly container: HTMLElement,
-    private readonly sessionId: string,
     private readonly token: string,
-    private readonly tabId: string,
-    private readonly tab: number,
+    private readonly endpoint: StreamEndpoint,
     private readonly cb: TerminalCallbacks,
   ) {
     this.term = new Terminal({
@@ -232,7 +225,7 @@ export class AttachTerminal {
     // suppresses xterm's own handling.
     this.term.attachCustomKeyEventHandler((ev) =>
       handleClipboardKeydown(ev, {
-        composerNewline: this.tab === 0,
+        composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
         clearSelection: () => this.term.clearSelection(),
@@ -332,26 +325,13 @@ export class AttachTerminal {
     }
     this.cb.onStatus(this.everOpened ? "reconnecting" : "connecting");
     // Reconnects replay the gap from our cursor; the first connect omits ?since so
-    // the broker starts at the live tail and sends a one-shot screen repaint.
-    const base = `${wsScheme()}//${window.location.host}/v1/sessions/${encodeURIComponent(this.sessionId)}/stream`;
-    const params = new URLSearchParams();
-    params.set("access_token", this.token);
-    // Address the bound tab by its STABLE id (#1738) so a reorder/close server-side
-    // resolves to the right PTY — the daemon maps ?tab_id= to the tab's current
-    // ordinal. Fall back to the ordinal ?tab= for a legacy tab with no id (parseTab
-    // in daemon/ws_pty.go: empty/absent = 0 = the agent tab), keeping the agent-tab
-    // URL unchanged when neither is needed.
-    if (this.tabId !== "") {
-      params.set("tab_id", this.tabId);
-    } else if (this.tab > 0) {
-      params.set("tab", String(this.tab));
-    }
-    if (this.seeded) {
-      params.set("since", this.cursor.toString());
-    }
+    // the broker starts at the live tail and sends a one-shot screen repaint. The
+    // endpoint owns the URL shape (session tab vs the bare config assistant); the
+    // reconnect/replay/resize machinery below is identical for either.
+    const url = this.endpoint.url(this.token, this.seeded ? this.cursor : null);
     let ws: WebSocket;
     try {
-      ws = new WebSocket(`${base}?${params.toString()}`);
+      ws = new WebSocket(url);
     } catch {
       this.scheduleReconnect();
       return;

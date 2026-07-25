@@ -548,6 +548,35 @@ func TestBuildProjectListUnionsSourcesWithCounts(t *testing.T) {
 	}
 }
 
+// TestBuildProjectListUnionsTheRegistry pins the #2456 union: a repo registered in
+// the durable project registry (config.RegisterProject) shows in the switcher even
+// with no live session and no root_agents opt-in — the read side that makes the
+// TUI add-project affordance observable.
+func TestBuildProjectListUnionsTheRegistry(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "/repos/active"
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return nil, nil // no live sessions anywhere
+	}))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	// A registered-but-sessionless repo (the sandboxed AGENT_FACTORY_HOME keeps this
+	// hermetic — the registry is empty until this write).
+	repoRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(repoRoot)
+	require.NoError(t, err)
+
+	got := h.buildProjectList()
+	var registered *overlay.Project
+	for i := range got {
+		if got[i].Root == repoRoot {
+			registered = &got[i]
+		}
+	}
+	require.NotNil(t, registered, "a registered-but-sessionless repo must appear in the switcher (registry union)")
+	assert.Equal(t, 0, registered.SessionCount, "the registered empty project has no sessions")
+}
+
 // TestHandleAddProjectRejectsNonGitPath keeps the overlay open with an inline
 // error when the entered path is not a git repository.
 func TestHandleAddProjectRejectsNonGitPath(t *testing.T) {
@@ -580,19 +609,55 @@ func TestHandleAddProjectRegistersAndSwitches(t *testing.T) {
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay(nil, h.repoRoot)
 	h.state = stateSwitchProject
 
+	// The add-project verb now writes through the daemon (the single writer, #2456
+	// step 3), not the in-process root_agents, and does so OFF the event loop (the
+	// register is a daemon round-trip). There is no real daemon in the app suite, so
+	// stub the seam — recording the path AND applying the daemon's effect
+	// (config.RegisterProject) so the durable-registry assertion is faithful.
+	var registeredPath string
+	oldRegister := registerProjectThroughDaemon
+	registerProjectThroughDaemon = func(path string) error {
+		registeredPath = path
+		_, err := config.RegisterProject(path)
+		return err
+	}
+	t.Cleanup(func() { registerProjectThroughDaemon = oldRegister })
+
 	// A real git repo so RepoFromPath resolves.
 	repoRoot := initTestGitRepo(t)
-	mod, _ := h.handleAddProject(repoRoot)
+	mod, cmd := h.handleAddProject(repoRoot)
 	require.NotNil(t, mod)
 
+	// The switch happens SYNCHRONOUSLY (fast + local), and the registration is
+	// dispatched as an off-loop command rather than blocking this keystroke (#2456).
 	assert.Equal(t, stateDefault, h.state, "a valid add closes the picker")
 	assert.Nil(t, h.projectPickerOverlay)
 	assert.Equal(t, config.RepoIDFromRoot(repoRoot), h.repoID, "add should switch to the new project")
+	require.NotNil(t, cmd, "add must dispatch the off-loop registration, not block on it")
 
-	// Persisted into root_agents so it appears in the picker next launch.
+	// Drive the off-loop registration directly (as the bubbletea runtime would),
+	// mirroring deleteProjectCmd: it must route through the daemon seam with the
+	// LOCALLY-resolved absolute root (so a relative input can never re-resolve against
+	// the daemon's cwd, #2491) and land in the durable registry.
+	done, ok := h.addProjectCmd(repoRoot)().(projectAddedMsg)
+	require.True(t, ok, "addProjectCmd must emit projectAddedMsg")
+	require.NoError(t, done.err)
+	assert.Equal(t, repoRoot, registeredPath, "the add must forward the resolved root to the daemon")
+
+	// Persisted into the durable registry (the #2355 store), NOT the legacy
+	// root_agents, so it appears in the switcher union next launch.
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	found := false
+	for _, p := range projects {
+		if p.Root == repoRoot {
+			found = true
+		}
+	}
+	assert.True(t, found, "add should register the repo in the durable project registry")
 	cfg, err := config.LoadConfig()
 	require.NoError(t, err)
-	assert.Contains(t, cfg.RootAgents, repoRoot)
+	assert.NotContains(t, cfg.RootAgents, repoRoot, "add no longer writes the legacy root_agents opt-in")
 }
 
 // initTestGitRepo initializes a bare-minimum git repo in a temp dir and returns

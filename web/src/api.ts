@@ -354,6 +354,16 @@ export async function listPrograms(repoPath: string, token: string): Promise<Pro
   return af<ProgramCatalog>("ListPrograms", { repo_path: repoPath }, token);
 }
 
+/** Asks the daemon for a random, readable "adjective-noun" session name not used
+ *  by any live session (#2470), for the create form's autocreate placeholder. The
+ *  wordlist is Go-only (the #1970 "serve the list, don't duplicate it" ruling), so
+ *  the web never generates names itself — it shows this and, on an empty submit,
+ *  sends it back as the title. Returns "" if the daemon has no suggestion. */
+export async function suggestSessionName(token: string): Promise<string> {
+  const resp = await af<{ name: string }>("SuggestSessionName", {}, token);
+  return resp?.name ?? "";
+}
+
 /** Creates a session and returns the daemon's authoritative projection of it (the
  *  resolved title + stable id). The created row also arrives via /v1/events. */
 export async function createSession(input: CreateSessionInput, token: string): Promise<SessionData> {
@@ -476,6 +486,44 @@ export interface DeleteProjectResult {
  *  events + the projects.changed event trigger a rail/projects resync. */
 export async function deleteProject(root: string, token: string): Promise<DeleteProjectResult> {
   return af("DeleteProject", { repo_path: root, repo_id: "" }, token);
+}
+
+/** A durable project identity the daemon registered (the #2355 registry record). */
+export interface RegisteredProject {
+  id: string;
+  checkout_id: string;
+  root: string;
+  relative_root: string;
+  path_exists: boolean;
+}
+
+/** Registers a git checkout as a durable, sessionless project (mirrors
+ *  `af projects add`). `path` is a path ON THE DAEMON HOST — absolute or
+ *  ~-prefixed — which the daemon resolves on its own filesystem (expand ~, walk
+ *  to the git checkout's main-repo root, validate). It is sent VERBATIM: unlike
+ *  the CLI, a browser has no shared working directory to resolve a relative path
+ *  against, so the user supplies an absolute path and the daemon owns resolution.
+ *
+ *  Idempotent for a known checkout. On success the daemon emits projects.changed;
+ *  the client refetches listProjects() and unions the registry into the derived
+ *  project list, so the registered repo appears in the switcher and is selectable
+ *  in the New session picker immediately — no session required (#2456 union). A
+ *  non-git or unreadable path throws an ApiError carrying the daemon's actionable
+ *  message, for inline display next to the input. */
+export async function registerProject(path: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RegisterProject", { path }, token);
+  return resp.project;
+}
+
+/** Lists the daemon's registered projects (the #2355 registry) — the read half of
+ *  the #2456 union. The client ∪s these roots with the projects it derives from live
+ *  sessions and tasks, so a registered-but-sessionless project still shows in the
+ *  switcher and is creatable-into (projectSummaries / pickerProjects). The web is the
+ *  only client that reads the registry over HTTP; the TUI and CLI read
+ *  config.ListProjects() in-process, so this has no Go apiclient twin. */
+export async function listProjects(token: string): Promise<RegisteredProject[]> {
+  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
+  return resp.projects ?? [];
 }
 
 // --- tab mutations (#1592 Phase 5 PR7) -------------------------------------
@@ -798,4 +846,67 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
+}
+
+// --- config assistant (#2467) ----------------------------------------------
+//
+// The web analogue of the TUI's config-agent takeover: POST spawns-or-reuses a
+// single shared assistant (a bare tmux session the daemon owns), the caller streams
+// it over /v1/config-assistant/stream (terminal.ts configAssistantStreamEndpoint),
+// and DELETE reaps it when the pane closes. The daemon builds the whole spawn request
+// server-side, so these carry no body that becomes a command.
+
+/** The POST /v1/config-assistant reply. session_name is informational (the stream
+ *  route resolves the assistant itself and accepts no name), so nothing needs it. */
+export interface ConfigAssistantResponse {
+  session_name?: string;
+}
+
+/**
+ * Spawns-or-reuses the shared config assistant (POST /v1/config-assistant). Blocks
+ * through the daemon's cold-start readiness wait (~60s) on a first spawn. The route
+ * is a plain POST (not the WS upgrade) precisely so this wait is a normal request,
+ * not a hung handshake.
+ *
+ * Throws ApiError carrying the HTTP status so the caller can honor the contract:
+ *   409 — the create raced a concurrent reap; RETRYABLE, POST again.
+ *   503 — the assistant is unavailable in this daemon build.
+ *   0   — the daemon was unreachable.
+ */
+export function spawnConfigAssistant(token: string): Promise<ConfigAssistantResponse> {
+  return af<ConfigAssistantResponse>("config-assistant", {}, token);
+}
+
+/**
+ * Reaps the shared config assistant (DELETE /v1/config-assistant) — the pane-close
+ * signal. Best-effort by design: the daemon's last-detach grace reaper is the
+ * backstop, and reaping an already-gone assistant is a no-op success, so a caller on
+ * the close path may ignore a failure here. Hand-rolled because af() is POST-only and
+ * the client has no other DELETE route; it throws ApiError like af() for callers that
+ * do care.
+ */
+export async function reapConfigAssistant(token: string): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  let resp: Response;
+  try {
+    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers });
+  } catch (e) {
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
+  }
+  if (!resp.ok) {
+    let env: Envelope<unknown> | null = null;
+    try {
+      env = (await resp.json()) as Envelope<unknown>;
+    } catch {
+      // Non-JSON error body: fall through to the status line.
+    }
+    throw new ApiError(
+      resp.status,
+      envelopeErrorText(env?.error, `${resp.status} ${resp.statusText}`.trim()),
+      envelopeErrorCode(env?.error),
+    );
+  }
 }
