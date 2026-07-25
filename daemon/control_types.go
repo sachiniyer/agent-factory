@@ -672,6 +672,17 @@ type ShutdownResponse struct {
 	OK bool `json:"ok"`
 }
 
+// ReleaseUpgradeProbationRequest asks a probationary upgrade candidate to leave
+// probation and admit ordinary daemon work (#2212 R2). TransactionID must match
+// the probation the daemon is under, so a stale or misdirected release cannot arm
+// the wrong daemon.
+type ReleaseUpgradeProbationRequest struct {
+	TransactionID string `json:"transaction_id"`
+}
+type ReleaseUpgradeProbationResponse struct {
+	OK bool `json:"ok"`
+}
+
 // SpawnConfigAgentRequest asks the daemon to start a config agent in a bare tmux
 // session at AF home — no Instance, no worktree, no branch, and no row in the
 // session list.

@@ -27,7 +27,12 @@ var (
 	version     = "dev"
 	programFlag string
 	daemonFlag  bool
-	rootCmd     = &cobra.Command{
+	// upgradeTransactionFlag carries an in-flight upgrade transaction id to the
+	// daemon so it starts in upgrade probation (#2212 R2). Internal only: the
+	// recovery actor's StartCandidate spawns `af --daemon --upgrade-transaction
+	// <id>`; an operator never sets it.
+	upgradeTransactionFlag string
+	rootCmd                = &cobra.Command{
 		Use:   "af",
 		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.",
 		Long: `Run 'af' with no arguments to open the TUI. The subcommands below drive the
@@ -56,7 +61,11 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				if err != nil {
 					return err
 				}
-				err = daemon.RunDaemon(cfg)
+				if upgradeTransactionFlag != "" {
+					err = daemon.RunDaemonForUpgrade(cfg, upgradeTransactionFlag)
+				} else {
+					err = daemon.RunDaemon(cfg)
+				}
 				if err != nil {
 					log.ErrorLog.Printf("failed to start daemon %v", err)
 				}
@@ -258,6 +267,14 @@ func init() {
 	// Hide the daemonFlag as it's only for internal use
 	err := rootCmd.Flags().MarkHidden("daemon")
 	if err != nil {
+		panic(err)
+	}
+
+	// Internal only (#2212 R2): the recovery actor's StartCandidate passes this to
+	// launch a candidate in upgrade probation. Hidden so it never appears in help.
+	rootCmd.Flags().StringVar(&upgradeTransactionFlag, "upgrade-transaction", "",
+		"Internal: run the daemon in upgrade probation for this transaction id")
+	if err := rootCmd.Flags().MarkHidden("upgrade-transaction"); err != nil {
 		panic(err)
 	}
 

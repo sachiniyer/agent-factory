@@ -116,6 +116,30 @@ func (l *daemonLifecycle) markReady() error {
 	return nil
 }
 
+// releaseUpgradeProbation clears an upgrade candidate's probation once its
+// previous-binary supervisor has validated it, so it admits ordinary daemon
+// work. expectedTransactionID must match the probation this daemon is actually
+// under — a mismatch means the request is for a different candidate and is
+// refused, so a stale or misdirected release can never arm the wrong daemon.
+// After the id is cleared the daemon is an ordinary daemon and reports ready.
+func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.transactionID == "" {
+		return fmt.Errorf("daemon is not in upgrade probation")
+	}
+	if expectedTransactionID != l.transactionID {
+		return fmt.Errorf("upgrade probation release for transaction %q does not match this daemon's transaction %q",
+			expectedTransactionID, l.transactionID)
+	}
+	if !l.restored {
+		return fmt.Errorf("cannot release upgrade probation before instance restore completes")
+	}
+	l.transactionID = ""
+	l.phase = DaemonPhaseReady
+	return nil
+}
+
 func (l *daemonLifecycle) isUpgradeProbation() bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

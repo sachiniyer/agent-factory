@@ -59,6 +59,22 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	return nil
 }
 
+// ReleaseUpgradeProbation clears this daemon's upgrade probation once its
+// previous-binary supervisor has validated it (#2212 R2). Only the supervisor,
+// which knows the transaction id, can call it; a mismatch or a non-probationary
+// daemon is refused. It is deliberately NOT gated on requireMutationAdmission —
+// probation is exactly what it lifts, so gating it on admission would deadlock.
+func (s *controlServer) ReleaseUpgradeProbation(req ReleaseUpgradeProbationRequest, resp *ReleaseUpgradeProbationResponse) error {
+	if s.manager == nil || s.manager.lifecycle == nil {
+		return fmt.Errorf("daemon has no lifecycle to release from upgrade probation")
+	}
+	if err := s.manager.lifecycle.releaseUpgradeProbation(req.TransactionID); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
 // PauseStatusPoll pauses the daemon's capture-pane liveness poll for one
 // attached session (#1160). Deliberately NOT gated on requireManagerReady:
 // it is a lightweight, lease-bounded map write on the dedicated pausedMu (not

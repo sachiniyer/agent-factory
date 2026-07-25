@@ -1527,6 +1527,7 @@
       "af hook-guard-tmux --help": "internal.hook-guard-tmux",
       "af --program": "session.create.opt.program",
       "af --token": "daemon.remote-access",
+      "af --upgrade-transaction": "meta.internal",
       "af --version": "meta.discovery",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
