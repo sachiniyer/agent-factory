@@ -282,6 +282,17 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	return client.Call(controlServiceName+"."+method, req, resp)
 }
 
+// RequestApplyConfig asks a RUNNING daemon to apply the on-disk global config to
+// itself in place (#2480). It deliberately never STARTS a daemon: a config write
+// with no daemon running has nothing to apply live and takes effect on the next
+// start, so this uses the no-ensure path and returns the dial error when none is
+// reachable (the caller treats that as "saved, nothing running to apply").
+func RequestApplyConfig() (ApplyConfigResponse, error) {
+	var resp ApplyConfigResponse
+	err := callDaemonNoEnsure("ApplyConfig", ApplyConfigRequest{}, &resp)
+	return resp, err
+}
+
 // CreateSession asks the daemon to create, start, and persist a session.
 func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	var resp CreateSessionResponse

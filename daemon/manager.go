@@ -27,6 +27,11 @@ type Manager struct {
 	// two config generations and produce an inconsistent result (e.g. a branch
 	// derived from one generation and a worktree path from the next).
 	live atomic.Pointer[config.Config]
+	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
+	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
+	// send, so a burst of applies collapses to one reset and ApplyConfig never
+	// blocks on the poll loop.
+	pollReloadCh chan struct{}
 
 	// previewToken is the ephemeral bearer credential for the web-tab PREVIEW
 	// listener (#1856 step 2). It is minted once, in memory, at daemon start
@@ -279,6 +284,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	mgr := &Manager{
 		cfg:                 cfg,
 		previewToken:        previewToken,
+		pollReloadCh:        make(chan struct{}, 1),
 		ready:               make(chan struct{}),
 		lifecycle:           lifecycle,
 		storage:             storage,

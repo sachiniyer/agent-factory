@@ -201,6 +201,33 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	}
 	resp.Result = result
 	resp.RestartNotice = config.RestartNotice
+	// Apply the write to the running daemon in place (#2480) so the web form need
+	// not tell the user to restart for a hot-reloadable key. Best-effort: the write
+	// already succeeded, so an apply failure leaves the legacy restart notice.
+	if s.manager != nil {
+		if applied, aerr := s.manager.ApplyConfig(); aerr == nil {
+			resp.Applied = applied.Applied
+			resp.Pending = applied.Pending
+		}
+	}
+	return nil
+}
+
+// ApplyConfig makes the running daemon reflect the on-disk global config in place
+// (#2480), so `af config set` (which writes the file itself) does not require a
+// manual restart to take effect. Reports which changed keys are live vs pending.
+// Not gated on mutation admission: it reloads config, touches no session state,
+// and is safe during warmup.
+func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigResponse) error {
+	if s.manager == nil {
+		return nil
+	}
+	result, err := s.manager.ApplyConfig()
+	if err != nil {
+		return err
+	}
+	resp.Applied = result.Applied
+	resp.Pending = result.Pending
 	return nil
 }
 

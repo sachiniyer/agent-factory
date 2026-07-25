@@ -83,8 +83,12 @@ func (s *controlServer) ListPrograms(req ListProgramsRequest, resp *ListPrograms
 	// ready) means the global config is unavailable — so there is no default to
 	// report. Reporting one anyway is the failure mode this whole issue is about.
 	global := ""
-	if s.manager != nil && s.manager.cfg != nil {
-		global = s.manager.cfg.DefaultProgram
+	if s.manager != nil {
+		// Single read in this RPC = its op-entry snapshot (#2480), so a saved
+		// default_program is reported by the next ListPrograms with no restart.
+		if c := s.manager.Config(); c != nil {
+			global = c.DefaultProgram
+		}
 	}
 	resp.Default = defaultProgramFor(global, req.RepoPath)
 	return nil

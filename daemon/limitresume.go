@@ -65,10 +65,14 @@ type limitResumeState struct {
 // dead/resolved retry state, then attempt each session in a stable order so the
 // logs read coherently.
 func (m *Manager) ResumeLimitedSessions() {
-	if !m.cfg.LimitAutoResume || !m.Ready() {
+	// One config snapshot per pass (#2480): limit_auto_resume and the retry
+	// interval read the same generation, so a save mid-pass cannot toggle the
+	// feature between the guard and the interval read.
+	cfg := m.Config()
+	if !cfg.LimitAutoResume || !m.Ready() {
 		return
 	}
-	retryInterval := m.cfg.LimitRetryIntervalDuration()
+	retryInterval := cfg.LimitRetryIntervalDuration()
 
 	type entry struct {
 		key      string

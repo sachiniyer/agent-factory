@@ -29,6 +29,15 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// One config snapshot for the whole create (#2480): default_program,
+	// session_env_passthrough, and every other per-op key read THIS generation, so
+	// a config save that races the create can never pair one key's old value with
+	// another key's new value. A per-use m.Config() inside the create is exactly the
+	// torn read the op-entry rule prevents. (branch_prefix is a NAMED EXCEPTION — it
+	// still reads the frozen m.cfg across the title-reservation helpers; making it
+	// hot-reloadable is a fast-follow, so ApplyConfig reports it pending.)
+	cfg := m.Config()
+
 	if req.Program == "" {
 		// Default from the repo-resolved config so an in-repo default_program
 		// applies to daemon-created sessions (task runs, API creates) too.
@@ -37,7 +46,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// ListPrograms (#1970) answers by calling the same function rather than
 		// restating the precedence — so the program a picker labels "repo default"
 		// cannot disagree with the one a real create picks.
-		req.Program = defaultProgramFor(m.cfg.DefaultProgram, req.RepoPath)
+		req.Program = defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
 	}
 	repo, title, release, renamedArchived, err := m.reserveCreate(req)
 	if err != nil {
@@ -109,14 +118,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
 
-	// Session environment grants are security-sensitive and configurable while
-	// the daemon is running. Reload them for every new create rather than pinning
-	// the values that happened to be present when this Manager started.
-	currentConfig, err := config.LoadConfig()
-	if err != nil {
-		return session.InstanceData{}, fmt.Errorf("load current session environment configuration: %w", err)
-	}
-
+	// Session environment grants are security-sensitive. They come from the single
+	// op-entry config snapshot (cfg) taken at the top of this create (#2480), so a
+	// config save that races the create cannot mix generations. Its liveness is via
+	// a save surface's ApplyConfig, not a per-create disk read: this used to do its
+	// own config.LoadConfig() here, so a raw hand-edit of session_env_passthrough
+	// was picked up on the next create; now it applies on save/ApplyConfig like
+	// every other key — a deliberate, uniform change (see the #2480 release note).
 	instance, err := session.NewInstance(session.InstanceOptions{
 		ID:                             pending.ID,
 		CreatedAt:                      pending.CreatedAt,
@@ -127,7 +135,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		InPlace:                        req.InPlace,
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),
-		ProvisionSessionEnvPassthrough: append([]string(nil), currentConfig.SessionEnvPassthrough...),
+		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 	})
 	if err != nil {
 		return session.InstanceData{}, err

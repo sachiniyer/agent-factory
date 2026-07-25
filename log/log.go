@@ -481,6 +481,30 @@ func Initialize(daemon bool) {
 	globalLogFile = w
 }
 
+// ReconfigureRotation re-reads the log-rotation policy (log_max_size_mb /
+// log_max_backups) from config and applies it to the active log file in place, so
+// a config save takes effect on the running daemon without a restart (#2480). A
+// no-op when logging fell back to stderr (globalLogFile is nil). Lock order is
+// package mu then the writer's mu, matching closeWithReport.
+func ReconfigureRotation() {
+	mu.Lock()
+	defer mu.Unlock()
+	if globalLogFile == nil {
+		return
+	}
+	maxBytes, backups := rotationPolicy()
+	globalLogFile.setRotation(maxBytes, backups)
+}
+
+// setRotation updates the rotation cap and keep-count under the writer's own
+// lock, so a concurrent Write never reads a torn (maxBytes, backups) pair.
+func (w *rotatingWriter) setRotation(maxBytes int64, backups int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.maxBytes = maxBytes
+	w.backups = backups
+}
+
 func Close() {
 	closeWithReport(true)
 }

@@ -326,6 +326,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			select {
 			case <-stopCh:
 				return
+			case <-manager.pollReloadCh:
+				// daemon_poll_interval changed via ApplyConfig (#2480): reset the
+				// ticker to the new cadence in place — no dropped poll goroutine, no
+				// session touched. Validated positive at config-set time; guard
+				// anyway since Reset panics on a non-positive duration.
+				if next := time.Duration(manager.Config().DaemonPollInterval) * time.Millisecond; next > 0 {
+					ticker.Reset(next)
+				}
 			case <-ticker.C:
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"reflect"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -83,8 +84,18 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// vscode_server_binary: the supervisor closure reads Config(), so the swap
 	// above already reaches new spawns.
 
-	// TODO(#2480 PR1, next slices): re-arm the poll ticker on a
-	// daemon_poll_interval change and reconfigure the logger on a log_* change.
+	// daemon_poll_interval: re-arm the poll ticker in place. Non-blocking; the
+	// buffered channel collapses a burst of applies to one ticker reset.
+	if old.DaemonPollInterval != newCfg.DaemonPollInterval {
+		select {
+		case m.pollReloadCh <- struct{}{}:
+		default:
+		}
+	}
+	// log_max_size_mb / log_max_backups: reconfigure the active log file in place.
+	if old.LogMaxSizeMB != newCfg.LogMaxSizeMB || old.LogMaxBackups != newCfg.LogMaxBackups {
+		log.ReconfigureRotation()
+	}
 
 	return result, nil
 }

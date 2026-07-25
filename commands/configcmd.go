@@ -5,17 +5,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/spf13/cobra"
 )
+
+// reportConfigApply prints how a saved global config key took effect (#2480),
+// per the #2479 principle — it never tells the user to run a command. applyErr
+// means no daemon was reachable to apply to, so the value is on disk and takes
+// effect on the next start.
+func reportConfigApply(cmd *cobra.Command, key string, resp daemon.ApplyConfigResponse, applyErr error) {
+	out := cmd.OutOrStdout()
+	switch {
+	case applyErr != nil:
+		fmt.Fprintln(out, "saved. No daemon is running to apply it to; it takes effect on the next start.")
+	case slices.Contains(resp.Pending, key):
+		fmt.Fprintln(out, "saved. This key takes effect on the next daemon start — the web listener keys and root_agents cannot be applied live yet.")
+	case slices.Contains(resp.Applied, key):
+		fmt.Fprintln(out, "applied — the running daemon is using the new value now.")
+	default:
+		// Keys the daemon does not track (theme/keybindings) or a value equal to the
+		// old one: on disk now, and a running af picks it up on its next start.
+		fmt.Fprintln(out, "saved.")
+	}
+}
 
 // jsonWrapError honors the --json contract for the CLI commands in this
 // package: when jsonMode is set, a failure is emitted as the shared {data,error}
@@ -153,9 +175,9 @@ candidate and why it did or did not supply the effective value.
 changing a single settable key in place so all comments and ordering are
 preserved. With --project <id-or-path> they edit that registered project's
 machine-local override instead (built-in < global < in-repo < personal project),
-which is never checked into the repository. Changes apply the same way a
-hand-edit does: af and the daemon read config at startup, so restart them to
-pick up a change.`,
+which is never checked into the repository. "af config set" applies a change to
+a running daemon in place where the key allows it (#2480), so most take effect
+without a restart; a raw hand-edit of config.toml still applies on the next start.`,
 }
 
 var configGetCmd = &cobra.Command{
@@ -320,7 +342,8 @@ Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
 so they are not settable here. Ask the config assistant to change them (it edits
 the file and validates), or edit config.toml directly and run "af config validate".
-Changes apply on the next af / daemon start.
+A settable key applies to a running daemon in place (#2480); the structural keys
+above and the network listener keys take effect on the next daemon start.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
@@ -362,19 +385,21 @@ Examples:
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
+		// Apply the write to a running daemon in place (#2480) so a config change
+		// takes effect without a manual `af daemon restart` (the #2479 principle).
+		// Best-effort and non-spawning: with no daemon running there is nothing to
+		// apply live and the value takes effect on the next start.
+		applyResp, applyErr := daemon.RequestApplyConfig()
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, echoValue(res.Value), prettyPath(res.Path))
-		// Warnings before the restart note: what the value MEANS matters more than
+		// Warnings before the apply note: what the value MEANS matters more than
 		// when it takes effect, and the last line is the one that gets read.
 		for _, w := range res.Warnings {
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
-		if res.RequiresRestart {
-			fmt.Fprintln(cmd.OutOrStdout(),
-				"note: af and the daemon read config.toml at startup — restart them to apply (same as a hand-edit)")
-		}
+		reportConfigApply(cmd, res.Key, applyResp, applyErr)
 		return nil
 	},
 }
@@ -441,7 +466,8 @@ config (a prj_ id from 'af projects list', or a path inside a registered
 repository). It edits only the target key, preserving every other comment and
 value, and is a clean no-op when there is no override to clear. There is no
 global unset — remove a line from config.toml by hand, or 'af config set' a new
-value. Changes apply on the next af / daemon start.`,
+value. The cleared override stops applying to sessions created in that project
+from now on.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -466,7 +492,7 @@ value. Changes apply on the next af / daemon start.`,
 			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
 		if res.RequiresRestart {
 			fmt.Fprintln(cmd.OutOrStdout(),
-				"note: af and the daemon read config at startup — restart them to apply (same as a hand-edit)")
+				"saved. It applies to sessions created in this project from now on.")
 		}
 		return nil
 	},
