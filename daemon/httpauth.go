@@ -46,6 +46,14 @@ type authGate struct {
 	// empty token — fails closed: the gate denies (see ConstantTimeEqual).
 	expectedToken func() (string, error)
 
+	// expectedTokenForRequest, when non-nil, SUPERSEDES expectedToken: it returns
+	// the credential THIS request must present, derived from the request itself. The
+	// web-tab PREVIEW listener (#1856) sets it to the per-tab HMAC token keyed on the
+	// sid/tid in the path, so the gate authenticates PER TAB — tab A's token is never
+	// accepted on tab B's route. Like expectedToken, an error or empty return fails
+	// closed. Only the preview listener sets it; every other listener leaves it nil.
+	expectedTokenForRequest func(*http.Request) (string, error)
+
 	// tokenDisabled drops token enforcement for ALL peers — the require_token=false
 	// posture, which is now the DEFAULT so the daemon-served web UI opens with no
 	// login (#1696). Zero value false ⇒ the token is enforced, so this struct's
@@ -95,7 +103,7 @@ func (g *authGate) authorize(r *http.Request) bool {
 	if !g.authRequired(r) {
 		return true
 	}
-	want, err := g.expectedToken()
+	want, err := g.wantToken(r)
 	if err != nil {
 		return false
 	}
@@ -104,6 +112,17 @@ func (g *authGate) authorize(r *http.Request) bool {
 		extract = webTabAwareToken
 	}
 	return ConstantTimeEqual(extract(r), want)
+}
+
+// wantToken resolves the credential this request must present. A per-request
+// resolver (expectedTokenForRequest — the preview listener's per-tab derivation)
+// supersedes the static expectedToken; every other listener uses the static one. An
+// empty return from either fails closed at the ConstantTimeEqual in authorize.
+func (g *authGate) wantToken(r *http.Request) (string, error) {
+	if g.expectedTokenForRequest != nil {
+		return g.expectedTokenForRequest(r)
+	}
+	return g.expectedToken()
 }
 
 // webTabAwareToken returns the request's bearer token, resolved differently under

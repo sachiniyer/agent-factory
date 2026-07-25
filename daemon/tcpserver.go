@@ -96,17 +96,14 @@ func webListenerPolicy(cfg *config.Config) tokenGatePolicy {
 // require_token/require_loopback_token posture.
 //
 // It returns the STRICT zero value — token mandatory for every peer, no
-// exemptions — deliberately, for the step that only opens the port. Two facts
-// make that the safe default rather than a placeholder guess:
-//
-//   - the preview listener serves NOTHING yet (an empty mux), so nothing is
-//     behind this gate to reach with or without a token; and
-//   - the preview origin's real credential is a preview-scoped one wired in a
-//     later step, and pre-committing to the control plane's require_token model
-//     here would be the wrong answer to bake in.
-//
-// So the fail-safe posture holds the seam until that step replaces it, and never
-// silently exposes a preview surface that does not exist.
+// exemptions — deliberately. The preview origin serves untrusted, repo/agent-
+// controlled content, and its credential is the PER-TAB preview token
+// (previewListenerAuth), not the daemon bearer — so it must NOT inherit the control
+// plane's require_token/require_loopback_token relaxations, under which the web UI
+// opens with no token. Here the token is mandatory for every peer, always: the gate
+// derives the request's own-tab token and compares (a loopback browser is exactly
+// the peer this must authenticate). The listener still serves no content until step
+// 3b, so the strict posture never blocks a real surface.
 func previewListenerPolicy(_ *config.Config) tokenGatePolicy {
 	return tokenGatePolicy{}
 }
@@ -141,15 +138,16 @@ const (
 // tcpListenerAuth overrides the credential a listener's gate uses. Nil selects
 // the default: the file-backed daemon bearer token (EnsureToken/LoadToken), used
 // by the control-plane and agent-server listeners. The web-tab PREVIEW listener
-// (#1856) passes a non-nil value to authenticate its SEPARATE ephemeral credential
-// on a distinct query/cookie transport, so the daemon bearer never reaches the
-// preview origin.
+// (#1856) passes a non-nil value to authenticate its SEPARATE per-tab credential on
+// a distinct query/cookie transport, so the daemon bearer never reaches the preview
+// origin.
 type tcpListenerAuth struct {
-	// token returns the credential to advertise AND to compare against, per auth
-	// event. For an in-memory preview token these are the same value; the daemon
-	// path keeps them separate (EnsureToken advertises, LoadToken compares) inside
-	// startTCPListener instead.
-	token func() (string, error)
+	// expectedForRequest returns the credential THIS request must present, derived
+	// per request (the preview listener's per-tab HMAC token, keyed on the sid/tid in
+	// the path). It becomes authGate.expectedTokenForRequest. There is no single
+	// credential to advertise, so the banner token is empty and per-tab tokens are
+	// vended via /v1/preview-auth. Fail-closed: an empty return denies (ConstantTimeEqual).
+	expectedForRequest func(*http.Request) (string, error)
 	// presented extracts the credential a request carries; it becomes
 	// authGate.presentedToken (nil there ⇒ the webTabAwareToken default).
 	presented func(*http.Request) string
@@ -177,14 +175,14 @@ type tcpListenerAuth struct {
 func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth) (func() error, tcpListenerInfo, error) {
 	var token string
 	var expectedToken func() (string, error)
+	var expectedForRequest func(*http.Request) (string, error)
 	var presentedToken func(*http.Request) string
 	if auth != nil {
-		t, err := auth.token()
-		if err != nil {
-			return nil, tcpListenerInfo{}, fmt.Errorf("resolve listener token: %w", err)
-		}
-		token = t
-		expectedToken = auth.token
+		// The preview listener authenticates a PER-TAB credential derived per request
+		// (HMAC over the sid/tid in the path); there is no single token to advertise,
+		// so the banner token stays empty and per-tab tokens are vended via
+		// /v1/preview-auth.
+		expectedForRequest = auth.expectedForRequest
 		presentedToken = auth.presented
 	} else {
 		// Generate-if-absent so enabling the listener always yields a usable token;
@@ -202,10 +200,11 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 		}
 	}
 	gate := &authGate{
-		expectedToken:  expectedToken,
-		presentedToken: presentedToken,
-		tokenDisabled:  policy.tokenDisabled,
-		loopbackExempt: policy.loopbackExempt,
+		expectedToken:           expectedToken,
+		expectedTokenForRequest: expectedForRequest,
+		presentedToken:          presentedToken,
+		tokenDisabled:           policy.tokenDisabled,
+		loopbackExempt:          policy.loopbackExempt,
 	}
 
 	// A plain TCP listener — net.Listen (not tls.Listen). Addr() reports the
