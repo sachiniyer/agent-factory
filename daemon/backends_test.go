@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/json"
+	"net"
+	"net/rpc"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -374,4 +376,48 @@ func TestListBackends_RequiresARepo(t *testing.T) {
 	var resp ListBackendsResponse
 	err := (&controlServer{}).ListBackends(ListBackendsRequest{RepoPath: t.TempDir()}, &resp)
 	assert.Error(t, err, "a non-repo path cannot answer which backends its sessions may use")
+}
+
+// TestListBackends_AnswersOverTheControlSocket proves the CLI's transport reaches
+// the same catalog the web's HTTP route does. `af sessions backends` calls
+// daemon.ListBackends, which goes over the gob control socket, while the web POSTs
+// /v1/ListBackends — two transports, one controlServer.ListBackends. What is NOT
+// obvious is that the gob half works at all: net/rpc only exposes a method whose
+// signature fits, and gob must carry BackendAvailability (a named string type) and
+// the reason strings intact. A tri-state that arrived empty over gob would have the
+// CLI quietly report every backend as usable, which is the promise this catalog
+// exists to keep honest.
+func TestListBackends_AnswersOverTheControlSocket(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	stubLookPath(t)
+	repo := setupControlRepo(t)
+	addOrigin(t, repo)
+	writeRepoBackendConfig(t, repo, map[string]any{
+		"docker": map[string]any{"image": "my-runtime:latest"},
+	})
+
+	server := rpc.NewServer()
+	require.NoError(t, server.RegisterName(controlServiceName, &controlServer{}),
+		"the control service must expose ListBackends — it is the CLI's only path to the catalog")
+	srvConn, cliConn := net.Pipe()
+	go server.ServeConn(srvConn)
+	client := rpc.NewClient(cliConn)
+	t.Cleanup(func() { _ = client.Close() })
+
+	var resp ListBackendsResponse
+	require.NoError(t, client.Call(controlServiceName+".ListBackends",
+		ListBackendsRequest{RepoPath: repo}, &resp))
+
+	assert.Equal(t, listBackends(t, repo), resp,
+		"the socket answer must be the in-process answer verbatim — same order, same tri-state, same reasons")
+
+	// Spelled out rather than left to the whole-struct compare, because these are
+	// the values a transport bug would silently blank.
+	assert.Equal(t, BackendAvailable, optionByName(t, resp, config.BackendDocker).Status,
+		"docker is configured in this repo, so the socket must report it selectable")
+	hook := optionByName(t, resp, config.BackendHook)
+	assert.Equal(t, BackendUnavailable, hook.Status)
+	assert.NotEmpty(t, hook.Reason, "the actionable reason is what the CLI prints; gob must carry it")
+	assert.Equal(t, config.BackendLocal, resp.Default)
+	assert.Equal(t, BackendAvailable, resp.DefaultStatus)
 }

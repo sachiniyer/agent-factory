@@ -1248,11 +1248,11 @@
         "pointer": "web/src/api.ts:260 ListBackends -> web/src/backends.ts renders the picker"
       },
       "cli": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "api/sessions_backends.go:19 sessionsBackendsCmd -> daemon/control_client.go:332 ListBackends"
       },
-      "verdict": "unclear",
-      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). The web needs the round-trip because it cannot import the Go enum; the CLI and TUI read config.SupportedBackends directly and the CLI validates --backend at create time with session.BackendConfigError. So upfront availability DISCOVERY is web-only, while create-time validation is not. Whether the CLI/TUI should also surface availability upfront (vs erroring at create) is an owner call — the #1968/#1970 session owns the serve-the-enum direction. Not filed."
+      "verdict": "deliberate",
+      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it) — one catalog, two transports, so the two surfaces cannot describe a repo's backends differently and a backend added server-side reaches both with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it — the flag advertised the enum but not which values this project can use. The TUI cell stays 'no' DELIBERATELY, and not as a second gap: the web's 'yes' here IS its create-time picker rendering availability, not a standalone catalog view, and the TUI has no backend surface at all (grep-verified — nothing under app/ or ui/ reads config.SupportedBackends or calls ListBackends). A TUI catalog with no way to select a backend would be a dead-end read, so the TUI's analogue is the create-time picker, tracked as session.create.opt.backend's TUI half; recording it here too would double-count one piece of work. This cell flips to 'yes' with that picker, not before."
     },
     {
       "id": "config-agent",
@@ -1365,6 +1365,7 @@
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
       "af sessions attach": "session.attach",
+      "af sessions backends": "backend.list",
       "af sessions create": "session.create",
       "af sessions get": "session.get",
       "af sessions handoff": "session.handoff",
@@ -1584,6 +1585,7 @@
       "af sessions archive --help": "meta.discovery",
       "af sessions archive --self": "session.archive",
       "af sessions attach --help": "meta.discovery",
+      "af sessions backends --help": "meta.discovery",
       "af sessions create --backend": "session.create.opt.backend",
       "af sessions create --help": "meta.discovery",
       "af sessions create --here": "session.create.opt.inplace",

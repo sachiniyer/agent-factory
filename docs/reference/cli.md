@@ -41,6 +41,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
+- [`af sessions backends`](#af-sessions-backends) — List the runtimes this project can create sessions on
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
@@ -1174,6 +1175,7 @@ af sessions
 
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
 - [`af sessions attach`](#af-sessions-attach) — Attach to a session's terminal
+- [`af sessions backends`](#af-sessions-backends) — List the runtimes this project can create sessions on
 - [`af sessions create`](#af-sessions-create) — Create a new session
 - [`af sessions get`](#af-sessions-get) — Get a session by title
 - [`af sessions handoff`](#af-sessions-handoff) — Continue a session under a different agent, in place
@@ -1262,6 +1264,52 @@ af sessions attach <title>
 | `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
+## af sessions backends
+
+List the runtimes this project can create sessions on
+
+Report which backends 'af sessions create --backend' accepts for this
+project, whether each one is usable as the project is configured right now, and
+which backend a create with no --backend resolves to.
+
+--backend names the enum, but knowing that "docker" is spelled correctly is not
+the same as knowing this project can use it. The daemon checks each backend's
+preconditions against the project's config and answers one of three things:
+
+  available    every precondition that can be checked was checked and passed
+  unavailable  a precondition FAILED — a create would fail; "reason" says what to fix
+  unknown      the preconditions could NOT be evaluated (e.g. the project's
+               config would not parse) — neither yes nor no is honest, so
+               "reason" says what stopped the check
+
+"unknown" is deliberately not folded into either of the other two: reporting an
+unchecked backend as available is a promise nobody verified.
+
+"default" is the backend a create with no --backend resolves to here. It is
+EMPTY when the project's 'backend' config key names something unrecognized —
+such a create fails rather than quietly running local, and "default_reason"
+names the offending value.
+
+The reasons are the same text a create prints when it refuses, because both come
+from the same precondition checks.
+
+Example:
+  af sessions backends
+  af sessions backends --repo ~/src/myproject
+
+```
+af sessions backends
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
 ## af sessions create
 
 Create a new session
@@ -1282,7 +1330,7 @@ af sessions create [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config) |
+| `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session name (required) |

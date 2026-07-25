@@ -155,7 +155,11 @@ func backendOptionFor(kind session.BackendKind, cfg *config.ResolvedConfig, cfgE
 			return opt
 		}
 		opt.Status = BackendUnknown
-		opt.Reason = fmt.Sprintf("cannot tell whether this repo can use backend=%s: its %s could not be read (%v). Fix that file, then reopen this form.", kind, config.InRepoConfigFileName(repoRoot), cfgErr)
+		// Surface-neutral phrasing. These reasons are rendered verbatim by every
+		// client — the web's picker, and `af sessions backends` in a terminal — so
+		// telling the reader to "reopen this form" names a thing a CLI user does
+		// not have. Say what to fix; each surface knows how to re-ask.
+		opt.Reason = fmt.Sprintf("cannot tell whether this repo can use backend=%s: its %s could not be read (%v). Fix that file to get a definite answer.", kind, config.InRepoConfigFileName(repoRoot), cfgErr)
 		return opt
 	}
 
@@ -205,7 +209,9 @@ func defaultFor(backends []BackendOption, cfg *config.ResolvedConfig, cfgErr err
 		if cfgErr == nil && cfg != nil {
 			raw = cfg.Backend
 		}
-		return "", BackendUnavailable, fmt.Sprintf("this repo's %s sets backend = %q, which is not a known backend (valid: %s). A session created here fails rather than falling back to local — fix that key, or pick a backend above.", config.InRepoConfigFileName(repoRoot), raw, config.SupportedBackendsString())
+		// "or pick a backend above" assumed a rendered list above the reader; see the
+		// note on the unknown-status reason. Name the ACTION both surfaces have.
+		return "", BackendUnavailable, fmt.Sprintf("this repo's %s sets backend = %q, which is not a known backend (valid: %s). A session created here fails rather than falling back to local — fix that key, or choose a backend explicitly for this session.", config.InRepoConfigFileName(repoRoot), raw, config.SupportedBackendsString())
 	}
 
 	// The default's usability IS the resolved backend's usability; reuse the answer
