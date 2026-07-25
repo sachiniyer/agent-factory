@@ -3,7 +3,32 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
+
+// sanitizeDetachKeys puts detach_keys on the same warn-and-default footing as the
+// other defaultable values in validateConfig (#2556): an unparseable hand-edited
+// value warns and falls back to the default ctrl-w rather than crashing the TUI.
+// Typed input stays strict — `af config set detach_keys` validates eagerly and
+// rejects a bad value up front (the deliberate hand-edit-lenient / typed-strict
+// asymmetry). An empty value is left as-is; the attach path treats "" as "use the
+// built-in default".
+func sanitizeDetachKeys(value, prettyConfigPath string) string {
+	if strings.TrimSpace(value) == "" {
+		return value
+	}
+	if _, err := ParseDetachKey(value); err != nil {
+		log.WarningLog.Printf("Config issue in %s: detach_keys=%q is invalid (%v); using default %q",
+			prettyConfigPath, value, err, defaultDetachKeys)
+		return defaultDetachKeys
+	}
+	return value
+}
+
+// DefaultDetachKeys is the built-in default attach-detach key ("ctrl-w"), the
+// value a bad configured key falls back to.
+func DefaultDetachKeys() string { return defaultDetachKeys }
 
 // ParseDetachKey parses a human-readable key name like "ctrl-w" into its ASCII byte value.
 // Supported formats:

@@ -31,6 +31,11 @@ const (
 	// a routable host:port), and disabling the web server entirely is an explicit
 	// opt-out (listen_addr = "").
 	defaultListenAddr = "127.0.0.1:8443"
+	// defaultDetachKeys is the default attach-detach key. A bad hand-edited
+	// detach_keys value falls back to this with a warning (sanitizeDetachKeys),
+	// on the same warn-and-default footing as the other defaultable values —
+	// never a crash (#2556).
+	defaultDetachKeys = "ctrl-w"
 )
 
 // Release channels selectable via the update_channel config key (#1041).
@@ -490,7 +495,7 @@ func DefaultConfig() *Config {
 			}
 			return fmt.Sprintf("%s/", strings.ToLower(user.Username))
 		}(),
-		DetachKeys: "ctrl-w",
+		DetachKeys: defaultDetachKeys,
 	}
 
 	if claudePath, err := GetClaudeCommand(); err == nil && claudePath != "" {

@@ -180,6 +180,7 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	sanitizeThemeColors(config, prettyConfigPath)
 	config.LimitRetryInterval = sanitizeLimitRetryInterval(config.LimitRetryInterval, prettyConfigPath)
 	config.WorktreeRoot = normalizeWorktreeRoot(config.WorktreeRoot, prettyConfigPath)
+	config.DetachKeys = sanitizeDetachKeys(config.DetachKeys, prettyConfigPath)
 
 	if config.DaemonPollInterval <= 0 {
 		log.WarningLog.Printf("daemon_poll_interval=%d is non-positive; using default %dms", config.DaemonPollInterval, defaultDaemonPollInterval)
