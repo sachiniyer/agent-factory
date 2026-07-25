@@ -1,6 +1,7 @@
 // Package envcommand parses the closed subset of GNU env that Agent Factory
-// can reason about without executing it. Both tmux safety policy and receipt
-// routing use this package so option consumption cannot drift between them.
+// can reason about without executing it. Receipt routing and session-env
+// command parsing use this package so option consumption cannot drift between
+// them.
 package envcommand
 
 import (
@@ -13,9 +14,9 @@ import (
 // statically. Callers must fail closed rather than guessing past this error.
 var ErrUnsupported = errors.New("unsupported env invocation")
 
-// Policy describes the one intentional consumer difference: the tmux guard
-// rejects every assignment because it cannot prove an assignment does not
-// change command resolution, while receipt routing must model literal ones.
+// Policy controls whether Parse accepts environment assignments. Assignments
+// can change command resolution, so callers that must model literal ones opt
+// in; all current callers pass AllowAssignments: true.
 type Policy struct {
 	AllowAssignments bool
 }

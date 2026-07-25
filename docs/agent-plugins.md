@@ -33,10 +33,10 @@ installs the plugin from it. Codex copies the manifest, the skill, and the hook
 into `$CODEX_HOME/plugins/cache/agent-factory/agent-factory/<version>/`.
 
 Codex does not trust a plugin's hooks just because the plugin is installed — it
-asks you to review their exact definitions first. The skill works if you decline
-them, but the tmux teardown guard does not: use `/hooks` to trust the plugin's
-current hooks if you want the protection described below. A plugin update that
-changes a hook requires review again.
+asks you to review their exact definitions first. The skill works whether or not
+you accept the hooks: the only hook is the `SessionStart` preflight, which is
+informational and not a restriction. A plugin update that changes a hook
+requires review again.
 
 ## Claude Code
 
