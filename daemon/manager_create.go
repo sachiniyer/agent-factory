@@ -773,6 +773,12 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string
 // label, not a branch to be created, so "is this branch checked out somewhere" is
 // not a question about it.
 func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program string, namespace runtimeNameNamespace, diskData []session.InstanceData) (string, error) {
+	// Bound the base so the " (archived N)" suffix survives branch truncation and
+	// each rung derives a DISTINCT branch; a long base otherwise collapses every
+	// rung to the same branch and the walk spins to 10,000 (#2528). Availability
+	// here is judged via TitlesCollide -> BranchForTitle even though no branch is
+	// created for the rename, so the same injectivity is required.
+	base = git.BoundTitleForDisambiguation(base)
 	for i := 1; i <= 10000; i++ {
 		candidate := fmt.Sprintf("%s (archived)", base)
 		if i > 1 {
@@ -801,10 +807,15 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 	// somewhere, ONCE per walk, and skip those rungs instead of discovering the
 	// collision at add time.
 	heldBranches := m.worktreeHeldBranchesLocked(repoPath, namespace != runtimeNamespaceLocalTmux)
+	// Bound the base before suffixing so a long title's "-N" survives branch
+	// truncation and each rung derives a DISTINCT branch; otherwise every rung
+	// collapses to the taken base's branch, and the walk skips all 10,000 rungs
+	// under m.mu before failing (#2528). The bare base (i == 1) is unchanged.
+	boundedBase := git.BoundTitleForDisambiguation(baseTitle)
 	for i := 1; i <= 10000; i++ {
 		candidate := baseTitle
 		if i > 1 {
-			candidate = fmt.Sprintf("%s-%d", baseTitle, i)
+			candidate = fmt.Sprintf("%s-%d", boundedBase, i)
 		}
 		branch := m.branchForTitle(candidate)
 		if holder, held := heldBranches[branch]; held {

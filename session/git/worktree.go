@@ -233,12 +233,22 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 		// always has a branch, so this fallback only ever engages on restore.
 		leaf := branchName
 		if strings.TrimSpace(leaf) == "" {
-			leaf = sanitizeWorktreePathSegment(sessionName)
+			// The fallback leaf is a standalone component (no repo-name prefix), so
+			// bound it against NAME_MAX on its own. Branch-derived leaves are already
+			// bounded per component by SanitizeBranchName.
+			leaf = boundWorktreeComponent("", sanitizeWorktreePathSegment(sessionName))
 		}
 		basePath = filepath.Join(worktreeDir, leaf)
 	} else {
-		// Sibling mode: {repoParent}/{repoName}-{sessionName}
-		basePath = filepath.Join(worktreeDir, filepath.Base(repoRoot)+"-"+sanitizeWorktreePathSegment(sessionName))
+		// Sibling mode: {repoParent}/{repoName}-{sessionName}. The directory name is
+		// the JOINED "<repoName>-<segment>" component — and git derives the
+		// .git/worktrees/<id> admin dir from its basename — so both must fit
+		// NAME_MAX. Budget the segment against the ACTUAL repo-name prefix here at
+		// the join site; a fixed cap on the segment alone silently overruns once the
+		// repo name is long (#2528).
+		repoBase := filepath.Base(repoRoot)
+		segment := boundWorktreeComponent(repoBase, sanitizeWorktreePathSegment(sessionName))
+		basePath = filepath.Join(worktreeDir, repoBase+"-"+segment)
 	}
 
 	// Ensure the worktree path is strictly nested inside worktreeDir. We use
@@ -251,6 +261,49 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 		return "", fmt.Errorf("invalid session name %q: would place worktree outside %s", sessionName, worktreeDir)
 	}
 	return firstFreeWorktreePath(basePath)
+}
+
+const (
+	// nameMax is the Linux per-component filesystem limit (NAME_MAX). A worktree
+	// directory name — and the .git/worktrees/<id> admin dir git derives from its
+	// basename — must both satisfy it, or `git worktree add` fails ENAMETOOLONG for
+	// a long title (#2528).
+	nameMax = 255
+	// worktreeCollisionSuffixReserve leaves room within nameMax for
+	// firstFreeWorktreePath's "-N" collision suffix, which extends the SAME
+	// directory component when the base path is already occupied.
+	worktreeCollisionSuffixReserve = 16
+)
+
+// boundWorktreeComponent trims segment so the worktree directory component stays
+// within NAME_MAX with room for the collision suffix. In sibling mode the
+// component is "<repoBase>-<segment>", so the segment's allowance is derived from
+// the actual repo-name prefix — the budgeting a fixed per-segment cap got wrong by
+// ignoring that prefix entirely (#2528). Pass repoBase "" for a standalone
+// component (the subdirectory-mode fallback leaf).
+//
+// repoBase is itself a real directory name and therefore already <= NAME_MAX; when
+// it is long enough to crowd the segment out, the segment collapses to a one-byte
+// floor and the collision suffix still disambiguates. segment is ASCII
+// (sanitizeWorktreePathSegment), so a byte truncation is rune-safe.
+func boundWorktreeComponent(repoBase, segment string) string {
+	allow := nameMax - worktreeCollisionSuffixReserve
+	if repoBase != "" {
+		allow -= len(repoBase) + len("-")
+	}
+	if allow < 1 {
+		allow = 1
+	}
+	if len(segment) <= allow {
+		return segment
+	}
+	segment = strings.Trim(segment[:allow], "-.")
+	if segment == "" {
+		// Never return empty: it would collapse "<repoBase>-<segment>" to a trailing
+		// separator (and a standalone leaf to nothing).
+		segment = "s"
+	}
+	return segment
 }
 
 // firstFreeWorktreePath returns basePath, or basePath with the lowest "-N"
