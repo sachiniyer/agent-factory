@@ -139,15 +139,20 @@ func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion 
 			Listeners:  toListenerExpectation(snap.listeners),
 		},
 		RecoveryJob: recoveryJob,
-		// MetadataPaths is intentionally empty for R2b, and this is a deferral, not a
-		// claim of completeness. Rollback only ever runs BEFORE commit; until commit
-		// the candidate is held in DaemonPhaseUpgradeProbation, which blocks every
-		// mutating RPC, and its startup restore is read-only — so no daemon-written
-		// metadata diverges from what the previous daemon left, and a binary-only
-		// restore is complete for that window. The full metadata manifest (guarding
-		// the residual migrate-on-load edge, where the new binary could rewrite a
-		// state file as it reads it) lands with the R3 release wiring that first
-		// stages a candidate; capturing it here now would be guessing at the set.
+		// MetadataPaths is intentionally empty because R2b STARTS NO CANDIDATE — the
+		// trigger is wired to nothing yet, so no candidate daemon boots to write any
+		// metadata. It is NOT empty because probation makes divergence safe: probation
+		// blocks mutating RPCs, but migrate-on-load is not an RPC and runs anyway.
+		// config.LoadAndMigrateSchemaFile atomically REWRITES a state file as it reads
+		// it (config/schema_migration.go), and it runs at daemon load — before restore —
+		// for every per-repo instances.json (config.MigrateAllRepoInstancesForDaemonLoad)
+		// and for tasks.json (task/schema_migration.go). So a candidate that boots,
+		// migrates vN→vN+1, then FAILS validation would leave a binary-only rollback
+		// restoring the FromVersion daemon onto state files written in a schema it can no
+		// longer read. That gap is inert only while nothing is staged; it goes live the
+		// moment R3 stages a real candidate, so R3 MUST populate this manifest with those
+		// migrated paths (recorded as the R3 prerequisite on #2212). Capturing them here
+		// now, with no candidate to protect, would only be guessing at the set.
 	}, nil
 }
 

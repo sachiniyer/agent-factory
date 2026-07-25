@@ -205,18 +205,25 @@ func TestRecoveryHomeGuard_ComparesCanonically(t *testing.T) {
 func TestUpgradeRecoveryJobFor_AllKinds(t *testing.T) {
 	unitDir := withAutostartTestEnv(t, "linux")
 	const id = "upgrade-abc"
+	// NewRecoveryJob emits the symlink-RESOLVED unit path (correct product behavior:
+	// a unit file records a real path), so the expectation is built in the same
+	// canonical space — the property is "the job path is the right path under the
+	// home", not byte-identity with an unresolved temp dir (which on macOS is a
+	// /var -> /private/var symlink).
+	resolvedUnitDir, err := filepath.EvalSymlinks(unitDir)
+	require.NoError(t, err)
 
 	systemd, err := upgradeRecoveryJobFor(id, upgradetxn.SupervisionSystemd)
 	require.NoError(t, err)
 	require.Equal(t, upgradetxn.RecoveryJobSystemd, systemd.Kind)
 	require.Equal(t, "agent-factory-upgrade-recovery-"+id+".service", systemd.Name)
-	require.Equal(t, filepath.Join(unitDir, systemd.Name), systemd.UnitPath)
+	require.Equal(t, filepath.Join(resolvedUnitDir, systemd.Name), systemd.UnitPath)
 
 	launchd, err := upgradeRecoveryJobFor(id, upgradetxn.SupervisionLaunchd)
 	require.NoError(t, err)
 	require.Equal(t, upgradetxn.RecoveryJobLaunchd, launchd.Kind)
 	require.Equal(t, "com.agent-factory.upgrade-recovery."+id, launchd.Name)
-	require.Equal(t, filepath.Join(unitDir, launchd.Name+".plist"), launchd.UnitPath)
+	require.Equal(t, filepath.Join(resolvedUnitDir, launchd.Name+".plist"), launchd.UnitPath)
 
 	adhoc, err := upgradeRecoveryJobFor(id, upgradetxn.SupervisionAdHoc)
 	require.NoError(t, err)

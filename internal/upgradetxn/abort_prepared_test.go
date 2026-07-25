@@ -1,10 +1,65 @@
 package upgradetxn
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// validateDirectoryNoSymlink must accept a real directory reached through a
+// symlinked ANCESTOR (a symlinked home, macOS /var -> /private/var) — rejecting that
+// wedged the whole upgrade engine, all 14 durable-fs call sites, on those boxes —
+// while still rejecting a symlinked LEAF, which is the swap defense (#2110 class).
+func TestValidateDirectoryNoSymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	require.NoError(t, os.MkdirAll(real, 0o755))
+
+	linkAncestor := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(base, linkAncestor)) // link -> base
+	require.NoError(t, validateDirectoryNoSymlink(filepath.Join(linkAncestor, "real")),
+		"a real directory reached through a symlinked ancestor must be accepted")
+
+	leaf := filepath.Join(base, "leaflink")
+	require.NoError(t, os.Symlink(real, leaf))
+	require.Error(t, validateDirectoryNoSymlink(leaf),
+		"a directory that is itself a symlink must be rejected (the swap defense)")
+
+	require.ErrorIs(t, validateDirectoryNoSymlink(filepath.Join(base, "absent")), os.ErrNotExist,
+		"a missing directory must surface ErrNotExist for the create/skip callers")
+
+	file := filepath.Join(base, "afile")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+	require.Error(t, validateDirectoryNoSymlink(file), "a non-directory must be rejected")
+}
+
+// The abort must succeed when the AF home is reached through a symlink — the exact
+// darwin failure, reproduced on linux with an explicit symlink. Before the shared
+// validator fix, removeRequiredDurableFile refused the symlinked directory path and
+// the un-wedge primitive was itself wedged.
+func TestAbortPreparedTransaction_SymlinkedHome(t *testing.T) {
+	base := t.TempDir()
+	realHome := filepath.Join(base, "real")
+	require.NoError(t, os.MkdirAll(realHome, 0o755))
+	linkHome := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(realHome, linkHome)) // like /var -> /private/var
+
+	exe := filepath.Join(base, "af")
+	require.NoError(t, os.WriteFile(exe, []byte("previous-af-binary"), 0o755))
+
+	txn, err := Prepare(Plan{
+		ID: "upgrade-symlink", HomeDir: linkHome, ExecutablePath: exe,
+		FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate-symlink"),
+		RecoveryJob: RecoveryJob{Kind: RecoveryJobDetached},
+	})
+	require.NoError(t, err)
+	require.NoError(t, AbortPreparedTransaction(linkHome, txn.Journal().ID),
+		"abort must succeed when the home is reached through a symlink")
+	_, loadErr := Load(linkHome)
+	require.ErrorIs(t, loadErr, ErrNoActiveTransaction)
+}
 
 // AbortPreparedTransaction lets the initiating daemon undo a published-but-unstarted
 // transaction so one transient InstallAndStart failure does not wedge every future
