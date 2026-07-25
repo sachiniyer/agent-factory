@@ -619,7 +619,10 @@ function taskFormModal(opts: {
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
   if (opts.projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet — create a session first");
+    // Post-#2456 a registered repo is a valid task target (opts.projects ∪ the
+    // registry), so the coherent action is the switcher's "+ Add project", not a
+    // session — matching the New session modal's empty state.
+    const opt = h("option", { value: "" }, "No projects yet — add one from the project switcher first");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);

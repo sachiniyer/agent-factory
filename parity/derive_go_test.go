@@ -67,6 +67,7 @@ var auditedRequests = map[string]reflect.Type{
 	"PingRequest":             reflect.TypeOf(daemon.PingRequest{}),
 	"PreviewRequest":          reflect.TypeOf(daemon.PreviewRequest{}),
 	"ReapConfigAgentRequest":  reflect.TypeOf(daemon.ReapConfigAgentRequest{}),
+	"RegisterProjectRequest":  reflect.TypeOf(daemon.RegisterProjectRequest{}),
 	"RenameTabRequest":        reflect.TypeOf(daemon.RenameTabRequest{}),
 	"ReorderTabRequest":       reflect.TypeOf(daemon.ReorderTabRequest{}),
 	"RestoreSessionRequest":   reflect.TypeOf(daemon.RestoreSessionRequest{}),

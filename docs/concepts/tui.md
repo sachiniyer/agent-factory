@@ -4,12 +4,16 @@ The `af` terminal UI is the home base for running agents. It's built to keep you
 in one screen: a list of everything running on the left, a live look at any
 agent on the right, and a keystroke to dive into any of them full-screen.
 
-Launch it from inside a git repository:
+Launch it from inside a git repository to open scoped to that project, or from
+anywhere to open on your project registry and pick one:
 
 ```bash
-cd your-project
+cd your-project   # opens scoped to this project
 af
 ```
+
+Run outside a git repository and `af` still opens — on the project registry, so
+you can select a known project or add one.
 
 ## Layout
 

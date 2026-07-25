@@ -335,12 +335,14 @@ keyboard never surprises you:
   attach — it just highlights a row. j/k always navigate, even after you've been
   typing to an agent.
 - **`Enter` attaches** the selected session: the main pane's terminal takes the
-  keyboard, and keystrokes now flow to the agent.
-- **`Escape` detaches**, handing the keyboard back to the rail. (The Escape is
-  swallowed — it never leaks a stray byte to the agent.)
+  keyboard, and keystrokes now flow to the agent — **including `Escape`**, which is
+  the agents' interrupt key (it cancels the current turn), exactly as in the TUI.
+- **`ctrl+]` detaches**, handing the keyboard back to the rail — the same detach
+  chord the TUI uses. (`Escape` is *not* a detach: it goes to the agent.)
 - **Clicking a row** does both at once: it selects *and* attaches, the same as
   `Enter` on that row. Clicking directly into the terminal also attaches; clicking
-  or tabbing away returns to rail navigation.
+  or tabbing away (or, on mobile, opening the rail drawer) returns to rail
+  navigation — so you are never trapped even without `ctrl+]`.
 
 The pane you're driving is highlighted with an accent border, so the active mode is
 always legible.
@@ -624,14 +626,18 @@ editor. Tab navigation (`1`–`9`, the sidebar tree) treats it like any other ta
 | --- | --- |
 | `j` / `k`, `↓` / `↑` | Move the rail selection (never attaches) |
 | `Enter` | Attach the selected session's terminal |
-| `Escape` | Detach — return the keyboard to the rail (or close a modal) |
+| `ctrl+]` | Detach — return the keyboard to the rail |
+| `Escape` | Interrupt the agent (forwarded to the terminal); closes an open modal/menu first |
 | `1`–`9` | Switch to that tab of the selected session |
 | `t` | New shell tab in the worktree |
 | `w` | Close the active shell tab (tab 0, the agent, is unclosable) |
 | `[` / `]` | Cycle the top-level view (Sessions → Tasks) |
 
 `[` / `]` work in every view; the rest are the Sessions view's session/tab keys.
-While a terminal is attached, all keys except `Escape` flow to the agent.
+While a terminal is attached, **every** key flows to the agent — `Escape` included,
+as the interrupt — and only `ctrl+]` detaches. An open modal or menu still takes
+`Escape` to close itself. (No keyboard? Click the rail, or open the mobile rail
+drawer, to detach.)
 
 ---
 

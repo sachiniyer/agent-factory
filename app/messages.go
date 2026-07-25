@@ -32,6 +32,15 @@ type startArchiveMsg struct {
 	target sessionActionTarget
 }
 
+// startRestoreMsg is emitted by the reprovisioning-restore confirmation (#2489);
+// its handler dispatches restoreInstanceCmd off the event loop, mirroring
+// startArchiveMsg → archiveInstanceCmd. Only the remote-sandbox restore that could
+// discard unpushed work is gated behind a confirm; a safe restore dispatches the
+// command immediately via handleRestore.
+type startRestoreMsg struct {
+	target sessionActionTarget
+}
+
 // startDeleteProjectMsg is emitted by the delete-project confirmation (#1735);
 // its handler dispatches deleteProjectCmd to run the daemon archive-then-remove
 // off the event loop, mirroring startArchiveMsg → archiveInstanceCmd.
@@ -55,6 +64,14 @@ type projectDeletedMsg struct {
 	// torn-down session is NOT restorable, and the user must not be told it is.
 	killed int
 	err    error
+}
+
+// projectAddedMsg reports completion of an async add-project (#2456). The switch
+// already happened synchronously; this only carries the off-loop registry write's
+// outcome so its success refreshes the switcher and its failure is surfaced.
+type projectAddedMsg struct {
+	root string
+	err  error
 }
 
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async

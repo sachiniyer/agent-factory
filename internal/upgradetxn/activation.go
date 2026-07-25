@@ -69,6 +69,34 @@ func (t *Transaction) AuthorizeActivation(transactionID, nonce string) error {
 	return nil
 }
 
+// ActivationApproved reports whether the old process has published an activation
+// approval for the currently active transaction. It is the lease-free check the
+// recovery actor's AwaitActivation waits on; the authoritative, actor-bound
+// validation remains RecoveryLease.ActivationAuthorized, which the supervisor
+// runs immediately afterwards. A missing approval is (false, nil), not an error.
+func ActivationApproved(homeDir string) (bool, error) {
+	txn, err := Load(homeDir)
+	if err != nil {
+		return false, err
+	}
+	journal := txn.Journal()
+	path := filepath.Join(transactionDir(journal.HomeDir, journal.ID), "activation.approved")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read upgrade activation approval: %w", err)
+	}
+	var approval activationApproval
+	if err := json.Unmarshal(data, &approval); err != nil {
+		return false, fmt.Errorf("decode upgrade activation approval: %w", err)
+	}
+	return approval.SchemaVersion == journalSchemaVersion &&
+		approval.TransactionID == journal.ID &&
+		approval.Nonce == journal.RecoveryNonce, nil
+}
+
 func publishActivationApproval(path string, data []byte) error {
 	writeErr := durableAtomicWriteFile(path, data, journalFileMode)
 	if writeErr == nil {

@@ -59,6 +59,25 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	return nil
 }
 
+// ReleaseUpgradeProbation lifts this daemon's upgrade probation once its
+// previous-binary supervisor has validated it (#2212 R2). A release for a
+// non-matching or non-probationary transaction is refused. It is deliberately NOT
+// gated on requireMutationAdmission — probation is exactly what it lifts, so
+// gating it on admission would deadlock. (Authority rests on the control socket
+// being owner-only and already privileged, NOT on the transaction id being
+// secret: Ping reports that id, `af daemon status` prints it, and it rides argv
+// visible in /proc — it is an identity check, never a capability.)
+func (s *controlServer) ReleaseUpgradeProbation(req ReleaseUpgradeProbationRequest, resp *ReleaseUpgradeProbationResponse) error {
+	if s.manager == nil || s.manager.lifecycle == nil {
+		return fmt.Errorf("daemon has no lifecycle to release from upgrade probation")
+	}
+	if err := s.manager.lifecycle.releaseUpgradeProbation(req.TransactionID); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
 // PauseStatusPoll pauses the daemon's capture-pane liveness poll for one
 // attached session (#1160). Deliberately NOT gated on requireManagerReady:
 // it is a lightweight, lease-bounded map write on the dedicated pausedMu (not
@@ -636,7 +655,7 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	for _, k := range result.Killed {
 		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
 	}
-	if len(result.Archived) > 0 || len(result.Killed) > 0 {
+	if len(result.Archived) > 0 || len(result.Killed) > 0 || result.Deregistered {
 		s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
 	}
 	if err != nil {
@@ -645,6 +664,53 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	resp.OK = true
 	resp.ArchivedCount = len(result.Archived)
 	resp.KilledCount = len(result.Killed)
+	return nil
+}
+
+// RegisterProject records a git checkout as a durable, sessionless project in
+// the #2355 registry (#2456). The daemon is the single writer (#960): the CLI,
+// web, and TUI all route their add-project action here rather than writing the
+// registry in-process, so one process owns the store and — for a web or remote
+// client — the path is resolved on the daemon's filesystem, not the caller's.
+//
+// config.RegisterProject does the work (expand ~, resolve the git root,
+// validate, persist, idempotent) under its own file lock, so this handler adds
+// only the admission gate and the projects-changed publish. It does NOT take a
+// manager lock: the registry is independent of the session roster, and
+// RegisterProject's own lock already serializes concurrent registrations.
+//
+// The publish rides the same EventProjectsChanged signal DeleteProject uses, so
+// a client showing a projects view re-fetches and the new empty project appears
+// without a manual refresh. It is emitted only on a successful, genuinely new or
+// re-confirmed registration — an error returns before it, and an idempotent
+// re-registration still publishes (harmless: the re-fetch is a no-op diff).
+func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *RegisterProjectResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	project, err := config.RegisterProject(req.Path)
+	if err != nil {
+		return err
+	}
+	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	resp.OK = true
+	resp.Project = project
+	return nil
+}
+
+// ListProjects returns every durable project in this daemon's #2355 registry
+// (#2456). It is a pure config read: config.ListProjects walks the registry
+// directory with no lock and no manager, so — like ListBackends — this handler
+// takes no admission gate and answers even while the daemon is still restoring
+// sessions (a client building its project list must not have to wait on the
+// session restore for the registry, which is independent of it). The read is the
+// half of #2491 the LOCAL union needs; see ListProjectsRequest.
+func (s *controlServer) ListProjects(_ ListProjectsRequest, resp *ListProjectsResponse) error {
+	projects, err := config.ListProjects()
+	if err != nil {
+		return err
+	}
+	resp.Projects = projects
 	return nil
 }
 

@@ -73,8 +73,8 @@ func TestHandleArchive_ConfirmationUsesEffectiveRestoreKey(t *testing.T) {
 		wantKey   string
 		notKey    string
 	}{
-		{name: "default", wantKey: "with r ", notKey: "with R "},
-		{name: "pinned restore key", overrides: map[string][]string{"restore": {"R"}}, wantKey: "with R ", notKey: "with r "},
+		{name: "default", wantKey: "with r.", notKey: "with R."},
+		{name: "pinned restore key", overrides: map[string][]string{"restore": {"R"}}, wantKey: "with R.", notKey: "with r."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, keys.ApplyOverrides(tc.overrides))

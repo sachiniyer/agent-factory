@@ -311,6 +311,122 @@ func TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad(t *testing.T) 
 	assert.True(t, restored.Started())
 }
 
+// TestRunningInstance_OneLiveOneDeadShell_DeadShellReplaced is the #2527
+// regression: with MULTIPLE shell tabs, a single live shell used to set
+// hasLiveShell and suppress replacement of every dead shell, leaving them pointing
+// at non-existent sessions ("Terminal session not available"). Each dead shell
+// must be replaced independently.
+func TestRunningInstance_OneLiveOneDeadShell_DeadShellReplaced(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_2527_agent"
+	firstShell := agentName + shellTmuxSuffix // "…__shell"
+	secondShell := agentName + "__shell-2"
+
+	// Agent and the FIRST shell are alive; the SECOND shell is gone and its
+	// re-spawn fails (failFirstNewSessionPty fails the first new-session it sees —
+	// the second shell's Restore). On master the live first shell sets
+	// hasLiveShell=true and the whole replacement block is skipped, so the dead
+	// second shell is stranded.
+	var newSessions, ptyNewSessions int
+	exec := countingExec(map[string]bool{agentName: true, firstShell: true}, &newSessions)
+	pty := failFirstNewSessionPty{t: t, cmdExec: exec, count: &ptyNewSessions}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	data := deadInstanceData(t, Running, agentName, firstShell)
+	data.Tabs = append(data.Tabs, TabData{Name: "shell-2", Kind: TabKindShell, TmuxName: secondShell})
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	assert.True(t, restored.TabAlive(0), "the live agent tab must stay reconnected")
+	assert.True(t, restored.TabAlive(1), "the live first shell must stay live")
+	assert.True(t, restored.TabAlive(2),
+		"the dead second shell must be replaced too — a live sibling must not suppress its replacement (#2527)")
+	assert.Equal(t, 1, newSessions,
+		"exactly one fresh shell session must be spawned (the one dead shell; the failed re-spawn never counted)")
+	// The replacement retook the dead shell's own persisted tmux name.
+	tabs := restored.GetTabs()
+	require.Len(t, tabs, 3)
+	assert.Equal(t, secondShell, tabs[2].tmux.SanitizedName(),
+		"the replacement keeps the dead shell's #930-derived tmux name")
+}
+
+// TestRunningInstance_AllShellsDead_EveryShellReplaced covers the other half of
+// #2527: when NO shell is live, the old code replaced only the FIRST dead shell.
+func TestRunningInstance_AllShellsDead_EveryShellReplaced(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_2527_alldead"
+	firstShell := agentName + shellTmuxSuffix
+	secondShell := agentName + "__shell-2"
+
+	// Only the agent is alive; both shells are gone. failNFirstNewSessionsPty fails
+	// the first TWO new-sessions — each dead shell's Restore re-spawn — so both stay
+	// dead and the setupTabs fallback must replace them; the later fresh-shell
+	// new-sessions succeed. On master the fallback replaced only the first shell.
+	var newSessions int
+	exec := countingExec(map[string]bool{agentName: true}, &newSessions)
+	failed := 0
+	pty := failNFirstNewSessionsPty{t: t, cmdExec: exec, failFirst: 2, count: &failed}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	data := deadInstanceData(t, Running, agentName, firstShell)
+	data.Tabs = append(data.Tabs, TabData{Name: "shell-2", Kind: TabKindShell, TmuxName: secondShell})
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	assert.True(t, restored.TabAlive(0), "the agent tab must be live")
+	assert.True(t, restored.TabAlive(1), "the first dead shell must be replaced")
+	assert.True(t, restored.TabAlive(2),
+		"the second dead shell must ALSO be replaced — the all-dead path replaced only the first (#2527)")
+	assert.Equal(t, 2, newSessions, "one fresh shell per dead shell")
+	// The two replacements must take DISTINCT tmux names — never resolve to the same
+	// token and collide on the second Start (#2527 review).
+	tabs := restored.GetTabs()
+	require.Len(t, tabs, 3)
+	assert.NotEqual(t, tabs[1].tmux.SanitizedName(), tabs[2].tmux.SanitizedName(),
+		"the two replacement shells must get distinct tmux names")
+}
+
+// failNFirstNewSessionsPty fails the first N `tmux new-session` calls (the dead
+// shells' re-spawns) and lets every later one (the fresh-shell fallbacks) succeed.
+type failNFirstNewSessionsPty struct {
+	t         *testing.T
+	cmdExec   cmd_test.MockCmdExec
+	failFirst int
+	count     *int
+}
+
+func (p failNFirstNewSessionsPty) Start(cmd *exec.Cmd) (*os.File, error) {
+	if strings.Contains(cmd.String(), "new-session") {
+		*p.count++
+		if *p.count <= p.failFirst {
+			return nil, fmt.Errorf("new-session failed: worktree gone")
+		}
+	}
+	f, err := os.CreateTemp(p.t.TempDir(), "pty-")
+	if err == nil {
+		_ = p.cmdExec.Run(cmd)
+	}
+	return f, err
+}
+
+func (p failNFirstNewSessionsPty) Close() {}
+
 func TestRunningInstance_DeadNonDefaultShellTabKeepsTmuxNameOnLoad(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()

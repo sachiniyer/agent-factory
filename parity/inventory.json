@@ -117,8 +117,8 @@
         "pointer": "keys/keys.go:153 (N) -> app/handle_input.go:207 ForceRemote"
       },
       "web": {
-        "status": "no",
-        "pointer": "web/src/api.ts:251-264 never sends force_remote"
+        "status": "partial",
+        "pointer": "web/src/api.ts createSession sends backend='hook' via the #1968 ListBackends picker — the SAME BackendHook force_remote selects (session/instance_factory.go resolveBackendKind)"
       },
       "cli": {
         "status": "yes",
@@ -126,7 +126,7 @@
       },
       "verdict": "real-gap",
       "issue": "#1933",
-      "notes": "TUI is 'partial' because ForceRemote resolves to the hook backend ONLY (session/instance_factory.go:106-108) — N cannot reach docker or ssh. The web has no remote affordance at all; this is the gap the owner reported."
+      "notes": "TUI is 'partial' because ForceRemote resolves to the hook backend ONLY (session/instance_factory.go resolveBackendKind) — N cannot reach docker or ssh. The web is ALSO 'partial', not 'no': the hook backend is reachable from the browser via the #1968 backend picker (backend='hook'), which resolveBackendKind routes to the same BackendHook by a STRONGER path than force_remote — an explicit backend wins over ForceRemote, and both override the repo's backend config, so the picker's 'hook' is strictly more capable than the legacy selector. The dedicated force_remote FIELD is deliberately NOT sent by the web (it stays a field_coverage gap): it adds no capability over the picker, and an ungated 'remote hooks' checkbox reintroduces the 'offered then fails at provision' trap the picker's backendSelectable gate closes (#2406 was closed in favor of this ledger correction). Same unproven-provisioning caveat as session.create.opt.backend: reachable != proven to create a WORKING remote session from the browser (#1968)."
     },
     {
       "id": "session.create.opt.inplace",
@@ -585,20 +585,20 @@
       "id": "project.list",
       "title": "See the list of durable projects",
       "tui": {
-        "status": "partial",
-        "pointer": "keys/keys.go:172 (ctrl+p) -> app/switch_project.go:25"
+        "status": "yes",
+        "pointer": "app/switch_project.go buildProjectListFrom unions config.ListProjects() (registry) with derived sessions + root_agents"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/ui.ts:1047 project switcher"
+        "status": "yes",
+        "pointer": "web/src/api.ts listProjects → project.ts projectSummaries/pickerProjects ∪ registeredProjects; web/src/ui.ts project switcher"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsListCmd"
+        "pointer": "api/projects.go projectsListCmd (config.ListProjects)"
       },
-      "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI reads the durable registry introduced in #2216's identity slice. The TUI and web still derive their switchers from sessions and legacy root-agent paths, so they expose only a partial, different set until the later #2216 UI/RPC slice consumes this registry."
+      "verdict": "parity",
+      "issue": "#2478",
+      "notes": "The CLI, TUI, and web all now surface the durable registry (#2216 identity slice, read via config.ListProjects / the daemon's ListProjects RPC). #2456 added the read half (ListProjects RPC, POST /v1/ListProjects) and unioned it into both switchers: derived (live sessions + tasks) ∪ registry ∪ root_agents, so a registered-but-sessionless project appears everywhere and is creatable-into. This closes the #2478 gap (the TUI/web switchers previously derived only from sessions + legacy root_agents). The web reads over HTTP; the two Go surfaces read config.ListProjects() in-process (a read of on-disk config the daemon writes needs no round trip)."
     },
     {
       "id": "project.delete",
@@ -622,20 +622,20 @@
       "id": "project.add",
       "title": "Register a new project",
       "tui": {
-        "status": "partial",
-        "pointer": "app/switch_project.go:196-216 (picker '+ Add project…' row)"
+        "status": "yes",
+        "pointer": "app/switch_project.go handleAddProject → registerProjectThroughDaemon (apiclient RegisterProject RPC)"
       },
       "web": {
-        "status": "no",
-        "pointer": "web/src/modals.ts:153-157 'No projects yet — create a session in the TUI first'"
+        "status": "yes",
+        "pointer": "web/src/ui.ts renderProjectSwitch '+ Add project' → web/src/modals.ts addProjectModal → api.ts registerProject (RegisterProject RPC)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsRegisterCmd"
+        "pointer": "api/projects.go newProjectsAddCmd (af projects add, register alias) → daemon RegisterProject RPC"
       },
-      "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI now explicitly registers a sessionless project by path in the durable registry. The TUI's existing row persists a legacy root_agents entry instead of the new identity, and the web has no registration action; the later #2216 UI/RPC slice will build on the registry rather than create another one."
+      "verdict": "parity",
+      "issue": "#2456",
+      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
     },
     {
       "id": "project.rebind",
@@ -1377,10 +1377,10 @@
       "af help": "meta.discovery",
       "af hook-guard-tmux": "internal.hook-guard-tmux",
       "af keys": "meta.discovery",
+      "af projects add": "project.add",
       "af projects delete": "project.delete",
       "af projects list": "project.list",
       "af projects rebind": "project.rebind",
-      "af projects register": "project.add",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
       "af sessions attach": "session.attach",
@@ -1428,8 +1428,10 @@
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListBackends": "backend.list",
+      "POST /v1/ListProjects": "project.list",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/RegisterProject": "project.add",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",
@@ -1441,6 +1443,7 @@
       "POST /v1/SetConfigValue": "config.write",
       "POST /v1/SetPRInfo": "session.pr.set",
       "POST /v1/Snapshot": "session.list",
+      "POST /v1/SuggestSessionName": "-",
       "POST /v1/TriggerTask": "task.trigger",
       "POST /v1/UpdateTask": "task.edit"
     },
@@ -1505,7 +1508,9 @@
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
       "ListPrograms": "enum.agent-programs",
+      "ListProjects": "project.list",
       "ListTasks": "task.list",
+      "RegisterProject": "project.add",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
       "ReorderTab": "session.tab.reorder",
@@ -1513,6 +1518,7 @@
       "ResumeFromLimit": "session.limit-retry",
       "SetConfigValue": "config.write",
       "Snapshot": "session.list",
+      "SuggestSessionName": "-",
       "TriggerTask": "task.trigger",
       "UpdateTask": "task.edit"
     },
@@ -1523,6 +1529,7 @@
       "af hook-guard-tmux --help": "internal.hook-guard-tmux",
       "af --program": "session.create.opt.program",
       "af --token": "daemon.remote-access",
+      "af --upgrade-transaction": "meta.internal",
       "af --version": "meta.discovery",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
@@ -1583,10 +1590,10 @@
       "af keys --help": "meta.discovery",
       "af projects --help": "meta.discovery",
       "af projects --json": "cli.json-envelope",
+      "af projects add --help": "meta.discovery",
       "af projects delete --help": "meta.discovery",
       "af projects list --help": "meta.discovery",
       "af projects rebind --help": "meta.discovery",
-      "af projects register --help": "meta.discovery",
       "af reset --force": "install.reset",
       "af reset --help": "meta.discovery",
       "af reset --yes": "install.reset",

@@ -354,6 +354,16 @@ export async function listPrograms(repoPath: string, token: string): Promise<Pro
   return af<ProgramCatalog>("ListPrograms", { repo_path: repoPath }, token);
 }
 
+/** Asks the daemon for a random, readable "adjective-noun" session name not used
+ *  by any live session (#2470), for the create form's autocreate placeholder. The
+ *  wordlist is Go-only (the #1970 "serve the list, don't duplicate it" ruling), so
+ *  the web never generates names itself — it shows this and, on an empty submit,
+ *  sends it back as the title. Returns "" if the daemon has no suggestion. */
+export async function suggestSessionName(token: string): Promise<string> {
+  const resp = await af<{ name: string }>("SuggestSessionName", {}, token);
+  return resp?.name ?? "";
+}
+
 /** Creates a session and returns the daemon's authoritative projection of it (the
  *  resolved title + stable id). The created row also arrives via /v1/events. */
 export async function createSession(input: CreateSessionInput, token: string): Promise<SessionData> {
@@ -476,6 +486,44 @@ export interface DeleteProjectResult {
  *  events + the projects.changed event trigger a rail/projects resync. */
 export async function deleteProject(root: string, token: string): Promise<DeleteProjectResult> {
   return af("DeleteProject", { repo_path: root, repo_id: "" }, token);
+}
+
+/** A durable project identity the daemon registered (the #2355 registry record). */
+export interface RegisteredProject {
+  id: string;
+  checkout_id: string;
+  root: string;
+  relative_root: string;
+  path_exists: boolean;
+}
+
+/** Registers a git checkout as a durable, sessionless project (mirrors
+ *  `af projects add`). `path` is a path ON THE DAEMON HOST — absolute or
+ *  ~-prefixed — which the daemon resolves on its own filesystem (expand ~, walk
+ *  to the git checkout's main-repo root, validate). It is sent VERBATIM: unlike
+ *  the CLI, a browser has no shared working directory to resolve a relative path
+ *  against, so the user supplies an absolute path and the daemon owns resolution.
+ *
+ *  Idempotent for a known checkout. On success the daemon emits projects.changed;
+ *  the client refetches listProjects() and unions the registry into the derived
+ *  project list, so the registered repo appears in the switcher and is selectable
+ *  in the New session picker immediately — no session required (#2456 union). A
+ *  non-git or unreadable path throws an ApiError carrying the daemon's actionable
+ *  message, for inline display next to the input. */
+export async function registerProject(path: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RegisterProject", { path }, token);
+  return resp.project;
+}
+
+/** Lists the daemon's registered projects (the #2355 registry) — the read half of
+ *  the #2456 union. The client ∪s these roots with the projects it derives from live
+ *  sessions and tasks, so a registered-but-sessionless project still shows in the
+ *  switcher and is creatable-into (projectSummaries / pickerProjects). The web is the
+ *  only client that reads the registry over HTTP; the TUI and CLI read
+ *  config.ListProjects() in-process, so this has no Go apiclient twin. */
+export async function listProjects(token: string): Promise<RegisteredProject[]> {
+  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
+  return resp.projects ?? [];
 }
 
 // --- tab mutations (#1592 Phase 5 PR7) -------------------------------------

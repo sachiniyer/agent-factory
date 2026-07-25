@@ -228,3 +228,27 @@ func TestWatchForReady_DisappearsMidWatch(t *testing.T) {
 		t.Fatalf("expected a 'disappeared' error, got: %v", err)
 	}
 }
+
+// TestDescribeWatchState_InFlightOps pins the timeout-message labels for each
+// in-flight op. #2530: OpReplacing (agent handoff) was missing, so it fell through
+// to the liveness switch and rendered as "working" during a replacement — against
+// master the OpReplacing case here reports "working".
+func TestDescribeWatchState_InFlightOps(t *testing.T) {
+	for _, tc := range []struct {
+		op   session.InFlightOp
+		want string
+	}{
+		{session.OpCreating, "being created"},
+		{session.OpKilling, "being killed"},
+		{session.OpArchiving, "being archived"},
+		{session.OpRestoring, "being restored"},
+		{session.OpReplacing, "being replaced"},
+	} {
+		// Liveness deliberately Running: without an explicit op case that would be
+		// the "working" fallback, so this proves the op wins.
+		d := &session.InstanceData{InFlightOp: tc.op, Liveness: session.LiveRunning}
+		if got := describeWatchState(d); got != tc.want {
+			t.Errorf("describeWatchState(op=%v) = %q, want %q", tc.op, got, tc.want)
+		}
+	}
+}

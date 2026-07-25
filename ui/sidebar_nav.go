@@ -698,8 +698,8 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 	s.syncFromStore()
 	sel := s.rawSelection()
 	// An archived row (#1028) is a real instance row too, so it resolves here —
-	// this is what lets the restore action and the Enter "restore it first"
-	// fence read the selected archived session.
+	// this is what lets the restore action, including the Enter/`o` restore of a
+	// resting row (#2489), read the selected archived session.
 	if !isInstanceRow(sel) {
 		return nil
 	}

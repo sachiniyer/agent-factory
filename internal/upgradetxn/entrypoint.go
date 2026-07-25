@@ -63,6 +63,15 @@ type EntrypointGate struct {
 	Sleep           func(context.Context, time.Duration) error
 	TakeoverTimeout time.Duration
 	PollInterval    time.Duration
+	// SkipWake makes a free recovery flock resolve immediately to "no live
+	// actor" (nil) instead of waking the recovery job and waiting for takeover.
+	// The daemon-BIND path (RunDaemon) sets it: that path only needs to know
+	// whether a live actor exists to defer to, and it runs inside a caller's
+	// bind budget — re-running the full wake/wait gate the client entrypoint
+	// already ran would blow that budget and churn a fallback spawn (#2212). A
+	// live actor is still reported (with its phase); only the wake/wait is
+	// skipped.
+	SkipWake bool
 }
 
 // Check returns nil only when no active transaction remains. Every other
@@ -92,6 +101,13 @@ func (g EntrypointGate) Check(ctx context.Context, homeDir string) error {
 	}
 	if live {
 		return g.liveRecoveryResult(journal)
+	}
+
+	if g.SkipWake {
+		// No live actor to defer to. The daemon-bind path proceeds rather than
+		// waking a dead recovery job — the client entrypoint owns that, and
+		// waking/waiting here would run twice and exceed the bind budget (#2212).
+		return nil
 	}
 
 	wake := g.WakeRecovery

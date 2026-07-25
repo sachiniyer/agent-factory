@@ -51,6 +51,52 @@ func TestInstanceRendererRemoteBadge(t *testing.T) {
 		"a local instance must not carry the [remote] badge")
 }
 
+// TestInstanceRendererNamePlaceholder pins the autocreate-name shadow text
+// (#2470): the row of the instance being named shows the suggested name while its
+// title is empty, and only that row, and only while empty.
+func TestInstanceRendererNamePlaceholder(t *testing.T) {
+	mk := func(title string) *session.Instance {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "test"})
+		require.NoError(t, err)
+		return inst
+	}
+	naming := mk("")
+	other := mk("beta")
+
+	r := NewInstanceRenderer()
+	r.SetWidth(60)
+	r.SetNamePlaceholder(naming, "brave-otter")
+
+	plain := func(inst *session.Instance) string {
+		return ansiEscape.ReplaceAllString(r.Render(inst, 1, true, false, false), "")
+	}
+
+	// The empty-title naming row shows the placeholder.
+	assert.Contains(t, plain(naming), "brave-otter",
+		"the named row must show the suggested name as shadow text")
+
+	// A different instance never borrows the placeholder.
+	assert.NotContains(t, plain(other), "brave-otter",
+		"only the named instance's row shows the placeholder")
+	assert.Contains(t, plain(other), "beta")
+
+	// The instant the title is non-empty the placeholder is gone — even a single
+	// space counts as "the user typed".
+	require.NoError(t, naming.SetTitle(" "))
+	assert.NotContains(t, plain(naming), "brave-otter",
+		"typing any character hides the placeholder")
+
+	require.NoError(t, naming.SetTitle("typed"))
+	out := plain(naming)
+	assert.Contains(t, out, "typed")
+	assert.NotContains(t, out, "brave-otter")
+
+	// Cleared placeholder shows nothing special on the (re-emptied) row.
+	require.NoError(t, naming.SetTitle(""))
+	r.SetNamePlaceholder(nil, "")
+	assert.NotContains(t, plain(naming), "brave-otter", "a cleared placeholder is not rendered")
+}
+
 // effectiveWidth models a sidebar-style content buffer (narrower than the
 // allocation) so the renderer tests exercise an effective content width the
 // way the sidebar passes one to SetWidth in production. Inlined rather than

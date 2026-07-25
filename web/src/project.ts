@@ -70,8 +70,20 @@ export function projectName(root: string): string {
  * Archived sessions still count toward a project's totalCount (they show in the rail
  * when the project is live/task-derived), but never on their own define one. Rows /
  * tasks with no repo_path / project_path are skipped (they can't be attributed).
+ *
+ * `registeredRoots` is the #2456 union input: the roots the daemon's project registry
+ * carries (listProjects). A registered root is ALWAYS a project — counts all zero,
+ * "no sessions yet" glance — even with no session and no task, and even if its only
+ * sessions are archived (registration is a durable opt-in that outranks the
+ * archived-only exclusion above). This is what lets a freshly "+ Add project"ed empty
+ * repo appear in the switcher before any session exists. Defaults to none, so the
+ * pure session+task derivation is unchanged for callers that don't pass it.
  */
-export function projectSummaries(sessions: SessionData[], tasks: TaskData[]): ProjectSummary[] {
+export function projectSummaries(
+  sessions: SessionData[],
+  tasks: TaskData[],
+  registeredRoots: string[] = [],
+): ProjectSummary[] {
   const byRoot = new Map<string, SessionData[]>();
   for (const s of sessions) {
     const root = s.worktree?.repo_path;
@@ -100,6 +112,11 @@ export function projectSummaries(sessions: SessionData[], tasks: TaskData[]): Pr
   }
   for (const root of taskCounts.keys()) {
     roots.add(root);
+  }
+  for (const root of registeredRoots) {
+    if (root) {
+      roots.add(root);
+    }
   }
   return [...roots].sort().map((root) => {
     const rows = byRoot.get(root) ?? [];
@@ -140,7 +157,11 @@ export function projectFullLabel(root: string): string {
  *  a session-only picker would omit it, so adding a task while a task-only project is
  *  selected would silently target another repo, or be blocked when there is no session
  *  repo at all (redesign PR2, Greptile follow-on Fix 1). */
-export function pickerProjects(sessions: SessionData[], tasks: TaskData[]): string[] {
+export function pickerProjects(
+  sessions: SessionData[],
+  tasks: TaskData[],
+  registeredRoots: string[] = [],
+): string[] {
   const roots = new Set<string>();
   for (const s of sessions) {
     const root = s.worktree?.repo_path;
@@ -151,6 +172,14 @@ export function pickerProjects(sessions: SessionData[], tasks: TaskData[]): stri
   for (const t of tasks) {
     if (t.project_path) {
       roots.add(t.project_path);
+    }
+  }
+  // #2456 union: a registered-but-sessionless repo is a valid new-session / new-task
+  // target, so the picker offers it — without this the "+ Add project" affordance
+  // would register a repo the New session modal still refuses to create into.
+  for (const root of registeredRoots) {
+    if (root) {
+      roots.add(root);
     }
   }
   return [...roots].sort();
@@ -169,8 +198,8 @@ export function scopeToProject(sessions: SessionData[], root: string | null): Se
 
 /** The set of valid project roots (a project has any live session or any task). A
  *  selected root must be in this set or it is stale — reconcileProject falls back. */
-function validRoots(sessions: SessionData[], tasks: TaskData[]): Set<string> {
-  return new Set(projectSummaries(sessions, tasks).map((p) => p.root));
+function validRoots(sessions: SessionData[], tasks: TaskData[], registeredRoots: string[] = []): Set<string> {
+  return new Set(projectSummaries(sessions, tasks, registeredRoots).map((p) => p.root));
 }
 
 /**
@@ -180,8 +209,12 @@ function validRoots(sessions: SessionData[], tasks: TaskData[]): Set<string> {
  * falls back to a task-only project (the newest task's), then the first project by
  * path, then null when there are no projects at all.
  */
-export function defaultProject(sessions: SessionData[], tasks: TaskData[]): string | null {
-  const summaries = projectSummaries(sessions, tasks);
+export function defaultProject(
+  sessions: SessionData[],
+  tasks: TaskData[],
+  registeredRoots: string[] = [],
+): string | null {
+  const summaries = projectSummaries(sessions, tasks, registeredRoots);
   if (summaries.length === 0) {
     return null;
   }
@@ -225,15 +258,16 @@ export function reconcileProject(
   tasks: TaskData[],
   persisted: string | null,
   current: string | null,
+  registeredRoots: string[] = [],
 ): string | null {
-  const valid = validRoots(sessions, tasks);
+  const valid = validRoots(sessions, tasks, registeredRoots);
   if (current && valid.has(current)) {
     return current;
   }
   if (persisted && valid.has(persisted)) {
     return persisted;
   }
-  return defaultProject(sessions, tasks);
+  return defaultProject(sessions, tasks, registeredRoots);
 }
 
 // --- persistence -----------------------------------------------------------

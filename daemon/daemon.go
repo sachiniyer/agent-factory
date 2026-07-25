@@ -42,12 +42,45 @@ func RunDaemon(cfg *config.Config) error {
 	return runDaemon(cfg, "")
 }
 
+// RunDaemonForUpgrade runs the daemon as an upgrade CANDIDATE in probation for
+// transactionID (#2212 R2). Carrying the id makes the daemon (a) enter
+// DaemonPhaseUpgradeProbation — restoring state but refusing mutating RPCs until
+// its supervisor validates and releases it — and (b) skip the entrypoint gate,
+// which a plain start would trip (the candidate's own live transaction would
+// defer it). Only the recovery actor's StartCandidate reaches this path.
+func RunDaemonForUpgrade(cfg *config.Config, transactionID string) error {
+	if transactionID == "" {
+		return fmt.Errorf("upgrade daemon requires a transaction id")
+	}
+	return runDaemon(cfg, transactionID)
+}
+
 // runDaemon carries the transaction identity used by the probation machinery.
 // The public daemon entrypoint deliberately supplies no transaction: only the
 // durable transaction layer may eventually select the unexported non-empty
 // path, so this stage cannot put an ordinary daemon into probation.
 func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	log.InfoLog.Printf("starting daemon")
+
+	// #2212 R1: on an ordinary daemon start (not the transaction's own probation
+	// daemon, which carries a non-empty transaction id), defer to a genuinely
+	// in-progress FORWARD upgrade instead of serving a rival, and exit cleanly so
+	// the autostart unit's Restart=on-failure does not loop against the recovery
+	// actor. But a rollback restoring the previous daemon must PROCEED to bind:
+	// during that phase THIS daemon is the previous daemon the actor started and
+	// is waiting to validate — deferring would deadlock the rollback into
+	// rollback_failed with no daemon running. Uses the non-waking gate so it never
+	// re-runs the client's wake/wait and overruns the bind budget. Fail-open: a
+	// stale or corrupt journal proceeds, so a bad journal can never wedge the
+	// daemon into the #2168 crash loop.
+	if upgradeTransactionID == "" {
+		if homeDir, ok := configHomeDir(); ok {
+			if decision, _ := checkUpgradeGate(homeDir, true); decision == upgradeGateInProgress {
+				log.InfoLog.Printf("a forward daemon upgrade is in progress; deferring to its recovery actor and exiting cleanly")
+				return nil
+			}
+		}
+	}
 
 	// No auth-posture gate here, deliberately (#2168 Phase 0). #2090 made a
 	// tokenless network listener a FATAL startup refusal at this exact spot; the
@@ -620,11 +653,13 @@ func launchDaemonProcessAt(execPath string) error {
 	return nil
 }
 
-// startDaemonChild starts execPath --daemon detached from the parent and
-// returns its PID. Split from launchDaemonProcess so tests can spawn a
-// short-lived stub instead of re-executing the real binary with --daemon.
-func startDaemonChild(execPath string) (int, error) {
-	cmd := exec.Command(execPath, "--daemon")
+// startDaemonChild starts execPath --daemon (plus any extraArgs) detached from
+// the parent and returns its PID. Split from launchDaemonProcess so tests can
+// spawn a short-lived stub instead of re-executing the real binary with --daemon.
+// extraArgs carries the upgrade-candidate probation flag (#2212 R2); ordinary
+// spawns pass none.
+func startDaemonChild(execPath string, extraArgs ...string) (int, error) {
+	cmd := exec.Command(execPath, append([]string{"--daemon"}, extraArgs...)...)
 
 	// Detach the process from the parent
 	cmd.Stdin = nil

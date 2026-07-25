@@ -119,8 +119,9 @@ export interface AppState {
   /** the attach terminal's connection state, shown in the pane header. */
   termStatus: TerminalStatus;
   /** which pane owns the keyboard (#1693): "rail" is the default nav mode (j/k move
-   *  the selection); "terminal" means keys go to the agent until Escape. Drives the
-   *  visible focus indicator so the active mode is legible, mirroring the TUI. */
+   *  the selection); "terminal" means keys go to the agent — Escape included, as its
+   *  interrupt (#2517) — until ctrl+] hands the keyboard back. Drives the visible
+   *  focus indicator so the active mode is legible, mirroring the TUI. */
   focus: KeyboardFocus;
   /** the selected session's active tab index (#1592 Phase 5 PR7): 0 is the agent
    *  tab, 1-8 the user-created shell/process tabs. The attach terminal streams
@@ -140,6 +141,11 @@ export interface AppState {
   tabError: string | null;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
+  /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
+   *  input, beside sessions + tasks, that projectSummaries / pickerProjects union so a
+   *  registered-but-sessionless repo shows in the switcher and is creatable-into.
+   *  Refetched on connect and on every projects.changed event. */
+  registeredProjects: string[];
   /** the config manifest zipped with the user's live values (GetConfig), the config
    *  view's data. There is no local key list: this IS the description of config, so
    *  a key added to config_types.go arrives here with no change to the bundle. */
@@ -270,6 +276,9 @@ export interface Actions {
   /** Opens the reversible delete-project confirm for a project row (#1735); on
    *  confirm index.ts calls DeleteProject, which archives its live sessions. */
   deleteProject(root: string, label: string, sessionCount: number): void;
+  /** Opens the add-project modal (#2456): register a git checkout by path via
+   *  RegisterProject so it appears as an empty project you can create into. */
+  addProject(): void;
   /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
    *  <html>, and re-themes the live terminals. */
   setTheme(choice: ThemeChoice): void;
@@ -623,6 +632,7 @@ export class AppShell {
   // highlight; the task set can add/drop a task-only project).
   private lastProjectSessions: SessionData[] | null = null;
   private lastProjectTasks: TaskData[] | null = null;
+  private lastRegisteredProjects: string[] | null = null;
   private lastSelectedProject: string | null = null;
 
   // The rail's status filter control (feat: hide archived by default): a rail-head
@@ -1111,11 +1121,21 @@ export class AppShell {
     }
 
     // The project switcher label + menu reflect the derived project list and the
-    // current scope; rebuild when the sessions, the tasks (a task-only project), or
-    // the selection changed.
-    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
+    // current scope; rebuild when the sessions, the tasks (a task-only project), the
+    // registered projects (the #2456 registry union — a just-added empty project that
+    // changed NEITHER sessions nor the selection), or the selection changed. Omitting
+    // registeredProjects here is why adding a project while another is selected left the
+    // switcher stale until an unrelated event (the store spreads, so a registry-only
+    // set never touched the sessions/tasks references or the reconciled selection).
+    if (
+      this.lastProjectSessions !== state.sessions ||
+      this.lastProjectTasks !== state.tasks ||
+      this.lastRegisteredProjects !== state.registeredProjects ||
+      projectChanged
+    ) {
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
+      this.lastRegisteredProjects = state.registeredProjects;
       this.lastSelectedProject = state.selectedProject;
       this.renderProjectSwitch(state);
     }
@@ -1223,16 +1243,12 @@ export class AppShell {
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
     // No project selected ⇒ there are no projects at all (nothing has been created):
-    // the global empty rail, its copy pointing at how to create the first session.
+    // the global empty rail. Post-#2456 the coherent first step is registering a repo
+    // from the switcher's "+ Add project", not the TUI — the union then surfaces it
+    // and a session can be created into it here.
     if (!state.selectedProject) {
       list.replaceChildren(
-        h(
-          "li",
-          { class: "af-rail-empty" },
-          "No sessions yet — create one in the TUI or with ",
-          h("code", {}, "af sessions create"),
-          ".",
-        ),
+        h("li", { class: "af-rail-empty" }, "No projects yet — add one from the project switcher to get started."),
       );
       return;
     }
@@ -1440,46 +1456,72 @@ export class AppShell {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   private renderProjectSwitch(state: AppState): void {
-    const summaries = projectSummaries(state.sessions, state.tasks);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
-    // Disable the switcher when there are no projects to switch between.
-    this.projectSwitchBtn.disabled = summaries.length === 0;
+    // The switcher is ALWAYS openable, even with no projects (#2456): its menu now
+    // hosts "+ Add project", which is the coherent action for the zero-projects
+    // empty state. Disabling it here would restore the dead end where a fresh web
+    // user with no sessions has nowhere to register a repo.
+    this.projectSwitchBtn.disabled = false;
 
     const children: HTMLElement[] = [h("div", { class: "af-project-menu-label" }, "Switch project")];
     if (summaries.length === 0) {
-      children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet."));
+      children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet — add one below."));
     }
     for (const p of summaries) {
       children.push(this.projectItem(p, p.root === current));
     }
-    // The reversible delete-project control (#1735) lived on the old Projects view's
-    // header; with that view folded into the switcher it moves here, as a footer
-    // action on the CURRENT project (single-project IA). index.ts pops the confirm.
+
+    // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
+    // state's coherent action and a convenience when projects already exist. The
+    // reversible delete-project control (#1735) rides alongside it, but only for
+    // the CURRENT project (single-project IA).
+    const footChildren: HTMLElement[] = [];
+
+    const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
+    add.setAttribute("title", "Register a git checkout by path as a project");
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closeProjectMenu();
+      this.actions.addProject();
+    });
+    footChildren.push(add);
+
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
-      // Delete-project ARCHIVES the project's live sessions (#1735, reversible). With
-      // no live sessions to archive it would be a silent no-op, so it is DISABLED for a
-      // task-only project — its tasks are cleared from the Tasks view, not here. This is
-      // also why an archived-only repo is never a project (projectSummaries): the delete
-      // can never appear-but-do-nothing.
-      if (currentSummary.liveCount === 0) {
+      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      // Delete-project ARCHIVES the project's live sessions (#1735, reversible) AND, for
+      // a registered project, removes its durable registry record (#2456) so it leaves
+      // the switcher. It is a silent no-op ONLY for a project with neither: a task-only,
+      // UNregistered repo (its tasks are cleared from the Tasks view, not here), so it is
+      // DISABLED just for that case. A registered project with no live sessions stays
+      // deletable — without this, once its sessions were archived its Delete would be
+      // permanently disabled and the registry entry could never be removed.
+      if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
         del.setAttribute(
           "title",
           `No live sessions in ${currentSummary.name} to archive — remove its tasks from the Tasks view to clear it`,
         );
       } else {
-        del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+        del.setAttribute(
+          "title",
+          currentSummary.liveCount > 0
+            ? `Delete project ${currentSummary.name} (archives its sessions, restorable)`
+            : `Delete project ${currentSummary.name} (removes the empty project)`,
+        );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
           this.actions.deleteProject(currentSummary.root, currentSummary.name, currentSummary.liveCount);
         });
       }
-      children.push(h("div", { class: "af-project-menu-foot" }, del));
+      footChildren.push(del);
     }
+
+    children.push(h("div", { class: "af-project-menu-foot" }, ...footChildren));
     this.projectMenu.replaceChildren(...children);
   }
 
@@ -1570,8 +1612,9 @@ export class AppShell {
       if (e.key !== "Escape") {
         return;
       }
-      // Swallow it: an open menu owns Escape, so closing it must not ALSO detach
-      // the terminal / drop rail focus the way a bare Escape does.
+      // Swallow it: an open menu owns Escape, so closing it must NOT also let the ESC
+      // reach the agent (a bare Escape now forwards to the PTY as the agent's
+      // interrupt, #2517 — an open menu is the exception).
       e.stopPropagation();
       close();
       trigger.focus();
@@ -1584,13 +1627,14 @@ export class AppShell {
       scrollParent?.addEventListener("scroll", positionMenu, { passive: true });
       window.addEventListener("resize", positionMenu);
       document.addEventListener("mousedown", onDocMouseDown);
-      // CAPTURE phase, deliberately. The app's own keydown handler is a
-      // capture-phase listener on document that stopPropagation()s Escape (so
-      // detaching can't leak a stray ESC into the PTY), which stops the event
-      // before it can bubble back here — a bubble-phase listener would simply never
-      // see it, and Escape would not close this menu. Same-node listeners are
-      // unaffected by stopPropagation, so registering in capture puts this beside
-      // the app's handler rather than downstream of it.
+      // CAPTURE phase, deliberately, so this runs BEFORE xterm's textarea handler:
+      // when the menu is open, Escape must close it here and this listener's own
+      // stopPropagation must keep the ESC from also reaching the agent (#2517: a bare
+      // Escape now forwards to the PTY as the agent's interrupt — an open menu is the
+      // exception that still owns it). It sits beside the app's own capture-phase
+      // document handler (index.ts onKeydown), which no longer stopPropagations
+      // Escape; same-node capture listeners both fire, so this one does the closing
+      // and the stopping.
       document.addEventListener("keydown", onKeyDown, true);
     };
 

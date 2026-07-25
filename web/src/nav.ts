@@ -7,8 +7,9 @@
 // The model is two keyboard modes plus the modal overlay:
 //   - "rail" (the default): j/k / arrows move the selection; Enter attaches the
 //     selected session and hands the keyboard to its terminal.
-//   - "terminal": keys flow to the agent; Escape is the ONE hatch back to rail
-//     navigation (blur the terminal), matching the TUI's detach/back-to-nav.
+//   - "terminal": keys flow to the agent — Escape included, since it is the agents'
+//     interrupt key (#2517). ctrl+] is the ONE keyboard hatch back to rail navigation
+//     (blur the terminal), matching the TUI's tea.KeyCtrlCloseBracket detach.
 //   - a modal, when open, owns the keyboard: only Escape (to cancel) is meaningful.
 //
 // This is kept pure — a (key, context) → action decision with no DOM and no I/O —
@@ -16,7 +17,9 @@
 // event wiring in index.ts, exactly as the session-list reducer (sessions.ts) is.
 
 /** Which pane owns the keyboard. The rail is the default; the terminal takes over
- *  on attach (Enter / click) and hands back on Escape. */
+ *  on attach (Enter / click) and hands back on ctrl+] (or any non-keyboard exit —
+ *  clicking the rail, the mobile drawer). Escape is NOT a detach: it forwards to the
+ *  agent as its interrupt (#2517). */
 export type KeyboardFocus = "rail" | "terminal";
 
 /** The app's top-level view: the live sessions rail+terminal, or the tasks
@@ -79,10 +82,15 @@ export type NavAction =
   | { kind: "cyclePane"; delta: 1 | -1 }
   | { kind: "closePane" };
 
-/** Modifier flags the split keybinds read. Only Alt is consulted; the rest are
- *  ignored so the split chords never shadow a browser/OS shortcut. */
+/** Modifier flags the keybinds read. Alt gates the split-pane chords; Ctrl gates
+ *  the ctrl+] detach. altGraph is `getModifierState("AltGraph")`: it excludes an
+ *  AltGr-produced "]" (an AltGr key on many EU layouts) from the detach chord, since
+ *  Chromium on Linux signals AltGr this way rather than via ctrlKey. Shift and Meta
+ *  are ignored so the chords never shadow a browser/OS shortcut. */
 export interface KeyMods {
   alt?: boolean;
+  ctrl?: boolean;
+  altGraph?: boolean;
 }
 
 /** The next selected id after moving `delta` rows, clamped to the ends. From no
@@ -134,10 +142,27 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
     }
     return { kind: "closePane" };
   }
-  // The terminal owns the keyboard: keys go to the agent. Escape is the escape
-  // hatch back to rail navigation (mirrors the TUI detach); nothing else is ours.
+  // ctrl+] is the terminal-detach chord (#2517), mirroring the TUI's
+  // tea.KeyCtrlCloseBracket (app/interactive.go). It is guarded against Alt/AltGr: on
+  // Windows AltGr arrives as ctrl+alt, and "]" is an AltGr key on many EU layouts
+  // (German AltGr+9, Spanish, French, Italian, …), so a "]" typed via AltGr must NOT
+  // be read as the chord — it has to reach the agent. Both altKey and the AltGraph
+  // modifier are excluded (Chromium on Linux signals AltGr through the latter, not
+  // ctrlKey), matching clipboard.ts's Ctrl-chord guard. Handled before BOTH the
+  // terminal branch (so it detaches) and the rail-mode [ / ] view cycle below (so a
+  // habitual repeat after detaching is inert, not a view switch); its toRail is a
+  // no-op when already on the rail.
+  if (key === "]" && mods.ctrl === true && mods.alt !== true && mods.altGraph !== true) {
+    return ctx.focus === "terminal" ? { kind: "toRail" } : { kind: "none" };
+  }
+  // The terminal owns the keyboard: EVERY OTHER key goes to the agent, Escape
+  // included. Escape is the agents' INTERRUPT key (#2070) — swallowing it here (as a
+  // detach) meant a running agent could never be interrupted from the web at all
+  // (#2517). Only the ctrl+] chord above is ours; everything else forwards. (An open
+  // menu/modal still owns Escape: the modal branch above, and each menu's own capture
+  // listener in ui.ts, run first.)
   if (ctx.focus === "terminal") {
-    return key === "Escape" ? { kind: "toRail" } : { kind: "none" };
+    return { kind: "none" };
   }
   // View switching: [ / ] cycle the top-level view (sessions ⇄ tasks). Rail-mode
   // ONLY — a modal owns the keyboard (handled above) and a focused terminal forwards

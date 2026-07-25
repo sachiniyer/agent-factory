@@ -166,7 +166,7 @@ func resolveRepo() (*config.RepoContext, error) {
 	} else {
 		repo, err = config.CurrentRepo()
 		if err != nil {
-			return nil, fmt.Errorf("--repo is required: current directory is not a git repository: %w", err)
+			return nil, fmt.Errorf("--repo is required: the current directory is not a git repository — pass --repo <path> to target a project (%w)", err)
 		}
 	}
 	if err != nil {
@@ -688,7 +688,7 @@ func init() {
 	// Projects (repo groupings, #1735)
 	ProjectsCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, jsonFlagUsage)
 	ProjectsCmd.AddCommand(projectsListCmd)
-	ProjectsCmd.AddCommand(projectsRegisterCmd)
+	ProjectsCmd.AddCommand(newProjectsAddCmd())
 	ProjectsCmd.AddCommand(projectsRebindCmd)
 	ProjectsCmd.AddCommand(projectsDeleteCmd)
 

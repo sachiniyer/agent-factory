@@ -115,6 +115,20 @@ func ensureDaemonWithPolicy(launch func() error, preferUnit bool) error {
 	if err := pingDaemon(); err == nil {
 		return nil
 	}
+	// #2212 R1: before spawning a daemon, defer to an in-progress upgrade rather
+	// than racing its recovery actor with a rival daemon. A client defers to BOTH
+	// a forward upgrade and a rollback restoring the previous daemon — in the
+	// latter it must not stop and replace the very daemon the actor is validating.
+	// Fail-open — only a provably live upgrade stops the spawn, as a typed
+	// retryable error; a stale, corrupt, or absent journal proceeds. The gate is
+	// bounded, so a bad journal can never wedge this launch path (which fronts
+	// every af invocation).
+	if homeDir, ok := configHomeDir(); ok {
+		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		case upgradeGateInProgress, upgradeGateRestoringPrevious:
+			return gateErr
+		}
+	}
 	if preferUnit {
 		configDir, configErr := config.GetConfigDir()
 		if configErr != nil {
@@ -432,6 +446,19 @@ func DeleteProject(req DeleteProjectRequest) (DeleteProjectResponse, error) {
 		return DeleteProjectResponse{}, err
 	}
 	return resp, nil
+}
+
+// RegisterProject asks the daemon to register a git checkout as a durable,
+// sessionless project (#2456). The daemon resolves req.Path on its OWN
+// filesystem (expand ~, git root, validate) and persists to the #2355 registry;
+// registering a known checkout is an idempotent success. Returns the resolved
+// durable identity.
+func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
+	var resp RegisterProjectResponse
+	if err := callDaemon("RegisterProject", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
 }
 
 // SendPrompt asks the daemon to send a prompt to an existing session.

@@ -119,14 +119,41 @@ func previewListenerPolicy(_ *config.Config) tokenGatePolicy {
 // pasted a token. Making this an explicit argument keeps "who serves the
 // frontend" a decision at the call site rather than an accident of sharing
 // startTCPListener.
-type webShell bool
+type webShell int
 
 const (
+	// withoutWebShell answers every non-/v1 path with the agent-server's "no web UI
+	// here, the daemon serves it at http://localhost:8443" 404. It is FIRST so it is
+	// the zero value: like tokenGatePolicy and authGate's bool fields, an unset
+	// webShell must default to the fail-safe posture (serve NO frontend), never to
+	// mounting the SPA + its token-paste login on a listener that was never meant to
+	// carry it (#1696 fail-safe-zero-value convention).
+	withoutWebShell webShell = iota
 	// withWebShell serves the browser SPA on every non-/v1 path — the daemon.
-	withWebShell webShell = true
-	// withoutWebShell leaves non-/v1 paths to the mux's own 404 — the agent-server.
-	withoutWebShell webShell = false
+	withWebShell
+	// previewShell answers every non-/v1 path with the preview origin's OWN 404.
+	// It must NOT reuse withoutWebShell's message: that text names the control-plane
+	// address, which the preview port must not advertise (least of all to an
+	// unauthenticated peer), and "agent-server" is simply wrong here (#1856).
+	previewShell
 )
+
+// tcpListenerAuth overrides the credential a listener's gate uses. Nil selects
+// the default: the file-backed daemon bearer token (EnsureToken/LoadToken), used
+// by the control-plane and agent-server listeners. The web-tab PREVIEW listener
+// (#1856) passes a non-nil value to authenticate its SEPARATE ephemeral credential
+// on a distinct query/cookie transport, so the daemon bearer never reaches the
+// preview origin.
+type tcpListenerAuth struct {
+	// token returns the credential to advertise AND to compare against, per auth
+	// event. For an in-memory preview token these are the same value; the daemon
+	// path keeps them separate (EnsureToken advertises, LoadToken compares) inside
+	// startTCPListener instead.
+	token func() (string, error)
+	// presented extracts the credential a request carries; it becomes
+	// authGate.presentedToken (nil there ⇒ the webTabAwareToken default).
+	presented func(*http.Request) string
+}
 
 // startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
 // wrapped in a token-enforcing gate + the CORS allow-list. It returns a cleanup
@@ -141,25 +168,42 @@ const (
 // supplies the shared token file and CORS allow-list; only the bind target
 // differs.
 //
-// It ensures the bearer token exists before opening the port (so an operator
-// enabling the listener always has a credential to present) and reads that
-// token FRESH per auth event through the gate so `af token rotate` takes effect
-// for new connections without a daemon restart.
-func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell) (func() error, tcpListenerInfo, error) {
-	// Generate-if-absent so enabling the listener always yields a usable token;
-	// the gate below re-reads the file per auth event, so rotation stays live.
-	tokenPath, err := TokenPath()
-	if err != nil {
-		return nil, tcpListenerInfo{}, err
-	}
-	token, err := EnsureToken(tokenPath)
-	if err != nil {
-		return nil, tcpListenerInfo{}, fmt.Errorf("ensure daemon token: %w", err)
+// auth overrides the credential the gate enforces (see tcpListenerAuth); nil is
+// the file-backed daemon bearer token. It ensures the bearer token exists before
+// opening the port (so an operator enabling the listener always has a credential
+// to present) and reads that token FRESH per auth event through the gate so `af
+// token rotate` takes effect for new connections without a daemon restart. An
+// override supplies its own already-minted credential and is compared as-is.
+func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth) (func() error, tcpListenerInfo, error) {
+	var token string
+	var expectedToken func() (string, error)
+	var presentedToken func(*http.Request) string
+	if auth != nil {
+		t, err := auth.token()
+		if err != nil {
+			return nil, tcpListenerInfo{}, fmt.Errorf("resolve listener token: %w", err)
+		}
+		token = t
+		expectedToken = auth.token
+		presentedToken = auth.presented
+	} else {
+		// Generate-if-absent so enabling the listener always yields a usable token;
+		// the gate below re-reads the file per auth event, so rotation stays live.
+		tokenPath, err := TokenPath()
+		if err != nil {
+			return nil, tcpListenerInfo{}, err
+		}
+		token, err = EnsureToken(tokenPath)
+		if err != nil {
+			return nil, tcpListenerInfo{}, fmt.Errorf("ensure daemon token: %w", err)
+		}
+		expectedToken = func() (string, error) {
+			return LoadToken(tokenPath)
+		}
 	}
 	gate := &authGate{
-		expectedToken: func() (string, error) {
-			return LoadToken(tokenPath)
-		},
+		expectedToken:  expectedToken,
+		presentedToken: presentedToken,
 		tokenDisabled:  policy.tokenDisabled,
 		loopbackExempt: policy.loopbackExempt,
 	}
@@ -179,10 +223,13 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 	// 404s), so the web assets never appear on the socket path. The agent-server
 	// passes withoutWebShell — it cannot back the SPA (see webShell).
 	handler := withAuth(mux, gate, cfg.CORSAllowedOrigins)
-	if shell == withWebShell {
+	switch shell {
+	case withWebShell:
 		handler = webShellHandler(handler)
-	} else {
-		handler = noWebShellHandler(handler)
+	case previewShell:
+		handler = noWebShellHandler(handler, noPreviewContentMessage)
+	default: // withoutWebShell — the agent-server
+		handler = noWebShellHandler(handler, noWebShellMessage)
 	}
 	srv := &http.Server{
 		Handler:           handler,

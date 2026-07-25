@@ -169,3 +169,84 @@ test("reconcileProject: a project whose last live session archived AND has no ta
   const afterDelete = [archived("a", "/x"), ready("b", "/y", "2026-06-01T00:00:00Z")];
   assert.equal(reconcileProject(afterDelete, [], null, "/x"), "/y", "the archived-only /x is gone; falls back to /y");
 });
+
+// --- the #2456 registry union -----------------------------------------------
+//
+// projectSummaries / pickerProjects take a third input: the roots the daemon's project
+// registry carries (listProjects). A registered root is ALWAYS a project even with no
+// session and no task — this is what makes a freshly "+ Add project"ed empty repo show
+// in the switcher and be creatable-into before any session exists.
+
+test("projectSummaries: a registered-but-sessionless repo IS a project (the empty add lands)", () => {
+  const s = projectSummaries([], [], ["/repos/fresh"]);
+  assert.equal(s.length, 1, "the registered repo is a project on its own");
+  assert.equal(s[0]!.root, "/repos/fresh");
+  assert.equal(s[0]!.liveCount, 0);
+  assert.equal(s[0]!.totalCount, 0);
+  assert.equal(s[0]!.taskCount, 0);
+  assert.equal(projectMeta(s[0]!), "no sessions yet", "the empty project reads its zero-state glance");
+});
+
+test("projectSummaries: a registered repo with ONLY archived sessions is still a project", () => {
+  // Registration is a durable opt-in that OUTRANKS the archived-only exclusion: an
+  // archived-only repo normally drops, but once registered it stays (with its archived
+  // session counted in totalCount).
+  const withRegistry = projectSummaries([archived("old", "/repos/shelved")], [], ["/repos/shelved"]);
+  assert.equal(withRegistry.length, 1, "the registration keeps the archived-only repo listed");
+  assert.equal(withRegistry[0]!.liveCount, 0);
+  assert.equal(withRegistry[0]!.totalCount, 1, "the archived session still counts toward the total");
+  // Without the registration it would drop, exactly as before.
+  assert.equal(projectSummaries([archived("old", "/repos/shelved")], []).length, 0);
+});
+
+test("projectSummaries: registered roots union with session/task roots, deduped and sorted", () => {
+  const s = projectSummaries([ready("a", "/repos/b")], [task("t", "/repos/c")], ["/repos/a", "/repos/b"]);
+  assert.deepEqual(
+    s.map((p) => p.root),
+    ["/repos/a", "/repos/b", "/repos/c"],
+    "a registered root already backed by a session (/repos/b) is not duplicated; the union is sorted",
+  );
+});
+
+test("pickerProjects: a registered-but-sessionless repo is a valid new-session / new-task target", () => {
+  assert.deepEqual(
+    pickerProjects([], [], ["/repos/fresh"]),
+    ["/repos/fresh"],
+    "without this, the New session modal would refuse to create into the repo the user just added",
+  );
+  assert.deepEqual(
+    pickerProjects([ready("a", "/repos/x")], [], ["/repos/x", "/repos/y"]),
+    ["/repos/x", "/repos/y"],
+    "session and registered roots union, deduped and sorted",
+  );
+});
+
+test("reconcileProject: a registered-only current selection is NOT reconciled away", () => {
+  // The user adds a project, it becomes the selection; with no session or task it must
+  // remain valid, or the very next reconcile (a session event elsewhere) would kick
+  // them off the project they just added.
+  assert.equal(
+    reconcileProject([ready("a", "/repos/x")], [], null, "/repos/fresh", ["/repos/fresh"]),
+    "/repos/fresh",
+    "the registered current stays selected",
+  );
+  assert.equal(
+    reconcileProject([ready("a", "/repos/x")], [], "/repos/fresh", null, ["/repos/fresh"]),
+    "/repos/fresh",
+    "a persisted registered choice resumes on load",
+  );
+});
+
+test("defaultProject: with only registered roots (no sessions, no tasks), opens on the first by path", () => {
+  assert.equal(
+    defaultProject([], [], ["/repos/z", "/repos/a"]),
+    "/repos/a",
+    "a client with only registered empty projects still opens on one rather than null",
+  );
+  // A live session still wins the default over a registered-only repo.
+  assert.equal(
+    defaultProject([ready("s", "/repos/live", "2026-06-01T00:00:00Z")], [], ["/repos/a"]),
+    "/repos/live",
+    "the most-recently-active live session's repo is still the preferred default",
+  );
+});

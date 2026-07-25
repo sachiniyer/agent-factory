@@ -28,7 +28,12 @@ var (
 	version     = "dev"
 	programFlag string
 	daemonFlag  bool
-	rootCmd     = &cobra.Command{
+	// upgradeTransactionFlag carries an in-flight upgrade transaction id to the
+	// daemon so it starts in upgrade probation (#2212 R2). Internal only: the
+	// recovery actor's StartCandidate spawns `af --daemon --upgrade-transaction
+	// <id>`; an operator never sets it.
+	upgradeTransactionFlag string
+	rootCmd                = &cobra.Command{
 		Use:   "af",
 		Short: "Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.",
 		Long: `Run 'af' with no arguments to open the TUI. The subcommands below drive the
@@ -57,43 +62,59 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 				if err != nil {
 					return err
 				}
-				// Wire the web config-assistant's spawn-request builder (#2467). The
-				// briefing/program resolution lives in configagent, which imports the
-				// daemon, so the daemon cannot import it back — it is injected here, the
-				// one layer that can import both. The web POST carries no body: the
-				// request (resolved program + briefing) is built entirely from the
-				// daemon's own config, so an authenticated client cannot smuggle an
-				// arbitrary program past the auth gate. ModeChange (an always-available
-				// helper, not first-run onboarding) and the global config (no repo).
+				// Wire the web config-assistant's spawn-request builder (#2467) before
+				// EITHER daemon entrypoint below — both host the HTTP surface the config
+				// assistant is served on. The briefing/program resolution lives in
+				// configagent, which imports the daemon, so the daemon cannot import it
+				// back — it is injected here, the one layer that can import both. The web
+				// POST carries no body: the request (resolved program + briefing) is built
+				// entirely from the daemon's own config, so an authenticated client cannot
+				// smuggle an arbitrary program past the auth gate. ModeChange (an
+				// always-available helper, not first-run onboarding) and the global config.
 				daemon.SetConfigAssistantRequestBuilder(func() (daemon.SpawnConfigAgentRequest, error) {
 					return configagent.BuildSpawnRequest(configagent.Options{Mode: configagent.ModeChange})
 				})
-				err = daemon.RunDaemon(cfg)
+				if upgradeTransactionFlag != "" {
+					err = daemon.RunDaemonForUpgrade(cfg, upgradeTransactionFlag)
+				} else {
+					err = daemon.RunDaemon(cfg)
+				}
 				if err != nil {
 					log.ErrorLog.Printf("failed to start daemon %v", err)
 				}
 				return err
 			}
 
-			// Check if we're in a git repository
+			// The project context comes from the CWD when it is inside a git
+			// repo, but being in one is a convenience, not a requirement
+			// (#2477): outside a repo af still launches, opening on the project
+			// registry so a project can be selected. git itself is still
+			// required — af's worktrees and sessions are built on it.
 			currentDir, err := filepath.Abs(".")
 			if err != nil {
 				return fmt.Errorf("failed to get current directory: %w", err)
 			}
-
-			if err := git.EnsureRepo(currentDir); err != nil {
+			if err := git.EnsureGitInstalled(); err != nil {
 				return err
 			}
 
-			repo, err := config.CurrentRepo()
-			if err != nil {
-				return fmt.Errorf("failed to determine project context: %w", err)
+			var repo *config.RepoContext
+			if git.IsGitRepo(currentDir) {
+				repo, err = config.CurrentRepo()
+				if err != nil {
+					return fmt.Errorf("failed to determine project context: %w", err)
+				}
 			}
 
-			// Resolve the effective config for this repo: app defaults ->
-			// global ~/.agent-factory/config.json -> the repo's own
-			// .agent-factory/config.json (#800).
-			cfg, err := config.ResolveConfig(repo.Root)
+			// Resolve the effective config: repo-scoped (app defaults -> global
+			// -> the repo's own .agent-factory config, #800) when the CWD is a
+			// repo, else the global config alone for a registry-mode launch.
+			var cfg *config.ResolvedConfig
+			if repo != nil {
+				cfg, err = config.ResolveConfig(repo.Root)
+			} else {
+				cfg, err = config.ResolveGlobalConfig()
+			}
 			if err != nil {
 				return err
 			}
@@ -259,6 +280,14 @@ func init() {
 	// Hide the daemonFlag as it's only for internal use
 	err := rootCmd.Flags().MarkHidden("daemon")
 	if err != nil {
+		panic(err)
+	}
+
+	// Internal only (#2212 R2): the recovery actor's StartCandidate passes this to
+	// launch a candidate in upgrade probation. Hidden so it never appears in help.
+	rootCmd.Flags().StringVar(&upgradeTransactionFlag, "upgrade-transaction", "",
+		"Internal: run the daemon in upgrade probation for this transaction id")
+	if err := rootCmd.Flags().MarkHidden("upgrade-transaction"); err != nil {
 		panic(err)
 	}
 

@@ -638,6 +638,89 @@ func TestWebTabProxy_QueryTokenIsOnlyABootstrapCredential(t *testing.T) {
 	}
 }
 
+// TestWebTabProxy_StripsPreviewTokenFromUpstreamQuery pins the #1856 invariant that no
+// af credential — the app's own af_webtab_token OR the foreign af_preview_token that
+// rides along via the shared cookie jar (cookies are not port-scoped, RFC 6265 §8.5) —
+// ever survives where an untrusted dev server could read it. It proves BOTH halves of
+// P2-a's interaction with the clean-before-render bootstrap:
+//
+//  1. Rendered URL: a request ARRIVING with both credential params is cleaned by a 307
+//     to a URL carrying NEITHER, before any upstream forward — strictly stronger than
+//     stripping on the way upstream, since the credential never enters window.location.
+//     The app origin adopts only its OWN credential as a cookie; it strips the foreign
+//     preview token, it does not adopt it.
+//  2. Proxied request: the post-bootstrap request (credentials in cookies) forwards the
+//     app's own query with NO af param, and forwardAppCookies strips BOTH af cookies so
+//     neither reaches the dev server.
+func TestWebTabProxy_StripsPreviewTokenFromUpstreamQuery(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	seenQuery := make(chan string, 1)
+	seenCookie := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		seenQuery <- r.URL.RawQuery
+		seenCookie <- r.Header.Get("Cookie")
+		fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	// Arrives with BOTH credentials: af_webtab_token (its own, authorizes) and
+	// af_preview_token (foreign, rides along). The bootstrap strips every af param.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/v1/webtab/%s/%s/asset.js?real=1&af_webtab_token=fixture-token&af_preview_token=leak", id, tabID), nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want 307 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("the credential-bearing request reached the dev server %d time(s), want 0", got)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, "real=1") {
+		t.Fatalf("redirect Location = %q, want the app's own param preserved", location)
+	}
+	for _, leak := range []string{"af_preview_token", "leak", "af_webtab_token", "fixture-token"} {
+		if strings.Contains(location, leak) {
+			t.Fatalf("redirect Location = %q must carry NO af credential (%q survived) — none may enter window.location", location, leak)
+		}
+	}
+	if c := cookieNamed(rec, previewTokenCookie); c != nil {
+		t.Fatalf("app origin set the preview cookie %+v; it must strip the foreign preview token, not adopt it", c)
+	}
+	ownCookie := cookieNamed(rec, webtabTokenCookie)
+	if ownCookie == nil || !ownCookie.HttpOnly {
+		t.Fatalf("app origin cookie = %+v, want its own HttpOnly af_webtab_token", ownCookie)
+	}
+
+	// The proxied follow-up: credentials now in cookies (the preview one riding along via
+	// the shared jar). The upstream sees the app's own query and NO af cookie.
+	clean := httptest.NewRecorder()
+	cleanReq := httptest.NewRequest(http.MethodGet, location, nil)
+	cleanReq.AddCookie(ownCookie)
+	cleanReq.AddCookie(&http.Cookie{Name: previewTokenCookie, Value: "leak"})
+	mux.ServeHTTP(clean, cleanReq)
+	if clean.Code != http.StatusOK {
+		t.Fatalf("clean follow-up status = %d, want 200 (body: %s)", clean.Code, clean.Body.String())
+	}
+	got := <-seenQuery
+	if !strings.Contains(got, "real=1") {
+		t.Fatalf("upstream RawQuery = %q, want the app's own param preserved", got)
+	}
+	for _, leak := range []string{"af_preview_token", "leak", "af_webtab_token", "fixture-token"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("upstream RawQuery = %q must carry NO af credential (%q reached the dev server)", got, leak)
+		}
+	}
+	gotCookie := <-seenCookie
+	for _, leak := range []string{"af_preview_token", "leak", "af_webtab_token", "fixture-token"} {
+		if strings.Contains(gotCookie, leak) {
+			t.Fatalf("upstream Cookie = %q must carry NO af credential (%q survived) — forwardAppCookies must strip both", gotCookie, leak)
+		}
+	}
+}
+
 // TestWebTabProxy_QueryTokenCleanupKeepsMirroredPath ensures a non-root target
 // cannot bypass the bootstrap boundary. The redirect stays on the exact mirrored
 // path and preserves the app's raw query bytes and order; it does not bounce via
@@ -827,20 +910,29 @@ func TestWebTabProxy_ForwardsCookiesBothDirections(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/webtab/%s/%s/", id, tabID), nil)
-	// The browser sends both the daemon token cookie and the app's own cookie.
-	req.Header.Set("Cookie", webtabTokenCookie+"=daemon-tok; appsess=xyz")
+	// The browser sends the daemon token cookie, the PREVIEW token cookie (the two
+	// origins share a cookie jar — cookies are not port-scoped, RFC 6265 §8.5 — and
+	// both are minted at Path=/v1/webtab/, so both arrive here), and the app's own
+	// cookie.
+	req.Header.Set("Cookie", webtabTokenCookie+"=daemon-tok; "+previewTokenCookie+"=preview-tok; appsess=xyz")
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 
-	// Upstream must have seen the app cookie but NOT the daemon token cookie.
+	// Upstream must have seen the app cookie but NEITHER af credential cookie.
 	echoed := rec.Header().Get("X-Echo-Cookie")
 	if !contains(echoed, "appsess=xyz") {
 		t.Fatalf("upstream Cookie %q missing app cookie appsess=xyz", echoed)
 	}
 	if contains(echoed, webtabTokenCookie) {
 		t.Fatalf("upstream Cookie %q must not carry the daemon token cookie", echoed)
+	}
+	// #1856 P1: the preview token shares this jar; forwarding it upstream would hand
+	// a global preview credential to the untrusted dev server (cross-session preview
+	// access). It must be stripped just like the daemon token.
+	if contains(echoed, previewTokenCookie) {
+		t.Fatalf("upstream Cookie %q must not carry the preview token cookie — it would leak a global preview credential to the dev server", echoed)
 	}
 
 	// The upstream Set-Cookie must be relayed back, re-scoped under this tab's proxy

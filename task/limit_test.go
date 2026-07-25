@@ -123,6 +123,68 @@ func TestIsLimitContent(t *testing.T) {
 			wantHit:   true,
 			wantReset: false,
 		},
+		// devin (#2411): detect-only. devin renders exhaustion as
+		// "Quota exhausted: <message>" (the <message> is BACKEND-supplied) and as a
+		// bare "Quota exhausted" UI heading, so the matcher anchors on the invariant
+		// "quota exhausted" prefix, NOT the default message half the backend
+		// overrides. Each is a hit with NO reset time (the format is
+		// uncharacterized). devin's HEALTHY quota-status displays — which share the
+		// "quota" vocabulary — must NOT trip it.
+		{
+			// The regression this matcher's anchor was corrected for: a
+			// backend-worded message (NOT the "usage quota has been exhausted"
+			// default) must still be caught by the "Quota exhausted:" prefix.
+			name:      "devin exhaustion, backend-supplied message -> hit, no reset (detect-only)",
+			agent:     tmux.ProgramDevin,
+			content:   "Quota exhausted: You have used all of your ACUs for this billing cycle.",
+			wantHit:   true,
+			wantReset: false,
+		},
+		{
+			name:      "devin exhaustion, default message -> hit, no reset",
+			agent:     tmux.ProgramDevin,
+			content:   "Quota exhausted: usage quota has been exhausted",
+			wantHit:   true,
+			wantReset: false,
+		},
+		{
+			name:      "devin exhaustion, bare UI heading -> hit, no reset",
+			agent:     tmux.ProgramDevin,
+			content:   "Quota exhausted\nUpgrade your plan or wait for your quota to reset",
+			wantHit:   true,
+			wantReset: false,
+		},
+		{
+			name:      "devin exhaustion banner is case-insensitive",
+			agent:     tmux.ProgramDevin,
+			content:   "QUOTA EXHAUSTED",
+			wantHit:   true,
+			wantReset: false,
+		},
+		{
+			name:    "devin healthy: percent remaining is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "❭ 59% remaining, resets in 3d",
+			wantHit: false,
+		},
+		{
+			name:    "devin healthy: (resets clause is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "Quota: 12% used (resets in 3 days)",
+			wantHit: false,
+		},
+		{
+			name:    "devin healthy: Quota used: line is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "Quota used: 41%",
+			wantHit: false,
+		},
+		{
+			name:    "devin healthy: Quota resets line is not a limit",
+			agent:   tmux.ProgramDevin,
+			content: "Quota resets in 2 days",
+			wantHit: false,
+		},
 		{
 			name:      "codex banner present but no reset phrase -> hit, no reset",
 			agent:     tmux.ProgramCodex,
@@ -224,8 +286,10 @@ func TestIsLimitContentPatternOverride(t *testing.T) {
 }
 
 // TestResolveLimitMatchers covers the resolver's guard rails: unknown-agent
-// and uncompilable overrides are dropped (built-in stands), and the built-ins
-// are present for the two v1 scheduled agents only.
+// and uncompilable overrides are dropped (built-in stands), the built-ins are
+// present for claude/codex (full) and devin (detect-only) but no other agent,
+// and a valid override for an agent WITH a built-in is honored — replacing the
+// detect while keeping its reset parser (nil for devin's detect-only entry).
 func TestResolveLimitMatchers(t *testing.T) {
 	base := resolveLimitMatchers(nil)
 	if _, ok := base[tmux.ProgramClaude]; !ok {
@@ -233,6 +297,14 @@ func TestResolveLimitMatchers(t *testing.T) {
 	}
 	if _, ok := base[tmux.ProgramCodex]; !ok {
 		t.Fatalf("built-in codex matcher missing")
+	}
+	// devin has a DETECT-ONLY matcher (#2411): present, but with no reset parser.
+	devinMatcher, ok := base[tmux.ProgramDevin]
+	if !ok {
+		t.Fatalf("built-in devin matcher missing")
+	}
+	if devinMatcher.parseReset != nil {
+		t.Fatalf("devin must be detect-only: parseReset must be nil (no auto-resume from an uncharacterized reset format)")
 	}
 	if _, ok := base[tmux.ProgramGemini]; ok {
 		t.Fatalf("gemini should have no matcher in v1")
@@ -251,8 +323,8 @@ func TestResolveLimitMatchers(t *testing.T) {
 		t.Fatalf("opencode is API-key metered and has no plan-reset banner to parse; it should have no matcher")
 	}
 
-	// An override for an agent with no built-in matcher is ignored (there is
-	// no reset parser to pair a detection-only override with yet).
+	// An override for an agent with no built-in matcher is ignored — there is
+	// nothing to layer it onto (gemini/amp/opencode).
 	withGemini := resolveLimitMatchers(map[string]string{tmux.ProgramGemini: `whatever`})
 	if _, ok := withGemini[tmux.ProgramGemini]; ok {
 		t.Fatalf("override for unmatched agent should be ignored")
@@ -266,9 +338,33 @@ func TestResolveLimitMatchers(t *testing.T) {
 		t.Fatalf("override for opencode should be ignored until opencode has a built-in matcher")
 	}
 
+	// An override for an agent WITH a built-in matcher is HONORED: it swaps the
+	// detect pattern and keeps the built-in reset parser. For devin (#2411) that
+	// parser is nil, so the override stays detect-only — it must not invent a reset
+	// time. This is the config contract #2411 leans on: a user who can see their own
+	// exhausted devin pane can point the matcher at the wording they actually
+	// observe, even before a built-in capture exists. Before devin had a built-in
+	// entry this override was dropped with a warning; it is now accepted.
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, nyLoc(t))
+	withDevin := resolveLimitMatchers(map[string]string{tmux.ProgramDevin: `(?i)rate ceiling hit`})
+	dm, ok := withDevin[tmux.ProgramDevin]
+	if !ok {
+		t.Fatalf("valid devin override should be accepted, not dropped")
+	}
+	if dm.parseReset != nil {
+		t.Fatalf("devin override must stay detect-only: parseReset must remain nil")
+	}
+	// The override REPLACES detection: the user's pattern hits...
+	if hit, _, _ := isLimitContent("the provider says: RATE CEILING HIT", tmux.ProgramDevin, withDevin, now); !hit {
+		t.Fatalf("devin override pattern should detect the user-supplied banner")
+	}
+	// ...and the built-in default ("quota exhausted") no longer does.
+	if hit, _, _ := isLimitContent("Quota exhausted: usage quota has been exhausted", tmux.ProgramDevin, withDevin, now); hit {
+		t.Fatalf("devin override should REPLACE the built-in detect, not augment it")
+	}
+
 	// An uncompilable regex is dropped and the built-in default stands: the
 	// stock claude banner must still detect.
-	now := time.Date(2026, 7, 4, 10, 0, 0, 0, nyLoc(t))
 	bad := resolveLimitMatchers(map[string]string{tmux.ProgramClaude: `(unclosed`})
 	hit, _, _ := isLimitContent("Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, bad, now)
 	if !hit {

@@ -389,18 +389,19 @@ func TestHandleStateNewPreflightErrorKeepsNamingFlow(t *testing.T) {
 // len()==0 check let it through to session creation, producing an invisible name
 // in the sidebar. Typing spaces and then Enter must leave the naming overlay open
 // and the namingInstance pointer intact (i.e. not submitted).
+//
+// It drives the REAL startNewInstance flow so a #2470 placeholder IS present (as it
+// always is in production), which is what makes the guard cover shipped behavior: a
+// whitespace-only title must be rejected even with a placeholder available, and must
+// NOT be silently replaced by it — the shadow name is gone the moment a space is
+// typed, so adopting it would create a name that was never on screen.
 func TestHandleStateNewWhitespaceViaRealInput(t *testing.T) {
 	h := newTestHome(t)
-	h.state = stateNew
 	h.errBox.SetSize(120, 1)
 
-	naming, err := session.NewInstance(session.InstanceOptions{
-		Title:   "",
-		Path:    t.TempDir(),
-		Program: "claude",
-	})
-	require.NoError(t, err)
-	h.namingInstance = naming
+	_, _ = h.startNewInstance(false)
+	require.NotNil(t, h.namingInstance)
+	require.NotEmpty(t, h.namingPlaceholder, "startNewInstance always generates a placeholder")
 
 	// Simulate the user typing three spaces in the naming flow: each KeySpace
 	// appends " " to instance.Title (the KeySpace branch in handle_input.go).
@@ -409,11 +410,13 @@ func TestHandleStateNewWhitespaceViaRealInput(t *testing.T) {
 	}
 	require.Equal(t, "   ", h.namingInstance.Title, "precondition: title is whitespace-only")
 
-	// Submit with Enter — must be rejected, keeping the flow open.
+	// Submit with Enter — must be rejected, keeping the flow open, and the whitespace
+	// must NOT have been adopted into the placeholder name.
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
 	assert.Equal(t, stateNew, h.state, "naming flow must stay open for whitespace-only title")
 	require.NotNil(t, h.namingInstance, "naming instance must not be submitted")
+	assert.Equal(t, "   ", h.namingInstance.Title, "whitespace-only must NOT adopt the placeholder")
 	assert.Contains(t, h.errBox.String(), "title cannot be empty")
 }
 
@@ -535,4 +538,81 @@ func TestNamingCreateFlow_NoDoubleTransition(t *testing.T) {
 	// Op raised exactly once — still Creating (the daemon start is deferred to the
 	// returned async cmd, which this test does not run).
 	assert.Equal(t, session.OpCreating, inst.GetInFlightOp())
+}
+
+// TestHandleStateNewEmptySubmitAdoptsPlaceholder pins the #2470 autocreate: with
+// the name field left untouched, pressing enter adopts the generated shadow
+// placeholder as the session title instead of erroring "title cannot be empty".
+func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
+
+	_, _ = h.startNewInstance(false)
+	inst := h.namingInstance
+	require.NotNil(t, inst)
+	require.Equal(t, "", inst.Title, "precondition: the name field starts empty")
+	require.NotEmpty(t, h.namingPlaceholder, "startNewInstance must generate a suggested name")
+	placeholder := h.namingPlaceholder
+
+	// Enter on the untouched field.
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Nil(t, h.namingInstance, "an empty submit with a placeholder submits, it does not error")
+	assert.Equal(t, placeholder, inst.Title, "the empty submit adopted the shadow placeholder as the title")
+	assert.Empty(t, h.namingPlaceholder, "the placeholder is cleared once naming ends")
+	assert.Equal(t, stateDefault, h.state)
+}
+
+// TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder is the #2470 review P2-a
+// guard: an empty submit resolves the placeholder into a LOCAL and commits it to the
+// instance only after every gate passes. So a FAILED gate — here a preflight error,
+// e.g. the agent binary missing — must leave the naming flow open with the title
+// still EMPTY, so the row keeps showing the shadow placeholder rather than a real,
+// full-contrast name the user never chose and would have to backspace out.
+func TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(120, 1)
+	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error {
+		return errors.New("Claude Code is not installed or not on PATH")
+	}))
+
+	_, _ = h.startNewInstance(false)
+	inst := h.namingInstance
+	require.NotNil(t, inst)
+	require.Equal(t, "", inst.Title, "precondition: the field starts empty")
+	require.NotEmpty(t, h.namingPlaceholder)
+
+	// Enter on the untouched field: the placeholder resolves, but preflight FAILS.
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state, "a failed gate keeps the naming flow open")
+	require.Same(t, inst, h.namingInstance, "the naming instance is not submitted")
+	assert.Equal(t, "", inst.Title, "a failed gate must NOT stamp the placeholder as a real title")
+	assert.NotEmpty(t, h.namingPlaceholder, "the placeholder is still available to retry or edit")
+	assert.Contains(t, h.errBox.String(), "not installed")
+}
+
+// TestCancelNamingClearsPlaceholder guards that both cancel paths drop the #2470
+// placeholder alongside the naming pointer, so a later frame cannot paint a stale
+// suggestion on some other row.
+func TestCancelNamingClearsPlaceholder(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"escape", tea.KeyMsg{Type: tea.KeyEsc}},
+		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			_, _ = h.startNewInstance(false)
+			require.NotNil(t, h.namingInstance)
+			require.NotEmpty(t, h.namingPlaceholder, "precondition: a placeholder was generated")
+
+			_, _ = h.handleStateNew(tc.key)
+
+			assert.Nil(t, h.namingInstance, "cancel clears the naming pointer")
+			assert.Empty(t, h.namingPlaceholder, "cancel clears the placeholder")
+		})
+	}
 }

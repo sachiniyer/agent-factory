@@ -116,6 +116,11 @@ func describeWatchState(d *session.InstanceData) string {
 		return "being archived"
 	case session.OpRestoring:
 		return "being restored"
+	case session.OpReplacing:
+		// An agent handoff (#2013) between its outgoing and incoming runtime — a
+		// distinct pending op (session/activity.go classifies it as such), not the
+		// generic "working" the liveness fallback below would otherwise report (#2530).
+		return "being replaced"
 	}
 	switch d.Liveness {
 	case session.LiveRunning:

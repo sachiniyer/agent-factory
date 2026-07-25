@@ -610,19 +610,28 @@ body {
   white-space: nowrap;
 }
 
-/* The menu footer holds the reversible delete-project action (#1735), moved here
- * from the removed Projects view; a hairline separates it from the switch list. */
+/* The menu footer holds the always-present add-project action (#2456) and, for the
+ * current project, the reversible delete-project action (#1735, moved here from the
+ * removed Projects view); a hairline separates it from the switch list. */
 .af-project-menu-foot {
   margin-top: 0.25rem;
   padding-top: 0.35rem;
   border-top: 1px solid var(--af-border-subtle);
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--af-sp-2);
 }
 
+/* Both footer actions split the row evenly and read at one size: a lone add button
+ * (the zero-projects empty state) spans the full width; add + delete share it. The
+ * default min-width:auto floors each at its label, so on a narrow phone the pair
+ * wraps to two stacked full-width rows instead of shrinking below/clipping a label. */
+.af-project-add,
 .af-project-delete {
-  width: 100%;
+  flex: 1 1 0;
   justify-content: center;
   font-size: var(--af-fs-xs);
+  white-space: nowrap;
 }
 
 /* The trailing appbar controls are one semantic group. It stays inline on desktop;

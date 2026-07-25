@@ -1,8 +1,9 @@
 // Tests for the keyboard/focus state machine (#1693): the TUI-style nav-vs-attach
 // model that makes j/k ALWAYS navigate the rail. These pin the exact transitions
 // the play-test exercises — nav mode moves the selection, Enter attaches, a focused
-// terminal sends to the agent, Escape returns to nav, and a modal owns the keyboard
-// — with no DOM and no daemon, exactly as sessions.test.ts pins the list reducer.
+// terminal sends every key to the agent (Escape included, as its interrupt) with
+// ctrl+] the sole keyboard detach, and a modal owns the keyboard — with no DOM and
+// no daemon, exactly as sessions.test.ts pins the list reducer.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -55,13 +56,39 @@ test("nav mode: Enter on a selection attaches; Enter with none selected is a no-
   assert.deepEqual(decideKey("Enter", ctx({ selectedId: null })), { kind: "none" });
 });
 
-test("terminal mode: keys go to the agent; only Escape returns to the rail", () => {
+test("terminal mode: every key reaches the agent, Escape included; only ctrl+] returns to the rail", () => {
   const t = ctx({ focus: "terminal" });
   assert.deepEqual(decideKey("j", t), { kind: "none" }, "j reaches the agent, does NOT navigate");
   assert.deepEqual(decideKey("ArrowDown", t), { kind: "none" });
   assert.deepEqual(decideKey("Enter", t), { kind: "none" }, "Enter reaches the agent");
   assert.deepEqual(decideKey("x", t), { kind: "none" });
-  assert.deepEqual(decideKey("Escape", t), { kind: "toRail" }, "Escape is the escape hatch back to nav");
+  // #2517: Escape is the agent's INTERRUPT key, so it forwards like any other key
+  // rather than detaching — the whole point of the fix.
+  assert.deepEqual(decideKey("Escape", t), { kind: "none" }, "Escape forwards to the agent as its interrupt");
+  // ctrl+] is the sole keyboard detach, mirroring the TUI's tea.KeyCtrlCloseBracket.
+  assert.deepEqual(decideKey("]", t, { ctrl: true }), { kind: "toRail" }, "ctrl+] detaches back to the rail");
+  // A BARE "]" still forwards — the agent needs it; only the ctrl chord detaches.
+  assert.deepEqual(decideKey("]", t), { kind: "none" }, "a bare ] reaches the agent");
+  // AltGr guard (#2517 review P2): on Windows AltGr is delivered as ctrl+alt, and "]"
+  // is an AltGr key on many EU layouts (German AltGr+9, Spanish, French, …). An
+  // AltGr-typed "]" must FORWARD to the agent, never be mistaken for the detach chord.
+  assert.deepEqual(
+    decideKey("]", t, { ctrl: true, alt: true }),
+    { kind: "none" },
+    "ctrl+alt (AltGr on Windows) ] forwards to the agent, it is not the detach chord",
+  );
+  assert.deepEqual(
+    decideKey("]", t, { ctrl: true, altGraph: true }),
+    { kind: "none" },
+    "an AltGraph-signalled ] (Chromium/Linux) forwards too",
+  );
+});
+
+test("rail mode: ctrl+] is inert, never a view cycle (#2517 review P3)", () => {
+  // After detaching with ctrl+], a habitual second press in rail mode must NOT fall
+  // through to the [ / ] view cycle and lose the rail. A bare ] still cycles.
+  assert.deepEqual(decideKey("]", ctx(), { ctrl: true }), { kind: "none" }, "ctrl+] in rail is inert");
+  assert.deepEqual(decideKey("]", ctx()), { kind: "switchView", view: "tasks" }, "a bare ] still cycles the view");
 });
 
 test("modal mode: the modal owns the keyboard — only Escape (to cancel) is ours", () => {
@@ -157,8 +184,8 @@ test("view switch: ] / [ cycle the top-level view in rail mode of any view", () 
 });
 
 test("view switch: a focused terminal / an open modal own the keyboard — [ and ] fall through", () => {
-  // Terminal mode forwards everything but Escape to the agent, so [ / ] reach the
-  // shell (a shell needs brackets) rather than switching views.
+  // Terminal mode forwards everything but the ctrl+] detach to the agent, so a bare
+  // [ / ] reach the shell (a shell needs brackets) rather than switching views.
   assert.deepEqual(decideKey("]", ctx({ focus: "terminal" })), { kind: "none" });
   assert.deepEqual(decideKey("[", ctx({ focus: "terminal" })), { kind: "none" });
   // A modal owns the keyboard: brackets type into the form, they don't switch views.

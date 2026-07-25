@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -138,8 +139,12 @@ func (p *hookProvisioner) provisionOrReap() (ProvisionResult, error) {
 	if reapErr := p.reap(); reapErr != nil {
 		// The reap failed too, so something on the user's account may still be
 		// running and billing with no record of it on our side. That has to reach
-		// the person creating the session, not just the log.
-		return ProvisionResult{}, fmt.Errorf("%w\n\n%s", err, p.orphanWarning(reapErr))
+		// the person creating the session, not just the log. errors.Join keeps
+		// reapErr's ErrWorkspaceStateUnknown sentinel classifiable rather than
+		// flattening it into %s text — the hook/docker/ssh unknown-state parity this
+		// path is about (ssh does the same in reapProvisionFailure); orphanWarning
+		// carries the human-actionable detail.
+		return ProvisionResult{}, fmt.Errorf("%w\n\n%s", errors.Join(err, reapErr), p.orphanWarning(reapErr))
 	}
 	return ProvisionResult{}, err
 }
@@ -247,6 +252,15 @@ func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent str
 	// killed, so the guarantee above is untouched.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	runErr := cmd.Run()
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// The context deadline killed the script mid-run, so whatever it was doing
+		// to the remote workspace is UNKNOWN. exec surfaces this as a bare
+		// "signal: killed" that does NOT wrap context.DeadlineExceeded, so wrap it
+		// here — that is the only place the ctx is in scope — letting callers (reap
+		// in particular) tell a timeout from a script that answered, and retain the
+		// record instead of trusting a success that never happened (#2529).
+		runErr = fmt.Errorf("%w: %w", context.DeadlineExceeded, runErr)
+	}
 
 	out, readErr := os.ReadFile(f.Name())
 	if readErr != nil && runErr == nil {
@@ -284,7 +298,17 @@ type hookProvisioner struct {
 	// provisioner was rebuilt for a Kill/archive rather than the launch itself.
 	launchPgid int
 
-	reapOnce sync.Once
+	// Reap memoizes only an attempt that COMPLETED — a success or a delete_cmd that
+	// ANSWERED with an error. A TIMEOUT deliberately does NOT latch: it leaves the
+	// remote workspace state unknown, so the daemon must retain the record and
+	// actually re-run delete_cmd on its next poll. sync.Once cannot express that
+	// conditional latch — it latched the timeout too, so the second reap skipped the
+	// closure and returned nil (reapErr was a per-call local), the record was
+	// deleted, and the sandbox leaked exactly one poll later (#2529), the same
+	// #2063-review defect docker and ssh already fixed this way.
+	reapMu  sync.Mutex
+	reaped  bool
+	reapErr error
 }
 
 // hookEndpointJSON is the object launch_cmd echoes: the authed `af agent-server`
@@ -440,35 +464,63 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 // and only if launch_cmd actually STARTED — if it never ran, nothing was
 // provisioned and there is nothing to delete. It backs the session's Kill (after
 // the in-sandbox workspace is torn down over REST), a provisioning failure, and a
-// bad-endpoint NewInstance failure — so a provisioned sandbox is never leaked. The
-// sync.Once collapses the repeated Kill retries and the Kill-vs-provision-failure
-// races to one delete_cmd.
+// bad-endpoint NewInstance failure — so a provisioned sandbox is never leaked.
+//
+// It memoizes CONDITIONALLY (reapMu + reaped, not sync.Once): a success or a
+// delete_cmd that ANSWERED with an error latches, collapsing repeated Kill retries
+// to one delete_cmd. A TIMEOUT does NOT latch — the reap did not complete, so the
+// daemon must re-run delete_cmd on its next poll rather than see a cached nil and
+// delete the record (#2529, the #2063-review defect docker/ssh fixed the same way).
 //
 // This is best-effort by contract: it may be called for a sandbox that was never
 // fully built, so delete_cmd must tolerate a slug it cannot find (documented in
 // docs/remote-hooks.md).
 func (p *hookProvisioner) reap() error {
-	var reapErr error
-	p.reapOnce.Do(func() {
-		if !p.launchStarted {
-			return
-		}
-		p.resolveAuthSelectors()
-		// runHookScript builds its timeout from context.Background(), NEVER a
-		// caller's context — and that is load-bearing here. reap's whole job is to
-		// run on the failure path, where the launch context is already cancelled or
-		// expired, and a WithTimeout derived from a dead parent is born expired:
-		// delete_cmd would never spawn and the sandbox would leak in silence. That
-		// is the exact failure #1955 is about, reintroduced by the cleanup.
-		out, _, err := runHookScriptWithResolvedEnvironment(hookDeleteTimeout, p.hooks.DeleteCmd,
-			p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, "--name", p.slug)
-		if err != nil {
-			reapErr = fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
-			log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
-			return
-		}
+	// Held across delete_cmd so concurrent reaps serialize and the latch is written
+	// race-free — the mutual exclusion sync.Once gave, minus its permanent latch.
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.reaped {
+		return p.reapErr
+	}
+	if !p.launchStarted {
+		// launch_cmd never ran, so nothing was provisioned: a completed no-op reap.
+		p.reaped = true
+		return nil
+	}
+	p.resolveAuthSelectors()
+	// runHookScript builds its timeout from context.Background(), NEVER a caller's
+	// context — and that is load-bearing here. reap's whole job is to run on the
+	// failure path, where the launch context is already cancelled or expired, and a
+	// WithTimeout derived from a dead parent is born expired: delete_cmd would never
+	// spawn and the sandbox would leak in silence. That is the exact failure #1955 is
+	// about, reintroduced by the cleanup.
+	out, _, err := runHookScriptWithResolvedEnvironment(hookDeleteTimeout, p.hooks.DeleteCmd,
+		p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, "--name", p.slug)
+	if err == nil {
+		p.reaped = true
+		p.reapErr = nil
 		log.InfoLog.Printf("hook runtime: reaped remote session %q via delete_cmd", p.slug)
-	})
+		return nil
+	}
+	reapErr := fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
+	if errors.Is(err, context.DeadlineExceeded) {
+		// A timeout is proof of NOTHING: delete_cmd was SIGKILLed mid-reap, so the
+		// remote workspace may still be running. Mark it unknown-state so
+		// deleteSessionRecord RETAINS the record, and do NOT latch (reaped stays
+		// false) so the next poll actually RE-RUNS delete_cmd — a latch here would
+		// buy one poll of retention and then return nil, deleting the record and
+		// leaking the workspace one poll later (#2529). Same as docker/ssh.
+		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+		log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
+		return reapErr
+	}
+	// delete_cmd ANSWERED with an error: the reap completed and TOLD us something, so
+	// it latches as a KNOWN-state error and the record may be deleted — retrying
+	// would just re-run a delete that already reported.
+	p.reaped = true
+	p.reapErr = reapErr
+	log.ErrorLog.Printf("%s", p.orphanWarning(reapErr))
 	return reapErr
 }
 

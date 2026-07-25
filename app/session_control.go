@@ -129,6 +129,13 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 // actually fires rather than waiting a real minute.
 var killRPCTimeout = 60 * time.Second
 
+// errDaemonUnresponsive marks a control call that timed out because the daemon
+// took the request and went quiet. The kill handler matches on it to OFFER an
+// in-interface daemon restart (#2479) rather than print a shell command: the
+// message names what happened and leaves the recovery to the TUI's own restart
+// affordance, which the handler surfaces as a confirm.
+var errDaemonUnresponsive = errors.New("daemon did not respond")
+
 var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
 	defer cancel()
@@ -142,9 +149,8 @@ var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	// teardown that did complete still lands.
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf(
-			"daemon did not respond within %s — it may be wedged or busy recovering this session; "+
-				"the teardown may still finish in the background. Check `af sessions list`, "+
-				"or restart the daemon with `af daemon restart`", killRPCTimeout)
+			"%w within %s — it may be wedged or busy recovering this session; the teardown "+
+				"may still finish in the background", errDaemonUnresponsive, killRPCTimeout)
 	}
 	return err
 }
@@ -184,6 +190,19 @@ var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeletePro
 		return e
 	})
 	return resp, err
+}
+
+// registerProjectThroughDaemon routes the TUI's add-project verb (#2456) through
+// the daemon — the single writer (#960) — which resolves + validates the path,
+// records it in the #2355 project registry, and publishes projects.changed. The
+// caller (handleAddProject) forwards the already-locally-resolved absolute root
+// and switches on its own, so only the error matters here. A package var so the
+// app test suite can stub it without dialing a real daemon.
+var registerProjectThroughDaemon = func(path string) error {
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		_, e := c.RegisterProject(path)
+		return e
+	})
 }
 
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)

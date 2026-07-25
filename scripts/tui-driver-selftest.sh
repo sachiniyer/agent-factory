@@ -159,6 +159,28 @@ _enter_interactive_and_probe_literal_send() {
     sleep "$AF_DRIVER_POLL"
 }
 
+# _expect_archive_confirm_names_the_restore_key — #2479 real-TUI proof. The
+# archive confirmation must tell the user how to bring the session back by naming
+# the in-TUI restore KEY, never a shell command. Drives the live dialog: select a
+# session, press the archive key, read the rendered overlay, and CANCEL with `n`
+# so nothing is torn down.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_archive_confirm_names_the_restore_key() {
+    af_select alpha || return 1
+    af_send a
+    af_wait_for 'Archive session' 10 'archive confirmation opened' || return 1
+    # The off-ramp names the in-TUI restore key ("Restore later with r."), and
+    # carries no `af sessions` shell command (#2479).
+    af_assert_screen 'with r' 'archive dialog names the restore key' || return 1
+    af_refute_screen 'af sessions' 'archive dialog prescribes no shell command' || return 1
+    # Cancel with `n` (not Escape) so the session is not actually archived, then
+    # confirm the dialog is gone. Wait on the DIALOG's own text disappearing, not
+    # on `n new`: that hint lives in the always-present footer, so it is on screen
+    # even while the dialog is up and would let the check pass before `n` lands.
+    af_send n
+    af_wait_gone 'Archive session' 10 'archive confirmation cancelled' || return 1
+}
+
 # _expect_multipane_hide — regression proof for #1822. Hiding a pane while
 # ANOTHER pane is still open advances focus to the pane that takes its slot, NOT
 # back to the tree; af_hide_pane waited for the tree menu (`n new`) and so
@@ -772,6 +794,9 @@ step "assert alpha display-selected (sole instance)"        af_expect_selected a
 step "attach the SOLE instance (proves 'o' is NOT a no-op)" af_attach
 step "detach from the single-instance attach"              af_detach
 step "assert alpha survived the single-instance round trip"  af_expect_selected alpha
+
+# #2479: the archive confirmation names the in-TUI restore key, not a shell command.
+step "archive confirm names the restore key (#2479)"        _expect_archive_confirm_names_the_restore_key
 
 step "create instance 'beta'"                               af_new_instance beta
 

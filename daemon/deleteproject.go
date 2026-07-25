@@ -28,6 +28,11 @@ type DeleteProjectResult struct {
 	// kill never touches the user's tree/branch).
 	Archived []session.InstanceData
 	Killed   []session.InstanceData
+	// Deregistered is true when this delete removed the repo's durable #2355 registry
+	// record (#2456). It is what lets the projects-changed signal fire for a
+	// registered project with NO live sessions — otherwise a delete that archived
+	// nothing would publish nothing and the registered project would linger.
+	Deregistered bool
 }
 
 // DeleteProject deletes a project — a repo grouping of sessions (#1735) — with
@@ -89,6 +94,21 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
 	} else if len(removed) > 0 {
 		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
+	}
+
+	// Also drop the repo's durable #2355 registry record, if any (#2456) — the
+	// symmetric counterpart to RegisterProject. The registry is now a project source
+	// (buildProjectListFrom and the web switcher union read config.ListProjects), so a
+	// delete that left the record behind would re-list the project forever. Fatal for
+	// the same reason as root_agents: a surviving record reappears on the next list.
+	// req.RepoPath is the project's root (both the web and TUI send it); a project that
+	// was never registered is a false no-op. Recorded so the projects-changed publish
+	// fires even when no session was archived (a registered, sessionless project).
+	if deregistered, regErr := config.DeregisterProject(config.ExpandTilde(strings.TrimSpace(req.RepoPath))); regErr != nil {
+		return result, fmt.Errorf("delete project %s: could not remove its durable registry record — the project would reappear, so nothing was changed; retry: %w", repoID, regErr)
+	} else if deregistered {
+		result.Deregistered = true
+		log.InfoLog.Printf("delete project %s: removed its durable registry record", repoID)
 	}
 
 	// The durable removal succeeded, so now apply the in-memory suppression that
