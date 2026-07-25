@@ -2844,6 +2844,68 @@ body {
   padding: 0.2rem 0.5rem;
 }
 
+/* The "Configure with assistant" button in the config header (#2467). Sits at the
+ * right of the header; when the config path is present it follows it, otherwise the
+ * auto margin carries it to the edge on its own. */
+.af-config-assistant-btn {
+  margin-left: auto;
+  font-size: var(--af-fs-xs);
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+
+/* The config-assistant chat overlay (#2467): a large modal card whose body is a live
+ * xterm bound to the daemon-owned assistant. Reuses the modal backdrop; the card is
+ * roomier than a form modal and lays out head / terminal / error as a column. */
+.af-assistant-card {
+  max-width: 60rem;
+  width: min(92vw, 60rem);
+  height: 80vh;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.af-assistant-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-3);
+  padding: var(--af-sp-3) var(--af-sp-4);
+  border-bottom: 1px solid var(--af-border);
+  background: var(--af-bg-surface);
+}
+
+.af-assistant-head .af-modal-title {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.af-assistant-status {
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+}
+
+.af-assistant-close {
+  margin-left: auto;
+  font-size: var(--af-fs-lg);
+  line-height: 1;
+  padding: 0 var(--af-sp-2);
+}
+
+.af-assistant-term {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--af-sp-2);
+}
+
+.af-assistant-error {
+  margin: 0;
+  padding: var(--af-sp-2) var(--af-sp-4) var(--af-sp-3);
+}
+
 /* One key. The label column is fluid and the control column fixed, so a long
  * purpose line wraps under its key instead of squeezing the field. */
 .af-config-row {

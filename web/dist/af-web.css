@@ -2119,6 +2119,54 @@ body {
   font-size: var(--af-fs-xs);
   padding: 0.2rem 0.5rem;
 }
+.af-config-assistant-btn {
+  margin-left: auto;
+  font-size: var(--af-fs-xs);
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+}
+.af-assistant-card {
+  max-width: 60rem;
+  width: min(92vw, 60rem);
+  height: 80vh;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.af-assistant-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-3);
+  padding: var(--af-sp-3) var(--af-sp-4);
+  border-bottom: 1px solid var(--af-border);
+  background: var(--af-bg-surface);
+}
+.af-assistant-head .af-modal-title {
+  margin: 0;
+  flex: 0 0 auto;
+}
+.af-assistant-status {
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+}
+.af-assistant-close {
+  margin-left: auto;
+  font-size: var(--af-fs-lg);
+  line-height: 1;
+  padding: 0 var(--af-sp-2);
+}
+.af-assistant-term {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--af-sp-2);
+}
+.af-assistant-error {
+  margin: 0;
+  padding: var(--af-sp-2) var(--af-sp-4) var(--af-sp-3);
+}
 .af-config-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);

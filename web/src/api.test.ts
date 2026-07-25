@@ -22,12 +22,14 @@ import {
   listPrograms,
   listProjects,
   probeWebTab,
+  reapConfigAssistant,
   registerProject,
   removeTask,
   renameTab,
   reorderTab,
   restoreSession,
   resumeFromLimit,
+  spawnConfigAssistant,
   suggestSessionName,
   triggerTask,
   updateTask,
@@ -753,4 +755,85 @@ test("listProjects tolerates a null/absent projects array", async () => {
     json: async () => ({ data: { projects: null }, error: null }),
   });
   assert.deepEqual(await listProjects("tok"), [], "an empty registry is an empty list, not a throw");
+});
+
+// --- config assistant (#2467) ----------------------------------------------
+
+test("spawnConfigAssistant POSTs /v1/config-assistant with an empty body and the bearer token", async () => {
+  const cap = stubFetch();
+  await spawnConfigAssistant("tok-1");
+  assert.equal(cap.url, "/v1/config-assistant", "posts to the config-assistant route");
+  assert.deepEqual(cap.body, {}, "the body is empty — the daemon builds the whole request server-side");
+  assert.equal(cap.auth, "Bearer tok-1");
+});
+
+test("spawnConfigAssistant surfaces a 409 as a retryable ApiError (create raced a reap)", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 409,
+    statusText: "Conflict",
+    json: async () => ({ data: null, error: { message: "config assistant creation was aborted; retry" } }),
+  });
+  const err = await spawnConfigAssistant("tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 409, "the pane retries the POST on a 409, so the status must survive");
+});
+
+test("spawnConfigAssistant surfaces a 503 (assistant absent from this build)", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 503,
+    statusText: "Service Unavailable",
+    json: async () => ({ data: null, error: { message: "config assistant is not available in this build" } }),
+  });
+  const err = await spawnConfigAssistant("tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 503);
+});
+
+test("reapConfigAssistant issues a DELETE to /v1/config-assistant with the bearer token", async () => {
+  let method = "";
+  let url = "";
+  let auth: string | undefined;
+  (globalThis as { fetch: unknown }).fetch = async (u: string, init: RequestInit): Promise<Response> => {
+    method = String(init.method);
+    url = u;
+    auth = (init.headers as Record<string, string>).Authorization;
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: {}, error: null }) } as unknown as Response;
+  };
+  await reapConfigAssistant("tok-2");
+  assert.equal(method, "DELETE");
+  assert.equal(url, "/v1/config-assistant");
+  assert.equal(auth, "Bearer tok-2");
+});
+
+test("reapConfigAssistant throws ApiError on a non-2xx so a caller that cares can see it", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "reap failed" } }),
+  });
+  const err = await reapConfigAssistant("tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 500);
+});
+
+test("reapConfigAssistant omits the Authorization header for a tokenless client", async () => {
+  let hadAuth = true;
+  (globalThis as { fetch: unknown }).fetch = async (_u: string, init: RequestInit): Promise<Response> => {
+    hadAuth = "Authorization" in (init.headers as Record<string, string>);
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: {}, error: null }) } as unknown as Response;
+  };
+  await reapConfigAssistant("");
+  assert.equal(hadAuth, false, 'a tokenless ("") client sends no Authorization header (#1696)');
 });

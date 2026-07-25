@@ -219,6 +219,11 @@ export interface Actions {
    *  in the browser: a second copy of the rules is how a UI accepts a value the
    *  loader later rejects at startup. */
   setConfigValue(key: string, value: string): void;
+  /** Opens the conversational config assistant (#2467): index.ts spawns-or-reuses
+   *  the daemon-owned assistant, streams it into a chat overlay, and reaps it on
+   *  close. The config pane only reports the intent; the shell owns the token and the
+   *  modal host. */
+  openConfigAssistant(): void;
   /** Renames the tab with the stable IDENTITY `id` (tabIdentity) to `name` (#1813):
    *  the commit of the bar's inline edit. Only offered for a RENAMEABLE tab (web /
    *  process — see isRenameableTab); index.ts resolves the identity to the tab's
@@ -968,6 +973,7 @@ export class AppShell {
     });
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
+      openAssistant: () => this.actions.openConfigAssistant(),
     });
     const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
 

@@ -49,6 +49,7 @@ import {
   updateTask,
 } from "./api.js";
 import { createKeyedQueue } from "./config.js";
+import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
 import { EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
@@ -196,6 +197,10 @@ termHost.className = "af-term-host";
 const modalHost = document.createElement("div");
 modalHost.className = "af-modal-host";
 let modal: ModalHandle | null = null;
+// The open config-assistant chat overlay (#2467), if any. Tracked alongside `modal`
+// so any overlay-open or teardown path reaps it — an orphaned controller would keep a
+// hidden terminal streaming and never fire its close-time DELETE.
+let configAssistant: ConfigAssistantController | null = null;
 
 // The appbar's "Install app" affordance (feat: PWA). Built ONCE here, for the same
 // reason termHost and modalHost are: rerender() drops `shell` on logout and builds a
@@ -292,6 +297,7 @@ function rerender(): void {
     }
     disposeSplit();
     closeModal();
+    closeConfigAssistant();
     renderLogin(root, state, actions);
     return;
   }
@@ -387,6 +393,7 @@ async function fetchRegisteredProjects(tok: string): Promise<string[]> {
 function disconnect(): void {
   stopStream();
   closeModal();
+  closeConfigAssistant();
   token = null;
   clearToken();
   store.set({
@@ -589,11 +596,42 @@ function closeModal(): void {
   }
 }
 
-/** Mounts a fresh modal, replacing any currently open one. */
+/** Closes the open config-assistant overlay, if any: disposes its terminal and reaps
+ *  the assistant. Idempotent — the controller's own close() latches. */
+function closeConfigAssistant(): void {
+  if (configAssistant) {
+    configAssistant.close();
+    configAssistant = null;
+  }
+}
+
+/** Mounts a fresh modal, replacing any currently open overlay (a form modal OR the
+ *  config-assistant chat) — one overlay at a time, and the assistant is torn down
+ *  (terminal disposed, session reaped) rather than left streaming behind the modal. */
 function openModal(m: ModalHandle): void {
   closeModal();
+  closeConfigAssistant();
   modal = m;
   modalHost.replaceChildren(m.el);
+}
+
+/** Opens the conversational config assistant (#2467): spawn-or-reuse, stream into a
+ *  chat overlay, reap on close. Needs a token (a tokenless "" client is authorized —
+ *  only a null token, "not authorized yet", is refused). One at a time. */
+function doOpenConfigAssistant(): void {
+  const tok = token;
+  if (tok === null) {
+    return;
+  }
+  closeModal();
+  closeConfigAssistant();
+  configAssistant = openConfigAssistant({
+    token: tok,
+    mountHost: modalHost,
+    onClosed: () => {
+      configAssistant = null;
+    },
+  });
 }
 
 /** Opens the new-session modal, its picker seeded from the live projects. Submit
@@ -1504,6 +1542,7 @@ const actions = {
   reorderTab: reorderSessionTab,
   switchView,
   setConfigValue: applyConfigValue,
+  openConfigAssistant: doOpenConfigAssistant,
   switchProject,
   setStatusFilter,
   resetStatusFilter,

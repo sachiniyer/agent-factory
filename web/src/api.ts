@@ -847,3 +847,66 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
 }
+
+// --- config assistant (#2467) ----------------------------------------------
+//
+// The web analogue of the TUI's config-agent takeover: POST spawns-or-reuses a
+// single shared assistant (a bare tmux session the daemon owns), the caller streams
+// it over /v1/config-assistant/stream (terminal.ts configAssistantStreamEndpoint),
+// and DELETE reaps it when the pane closes. The daemon builds the whole spawn request
+// server-side, so these carry no body that becomes a command.
+
+/** The POST /v1/config-assistant reply. session_name is informational (the stream
+ *  route resolves the assistant itself and accepts no name), so nothing needs it. */
+export interface ConfigAssistantResponse {
+  session_name?: string;
+}
+
+/**
+ * Spawns-or-reuses the shared config assistant (POST /v1/config-assistant). Blocks
+ * through the daemon's cold-start readiness wait (~60s) on a first spawn. The route
+ * is a plain POST (not the WS upgrade) precisely so this wait is a normal request,
+ * not a hung handshake.
+ *
+ * Throws ApiError carrying the HTTP status so the caller can honor the contract:
+ *   409 — the create raced a concurrent reap; RETRYABLE, POST again.
+ *   503 — the assistant is unavailable in this daemon build.
+ *   0   — the daemon was unreachable.
+ */
+export function spawnConfigAssistant(token: string): Promise<ConfigAssistantResponse> {
+  return af<ConfigAssistantResponse>("config-assistant", {}, token);
+}
+
+/**
+ * Reaps the shared config assistant (DELETE /v1/config-assistant) — the pane-close
+ * signal. Best-effort by design: the daemon's last-detach grace reaper is the
+ * backstop, and reaping an already-gone assistant is a no-op success, so a caller on
+ * the close path may ignore a failure here. Hand-rolled because af() is POST-only and
+ * the client has no other DELETE route; it throws ApiError like af() for callers that
+ * do care.
+ */
+export async function reapConfigAssistant(token: string): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  let resp: Response;
+  try {
+    resp = await fetch("/v1/config-assistant", { method: "DELETE", headers });
+  } catch (e) {
+    throw new ApiError(0, `cannot reach the daemon: ${errorText(e)}`);
+  }
+  if (!resp.ok) {
+    let env: Envelope<unknown> | null = null;
+    try {
+      env = (await resp.json()) as Envelope<unknown>;
+    } catch {
+      // Non-JSON error body: fall through to the status line.
+    }
+    throw new ApiError(
+      resp.status,
+      envelopeErrorText(env?.error, `${resp.status} ${resp.statusText}`.trim()),
+      envelopeErrorCode(env?.error),
+    );
+  }
+}

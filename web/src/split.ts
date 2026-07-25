@@ -63,6 +63,7 @@ import {
   webProxyPath,
 } from "./tabaddr.js";
 import { tabIcon, tabLabel } from "./tablabel.js";
+import { sessionStreamEndpoint } from "./stream_endpoint.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
 import { currentXtermTheme } from "./theme.js";
 import { TabKind } from "./types.js";
@@ -695,10 +696,15 @@ export class SplitView {
         // for an id-less tab, and sending that as ?tab_id= is an unknown id the
         // daemon 404s — breaking a legacy tab that attaches fine by ordinal (#1779).
         // "" is the honest "no id", which makes AttachTerminal fall back to ?tab=.
-        pane.term = new AttachTerminal(pane.host, this.sessionId, this.token, realId, leaf.tab, {
-          onStatus: (s) => this.onPaneStatus(leaf.id, s),
-          onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
-        });
+        pane.term = new AttachTerminal(
+          pane.host,
+          this.token,
+          sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
+          {
+            onStatus: (s) => this.onPaneStatus(leaf.id, s),
+            onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
+          },
+        );
       } else if (moved) {
         // The same tab, merely at a new ordinal, streamed by ?tab_id=: the terminal's
         // captured ordinal is inert (terminal.ts sends tab_id OR tab, never both), so
