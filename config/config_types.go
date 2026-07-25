@@ -203,6 +203,19 @@ type Config struct {
 	// Default strict, so an existing backend=ssh user sees no change; accept-new
 	// writes learned keys to an af-owned store, never the user's ~/.ssh/known_hosts.
 	SSHHostKeyVerification string `json:"ssh_host_key_verification" toml:"ssh_host_key_verification"`
+	// SandboxSSH is the free-form `ssh …` command the `sandbox` backend runs to
+	// reach the sandbox host — any invocation that already works for the operator
+	// (jump hosts, ProxyCommand, custom ports/flags/keys; #2476). It is
+	// deliberately global-only, the sibling of the other operator grants: af
+	// EXECUTES this command on the daemon host at session-create, so a
+	// repo-settable version would let a cloned repository run an arbitrary command
+	// on the operator's machine — a strict escalation of the #2329/#2462
+	// checked-in-config class, from a credential leak to code execution. A
+	// repository selects `backend = "sandbox"`; only the operator says how their
+	// sandbox is reached. Host-key verification here is the ssh binary's own: the
+	// operator's ssh_config / known_hosts / ProxyCommand are the authority (unlike
+	// the x/crypto `ssh` backend, which af enforces via ssh_host_key_verification).
+	SandboxSSH string `json:"sandbox_ssh,omitempty" toml:"sandbox_ssh,omitempty"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.

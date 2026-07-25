@@ -15,10 +15,11 @@ import "strings"
 // remote-hook backend. `docker` and `ssh` are the first-class sandboxed
 // runtimes (implemented in Phase 4 PR4/PR5).
 const (
-	BackendLocal  = "local"
-	BackendDocker = "docker"
-	BackendSSH    = "ssh"
-	BackendHook   = "hook"
+	BackendLocal   = "local"
+	BackendDocker  = "docker"
+	BackendSSH     = "ssh"
+	BackendSandbox = "sandbox"
+	BackendHook    = "hook"
 )
 
 // SupportedBackends is the canonical, ordered list of the backend values a user
@@ -34,7 +35,7 @@ const (
 // offered-but-unconstructible). Every client reads the list off the daemon at
 // run time rather than hard-coding it, so a new backend reaches the web without
 // a web change (#1933).
-var SupportedBackends = []string{BackendLocal, BackendDocker, BackendSSH, BackendHook}
+var SupportedBackends = []string{BackendLocal, BackendDocker, BackendSSH, BackendSandbox, BackendHook}
 
 // defaultInRepoConfig is the built-in schema for repo-only configuration.
 // Keep non-zero defaults here rather than relying on InRepoConfig's zero value:
