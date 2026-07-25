@@ -525,13 +525,13 @@ export function confirmDeleteProjectModal(
     onCancel: opts.onCancel,
   });
 
-  body.append(
-    h(
-      "p",
-      { class: "af-modal-text" },
-      `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`,
-    ),
-  );
+  // A registered project with no live sessions (#2456) has nothing to archive — the
+  // delete just drops its registry record. Say so, rather than "Archive 0 sessions".
+  const message =
+    opts.sessionCount === 0
+      ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched — you can add it again anytime."
+      : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched — restore any of them to bring the project back.`;
+  body.append(h("p", { class: "af-modal-text" }, message));
 
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {

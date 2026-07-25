@@ -57,6 +57,14 @@ type projectDeletedMsg struct {
 	err    error
 }
 
+// projectAddedMsg reports completion of an async add-project (#2456). The switch
+// already happened synchronously; this only carries the off-loop registry write's
+// outcome so its success refreshes the switcher and its failure is surfaced.
+type projectAddedMsg struct {
+	root string
+	err  error
+}
+
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async
 // archive / restore (#1028). On success the row's new status arrives via the
 // next daemon Snapshot reconcile (which re-partitions it into / out of the

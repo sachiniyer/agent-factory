@@ -1633,11 +1633,12 @@ function onEvent(ev: WireEvent): void {
   // by another client / the CLI / the TUI — refetches the registry so the switcher's
   // union reflects it. This is the mechanism that makes THIS client's own "+ Add
   // project" observable (openAddProject writes and closes; the echoed event surfaces
-  // it). A delete also emits per-session archived events, which the session reducer
-  // below handles; this carries only the registry half. Doesn't touch the session list.
+  // it). It then FALLS THROUGH to the session reducer, whose projects.changed case
+  // (sessions.ts) requests a Snapshot resync so the derived-from-sessions half of the
+  // project view (and any dropped root_agents opt-in) also settles against
+  // authoritative state after a delete — without the fall-through that branch is dead.
   if (ev.type === "projects.changed") {
     requestProjectsResync();
-    return;
   }
   sessionEventGeneration += 1;
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);

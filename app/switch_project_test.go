@@ -610,8 +610,9 @@ func TestHandleAddProjectRegistersAndSwitches(t *testing.T) {
 	h.state = stateSwitchProject
 
 	// The add-project verb now writes through the daemon (the single writer, #2456
-	// step 3), not the in-process root_agents. There is no real daemon in the app
-	// suite, so stub the seam — recording the path AND applying the daemon's effect
+	// step 3), not the in-process root_agents, and does so OFF the event loop (the
+	// register is a daemon round-trip). There is no real daemon in the app suite, so
+	// stub the seam — recording the path AND applying the daemon's effect
 	// (config.RegisterProject) so the durable-registry assertion is faithful.
 	var registeredPath string
 	oldRegister := registerProjectThroughDaemon
@@ -624,15 +625,23 @@ func TestHandleAddProjectRegistersAndSwitches(t *testing.T) {
 
 	// A real git repo so RepoFromPath resolves.
 	repoRoot := initTestGitRepo(t)
-	mod, _ := h.handleAddProject(repoRoot)
+	mod, cmd := h.handleAddProject(repoRoot)
 	require.NotNil(t, mod)
 
+	// The switch happens SYNCHRONOUSLY (fast + local), and the registration is
+	// dispatched as an off-loop command rather than blocking this keystroke (#2456).
 	assert.Equal(t, stateDefault, h.state, "a valid add closes the picker")
 	assert.Nil(t, h.projectPickerOverlay)
 	assert.Equal(t, config.RepoIDFromRoot(repoRoot), h.repoID, "add should switch to the new project")
+	require.NotNil(t, cmd, "add must dispatch the off-loop registration, not block on it")
 
-	// Routed through the daemon seam with the LOCALLY-resolved absolute root, so a
-	// relative input can never re-resolve against the daemon's cwd (#2491).
+	// Drive the off-loop registration directly (as the bubbletea runtime would),
+	// mirroring deleteProjectCmd: it must route through the daemon seam with the
+	// LOCALLY-resolved absolute root (so a relative input can never re-resolve against
+	// the daemon's cwd, #2491) and land in the durable registry.
+	done, ok := h.addProjectCmd(repoRoot)().(projectAddedMsg)
+	require.True(t, ok, "addProjectCmd must emit projectAddedMsg")
+	require.NoError(t, done.err)
 	assert.Equal(t, repoRoot, registeredPath, "the add must forward the resolved root to the daemon")
 
 	// Persisted into the durable registry (the #2355 store), NOT the legacy

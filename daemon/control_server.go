@@ -636,7 +636,7 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	for _, k := range result.Killed {
 		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
 	}
-	if len(result.Archived) > 0 || len(result.Killed) > 0 {
+	if len(result.Archived) > 0 || len(result.Killed) > 0 || result.Deregistered {
 		s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
 	}
 	if err != nil {

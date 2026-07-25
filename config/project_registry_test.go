@@ -31,6 +31,58 @@ func TestResetProjectRegistryMissingHomeIsReadOnly(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist, "an empty reset must not materialize the AF home")
 }
 
+func TestDeregisterProjectMissingHomeIsReadOnly(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "missing-af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	removed, err := DeregisterProject(filepath.Join(t.TempDir(), "whatever"))
+	require.NoError(t, err)
+	require.False(t, removed, "deregistering against a missing registry removes nothing")
+	_, statErr := os.Stat(home)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "a no-op deregister must not materialize the AF home")
+}
+
+// TestDeregisterProjectRemovesOnlyTheMatchingRecord is the #2456 delete counterpart
+// to RegisterProject: it removes exactly the record whose root matches, is an
+// idempotent no-op for an unregistered or already-removed root, and — because it
+// leaves the checkout marker — a re-add succeeds with a FRESH project id.
+func TestDeregisterProjectRemovesOnlyTheMatchingRecord(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	firstRoot := initProjectRegistryRepo(t, filepath.Join(base, "first"))
+	secondRoot := initProjectRegistryRepo(t, filepath.Join(base, "second"))
+	first, err := RegisterProject(firstRoot)
+	require.NoError(t, err)
+	second, err := RegisterProject(secondRoot)
+	require.NoError(t, err)
+
+	// A repo that was never registered is a false no-op.
+	removed, err := DeregisterProject(filepath.Join(base, "never"))
+	require.NoError(t, err)
+	require.False(t, removed)
+
+	// Deregistering the first removes ONLY its record; the second survives.
+	removed, err = DeregisterProject(firstRoot)
+	require.NoError(t, err)
+	require.True(t, removed, "the matching record is removed")
+
+	projects, err := ListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1, "only the other project remains")
+	assert.Equal(t, second.ID, projects[0].ID)
+
+	// Idempotent: a second deregister of the same root is a false no-op.
+	removed, err = DeregisterProject(firstRoot)
+	require.NoError(t, err)
+	require.False(t, removed)
+
+	// The marker is preserved, so re-adding the deregistered checkout succeeds and
+	// mints a FRESH project id — the old identity was deleted, not resurrected.
+	readded, err := RegisterProject(firstRoot)
+	require.NoError(t, err)
+	assert.NotEqual(t, first.ID, readded.ID, "re-adding a deregistered project mints a new id")
+}
+
 func TestProjectRegistryRebindPreservesIdentityAndClonesStayDistinct(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))

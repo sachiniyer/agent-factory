@@ -325,6 +325,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.deleteProjectCmd(msg)
 	case projectDeletedMsg:
 		return m.handleProjectDeleted(msg)
+	case projectAddedMsg:
+		return m.handleProjectAdded(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
 	case configAgentSpawnedMsg:

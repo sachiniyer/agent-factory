@@ -3647,38 +3647,76 @@ test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a 
   }
 });
 
-test("add project (#2456): the switcher's + Add project drives the real RegisterProject round-trip", REAL_FIXTURE, async () => {
-  // The switcher is always openable now (the zero-projects dead end is gone), and
-  // its "+ Add project" footer action opens a path input that registers a repo
-  // through the REAL RegisterProject RPC. A non-git path is rejected by the daemon
-  // and the message shows INLINE while the modal stays open — proving this drives a
-  // real daemon round-trip, not a client-only stub.
-  const mockRepo = process.env.AF_MOCK_REPO;
-  expect(mockRepo, "the add-project round-trip needs AF_MOCK_REPO (set by web-selftest-entry.sh)").toBeTruthy();
+test("add + delete a registered empty project (#2456): appears while another is selected, then deletes", REAL_FIXTURE, async () => {
+  // Uses a real git repo the fixture deliberately gives NO sessions and NO tasks, so
+  // it is a project ONLY once registered — the case a session-derived repo can't
+  // exercise. mock-repo stays SELECTED throughout the add, so this also pins the P1-b
+  // render gate: the switcher must re-render on a registry change even when the
+  // sessions/tasks/selection are all unchanged.
+  const emptyRepo = process.env.AF_MOCK_REPO_EMPTY;
+  expect(emptyRepo, "the registered-empty flow needs AF_MOCK_REPO_EMPTY (set by web-selftest-entry.sh)").toBeTruthy();
+
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
+
+  // The always-openable switcher hosts "+ Add project". A non-git path is rejected by
+  // the REAL daemon and shown INLINE while the modal stays open (proving a real
+  // round-trip); editing clears the error and a VALID sessionless checkout registers.
   await page.locator(".af-project-switch").click();
   const add = page.locator(".af-project-menu .af-project-add");
   await expect(add).toBeVisible();
   await add.click();
-
   const addModal = page.locator(".af-modal-card");
-  await expect(addModal).toBeVisible();
   await expect(addModal.locator(".af-modal-title")).toHaveText("Add project");
-
   const pathInput = addModal.locator('input[aria-label="Repository path"]');
   await pathInput.fill("/work/definitely-not-a-git-repo");
   await addModal.locator("button.af-primary").click();
-  // Rejected by the daemon: the error is shown inline and the modal stays open to
-  // correct — a failed submit does NOT dismiss it.
   await expect(addModal.locator(".af-modal-error")).toBeVisible();
   await expect(addModal).toBeVisible();
-
-  // Editing clears the stale error, and a VALID checkout path (mock-repo is a real
-  // git repo in the fixture; registering it is an idempotent success) submits and
-  // closes the modal.
-  await pathInput.fill(mockRepo!);
+  await pathInput.fill(emptyRepo!);
   await expect(addModal.locator(".af-modal-error")).toBeHidden();
   await addModal.locator("button.af-primary").click();
   await expect(addModal).toBeHidden();
+
+  // P1-b: WITHOUT a reload, and with mock-repo STILL selected, the newly-registered
+  // sessionless repo appears in the switcher — the daemon's projects.changed drove a
+  // registry refetch and the switcher re-rendered (the render gate now watches
+  // registeredProjects). It reads its zero-state glance, not a session/task count.
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
+  await page.locator(".af-project-switch").click();
+  await expect(projectItem(page, "mock-repo-empty")).toHaveCount(1);
+  await expect(projectItem(page, "mock-repo-empty").locator(".af-project-item-meta")).toContainText("no sessions yet");
+
+  // It is a real, selectable project: switch to it and its rail is the empty state
+  // (a session can be created into it — the affordance is coherent, not a no-op).
+  await projectItem(page, "mock-repo-empty").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-empty");
+  await expect(page.locator(".af-rail-count")).toHaveText("0");
+
+  // P1-a: the registered empty project's Delete is ENABLED (not the permanently-
+  // disabled no-op the old liveCount===0 gate produced once a project had no live
+  // session). Deleting it removes the durable registry record, so it LEAVES the
+  // switcher — a create verb whose entries can actually be destroyed. The confirm is
+  // honest about there being nothing to archive.
+  await page.locator(".af-project-switch").click();
+  const del = page.locator(".af-project-menu .af-project-delete");
+  await expect(del).toBeEnabled();
+  await del.click();
+  const delModal = page.locator(".af-modal-card");
+  await expect(delModal).toBeVisible();
+  await expect(delModal).toContainText("no sessions to archive");
+  await delModal.locator("button.af-danger").click();
+  await expect(delModal).toBeHidden();
+
+  // It actually goes away (not a lingering row whose delete silently no-ops, the
+  // #1735 regression the registry read would otherwise cause). The selection
+  // reconciles to a still-valid project; pin it to mock-repo for the downstream cases.
+  await expect(page.locator(".af-project-switch-name")).not.toHaveText("mock-repo-empty", { timeout: 30_000 });
+  await page.locator(".af-project-switch").click();
+  await expect(projectItem(page, "mock-repo-empty")).toHaveCount(0);
+  await projectItem(page, "mock-repo").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
 });
 
 test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", REAL_FIXTURE, async () => {

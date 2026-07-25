@@ -632,6 +632,7 @@ export class AppShell {
   // highlight; the task set can add/drop a task-only project).
   private lastProjectSessions: SessionData[] | null = null;
   private lastProjectTasks: TaskData[] | null = null;
+  private lastRegisteredProjects: string[] | null = null;
   private lastSelectedProject: string | null = null;
 
   // The rail's status filter control (feat: hide archived by default): a rail-head
@@ -1120,11 +1121,21 @@ export class AppShell {
     }
 
     // The project switcher label + menu reflect the derived project list and the
-    // current scope; rebuild when the sessions, the tasks (a task-only project), or
-    // the selection changed.
-    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
+    // current scope; rebuild when the sessions, the tasks (a task-only project), the
+    // registered projects (the #2456 registry union — a just-added empty project that
+    // changed NEITHER sessions nor the selection), or the selection changed. Omitting
+    // registeredProjects here is why adding a project while another is selected left the
+    // switcher stale until an unrelated event (the store spreads, so a registry-only
+    // set never touched the sessions/tasks references or the reconciled selection).
+    if (
+      this.lastProjectSessions !== state.sessions ||
+      this.lastProjectTasks !== state.tasks ||
+      this.lastRegisteredProjects !== state.registeredProjects ||
+      projectChanged
+    ) {
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
+      this.lastRegisteredProjects = state.registeredProjects;
       this.lastSelectedProject = state.selectedProject;
       this.renderProjectSwitch(state);
     }
@@ -1480,19 +1491,27 @@ export class AppShell {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
-      // Delete-project ARCHIVES the project's live sessions (#1735, reversible). With
-      // no live sessions to archive it would be a silent no-op, so it is DISABLED for a
-      // task-only project — its tasks are cleared from the Tasks view, not here. This is
-      // also why an archived-only repo is never a project (projectSummaries): the delete
-      // can never appear-but-do-nothing.
-      if (currentSummary.liveCount === 0) {
+      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      // Delete-project ARCHIVES the project's live sessions (#1735, reversible) AND, for
+      // a registered project, removes its durable registry record (#2456) so it leaves
+      // the switcher. It is a silent no-op ONLY for a project with neither: a task-only,
+      // UNregistered repo (its tasks are cleared from the Tasks view, not here), so it is
+      // DISABLED just for that case. A registered project with no live sessions stays
+      // deletable — without this, once its sessions were archived its Delete would be
+      // permanently disabled and the registry entry could never be removed.
+      if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
         del.setAttribute(
           "title",
           `No live sessions in ${currentSummary.name} to archive — remove its tasks from the Tasks view to clear it`,
         );
       } else {
-        del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+        del.setAttribute(
+          "title",
+          currentSummary.liveCount > 0
+            ? `Delete project ${currentSummary.name} (archives its sessions, restorable)`
+            : `Delete project ${currentSummary.name} (removes the empty project)`,
+        );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();

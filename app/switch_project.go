@@ -215,28 +215,52 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAddProject validates a user-entered repo path, registers it in the #2355
-// project registry through the daemon (so it persists in the switcher), and
-// switches to it. A path that is not a git repository keeps the overlay open with
-// an inline error rather than dismissing the user's typing.
+// handleAddProject validates a user-entered repo path, switches to it immediately,
+// and registers it in the #2355 project registry through the daemon OFF the event
+// loop. A path that is not a git repository keeps the overlay open with an inline
+// error rather than dismissing the user's typing.
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 	repo, err := config.RepoFromPath(config.ExpandTilde(path))
 	if err != nil {
 		m.projectPickerOverlay.SetAddError(fmt.Sprintf("not a git repository: %s", path))
 		return m, nil
 	}
-	// Persist through the daemon — the single writer (#960) — which records the repo
-	// in the project registry (config.RegisterProject) and publishes projects.changed,
-	// so it survives the next launch and joins the switcher union (buildProjectListFrom
-	// reads config.ListProjects). This REPLACES the legacy in-process root_agents write
-	// (#2456 step 3). We forward the LOCALLY-resolved absolute root, not the raw input,
-	// so a relative path cannot re-resolve against the daemon's cwd (#2491). Non-fatal
-	// on failure: the switch still works this session, it just isn't remembered.
-	if err := registerProjectThroughDaemon(repo.Root); err != nil {
-		log.WarningLog.Printf("failed to register project %s in the registry: %v", repo.Root, err)
-	}
 	m.closeProjectPicker()
-	return m.switchProject(repo)
+	// Switch NOW (local + fast), and register through the daemon off the event loop —
+	// mirroring deleteProjectCmd (#1735). RegisterProject is a daemon round-trip that
+	// blocks on the admission-retry window while the daemon warms, so running it inline
+	// (as the pre-#2456 root_agents file write did) would freeze the TUI on this
+	// keystroke. The switch does not depend on the write: the active project already
+	// shows (buildProjectListFrom seeds it from m.repoRoot); the registry write only
+	// has to persist for the switcher union and the next launch, and handleProjectAdded
+	// refreshes the section when it lands.
+	model, switchCmd := m.switchProject(repo)
+	return model, tea.Batch(switchCmd, m.addProjectCmd(repo.Root))
+}
+
+// addProjectCmd registers a project through the daemon — the single writer (#960) —
+// off the event loop (#2456), mirroring deleteProjectCmd, and reports completion. It
+// forwards the LOCALLY-resolved absolute root, not the raw input, so a relative path
+// cannot re-resolve against the daemon's cwd (#2491). The receiver is unused (like
+// deleteProjectCmd's), kept for symmetry with the sibling verb.
+func (m *home) addProjectCmd(root string) tea.Cmd {
+	return func() tea.Msg {
+		return projectAddedMsg{root: root, err: registerProjectThroughDaemon(root)}
+	}
+}
+
+// handleProjectAdded finalizes an async add-project (#2456). On success it refreshes
+// the Projects section so the newly-registered project appears in the switcher union
+// even when the repo has no sessions. A failure is NON-FATAL — the switch already
+// happened; the registration just won't persist for the next launch — and is surfaced
+// as a warning rather than an error box, matching the pre-#2456 best-effort write.
+func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		log.WarningLog.Printf("failed to register project %s in the registry: %v", msg.root, msg.err)
+		return m, nil
+	}
+	m.refreshSidebarProjects()
+	return m, nil
 }
 
 // sessionWord pluralizes "session" for the delete-project copy.

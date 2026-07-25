@@ -6767,13 +6767,8 @@ function confirmDeleteProjectModal(opts) {
     confirmClass: "af-danger",
     onCancel: opts.onCancel
   });
-  body.append(
-    h(
-      "p",
-      { class: "af-modal-text" },
-      `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`
-    )
-  );
+  const message = opts.sessionCount === 0 ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched \u2014 you can add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`;
+  body.append(h("p", { class: "af-modal-text" }, message));
   const card = handle.el.firstElementChild;
   asForm(card, () => {
     handle.setError(null);
@@ -11272,6 +11267,7 @@ var AppShell = class {
   // highlight; the task set can add/drop a task-only project).
   lastProjectSessions = null;
   lastProjectTasks = null;
+  lastRegisteredProjects = null;
   lastSelectedProject = null;
   // The rail's status filter control (feat: hide archived by default): a rail-head
   // button + a checkbox menu, one row per session state. Same imperative treatment as
@@ -11454,9 +11450,10 @@ var AppShell = class {
     if (selectionChanged && state.selectedId) {
       this.setNav(false);
     }
-    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || projectChanged) {
+    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || this.lastRegisteredProjects !== state.registeredProjects || projectChanged) {
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
+      this.lastRegisteredProjects = state.registeredProjects;
       this.lastSelectedProject = state.selectedProject;
       this.renderProjectSwitch(state);
     }
@@ -11732,14 +11729,18 @@ var AppShell = class {
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
       const del = h2("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
-      if (currentSummary.liveCount === 0) {
+      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
         del.setAttribute(
           "title",
           `No live sessions in ${currentSummary.name} to archive \u2014 remove its tasks from the Tasks view to clear it`
         );
       } else {
-        del.setAttribute("title", `Delete project ${currentSummary.name} (archives its sessions, restorable)`);
+        del.setAttribute(
+          "title",
+          currentSummary.liveCount > 0 ? `Delete project ${currentSummary.name} (archives its sessions, restorable)` : `Delete project ${currentSummary.name} (removes the empty project)`
+        );
         del.addEventListener("click", (e) => {
           e.stopPropagation();
           this.closeProjectMenu();
@@ -13215,7 +13216,6 @@ function onEvent(ev) {
   }
   if (ev.type === "projects.changed") {
     requestProjectsResync();
-    return;
   }
   sessionEventGeneration += 1;
   const { sessions, needsResync } = applyEvent(store.get().sessions, ev);

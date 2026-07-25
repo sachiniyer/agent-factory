@@ -508,8 +508,9 @@ export async function registerProject(path: string, token: string): Promise<Regi
 /** Lists the daemon's registered projects (the #2355 registry) — the read half of
  *  the #2456 union. The client ∪s these roots with the projects it derives from live
  *  sessions and tasks, so a registered-but-sessionless project still shows in the
- *  switcher and is creatable-into (projectSummaries / pickerProjects). Mirrors the
- *  TUI's apiclient.ListProjects and the daemon's ListProjects RPC. */
+ *  switcher and is creatable-into (projectSummaries / pickerProjects). The web is the
+ *  only client that reads the registry over HTTP; the TUI and CLI read
+ *  config.ListProjects() in-process, so this has no Go apiclient twin. */
 export async function listProjects(token: string): Promise<RegisteredProject[]> {
   const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
   return resp.projects ?? [];
