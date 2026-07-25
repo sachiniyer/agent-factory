@@ -2,10 +2,17 @@ package config
 
 // This file is the permanent legacy `root_agents` compatibility adapter (#2216
 // Phase 6, PR1). It introduces the canonical root-agent profile and the single
-// resolver that combines every root-agent source into one effective decision,
-// so no consumer re-implements precedence. PR1 carries only the built-in and the
-// legacy path-keyed source; a later PR adds the global and personal-project
-// singleton layers to the same resolver without any consumer changing.
+// resolver, ResolveRootAgent, that combines every root-agent source into one
+// effective decision so no consumer re-implements precedence.
+//
+// PR1 is the config-package adapter ONLY: it carries the built-in base and the
+// legacy path-keyed source, with tests proving existing `root_agents` entries
+// resolve to the canonical form unchanged. The daemon still reads
+// m.cfg.RootAgents directly and is untouched here — the strongest non-breaking
+// guarantee is that its ensure loop does not change at all. PR2's daemon
+// integration is what switches EnsureRootAgents AND repoRootAgentWillMaterialize
+// (which both read the map directly today) onto this resolver, at the same time
+// it adds the global and personal-project singleton layers below the personal one.
 
 // RootAgent is the canonical root-agent profile: whether a project keeps an
 // always-ensured "root" session, and the command it runs. It is the singular
@@ -15,9 +22,17 @@ package config
 type RootAgent struct {
 	// Enabled is whether an always-ensured root session runs for the project.
 	// The built-in default is false, which keeps root agents strictly opt-in.
-	Enabled bool `json:"enabled,omitempty" toml:"enabled,omitempty"`
-	// Program is the command the root session runs. Empty selects the default
-	// root profile downstream (the repo's resolved claude with
+	//
+	// Deliberately NO omitempty: once this is the singleton [root_agent] key
+	// (PR2), an explicit `enabled = false` written to override an enabling global
+	// layer must survive a full serialization — RegisterRootAgent and
+	// saveConfigLocked toml.Marshal the whole Config — or the override is silently
+	// erased on the next write, the zero-value-elision class this repo already
+	// paid for in #1700.
+	Enabled bool `json:"enabled" toml:"enabled"`
+	// Program is the command the root session runs. Empty means UNSET, not "run
+	// an empty command": it falls through to a lower-precedence layer's program
+	// and ultimately the default root profile (the repo's resolved claude with
 	// --dangerously-skip-permissions), exactly as an empty legacy
 	// RootAgentConfig.Program does today.
 	Program string `json:"program,omitempty" toml:"program,omitempty"`
@@ -30,9 +45,13 @@ type RootAgent struct {
 // compatibility source, and adding fields keeps existing callers valid.
 type RootAgentInputs struct {
 	// Legacy is the path-keyed `root_agents` entry for this project, or nil. A
-	// present entry is always enabled with its configured program — that is what
-	// a legacy entry has always meant, and preserving it verbatim is the
-	// non-breaking compatibility guarantee.
+	// present entry always ENABLES the root (that is what a legacy entry has
+	// always meant); its program applies only when non-empty, because an empty
+	// legacy program has always meant "use the default profile" — i.e. unset. That
+	// distinction is load-bearing once a lower layer can supply a program: the
+	// common legacy entry is EMPTY (af's own register and project-switch paths
+	// write an empty RootAgentConfig for every project), so treating empty as
+	// set-to-empty would clobber a global program back to nothing.
 	Legacy *RootAgentConfig
 }
 
@@ -75,11 +94,13 @@ type RootAgentResolution struct {
 //
 // PR1 (#2216 Phase 6) carries the permanent legacy compatibility source only:
 // the built-in opt-in-false base, then the path-keyed `root_agents` entry. A
-// present legacy entry resolves to exactly {Enabled: true, Program:
-// entry.Program} — byte-for-byte the profile the daemon used when it read the
-// map directly, which is the non-breaking guarantee this PR is built to prove.
-// Later phases add the global and personal-project singleton layers to this
-// function; consumers keep calling ResolveRootAgent unchanged.
+// present legacy entry resolves to Enabled=true with its program (an empty
+// program stays unset and falls through to the default profile) — matching the
+// profile the daemon derives when it reads the map directly, which is the
+// non-breaking guarantee this PR proves by test. PR1 does NOT wire the daemon to
+// this function. PR2's daemon integration does, and adds the global layer
+// between the built-in base and the legacy source, and the personal-project
+// layer after it.
 func ResolveRootAgent(in RootAgentInputs) RootAgentResolution {
 	res := RootAgentResolution{}
 	// Built-in base: root agents are opt-in, so nothing runs unless a higher
@@ -94,14 +115,21 @@ func ResolveRootAgent(in RootAgentInputs) RootAgentResolution {
 
 	if in.Legacy != nil {
 		res.Enabled = true
-		res.Program = in.Legacy.Program
+		reason := "a path-keyed root_agents entry is an always-ensured root"
+		if in.Legacy.Program != "" {
+			res.Program = in.Legacy.Program
+		} else {
+			// An empty legacy program is UNSET, not set-to-empty: leave any
+			// lower-precedence program in place instead of clobbering it (P3-a).
+			reason += "; empty program is unset, so the default profile applies"
+		}
 		res.Candidates = append(res.Candidates, RootAgentCandidate{
 			Source:  RootAgentSourceLegacy,
 			Present: true,
 			Enabled: true,
 			Program: in.Legacy.Program,
 			Result:  "winner",
-			Reason:  "a path-keyed root_agents entry is an always-ensured root",
+			Reason:  reason,
 		})
 	} else {
 		res.Candidates = append(res.Candidates, RootAgentCandidate{

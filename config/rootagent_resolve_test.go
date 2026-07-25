@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,4 +85,43 @@ func TestResolveRootAgentMatchesDirectMapValueForEveryEntry(t *testing.T) {
 		assert.Equal(t, entry.Program, res.Program,
 			"%s: the resolver must hand ensureRootAgent the same program the map held", path)
 	}
+}
+
+// TestResolveRootAgentEmptyLegacyProgramIsUnset pins P3-a: an empty legacy
+// program is UNSET, not set-to-empty, so once a lower-precedence layer supplies a
+// program (PR2's global layer) the empty legacy entry does not clobber it back to
+// empty. In PR1 the observable form is that an empty entry leaves Program "" and
+// the legacy candidate records that its program is unset; a non-empty entry sets
+// it. A regression to unconditional assignment drops the "unset" reason.
+func TestResolveRootAgentEmptyLegacyProgramIsUnset(t *testing.T) {
+	empty := ResolveRootAgent(RootAgentInputs{Legacy: &RootAgentConfig{}})
+	assert.True(t, empty.Enabled, "a present legacy entry still enables the root")
+	assert.Equal(t, "", empty.Program, "an empty legacy program leaves the effective program unset")
+	legacyEmpty, ok := candidateBySource(empty, RootAgentSourceLegacy)
+	require.True(t, ok)
+	assert.Contains(t, legacyEmpty.Reason, "unset",
+		"the trace must record that an empty legacy program is unset, not set-to-empty")
+
+	set := ResolveRootAgent(RootAgentInputs{Legacy: &RootAgentConfig{Program: "codex"}})
+	assert.Equal(t, "codex", set.Program, "a non-empty legacy program is the effective program")
+	legacySet, ok := candidateBySource(set, RootAgentSourceLegacy)
+	require.True(t, ok)
+	assert.NotContains(t, legacySet.Reason, "unset")
+}
+
+// TestRootAgentEnabledSerializesExplicitFalse pins P3-b: RootAgent.Enabled has
+// no omitempty, so an explicit `enabled = false` survives a full serialization
+// (RegisterRootAgent/saveConfigLocked marshal the whole Config). With omitempty
+// the false would be dropped and a disabling override erased on the next write
+// — the #1700 zero-value-elision class.
+func TestRootAgentEnabledSerializesExplicitFalse(t *testing.T) {
+	tomlBytes, err := toml.Marshal(RootAgent{Enabled: false})
+	require.NoError(t, err)
+	assert.Contains(t, string(tomlBytes), "enabled = false",
+		"an explicit enabled=false must be written to TOML, not omitted")
+
+	jsonBytes, err := json.Marshal(RootAgent{Enabled: false})
+	require.NoError(t, err)
+	assert.Contains(t, string(jsonBytes), "\"enabled\":false",
+		"an explicit enabled=false must be written to JSON (the --explain surface), not omitted")
 }
