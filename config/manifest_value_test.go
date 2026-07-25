@@ -126,6 +126,28 @@ func TestCurrentValueRoundTripsThroughConfigSet(t *testing.T) {
 	}
 }
 
+// TestCurrentValueCommaJoinsOnlyOptedInLists is the #2564-review lock: the comma
+// form is PER-KEY opt-in (isCommaListKey), never inferred from the []string type.
+// A settable comma-list key (cors_allowed_origins) renders comma-joined; a
+// []string key that has NOT opted in (session_env_passthrough) keeps the
+// unambiguous compact-JSON form — so a future list whose elements can contain a
+// comma is not silently displayed as more entries than it holds.
+func TestCurrentValueCommaJoinsOnlyOptedInLists(t *testing.T) {
+	cfg := &Config{
+		CORSAllowedOrigins:    []string{"https://a.example.com", "https://b.example.com"},
+		SessionEnvPassthrough: []string{"FOO", "BAR"},
+	}
+
+	if got, _ := CurrentValue(cfg, "cors_allowed_origins"); got != "https://a.example.com,https://b.example.com" {
+		t.Errorf("an opted-in comma-list key must render comma-joined, got %q", got)
+	}
+	// session_env_passthrough is a []string but is NOT a cfgStringList settable
+	// key, so it must NOT render comma-joined — it keeps compact JSON.
+	if got, _ := CurrentValue(cfg, "session_env_passthrough"); got != `["FOO","BAR"]` {
+		t.Errorf("a non-opted-in []string key must keep compact JSON (not comma-joined), got %q", got)
+	}
+}
+
 // TestEditorWriteKeepsConfigHandEditable is the external-user guard: config.toml
 // is a file the README tells people to hand-edit, and an edit made from a UI must
 // leave it exactly as hand-editable as it found it — every comment, blank line,

@@ -240,6 +240,19 @@ func validateCORSOrigin(origin string) error {
 	return nil
 }
 
+// isCommaListKey reports whether key is settable as a comma-separated list
+// (its spec kind is cfgStringList). It is the SINGLE per-key opt-in for the comma
+// syntax: the writer (canonicalizeScalar) comma-splits input for exactly these
+// keys, and the editor/get renderer (CurrentValue) comma-joins exactly these keys.
+// Both gate on this one property so they cannot drift, and a []string key that has
+// NOT opted in is never comma-split or comma-joined by its type alone — which
+// would silently mangle a value whose elements can contain a comma. A dynamic
+// family is never a comma list (its leaves are scalars).
+func isCommaListKey(key string) bool {
+	spec, ok := settableKeySpecs[key]
+	return ok && !spec.dynamic && spec.kind == cfgStringList
+}
+
 // SettableKeys returns the sorted, human-facing list of keys `config set`
 // accepts; dynamic families are rendered as prefix.<name>.
 func SettableKeys() []string {

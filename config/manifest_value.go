@@ -54,8 +54,9 @@ func configFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 
 // CurrentValue returns cfg's live value for one global manifest key in the form
 // an editor should show and `af config set` would accept back: a string bare, a
-// bool as "true"/"false", an int in decimal, and a composite (a table or list)
-// as compact JSON.
+// bool as "true"/"false", an int in decimal, a comma-list key (isCommaListKey)
+// comma-joined, and any other composite (a table, or a list that has not opted
+// into the comma syntax) as compact JSON.
 //
 // ok is false for a nil cfg and for a key naming no toml-tagged field. Callers
 // must not substitute a default on !ok: showing a default as though it were the
@@ -68,6 +69,13 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 	field, ok := configFieldByTomlKey(cfg, key)
 	if !ok {
 		return "", false
+	}
+	// The comma-list form is per-key opt-in (isCommaListKey), never inferred from
+	// the []string type: a future list whose elements can contain a comma keeps the
+	// unambiguous compact-JSON rendering rather than silently displaying one entry
+	// as two.
+	if isCommaListKey(key) {
+		return commaListValue(field), true
 	}
 	return editorValue(field), true
 }
@@ -247,18 +255,6 @@ func editorValue(v reflect.Value) string {
 		}
 		return compactJSON(v)
 	case reflect.Slice:
-		// A []string list renders comma-joined — the exact form `af config set`
-		// accepts for a settable list key (cors_allowed_origins) and `af config get`
-		// prints back, so a set→get round-trips. An empty or unset list is "", not
-		// "[]" (an editor pre-filled with "[]" would write that literal back). Any
-		// non-string slice (there are none in the manifest today) keeps compact JSON.
-		if v.Type().Elem().Kind() == reflect.String {
-			parts := make([]string, v.Len())
-			for i := range parts {
-				parts[i] = v.Index(i).String()
-			}
-			return strings.Join(parts, ",")
-		}
 		if v.Len() == 0 {
 			return "[]"
 		}
@@ -266,4 +262,21 @@ func editorValue(v reflect.Value) string {
 	default:
 		return compactJSON(v)
 	}
+}
+
+// commaListValue renders a []string field as the comma-joined form a
+// cfgStringList key is SET with and printed back (an empty/unset list ⇒ "", not
+// "[]" — an editor pre-filled with "[]" would write that literal). Only a key that
+// opted into the comma syntax (isCommaListKey) reaches here; every other slice
+// keeps editorValue's unambiguous compact-JSON rendering, so a []string key whose
+// elements can contain a comma cannot inherit comma-joining by its type alone.
+func commaListValue(field reflect.Value) string {
+	if field.Kind() != reflect.Slice || field.Type().Elem().Kind() != reflect.String {
+		return editorValue(field)
+	}
+	parts := make([]string, field.Len())
+	for i := range parts {
+		parts[i] = field.Index(i).String()
+	}
+	return strings.Join(parts, ",")
 }
