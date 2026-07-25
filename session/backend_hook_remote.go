@@ -8,15 +8,28 @@ import (
 
 var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
 
+// maxSlugLen bounds the slug so it stays a legal filesystem component wherever a
+// backend uses it as one: the ssh backend's `mktemp -d "$HOME/<root>/<slug>.XXXXXX"`
+// and the hook backend's `mkdir -p "$STATE/<slug>"`. Linux NAME_MAX is 255 bytes
+// per component; 200 leaves room for the ssh ".XXXXXX" suffix and any prefix a hook
+// script adds. Without it a long title (creatable via the CLI/API, which don't share
+// the TUI's 32-char cap) failed deep in provisioning with a cryptic ENAMETOOLONG
+// (#2528). The slug is ASCII ([a-z0-9-]), so a byte truncation is rune-safe.
+const maxSlugLen = 200
+
 // Slugify converts a title to a slug-safe string for the remote hook scripts.
 // The slug is the stable identifier launch_cmd and delete_cmd receive via
 // --name (docs/remote-hooks.md): launch_cmd tags the provisioned sandbox with
 // it and delete_cmd reaps by it, so two sessions whose titles slugify the same
-// must not coexist (FindSlugCollision guards that at create time).
+// must not coexist (FindSlugCollision guards that at create time — including two
+// long titles that truncate to the same slug).
 func Slugify(title string) string {
 	s := strings.ToLower(title)
 	s = strings.ReplaceAll(s, " ", "-")
 	s = slugRegexp.ReplaceAllString(s, "")
+	if len(s) > maxSlugLen {
+		s = s[:maxSlugLen]
+	}
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "session"

@@ -52,6 +52,15 @@ func SanitizeBranchName(s string) string {
 		for strings.HasSuffix(part, ".lock") {
 			part = strings.TrimSuffix(part, ".lock")
 		}
+		// Each component becomes a directory/file under .git/refs/heads (or the
+		// worktree's refs), so it is bound by NAME_MAX. A long title creatable via
+		// the CLI/API (no TUI 32-char cap) otherwise failed with a cryptic "Unable to
+		// create ...: File name too long" (#2528). Truncate here, before the trailing
+		// edge cleanup below strips any dash/dot the cut exposed. The subset is ASCII,
+		// so a byte truncation is rune-safe.
+		if len(part) > maxNameComponentLen {
+			part = part[:maxNameComponentLen]
+		}
 		if part != "" {
 			filtered = append(filtered, part)
 		}
@@ -116,12 +125,24 @@ func sanitizeWorktreePathSegment(title string) string {
 	s := reUnsafeWorktreePathSegment.ReplaceAllString(title, "-")
 	s = strings.ReplaceAll(s, "..", "")
 	s = reMultiDash.ReplaceAllString(s, "-")
+	// One filesystem component (joined as "<repo>-<segment>"), so bound it under
+	// NAME_MAX or `git worktree add <path>` fails ENAMETOOLONG for a long title
+	// (#2528). reUnsafeWorktreePathSegment already reduced this to ASCII, so a byte
+	// truncation is rune-safe; trim afterwards so a dash the cut exposed is removed.
+	if len(s) > maxNameComponentLen {
+		s = s[:maxNameComponentLen]
+	}
 	s = strings.Trim(s, "-.")
 	if s == "" {
 		return "session"
 	}
 	return s
 }
+
+// maxNameComponentLen bounds a single title-derived filesystem/ref component. Linux
+// NAME_MAX is 255 bytes; 200 leaves margin for the "<repo>-" worktree prefix and
+// git's per-segment ".lock" reservation.
+const maxNameComponentLen = 200
 
 // TitlesCollide reports whether two session titles cannot coexist in the same
 // repo because they would derive the same git branch. Exact (case-insensitive)

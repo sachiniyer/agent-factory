@@ -188,6 +188,34 @@ func TestBranchForTitle(t *testing.T) {
 	}
 }
 
+// TestBranchAndWorktreeNamesBoundLongTitles is the #2528 regression: a long title
+// (creatable via the CLI/API, no TUI 32-char cap) must not derive a branch ref or
+// worktree path component that overruns NAME_MAX and fails with "File name too
+// long". Against master these are 500+ chars.
+func TestBranchAndWorktreeNamesBoundLongTitles(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	// The invariant: every derived filesystem/ref component stays under Linux
+	// NAME_MAX (255), with margin for git's transient "<ref>.lock". Asserting the
+	// real limit, not the impl bound, so this fails on master (500 chars).
+	const safeMax = 255 - len(".lock")
+
+	branch := BranchForTitle("af-jdoe/", long)
+	for _, part := range strings.Split(branch, "/") {
+		if len(part) > safeMax {
+			t.Errorf("branch component %q is %d bytes, over the %d NAME_MAX budget", part, len(part), safeMax)
+		}
+	}
+
+	if seg := sanitizeWorktreePathSegment(long); len(seg) > safeMax {
+		t.Errorf("worktree path segment is %d bytes, over the %d NAME_MAX budget", len(seg), safeMax)
+	}
+
+	// Short titles are unaffected.
+	if got := BranchForTitle("af-", "MyApp"); got != "af-myapp" {
+		t.Errorf("short title branch changed: %q", got)
+	}
+}
+
 // TestTitlesCollide pins the shared collision rule used by both the daemon's
 // authoritative create-time check and the TUI's naming pre-check (#936). The
 // rule is: case-insensitive equality OR sanitize-to-the-same-branch.

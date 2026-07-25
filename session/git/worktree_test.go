@@ -183,14 +183,28 @@ func TestNewGitWorktree_StatErrorReturns(t *testing.T) {
 	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
+	// Subdirectory mode nests the worktree under the branch-prefix path, giving an
+	// intermediate directory to sabotage. (A long title no longer works as the
+	// trigger — #2528 bounds title-derived path components under NAME_MAX.)
 	cfg := config.DefaultConfig()
-	cfg.BranchPrefix = "test/"
+	cfg.WorktreeRoot = config.WorktreeRootSubdirectory
+	cfg.BranchPrefix = "blocker/"
 	require.NoError(t, config.SaveConfig(cfg))
+
+	// Plant a FILE where the "blocker" branch-prefix subdirectory would be, so
+	// os.Stat of the worktree path (worktrees/blocker/<title>) returns a non-ENOENT
+	// error (ENOTDIR). firstFreeWorktreePath must surface it as "cannot check
+	// worktree path", never hang or treat the path as free.
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	worktreeDir := filepath.Join(configDir, "worktrees")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, "blocker"), []byte("not a dir"), 0o644))
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, err := NewGitWorktree(repoRoot, strings.Repeat("a", 300))
-		errCh <- err
+		_, _, wErr := NewGitWorktree(repoRoot, "some-title")
+		errCh <- wErr
 	}()
 
 	select {

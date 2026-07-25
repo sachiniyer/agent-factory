@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -65,6 +66,21 @@ func TestSlugifyNonEmpty(t *testing.T) {
 		s := Slugify(title)
 		assert.NotEmpty(t, s, "Slugify(%q) should not be empty", title)
 	}
+}
+
+// TestSlugifyBoundsLongTitles is the #2528 regression: a long title (creatable via
+// the CLI/API, which don't share the TUI's 32-char cap) must not produce a slug that
+// blows past a filesystem component limit and fails ssh mktemp / hook mkdir with
+// ENAMETOOLONG. Against master the slug is 500 chars.
+func TestSlugifyBoundsLongTitles(t *testing.T) {
+	s := Slugify(strings.Repeat("a", 500))
+	// The invariant: the slug plus ssh's ".XXXXXX" mktemp suffix stays under Linux
+	// NAME_MAX (255). Asserting the real limit, not the impl bound, so this fails on
+	// master (500 chars) rather than merely tracking the constant.
+	assert.LessOrEqual(t, len(s)+len(".XXXXXX"), 255, "slug must stay under the filesystem component limit")
+	assert.False(t, strings.HasPrefix(s, "-") || strings.HasSuffix(s, "-"), "no dangling dash from the cut: %q", s)
+	// A short title is unaffected.
+	assert.Equal(t, "my-session", Slugify("My Session"))
 }
 
 func TestSlugifyCollisionsReduce(t *testing.T) {
