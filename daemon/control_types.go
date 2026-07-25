@@ -764,10 +764,11 @@ type SetConfigValueResponse struct {
 	// RequiresRestart — so the web UI echoes what was actually written rather
 	// than what it believes it sent.
 	Result *config.SetResult `json:"result"`
-	// RestartNotice is the legacy sentence shown when a change could not be applied
-	// live. Retained for the keys ApplyConfig still reports as Pending; kept on the
-	// response so the TUI, web UI, and CLI share one account of when an edit takes
-	// effect.
+	// RestartNotice is the per-key effect notice (config.EffectNotice, #2480): the
+	// one sentence a save surface shows the user, stating whether this key is live
+	// now, waits for the next daemon start, or is a client-side key af picks up on
+	// its next launch. The web form renders it verbatim. Named RestartNotice for
+	// wire/back-compat; it is no longer a single canned "restart to apply" string.
 	RestartNotice string `json:"restart_notice"`
 	// Applied and Pending report the ApplyConfig outcome (#2480): the daemon
 	// applies the write to itself in place, so a save surface can say what took

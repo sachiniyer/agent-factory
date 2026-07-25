@@ -219,16 +219,22 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 		return err
 	}
 	resp.Result = result
-	resp.RestartNotice = config.RestartNotice
 	// Apply the write to the running daemon in place (#2480) so the web form need
 	// not tell the user to restart for a hot-reloadable key. Best-effort: the write
-	// already succeeded, so an apply failure leaves the legacy restart notice.
+	// already succeeded on disk, so an apply failure just means the change waits for
+	// the next daemon start.
+	daemonApplied := false
 	if s.manager != nil {
 		if applied, aerr := s.manager.ApplyConfig(); aerr == nil {
 			resp.Applied = applied.Applied
 			resp.Pending = applied.Pending
+			daemonApplied = true
 		}
 	}
+	// The per-key effect notice (#2480): whether the running daemon is using this
+	// key now, whether it waits for the next daemon start, or whether it is a
+	// client-side key af picks up on its next launch — never one canned sentence.
+	resp.RestartNotice = config.EffectNotice(result.Key, daemonApplied)
 	return nil
 }
 

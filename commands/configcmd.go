@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -20,23 +19,12 @@ import (
 )
 
 // reportConfigApply prints how a saved global config key took effect (#2480),
-// per the #2479 principle — it never tells the user to run a command. applyErr
-// means no daemon was reachable to apply to, so the value is on disk and takes
-// effect on the next start.
-func reportConfigApply(cmd *cobra.Command, key string, resp daemon.ApplyConfigResponse, applyErr error) {
-	out := cmd.OutOrStdout()
-	switch {
-	case applyErr != nil:
-		fmt.Fprintln(out, "saved. No daemon is running to apply it to; it takes effect on the next start.")
-	case slices.Contains(resp.Pending, key):
-		fmt.Fprintln(out, "saved. This key takes effect on the next daemon start — the web listener keys and root_agents cannot be applied live yet.")
-	case slices.Contains(resp.Applied, key):
-		fmt.Fprintln(out, "applied — the running daemon is using the new value now.")
-	default:
-		// Keys the daemon does not track (theme/keybindings) or a value equal to the
-		// old one: on disk now, and a running af picks it up on its next start.
-		fmt.Fprintln(out, "saved.")
-	}
+// per the #2479 principle — it never tells the user to run a command. The honest
+// per-key answer comes from config.EffectNotice, the same one the daemon hands the
+// web form and the TUI pane uses, so all three surfaces say the same thing.
+// daemonReachable is false when no daemon was running to apply the change.
+func reportConfigApply(cmd *cobra.Command, key string, daemonReachable bool) {
+	fmt.Fprintln(cmd.OutOrStdout(), config.EffectNotice(key, daemonReachable))
 }
 
 // jsonWrapError honors the --json contract for the CLI commands in this
@@ -392,7 +380,7 @@ Examples:
 		// takes effect without a manual `af daemon restart` (the #2479 principle).
 		// Best-effort and non-spawning: with no daemon running there is nothing to
 		// apply live and the value takes effect on the next start.
-		applyResp, applyErr := daemon.RequestApplyConfig()
+		_, applyErr := daemon.RequestApplyConfig()
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 		}
@@ -402,7 +390,7 @@ Examples:
 		for _, w := range res.Warnings {
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
-		reportConfigApply(cmd, res.Key, applyResp, applyErr)
+		reportConfigApply(cmd, res.Key, applyErr == nil)
 		return nil
 	},
 }

@@ -72,3 +72,40 @@ func TestApplyConfigReportsNetworkKeysPending(t *testing.T) {
 	require.Contains(t, result.Pending, "listen_addr", "a changed network key must be reported pending, not applied")
 	require.NotContains(t, result.Applied, "listen_addr")
 }
+
+// TestApplyConfigReportsBranchPrefixPending is the regression for the lie the
+// per-key notice rework caught: branch_prefix is read from the FROZEN startup
+// config in the title-reservation helpers (manager_create.go, deliberately not
+// threaded live), so a change does NOT hot-reload — yet it was reported Applied,
+// telling the user "the daemon is using it now" while the daemon kept deriving
+// branches from the old prefix. It must be Pending.
+func TestApplyConfigReportsBranchPrefixPending(t *testing.T) {
+	m := applyConfigTestManager(t)
+
+	_, err := config.SetGlobalConfigValue("branch_prefix", "test-branch/")
+	require.NoError(t, err)
+
+	result, err := m.ApplyConfig()
+	require.NoError(t, err)
+	require.Contains(t, result.Pending, "branch_prefix",
+		"branch_prefix is read from the frozen startup config, so a change waits for the next daemon start")
+	require.NotContains(t, result.Applied, "branch_prefix",
+		"reporting branch_prefix applied claims a change is live while the daemon still uses the old prefix")
+}
+
+// TestApplyBucketsAgreeWithEffectClasses pins the invariant that keeps the daemon
+// and the save-surface notice (config.EffectNotice) from disagreeing: every key
+// the daemon diffs is classified applied-live or next-daemon-start — never
+// client-side, never unclassified — so ApplyConfig can never file a key into a
+// bucket the notice would describe a different way.
+func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
+	for key := range keyDiff {
+		switch config.KeyEffectClass(key) {
+		case config.EffectAppliedLive, config.EffectNextDaemonStart:
+			// ok: these are the only two buckets ApplyConfig files into.
+		default:
+			t.Errorf("keyDiff key %q has effect class %v; a diffed key must be applied-live or next-daemon-start",
+				key, config.KeyEffectClass(key))
+		}
+	}
+}

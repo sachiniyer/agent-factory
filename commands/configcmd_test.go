@@ -416,10 +416,13 @@ func TestConfigSetEchoesKeyValueAndRoundTrips(t *testing.T) {
 	if !strings.Contains(echo, "daemon_poll_interval = 2500") {
 		t.Errorf("`af config set` must echo the change as `key = value` (the shape the config agent mirrors), got: %q", echo)
 	}
-	if !strings.Contains(echo, "saved") {
-		t.Errorf("`af config set` must print the apply/save note itself (#2480/#2479) — it applies to a running "+
-			"daemon and states what took effect, and the config agent's briefing tells the agent not to repeat it, "+
-			"so dropping this line means nobody tells the user. Got: %q", echo)
+	// The per-key effect note (#2480): daemon_poll_interval is applied-live, but no
+	// daemon is running in this test's throwaway home, so the honest note defers it
+	// to the next daemon start rather than claiming it is live now.
+	if !strings.Contains(echo, "Saved") || !strings.Contains(echo, "next daemon start") {
+		t.Errorf("`af config set` must print the per-key effect note itself (#2480/#2479) — it states when the "+
+			"change takes effect, and the config agent's briefing tells the agent not to repeat it, so dropping "+
+			"this line means nobody tells the user. Got: %q", echo)
 	}
 	if strings.Contains(echo, "af daemon restart") {
 		t.Errorf("`af config set` must NOT tell the user to run a command (#2479); it applies the change itself. Got: %q", echo)

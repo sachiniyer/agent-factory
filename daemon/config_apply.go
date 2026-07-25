@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -15,7 +16,8 @@ import (
 // swap and observe two config generations, producing an inconsistent result (a
 // branch derived from one generation, a worktree path from the next). The frozen
 // startup config m.cfg is deliberately separate — it backs only the keys that do
-// NOT hot-reload (root_agents, and the network listener keys until PR2).
+// NOT hot-reload: root_agents/root_agent, branch_prefix (title-reservation
+// helpers), and the network listener keys until PR2.
 func (m *Manager) Config() *config.Config {
 	if c := m.live.Load(); c != nil {
 		return c
@@ -33,24 +35,47 @@ type ApplyConfigResult struct {
 	// Applied names the changed keys that took effect live — no restart, no
 	// session loss.
 	Applied []string
-	// Pending names changed keys this daemon build cannot yet apply in place: the
-	// network listener keys (a follow-up in-process listener reload lands them,
-	// PR2) and root_agents (its next-daemon-start contract, carved out pending
-	// #2216). They are written to disk and take effect on the next daemon start.
+	// Pending names changed keys this daemon build reads only at startup, so they
+	// take effect on the next daemon start: the network listener keys (a follow-up
+	// in-process listener reload lands them, PR2), root_agents (its
+	// next-daemon-start contract, carved out pending #2216), and branch_prefix
+	// (read from the FROZEN startup config in the title-reservation helpers).
 	Pending []string
 }
 
-// applyPendingKeys are the changed keys ApplyConfig cannot yet apply in place.
-// listen_addr/preview_listen_addr/require_token/require_loopback_token/
-// cors_allowed_origins are served by the listener that reads the FROZEN m.cfg
-// until the PR2 in-process listener reload; root_agents is carved out (#2216).
-var applyPendingKeys = map[string]func(a, b *config.Config) bool{
+// keyDiff maps every config key the daemon reads to a predicate reporting whether
+// it CHANGED between two configs. Which bucket a changed key lands in — Applied
+// (live now) versus Pending (next daemon start) — is NOT decided here: it is
+// config.KeyEffectClass, the single source of truth the save-surface notice reads
+// too (config/effect.go). So a key cannot be bucketed one way for the daemon and
+// described another way to the user. Client-side keys (update_channel, theme, …)
+// are absent because the daemon never reads them; their notice is class-driven.
+var keyDiff = map[string]func(a, b *config.Config) bool{
+	// EffectAppliedLive keys.
+	"default_program":   func(a, b *config.Config) bool { return a.DefaultProgram != b.DefaultProgram },
+	"program_overrides": func(a, b *config.Config) bool { return !reflect.DeepEqual(a.ProgramOverrides, b.ProgramOverrides) },
+	"session_env_passthrough": func(a, b *config.Config) bool {
+		return !reflect.DeepEqual(a.SessionEnvPassthrough, b.SessionEnvPassthrough)
+	},
+	"worktree_root":                  func(a, b *config.Config) bool { return a.WorktreeRoot != b.WorktreeRoot },
+	"vscode_server_binary":           func(a, b *config.Config) bool { return a.VSCodeServerBinary != b.VSCodeServerBinary },
+	"daemon_poll_interval":           func(a, b *config.Config) bool { return a.DaemonPollInterval != b.DaemonPollInterval },
+	"log_max_size_mb":                func(a, b *config.Config) bool { return a.LogMaxSizeMB != b.LogMaxSizeMB },
+	"log_max_backups":                func(a, b *config.Config) bool { return a.LogMaxBackups != b.LogMaxBackups },
+	"limit_auto_resume":              func(a, b *config.Config) bool { return a.LimitAutoResume != b.LimitAutoResume },
+	"limit_retry_interval":           func(a, b *config.Config) bool { return a.LimitRetryInterval != b.LimitRetryInterval },
+	"limit_patterns":                 func(a, b *config.Config) bool { return !reflect.DeepEqual(a.LimitPatterns, b.LimitPatterns) },
+	"global_agent_skills":            func(a, b *config.Config) bool { return a.GlobalAgentSkills != b.GlobalAgentSkills },
+	"docker_mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
+	// EffectNextDaemonStart keys — read once at startup.
 	"listen_addr":            func(a, b *config.Config) bool { return a.ListenAddr != b.ListenAddr },
 	"preview_listen_addr":    func(a, b *config.Config) bool { return a.PreviewListenAddr != b.PreviewListenAddr },
 	"require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
 	"root_agents":            func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
+	"root_agent":             func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
+	"branch_prefix":          func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
 }
 
 // ApplyConfig re-reads the global config from disk and applies it to the running
@@ -68,18 +93,28 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	}
 	old := m.Config()
 
+	// Bucket every changed key by its effect class (config.KeyEffectClass, the same
+	// source the save-surface notice reads). Sorted so the reported order is stable
+	// across map iterations.
 	var result ApplyConfigResult
-	for key, changed := range applyPendingKeys {
-		if changed(old, newCfg) {
+	for key, changed := range keyDiff {
+		if !changed(old, newCfg) {
+			continue
+		}
+		switch config.KeyEffectClass(key) {
+		case config.EffectAppliedLive:
+			result.Applied = append(result.Applied, key)
+		case config.EffectNextDaemonStart:
 			result.Pending = append(result.Pending, key)
 		}
 	}
-	// Everything else that differs is applied live below.
-	result.Applied = appliedLiveKeys(old, newCfg)
+	sort.Strings(result.Applied)
+	sort.Strings(result.Pending)
 
-	// Swap the live config: per-op keys (default_program, branch_prefix,
-	// session_env_passthrough, limit_auto_resume, limit_retry_interval) read it at
-	// their next op entry.
+	// Swap the live config: per-op keys (default_program, session_env_passthrough,
+	// limit_auto_resume, limit_retry_interval, …) read it at their next op entry.
+	// branch_prefix rides along in the swapped config but is read from the frozen
+	// m.cfg in the title-reservation helpers, so it stays Pending, not Applied.
 	m.live.Store(newCfg)
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent
@@ -104,28 +139,4 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	}
 
 	return result, nil
-}
-
-// appliedLiveKeys names the hot-reloadable keys that differ between old and new.
-// It is the inverse of applyPendingKeys over the keys #2480 PR1 applies in place.
-func appliedLiveKeys(old, next *config.Config) []string {
-	var keys []string
-	add := func(name string, changed bool) {
-		if changed {
-			keys = append(keys, name)
-		}
-	}
-	add("default_program", old.DefaultProgram != next.DefaultProgram)
-	add("program_overrides", !reflect.DeepEqual(old.ProgramOverrides, next.ProgramOverrides))
-	add("branch_prefix", old.BranchPrefix != next.BranchPrefix)
-	add("worktree_root", old.WorktreeRoot != next.WorktreeRoot)
-	add("session_env_passthrough", !reflect.DeepEqual(old.SessionEnvPassthrough, next.SessionEnvPassthrough))
-	add("limit_auto_resume", old.LimitAutoResume != next.LimitAutoResume)
-	add("limit_retry_interval", old.LimitRetryInterval != next.LimitRetryInterval)
-	add("limit_patterns", !reflect.DeepEqual(old.LimitPatterns, next.LimitPatterns))
-	add("vscode_server_binary", old.VSCodeServerBinary != next.VSCodeServerBinary)
-	add("daemon_poll_interval", old.DaemonPollInterval != next.DaemonPollInterval)
-	add("log_max_size_mb", old.LogMaxSizeMB != next.LogMaxSizeMB)
-	add("log_max_backups", old.LogMaxBackups != next.LogMaxBackups)
-	return keys
 }

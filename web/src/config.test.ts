@@ -77,7 +77,9 @@ test("getConfig reports no entries as an empty list, never null", async () => {
 test("setConfigValue posts the key and the RAW value for the daemon to validate", async () => {
   const cap = stubFetch({
     result: { key: "update_channel", value: "preview", path: "/tmp/config.toml", requires_restart: true },
-    restart_notice: "Saved. A running daemon applies most changes right away; the web-listener keys and root_agents take effect on the next daemon start.",
+    // The per-key effect notice (#2480): update_channel is client-side, so the
+    // daemon returns the "next af launch" sentence — never one canned banner.
+    restart_notice: "Saved — this setting takes effect the next time you launch af.",
   });
   const resp = await setConfigValue("update_channel", "preview", "tok");
 
@@ -87,9 +89,9 @@ test("setConfigValue posts the key and the RAW value for the daemon to validate"
   // rather than what it sent, which is the same contract `af config set` has.
   assert.equal(resp.result.value, "preview");
   assert.equal(resp.result.requires_restart, true);
-  // Since #2480 the daemon applies the write in place, so the notice must NOT
-  // drop the user to a shell to run a command (#2479); it is passed through
-  // verbatim from the daemon.
+  // Since #2480 the daemon applies the write in place and returns a per-key notice,
+  // so it must NOT drop the user to a shell to run a command (#2479); the client
+  // passes it through verbatim from the daemon.
   assert.doesNotMatch(resp.restart_notice, /daemon restart|run `/, "the notice must not tell the user to run a command (#2479)");
 });
 

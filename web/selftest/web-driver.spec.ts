@@ -1510,19 +1510,58 @@ test("config: the editor renders from the manifest and writes through the real p
   await expect(channel).toBeVisible();
   await channel.selectOption("preview");
 
-  // The echo names what was WRITTEN, and the restart notice appears at the moment
-  // of the edit naming the command to run — config.toml is read at startup, so an
-  // editor that changed a value the running daemon ignores must say so.
-  const echo = pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo');
-  await expect(echo).toHaveText(/set update_channel = preview/);
-  await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-notice')).toContainText(
-    "af daemon restart",
+  // The notice is PER-KEY (#2480): it states when THIS key takes effect, not one
+  // canned sentence. The echo names what was written; each per-key notice below is
+  // asserted right after its edit, because only the last-edited row shows a notice
+  // (config.ts renders it only where status.key === row key).
+  //
+  // update_channel is CLIENT-SIDE — the daemon never reads it — so the notice points
+  // at the next af launch and must NEVER imply a running daemon did anything. The old
+  // notice said "af daemon restart" (the sentence #2480 removes); its generic
+  // replacement wrongly claimed "a running daemon applies most changes right away"
+  // for this daemon-independent key. Both are the lie this asserts against.
+  await expect(pane.locator('.af-config-row[data-key="update_channel"] .af-config-echo')).toHaveText(
+    /set update_channel = preview/,
+  );
+  const channelNotice = pane.locator('.af-config-row[data-key="update_channel"] .af-config-notice');
+  await expect(channelNotice).toContainText("next time you launch af");
+  await expect(channelNotice).not.toContainText("daemon");
+
+  // A key the running daemon applies in place says so — "using the new value now" —
+  // not "restart to apply". This pane writes through a REAL daemon shared with every
+  // test below, so the applied-live key it exercises must touch a subsystem NONE of
+  // them drive. log_max_backups reconfigures log rotation and nothing else — no
+  // session create reads it, no tab reads it, no liveness poll reads it — so setting
+  // it is invisible to the rest of the suite. (default_program would hang later
+  // creates on an unavailable agent; vscode_server_binary would hang the VS Code tab
+  // test #2077 — both are applied-live but NOT inert, which is the trap here.)
+  const backups = pane.locator('.af-config-row[data-key="log_max_backups"] input');
+  await expect(backups).toBeVisible();
+  await backups.fill("7");
+  await backups.press("Enter");
+  await expect(pane.locator('.af-config-row[data-key="log_max_backups"] .af-config-echo')).toHaveText(
+    /set log_max_backups = 7/,
+  );
+  await expect(pane.locator('.af-config-row[data-key="log_max_backups"] .af-config-notice')).toContainText(
+    "using the new value now",
+  );
+
+  // A web-listener key cannot be applied in place yet (PR1), so its notice defers to
+  // the next daemon start — and says "this setting", the per-key phrasing, not the
+  // old multi-key banner. The change is pending, so the running daemon keeps its
+  // current listener and this write does not rebind it.
+  const listen = pane.locator('.af-config-row[data-key="listen_addr"] input');
+  await expect(listen).toBeVisible();
+  await listen.fill("127.0.0.1:8544");
+  await listen.press("Enter");
+  await expect(pane.locator('.af-config-row[data-key="listen_addr"] .af-config-notice')).toContainText(
+    "this setting takes effect on the next daemon start",
   );
 
   // Enter on an UNTOUCHED field must do nothing. The Save button is disabled
-  // there, and Enter has to honor the same gate: a no-op write still echoes and
-  // still raises the restart notice, telling the user they changed something and
-  // owe a restart when they did neither.
+  // there, and Enter has to honor the same gate: a no-op write would still echo
+  // and still raise an effect notice, telling the user something took effect when
+  // they changed nothing.
   const branch = pane.locator('.af-config-row[data-key="branch_prefix"]');
   await expect(branch.locator("button.af-config-save")).toBeDisabled();
   await branch.locator("input").press("Enter");

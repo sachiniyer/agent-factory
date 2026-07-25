@@ -17,13 +17,17 @@ import (
 // The apply is best-effort and never spawns a daemon (RequestApplyConfig uses the
 // no-ensure path): the write already succeeded, so its result is what the pane
 // echoes regardless of whether a daemon was reachable to apply it live.
-func applyingConfigSet(key, value string) (*config.SetResult, error) {
+//
+// It returns the per-key effect notice (config.EffectNotice) so the pane shows the
+// honest outcome — live now, next daemon start, or next af launch — rather than one
+// canned sentence. daemonApplied is whether the apply reached a running daemon.
+func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
 	res, err := config.SetGlobalConfigValue(key, value)
 	if err != nil {
-		return res, err
+		return res, "", err
 	}
-	_, _ = daemon.RequestApplyConfig()
-	return res, nil
+	_, applyErr := daemon.RequestApplyConfig()
+	return res, config.EffectNotice(res.Key, applyErr == nil), nil
 }
 
 // ConfigPane is the direct config editor: a form over the config manifest,
@@ -40,10 +44,11 @@ func applyingConfigSet(key, value string) (*config.SetResult, error) {
 // no edit to this file, which is what TestConfigPaneRendersEveryManifestKey
 // pins.
 //
-// What this pane must never do is imply an edit is live. config.toml is read at
-// startup, so a saved value reaches af and the daemon on their next start. The
-// pane says so at the moment of the edit, and names the command — see
-// config.RestartNotice.
+// What this pane must never do is misstate WHEN an edit takes effect. Since #2480
+// most keys reach a running daemon in place, but not all do, so the pane shows the
+// honest per-key answer at the moment of the edit — live now, next daemon start, or
+// next af launch — from config.EffectNotice, never one canned sentence and never a
+// command to run (#2479).
 type ConfigPane struct {
 	entries []config.ConfigEntry
 	path    string
@@ -81,7 +86,7 @@ type ConfigPane struct {
 	// staying a plain unit test. It is never nil in production
 	// (NewConfigPane wires it); a test that swaps it is testing the pane's
 	// plumbing, not inventing a second writer.
-	save func(key, value string) (*config.SetResult, error)
+	save func(key, value string) (result *config.SetResult, notice string, err error)
 
 	// assistantRequested is set when the user presses the assistant key in normal
 	// mode. The pane cannot spawn the config agent itself — that is a daemon round
@@ -404,7 +409,7 @@ func (c *ConfigPane) commitEdit() {
 		return
 	}
 
-	result, err := c.save(entry.Key, value)
+	result, notice, err := c.save(entry.Key, value)
 	if err != nil {
 		// Stay in edit mode on a rejection: the bad value is still in the field
 		// for the user to correct, which is the whole point of validating before
@@ -421,9 +426,9 @@ func (c *ConfigPane) commitEdit() {
 	// and the config agent.
 	c.status = fmt.Sprintf("set %s = %s", result.Key, result.Value)
 	c.statusIsError = false
-	if result.RequiresRestart {
-		c.restartNotice = config.RestartNotice
-	}
+	// The per-key effect notice (#2480): live now, next daemon start, or next af
+	// launch — the honest answer for THIS key, computed by the write path.
+	c.restartNotice = notice
 
 	// Reflect the canonical value back into the row so the list shows what the
 	// file holds, not what was typed.
