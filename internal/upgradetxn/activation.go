@@ -2,6 +2,7 @@ package upgradetxn
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,43 @@ import (
 	"path/filepath"
 	"time"
 )
+
+// awaitSupervisorReadyPoll is the cadence AwaitSupervisorReady re-checks the
+// recovery actor's readiness proof. Package var so tests can shorten the path.
+var awaitSupervisorReadyPoll = 100 * time.Millisecond
+
+// AwaitSupervisorReady blocks until the previous-binary recovery actor has
+// POSITIVELY proven it reached supervisor_ready, or the bounded deadline elapses.
+// It runs the same validation AuthorizeActivation runs — the recovery lock is held
+// (the actor is alive), its readiness lock is published, its status reports
+// PhaseSupervisorReady, and that proof's deadline is still in the future — but
+// publishes nothing. It is the observation the old-daemon trigger makes BEFORE the
+// single AuthorizeActivation, so "the trigger fired" means the actor took the lease
+// and reached supervisor_ready, never that InstallAndStart returned. A missing,
+// stale, or dead-actor proof keeps polling; the deadline turns an unobservable
+// readiness into a loud error, never an assumed success.
+func AwaitSupervisorReady(ctx context.Context, homeDir string, deadline time.Time) error {
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if txn, err := Load(homeDir); err != nil {
+			lastErr = err
+		} else if _, err := validateActivationRecoveryProof(txn.Journal(), time.Now().UTC()); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			if lastErr == nil {
+				lastErr = errors.New("supervisor_ready deadline elapsed before the recovery actor could be probed")
+			}
+			return fmt.Errorf("upgrade recovery actor did not reach supervisor_ready by the deadline: %w", lastErr)
+		}
+		time.Sleep(awaitSupervisorReadyPoll)
+	}
+}
 
 type activationApproval struct {
 	SchemaVersion int    `json:"schema_version"`

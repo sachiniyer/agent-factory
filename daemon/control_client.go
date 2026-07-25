@@ -41,6 +41,23 @@ func errDaemonUpgradeProbation(transactionID string) error {
 	return fmt.Errorf("%s (transaction %s); retry shortly", daemonUpgradeProbationErrText, transactionID)
 }
 
+// daemonQuiescingErrText is the stable wire prefix for a mutation refused because
+// the daemon is quiescing to hand off to a validated upgrade candidate: it has
+// stopped admitting new work and is about to exit so the candidate can bind the
+// socket. Retryable — the client should reach the new daemon that takes over.
+const daemonQuiescingErrText = "agent-factory daemon is handing off to an upgrade"
+
+func errDaemonQuiescing() error {
+	return errors.New(daemonQuiescingErrText + "; retry shortly")
+}
+
+// IsDaemonQuiescingErr reports whether a mutation was refused because the daemon is
+// quiescing for an upgrade hand-off. net/rpc flattens the server error to text, so
+// this matches the stable wire prefix like the other admission classifiers.
+func IsDaemonQuiescingErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), daemonQuiescingErrText)
+}
+
 // IsDaemonStartingErr reports whether an RPC client error means the daemon is
 // up but still restoring instances. Callers should treat it as retryable: the
 // daemon is alive (EnsureDaemon's ping succeeds, so it must NOT spawn another)
@@ -62,7 +79,7 @@ func IsDaemonUpgradeProbationErr(err error) bool {
 // and HTTP/TUI transports use this predicate so a new admission phase cannot
 // become retryable on one transport while failing immediately on the other.
 func IsDaemonAdmissionRetryable(err error) bool {
-	return IsDaemonStartingErr(err) || IsDaemonUpgradeProbationErr(err)
+	return IsDaemonStartingErr(err) || IsDaemonUpgradeProbationErr(err) || IsDaemonQuiescingErr(err)
 }
 
 // DaemonSocketPath returns the Unix socket path used by the local control

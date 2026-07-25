@@ -29,6 +29,13 @@ const (
 	// af doctor / the HTTP health surface render it honestly (#2212 R2a).
 	DaemonPhaseHandoffPending DaemonPhase = "handoff_pending"
 	DaemonPhaseReady          DaemonPhase = "ready"
+	// DaemonPhaseQuiescing is a formerly-ready daemon that has authorized an upgrade
+	// activation and is stopping admitting new work before it exits to free the
+	// socket for the validated candidate. It is NOT ready — it is refusing mutations
+	// and about to go away — so, by the same principle as DaemonPhaseHandoffPending,
+	// it must not keep reporting DaemonPhaseReady: a daemon stuck mid-hand-off has to
+	// be VISIBLE to `af daemon status` / `af doctor`, not look healthy (#2212 R2b).
+	DaemonPhaseQuiescing DaemonPhase = "quiescing"
 )
 
 // DaemonListenerStatus reports which auxiliary HTTP surfaces this daemon
@@ -71,7 +78,11 @@ type daemonLifecycle struct {
 	// released is set when the previous-binary supervisor lifts this candidate's
 	// probation. It gates mutation ADMISSION; transactionID is kept for the whole
 	// boot as the supervisor's IDENTITY (#1947), so the two never conflate.
-	released  bool
+	released bool
+	// quiescing is set when this daemon has authorized an upgrade activation and is
+	// handing off. It closes admission (the daemon is about to exit) and drives the
+	// reported DaemonPhaseQuiescing so a stuck hand-off is visible, not silent.
+	quiescing bool
 	listeners DaemonListenerStatus
 }
 
@@ -130,6 +141,18 @@ func (l *daemonLifecycle) markReady() error {
 	}
 	l.phase = DaemonPhaseReady
 	return nil
+}
+
+// markQuiescing moves a ready daemon into the upgrade hand-off: it stops admitting
+// new mutations and reports DaemonPhaseQuiescing. The activation trigger calls it
+// AFTER AuthorizeActivation and BEFORE the daemon exits to free the socket for the
+// validated candidate, so no mutation races the hand-off window and a daemon stuck
+// mid-hand-off is visible rather than reporting ready. Idempotent.
+func (l *daemonLifecycle) markQuiescing() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.quiescing = true
+	l.phase = DaemonPhaseQuiescing
 }
 
 // releaseUpgradeProbation lifts an upgrade candidate's probation once its
@@ -195,6 +218,9 @@ func (l *daemonLifecycle) isUpgradeProbation() bool {
 func (l *daemonLifecycle) mutationAdmissionError() error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	if l.quiescing {
+		return errDaemonQuiescing()
+	}
 	if l.inProbationLocked() {
 		return errDaemonUpgradeProbation(l.transactionID)
 	}
