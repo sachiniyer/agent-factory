@@ -3,6 +3,7 @@ package config
 import (
 	"reflect"
 	"strconv"
+	"strings"
 )
 
 // This file is the GLOBAL manifest view's value-reading half: given a key from
@@ -191,8 +192,8 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 //     bare key is NOT settable, but its leaves are — so the honest hint names
 //     the command that works, rather than sending someone to a text editor for
 //     something af can do for them.
-//   - A structural key (theme, root_agents, keys, session_env_passthrough,
-//     cors_allowed_origins) has no single-scalar `af config set` shape. The hint
+//   - A structural key (theme, root_agents, keys, session_env_passthrough) has no
+//     single-scalar `af config set` shape. The hint
 //     points at the config assistant, which edits these in the file for the user
 //     — the whole reason "hand-edit the file yourself" is no longer the answer
 //     (#2453 / #2454).
@@ -246,6 +247,18 @@ func editorValue(v reflect.Value) string {
 		}
 		return compactJSON(v)
 	case reflect.Slice:
+		// A []string list renders comma-joined — the exact form `af config set`
+		// accepts for a settable list key (cors_allowed_origins) and `af config get`
+		// prints back, so a set→get round-trips. An empty or unset list is "", not
+		// "[]" (an editor pre-filled with "[]" would write that literal back). Any
+		// non-string slice (there are none in the manifest today) keeps compact JSON.
+		if v.Type().Elem().Kind() == reflect.String {
+			parts := make([]string, v.Len())
+			for i := range parts {
+				parts[i] = v.Index(i).String()
+			}
+			return strings.Join(parts, ",")
+		}
 		if v.Len() == 0 {
 			return "[]"
 		}

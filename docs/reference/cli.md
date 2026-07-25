@@ -572,11 +572,12 @@ Settable keys:
   global_agent_skills        true | false
   docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
+  cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
-session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
-so they are not settable here. Ask the config assistant to change them (it edits
-the file and validates), or edit config.toml directly and run "af config validate".
+session_env_passthrough list have no single-scalar shape, so they are not settable
+here. Ask the config assistant to change them (it edits the file and validates), or
+edit config.toml directly and run "af config validate".
 Changes apply on the next af / daemon start.
 
 With --project <id-or-path> the value is written to a registered project's
@@ -657,10 +658,10 @@ materializes nothing — a read-only check.
 This is the companion to a hand-edit. Most keys go through "af config set",
 which validates before it writes and so can never leave a broken file; but the
 structured settings (theme, the [keys] rebinds, root_agents, and the
-session_env_passthrough / cors_allowed_origins lists) are edited in the file
-directly, and a broken edit there is a hard startup failure with no fallback to
-defaults. Run this after such an edit: exit 0 means the next start will load it,
-a non-zero exit names what is wrong so it can be fixed before restarting.
+session_env_passthrough list) are edited in the file directly, and a broken edit
+there is a hard startup failure with no fallback to defaults. Run this after such
+an edit: exit 0 means the next start will load it, a non-zero exit names what is
+wrong so it can be fixed before restarting.
 
 ```
 af config validate [flags]

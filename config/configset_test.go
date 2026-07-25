@@ -501,18 +501,119 @@ func TestSetGlobalConfigValueRejectsInvalidNewKeys(t *testing.T) {
 }
 
 // TestSetGlobalConfigValueStillRejectsStructuralKeys locks the deliberate
-// exclusions in place. Widening the allowlist must not have made the
-// structural tables settable by accident: root_agents, [theme] and the [keys]
-// rebinds have no scalar shape, and cors_allowed_origins is a list whose write
-// semantics (replace? append?) are an undecided CLI contract. The manifest marks
-// all four Settable: false, and TestManifestAgreesWithSettableKeys ties that
-// claim to this rejection.
+// exclusions in place. Widening the allowlist must not have made the structural
+// tables settable by accident: root_agents, [theme] and the [keys] rebinds have
+// no scalar shape. The manifest marks them Settable: false, and
+// TestManifestAgreesWithSettableKeys ties that claim to this rejection.
+//
+// cors_allowed_origins is deliberately NOT in this list any more: #2564 made it a
+// settable comma-separated list, so it must be tested for round-trip and origin
+// validation, not rejection (a stale entry here would pass only because "x" is a
+// malformed origin, hiding that the key is now settable).
 func TestSetGlobalConfigValueStillRejectsStructuralKeys(t *testing.T) {
 	writeTempConfig(t, "default_program = 'claude'\n")
-	for _, key := range []string{"theme", "root_agents", "keys", "cors_allowed_origins", "schema_version"} {
+	for _, key := range []string{"theme", "root_agents", "keys", "schema_version"} {
 		if _, err := SetGlobalConfigValue(key, "x"); err == nil {
 			t.Errorf("`af config set %s` must be rejected — it is not a settable scalar key", key)
 		}
+	}
+}
+
+// TestSetGlobalConfigValueCORSAllowedOriginsRoundTrips is the #2564 lock: the
+// list-valued key is settable as a comma-separated set that REPLACES the whole
+// list, and the value read back through CurrentValue (what `af config get`
+// prints) is byte-identical to what was set.
+func TestSetGlobalConfigValueCORSAllowedOriginsRoundTrips(t *testing.T) {
+	path := writeTempConfig(t, "# hand-written\n")
+
+	const two = "https://a.example.com,https://b.example.com:8443"
+	res, err := SetGlobalConfigValue("cors_allowed_origins", two)
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if res.Value != two {
+		t.Fatalf("echoed %q, want the comma-joined form %q", res.Value, two)
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := strings.Join(cfg.CORSAllowedOrigins, ","); got != two {
+		t.Fatalf("loaded list joins to %q, want %q", got, two)
+	}
+	shown, ok := CurrentValue(cfg, "cors_allowed_origins")
+	if !ok || shown != two {
+		t.Fatalf("config get would show %q (ok=%v), want the %q that was set", shown, ok, two)
+	}
+
+	// Whitespace around a comma and a trailing comma are tolerated and normalized.
+	res, err = SetGlobalConfigValue("cors_allowed_origins", "  https://only.example.com , ")
+	if err != nil {
+		t.Fatalf("set with whitespace: %v", err)
+	}
+	if res.Value != "https://only.example.com" {
+		t.Fatalf("value %q was not trimmed to the single origin", res.Value)
+	}
+
+	// An empty value CLEARS the list AND the key line, so an unset list stays unset
+	// (nil) rather than becoming `= []` (which the round-trip test relies on).
+	if _, err := SetGlobalConfigValue("cors_allowed_origins", ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatalf("load after clear: %v", err)
+	}
+	if len(cfg.CORSAllowedOrigins) != 0 {
+		t.Fatalf("clear left %#v, want empty", cfg.CORSAllowedOrigins)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "cors_allowed_origins") {
+		t.Fatalf("clear left a cors_allowed_origins line in the file:\n%s", data)
+	}
+}
+
+// TestSetGlobalConfigValueCORSAllowedOriginsRejectsMalformed pins the eager
+// validation at the set boundary: a value that would silently never match a
+// browser Origin is rejected here, so a typo cannot become a dead allow-list
+// entry. A well-formed origin (with and without a port) is accepted.
+func TestSetGlobalConfigValueCORSAllowedOriginsRejectsMalformed(t *testing.T) {
+	writeTempConfig(t, "# hand-written\n")
+	for _, bad := range []string{
+		"af.example.com",                // no scheme
+		"https://af.example.com/",       // trailing slash
+		"https://af.example.com/app",    // path
+		"https://af.example.com?x=1",    // query
+		"*",                             // wildcard is not exact-match
+		"https://good.example.com,nope", // one good, one malformed — the set fails
+	} {
+		if _, err := SetGlobalConfigValue("cors_allowed_origins", bad); err == nil {
+			t.Errorf("`af config set cors_allowed_origins %q` must be rejected as a malformed origin", bad)
+		}
+	}
+	for _, good := range []string{"https://af.example.com", "http://localhost:3000"} {
+		if _, err := SetGlobalConfigValue("cors_allowed_origins", good); err != nil {
+			t.Errorf("`af config set cors_allowed_origins %q` must be accepted: %v", good, err)
+		}
+	}
+}
+
+// TestLoaderAcceptsHandEditedMalformedCORSOrigin pins the other half of the
+// asymmetry #2562 and #2565 preserved: validation lives at `af config set`, and
+// the LOADER stays lenient. A hand-edited config with a malformed origin still
+// loads — a bad entry just never matches, it does not brick startup.
+func TestLoaderAcceptsHandEditedMalformedCORSOrigin(t *testing.T) {
+	writeTempConfig(t, "cors_allowed_origins = ['not-an-origin', 'https://ok.example.com/path']\n")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("loader must stay lenient on a hand-edited origin: %v", err)
+	}
+	if len(cfg.CORSAllowedOrigins) != 2 {
+		t.Fatalf("loader dropped a hand-edited origin: %#v", cfg.CORSAllowedOrigins)
 	}
 }
 
