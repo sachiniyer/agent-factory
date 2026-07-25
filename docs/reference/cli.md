@@ -758,8 +758,14 @@ such unit there is nothing to adopt the daemon into. If the installed unit
 already owns the running daemon, adopt reports that and changes nothing.
 
 ```
-af daemon adopt
+af daemon adopt [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--force` |  | displace the running daemon even if af cannot confirm it is unsupervised (you assert it is yours to replace) |
 
 **Global flags**
 

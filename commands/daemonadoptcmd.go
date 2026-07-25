@@ -61,11 +61,12 @@ already owns the running daemon, adopt reports that and changes nothing.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
-		return runDaemonAdopt(cmd.OutOrStdout())
+		force, _ := cmd.Flags().GetBool("force")
+		return runDaemonAdopt(cmd.OutOrStdout(), force)
 	},
 }
 
-func runDaemonAdopt(w io.Writer) error {
+func runDaemonAdopt(w io.Writer, force bool) error {
 	configDir, err := configDirFn()
 	if err != nil {
 		return fmt.Errorf("cannot resolve the config dir to find the daemon autostart unit: %w", err)
@@ -102,10 +103,18 @@ func runDaemonAdopt(w io.Writer) error {
 			return nil
 		}
 		if cannotTell != nil {
-			// Fail-closed: we could not prove the running daemon is unsupervised.
-			// Displacing it on missing evidence risks killing a healthy supervised
-			// daemon, so refuse and point at the diagnostic instead.
-			return fmt.Errorf("cannot confirm whether the running daemon is already supervised, so refusing to displace it: %w — run `af doctor` for detail", cannotTell)
+			// Fail-closed by DEFAULT: we could not prove the running daemon is
+			// unsupervised, and displacing it on missing evidence risks killing a
+			// healthy supervised daemon — so refuse and point at the diagnostic.
+			// But this is the operator's own machine and adopt is an explicit
+			// recovery verb: --force lets them assert the daemon is theirs to
+			// replace and proceed anyway, with the uncertainty stated plainly
+			// rather than an unoverridable wall (#2556).
+			if !force {
+				return fmt.Errorf("cannot confirm whether the running daemon is already supervised, so refusing to displace it: %w — run `af doctor` for detail, or pass --force to displace it anyway", cannotTell)
+			}
+			log.WarningLog.Printf("adopt --force: could not confirm the running daemon's supervision (%v); displacing it anyway at your request", cannotTell)
+			fmt.Fprintf(w, "warning: could not confirm the running daemon is unsupervised (%v); displacing it anyway (--force)\n", cannotTell)
 		}
 		// A detached, unsupervised daemon is serving. Stop it and wait for its
 		// control socket to go quiet so the unit's fresh daemon acquires the freed
@@ -176,5 +185,7 @@ func verifyAdoption() (daemon.ProbeAnswer, daemon.HealthStatus) {
 }
 
 func init() {
+	daemonAdoptCmd.Flags().Bool("force", false,
+		"displace the running daemon even if af cannot confirm it is unsupervised (you assert it is yours to replace)")
 	daemonCmd.AddCommand(daemonAdoptCmd)
 }

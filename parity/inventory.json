@@ -1571,6 +1571,7 @@
       "af config validate --help": "meta.discovery",
       "af config validate --json": "cli.json-envelope",
       "af daemon --help": "meta.discovery",
+      "af daemon adopt --force": "daemon.lifecycle",
       "af daemon adopt --help": "meta.discovery",
       "af daemon install --help": "meta.discovery",
       "af daemon restart --help": "meta.discovery",

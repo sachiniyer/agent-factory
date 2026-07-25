@@ -72,7 +72,7 @@ func TestAdopt_NoUnitServingHome_RefusesWithInstallHint(t *testing.T) {
 	resolveSupervisionOwnerFn = func(string) (daemon.SupervisionOwner, error) { return daemon.OwnerAdHoc, nil }
 
 	var out bytes.Buffer
-	err := runDaemonAdopt(&out)
+	err := runDaemonAdopt(&out, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "af daemon install",
 		"with no installed unit there is nothing to adopt into; point the user at install")
@@ -86,7 +86,7 @@ func TestAdopt_OwnerUnknown_FailsClosed(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runDaemonAdopt(&out)
+	err := runDaemonAdopt(&out, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "refusing to adopt",
 		"an unresolvable owner must not authorize touching a possibly-healthy daemon")
@@ -101,7 +101,7 @@ func TestAdopt_AlreadyOwned_NoOp(t *testing.T) {
 	// supervised daemon must never be cycled.
 
 	var out bytes.Buffer
-	err := runDaemonAdopt(&out)
+	err := runDaemonAdopt(&out, false)
 	require.NoError(t, err)
 	require.Contains(t, out.String(), "already adopted")
 	require.Contains(t, out.String(), "pid 222")
@@ -115,11 +115,49 @@ func TestAdopt_UndeterminedSupervision_RefusesToDisplace(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runDaemonAdopt(&out)
+	err := runDaemonAdopt(&out, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "refusing to displace",
 		"a fabricated negative here would send the user to kill a healthy supervised daemon")
 	require.Contains(t, err.Error(), "af doctor")
+	require.Contains(t, err.Error(), "--force",
+		"the refusal must name the escape hatch (#2556)")
+}
+
+// TestAdopt_UndeterminedSupervision_ForceDisplaces is the #2556 escape hatch:
+// with --force the same undetermined-supervision case that refuses above instead
+// proceeds — it warns plainly, stops the running daemon, and hands supervision to
+// the unit. The operator, on their own machine, may override af's fail-closed
+// default; the default itself is unchanged.
+func TestAdopt_UndeterminedSupervision_ForceDisplaces(t *testing.T) {
+	stubAdoptVars(t)
+	started := false
+	stopCalls, restartCalls := 0, 0
+	daemonStopFn = func() (bool, error) { stopCalls++; return true, nil }
+	waitForShutdownCompletionFn = func() error { return nil }
+	restartAutostartUnitFn = func() error { started = true; restartCalls++; return nil }
+	daemonHealthFn = func() daemon.HealthStatus {
+		if started {
+			return respondingHealth(222)
+		}
+		return respondingHealth(111)
+	}
+	daemonStatusSupervisionFn = func() daemon.SupervisionInfo {
+		if started {
+			return supervisedInfo(222)
+		}
+		// Pre-adopt: supervision cannot be determined — the exact case that
+		// refuses without --force.
+		return daemon.SupervisionInfo{Supported: true, UnitPresent: true, Active: daemon.Undetermined(errors.New("user bus is down"))}
+	}
+
+	var out bytes.Buffer
+	err := runDaemonAdopt(&out, true)
+	require.NoError(t, err, "--force must displace a daemon whose supervision cannot be confirmed")
+	require.Contains(t, out.String(), "--force", "the override must state plainly that it is displacing on uncertainty")
+	require.Contains(t, out.String(), "stopped the unsupervised daemon")
+	require.Equal(t, 1, stopCalls, "--force must stop the running daemon")
+	require.Equal(t, 1, restartCalls, "--force must start the unit in its place")
 }
 
 func TestAdopt_DetachedDaemon_StopsStartsVerifies(t *testing.T) {
@@ -143,7 +181,7 @@ func TestAdopt_DetachedDaemon_StopsStartsVerifies(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := runDaemonAdopt(&out)
+	err := runDaemonAdopt(&out, false)
 	require.NoError(t, err)
 	require.Contains(t, out.String(), "stopped the unsupervised daemon")
 	require.Contains(t, out.String(), "pid 222")
@@ -173,7 +211,7 @@ func TestAdopt_NothingRunning_StartsUnderUnit(t *testing.T) {
 	// serving there is no detached daemon to stop.
 
 	var out bytes.Buffer
-	err := runDaemonAdopt(&out)
+	err := runDaemonAdopt(&out, false)
 	require.NoError(t, err)
 	require.Contains(t, out.String(), "now supervises the daemon")
 	require.Contains(t, out.String(), "pid 222")
@@ -196,7 +234,7 @@ func TestAdopt_VerifyFails_ReportsDoctor(t *testing.T) {
 	daemonStatusSupervisionFn = func() daemon.SupervisionInfo { return inactiveInfo() }
 
 	var out bytes.Buffer
-	err := runDaemonAdopt(&out)
+	err := runDaemonAdopt(&out, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "pid 333")
 	require.Contains(t, err.Error(), "af doctor")
