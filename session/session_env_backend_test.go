@@ -298,7 +298,7 @@ func TestSandboxAgentServersCarryPassThroughNamesIntoFilteredExec(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	sshCommand, err := (&sshProvisioner{spec: spec, program: spec.Program, sessionDir: "/srv/af-session"}).agentServerCommand()
+	sshCommand, err := (&sandboxWorkspace{spec: spec, program: spec.Program, SessionDir: "/srv/af-session"}).agentServerCommand()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 			inner: fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
 				shellQuote("/srv/af-session/af"), shellQuote("/srv/af-session/workspace"), shellQuote(spec.Title), shellQuote(tmux.ProgramCodex)),
 			commandResult: func() (string, error) {
-				return (&sshProvisioner{spec: spec, program: tmux.ProgramCodex, sessionDir: "/srv/af-session"}).agentServerCommand()
+				return (&sandboxWorkspace{spec: spec, program: tmux.ProgramCodex, SessionDir: "/srv/af-session"}).agentServerCommand()
 			},
 		},
 	}
@@ -357,7 +357,7 @@ func TestSandboxAgentServerMarksResolvedProgram(t *testing.T) {
 			return (&dockerProvisioner{spec: spec, program: tmux.ProgramCodex}).agentServerCommand()
 		},
 		"ssh": func() (string, error) {
-			return (&sshProvisioner{spec: spec, program: tmux.ProgramCodex, sessionDir: "/srv/af-session"}).agentServerCommand()
+			return (&sandboxWorkspace{spec: spec, program: tmux.ProgramCodex, SessionDir: "/srv/af-session"}).agentServerCommand()
 		},
 	}
 	for backend, commandResult := range tests {
@@ -373,14 +373,14 @@ func TestSandboxAgentServerMarksResolvedProgram(t *testing.T) {
 
 func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
 	spec := ProvisionSpec{Title: "pid-identity", Program: tmux.ProgramCodex}
-	p := &sshProvisioner{spec: spec, program: spec.Program, sessionDir: "/srv/af-session"}
-	command, err := p.agentServerCommand()
+	w := &sandboxWorkspace{spec: spec, program: spec.Program, SessionDir: "/srv/af-session"}
+	command, err := w.agentServerCommand()
 	if err != nil {
 		t.Fatal(err)
 	}
 	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s --program %s --program-resolved",
-		shellQuote(p.afPath()), shellQuote(p.workspacePath()), shellQuote(spec.Title), shellQuote(spec.Program))
-	want, err := sessionenv.WrapCommand(p.afPath(), tmux.ProgramCodex, nil, inner)
+		shellQuote(w.AfPath()), shellQuote(w.WorkspacePath()), shellQuote(spec.Title), shellQuote(spec.Program))
+	want, err := sessionenv.WrapCommand(w.AfPath(), tmux.ProgramCodex, nil, inner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func TestSandboxCredentialSelectionRejectsAgentNameUsedAsData(t *testing.T) {
 	program := "./collect codex"
 	tests := map[string]func() string{
 		"docker": func() string { return (&dockerProvisioner{program: program}).agentName() },
-		"ssh":    func() string { return (&sshProvisioner{program: program}).agentName() },
+		"ssh":    func() string { return (&sandboxWorkspace{program: program}).agentName() },
 		"hook":   func() string { return (&hookProvisioner{program: program}).environmentAgent() },
 	}
 	for backend, selectedAgent := range tests {
