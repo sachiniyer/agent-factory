@@ -1548,6 +1548,74 @@ test("config: the editor renders from the manifest and writes through the real p
   await expect(page.locator(".af-rail-list")).toBeVisible();
 });
 
+// typeIntoAssistantAndExpectEcho is the config assistant's live-output proof. The
+// assistant runs the fake agent (`cat`), so a keystroke makes the full round trip —
+// OpInput → daemon → tmux PTY → `cat` echo → /v1/config-assistant/stream → xterm — and
+// the typed nonce, being unique and arriving after the briefing, is reliably visible.
+// The startup marker is NOT usable here: the daemon pastes the config briefing on spawn
+// (which `cat` echoes), scrolling the one-line marker out of the pane.
+async function typeIntoAssistantAndExpectEcho(page: Page, nonce: string): Promise<void> {
+  const term = page.locator(".af-assistant-term");
+  await term.click(); // focus the xterm before typing
+  await page.keyboard.type(nonce);
+  await expect(term).toContainText(nonce, { timeout: 30_000 });
+}
+
+test("config assistant (#2467): open → live stream → close reaps → reopen spawns fresh", REAL_FIXTURE, async () => {
+  // The web counterpart of the TUI's config-agent takeover, over the bare-session PTY
+  // route (#2522). This proves the COMPOSED LIFECYCLE the unit tests structurally
+  // cannot: the button opens a real overlay, the daemon spawns the config assistant
+  // (the seeded fake agent at AF home, which has no Instance and so is unreachable
+  // through the session stream route), its PTY streams into the pane and renders live
+  // output, closing disposes the terminal AND fires the DELETE reap, and reopening
+  // cold-spawns a fresh one. The individual calls — endpoint URLs, spawn/reap status
+  // handling, and the 409 retry — are pinned at the unit level (stream_endpoint.test.ts,
+  // api.test.ts). The 409 arm STAYS there deliberately: forcing a concurrent DELETE
+  // mid-spawn from a browser is impractical and would only add flake, so this exercises
+  // the wiring and the happy round-trip, not that retry.
+  await page.locator('.af-viewtab[data-view="config"]').click();
+  await expect(page.locator(".af-config")).toBeVisible();
+
+  // Open: the "Configure with assistant" button lives in the config header. The daemon
+  // spawns the assistant (POST /v1/config-assistant) and the overlay mounts its xterm.
+  await page.locator(".af-config-assistant-btn").click();
+  await expect(page.locator(".af-assistant-card")).toBeVisible();
+  await expect(page.locator(".af-assistant-term .xterm")).toBeVisible({ timeout: 30_000 });
+  // The status seam confirms the WS stream reached open, not a reconnect loop.
+  await expect(page.locator(".af-assistant-status")).toHaveText("Connected", { timeout: 30_000 });
+
+  // Live output END TO END, over the new bare-session route. See typeIntoAssistant... for
+  // why the round-trip echo is the signal rather than the startup marker.
+  await typeIntoAssistantAndExpectEcho(page, "af-pr3-probe-alpha");
+
+  // Close (the × button) disposes the terminal AND issues the best-effort DELETE reap.
+  // Arm the request wait BEFORE the click so the fetch cannot slip past it.
+  const firstReap = page.waitForRequest(
+    (r) => r.method() === "DELETE" && r.url().includes("/v1/config-assistant"),
+    { timeout: 10_000 },
+  );
+  await page.locator(".af-assistant-close").click();
+  await firstReap;
+  await expect(page.locator(".af-assistant-card")).toHaveCount(0);
+
+  // Reopen cold-spawns a fresh assistant: the DELETE reaped the last one, so the POST
+  // sees no current assistant and spawns anew. A second nonce echoing through the new
+  // pane is the browser-observable proof the reap actually tore the old session down —
+  // the config assistant is deliberately not a rail row, so there is no session-list
+  // signal, and a fresh stream carrying live output is the honest indirect check.
+  await page.locator(".af-config-assistant-btn").click();
+  await expect(page.locator(".af-assistant-card")).toBeVisible();
+  await expect(page.locator(".af-assistant-status")).toHaveText("Connected", { timeout: 30_000 });
+  await typeIntoAssistantAndExpectEcho(page, "af-pr3-probe-bravo");
+
+  // Clean up: close (reaps again) and return to sessions for the flows that follow,
+  // matching the config-editor test's own teardown.
+  await page.locator(".af-assistant-close").click();
+  await expect(page.locator(".af-assistant-card")).toHaveCount(0);
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
+  await expect(page.locator(".af-rail-list")).toBeVisible();
+});
+
 test("tabs: create a shell tab, switch to it, see its distinct output, close it (#1592 PR7)", REAL_FIXTURE, async () => {
   // Capture the tab-mutation request bodies so we can assert they carry the stable
   // session id (#1592 PR7 fix 1 — the daemon must resolve by id, not the cross-repo
