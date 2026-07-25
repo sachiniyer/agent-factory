@@ -570,6 +570,7 @@ Settable keys:
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
+  docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
