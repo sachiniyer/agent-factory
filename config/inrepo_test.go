@@ -69,7 +69,7 @@ func TestLoadInRepoConfigBackendKeys(t *testing.T) {
 	repoRoot := t.TempDir()
 	writeInRepoConfig(t, repoRoot, `{
 		"backend": "docker",
-		"docker": {"image": "af-runtime:latest", "run_args": ["--memory", "2g"]},
+		"docker": {"image": "af-runtime:latest", "run_args": ["--memory", "2g"], "mount_agent_credentials": true},
 		"ssh": {"host": "build-box", "user": "ci", "port": 2222, "identity_file": "/keys/id"}
 	}`)
 
@@ -80,6 +80,7 @@ func TestLoadInRepoConfigBackendKeys(t *testing.T) {
 	require.NotNil(t, cfg.Docker)
 	assert.Equal(t, "af-runtime:latest", cfg.Docker.Image)
 	assert.Equal(t, []string{"--memory", "2g"}, cfg.Docker.RunArgs)
+	assert.True(t, cfg.Docker.MountAgentCredentials, "mount_agent_credentials must load")
 	require.NotNil(t, cfg.SSH)
 	assert.Equal(t, "build-box", cfg.SSH.Host)
 	assert.Equal(t, "ci", cfg.SSH.User)
@@ -94,6 +95,7 @@ func TestLoadInRepoConfigBackendKeys(t *testing.T) {
 	assert.Equal(t, "docker", res.Backend)
 	require.NotNil(t, res.Docker)
 	assert.Equal(t, "af-runtime:latest", res.Docker.Image)
+	assert.True(t, res.Docker.MountAgentCredentials, "mount_agent_credentials must resolve")
 	require.NotNil(t, res.SSH)
 	assert.Equal(t, "build-box", res.SSH.Host)
 }

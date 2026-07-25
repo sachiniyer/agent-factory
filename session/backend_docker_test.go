@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,6 +131,42 @@ func TestRunContainer_CapturesCreatedIDOnError(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, dockerCreatedID, p.containerID,
 		"created-then-failed container id must be captured so the failed provision can reap it")
+}
+
+// TestRunContainer_IncludesCredentialMounts proves the docker.mount_agent_credentials
+// wiring end to end into the argv: mounts resolved into the provisioner reach
+// `docker run` as read-only `-v` binds, positioned AFTER the env flags and BEFORE
+// the operator's run_args (which in turn precede --entrypoint/image). Ordering
+// matters only for predictability, but the presence + :ro is the contract.
+func TestRunContainer_IncludesCredentialMounts(t *testing.T) {
+	const credSpec = "/home/u/.codex/auth.json:/root/.codex/auth.json:ro"
+	var runArgs []string
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runArgs = append([]string(nil), args...)
+			return []byte(dockerCreatedID), nil
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})()
+
+	p := &dockerProvisioner{
+		image:            "img:latest",
+		spec:             ProvisionSpec{Title: "creds"},
+		credentialMounts: []string{"-v", credSpec},
+		runArgs:          []string{"--memory", "2g"},
+	}
+	require.NoError(t, p.runContainer())
+
+	specIdx := slices.Index(runArgs, credSpec)
+	require.Greater(t, specIdx, 0, "credential mount missing from docker run args: %v", runArgs)
+	assert.Equal(t, "-v", runArgs[specIdx-1], "credential mount must be a -v flag")
+
+	memIdx := slices.Index(runArgs, "--memory")
+	entIdx := slices.Index(runArgs, "--entrypoint")
+	require.GreaterOrEqual(t, memIdx, 0, "operator run_args missing: %v", runArgs)
+	require.GreaterOrEqual(t, entIdx, 0, "--entrypoint missing: %v", runArgs)
+	assert.Less(t, specIdx, memIdx, "credential mounts must precede operator run_args")
+	assert.Less(t, memIdx, entIdx, "operator run_args must precede --entrypoint/image")
 }
 
 // TestParseCreatedContainerID covers the extraction: a create-then-fail blob
