@@ -3812,6 +3812,13 @@ test("empty state (#1592 PR9, #2456): an empty Snapshot + registry renders the z
   // points at the switcher's add action, not the TUI.
   await expect(page.locator(".af-app")).toBeVisible();
   await expect(page.locator(".af-rail-empty")).toContainText("No projects yet");
+  // #2479: the zero-projects rail names no shell command AND offers no button that
+  // cannot act — with no projects the New-session modal's Create is disabled, so a
+  // New button here would dead-end. The coherent action is the switcher's
+  // "+ Add project" (asserted just below, #2456/#2546), not a rail button.
+  await expect(page.locator(".af-rail-empty")).not.toContainText("af sessions create");
+  await expect(page.locator(".af-rail-empty")).not.toContainText("in the TUI");
+  await expect(page.locator(".af-rail-empty .af-rail-empty-new")).toHaveCount(0);
   await expect(page.locator(".af-rail-count")).toHaveText("0");
   // With nothing selected the main pane is the "Select a session" placeholder.
   await expect(page.locator(".af-main-empty")).toContainText("Select a session");

@@ -799,7 +799,7 @@ func TestPanePreviewEnterRestoresRestingTarget(t *testing.T) {
 				"Enter on a resting row with a pane open must RESTORE it, not commit the preview (#2489 P1)")
 			require.Nil(t, h.panePreviewTxn, "the restore resolves the preview txn")
 			h.errBox.SetSize(200, 1)
-			require.NotContains(t, h.errBox.String(), "restore it first", "no guard error on the restore path")
+			require.NotContains(t, h.errBox.String(), "to restore", "no guard error on the restore path")
 			require.NotNil(t, cmd)
 			_ = cmd()
 			require.True(t, called, "the restore RPC fires")

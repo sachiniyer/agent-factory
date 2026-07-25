@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -12,7 +13,6 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
 // handleDefaultKeyPress handles key events in stateDefault (main interaction state).
@@ -304,6 +304,13 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 			// daemon liveness so the user can retry the kill.
 			_ = inst.Transition(session.RevertKill())
 		}
+		// A wedged LOCAL daemon has an in-interface recovery: offer to restart it
+		// (#2479) instead of surfacing a shell command. A remote daemon is on
+		// another machine, so the local restart cannot help — fall through to the
+		// plain message there.
+		if errors.Is(msg.err, errDaemonUnresponsive) && !isRemoteTarget() {
+			return m, m.offerDaemonRestart(msg.target.title)
+		}
 		return m, m.handleError(fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
 	}
 
@@ -356,8 +363,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		return m, m.handleError(fmt.Errorf("cannot archive in-place session '%s': archive relocates the worktree, which it doesn't own", title))
 	}
 
-	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
-	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s (or `af sessions restore`).", title, restoreKey)
+	message := fmt.Sprintf("[!] Archive session '%s'?\n\nIts tmux is torn down and its worktree is moved out to the archive directory (branch + uncommitted changes preserved). Restore later with %s.", title, restoreKeyHint())
 	return m, m.confirmAction(message, func() tea.Msg {
 		// Raise the optimistic OpArchiving op so the row visibly shows archiving
 		// while the RPC runs (#1195). It composes to Deleting for rendering; the
@@ -414,10 +420,10 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 }
 
 // restoreIfResting turns an Enter/`o` on a resting (Lost/Dead/archived) row into a
-// restore instead of interactiveGuard's "restore it first (af sessions restore …)"
-// error: the gesture the user already made expresses the intent, so acting on it
-// is more intuitive than naming a shell command (#2489). It reports whether it took
-// the row. LifecycleActionRestore is true for EXACTLY the resting states the guard
+// restore instead of interactiveGuard's "press <key> to restore" fence: the gesture
+// the user already made expresses the intent, so acting on it is more intuitive than
+// making them read the fence and press the key themselves (#2489/#2479). It reports
+// whether it took the row. LifecycleActionRestore is true for EXACTLY the resting states the guard
 // fences (LiveLost/LiveDead/LiveArchived, with a stable id and no teardown/replace
 // op), so a live, tearing-down, id-less, or startup-unknown row returns false and
 // falls through to the guard's own message unchanged.
@@ -701,7 +707,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	}
 	// Instance selected — in either the Instances tree or the Archived folder
 	// (#1028). A resting (Lost/Dead/archived) row is not embeddable: rather than
-	// surfacing the guard's "restore it first" error, Enter restores it — with a
+	// surfacing the guard's "press <key> to restore" fence, Enter restores it — with a
 	// confirm first when that would re-provision a remote sandbox (#2489). Any other
 	// non-embeddable state still surfaces interactiveGuard's error. (This is the
 	// no-preview path — an archived row cancels its preview; the Lost/Dead pane-open
@@ -735,6 +741,14 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	return mod, tea.Batch(cmd, interactCmd)
 }
 
+// restoreKeyHint is the configured restore key, named in copy so a
+// Lost/Dead/archived session's off-ramp points at the in-TUI action rather than
+// a shell command the user would have to leave the interface to run (#2479). It
+// reads the live binding, so a rebound restore key names itself.
+func restoreKeyHint() string {
+	return keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
+}
+
 // interactiveGuard returns the user-facing error that fences Enter off a
 // session in a state it cannot be entered or attached in — shared by the
 // interactive and full-screen paths (the #935 dead-tmux error, the Deleting
@@ -759,10 +773,13 @@ func interactiveGuard(inst *session.Instance) error {
 		// record. Entering or attaching is impossible right now; say what
 		// happened — same explicit-feedback contract as the Deleting path
 		// (#935). Checked before TmuxAlive so the specific message wins.
-		return fmt.Errorf("session '%s' was lost — restore it first (%s)", inst.Title, shellsuggest.Command("af", "sessions", "restore", inst.Title))
+		//
+		// Restore is a key IN this interface, so the off-ramp names the key, not
+		// a shell command the user would have to leave the TUI to run (#2479).
+		return fmt.Errorf("session '%s' was lost — press %s to restore", inst.Title, restoreKeyHint())
 	}
 	if inst.GetLiveness() == session.LiveDead {
-		return fmt.Errorf("session '%s' is no longer running — restore it first (%s)", inst.Title, shellsuggest.Command("af", "sessions", "restore", inst.Title))
+		return fmt.Errorf("session '%s' is no longer running — press %s to restore", inst.Title, restoreKeyHint())
 	}
 	if inst.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): the user tore the session down and its worktree was
@@ -770,7 +787,7 @@ func interactiveGuard(inst *session.Instance) error {
 		// Point at the off-ramp (restore) rather than a bare "not running" —
 		// same explicit-feedback contract as Lost/Deleting. Checked before
 		// TmuxAlive so the specific message wins.
-		return fmt.Errorf("session '%s' is archived — restore it first (%s)", inst.Title, shellsuggest.Command("af", "sessions", "restore", inst.Title))
+		return fmt.Errorf("session '%s' is archived — press %s to restore", inst.Title, restoreKeyHint())
 	}
 	if !inst.TmuxAlive() {
 		return fmt.Errorf("session '%s' is no longer running", inst.Title)
@@ -790,7 +807,7 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 	// Accept both the Instances tree and the Archived folder (#1028): a resting
 	// (Lost/Dead/archived) row is non-attachable, so `o` restores it — with a
 	// confirm first when that would re-provision a remote sandbox (#2489) — rather
-	// than surfacing the guard's "restore it first" error; any other non-attachable
+	// than surfacing the guard's "press <key> to restore" fence; any other non-attachable
 	// state surfaces interactiveGuard's error rather than a silent no-op.
 	if sel.IsHeader || (sel.Kind != ui.SectionInstances && sel.Kind != ui.SectionArchived) {
 		return m, nil

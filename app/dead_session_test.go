@@ -116,9 +116,10 @@ func TestHandleEnter_RestingRowRestores(t *testing.T) {
 				"Enter restores the row (#2489), raising the optimistic restore op")
 
 			// No guard message: the gesture ACTS on the restore. This fails if the
-			// fix regresses to interactiveGuard, which emits "restore it first".
+			// fix regresses to interactiveGuard, whose fence now names the restore key
+			// ("press <key> to restore", #2479).
 			h.errBox.SetSize(200, 1)
-			require.NotContains(t, h.errBox.String(), "restore it first",
+			require.NotContains(t, h.errBox.String(), "to restore",
 				"Enter must act on the restore, not surface the guard error")
 
 			require.NotNil(t, cmd, "the restore must dispatch its daemon command")
@@ -228,11 +229,12 @@ func TestHandleEnter_RemoteArchivedRowRestoresImmediately(t *testing.T) {
 	require.NotNil(t, cmd)
 }
 
-// TestInteractiveGuard_RestingRowsNameTheRestoreCommand keeps coverage for the
-// guard copy after #2489 moved the row verbs off it: the "restore it first"
-// message is still live for the paths that do NOT restore — an id-less row, an
-// OpReplacing row, and the focused-pane guards (interactive.go / handle_panes.go).
-func TestInteractiveGuard_RestingRowsNameTheRestoreCommand(t *testing.T) {
+// TestInteractiveGuard_RestingRowsNameTheRestoreKey keeps coverage for the guard
+// copy after #2489 moved the row verbs off it and #2479 replaced the CLI-command
+// off-ramp with the in-TUI action. A Lost/Dead/archived row that does NOT restore
+// (an id-less row, an OpReplacing row, the focused-pane guards) is still fenced,
+// and the fence now names the restore KEY, not a shell command.
+func TestInteractiveGuard_RestingRowsNameTheRestoreKey(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		status  session.Status
@@ -247,7 +249,13 @@ func TestInteractiveGuard_RestingRowsNameTheRestoreCommand(t *testing.T) {
 			err := interactiveGuard(inst)
 			require.Error(t, err, "a resting row still fences the non-restoring guard paths")
 			require.Contains(t, err.Error(), tc.wantMsg)
-			require.Contains(t, err.Error(), "restore it first", "the guard names the restore off-ramp")
+			// The off-ramp names the CONFIGURED restore key (via restoreKeyHint, so a
+			// rebind names itself and does not break this) — not a CLI command the user
+			// would have to leave the interface to run (#2479).
+			require.Contains(t, err.Error(), "press "+restoreKeyHint()+" to restore",
+				"the guard names the restore key, not a shell command")
+			require.NotContains(t, err.Error(), "af sessions restore",
+				"the guard must not send the user out to a CLI command (#2479)")
 		})
 	}
 }
