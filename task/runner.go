@@ -505,9 +505,10 @@ func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
 	// program's readiness heuristic, and a non-agent override gets the
 	// generic one instead of waiting 60s for a claude glyph (#1116, #1131).
 	agent := target.ResolvedAgent()
-	// Resolve the usage-limit detector once so a claude/codex pane that shows a
-	// limit banner mid-startup is recognized and PARKED, not spun into a failure
-	// (#1146 PR4). Only claude/codex ever match; other agents never park here.
+	// Resolve the usage-limit detector once so a pane that shows a limit banner
+	// mid-startup is recognized and PARKED, not spun into a failure (#1146 PR4).
+	// Only agents with a matcher park here — claude/codex (with a reset time) and
+	// devin (detect-only, #2411); agents with no matcher never park.
 	detector := newLimitDetectorForWait()
 
 	// The readiness budget measures the AGENT's startup. Post-worktree hooks
