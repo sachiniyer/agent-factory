@@ -187,6 +187,18 @@ prints the same resolved value with the complete source trace.`,
 			if !ok {
 				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
 			}
+			// root_agent resolves through FOUR layers in the daemon
+			// (built-in/global/legacy/personal), but the generic resolver only
+			// knows its two singleton layers. For --explain, swap in the daemon's
+			// real four-layer trace so the explanation matches what decides the
+			// root agent, not a narrower model of it (#2216).
+			if configGetExplainFlag && isRootAgentExplainKey(args[0]) {
+				specialized, err := rootAgentExplainValue(configGetProjectFlag, args[0])
+				if err != nil {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
+				value = specialized
+			}
 			if configGetExplainFlag {
 				if configJSONFlag {
 					output := configGetExplanation{
