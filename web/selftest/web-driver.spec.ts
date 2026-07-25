@@ -3653,6 +3653,8 @@ test("add project (#2456): the switcher's + Add project drives the real Register
   // through the REAL RegisterProject RPC. A non-git path is rejected by the daemon
   // and the message shows INLINE while the modal stays open — proving this drives a
   // real daemon round-trip, not a client-only stub.
+  const mockRepo = process.env.AF_MOCK_REPO;
+  expect(mockRepo, "the add-project round-trip needs AF_MOCK_REPO (set by web-selftest-entry.sh)").toBeTruthy();
   await page.locator(".af-project-switch").click();
   const add = page.locator(".af-project-menu .af-project-add");
   await expect(add).toBeVisible();
@@ -3673,7 +3675,7 @@ test("add project (#2456): the switcher's + Add project drives the real Register
   // Editing clears the stale error, and a VALID checkout path (mock-repo is a real
   // git repo in the fixture; registering it is an idempotent success) submits and
   // closes the modal.
-  await pathInput.fill("/work/mock-repo");
+  await pathInput.fill(mockRepo!);
   await expect(addModal.locator(".af-modal-error")).toBeHidden();
   await addModal.locator("button.af-primary").click();
   await expect(addModal).toBeHidden();
@@ -3732,12 +3734,12 @@ test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bou
 // the regression guard for the emit; the client arm is exercised by the daemon's own
 // session-end path in manual play-testing.
 
-test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeholder", async () => {
+test("empty state (#1592 PR9, #2456): an empty Snapshot + registry renders the zero-projects state with the add affordance", async () => {
   // Force the authoritative Snapshot to come back empty, then reload so bootstrap
   // re-seeds the rail from it. HTTP routing (unlike WS mocking) is deterministic
   // against the loopback daemon, so this reliably drives the zero-sessions state the
-  // seeded harness otherwise never reaches. Runs LAST — it reloads and mocks Snapshot,
-  // so it must not precede the create/kill/archive flows.
+  // seeded harness otherwise never reaches. Runs LAST — it reloads and mocks, so it
+  // must not precede the create/kill/archive flows.
   await page.route("**/v1/Snapshot", async (route) => {
     await route.fulfill({
       status: 200,
@@ -3754,19 +3756,43 @@ test("empty state (#1592 PR9): an empty Snapshot renders the empty rail + placeh
       body: JSON.stringify({ data: { tasks: [] }, error: null }),
     });
   });
+  // Empty the project REGISTRY too (#2456): the switcher now unions ListProjects, and
+  // the add-project test above registered mock-repo into the REAL registry — without
+  // this mock the union would surface it and this would not be a zero-projects state.
+  await page.route("**/v1/ListProjects", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: { projects: [] }, error: null }),
+    });
+  });
   await page.reload();
 
   // The authed shell still comes up (tokenless loopback), but the rail shows its
-  // empty-state copy instead of rows, and the count reads 0 — the empty state renders
-  // as designed rather than a broken/blank shell.
+  // zero-projects empty-state copy instead of rows, and the count reads 0 — the empty
+  // state renders as designed rather than a broken/blank shell. Post-#2456 the copy
+  // points at the switcher's add action, not the TUI.
   await expect(page.locator(".af-app")).toBeVisible();
-  await expect(page.locator(".af-rail-empty")).toContainText("No sessions yet");
+  await expect(page.locator(".af-rail-empty")).toContainText("No projects yet");
   await expect(page.locator(".af-rail-count")).toHaveText("0");
   // With nothing selected the main pane is the "Select a session" placeholder.
   await expect(page.locator(".af-main-empty")).toContainText("Select a session");
 
+  // #2456: the zero-projects switcher is still OPENABLE (the dead end lane-detail-backlog
+  // removed its dead-end "+ New" for), and its ONE coherent action is the "+ Add project"
+  // footer — the empty state points the user straight at it. With no project selected
+  // there is no Delete-project action alongside it.
+  await page.locator(".af-project-switch").click();
+  const menu = page.locator(".af-project-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu.locator(".af-project-menu-empty")).toContainText("No projects yet");
+  await expect(menu.locator(".af-project-add")).toBeVisible();
+  await expect(menu.locator(".af-project-delete")).toHaveCount(0);
+  await page.locator(".af-project-switch").click(); // close the menu
+
   await page.unroute("**/v1/Snapshot");
   await page.unroute("**/v1/ListTasks");
+  await page.unroute("**/v1/ListProjects");
 });
 
 test("filter (feat): a project whose sessions are ALL archived reads as empty, and the filter still reveals them", REAL_FIXTURE, async ({
