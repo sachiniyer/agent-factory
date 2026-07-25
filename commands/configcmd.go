@@ -91,6 +91,7 @@ var globalConfigReadOrder = []string{
 	"vscode_server_binary",
 	"theme",
 	"root_agents",
+	"root_agent",
 	"limit_auto_resume",
 	"global_agent_skills",
 	"docker_mount_agent_credentials",
