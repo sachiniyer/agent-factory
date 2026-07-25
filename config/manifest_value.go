@@ -220,14 +220,16 @@ func editability(e ManifestEntry) (editable bool, hint string) {
 	return true, ""
 }
 
-// RestartNotice is the one sentence every surface uses to tell a user their edit
-// is not live yet, and what to do about it.
+// RestartNotice is the one sentence a save surface shows for the keys a running
+// daemon cannot yet apply in place.
 //
-// It names `af daemon restart` because "restart them to apply" (what the CLI
-// prints) leaves a user to guess the command — and a UI that changes a value the
-// running daemon then ignores, without saying so, is the failure this feature is
-// specifically not allowed to ship.
-const RestartNotice = "af and the daemon read config.toml at startup · run `af daemon restart` and restart af to apply"
+// Since #2480, `af config set` and the web form's SetConfigValue apply most
+// changes to a running daemon automatically (Manager.ApplyConfig), so this is the
+// fallback for the deferred keys — the network listener keys until the in-process
+// listener reload lands, and root_agents. It deliberately does NOT tell the user
+// to run a command (#2479): a surface applies what it can and states what is
+// deferred, rather than dropping the user to a shell to run `af daemon restart`.
+const RestartNotice = "Saved. A running daemon applies most changes right away; the web-listener keys and root_agents take effect on the next daemon start."
 
 // editorValue renders one config field in the editor form. It deliberately does
 // NOT share renderConfigValue's briefing decorations (`""`, "none") — see the

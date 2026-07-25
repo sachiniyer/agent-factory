@@ -77,7 +77,7 @@ test("getConfig reports no entries as an empty list, never null", async () => {
 test("setConfigValue posts the key and the RAW value for the daemon to validate", async () => {
   const cap = stubFetch({
     result: { key: "update_channel", value: "preview", path: "/tmp/config.toml", requires_restart: true },
-    restart_notice: "af and the daemon read config.toml at startup · run `af daemon restart` and restart af to apply",
+    restart_notice: "Saved. A running daemon applies most changes right away; the web-listener keys and root_agents take effect on the next daemon start.",
   });
   const resp = await setConfigValue("update_channel", "preview", "tok");
 
@@ -87,7 +87,10 @@ test("setConfigValue posts the key and the RAW value for the daemon to validate"
   // rather than what it sent, which is the same contract `af config set` has.
   assert.equal(resp.result.value, "preview");
   assert.equal(resp.result.requires_restart, true);
-  assert.match(resp.restart_notice, /af daemon restart/, "the notice must name the command to run");
+  // Since #2480 the daemon applies the write in place, so the notice must NOT
+  // drop the user to a shell to run a command (#2479); it is passed through
+  // verbatim from the daemon.
+  assert.doesNotMatch(resp.restart_notice, /daemon restart|run `/, "the notice must not tell the user to run a command (#2479)");
 });
 
 test("setConfigValue surfaces the validator's own message on a rejected value", async () => {

@@ -449,9 +449,9 @@ candidate and why it did or did not supply the effective value.
 changing a single settable key in place so all comments and ordering are
 preserved. With --project <id-or-path> they edit that registered project's
 machine-local override instead (built-in < global < in-repo < personal project),
-which is never checked into the repository. Changes apply the same way a
-hand-edit does: af and the daemon read config at startup, so restart them to
-pick up a change.
+which is never checked into the repository. "af config set" applies a change to
+a running daemon in place where the key allows it (#2480), so most take effect
+without a restart; a raw hand-edit of config.toml still applies on the next start.
 
 ```
 af config
@@ -575,7 +575,8 @@ Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
 so they are not settable here. Ask the config assistant to change them (it edits
 the file and validates), or edit config.toml directly and run "af config validate".
-Changes apply on the next af / daemon start.
+A settable key applies to a running daemon in place (#2480); the structural keys
+above and the network listener keys take effect on the next daemon start.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
@@ -624,7 +625,8 @@ config (a prj_ id from 'af projects list', or a path inside a registered
 repository). It edits only the target key, preserving every other comment and
 value, and is a clean no-op when there is no override to clear. There is no
 global unset — remove a line from config.toml by hand, or 'af config set' a new
-value. Changes apply on the next af / daemon start.
+value. The cleared override stops applying to sessions created in that project
+from now on.
 
 ```
 af config unset <key> --project <id-or-path> [flags]

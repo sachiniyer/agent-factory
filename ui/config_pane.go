@@ -9,7 +9,22 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 )
+
+// applyingConfigSet writes a global config key and then asks a running daemon to
+// apply it in place (#2480), so a TUI config edit takes effect without a restart.
+// The apply is best-effort and never spawns a daemon (RequestApplyConfig uses the
+// no-ensure path): the write already succeeded, so its result is what the pane
+// echoes regardless of whether a daemon was reachable to apply it live.
+func applyingConfigSet(key, value string) (*config.SetResult, error) {
+	res, err := config.SetGlobalConfigValue(key, value)
+	if err != nil {
+		return res, err
+	}
+	_, _ = daemon.RequestApplyConfig()
+	return res, nil
+}
 
 // ConfigPane is the direct config editor: a form over the config manifest,
 // hosted as a full-screen overlay (stateConfigEditor, opened with ",").
@@ -128,7 +143,7 @@ func NewConfigPane() *ConfigPane {
 	in.Blur()
 	return &ConfigPane{
 		input: in,
-		save:  config.SetGlobalConfigValue,
+		save:  applyingConfigSet,
 	}
 }
 

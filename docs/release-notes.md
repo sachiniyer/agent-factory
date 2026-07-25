@@ -1,5 +1,22 @@
 # Release Notes
 
+## Config changes apply on save
+
+- Saving a config change via `af config set` or the web config editor now applies
+  it to a running daemon in place — no manual `af daemon restart`, and no session
+  loss. Keys that still need the web listener or a root-agent change (the network
+  listener keys and `root_agents`) take effect on the next daemon start, and each
+  surface says which happened rather than telling you to run a command.
+- **Behavior change — `session_env_passthrough`:** this key's grants used to be
+  re-read from disk on every session create, so a raw hand-edit of `config.toml`
+  was picked up by the next create with no apply step — a liveness no other key
+  had. It now applies the same way every other key does: on a save through
+  `af config set`, the web editor, or the config assistant. A raw hand-edit of
+  `config.toml` that bypasses those surfaces therefore needs one of them (or a
+  daemon restart) to take effect. This trades one key's accidental liveness for a
+  single uniform rule; a later change that watches `config.toml` will make
+  hand-edits live for every key — strictly better than today for all of them.
+
 ## Watch-task restart
 
 - `af tasks restart <id>` now reloads an edited watch script without manual
