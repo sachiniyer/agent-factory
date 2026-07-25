@@ -11,9 +11,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// MigrateOnLoadPath must point at the exact tasks.json that LoadTasks migrates in
+// place — the upgrade manifest snapshots this path, so if it named a different file
+// the rollback would protect the wrong one (#2212 R3).
+func TestMigrateOnLoadPathIsTheFileLoadTasksMigrates(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	path, err := MigrateOnLoadPath()
+	require.NoError(t, err)
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(configDir, tasksFileName), path)
+
+	// A legacy array-root file at that path is migrated to the envelope schema by
+	// LoadTasks — proving MigrateOnLoadPath names the file the daemon rewrites.
+	legacy := []byte(`[{"id":"t1","name":"n","prompt":"p","cron_expr":"0 9 * * *","project_path":"/tmp","enabled":true,"created_at":"2025-01-01T00:00:00Z"}]`)
+	require.NoError(t, os.WriteFile(path, legacy, 0644))
+	_, err = LoadTasks()
+	require.NoError(t, err)
+
+	onDisk, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(onDisk), `"schema_version"`,
+		"LoadTasks must migrate the file MigrateOnLoadPath points at to the envelope schema")
+}
 
 // setupTestTasks writes a tasks file to a temp dir and overrides
 // getTasksPath for the duration of the test.

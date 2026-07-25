@@ -84,6 +84,46 @@ func TestMigrateRepoInstancesWriteFailurePreservesLegacyArray(t *testing.T) {
 	assert.Equal(t, legacy, backup)
 }
 
+// RepoInstancesMigrateOnLoadPaths must list exactly the per-repo instances.json
+// files the daemon-load migrator walks — one per repo subdirectory, non-directory
+// entries skipped — because the upgrade manifest snapshots this set. Under-listing
+// would leave a rolled-back daemon on a file it cannot read (#2212 R3).
+func TestRepoInstancesMigrateOnLoadPaths(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tempHome)
+
+	alpha := RepoIDFromRoot("/repo/alpha")
+	beta := RepoIDFromRoot("/repo/beta")
+	alphaPath, err := repoInstancesPath(alpha)
+	require.NoError(t, err)
+	betaPath, err := repoInstancesPath(beta)
+	require.NoError(t, err)
+	for _, path := range []string{alphaPath, betaPath} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(`[]`), 0644))
+	}
+
+	// A stray non-directory entry in the instances dir must not appear: the migrator
+	// skips it, so the manifest must too.
+	dir, err := instancesDirPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "not-a-repo"), []byte("x"), 0644))
+
+	paths, err := RepoInstancesMigrateOnLoadPaths()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{alphaPath, betaPath}, paths,
+		"the manifest must list exactly the per-repo instances.json files the migrator walks")
+}
+
+// A daemon with no per-repo state (no instances directory) has nothing to migrate,
+// so the manifest is empty rather than an error.
+func TestRepoInstancesMigrateOnLoadPathsNoInstancesDir(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	paths, err := RepoInstancesMigrateOnLoadPaths()
+	require.NoError(t, err)
+	assert.Empty(t, paths)
+}
+
 func TestSaveRepoInstancesWritesEnvelopeAndLoadReturnsArray(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tempHome)

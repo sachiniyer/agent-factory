@@ -226,6 +226,15 @@ func getTasksPath() (string, error) {
 	return filepath.Join(configDir, tasksFileName), nil
 }
 
+// MigrateOnLoadPath returns the absolute path of tasks.json, which LoadTasks
+// rewrites in place when it migrates a legacy file to the current schema at daemon
+// load (task/schema_migration.go -> config.LoadAndMigrateSchemaFile). The upgrade
+// transaction manifest (#2212 R3) snapshots it so a binary-only rollback restores
+// tasks in a schema the previous daemon can read.
+func MigrateOnLoadPath() (string, error) {
+	return getTasksPathFn()
+}
+
 func LoadTasks() ([]Task, error) {
 	path, err := getTasksPathFn()
 	if err != nil {

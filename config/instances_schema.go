@@ -56,28 +56,45 @@ func MigrateRepoInstancesForDaemonLoad(repoID string) (SchemaMigrationResult, er
 	return result, err
 }
 
+// repoInstanceIDsForDaemonLoad lists the repo-scoped subdirectories under the
+// instances directory. It is the single walk shared by the daemon-load migrator
+// (MigrateAllRepoInstancesForDaemonLoad) and the upgrade manifest
+// (RepoInstancesMigrateOnLoadPaths) so the two can never enumerate a different
+// set. A missing instances directory is not an error: a daemon with no per-repo
+// state has nothing to migrate.
+func repoInstanceIDsForDaemonLoad() ([]string, error) {
+	dir, err := instancesDirPath()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read instances directory: %w", err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		ids = append(ids, entry.Name())
+	}
+	return ids, nil
+}
+
 // MigrateAllRepoInstancesForDaemonLoad upgrades every readable per-repo
 // instances.json before daemon restore/refresh reads it. Corrupted legacy files
 // keep the existing skip-and-warn behavior; newer schema versions and write
 // failures are returned so the daemon never overwrites a file it cannot safely
 // understand or migrate.
 func MigrateAllRepoInstancesForDaemonLoad() error {
-	dir, err := instancesDirPath()
+	ids, err := repoInstanceIDsForDaemonLoad()
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read instances directory: %w", err)
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		repoID := entry.Name()
+	for _, repoID := range ids {
 		if _, err := MigrateRepoInstancesForDaemonLoad(repoID); err != nil {
 			var newer *UnsupportedSchemaVersionError
 			switch {
@@ -95,6 +112,31 @@ func MigrateAllRepoInstancesForDaemonLoad() error {
 		}
 	}
 	return nil
+}
+
+// RepoInstancesMigrateOnLoadPaths returns the absolute path of every per-repo
+// instances.json that MigrateAllRepoInstancesForDaemonLoad rewrites in place at
+// daemon load. It walks the SAME repo set as that migrator, so the upgrade
+// transaction manifest (#2212 R3) snapshots exactly the files a candidate would
+// migrate on boot — letting a binary-only rollback to the previous daemon restore
+// state in a schema it can still read, instead of stranding it on a vN+1 file it
+// cannot parse. Errors propagate rather than skip: an incomplete manifest silently
+// under-protects the rollback, which is the failure mode this whole path exists to
+// prevent.
+func RepoInstancesMigrateOnLoadPaths() ([]string, error) {
+	ids, err := repoInstanceIDsForDaemonLoad()
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(ids))
+	for _, repoID := range ids {
+		path, err := repoInstancesPath(repoID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve instances path for repo %s: %w", repoID, err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
 }
 
 func migrateInstancesSchemaBytes(raw []byte, path string) ([]byte, SchemaMigrationResult, error) {
