@@ -113,10 +113,32 @@ type Manager struct {
 	// the rest in arrival order instead of racing creation and dropping the
 	// losers' prompts (#865). Lazily populated like repoStartLocks.
 	targetLocks map[string]*sync.Mutex
-	// rootEnsureStates tracks per-configured-repo retry state for the
-	// root-agent ensure loop (#1106), keyed by the root_agents config key
-	// (the repo path as written in config.json).
+	// rootEnsureStates tracks per-candidate retry state for the root-agent
+	// ensure loop (#1106), keyed by the root_agents config key (the repo path as
+	// written in config.json) for a legacy entry, or by the registered project's
+	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
+	// rootAgentGlobal is the global [root_agent] singleton layer (#2216 Phase 6),
+	// snapshotted at daemon start (nil when the config declared no [root_agent]).
+	// Like the RootAgents map it is immutable in memory after construction:
+	// root_agent config changes take effect on the next daemon start.
+	rootAgentGlobal *config.RootAgentLayer
+	// rootAgentPersonal maps a registered project's repo ID to its personal
+	// [root_agent] layer, snapshotted at daemon start (projects with no such
+	// override are absent). It is the highest-precedence root-agent source,
+	// merged over global and legacy in config.ResolveRootAgent.
+	rootAgentPersonal map[string]*config.RootAgentLayer
+	// rootAgentProjectRoots maps a registered project's repo ID to its resolved
+	// root path, snapshotted at daemon start. It is the candidate set the ensure
+	// loop visits for a root enabled purely by the global/personal singleton — a
+	// project with no legacy root_agents entry — and supplies the repo root
+	// CreateSession needs. Restart-to-apply, like RootAgents.
+	rootAgentProjectRoots map[string]string
+	// rootAgentLegacyRepoIDs is the set of repo IDs a root_agents path resolved to
+	// at daemon start. The singleton-project sweep skips these so a repo named by
+	// both a legacy entry and a registered project is ensured once — by the legacy
+	// sweep, which merges the personal layer — rather than twice.
+	rootAgentLegacyRepoIDs map[string]bool
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
@@ -276,37 +298,42 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		}
 		return cfg.VSCodeServerBinary
 	}
+	raGlobal, raPersonal, raProjectRoots, raLegacyIDs := buildRootAgentSnapshot(cfg)
 	m := &Manager{
-		cfg:                 cfg,
-		previewSecret:       previewSecret,
-		limitDetector:       task.NewLimitDetector(cfg.LimitPatterns),
-		ready:               make(chan struct{}),
-		lifecycle:           lifecycle,
-		storage:             storage,
-		instances:           make(map[string]*session.Instance),
-		pendingCreates:      make(map[string]session.InstanceData),
-		reservedTitles:      make(map[string]struct{}),
-		reservedTmuxNames:   make(map[string]string),
-		reservedRemoteNames: make(map[string]struct{}),
-		reservedTaskRuns:    make(map[string]int),
-		ghostTaskRuns:       make(map[string]int),
-		repoStartLocks:      make(map[string]*sync.Mutex),
-		aliveObservations:   make(map[string]uint64),
-		targetLocks:         make(map[string]*sync.Mutex),
-		rootEnsureStates:    make(map[string]*rootEnsureState),
-		rootKilledAt:        make(map[string]time.Time),
-		deletedRootRepos:    make(map[string]struct{}),
-		killsInFlight:       make(map[string]struct{}),
-		lostRestoreStates:   make(map[string]*lostRestoreState),
-		limitResumeStates:   make(map[string]*limitResumeState),
-		handoffRetryDue:     make(map[string]time.Time),
-		remoteLossStates:    make(map[string]*remoteLossState),
-		instanceOpLocks:     make(map[string]*sync.Mutex),
-		pausedPolls:         make(map[string]time.Time),
-		taskRunProbeDue:     make(map[string]time.Time),
-		events:              newEventsHub(),
-		vscode:              vscode,
-		configAgents:        configAgents,
+		cfg:                    cfg,
+		previewSecret:          previewSecret,
+		limitDetector:          task.NewLimitDetector(cfg.LimitPatterns),
+		ready:                  make(chan struct{}),
+		lifecycle:              lifecycle,
+		storage:                storage,
+		instances:              make(map[string]*session.Instance),
+		pendingCreates:         make(map[string]session.InstanceData),
+		reservedTitles:         make(map[string]struct{}),
+		reservedTmuxNames:      make(map[string]string),
+		reservedRemoteNames:    make(map[string]struct{}),
+		reservedTaskRuns:       make(map[string]int),
+		ghostTaskRuns:          make(map[string]int),
+		repoStartLocks:         make(map[string]*sync.Mutex),
+		aliveObservations:      make(map[string]uint64),
+		targetLocks:            make(map[string]*sync.Mutex),
+		rootEnsureStates:       make(map[string]*rootEnsureState),
+		rootAgentGlobal:        raGlobal,
+		rootAgentPersonal:      raPersonal,
+		rootAgentProjectRoots:  raProjectRoots,
+		rootAgentLegacyRepoIDs: raLegacyIDs,
+		rootKilledAt:           make(map[string]time.Time),
+		deletedRootRepos:       make(map[string]struct{}),
+		killsInFlight:          make(map[string]struct{}),
+		lostRestoreStates:      make(map[string]*lostRestoreState),
+		limitResumeStates:      make(map[string]*limitResumeState),
+		handoffRetryDue:        make(map[string]time.Time),
+		remoteLossStates:       make(map[string]*remoteLossState),
+		instanceOpLocks:        make(map[string]*sync.Mutex),
+		pausedPolls:            make(map[string]time.Time),
+		taskRunProbeDue:        make(map[string]time.Time),
+		events:                 newEventsHub(),
+		vscode:                 vscode,
+		configAgents:           configAgents,
 	}
 	m.configAssistants = newConfigAssistantHub(m)
 	return m, nil
