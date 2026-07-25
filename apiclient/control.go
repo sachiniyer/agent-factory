@@ -186,17 +186,14 @@ func (c *Client) SnapshotWithAlarms(req daemon.SnapshotRequest) (daemon.Snapshot
 	return resp, nil
 }
 
-// ListProjects fetches the daemon's registered projects (#2456) — the read the
-// TUI unions with its derived (from-sessions) project list so a
-// registered-but-sessionless project still shows in the switcher and is
-// creatable-into. HTTP twin of the daemon's ListProjects RPC.
-func (c *Client) ListProjects() ([]config.Project, error) {
-	var resp daemon.ListProjectsResponse
-	if err := c.call("ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Projects, nil
-}
+// There is deliberately no ListProjects here. The web reads the registry over HTTP
+// (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
+// but the two GO consumers read it in-process: the TUI's switcher union
+// (app/switch_project.go buildProjectListFrom) and the CLI's `af projects list`
+// (api/projects.go) both call config.ListProjects(), the same file-locked read the
+// daemon writes through — a read of on-disk config needs no round trip. A wrapper
+// here would be dead code whose only caller was its own test. RegisterProject stays
+// because it is a WRITE, which must go through the daemon (the single writer, #960).
 
 // RegisterProject registers a git checkout as a durable project through the
 // daemon (#2456) — the single-writer path the TUI's add-project action routes

@@ -585,20 +585,20 @@
       "id": "project.list",
       "title": "See the list of durable projects",
       "tui": {
-        "status": "partial",
-        "pointer": "keys/keys.go:172 (ctrl+p) -> app/switch_project.go:25"
+        "status": "yes",
+        "pointer": "app/switch_project.go buildProjectListFrom unions config.ListProjects() (registry) with derived sessions + root_agents"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/ui.ts:1047 project switcher"
+        "status": "yes",
+        "pointer": "web/src/api.ts listProjects → project.ts projectSummaries/pickerProjects ∪ registeredProjects; web/src/ui.ts project switcher"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsListCmd"
+        "pointer": "api/projects.go projectsListCmd (config.ListProjects)"
       },
-      "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI reads the durable registry introduced in #2216's identity slice. The TUI and web still derive their switchers from sessions and legacy root-agent paths, so they expose only a partial, different set until the later #2216 UI/RPC slice consumes this registry."
+      "verdict": "parity",
+      "issue": "#2478",
+      "notes": "The CLI, TUI, and web all now surface the durable registry (#2216 identity slice, read via config.ListProjects / the daemon's ListProjects RPC). #2456 added the read half (ListProjects RPC, POST /v1/ListProjects) and unioned it into both switchers: derived (live sessions + tasks) ∪ registry ∪ root_agents, so a registered-but-sessionless project appears everywhere and is creatable-into. This closes the #2478 gap (the TUI/web switchers previously derived only from sessions + legacy root_agents). The web reads over HTTP; the two Go surfaces read config.ListProjects() in-process (a read of on-disk config the daemon writes needs no round trip)."
     },
     {
       "id": "project.delete",
@@ -622,8 +622,8 @@
       "id": "project.add",
       "title": "Register a new project",
       "tui": {
-        "status": "partial",
-        "pointer": "app/switch_project.go:196-216 (picker '+ Add project…' row)"
+        "status": "yes",
+        "pointer": "app/switch_project.go handleAddProject → registerProjectThroughDaemon (apiclient RegisterProject RPC)"
       },
       "web": {
         "status": "yes",
@@ -633,9 +633,9 @@
         "status": "yes",
         "pointer": "api/projects.go newProjectsAddCmd (af projects add, register alias) → daemon RegisterProject RPC"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#2456",
-      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); `af projects add` (register is a deprecated alias) and the web project switcher's '+ Add project' both route through it, so the checkout is resolved on the daemon's filesystem and the single writer owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Still real-gap because the TUI add persists a legacy root_agents entry rather than the registry; the remaining TUI slice rewires it and unions the project list (derived + registry + root_agents), which flips this to parity."
+      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
     },
     {
       "id": "project.rebind",
@@ -1507,6 +1507,7 @@
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
       "ListPrograms": "enum.agent-programs",
+      "ListProjects": "project.list",
       "ListTasks": "task.list",
       "RegisterProject": "project.add",
       "RemoveTask": "task.remove",

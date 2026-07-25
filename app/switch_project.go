@@ -93,6 +93,19 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Proje
 		}
 	}
 
+	// The #2456 union: derived (live sessions above) ∪ registry ∪ root_agents. The
+	// registry (config.ListProjects, the #2355 durable project store the daemon writes
+	// via RegisterProject) is what NEW adds land in; the root_agents opt-in is kept in
+	// the union for repos registered before the add-verb rewire, so an existing opt-in
+	// keeps its switcher entry. Both are on-disk config read in-process here, exactly
+	// as the counts above come from the daemon's session snapshot passed in.
+	if projects, err := config.ListProjects(); err == nil {
+		for _, p := range projects {
+			seen(p.Root)
+		}
+	} else {
+		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
+	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
 			if repo, err := config.RepoFromPath(config.ExpandTilde(path)); err == nil {
@@ -202,27 +215,25 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAddProject validates a user-entered repo path, registers it in the
-// global root_agents opt-in list (so it persists in the picker), and switches to
-// it. A path that is not a git repository keeps the overlay open with an inline
-// error rather than dismissing the user's typing.
+// handleAddProject validates a user-entered repo path, registers it in the #2355
+// project registry through the daemon (so it persists in the switcher), and
+// switches to it. A path that is not a git repository keeps the overlay open with
+// an inline error rather than dismissing the user's typing.
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 	repo, err := config.RepoFromPath(config.ExpandTilde(path))
 	if err != nil {
 		m.projectPickerOverlay.SetAddError(fmt.Sprintf("not a git repository: %s", path))
 		return m, nil
 	}
-	if _, err := config.RegisterRootAgent(repo.Root); err != nil {
-		// Non-fatal: the switch still works this session; it just won't be
-		// remembered for the next launch.
-		log.WarningLog.Printf("failed to register project %s in root_agents: %v", repo.Root, err)
-	} else if m.appConfig != nil {
-		if m.appConfig.RootAgents == nil {
-			m.appConfig.RootAgents = map[string]config.RootAgentConfig{}
-		}
-		if _, ok := m.appConfig.RootAgents[repo.Root]; !ok {
-			m.appConfig.RootAgents[repo.Root] = config.RootAgentConfig{}
-		}
+	// Persist through the daemon — the single writer (#960) — which records the repo
+	// in the project registry (config.RegisterProject) and publishes projects.changed,
+	// so it survives the next launch and joins the switcher union (buildProjectListFrom
+	// reads config.ListProjects). This REPLACES the legacy in-process root_agents write
+	// (#2456 step 3). We forward the LOCALLY-resolved absolute root, not the raw input,
+	// so a relative path cannot re-resolve against the daemon's cwd (#2491). Non-fatal
+	// on failure: the switch still works this session, it just isn't remembered.
+	if err := registerProjectThroughDaemon(repo.Root); err != nil {
+		log.WarningLog.Printf("failed to register project %s in the registry: %v", repo.Root, err)
 	}
 	m.closeProjectPicker()
 	return m.switchProject(repo)

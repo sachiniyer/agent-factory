@@ -186,6 +186,19 @@ var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeletePro
 	return resp, err
 }
 
+// registerProjectThroughDaemon routes the TUI's add-project verb (#2456) through
+// the daemon — the single writer (#960) — which resolves + validates the path,
+// records it in the #2355 project registry, and publishes projects.changed. The
+// caller (handleAddProject) forwards the already-locally-resolved absolute root
+// and switches on its own, so only the error matters here. A package var so the
+// app test suite can stub it without dialing a real daemon.
+var registerProjectThroughDaemon = func(path string) error {
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		_, e := c.RegisterProject(path)
+		return e
+	})
+}
+
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)
 // verb (#1146) through the daemon — the single writer (#960) — which re-spawns
 // the agent if it exited, re-delivers the pending prompt, and clears the limit
