@@ -10,7 +10,7 @@ Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
   af sessions list                                     List sessions
   af sessions get <title>                              Fetch one session
-  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp|opencode]
+  af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp|opencode|devin]
   af sessions send-prompt <title> <prompt> [--create]  Send a prompt (--create makes the session first if missing)
   af sessions preview <title>                          Snapshot another session's terminal output
   af sessions watch <title>                            Block until the session goes idle (agent done, ready for review); exits 0 when ready, non-zero on lost/dead/archived or --timeout (default 30m)
