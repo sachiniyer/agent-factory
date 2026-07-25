@@ -773,10 +773,14 @@ type SetConfigValueResponse struct {
 	// Applied and Pending report the ApplyConfig outcome (#2480): the daemon
 	// applies the write to itself in place, so a save surface can say what took
 	// effect rather than telling the user to restart. Applied keys are live now;
-	// Pending keys (the network listener keys until PR2, root_agents until #2216)
-	// take effect on the next daemon start.
+	// Pending keys (root_agents/root_agent until #2216, branch_prefix) take effect
+	// on the next daemon start.
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
+	// Warnings surfaces the tokenless-network exposure notice and any listener
+	// rebind failure at save time (#2480 PR2). The web form shows them after the
+	// echo so a user learns when a socket key did not apply or a posture is exposed.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config
@@ -786,8 +790,15 @@ type SetConfigValueResponse struct {
 type ApplyConfigRequest struct{}
 
 // ApplyConfigResponse reports which changed keys took effect live versus which
-// are still pending a restart.
+// are still pending a restart, plus save-time warnings (#2480 PR2).
 type ApplyConfigResponse struct {
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
+	// Warnings carries the tokenless-network exposure notice and any listener rebind
+	// failure so `af config set` (which applies via RequestApplyConfig) can print them.
+	Warnings []string `json:"warnings,omitempty"`
+	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
+	// whose live rebind failed, so the CLI can report THAT key's change as deferred
+	// rather than falsely applied.
+	FailedListenerKeys []string `json:"failed_listener_keys,omitempty"`
 }

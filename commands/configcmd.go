@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -21,10 +22,20 @@ import (
 // reportConfigApply prints how a saved global config key took effect (#2480),
 // per the #2479 principle — it never tells the user to run a command. The honest
 // per-key answer comes from config.EffectNotice, the same one the daemon hands the
-// web form and the TUI pane uses, so all three surfaces say the same thing.
-// daemonReachable is false when no daemon was running to apply the change.
-func reportConfigApply(cmd *cobra.Command, key string, daemonReachable bool) {
-	fmt.Fprintln(cmd.OutOrStdout(), config.EffectNotice(key, daemonReachable))
+// web form and the TUI pane uses, so all three surfaces say the same thing. A
+// socket key (listen_addr / preview_listen_addr, #2480 PR2) whose live rebind FAILED
+// is reported deferred instead of applied, and the actionable reason plus any
+// exposure notice are printed after it (on stderr). applyErr is non-nil when no
+// daemon was running to apply the change.
+func reportConfigApply(cmd *cobra.Command, key string, resp daemon.ApplyConfigResponse, applyErr error) {
+	if applyErr == nil && slices.Contains(resp.FailedListenerKeys, key) {
+		fmt.Fprintln(cmd.OutOrStdout(), config.ListenerRebindDeferredNotice(key))
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), config.EffectNotice(key, applyErr == nil))
+	}
+	for _, w := range resp.Warnings {
+		fmt.Fprintln(cmd.ErrOrStderr(), w)
+	}
 }
 
 // jsonWrapError honors the --json contract for the CLI commands in this
@@ -395,17 +406,17 @@ Examples:
 		// takes effect without a manual `af daemon restart` (the #2479 principle).
 		// Best-effort and non-spawning: with no daemon running there is nothing to
 		// apply live and the value takes effect on the next start.
-		_, applyErr := daemon.RequestApplyConfig()
+		applyResp, applyErr := daemon.RequestApplyConfig()
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s in %s\n", res.Key, echoValue(res.Value), prettyPath(res.Path))
-		// Warnings before the apply note: what the value MEANS matters more than
-		// when it takes effect, and the last line is the one that gets read.
+		// Writer warnings (validation) before the apply note: what the value MEANS
+		// matters more than when it takes effect, and the last line is read first.
 		for _, w := range res.Warnings {
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
-		reportConfigApply(cmd, res.Key, applyErr == nil)
+		reportConfigApply(cmd, res.Key, applyResp, applyErr)
 		return nil
 	},
 }

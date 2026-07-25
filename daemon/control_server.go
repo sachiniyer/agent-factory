@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -224,17 +225,25 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	// already succeeded on disk, so an apply failure just means the change waits for
 	// the next daemon start.
 	daemonApplied := false
+	var applyResult ApplyConfigResult
 	if s.manager != nil {
 		if applied, aerr := s.manager.ApplyConfig(); aerr == nil {
+			applyResult = applied
 			resp.Applied = applied.Applied
 			resp.Pending = applied.Pending
+			resp.Warnings = applied.Warnings
 			daemonApplied = true
 		}
 	}
-	// The per-key effect notice (#2480): whether the running daemon is using this
-	// key now, whether it waits for the next daemon start, or whether it is a
-	// client-side key af picks up on its next launch — never one canned sentence.
-	resp.RestartNotice = config.EffectNotice(result.Key, daemonApplied)
+	// The per-key effect notice (#2480). A socket key (listen_addr / preview_listen_addr,
+	// #2480 PR2) whose live rebind FAILED did not apply — the daemon kept the old
+	// listener — so override the class-based "applied" with the honest deferred
+	// notice; the address + reason ride in resp.Warnings.
+	if slices.Contains(applyResult.FailedListenerKeys, result.Key) {
+		resp.RestartNotice = config.ListenerRebindDeferredNotice(result.Key)
+	} else {
+		resp.RestartNotice = config.EffectNotice(result.Key, daemonApplied)
+	}
 	return nil
 }
 
@@ -253,6 +262,8 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 	}
 	resp.Applied = result.Applied
 	resp.Pending = result.Pending
+	resp.Warnings = result.Warnings
+	resp.FailedListenerKeys = result.FailedListenerKeys
 	return nil
 }
 

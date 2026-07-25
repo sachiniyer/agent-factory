@@ -188,34 +188,75 @@ type authInfoResponse struct {
 	AuthRequired bool `json:"auth_required"`
 }
 
-// withAuth wraps the daemon mux with the auth + CORS gate. gate is nil for the
-// trusted unix socket (no token enforcement) and non-nil for the TCP listener.
-// corsOrigins is the exact-match browser-origin allow-list (§1.5); empty ⇒ no
-// Access-Control-Allow-Origin is emitted.
+// requestPosture is the COMPLETE auth + CORS decision for one request: the gate
+// that judges its token and the CORS allow-list that judges its Origin. Bundling
+// both into ONE value is the structural guarantee behind #2480 PR2's live-read: a
+// listener that reads config per request reads it EXACTLY ONCE and builds one
+// requestPosture from that single snapshot (withLivePosture), so a config swap
+// landing mid-request can never split one authorization across two config
+// generations — require_token from one, require_loopback_token or cors from the
+// next. A future term that depends on live config must become a FIELD here; it
+// cannot be a second read, because servePosture takes the finished posture and
+// reads no config of its own. TestWebListenerReadsConfigExactlyOncePerRequest pins
+// that the live path reads the snapshot exactly once.
+type requestPosture struct {
+	// gate judges the token. Nil ⇒ trusted transport (the unix socket): every
+	// request authorized. Non-nil ⇒ the token is enforced per its policy.
+	gate *authGate
+	// cors is the exact-match browser-origin allow-list; empty ⇒ no
+	// Access-Control-Allow-Origin is emitted.
+	cors []string
+}
+
+// servePosture runs the auth + CORS flow for one request against a posture the
+// caller has ALREADY built from a single config read. It performs no config read
+// of its own — that is the whole point: the one read happened once, above.
+func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p requestPosture) {
+	applyCORSPolicy(w, r, p.cors)
+	if r.Method == http.MethodOptions {
+		// CORS preflight carries no credentials — answer it before the gate
+		// so cross-origin discovery works for the web client without a token.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// The auth-info probe is answered BEFORE the gate: its whole purpose is
+	// to let a tokenless client discover whether it needs a token, so gating
+	// it would defeat it. It reports the gate's decision FOR THIS PEER, so a
+	// loopback client sees auth_required=false while a network client on the
+	// same daemon sees true — the same authRequired predicate the gate
+	// enforces below, never a different answer.
+	if r.URL.Path == authInfoPath {
+		writeAuthInfo(w, r, p.gate)
+		return
+	}
+	if p.gate != nil && !p.gate.authorize(r) {
+		writeHTTPError(w, r, http.StatusUnauthorized, errUnauthorized)
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+// withAuth wraps the daemon mux with a STATIC posture — the gate and CORS list are
+// fixed at construction. Used by the trusted unix socket (nil gate) and the
+// agent-server (fixed strict gate). The daemon's own web + preview listeners use
+// withLivePosture instead so #2480 config changes apply with no rebind.
 func withAuth(next http.Handler, gate *authGate, corsOrigins []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		applyCORSPolicy(w, r, corsOrigins)
-		if r.Method == http.MethodOptions {
-			// CORS preflight carries no credentials — answer it before the gate
-			// so cross-origin discovery works for the web client without a token.
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		// The auth-info probe is answered BEFORE the gate: its whole purpose is
-		// to let a tokenless client discover whether it needs a token, so gating
-		// it would defeat it. It reports the gate's decision FOR THIS PEER, so a
-		// loopback client sees auth_required=false while a network client on the
-		// same daemon sees true — the same authRequired predicate the gate
-		// enforces below, never a different answer.
-		if r.URL.Path == authInfoPath {
-			writeAuthInfo(w, r, gate)
-			return
-		}
-		if gate != nil && !gate.authorize(r) {
-			writeHTTPError(w, r, http.StatusUnauthorized, errUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
+		servePosture(w, r, next, requestPosture{gate: gate, cors: corsOrigins})
+	})
+}
+
+// withLivePosture wraps next so the auth + CORS posture is read from live config
+// ONCE per request (#2480 PR2), making require_token / require_loopback_token /
+// cors_allowed_origins take effect on the NEXT request with no socket rebind. This
+// is deliberately DECOUPLED from the listener rebind: a tightening (require_token
+// = true) applies to the next request whether or not any concurrent listen_addr
+// rebind succeeds, so a security change can never fail in the permissive direction
+// because a socket operation failed. buildPosture must read its config snapshot
+// exactly once and derive the whole returned posture from it.
+func withLivePosture(next http.Handler, buildPosture func() requestPosture) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		servePosture(w, r, next, buildPosture())
 	})
 }
 

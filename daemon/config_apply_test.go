@@ -57,20 +57,22 @@ func TestApplyConfigRebuildsLimitDetector(t *testing.T) {
 	require.Equal(t, "CUSTOM-LIMIT-BANNER", m.Config().LimitPatterns["claude"], "the rebuilt detector is built from the swapped config")
 }
 
-// TestApplyConfigReportsNetworkKeysPending: the network listener keys cannot be
-// applied in place in PR1 (they are served from the frozen startup config until
-// the in-process listener reload), so a changed listen_addr is reported Pending —
-// surfaced, never silently dropped.
-func TestApplyConfigReportsNetworkKeysPending(t *testing.T) {
+// TestApplyConfigReportsNetworkKeysApplied: since #2480 PR2 the network listener
+// keys apply live — the auth/CORS keys per request (livePosture), listen_addr /
+// preview_listen_addr by rebind — so a change is reported Applied, not Pending.
+// (The live-read enforcement and the rebind/brick-prevention behavior are pinned
+// with real listeners in listener_reload_test.go; this pins the classification the
+// save-surface notice reads.)
+func TestApplyConfigReportsNetworkKeysApplied(t *testing.T) {
 	m := applyConfigTestManager(t)
 
-	_, err := config.SetGlobalConfigValue("listen_addr", "127.0.0.1:9999")
+	_, err := config.SetGlobalConfigValue("require_token", "true")
 	require.NoError(t, err)
 
 	result, err := m.ApplyConfig()
 	require.NoError(t, err)
-	require.Contains(t, result.Pending, "listen_addr", "a changed network key must be reported pending, not applied")
-	require.NotContains(t, result.Applied, "listen_addr")
+	require.Contains(t, result.Applied, "require_token", "a network key applies live since PR2, so it is reported applied, not pending")
+	require.NotContains(t, result.Pending, "require_token")
 }
 
 // TestApplyConfigReportsBranchPrefixPending is the regression for the lie the

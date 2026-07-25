@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // EffectClass says WHEN a change to a config key takes effect. #2480 makes this a
 // per-key fact rather than the old uniform "restart to apply": a save surface
@@ -23,12 +26,11 @@ const (
 	// EffectNotice downgrades the message to the next daemon start.
 	EffectAppliedLive
 	// EffectNextDaemonStart: the daemon reads the key, but only at startup, so a
-	// change waits for the next daemon start. The network listener keys (captured
-	// into manager.cfg until the #2480 PR2 in-process reload lands), root_agents
-	// (its next-daemon-start contract, #2216), and branch_prefix (read from the
-	// FROZEN startup config in the title-reservation helpers — deliberately not
-	// threaded live, so it is reported here rather than falsely claimed applied) are
-	// these.
+	// change waits for the next daemon start. root_agents / root_agent (their
+	// next-daemon-start contract, #2216) and branch_prefix (read from the FROZEN
+	// startup config in the title-reservation helpers — deliberately not threaded
+	// live, so it is reported here rather than falsely claimed applied) are these.
+	// (The network listener keys used to be here; #2480 PR2 made them applied-live.)
 	EffectNextDaemonStart
 	// EffectNextAfLaunch: the daemon never reads the key at all — af's own CLI or TUI
 	// does, on its next launch (auto_update and update_channel are read by the
@@ -61,15 +63,21 @@ var keyEffectClasses = map[string]EffectClass{
 	"global_agent_skills":            EffectAppliedLive,
 	"docker_mount_agent_credentials": EffectAppliedLive,
 	"ssh_host_key_verification":      EffectAppliedLive,
+	// The network listener keys apply live since #2480 PR2: require_token /
+	// require_loopback_token / cors_allowed_origins are read per request
+	// (livePosture), and listen_addr / preview_listen_addr rebind in place
+	// (bind-new-before-close). A listen_addr rebind that FAILS is surfaced as a
+	// warning and reported as deferred to the next daemon start — the class here is
+	// the success case; the runtime outcome overrides the notice on failure.
+	"listen_addr":            EffectAppliedLive,
+	"preview_listen_addr":    EffectAppliedLive,
+	"require_token":          EffectAppliedLive,
+	"require_loopback_token": EffectAppliedLive,
+	"cors_allowed_origins":   EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
-	"listen_addr":            EffectNextDaemonStart,
-	"preview_listen_addr":    EffectNextDaemonStart,
-	"require_token":          EffectNextDaemonStart,
-	"require_loopback_token": EffectNextDaemonStart,
-	"cors_allowed_origins":   EffectNextDaemonStart,
-	"root_agents":            EffectNextDaemonStart,
-	"root_agent":             EffectNextDaemonStart,
-	"branch_prefix":          EffectNextDaemonStart,
+	"root_agents":   EffectNextDaemonStart,
+	"root_agent":    EffectNextDaemonStart,
+	"branch_prefix": EffectNextDaemonStart,
 	// Next af launch — the daemon never reads these; af's CLI/TUI does.
 	"auto_update":    EffectNextAfLaunch,
 	"update_channel": EffectNextAfLaunch,
@@ -112,4 +120,14 @@ func EffectNotice(key string, daemonApplied bool) string {
 	default:
 		return "Saved."
 	}
+}
+
+// ListenerRebindDeferredNotice is the honest notice when a listen_addr /
+// preview_listen_addr change could NOT be applied to the running daemon: the
+// bind-new-before-close rebind failed, so the OLD listener is still serving. The
+// value is on disk and takes effect on the next daemon start; the actionable
+// reason (address + why) rides alongside in the save surface's warnings. Like every
+// #2480 notice it names no command to run.
+func ListenerRebindDeferredNotice(key string) string {
+	return fmt.Sprintf("Saved — %s could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).", key)
 }

@@ -1546,17 +1546,13 @@ test("config: the editor renders from the manifest and writes through the real p
     "using the new value now",
   );
 
-  // A web-listener key cannot be applied in place yet (PR1), so its notice defers to
-  // the next daemon start — and says "this setting", the per-key phrasing, not the
-  // old multi-key banner. The change is pending, so the running daemon keeps its
-  // current listener and this write does not rebind it.
-  const listen = pane.locator('.af-config-row[data-key="listen_addr"] input');
-  await expect(listen).toBeVisible();
-  await listen.fill("127.0.0.1:8544");
-  await listen.press("Enter");
-  await expect(pane.locator('.af-config-row[data-key="listen_addr"] .af-config-notice')).toContainText(
-    "this setting takes effect on the next daemon start",
-  );
+  // NB: this pane shares ONE real daemon with every test below, so it must not
+  // write a network listener key. Since #2480 PR2 those apply live — listen_addr
+  // would REBIND this very daemon's listener out from under the selftest, and
+  // require_token would change its auth posture — so the live-read + rebind
+  // behavior is pinned in Go (daemon/listener_reload_test.go), not here. The two
+  // notice classes exercised above (client-side, applied-live) are what the web
+  // surface must render, and they touch only inert keys.
 
   // Enter on an UNTOUCHED field must do nothing. The Save button is disabled
   // there, and Enter has to honor the same gate: a no-op write would still echo

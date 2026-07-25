@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -26,8 +27,19 @@ func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
 	if err != nil {
 		return res, "", err
 	}
-	_, applyErr := daemon.RequestApplyConfig()
-	return res, config.EffectNotice(res.Key, applyErr == nil), nil
+	applyResp, applyErr := daemon.RequestApplyConfig()
+	notice := config.EffectNotice(res.Key, applyErr == nil)
+	// A socket key whose live rebind failed (#2480 PR2) is reported deferred, not
+	// applied. Any warnings (the exposure notice, or the rebind's actionable reason)
+	// are folded into the one line the pane shows so a TUI edit that exposes the API
+	// or could not rebind still tells the user.
+	if applyErr == nil && slices.Contains(applyResp.FailedListenerKeys, res.Key) {
+		notice = config.ListenerRebindDeferredNotice(res.Key)
+	}
+	if len(applyResp.Warnings) > 0 {
+		notice = notice + " " + strings.Join(applyResp.Warnings, " ")
+	}
+	return res, notice, nil
 }
 
 // ConfigPane is the direct config editor: a form over the config manifest,

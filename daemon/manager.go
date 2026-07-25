@@ -32,6 +32,12 @@ type Manager struct {
 	// send, so a burst of applies collapses to one reset and ApplyConfig never
 	// blocks on the poll loop.
 	pollReloadCh chan struct{}
+	// webListeners owns the restartable web + preview TCP listeners (#2480 PR2), so
+	// ApplyConfig can rebind them in place for a listen_addr / preview_listen_addr
+	// change (bind-new-before-close). Nil on a manager built without startHTTPServer
+	// (many tests); ApplyConfig's reconcile is a no-op then. The auth/CORS keys do
+	// NOT go through here — their handlers read live config per request.
+	webListeners *webListeners
 
 	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
 	// a PER-TAB credential (#1856 step 3): the token for (sessionID, tabID) is

@@ -123,128 +123,36 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		}
 	}()
 
-	// Plain-HTTP TCP listener (#1592 Phase 3 PR3, §1.1; HTTP-only since
-	// 2026-07-14) — the daemon's bundled web UI + HTTP/WS surface. ON BY
-	// DEFAULT: listen_addr defaults to loopback ("127.0.0.1:8443"), so a daemon
-	// with no config serves the browser client on localhost. An explicit
-	// `listen_addr = ""` is the opt-out that skips this block entirely
-	// (pure-unix daemon). It serves the same mux behind a token-enforcing gate.
-	// A bind failure — including the loopback default losing a port race with
-	// another daemon — is logged but NEVER fatal: the unix socket and control
-	// plane every local client depends on must not regress because a web port
-	// could not open, so the daemon keeps running with the web server skipped.
-	closeTCP := func() error { return nil }
-	if manager.cfg.ListenAddr != "" {
-		// The daemon's web listener exempts loopback peers from the token only when
-		// the listener is LOOPBACK-BOUND (a same-machine browser gets the
-		// unix-socket's local trust, #1696), honors require_token=false to drop the
-		// token for all peers on a trusted network, and withdraws the loopback
-		// exemption on require_loopback_token=true. Crucially, a NETWORK-bound
-		// listener never exempts loopback: a same-host reverse proxy connects from
-		// 127.0.0.1, so exempting it would bypass the token (webListenerPolicy).
-		policy := webListenerPolicy(manager.cfg)
-		notice := config.ListenerExposureNotice(manager.cfg)
-		// A tokenless NETWORK listener binds (#2168 Phase 0). #2090 made this site
-		// skip the bind, backed by a fatal refusal in RunDaemon; the owner reversed
-		// both — "just allow binding to 0.0.0.0 without a token" — so the exposure
-		// is reported, not prevented.
-		//
-		// This is the ONE place the notice is emitted. startHTTPServer runs exactly
-		// once per daemon start and only reaches the warning when the port actually
-		// opened, so the operator gets a single accurate line rather than a warning
-		// about a listener that was never served — and nothing on a per-request or
-		// per-connection path repeats it.
-		if closer, info, err := startTCPListener(mux, manager.cfg.ListenAddr, manager.cfg, policy, withWebShell, nil); err != nil {
-			log.WarningLog.Printf("failed to start daemon HTTP TCP listener on %q: %v", manager.cfg.ListenAddr, err)
-		} else {
-			closeTCP = closer
-			if manager.lifecycle != nil {
-				manager.lifecycle.setTCPBound(info.Addr)
-				go func() {
-					<-info.done
-					manager.lifecycle.clearTCPBound()
-				}()
-			}
-			log.InfoLog.Printf("daemon HTTP TCP listener enabled on %s (plain HTTP — terminate TLS at a proxy if needed)", info.Addr)
-			log.InfoLog.Printf("  bearer token: %s", info.Token)
-			switch {
-			// The exposure warning REPLACES the tokenless banner line for a network
-			// bind rather than joining it: they say the same thing, and saying it
-			// twice is how a warning stops being read.
-			case notice != "":
-				log.WarningLog.Printf("%s", notice)
-			case policy.tokenDisabled:
-				log.InfoLog.Printf("  all peers connect with NO token (require_token defaults to false; set require_token = true to require auth)")
-			case policy.loopbackExempt:
-				log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above")
-			case config.IsLoopbackListenAddr(manager.cfg.ListenAddr):
-				log.InfoLog.Printf("  require_loopback_token=true: every peer (loopback included) must present the token above")
-			default:
-				log.InfoLog.Printf("  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests — a same-host reverse proxy is NOT exempt (front it and let the proxy pass the token, or set require_token=false only on a fully trusted network)")
-			}
-		}
-	}
-
-	// The web-tab PREVIEW listener (#1856), a SECOND TCP listener bound from
-	// preview_listen_addr. It exists so previews can eventually be served
-	// cross-origin to the SPA — a different origin the framed dev server cannot use
-	// to reach the SPA's token. Step 2 opens the AUTH handshake on it (its own
-	// ephemeral credential + the clean-before-render bootstrap, newPreviewMux) but
-	// still serves NO content; the preview proxy routes and the sandbox relax land
-	// in step 3.
-	//
-	// Same non-fatal discipline as the web listener above: a bind failure (a port
-	// conflict, an unbindable host) is logged and skipped, never fatal — the unix
-	// socket and control plane must not regress because a second web port could not
-	// open. Disabled by default: an unset preview_listen_addr skips this block
-	// entirely, so no second port opens until an operator opts in.
-	closePreview := func() error { return nil }
-	if manager.cfg.PreviewListenAddr != "" {
-		// Its OWN policy (previewListenerPolicy), OWN exposure notice
-		// (PreviewListenerExposureNotice), and OWN credential (previewListenerAuth —
-		// the ephemeral preview token, never the daemon bearer). The preview origin
-		// does not serve the daemon API and must not borrow its posture, its
-		// DeliverPrompt warning, or its control-plane credential.
-		policy := previewListenerPolicy(manager.cfg)
-		notice := config.PreviewListenerExposureNotice(manager.cfg)
-		if closer, info, err := startTCPListener(newPreviewMux(), manager.cfg.PreviewListenAddr, manager.cfg, policy, previewShell, previewListenerAuth(manager)); err != nil {
-			log.WarningLog.Printf("failed to start web-tab preview listener on %q: %v", manager.cfg.PreviewListenAddr, err)
-		} else {
-			closePreview = closer
-			if manager.lifecycle != nil {
-				manager.lifecycle.setPreviewBound(info.Addr)
-				go func() {
-					<-info.done
-					manager.lifecycle.clearPreviewBound()
-				}()
-			}
-			// Deliberately no "bearer token:" line here: the preview credential is an
-			// in-memory ephemeral secret an authenticated client fetches over
-			// /v1/preview-auth, never something to print to the operator's log.
-			log.InfoLog.Printf("web-tab preview listener enabled on %s (serves no content yet — preview routing lands in a later step)", info.Addr)
-			if notice != "" {
-				log.WarningLog.Printf("%s", notice)
-			}
-		}
+	// The restartable web + preview TCP listeners (#2480 PR2). ONE bind path: this
+	// initial bind and ApplyConfig's later listen_addr / preview_listen_addr
+	// rebinds both go through webListeners, so a rebind cannot drift from the
+	// startup bind. Each is ON BY DEFAULT / opt-in exactly as before — an empty
+	// listen_addr (or preview_listen_addr) binds nothing — and each honors the same
+	// non-fatal discipline: a bind failure is logged, never fatal, because the unix
+	// socket and control plane every local client depends on must not regress
+	// because a web port could not open. The auth/CORS keys apply live per request
+	// (livePosture) and never come through here. A tokenless network bind is
+	// reported, not refused (#2168 Phase 0), by bindWebLocked's banner.
+	wl := newWebListeners(manager, mux)
+	manager.webListeners = wl
+	if _, err := wl.reconcile(manager.cfg); err != nil {
+		log.WarningLog.Printf("daemon web listener(s): %v", err)
 	}
 
 	return func() error {
-		// Close stops the listener (which unlinks the Unix socket file, net's
-		// default for a listener it created) and terminates active connections.
-		// Deliberately no explicit os.Remove: mirrors startControlServer's
-		// #718/#767 reasoning — a Remove could race a freshly bound socket.
+		// Close stops the listeners (a listener unlinks its own Unix socket file,
+		// net's default for a listener it created) and terminates active
+		// connections. Deliberately no explicit os.Remove: mirrors
+		// startControlServer's #718/#767 reasoning — a Remove could race a freshly
+		// bound socket.
 		if manager.lifecycle != nil {
 			manager.lifecycle.clearHTTPListeners()
 		}
-		tcpErr := closeTCP()
-		previewErr := closePreview()
+		listenersErr := wl.close()
 		if err := srv.Close(); err != nil {
 			return err
 		}
-		if tcpErr != nil {
-			return tcpErr
-		}
-		return previewErr
+		return listenersErr
 	}, nil
 }
 

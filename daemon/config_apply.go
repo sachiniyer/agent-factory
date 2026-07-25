@@ -36,11 +36,21 @@ type ApplyConfigResult struct {
 	// session loss.
 	Applied []string
 	// Pending names changed keys this daemon build reads only at startup, so they
-	// take effect on the next daemon start: the network listener keys (a follow-up
-	// in-process listener reload lands them, PR2), root_agents (its
-	// next-daemon-start contract, carved out pending #2216), and branch_prefix
-	// (read from the FROZEN startup config in the title-reservation helpers).
+	// take effect on the next daemon start: root_agents / root_agent (their
+	// next-daemon-start contract, carved out pending #2216) and branch_prefix (read
+	// from the FROZEN startup config in the title-reservation helpers).
 	Pending []string
+	// Warnings are operator/user-facing notices produced while applying (#2480 PR2):
+	// the tokenless-network exposure notice (#2168 — warn, never refuse) and a
+	// listener rebind failure (bind-new-before-close kept the OLD listener serving,
+	// so the requested listen_addr / preview_listen_addr did NOT take effect). A save
+	// surface shows these so the user learns when a socket key did not apply.
+	Warnings []string
+	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
+	// whose live rebind failed, so a save surface can word THAT key's notice as
+	// deferred rather than falsely "applied". The auth/CORS keys never appear here —
+	// they are live-read and cannot fail to apply.
+	FailedListenerKeys []string
 }
 
 // keyDiff maps every config key the daemon reads to a predicate reporting whether
@@ -68,15 +78,18 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"global_agent_skills":            func(a, b *config.Config) bool { return a.GlobalAgentSkills != b.GlobalAgentSkills },
 	"docker_mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh_host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
-	// EffectNextDaemonStart keys — read once at startup.
+	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
+	// read per request (livePosture); listen_addr / preview_listen_addr rebind the
+	// socket in place (webListeners.reconcile, below in ApplyConfig).
 	"listen_addr":            func(a, b *config.Config) bool { return a.ListenAddr != b.ListenAddr },
 	"preview_listen_addr":    func(a, b *config.Config) bool { return a.PreviewListenAddr != b.PreviewListenAddr },
 	"require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
 	"require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
 	"cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
-	"root_agents":            func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
-	"root_agent":             func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
-	"branch_prefix":          func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
+	// EffectNextDaemonStart keys — read once at startup.
+	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
+	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
+	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
 }
 
 // ApplyConfig re-reads the global config from disk and applies it to the running
@@ -137,6 +150,27 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// log_max_size_mb / log_max_backups: reconfigure the active log file in place.
 	if old.LogMaxSizeMB != newCfg.LogMaxSizeMB || old.LogMaxBackups != newCfg.LogMaxBackups {
 		log.ReconfigureRotation()
+	}
+
+	// Network listener keys (#2480 PR2). The auth/CORS keys already apply — their
+	// handlers read the swapped live config per request, so require_token /
+	// require_loopback_token / cors_allowed_origins take effect on the next request
+	// with no action here, and DECOUPLED from any rebind (a security tightening lands
+	// whether or not a socket rebind succeeds). Only a listen_addr / preview_listen_addr
+	// change is a socket operation: reconcile rebinds it bind-new-before-close. A
+	// rebind that fails keeps the OLD listener serving and is reported deferred with
+	// the reason — never silently dropped.
+	if m.webListeners != nil {
+		if failed, rerr := m.webListeners.reconcile(newCfg); rerr != nil {
+			result.Warnings = append(result.Warnings, rerr.Error())
+			result.FailedListenerKeys = append(result.FailedListenerKeys, failed...)
+		}
+	}
+	// The tokenless-network exposure notice, surfaced at SAVE time so a user who
+	// makes the control API reachable without a token is told once — warned, never
+	// refused (#2168 Phase 0 / config/authposture.go).
+	if notice := config.ListenerExposureNotice(newCfg); notice != "" {
+		result.Warnings = append(result.Warnings, notice)
 	}
 
 	return result, nil

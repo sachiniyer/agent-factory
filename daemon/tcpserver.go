@@ -153,6 +153,24 @@ type tcpListenerAuth struct {
 	presented func(*http.Request) string
 }
 
+// livePosture makes a TCP listener read its auth + CORS posture from LIVE config
+// once per request (#2480 PR2) rather than baking the posture passed at bind time.
+// Only the daemon's own web + preview listeners set it; the agent-server passes
+// nil and keeps its fixed posture. It is how require_token / require_loopback_token
+// / cors_allowed_origins take effect with no socket rebind — deliberately decoupled
+// from the listen_addr / preview_listen_addr rebind path, so a security tightening
+// applies on the next request whether or not any rebind succeeded.
+type livePosture struct {
+	// snapshot returns the current global config. It is read EXACTLY ONCE per
+	// request (withLivePosture) and the whole posture derives from that one read.
+	snapshot func() *config.Config
+	// policyFromConfig derives the gate's token/loopback posture from the snapshot
+	// (require_token / require_loopback_token) — the control-plane web listener. The
+	// preview listener leaves it false: its gate posture is the fixed strict zero
+	// value (previewListenerPolicy), and only its CORS list is live.
+	policyFromConfig bool
+}
+
 // startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
 // wrapped in a token-enforcing gate + the CORS allow-list. It returns a cleanup
 // function that shuts the server down and the banner payload the caller logs.
@@ -172,7 +190,7 @@ type tcpListenerAuth struct {
 // to present) and reads that token FRESH per auth event through the gate so `af
 // token rotate` takes effect for new connections without a daemon restart. An
 // override supplies its own already-minted credential and is compared as-is.
-func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth) (func() error, tcpListenerInfo, error) {
+func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture) (func() error, tcpListenerInfo, error) {
 	var token string
 	var expectedToken func() (string, error)
 	var expectedForRequest func(*http.Request) (string, error)
@@ -199,19 +217,49 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 			return LoadToken(tokenPath)
 		}
 	}
-	gate := &authGate{
-		expectedToken:           expectedToken,
-		expectedTokenForRequest: expectedForRequest,
-		presentedToken:          presentedToken,
-		tokenDisabled:           policy.tokenDisabled,
-		loopbackExempt:          policy.loopbackExempt,
-	}
-
 	// A plain TCP listener — net.Listen (not tls.Listen). Addr() reports the
 	// concrete port even when addr requests :0 (used by the integration test).
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, tcpListenerInfo{}, fmt.Errorf("bind TCP listener on %q: %w", addr, err)
+	}
+
+	// The auth + CORS posture. A live listener (the daemon's web/preview listeners,
+	// #2480 PR2) reads it from config ONCE per request, so require_token /
+	// require_loopback_token / cors_allowed_origins apply with no rebind; a static
+	// listener (the agent-server) bakes the posture passed at bind. boundLoopback is
+	// fixed at the RESOLVED bound address so a network bind never inherits
+	// loopback-exempt from a config.ListenAddr that is mid-change.
+	var handler http.Handler
+	if live != nil {
+		boundLoopback := config.IsLoopbackListenAddr(listener.Addr().String())
+		handler = withLivePosture(mux, func() requestPosture {
+			c := live.snapshot()
+			g := &authGate{
+				expectedToken:           expectedToken,
+				expectedTokenForRequest: expectedForRequest,
+				presentedToken:          presentedToken,
+				tokenDisabled:           policy.tokenDisabled,
+				loopbackExempt:          policy.loopbackExempt,
+			}
+			if live.policyFromConfig {
+				// The control-plane web listener: token/loopback posture from live
+				// config (webListenerPolicy's terms), loopback judged from the fixed
+				// bound address, not the possibly-mid-change config.ListenAddr.
+				g.tokenDisabled = !c.RequireToken
+				g.loopbackExempt = boundLoopback && !c.RequireLoopbackToken
+			}
+			return requestPosture{gate: g, cors: c.CORSAllowedOrigins}
+		})
+	} else {
+		gate := &authGate{
+			expectedToken:           expectedToken,
+			expectedTokenForRequest: expectedForRequest,
+			presentedToken:          presentedToken,
+			tokenDisabled:           policy.tokenDisabled,
+			loopbackExempt:          policy.loopbackExempt,
+		}
+		handler = withAuth(mux, gate, cfg.CORSAllowedOrigins)
 	}
 
 	// The DAEMON's TCP listener also serves the embedded browser SPA (#1592 Phase 5
@@ -221,7 +269,6 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 	// wrapper is TCP-only: the unix socket keeps its bare mux (whose `/` still
 	// 404s), so the web assets never appear on the socket path. The agent-server
 	// passes withoutWebShell — it cannot back the SPA (see webShell).
-	handler := withAuth(mux, gate, cfg.CORSAllowedOrigins)
 	switch shell {
 	case withWebShell:
 		handler = webShellHandler(handler)
