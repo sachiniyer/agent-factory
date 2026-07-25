@@ -12,7 +12,7 @@ Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you 
 
 You can also read and write config from the CLI. Bare `af config get <key>` / `af config list` keep their script-compatible global-only output. Add `--project <repository-path>` to read the effective value after that repository's checked-in and personal per-project layers are applied, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --project . --explain` show the source of one merged-table leaf. The project path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
 
-`af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `preview_listen_addr`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`, `docker_mount_agent_credentials`; the structural tables (`root_agents`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. Without `--project` it edits the global config; with `--project <id-or-path>` it writes a personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
+`af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `preview_listen_addr`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`, `docker_mount_agent_credentials`; the structural tables (`root_agents`, `[root_agent]`, `[theme]`, `[keys]`) and the `cors_allowed_origins` list are hand-edited only. Without `--project` it edits the global config; with `--project <id-or-path>` it writes a personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. Changes apply on the next `af`/daemon start, the same as a hand-edit.
 
 ## Global config
 
@@ -78,6 +78,7 @@ pane_border_preview = "#DC8CC3"
 | `log_max_backups` | How many rotated logs (`agent-factory.log.1`, `.2`, ...) to keep per log file; older ones are deleted (defaults to 2). `0` keeps none. |
 | `update_channel` | Release channel that auto-update and `af upgrade` follow: `stable` (default) tracks manual `1.x.y` releases only; `preview` opts into the automatic `1.x.y-preview-z` prereleases cut every 3 hours. Any other value falls back to `stable` with a warning. See [release-process.md](release-process.md). |
 | `root_agents` | Opt-in table of repositories that get an always-ensured `root` agent (default: none). See [Root agents](#root-agents-always-ensured). |
+| `root_agent` | Singleton successor to `root_agents`: whether a **registered project** keeps a `root` agent and the command it runs (default: not enabled). A global default plus an optional personal per-project override; layers with the legacy `root_agents` map. See [The `[root_agent]` singleton](#the-root_agent-singleton). |
 | `limit_auto_resume` | Opt in to the daemon auto-resuming a session parked at a usage-limit wall once its limit window elapses (default: `false`). See [Usage-limit auto-resume](#usage-limit-auto-resume). |
 | `limit_retry_interval` | Fallback retry cadence (Go duration, e.g. `30m`) used only when `limit_auto_resume` is on **and** the limit banner carried no parseable reset time (default: `30m`). Empty or `0` disables the fallback. |
 | `global_agent_skills` | Opt in to af writing its `agent-factory` skill file into your **global** codex/gemini/amp/devin config directories so those agents discover af's CLI guidance (default: `false`). See [Agent guidance and your global agent config](#agent-guidance-and-your-global-agent-config). |
@@ -306,6 +307,32 @@ Behavior and guarantees:
 
 Because the default profile skips permission prompts, only opt in repositories where you are comfortable with a fully autonomous agent running at the repo root.
 
+#### The `[root_agent]` singleton
+
+`[root_agent]` is the canonical successor to the path-keyed `root_agents` map: a single profile — whether a project keeps a `root` session, and the command it runs — that layers per **registered project** instead of per hard-coded path.
+
+```toml
+# ~/.agent-factory/config.toml — a global default applied to registered projects
+[root_agent]
+enabled = true
+program = "claude --model opus"   # optional; empty = the default root profile
+```
+
+The same table is also valid in a project's **personal** per-project config (`--project`, see [Personal per-project config](#personal-per-project-config)), where it overrides the global default for that one project on this machine:
+
+```toml
+# a registered project's personal config — disable the root here only
+[root_agent]
+enabled = false
+```
+
+Semantics:
+
+- **Precedence (low → high): built-in `enabled=false` < global `[root_agent]` < legacy `root_agents[path]` < personal per-project `[root_agent]`.** Layers merge **by field**: a higher layer overrides `enabled` only if it set it (an explicit `false` counts) and `program` only if non-empty. So a personal `enabled = false` can disable a root that the global default — or a legacy `root_agents` entry — turned on.
+- **The global default reaches registered projects only.** It never scans disk for repositories; a project must be registered (`af projects register`) to receive it. Legacy `root_agents` entries keep working unchanged and forever.
+- **Hand-edited for now.** Like `[theme]`, `[root_agent]` is not writable with `af config set` yet (`af config get root_agent` reads it); editing through the CLI/TUI lands in a later phase. Edit the file (or use the config assistant) directly.
+- **Restart-to-apply**, exactly like `root_agents`: changes take effect on the next daemon start. All the always-ensure guarantees above (adopt-never-clobber, reserved name, kill respected, back-off-but-never-give-up) apply identically to a root the singleton enables.
+
 ### Usage-limit auto-resume
 
 > This section covers the two auto-resume config keys. For the whole usage-limit feature end to end — detection, the `[limit]` badge, manual retry, auto-resume, and task park-don't-fail — see [docs/usage-limits.md](usage-limits.md).
@@ -520,7 +547,7 @@ af config set program_overrides.claude "/opt/claude --verbose" --project prj_012
 af config unset default_program --project ~/work/myrepo   # fall back to the lower layers
 ```
 
-Only preference keys admit this layer: **`default_program`**, **`program_overrides.<agent>`**, and **`branch_prefix`**. Setting a global-only key (`listen_addr`, daemon tuning, …) or a repo-contract key (`backend`, `docker`, `ssh`) per project is rejected with the location it actually belongs to. Setting a value **equal** to the lower layer is still a present, winning override — use `af config unset` to genuinely fall through again; it removes only the key you name (comments and other keys are preserved) and deletes the file once its last override is cleared.
+Only preference keys admit this layer: **`default_program`**, **`program_overrides.<agent>`**, **`branch_prefix`**, and the **`[root_agent]`** table (whether this project keeps a `root` agent — the highest-precedence root-agent layer, so it can disable one the global default or a legacy `root_agents` entry enabled). Setting a global-only key (`listen_addr`, daemon tuning, …) or a repo-contract key (`backend`, `docker`, `ssh`) per project is rejected with the location it actually belongs to. Setting a value **equal** to the lower layer is still a present, winning override — use `af config unset` to genuinely fall through again; it removes only the key you name (comments and other keys are preserved) and deletes the file once its last override is cleared.
 
 Precedence for a key that admits every layer is:
 

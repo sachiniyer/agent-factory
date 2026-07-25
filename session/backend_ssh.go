@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,9 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -111,17 +108,6 @@ func SetSSHSelfBinaryForTest(path string) func() {
 	prev := sshSelfBinary
 	sshSelfBinary = func() (string, error) { return path, nil }
 	return func() { sshSelfBinary = prev }
-}
-
-// sshBanner mirrors daemon.AgentServerInfo field-for-field (the JSON the `af
-// agent-server` prints on startup). Duplicated here rather than imported because
-// daemon imports session (a cycle); the shared contract is the JSON tags, pinned
-// by the round-trip test. Identical to dockerBanner — the same banner, a different
-// transport.
-type sshBanner struct {
-	Addr  string `json:"addr"`
-	Token string `json:"token"`
-	Title string `json:"title"`
 }
 
 // sshRuntime provisions a real remote-machine sandbox (#1592 Phase 4 PR5).
@@ -224,24 +210,37 @@ func (p *sshProvisioner) provision() (ProvisionResult, error) {
 	if err := p.dial(); err != nil {
 		return ProvisionResult{}, err
 	}
-	if err := p.makeSessionDir(); err != nil {
-		return ProvisionResult{}, err
+	// The provision steps are transport-agnostic (#2476 phase 1): they run over
+	// this provisioner's Run (the x/crypto ssh session). sessionDir/remotePID are
+	// mirrored back onto the provisioner the instant each is known, because the
+	// reap (which stays x/crypto-specific) reaps by them even if a LATER step fails.
+	w := &sandboxWorkspace{shell: p, spec: p.spec, program: p.program}
+	if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sshErr(err)
 	}
-	if err := p.configureGit(); err != nil {
-		return ProvisionResult{}, err
+	p.sessionDir = w.SessionDir
+	if err := w.configureGit(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sshErr(err)
 	}
-	if err := p.cloneWorkspace(); err != nil {
-		return ProvisionResult{}, err
+	if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sshErr(err)
 	}
-	if err := p.copyAfBinary(); err != nil {
-		return ProvisionResult{}, err
-	}
-	if err := p.startAgentServer(); err != nil {
-		return ProvisionResult{}, err
-	}
-	banner, err := p.readBanner()
+	binary, err := os.Open(p.afBin)
 	if err != nil {
-		return ProvisionResult{}, err
+		return ProvisionResult{}, fmt.Errorf("backend=ssh: opening the af binary %q to stream to the remote failed: %w", p.afBin, err)
+	}
+	copyErr := w.copyAfBinary(sshProvisionStepTimeout, binary)
+	_ = binary.Close()
+	if copyErr != nil {
+		return ProvisionResult{}, p.sshErr(copyErr)
+	}
+	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sshErr(err)
+	}
+	p.remotePID = w.RemotePID
+	banner, err := w.readBanner(sshBannerPollTimeout, sshBannerPollInterval, sshShortStepTimeout)
+	if err != nil {
+		return ProvisionResult{}, p.sshErr(err)
 	}
 	localAddr, err := p.startTunnel(banner.Addr)
 	if err != nil {
@@ -439,179 +438,6 @@ func (p *sshProvisioner) loginUser() string {
 	return os.Getenv("USER")
 }
 
-// makeSessionDir creates a fresh per-session dir under the remote home with
-// `mktemp -d` and captures its absolute path — the workspace + af binary + banner
-// all live under it, so teardown reaps the whole session with one `rm -rf`.
-func (p *sshProvisioner) makeSessionDir() error {
-	slug := Slugify(p.spec.Title)
-	script := fmt.Sprintf(`mkdir -p "$HOME/%s" && mktemp -d "$HOME/%s/%s.XXXXXX"`, sshSessionRoot, sshSessionRoot, slug)
-	out, err := p.runOut(sshShortStepTimeout, script)
-	if err != nil {
-		return fmt.Errorf("backend=ssh: creating the remote session dir failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	dir := strings.TrimSpace(string(out))
-	if dir == "" {
-		return fmt.Errorf("backend=ssh: `mktemp -d` returned no path")
-	}
-	p.sessionDir = dir
-	return nil
-}
-
-// configureGit sets a git identity and marks every directory safe on the remote so
-// the clone + worktree creation don't trip on "dubious ownership" or a missing
-// committer identity. Mirrors the docker runtime.
-func (p *sshProvisioner) configureGit() error {
-	script := `git config --global user.email "af@agent-factory.local" && ` +
-		`git config --global user.name "Agent Factory" && ` +
-		`git config --global --add safe.directory "*"`
-	out, err := p.runCombined(sshShortStepTimeout, script)
-	if err != nil {
-		return fmt.Errorf("backend=ssh: git config on the remote failed (is git installed there?): %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// cloneWorkspace clones the repo's origin into <sessionDir>/workspace on the
-// remote. A fresh create clones the default branch; the remote agent-server's
-// LOCAL backend then creates the session's git worktree + branch off it. On a
-// RESTORE (spec.RestoreBranch set, #1592 Phase 4 PR6) it additionally
-// materializes the pushed session branch as a local ref so the remote Setup
-// checks it out.
-func (p *sshProvisioner) cloneWorkspace() error {
-	script := gitCloneCommand(p.spec.CloneURL, p.workspacePath())
-	out, err := p.runCombined(sshProvisionStepTimeout, script)
-	if err != nil {
-		return fmt.Errorf("backend=ssh: cloning %q on the remote failed (is git installed, and the URL reachable from the remote host?): %s: %w",
-			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
-	}
-	if credentialCommand := gitPersistCredentialCommand(p.spec.CloneURL, p.workspacePath()); credentialCommand != "" {
-		out, err = p.runCombined(sshShortStepTimeout, credentialCommand)
-		if err != nil {
-			return fmt.Errorf("backend=ssh: configuring value-free GitHub credentials in the remote clone failed: %s: %w",
-				strings.TrimSpace(string(out)), err)
-		}
-	}
-	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
-		return p.fetchRestoreBranch(branch)
-	}
-	return nil
-}
-
-// fetchRestoreBranch materializes the archived session branch (pushed to origin
-// at archive time) as a LOCAL ref in the fresh remote clone, WITHOUT checking it
-// out in the main tree (#1592 Phase 4 PR6) — the ssh mirror of the docker
-// runtime's fetchRestoreBranch. The `<branch>:<branch>` refspec creates
-// refs/heads/<branch> so the remote local backend's Setup reuses it and brings
-// the pushed commits back.
-func (p *sshProvisioner) fetchRestoreBranch(branch string) error {
-	script := fmt.Sprintf("git -C %s fetch origin %s:%s",
-		shellQuote(p.workspacePath()), shellQuote(branch), shellQuote(branch))
-	out, err := p.runCombined(sshProvisionStepTimeout, script)
-	if err != nil {
-		return fmt.Errorf("backend=ssh: restoring archived branch %q on the remote failed (was it pushed to origin?): %s: %w",
-			branch, strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// copyAfBinary streams the daemon's own `af` binary into <sessionDir>/af over the
-// ssh connection (scp-equivalent — no external scp/sftp dependency) and makes it
-// executable. Always the daemon's binary (never a reused remote `af`) so the remote
-// agent-server is version-matched to the daemon, exactly as the docker runtime docker
-// cp's its binary in. The binary must be compatible with the remote (matching
-// arch/libc) — a static build runs anywhere; documented in docs/backends.md.
-func (p *sshProvisioner) copyAfBinary() error {
-	f, err := os.Open(p.afBin)
-	if err != nil {
-		return fmt.Errorf("backend=ssh: opening the af binary %q to stream to the remote failed: %w", p.afBin, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	dst := p.afPath()
-	script := fmt.Sprintf("cat > %s && chmod +x %s", shellQuote(dst), shellQuote(dst))
-	if out, err := p.runStdin(sshProvisionStepTimeout, script, f); err != nil {
-		return fmt.Errorf("backend=ssh: streaming the af binary to the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// startAgentServer launches `af agent-server` headless on the remote, detached via
-// nohup with its stdout banner + stderr redirected to files under the session dir,
-// bound to 127.0.0.1:0 (the tunnel reaches it — no port on the remote's public
-// interface). `echo $!` returns the background PID, captured for teardown. The
-// workspace title matches the daemon-side session title so the daemon's remote
-// client dials /v1/sessions/{title}/stream. readBanner then polls the banner file.
-func (p *sshProvisioner) startAgentServer() error {
-	filteredInner, err := p.agentServerCommand()
-	if err != nil {
-		return err
-	}
-	// nohup + background + redirected fds + </dev/null so the agent-server outlives
-	// this ssh command; `echo $!` prints the background PID on stdout.
-	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
-		filteredInner, shellQuote(p.bannerPath()), shellQuote(p.logPath()))
-	out, err := p.runOut(sshShortStepTimeout, launch)
-	if err != nil {
-		return fmt.Errorf("backend=ssh: starting af agent-server on the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	pid := strings.TrimSpace(string(out))
-	p.remotePID = pid
-	if !positivePID(pid) {
-		return fmt.Errorf("backend=ssh: starting af agent-server returned invalid background PID %q", pid)
-	}
-	return nil
-}
-
-func (p *sshProvisioner) agentServerCommand() (string, error) {
-	inner := fmt.Sprintf("exec %s agent-server --listen 127.0.0.1:0 --repo %s --title %s",
-		shellQuote(p.afPath()), shellQuote(p.workspacePath()), shellQuote(p.spec.Title))
-	if strings.TrimSpace(p.program) != "" {
-		inner += " --program " + shellQuote(p.program)
-		inner += " --program-resolved"
-	}
-	for _, name := range p.spec.SessionEnvPassthrough {
-		inner += " --session-env " + shellQuote(name)
-	}
-	filteredInner, err := sessionenv.WrapCommand(
-		p.afPath(), p.agentName(), p.spec.SessionEnvPassthrough, inner,
-	)
-	if err != nil {
-		return "", fmt.Errorf("backend=ssh: preparing filtered agent-server environment failed: %w", err)
-	}
-	return filteredInner, nil
-}
-
-func (p *sshProvisioner) agentName() string {
-	agentName := sessionenv.AgentForCommand(p.program)
-	if agentName == "" && strings.TrimSpace(p.program) == "" {
-		return tmux.ProgramClaude
-	}
-	return agentName
-}
-
-// readBanner polls the remote banner file until the agent-server has bound its
-// listener and printed its {addr,token} JSON line, or times out. On
-// timeout it pulls the agent-server's stderr log into the error so a failure to
-// start (missing tmux/git, bad binary, port clash) is self-diagnosing.
-func (p *sshProvisioner) readBanner() (sshBanner, error) {
-	deadline := time.Now().Add(sshBannerPollTimeout)
-	for {
-		out, err := p.runOut(sshShortStepTimeout, "cat "+shellQuote(p.bannerPath()))
-		if err == nil {
-			var b sshBanner
-			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
-				return b, nil
-			}
-		}
-		if time.Now().After(deadline) {
-			logOut, _ := p.runCombined(sshShortStepTimeout, "cat "+shellQuote(p.logPath()))
-			return sshBanner{}, fmt.Errorf("backend=ssh: af agent-server did not report a startup banner within %s; remote log:\n%s",
-				sshBannerPollTimeout, strings.TrimSpace(string(logOut)))
-		}
-		time.Sleep(sshBannerPollInterval)
-	}
-}
-
 // startTunnel opens an ssh local-forward: a daemon-local loopback listener whose
 // every accepted connection is proxied over the ssh connection to remoteAddr (the
 // agent-server's 127.0.0.1:<port> on the remote). Returns the local
@@ -668,17 +494,18 @@ func (p *sshProvisioner) runCombined(timeout time.Duration, script string) ([]by
 	return p.runSession(timeout, script, nil, true)
 }
 
-// runOut runs script via `sh -c` on the remote and returns ONLY stdout — used
-// where stderr would pollute the captured value (the launch's PID, the banner
-// JSON).
-func (p *sshProvisioner) runOut(timeout time.Duration, script string) ([]byte, error) {
-	return p.runSession(timeout, script, nil, false)
+// Run is the sandboxShell primitive the shared provision steps drive (#2476
+// phase 1): `sh -c <script>` on the remote with an optional stdin, bounded by
+// timeout, returning combined stdout+stderr or stdout only.
+func (p *sshProvisioner) Run(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
+	return p.runSession(timeout, script, stdin, combined)
 }
 
-// runStdin runs script via `sh -c` on the remote with stdin fed from r (used to
-// stream the af binary), returning combined output.
-func (p *sshProvisioner) runStdin(timeout time.Duration, script string, r io.Reader) ([]byte, error) {
-	return p.runSession(timeout, script, r, true)
+// sshErr prefixes a transport-agnostic provision-step error (the shared steps
+// carry no backend name) with "backend=ssh:", keeping the message byte-identical
+// to the pre-refactor wording.
+func (p *sshProvisioner) sshErr(err error) error {
+	return fmt.Errorf("backend=ssh: %w", err)
 }
 
 type sshSessionResult struct {
@@ -776,12 +603,10 @@ func awaitSSHSession(ctx context.Context, sess io.Closer, ch <-chan sshSessionRe
 
 // --- remote path helpers ----------------------------------------------------
 
-func (p *sshProvisioner) workspacePath() string {
-	return p.sessionDir + "/" + sshWorkspaceSubdir
-}
-func (p *sshProvisioner) afPath() string     { return p.sessionDir + "/" + sshAfBinaryName }
-func (p *sshProvisioner) bannerPath() string { return p.sessionDir + "/" + sshBannerName }
-func (p *sshProvisioner) logPath() string    { return p.sessionDir + "/" + sshLogName }
+// afPath is the streamed binary's remote path; the reap's identity-kill checks
+// argv[0] against it (backend_ssh_reap.go). The other per-session paths live on
+// sandboxWorkspace, which owns the provision steps that use them.
+func (p *sshProvisioner) afPath() string { return p.sessionDir + "/" + sshAfBinaryName }
 
 // expandUserPath expands a leading ~ to the user's home dir, so ssh.identity_file
 // / ssh.known_hosts accept the usual ~/.ssh/... form.

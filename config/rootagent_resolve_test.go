@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -87,26 +88,81 @@ func TestResolveRootAgentMatchesDirectMapValueForEveryEntry(t *testing.T) {
 	}
 }
 
-// TestResolveRootAgentEmptyLegacyProgramIsUnset pins P3-a: an empty legacy
-// program is UNSET, not set-to-empty, so once a lower-precedence layer supplies a
-// program (PR2's global layer) the empty legacy entry does not clobber it back to
-// empty. In PR1 the observable form is that an empty entry leaves Program "" and
-// the legacy candidate records that its program is unset; a non-empty entry sets
-// it. A regression to unconditional assignment drops the "unset" reason.
-func TestResolveRootAgentEmptyLegacyProgramIsUnset(t *testing.T) {
-	empty := ResolveRootAgent(RootAgentInputs{Legacy: &RootAgentConfig{}})
-	assert.True(t, empty.Enabled, "a present legacy entry still enables the root")
-	assert.Equal(t, "", empty.Program, "an empty legacy program leaves the effective program unset")
-	legacyEmpty, ok := candidateBySource(empty, RootAgentSourceLegacy)
-	require.True(t, ok)
-	assert.Contains(t, legacyEmpty.Reason, "unset",
-		"the trace must record that an empty legacy program is unset, not set-to-empty")
+// TestResolveRootAgentEmptyLegacyDoesNotClobberGlobalProgram pins P3-a with PR2's
+// global layer present: an empty legacy entry enables the root but must NOT clobber
+// a global program back to the default. This is the case that would have silently
+// broken — af writes an empty legacy entry for every registered project.
+func TestResolveRootAgentEmptyLegacyDoesNotClobberGlobalProgram(t *testing.T) {
+	res := ResolveRootAgent(RootAgentInputs{
+		Global: &RootAgentLayer{Value: RootAgent{Program: "codex"}}, // program set, enabled unset
+		Legacy: &RootAgentConfig{},                                  // empty: enables, program unset
+	})
+	assert.True(t, res.Enabled, "the legacy entry enables the root")
+	assert.Equal(t, "codex", res.Program, "an empty legacy program must not clobber the global program")
+	assert.Equal(t, RootAgentSourceGlobal, res.ProgramSource)
+	assert.Equal(t, RootAgentSourceLegacy, res.EnabledSource)
 
-	set := ResolveRootAgent(RootAgentInputs{Legacy: &RootAgentConfig{Program: "codex"}})
-	assert.Equal(t, "codex", set.Program, "a non-empty legacy program is the effective program")
-	legacySet, ok := candidateBySource(set, RootAgentSourceLegacy)
-	require.True(t, ok)
-	assert.NotContains(t, legacySet.Reason, "unset")
+	alone := ResolveRootAgent(RootAgentInputs{Legacy: &RootAgentConfig{}})
+	assert.Equal(t, "", alone.Program, "an empty legacy alone supplies no program")
+	assert.Equal(t, RootAgentSource(""), alone.ProgramSource)
+}
+
+// TestResolveRootAgentPrecedence pins the approved order built-in < global <
+// legacy < personal, merged by field.
+func TestResolveRootAgentPrecedence(t *testing.T) {
+	res := ResolveRootAgent(RootAgentInputs{
+		Global:   &RootAgentLayer{Value: RootAgent{Enabled: true, Program: "global-prog"}, EnabledSet: true},
+		Legacy:   &RootAgentConfig{Program: "legacy-prog"},
+		Personal: &RootAgentLayer{Value: RootAgent{Enabled: true, Program: "personal-prog"}, EnabledSet: true},
+	})
+	assert.True(t, res.Enabled)
+	assert.Equal(t, "personal-prog", res.Program, "personal outranks legacy and global")
+	assert.Equal(t, RootAgentSourcePersonal, res.ProgramSource)
+	assert.Equal(t, RootAgentSourcePersonal, res.EnabledSource)
+}
+
+// TestResolveRootAgentPersonalDisablesLegacy is THE case the confirmed precedence
+// exists for: a personal enabled=false must disable a root a legacy entry turned
+// on. Since af writes an empty legacy entry (enabled=true) for every registered
+// project, legacy-above-personal would make this impossible — the silent no-op
+// #2216 kills.
+func TestResolveRootAgentPersonalDisablesLegacy(t *testing.T) {
+	res := ResolveRootAgent(RootAgentInputs{
+		Legacy:   &RootAgentConfig{Program: "legacy-prog"},                            // enables
+		Personal: &RootAgentLayer{Value: RootAgent{Enabled: false}, EnabledSet: true}, // explicit disable
+	})
+	assert.False(t, res.Enabled, "a personal enabled=false disables a legacy-enabled root")
+	assert.Equal(t, RootAgentSourcePersonal, res.EnabledSource, "personal supplies the effective enabled")
+
+	// personal wins the enabled decision; the legacy program is still the
+	// effective program (moot while disabled), so its trace result is winner-by-
+	// program, not shadowed — what matters is that Enabled is false.
+	personal, _ := candidateBySource(res, RootAgentSourcePersonal)
+	assert.Equal(t, "winner", personal.Result)
+}
+
+// TestResolveRootAgentGlobalEnables: a global enabled=true (no legacy, no personal)
+// enables the root — the global default fanning out to a registered project.
+func TestResolveRootAgentGlobalEnables(t *testing.T) {
+	res := ResolveRootAgent(RootAgentInputs{
+		Global: &RootAgentLayer{Value: RootAgent{Enabled: true}, EnabledSet: true},
+	})
+	assert.True(t, res.Enabled)
+	assert.Equal(t, RootAgentSourceGlobal, res.EnabledSource)
+}
+
+// TestRootAgentConfigIsFullyAdapted is the struct-field guard (P2-a carry-forward):
+// it fails when RootAgentConfig gains or loses a field, forcing rootAgentFromLegacy
+// (and RootAgent) to carry it rather than silently dropping it — the AutoYes/#2335
+// class where a new per-repo field vanishes from every ensured root while the
+// suite stays green.
+func TestRootAgentConfigIsFullyAdapted(t *testing.T) {
+	var names []string
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(RootAgentConfig{})) {
+		names = append(names, f.Name)
+	}
+	assert.Equal(t, []string{"Program"}, names,
+		"RootAgentConfig's fields changed — update rootAgentFromLegacy and RootAgent to carry the new field, then this guard")
 }
 
 // TestRootAgentEnabledSerializesExplicitFalse pins P3-b: RootAgent.Enabled has

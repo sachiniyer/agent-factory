@@ -71,35 +71,153 @@ type rootEnsureState struct {
 	suppressLogged bool
 }
 
-// EnsureRootAgents runs one ensure pass over every repo configured in
-// root_agents. Called from the daemon poll loop after RefreshStatuses; a
-// no-op when nothing is configured or the initial restore has not finished.
-func (m *Manager) EnsureRootAgents() {
-	if len(m.cfg.RootAgents) == 0 || !m.Ready() {
-		return
+// buildRootAgentSnapshot captures the start-of-day root-agent configuration the
+// ensure loop resolves against (#2216 Phase 6): the global [root_agent]
+// singleton, every registered project's personal [root_agent] layer and resolved
+// root (both keyed by repo ID), and the repo IDs the legacy root_agents map
+// already covers (so the singleton sweep can dedupe against it). It is
+// best-effort — a project whose checkout no longer resolves, or whose personal
+// config cannot be read, is logged and skipped, never fatal, so one bad project
+// never keeps the daemon from starting. Reading the registry once at start
+// matches the RootAgents map's restart-to-apply contract: registering a project
+// or editing its personal root_agent takes effect on the next daemon start.
+func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, personal map[string]*config.RootAgentLayer, projectRoots map[string]string, legacyRepoIDs map[string]bool) {
+	global = config.GlobalRootAgentLayer(cfg)
+	personal = map[string]*config.RootAgentLayer{}
+	projectRoots = map[string]string{}
+	legacyRepoIDs = map[string]bool{}
+
+	for path := range cfg.RootAgents {
+		repo, err := config.RepoFromPath(config.ExpandTilde(path))
+		if err != nil {
+			// A not-yet-cloned legacy path is normal (#1122): the per-path ensure
+			// sweep retries it. It is simply not part of the dedup set until it
+			// resolves — and while it does not resolve it cannot collide with a
+			// registered project (which did resolve at start).
+			continue
+		}
+		legacyRepoIDs[repo.ID] = true
 	}
-	paths := make([]string, 0, len(m.cfg.RootAgents))
-	for path := range m.cfg.RootAgents {
-		paths = append(paths, path)
+
+	projects, err := config.ListProjects()
+	if err != nil {
+		log.WarningLog.Printf("root agent snapshot: could not list registered projects; singleton root agents are disabled until the next daemon start: %v", err)
+		return global, personal, projectRoots, legacyRepoIDs
 	}
-	sort.Strings(paths)
-	for _, path := range paths {
-		m.ensureRootAgent(path, m.cfg.RootAgents[path])
+	for _, p := range projects {
+		repo, err := config.RepoFromPath(p.Root)
+		if err != nil {
+			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; skipping it until the next daemon start: %v", p.ID, p.Root, err)
+			continue
+		}
+		projectRoots[repo.ID] = repo.Root
+		pc, err := config.LoadProjectConfig(p.ID)
+		if err != nil {
+			log.WarningLog.Printf("root agent snapshot: project %s personal config is unreadable; ignoring its root_agent override until the next daemon start: %v", p.ID, err)
+			continue
+		}
+		if layer := pc.RootAgentLayer(); layer != nil {
+			personal[repo.ID] = layer
+		}
+	}
+	return global, personal, projectRoots, legacyRepoIDs
+}
+
+// rootAgentInputsFor assembles the resolver inputs for one repo from the
+// start-of-day snapshot plus its (optional) legacy entry, so every caller — the
+// ensure sweep and repoRootAgentWillMaterialize — layers the same sources and
+// can never disagree on whether a root should run or what it runs.
+func (m *Manager) rootAgentInputsFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentInputs {
+	return config.RootAgentInputs{
+		Global:   m.rootAgentGlobal,
+		Legacy:   legacy,
+		Personal: m.rootAgentPersonal[repoID],
 	}
 }
 
-// ensureRootAgent guarantees the root agent for one configured repo path:
-// adopt a live root untouched, heal a Dead/Lost one in place, create a missing
-// one, and respect an explicit user kill. All outcomes are logged; failures
-// back off exponentially and settle at the rootEnsureBackoffMax cadence, so
-// the loop always heals eventually once the cause clears.
-func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
-	m.mu.Lock()
-	st := m.rootEnsureStates[path]
-	if st == nil {
-		st = &rootEnsureState{}
-		m.rootEnsureStates[path] = st
+// legacyRootAgentForRepo returns a copy of the root_agents entry whose path
+// resolves to repoID, or nil if none does. Resolved per call (not from the
+// snapshot dedup set) to preserve the legacy contract that a path pointing at a
+// not-yet-cloned repo starts applying the moment the repo appears.
+func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig {
+	for path, rc := range m.cfg.RootAgents {
+		repo, err := config.RepoFromPath(config.ExpandTilde(path))
+		if err != nil {
+			continue
+		}
+		if repo.ID == repoID {
+			entry := rc
+			return &entry
+		}
 	}
+	return nil
+}
+
+// rootAgentResolutionForRepo resolves the effective root-agent profile for one
+// repo ID and reports whether the repo is a candidate at all (named by a legacy
+// entry or a registered project). It is the single authority
+// repoRootAgentWillMaterialize shares with the ensure loop, so a delivery waits
+// for a root exactly when the loop will create one. Layers are merged, so a
+// personal enabled=false disables a legacy-enabled root here too.
+func (m *Manager) rootAgentResolutionForRepo(repoID string) (config.RootAgentResolution, bool) {
+	legacy := m.legacyRootAgentForRepo(repoID)
+	_, isProject := m.rootAgentProjectRoots[repoID]
+	if legacy == nil && !isProject {
+		return config.RootAgentResolution{}, false
+	}
+	return config.ResolveRootAgent(m.rootAgentInputsFor(repoID, legacy)), true
+}
+
+// EnsureRootAgents runs one ensure pass over every repo that resolves to an
+// enabled root agent: the legacy root_agents entries and the registered projects
+// a global/personal [root_agent] singleton turns on (#2216 Phase 6). Called from
+// the daemon poll loop after RefreshStatuses; a no-op until the initial restore
+// finishes.
+func (m *Manager) EnsureRootAgents() {
+	if !m.Ready() {
+		return
+	}
+
+	// Legacy root_agents paths first: this path keeps the per-path RepoFromPath
+	// retry and backoff a not-yet-cloned repo relies on (#1122). Sorted for a
+	// deterministic order.
+	if len(m.cfg.RootAgents) > 0 {
+		paths := make([]string, 0, len(m.cfg.RootAgents))
+		for path := range m.cfg.RootAgents {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			m.ensureLegacyRootAgent(path, m.cfg.RootAgents[path])
+		}
+	}
+
+	// Registered projects a legacy entry did NOT already cover, enabled purely by
+	// the global or personal [root_agent] singleton. Skipping legacy-covered repo
+	// IDs is what keeps a repo named by both from being ensured twice.
+	if len(m.rootAgentProjectRoots) > 0 {
+		repoIDs := make([]string, 0, len(m.rootAgentProjectRoots))
+		for repoID := range m.rootAgentProjectRoots {
+			if m.rootAgentLegacyRepoIDs[repoID] {
+				continue
+			}
+			repoIDs = append(repoIDs, repoID)
+		}
+		sort.Strings(repoIDs)
+		for _, repoID := range repoIDs {
+			m.ensureSingletonRootAgent(repoID)
+		}
+	}
+}
+
+// ensureLegacyRootAgent ensures the root for one root_agents path, resolving its
+// full layer stack (global + this legacy entry + the project's personal layer)
+// so a personal enabled=false can disable it. It owns the per-path RepoFromPath
+// retry/backoff (#1122); resolution and the create/adopt/heal tail are shared
+// with the singleton path via ensureResolvedRoot.
+func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) {
+	m.mu.Lock()
+	st := m.rootEnsureStateForLocked(path)
 	skip := time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if skip {
@@ -111,11 +229,59 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		m.rootEnsureFailed(path, st, fmt.Errorf("root_agents entry %q does not resolve to a git repository: %w", path, err))
 		return
 	}
+	resolution := config.ResolveRootAgent(m.rootAgentInputsFor(repo.ID, &rc))
+	m.ensureResolvedRoot(path, st, repo, resolution)
+}
+
+// ensureSingletonRootAgent ensures the root for a registered project enabled by
+// the global/personal singleton with no legacy root_agents entry. The repo
+// identity and root come from the start-of-day snapshot (no per-tick git
+// resolution — a registered project resolved at daemon start), and the state is
+// keyed by that resolved root path.
+func (m *Manager) ensureSingletonRootAgent(repoID string) {
+	root := m.rootAgentProjectRoots[repoID]
+	m.mu.Lock()
+	st := m.rootEnsureStateForLocked(root)
+	skip := time.Now().Before(st.nextAttempt)
+	m.mu.Unlock()
+	if skip {
+		return
+	}
+	repo := &config.RepoContext{Root: root, ID: repoID}
+	resolution := config.ResolveRootAgent(m.rootAgentInputsFor(repoID, nil))
+	m.ensureResolvedRoot(root, st, repo, resolution)
+}
+
+// rootEnsureStateForLocked returns the retry state for a candidate key, creating
+// it on first use. Caller must hold m.mu.
+func (m *Manager) rootEnsureStateForLocked(key string) *rootEnsureState {
+	st := m.rootEnsureStates[key]
+	if st == nil {
+		st = &rootEnsureState{}
+		m.rootEnsureStates[key] = st
+	}
+	return st
+}
+
+// ensureResolvedRoot is the shared create/adopt/heal tail for a resolved
+// candidate: adopt a live root untouched, heal a Dead/Lost one in place, create
+// a missing one, and respect an explicit user kill. stateKey names the retry
+// state (a legacy config path or a project root); resolution is the merged
+// profile. A candidate the config resolves to disabled is a no-op that resets
+// the retry state and leaves any existing root alone — removing an opt-in never
+// tears a live root down, it just stops re-ensuring it. All outcomes are logged;
+// failures back off exponentially and settle at rootEnsureBackoffMax, so the
+// loop always heals once the cause clears.
+func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo *config.RepoContext, resolution config.RootAgentResolution) {
+	if !resolution.Enabled {
+		m.rootEnsureSucceeded(st)
+		return
+	}
 
 	// A project deleted at runtime (#1735) is suppressed for the rest of this
 	// daemon's life: DeleteProject already stopped its root and removed it from
 	// root_agents on disk, so respawning it here from the still-immutable
-	// in-memory m.cfg would resurrect the project the user just deleted.
+	// in-memory config would resurrect the project the user just deleted.
 	m.mu.Lock()
 	_, deleted := m.deletedRootRepos[repo.ID]
 	m.mu.Unlock()
@@ -178,7 +344,7 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", repo.Root)
 		reaped, err := m.reapDeadRoot(repo.ID, inst)
 		if err != nil {
-			m.rootEnsureFailed(path, st, fmt.Errorf("failed to remove dead root record: %w", err))
+			m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to remove dead root record: %w", err))
 			return
 		}
 		if !reaped {
@@ -186,7 +352,7 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		}
 	}
 
-	program := rootAgentProgram(repo.Root, rc)
+	program := rootAgentProgramForProfile(repo.Root, resolution.RootAgent)
 	if _, err := m.CreateSession(context.Background(), CreateSessionRequest{
 		Title:         session.RootSessionTitle,
 		RepoPath:      repo.Root,
@@ -194,7 +360,7 @@ func (m *Manager) ensureRootAgent(path string, rc config.RootAgentConfig) {
 		InPlace:       true,
 		allowReserved: true,
 	}); err != nil {
-		m.rootEnsureFailed(path, st, fmt.Errorf("failed to create root session: %w", err))
+		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
 		return
 	}
 	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", repo.Root, program)
@@ -235,21 +401,28 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 
 // repoRootAgentWillMaterialize reports whether the daemon's ensure loop is
 // responsible for (re-)creating the reserved "root" session for this repo: the
-// repo is opted into root_agents and its project has not been deleted at
-// runtime. Config is the single source of truth for "root should be running" —
-// a root that is Dead, Lost, or even explicitly killed self-heals (the kill only
-// delays re-creation by rootKillHealDelay, #1223), so a configured root always
-// materializes eventually and a delivery to a momentarily-absent one should wait
-// for the ensure loop rather than auto-create it (which the reserved-name guard
-// would reject).
+// repo's layered root_agent config resolves to enabled and its project has not
+// been deleted at runtime. Config is the single source of truth for "root should
+// be running" — a root that is Dead, Lost, or even explicitly killed self-heals
+// (the kill only delays re-creation by rootKillHealDelay, #1223), so an enabled
+// root always materializes eventually and a delivery to a momentarily-absent one
+// should wait for the ensure loop rather than auto-create it (which the
+// reserved-name guard would reject).
 //
-// A deleted project (#1735) is the one case where the still-immutable m.cfg
+// It routes through rootAgentResolutionForRepo, the SAME resolution the ensure
+// loop uses, so the two never disagree: a repo the loop will not create (a
+// personal enabled=false over a legacy entry, or a project no singleton turned
+// on) reports false, and a singleton-only project the loop WILL create reports
+// true even with no legacy root_agents entry. Otherwise a send-prompt to such a
+// root is wrongly rejected at the reserved-name gate (#1835).
+//
+// A deleted project (#1735) is the one case where the still-immutable snapshot
 // outlives the truth: DeleteProject removed the opt-in from disk but this
-// in-memory copy keeps listing the repo, and ensureRootAgent skips it for the
+// in-memory copy keeps listing the repo, and ensureResolvedRoot skips it for the
 // rest of the daemon's life. Answering from config alone would make callers wait
 // out targetDeliverWait for a root that can never come back, then blame a
-// recreation that is not happening (#1835), so deletion is checked with the same
-// lock+lookup ensureRootAgent uses.
+// recreation that is not happening, so deletion is checked with the same
+// lock+lookup the ensure loop uses, before the resolution.
 func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
 	m.mu.Lock()
 	_, deleted := m.deletedRootRepos[repoID]
@@ -257,16 +430,8 @@ func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
 	if deleted {
 		return false
 	}
-	for path := range m.cfg.RootAgents {
-		repo, err := config.RepoFromPath(config.ExpandTilde(path))
-		if err != nil {
-			continue
-		}
-		if repo.ID == repoID {
-			return true
-		}
-	}
-	return false
+	resolution, ok := m.rootAgentResolutionForRepo(repoID)
+	return ok && resolution.Enabled
 }
 
 // reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
@@ -369,15 +534,23 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
 }
 
-// rootAgentProgram resolves the command the root agent runs. An explicit
-// per-repo program wins verbatim (an agent enum name still resolves through
-// program_overrides downstream, exactly like any session program). The
-// default profile is the repo's resolved claude command with
-// --dangerously-skip-permissions ensured — the root agent's whole purpose is
-// autonomous operation (#1106).
+// rootAgentProgram resolves the command the root agent runs from a legacy
+// per-repo entry. Retained as the thin adapter the direct-map program test and
+// any legacy-only caller use; it delegates to rootAgentProgramForProfile so the
+// resolution rule lives in exactly one place.
 func rootAgentProgram(repoRoot string, rc config.RootAgentConfig) string {
-	if strings.TrimSpace(rc.Program) != "" {
-		return rc.Program
+	return rootAgentProgramForProfile(repoRoot, config.RootAgent{Program: rc.Program})
+}
+
+// rootAgentProgramForProfile resolves the command the root agent runs from a
+// resolved root-agent profile. An explicit program wins verbatim (an agent enum
+// name still resolves through program_overrides downstream, exactly like any
+// session program). The default profile — an empty program — is the repo's
+// resolved claude command with --dangerously-skip-permissions ensured, the root
+// agent's whole purpose being autonomous operation (#1106).
+func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
+	if strings.TrimSpace(ra.Program) != "" {
+		return ra.Program
 	}
 	program := "claude"
 	if resolved, err := config.ResolveConfig(repoRoot); err == nil {

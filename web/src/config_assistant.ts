@@ -59,6 +59,11 @@ export function openConfigAssistant(opts: {
 
   const closeBtn = h("button", { type: "button", class: "af-ghost af-assistant-close" }, "×");
   closeBtn.setAttribute("aria-label", "Close the config assistant");
+  // Wire the × explicitly: it sits inside the card, whose click handler stopPropagation()s
+  // to protect the backdrop, so the button would otherwise be dead — a click on it reaches
+  // neither the backdrop's close nor any handler of its own. (Escape and a backdrop click
+  // still close too; this makes the most obvious affordance actually work.)
+  closeBtn.addEventListener("click", () => close());
 
   const termHost = h("div", { class: "af-assistant-term" });
   const errorLine = h("p", { class: "af-modal-error af-assistant-error", role: "alert" });

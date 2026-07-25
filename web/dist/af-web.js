@@ -7954,6 +7954,7 @@ function openConfigAssistant(opts) {
   status.setAttribute("role", "status");
   const closeBtn = h("button", { type: "button", class: "af-ghost af-assistant-close" }, "\xD7");
   closeBtn.setAttribute("aria-label", "Close the config assistant");
+  closeBtn.addEventListener("click", () => close());
   const termHost2 = h("div", { class: "af-assistant-term" });
   const errorLine = h("p", { class: "af-modal-error af-assistant-error", role: "alert" });
   errorLine.hidden = true;
