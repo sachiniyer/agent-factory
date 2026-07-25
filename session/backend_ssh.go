@@ -78,6 +78,11 @@ const (
 	sshAfBinaryName = "af"
 	sshBannerName   = "agent-server.json"
 	sshLogName      = "agent-server.log"
+	// sshKnownHostsFileName is the af-owned host-key store under AF_HOME that
+	// ssh_host_key_verification=accept-new reads and writes when the operator has
+	// not set ssh.known_hosts — kept out of the user's shared ~/.ssh/known_hosts
+	// (#2556).
+	sshKnownHostsFileName = "ssh_known_hosts"
 )
 
 // ssh command/dial timeouts. Provisioning steps (clone, binary stream) get a
@@ -139,10 +144,11 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 
 	p := &sshProvisioner{
-		spec:    spec,
-		cfg:     sshCfg,
-		afBin:   afBin,
-		program: config.ResolveProgram(&cfg.Config, spec.Program),
+		spec:                spec,
+		cfg:                 sshCfg,
+		afBin:               afBin,
+		program:             config.ResolveProgram(&cfg.Config, spec.Program),
+		hostKeyVerification: cfg.SSHHostKeyVerification,
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -173,6 +179,10 @@ type sshProvisioner struct {
 	cfg     config.SSHConfig
 	afBin   string
 	program string
+	// hostKeyVerification is the operator's global-only ssh_host_key_verification
+	// posture (strict|accept-new|insecure), resolved from config.Config — NOT the
+	// repo-settable ssh table — so a cloned repo cannot relax it (#2556).
+	hostKeyVerification string
 
 	client         *ssh.Client
 	agentConn      io.Closer
@@ -391,26 +401,144 @@ func agentSigners() ([]ssh.Signer, io.Closer) {
 	return signers, conn
 }
 
-// hostKeyCallback verifies the remote's host key against a known_hosts file
-// (ssh.known_hosts, else ~/.ssh/known_hosts). Verification is mandatory: an
-// InsecureIgnoreHostKey escape hatch would let a MITM capture the bearer token, so
-// there is none — seed the known_hosts entry for an ephemeral host out of band.
+// hostKeyCallback returns the host-key verification callback for the operator's
+// configured posture (ssh_host_key_verification, global-only #2556). The default
+// (strict) is the original behavior, so an existing backend=ssh user sees no
+// change; only an explicit operator opt-in relaxes it.
+//
+//   - strict: verify against a known_hosts file, refuse an unknown or changed key.
+//   - accept-new: trust-on-first-use — record an UNKNOWN key and accept it, but
+//     still refuse a CHANGED key. Learned keys go to an af-owned store (never the
+//     user's shared ~/.ssh/known_hosts).
+//   - insecure: no verification, with an honest warning that names the MITM risk.
 func (p *sshProvisioner) hostKeyCallback() (ssh.HostKeyCallback, error) {
-	path := strings.TrimSpace(p.cfg.KnownHosts)
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("backend=ssh: cannot locate ~/.ssh/known_hosts (set ssh.known_hosts): %w", err)
-		}
-		path = filepath.Join(home, ".ssh", "known_hosts")
-	} else {
-		path = expandUserPath(path)
+	switch p.hostKeyVerification {
+	case config.SSHHostKeyInsecure:
+		log.WarningLog.Printf("backend=ssh: host-key verification is DISABLED for %s (ssh_host_key_verification=insecure) — a man-in-the-middle on this connection can capture the bearer token that controls the agent session", p.cfg.Host)
+		return ssh.InsecureIgnoreHostKey(), nil
+	case config.SSHHostKeyAcceptNew:
+		return p.acceptNewHostKeyCallback()
+	default:
+		// strict, and any unexpected value: fail safe to the strictest posture.
+		return p.strictHostKeyCallback()
+	}
+}
+
+// strictHostKeyCallback verifies against ssh.known_hosts (else ~/.ssh/known_hosts)
+// and refuses an unknown or changed key. This is the default, unchanged from
+// before #2556.
+func (p *sshProvisioner) strictHostKeyCallback() (ssh.HostKeyCallback, error) {
+	path, err := p.strictKnownHostsPath()
+	if err != nil {
+		return nil, err
 	}
 	cb, err := knownhosts.New(path)
 	if err != nil {
-		return nil, fmt.Errorf("backend=ssh: cannot load known_hosts %q for host-key verification (add the remote's key with `ssh-keyscan`, or point ssh.known_hosts at a file that has it): %w", path, err)
+		return nil, fmt.Errorf("backend=ssh: cannot load known_hosts %q for host-key verification (add the remote's key with `ssh-keyscan`, point ssh.known_hosts at a file that has it, or set ssh_host_key_verification=accept-new to trust it on first connect): %w", path, err)
 	}
 	return cb, nil
+}
+
+// strictKnownHostsPath is the file strict mode verifies against: ssh.known_hosts
+// if set, else the user's ~/.ssh/known_hosts. Unchanged from before #2556.
+func (p *sshProvisioner) strictKnownHostsPath() (string, error) {
+	if path := strings.TrimSpace(p.cfg.KnownHosts); path != "" {
+		return expandUserPath(path), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("backend=ssh: cannot locate ~/.ssh/known_hosts (set ssh.known_hosts): %w", err)
+	}
+	return filepath.Join(home, ".ssh", "known_hosts"), nil
+}
+
+// acceptNewHostKeyCallback implements trust-on-first-use: an UNKNOWN host's key
+// is recorded and accepted; a CHANGED key is still refused (MITM protection is
+// preserved). Reads and writes ssh.known_hosts if the operator set it, else an
+// af-owned store under AF_HOME — deliberately never the user's shared
+// ~/.ssh/known_hosts, and never a path resolved from ssh_config, so the
+// destination is predictable and af never edits a file it does not own (#2556).
+func (p *sshProvisioner) acceptNewHostKeyCallback() (ssh.HostKeyCallback, error) {
+	path, err := p.acceptNewKnownHostsPath()
+	if err != nil {
+		return nil, err
+	}
+	// knownhosts.New requires the file to exist; a fresh af store does not yet.
+	if err := ensureKnownHostsFile(path); err != nil {
+		return nil, fmt.Errorf("backend=ssh: cannot prepare host-key store %q for accept-new: %w", path, err)
+	}
+	verify, err := knownhosts.New(path)
+	if err != nil {
+		return nil, fmt.Errorf("backend=ssh: cannot load host-key store %q for accept-new: %w", path, err)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		switch verr := verify(hostname, remote, key); {
+		case verr == nil:
+			return nil // known and matches
+		case isUnknownHostKeyError(verr):
+			if aerr := appendKnownHostKey(path, hostname, key); aerr != nil {
+				return fmt.Errorf("backend=ssh: accept-new could not record the host key for %s in %q: %w", hostname, path, aerr)
+			}
+			log.WarningLog.Printf("backend=ssh: accept-new trusted a new host key for %s and recorded it in %s (trust-on-first-use)", hostname, path)
+			return nil
+		default:
+			// A changed/mismatched key (KeyError with a non-empty Want) or any
+			// other verification failure: refuse.
+			return verr
+		}
+	}, nil
+}
+
+// acceptNewKnownHostsPath is where accept-new reads and writes: ssh.known_hosts
+// if the operator set it, else an af-owned file under AF_HOME. Never the user's
+// ~/.ssh/known_hosts and never an ssh_config-resolved path (#2556).
+func (p *sshProvisioner) acceptNewKnownHostsPath() (string, error) {
+	if kh := strings.TrimSpace(p.cfg.KnownHosts); kh != "" {
+		return expandUserPath(kh), nil
+	}
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("backend=ssh: cannot resolve AF home for the accept-new host-key store: %w", err)
+	}
+	return filepath.Join(dir, sshKnownHostsFileName), nil
+}
+
+// isUnknownHostKeyError reports whether err is knownhosts' "host not present"
+// signal (a *knownhosts.KeyError carrying no known keys) rather than a key
+// MISMATCH (Want non-empty), which accept-new must still refuse.
+func isUnknownHostKeyError(err error) bool {
+	var keyErr *knownhosts.KeyError
+	return errors.As(err, &keyErr) && len(keyErr.Want) == 0
+}
+
+// appendKnownHostKey appends a single known_hosts line binding hostname → key.
+func appendKnownHostKey(path, hostname string, key ssh.PublicKey) error {
+	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(line + "\n")
+	return err
+}
+
+// ensureKnownHostsFile creates path (and its parent directory) if absent, so
+// knownhosts.New can read an as-yet-unused af store.
+func ensureKnownHostsFile(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // hostPort splits ssh.host into host + port. A port embedded in ssh.host wins;
