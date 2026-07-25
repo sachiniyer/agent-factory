@@ -87,7 +87,7 @@ func createdTaskStatus(data session.InstanceData) string {
 // nothing is lost — see session/state_epoch.go.
 func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string, epoch uint64) {
 	agent := instance.ResolvedAgent()
-	if hit, resetAt, _ := m.limitDetector.Check(content, agent, time.Now()); hit {
+	if hit, resetAt, _ := m.limitDetector.Load().Check(content, agent, time.Now()); hit {
 		// Returns false when the decision was superseded; nothing to do about it
 		// here — the next tick observes the session as it is now.
 		_ = instance.SetLimitReachedAtEpoch(resetAt, epoch)
