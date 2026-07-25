@@ -155,9 +155,9 @@ on the old binary until you restart it yourself with 'af daemon restart'.`,
 // shouldUpgrade decides whether `af upgrade` should install latestTag over the
 // currently running version, and returns a user-facing message to print
 // (empty when there is nothing to say beyond the normal download line). It
-// reuses the shared version validation and isNewer ordering so preview
-// precedence matches auto-update
-// exactly: 1.2.0 < 1.2.1-preview-1 < 1.2.1-preview-2 < 1.2.1 (#1212).
+// reuses the shared version validation and autoupdate.IsNewer ordering so
+// preview precedence matches auto-update exactly:
+// 1.2.0 < 1.2.1-preview-1 < 1.2.1-preview-2 < 1.2.1 (#1212).
 //
 //   - latest newer than current  -> proceed (normal upgrade).
 //   - latest older than current  -> refuse unless allowDowngrade, naming both
@@ -177,9 +177,9 @@ func shouldUpgrade(latestTag, current, channel string, allowDowngrade bool) (pro
 	}
 
 	switch {
-	case isNewer(latest, cur):
+	case autoupdate.IsNewer(latest, cur):
 		return true, ""
-	case isNewer(cur, latest):
+	case autoupdate.IsNewer(cur, latest):
 		// latest is strictly older than current: a real downgrade.
 		if allowDowngrade {
 			return true, fmt.Sprintf("Downgrading %s -> %s (--allow-downgrade).", current, latestTag)

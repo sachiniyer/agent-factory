@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 )
 
 // reexecCapture records what autoUpdateOnLaunch handed to the re-exec instead
@@ -300,7 +301,7 @@ func TestAutoUpdateOnLaunchSkipsWhileAnotherLaunchHoldsTheLock(t *testing.T) {
 	held := make(chan struct{})
 	released := make(chan struct{})
 	go func() {
-		_ = config.WithFileLock(lastCheckPath(), func() error {
+		_ = config.WithFileLock(autoupdate.CheckCachePath(), func() error {
 			close(held)
 			<-released
 			return nil

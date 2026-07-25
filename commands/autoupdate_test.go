@@ -595,8 +595,8 @@ func TestIsNewer(t *testing.T) {
 		{"1.2.0.4", "1.0.0", false},
 	}
 	for _, c := range cases {
-		if got := isNewer(c.latest, c.current); got != c.want {
-			t.Errorf("isNewer(%q, %q) = %v, want %v", c.latest, c.current, got, c.want)
+		if got := autoupdate.IsNewer(c.latest, c.current); got != c.want {
+			t.Errorf("autoupdate.IsNewer(%q, %q) = %v, want %v", c.latest, c.current, got, c.want)
 		}
 	}
 }
@@ -605,13 +605,13 @@ func TestPickLatestReleaseTag(t *testing.T) {
 	cases := []struct {
 		name     string
 		channel  string
-		releases []releaseEntry
+		releases []autoupdate.Release
 		want     string
 	}{
 		{
 			name:    "preview channel: newest preview wins over older stable",
 			channel: config.UpdateChannelPreview,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.0.138-preview-2", Prerelease: true},
 				{TagName: "v1.0.138-preview-1", Prerelease: true},
 				{TagName: "v1.0.137"},
@@ -621,7 +621,7 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:    "stable channel: previews are skipped entirely",
 			channel: config.UpdateChannelStable,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.0.138-preview-2", Prerelease: true},
 				{TagName: "v1.0.138-preview-1", Prerelease: true},
 				{TagName: "v1.0.137"},
@@ -631,7 +631,7 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:    "stable channel: preview-shaped tag is skipped even without the prerelease flag",
 			channel: config.UpdateChannelStable,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.0.138-preview-2"},
 				{TagName: "v1.0.137"},
 			},
@@ -640,7 +640,7 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:    "stable channel: stable-shaped tag flagged prerelease is skipped",
 			channel: config.UpdateChannelStable,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.0.138", Prerelease: true},
 				{TagName: "v1.0.137"},
 			},
@@ -649,7 +649,7 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:    "preview channel: fresh stable wins over previews of the old base",
 			channel: config.UpdateChannelPreview,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.1.0"},
 				{TagName: "v1.0.138-preview-9", Prerelease: true},
 				{TagName: "v1.0.137"},
@@ -659,7 +659,7 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:    "preview channel: promoted base outranks its own previews",
 			channel: config.UpdateChannelPreview,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.0.138-preview-9", Prerelease: true},
 				{TagName: "v1.0.138"},
 			},
@@ -668,7 +668,7 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:    "drafts and unparseable tags are skipped",
 			channel: config.UpdateChannelPreview,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v9.9.9", Draft: true},
 				{TagName: "nightly"},
 				{TagName: "v1.0.137"},
@@ -678,7 +678,7 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:    "API order does not matter",
 			channel: config.UpdateChannelPreview,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.0.137"},
 				{TagName: "v1.0.138-preview-10", Prerelease: true},
 				{TagName: "v1.0.138-preview-9", Prerelease: true},
@@ -688,21 +688,21 @@ func TestPickLatestReleaseTag(t *testing.T) {
 		{
 			name:     "no usable releases",
 			channel:  config.UpdateChannelPreview,
-			releases: []releaseEntry{{TagName: "junk"}, {TagName: "v1.0.0", Draft: true}},
+			releases: []autoupdate.Release{{TagName: "junk"}, {TagName: "v1.0.0", Draft: true}},
 			want:     "",
 		},
 		{
 			name:    "stable channel: only previews published means no target",
 			channel: config.UpdateChannelStable,
-			releases: []releaseEntry{
+			releases: []autoupdate.Release{
 				{TagName: "v1.0.138-preview-1", Prerelease: true},
 			},
 			want: "",
 		},
 	}
 	for _, c := range cases {
-		if got := pickLatestReleaseTag(c.channel, c.releases); got != c.want {
-			t.Errorf("%s: pickLatestReleaseTag = %q, want %q", c.name, got, c.want)
+		if got := autoupdate.PickLatestReleaseTag(c.channel, c.releases); got != c.want {
+			t.Errorf("%s: autoupdate.PickLatestReleaseTag = %q, want %q", c.name, got, c.want)
 		}
 	}
 }
@@ -715,9 +715,9 @@ func TestPickLatestReleaseTag(t *testing.T) {
 // auto-update for every default-channel user. The preview channel must keep
 // resolving the newest preview from the list.
 func TestFetchLatestReleaseTagChannels(t *testing.T) {
-	previews := make([]releaseEntry, 0, 100)
+	previews := make([]autoupdate.Release, 0, 100)
 	for i := 100; i >= 1; i-- {
-		previews = append(previews, releaseEntry{
+		previews = append(previews, autoupdate.Release{
 			TagName:    fmt.Sprintf("v1.9.10-preview-%d", i),
 			Prerelease: true,
 		})
@@ -733,7 +733,7 @@ func TestFetchLatestReleaseTagChannels(t *testing.T) {
 	latestCalls := 0
 	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		latestCalls++
-		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "v1.9.9"}); err != nil {
+		if err := json.NewEncoder(w).Encode(autoupdate.Release{TagName: "v1.9.9"}); err != nil {
 			t.Errorf("encode latest release: %v", err)
 		}
 	})
@@ -782,7 +782,7 @@ func TestFetchLatestReleaseTagDoesNotSendAmbientGitHubToken(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Errorf("public product lookup sent ambient Authorization header")
 		}
-		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "v1.9.9"}); err != nil {
+		if err := json.NewEncoder(w).Encode(autoupdate.Release{TagName: "v1.9.9"}); err != nil {
 			t.Errorf("encode latest release: %v", err)
 		}
 	}))
@@ -807,7 +807,7 @@ func TestFetchLatestReleaseTagDoesNotSendAmbientGitHubToken(t *testing.T) {
 func TestFetchLatestStableTagRejectsOffSchemeTag(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewEncoder(w).Encode(releaseEntry{TagName: "nightly-2026-07-02"}); err != nil {
+		if err := json.NewEncoder(w).Encode(autoupdate.Release{TagName: "nightly-2026-07-02"}); err != nil {
 			t.Errorf("encode latest release: %v", err)
 		}
 	})
@@ -981,7 +981,7 @@ func TestAutoUpdateRecordsChannelTagAndInstalledVersionAfterSuccessfulCheck(t *t
 	if err != nil {
 		t.Fatalf("read %s: %v", lastCheckFile, err)
 	}
-	var cache updateCheckCache
+	var cache autoupdate.CheckCache
 	if err := json.Unmarshal(data, &cache); err != nil {
 		t.Fatalf("decode cache: %v\n%s", err, string(data))
 	}

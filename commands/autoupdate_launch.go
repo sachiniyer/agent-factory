@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/log"
 
 	"golang.org/x/term"
@@ -64,7 +65,7 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 			cfg = loaded
 		}
 	}
-	if !autoUpdateEnabled(cfg) {
+	if !autoupdate.Enabled(cfg) {
 		log.InfoLog.Printf("auto-update: disabled")
 		return
 	}

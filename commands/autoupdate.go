@@ -79,18 +79,18 @@ var fetchLatestReleaseTagFn = fetchLatestReleaseTag
 // the full checkTimeout before the TUI opens. Retrying that eagerly is worse
 // for the user than being briefly behind, so #459's position wins.
 func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Duration) (installed string, err error) {
-	channel = normalizeUpdateChannel(channel)
+	channel = autoupdate.NormalizeChannel(channel)
 	// Auto-update is not supported on Windows, so skip before any network
 	// operations — there is nothing to fetch, download, or install (#1002).
 	// Treat the platform skip as a successful startup decision so Windows
 	// launch loops do not re-enter this branch every time (#262).
 	if runtimeGOOS == "windows" {
-		return "", withUpdateCheckLock(func(cache *updateCheckCache, now time.Time) error {
+		return "", withUpdateCheckLock(func(cache *autoupdate.CheckCache, now time.Time) error {
 			currentVersion := strings.TrimPrefix(version, "v")
-			if !updateCheckDue(cache, channel, currentVersion, now) {
+			if !cache.Due(channel, currentVersion, now) {
 				return nil
 			}
-			return recordCheckLocked(cache, channel, "", currentVersion, now)
+			return cache.Record(channel, "", currentVersion, now)
 		})
 	}
 
@@ -98,9 +98,9 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 
-	err = withUpdateCheckLock(func(cache *updateCheckCache, now time.Time) error {
+	err = withUpdateCheckLock(func(cache *autoupdate.CheckCache, now time.Time) error {
 		currentVersion := strings.TrimPrefix(version, "v")
-		if !updateCheckDue(cache, channel, currentVersion, now) {
+		if !cache.Due(channel, currentVersion, now) {
 			return nil
 		}
 		// Close the throttle window on every outcome below, successful or
@@ -109,7 +109,7 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		// truthful — nothing was installed — while still suppressing the
 		// retry until the window rolls over.
 		throttleFailure := func(tag string) {
-			if recErr := recordCheckLocked(cache, channel, tag, currentVersion, now); recErr != nil {
+			if recErr := cache.Record(channel, tag, currentVersion, now); recErr != nil {
 				log.WarningLog.Printf("auto-update: failed to record check: %v", recErr)
 			}
 		}
@@ -124,8 +124,8 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		latestVersion := strings.TrimPrefix(latestTag, "v")
 		// Never downgrade: a preview user switching back to stable resolves
 		// an older tag here, and installing it would roll them backwards.
-		if !isNewer(latestVersion, currentVersion) {
-			return recordCheckLocked(cache, channel, latestTag, currentVersion, now)
+		if !autoupdate.IsNewer(latestVersion, currentVersion) {
+			return cache.Record(channel, latestTag, currentVersion, now)
 		}
 
 		log.InfoLog.Printf("auto-update: updating from %s to %s", version, latestVersion)
@@ -193,7 +193,7 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		// re-exec'd process sees a fresh, matching entry and skips its own
 		// check instead of looping back through this path.
 		installed = latestVersion
-		return recordCheckLocked(cache, channel, latestTag, latestVersion, now)
+		return cache.Record(channel, latestTag, latestVersion, now)
 	})
 	// installed is reported even alongside an error: the only way to reach
 	// here with both set is a successful install whose bookkeeping write
@@ -212,7 +212,7 @@ func updateChannel() string {
 	if err != nil || cfg == nil {
 		return config.UpdateChannelStable
 	}
-	return normalizeUpdateChannel(cfg.UpdateChannel)
+	return autoupdate.NormalizeChannel(cfg.UpdateChannel)
 }
 
 // latestDownloadURL resolves the newest release on the given channel (#1041)
@@ -228,10 +228,6 @@ func latestDownloadURL(channel, goos, goarch string, timeout time.Duration) (tag
 	return tag, url, nil
 }
 
-// releaseEntry is the subset of the GitHub release object needed to pick an
-// update target.
-type releaseEntry = autoupdate.Release
-
 // fetchLatestReleaseTag queries the GitHub API for the newest release tag on
 // the given channel (#1041): the stable channel resolves directly through
 // /releases/latest, the preview channel through the release list (see the
@@ -244,46 +240,14 @@ func fetchLatestReleaseTag(channel string, timeout time.Duration) (string, error
 	return discovery.LatestReleaseTag(channel, timeout)
 }
 
-// pickLatestReleaseTag returns the version-newest non-draft release tag on
-// the given channel, or "" when none qualifies. On the stable channel a
-// release is skipped when either GitHub's prerelease flag or the tag's
-// -preview-N suffix marks it as a preview; the preview channel includes
-// everything.
-func pickLatestReleaseTag(channel string, releases []releaseEntry) string {
-	return autoupdate.PickLatestReleaseTag(channel, releases)
-}
-
-// isNewer returns true if latest is strictly newer than current under the
-// two-channel scheme (#1041). MAJOR.MINOR.PATCH compare numerically; on a
-// tie a stable release is newer than any of its previews (standard semver
-// precedence), and previews order by their preview number:
-// 1.2.0 < 1.2.1-preview-1 < 1.2.1-preview-2 < 1.2.1.
-func isNewer(latest, current string) bool {
-	return autoupdate.IsNewer(latest, current)
-}
-
-func lastCheckPath() string {
-	return autoupdate.CheckCachePath()
-}
-
-func autoUpdateEnabled(cfg *config.Config) bool {
-	return autoupdate.Enabled(cfg)
-}
-
-func normalizeUpdateChannel(channel string) string {
-	return autoupdate.NormalizeChannel(channel)
-}
-
-type updateCheckCache = autoupdate.CheckCache
-
 // withUpdateCheckLock runs fn against the throttle cache under the update
 // lock. The lock is taken without waiting: when another `af` is already
 // mid-check its peers skip rather than queue, because a second launch has
 // nothing to gain by waiting out someone else's download — and everything to
 // lose, since this now sits in front of the TUI and a blocking wait would read
 // as a hang for as long as that download takes.
-func withUpdateCheckLock(fn func(cache *updateCheckCache, now time.Time) error) error {
-	acquired, err := autoupdate.TryWithCheckCache(lastCheckPath(), fn)
+func withUpdateCheckLock(fn func(cache *autoupdate.CheckCache, now time.Time) error) error {
+	acquired, err := autoupdate.TryWithCheckCache(autoupdate.CheckCachePath(), fn)
 	if err != nil {
 		return err
 	}
@@ -291,12 +255,4 @@ func withUpdateCheckLock(fn func(cache *updateCheckCache, now time.Time) error) 
 		log.InfoLog.Printf("auto-update: another af holds the update lock; skipping this launch")
 	}
 	return nil
-}
-
-func updateCheckDue(cache *updateCheckCache, channel, currentVersion string, now time.Time) bool {
-	return cache.Due(channel, currentVersion, now)
-}
-
-func recordCheckLocked(cache *updateCheckCache, channel, lastSeenTag, currentVersion string, now time.Time) error {
-	return cache.Record(channel, lastSeenTag, currentVersion, now)
 }
