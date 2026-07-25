@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,44 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestClassifyRemoveAllFailure is the #2531 decision lock. When os.RemoveAll of a
+// worktree directory fails and git may still own the path — the worktree is
+// registered, or its registration could not be determined — the error must wrap
+// ErrWorktreeStillRegistered so the factory reset RETAINS the session record for a
+// re-run rather than dropping it and orphaning a git-registered worktree and branch.
+// Only a confirmed-deregistered path stays a plain error. (The full path — git's
+// "validation failed" gate plus a filesystem permission failure — is not
+// hermetically reproducible, so the decision is unit-tested; the one call site is a
+// direct substitution.)
+func TestClassifyRemoveAllFailure(t *testing.T) {
+	rmErr := errors.New("permission denied")
+	const wt = "/x/wt-orphan"
+
+	// Registered → retain (wrap the sentinel).
+	if err := classifyRemoveAllFailure(wt, true, nil, rmErr); !errors.Is(err, ErrWorktreeStillRegistered) {
+		t.Errorf("a registered worktree whose removal failed must be retained, got %v", err)
+	}
+	// Registration undetermined (probe errored) → retain.
+	if err := classifyRemoveAllFailure(wt, false, errors.New("probe failed"), rmErr); !errors.Is(err, ErrWorktreeStillRegistered) {
+		t.Errorf("an undetermined registration whose removal failed must be retained, got %v", err)
+	}
+	// Confirmed deregistered → plain error (a filesystem orphan, not a lost registration).
+	err := classifyRemoveAllFailure(wt, false, nil, rmErr)
+	if errors.Is(err, ErrWorktreeStillRegistered) {
+		t.Errorf("a confirmed-deregistered path must not be reported as still-registered, got %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), wt) {
+		t.Errorf("the error must still name the worktree, got %v", err)
+	}
+	// The underlying os.RemoveAll error is preserved in every case.
+	if !errors.Is(classifyRemoveAllFailure(wt, true, nil, rmErr), rmErr) {
+		t.Error("the underlying os.RemoveAll error must be preserved for the sentinel case")
+	}
+	if !errors.Is(classifyRemoveAllFailure(wt, false, nil, rmErr), rmErr) {
+		t.Error("the underlying os.RemoveAll error must be preserved for the plain case")
+	}
+}
 
 // resetRepoWithWorktree builds a THROWAWAY repo in t.TempDir() with one linked
 // worktree on its own branch, and returns (repoRoot, worktreePath, branch).

@@ -110,7 +110,15 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 				return false, worktreeStillRegisteredError(repoRoot, worktreePath, err)
 			}
 			if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
-				return false, fmt.Errorf("remove worktree dir %s: %w", worktreePath, rmErr)
+				// The directory is still on disk, and we reached this fallback via the
+				// "validation failed" gate — git's own remove FAILED, so it may still
+				// own the worktree (registered, or its registration undetermined). A
+				// plain error here classifies as known-state and reset DELETES the
+				// session record, orphaning a git-registered worktree and its branch with
+				// no record left to plan a re-run from (#2531). Classify it so reset
+				// RETAINS the record instead. A confirmed-deregistered path is a plain
+				// filesystem orphan, not a lost registration, so it stays a plain error.
+				return false, classifyRemoveAllFailure(worktreePath, registered, probeErr, rmErr)
 			}
 		}
 		removed = true
@@ -138,6 +146,22 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 		return removed, worktreeStillRegisteredError(repoRoot, worktreePath, nil)
 	}
 	return removed, nil
+}
+
+// classifyRemoveAllFailure reports a failed os.RemoveAll of a worktree directory to
+// the caller (the factory reset). When git may still own the path — the worktree is
+// registered, or its registration could not be determined — it wraps
+// ErrWorktreeStillRegistered so reset RETAINS the session record and a re-run can
+// finish the removal, rather than dropping the record and orphaning a git-registered
+// worktree and its branch (#2531). A CONFIRMED-deregistered path (registered==false
+// with the probe answered) is a plain filesystem orphan with no registration to
+// recover, so it stays an ordinary error.
+func classifyRemoveAllFailure(worktreePath string, registered bool, probeErr, rmErr error) error {
+	if registered || probeErr != nil {
+		return fmt.Errorf("%w: worktree %s could not be removed and git may still own it: %w",
+			ErrWorktreeStillRegistered, worktreePath, rmErr)
+	}
+	return fmt.Errorf("remove worktree dir %s: %w", worktreePath, rmErr)
 }
 
 // repoRegistersNothing reports whether repoRoot definitively cannot hold a
