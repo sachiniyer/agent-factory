@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,4 +95,42 @@ func TestRootAgentExplainTraceCoversAllFourLayers(t *testing.T) {
 	// a program (it falls through to the default profile — no config origin).
 	assert.Equal(t, string(RootAgentSourceBuiltIn), rv.Origins["enabled"].Layer)
 	assert.NotContains(t, rv.Origins, "program")
+}
+
+// TestRootAgentInspectionInputsPopulateEveryLayer is the drift guard for the
+// --explain input assembly. assembleRootAgentInspectionInputs DUPLICATES the
+// daemon's RootAgentInputs assembly (rootAgentInputsFor) on purpose — the two
+// must read different sources (on-disk config vs the daemon's start-of-day
+// snapshot) — and only the downstream ResolveRootAgent is shared. The hazard of
+// that split: a FIFTH layer added to RootAgentInputs for the daemon could go
+// unassembled here and silently vanish from the trace, reintroducing the
+// wrong-precedence explanation this whole change fixes. So, given a fixture that
+// configures every layer, every RootAgentInputs field MUST be populated; a new
+// unset field fails this loudly, forcing the assembler and this fixture to carry
+// it. It mirrors TestRootAgentConfigIsFullyAdapted, which guards the legacy
+// adapter the same way.
+func TestRootAgentInspectionInputsPopulateEveryLayer(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	require.NoError(t, os.MkdirAll(home, 0o755))
+	// A fixture exercising every non-built-in layer: a global [root_agent], a
+	// legacy root_agents entry that resolves to the repo, and the project's
+	// personal [root_agent]. built-in is synthesized inside ResolveRootAgent, not
+	// a RootAgentInputs field, so it needs no fixture.
+	globalTOML := "schema_version = 1\n\n[root_agent]\nenabled = true\n\n[root_agents]\n\"" + repoRoot + "\" = {}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName), []byte(globalTOML), 0o644))
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\n")
+
+	inputs, _, err := assembleRootAgentInspectionInputs(repoRoot)
+	require.NoError(t, err)
+
+	v := reflect.ValueOf(inputs)
+	require.NotZero(t, v.NumField(), "RootAgentInputs must have layer fields")
+	for i := 0; i < v.NumField(); i++ {
+		name := v.Type().Field(i).Name
+		field := v.Field(i)
+		require.Equalf(t, reflect.Ptr, field.Kind(),
+			"RootAgentInputs.%s is not a pointer layer; the drift guard assumes every input is a nilable layer source — update it deliberately for a new shape", name)
+		require.Falsef(t, field.IsNil(),
+			"RootAgentInputs.%s was left nil by assembleRootAgentInspectionInputs even though the fixture configures every layer — a new root-agent layer must be assembled for --explain too, or it silently drops out of the trace (the drift this guard prevents)", name)
+	}
 }

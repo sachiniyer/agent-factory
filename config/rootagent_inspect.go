@@ -59,9 +59,33 @@ func (locs rootAgentLocations) forSource(source RootAgentSource) (path, keyPath 
 // layers by, so those layers resolve as absent; pass --project <path> to see them
 // participate.
 func ResolveRootAgentForInspection(projectSelector string) (ResolvedValue, error) {
-	global, err := LoadConfig()
+	inputs, locs, err := assembleRootAgentInspectionInputs(projectSelector)
 	if err != nil {
 		return ResolvedValue{}, err
+	}
+	return rootAgentResolvedValue(ResolveRootAgent(inputs), locs), nil
+}
+
+// assembleRootAgentInspectionInputs builds the RootAgentInputs the --explain
+// surface resolves, from on-disk config: the global [root_agent] layer, and —
+// when a project is selected — the legacy root_agents entry and personal
+// [root_agent] that resolve to its repo, with each layer's source path for the
+// LOCATION column.
+//
+// It deliberately DUPLICATES the daemon's rootAgentInputsFor rather than sharing
+// it, because the two must read from different sources: the daemon from its
+// start-of-day snapshot, this from on-disk config (--explain describes the next
+// start, not the running daemon). The shared half is ResolveRootAgent, so
+// precedence and merge never diverge. The duplication has one hazard — a new
+// RootAgentInputs layer added for the daemon but not assembled here would drop
+// silently out of --explain, the exact wrong-trace bug this file fixes. That is
+// why TestRootAgentInspectionInputsPopulateEveryLayer reflects over the assembled
+// inputs and fails when any layer is left unset: keep this in step with
+// RootAgentInputs and the guard, not with a comment.
+func assembleRootAgentInspectionInputs(projectSelector string) (RootAgentInputs, rootAgentLocations, error) {
+	global, err := LoadConfig()
+	if err != nil {
+		return RootAgentInputs{}, rootAgentLocations{}, err
 	}
 	locs := rootAgentLocations{globalPath: global.source.path}
 	if locs.globalPath == "" {
@@ -74,11 +98,11 @@ func ResolveRootAgentForInspection(projectSelector string) (ResolvedValue, error
 	if projectSelector != "" {
 		abs, err := ResolveUserPath(projectSelector)
 		if err != nil {
-			return ResolvedValue{}, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
+			return RootAgentInputs{}, rootAgentLocations{}, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
 		}
 		repo, err := RepoFromPath(abs)
 		if err != nil {
-			return ResolvedValue{}, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
+			return RootAgentInputs{}, rootAgentLocations{}, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
 		}
 		if legacy, key := legacyRootAgentForRepoID(global, repo.ID); legacy != nil {
 			inputs.Legacy = legacy
@@ -86,12 +110,12 @@ func ResolveRootAgentForInspection(projectSelector string) (ResolvedValue, error
 		}
 		project, found, err := projectForRoot(repo.Root)
 		if err != nil {
-			return ResolvedValue{}, err
+			return RootAgentInputs{}, rootAgentLocations{}, err
 		}
 		if found {
 			pc, err := LoadProjectConfig(project.ID)
 			if err != nil {
-				return ResolvedValue{}, err
+				return RootAgentInputs{}, rootAgentLocations{}, err
 			}
 			if layer := pc.RootAgentLayer(); layer != nil {
 				inputs.Personal = layer
@@ -102,7 +126,7 @@ func ResolveRootAgentForInspection(projectSelector string) (ResolvedValue, error
 		}
 	}
 
-	return rootAgentResolvedValue(ResolveRootAgent(inputs), locs), nil
+	return inputs, locs, nil
 }
 
 // legacyRootAgentForRepoID returns the root_agents entry whose path resolves to
