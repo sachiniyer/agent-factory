@@ -421,6 +421,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "root_agent",
+		Type:       "table",
+		Default:    "not enabled",
+		Purpose:    "Whether a project keeps a session named root running, and the command it runs · the singleton successor to the root_agents list, settable per project.",
+		Tier:       TierAdvanced,
+		Settable:   false,
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeTableByField,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "keys",
 		Type:       "table",
 		Default:    "none · the built-in bindings are used",

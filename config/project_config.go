@@ -38,6 +38,12 @@ type ProjectConfig struct {
 	ProgramOverrides map[string]string `toml:"program_overrides,omitempty"`
 	// BranchPrefix overrides the git branch prefix for this project's sessions.
 	BranchPrefix string `toml:"branch_prefix,omitempty"`
+	// RootAgent is the personal per-project root-agent profile (#2216 Phase 6):
+	// whether THIS project keeps an always-ensured root session on this machine,
+	// and the command it runs. It is the highest-precedence root-agent layer, so
+	// it can enable, disable, or reprogram a root the global default or a legacy
+	// root_agents entry set — see config.ResolveRootAgent.
+	RootAgent RootAgent `toml:"root_agent,omitempty"`
 
 	// setKeys records which top-level keys were present in the file so the
 	// resolver can distinguish "set to an empty value" from "absent", exactly as
@@ -52,6 +58,18 @@ type ProjectConfig struct {
 // project config file, even if its value was empty.
 func (c *ProjectConfig) IsSet(key string) bool {
 	return c != nil && c.setKeys[key]
+}
+
+// RootAgentLayer extracts the personal per-project [root_agent] singleton layer,
+// or nil when the personal config did not declare [root_agent]. Presence of
+// `enabled` comes from the decoded shape so an explicit `enabled=false` (a
+// disabling override) is distinguished from absence.
+func (c *ProjectConfig) RootAgentLayer() *RootAgentLayer {
+	if c == nil {
+		return nil
+	}
+	shape, _ := c.source.topLevel("root_agent")
+	return rootAgentLayerFromShape(c.RootAgent, shape)
 }
 
 // projectPersonalAllowedKeys is the manifest-derived allowlist of keys a
