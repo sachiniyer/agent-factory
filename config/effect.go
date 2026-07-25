@@ -60,6 +60,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"limit_patterns":                 EffectAppliedLive,
 	"global_agent_skills":            EffectAppliedLive,
 	"docker_mount_agent_credentials": EffectAppliedLive,
+	"ssh_host_key_verification":      EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
 	"listen_addr":            EffectNextDaemonStart,
 	"preview_listen_addr":    EffectNextDaemonStart,
