@@ -5,12 +5,63 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
+	"github.com/sachiniyer/agent-factory/task"
 	"github.com/stretchr/testify/require"
 )
+
+// captureUpgradePlan must populate the metadata manifest with every state file the
+// daemon rewrites in place at load — each per-repo instances.json and tasks.json,
+// home-relative — so a binary-only rollback restores state in a schema the previous
+// daemon can read (#2212 R3). Proven end-to-end: the real Prepare snapshots each
+// listed file into the journal as an existing rollback input.
+func TestCaptureUpgradePlan_PopulatesMetadataManifest(t *testing.T) {
+	_, _, candidate := stubTriggerEnv(t)
+	lifecycle := readyLifecycle(t)
+
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	writeState := func(rel string) {
+		abs := filepath.Join(configDir, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(abs), 0o755))
+		require.NoError(t, os.WriteFile(abs, []byte(`[]`), 0o644))
+	}
+	alphaRel := filepath.Join("instances", config.RepoIDFromRoot("/repo/alpha"), config.InstancesFileName)
+	betaRel := filepath.Join("instances", config.RepoIDFromRoot("/repo/beta"), config.InstancesFileName)
+	tasksRel, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	tasksRel, err = filepath.Rel(configDir, tasksRel)
+	require.NoError(t, err)
+	writeState(alphaRel)
+	writeState(betaRel)
+	writeState(tasksRel)
+
+	plan, err := captureUpgradePlan(lifecycle, candidate, "1.0.200")
+	require.NoError(t, err)
+
+	expected := []string{alphaRel, betaRel, tasksRel}
+	sort.Strings(expected)
+	require.Equal(t, expected, plan.MetadataPaths,
+		"the manifest must list every migrate-on-load state file, home-relative")
+
+	// The real Prepare must accept the manifest and snapshot each listed file as an
+	// existing rollback input — proving the paths resolve inside the home and drive a
+	// real snapshot, not just a list.
+	txn, err := upgradetxn.Prepare(plan)
+	require.NoError(t, err)
+	snapshotted := map[string]bool{}
+	for _, m := range txn.Journal().Metadata {
+		snapshotted[m.Path] = m.Existed
+	}
+	for _, rel := range expected {
+		require.True(t, snapshotted[rel], "Prepare must snapshot the migrate-on-load file %s", rel)
+	}
+}
 
 // stubTriggerEnv binds a throwaway home with an ad-hoc owner (no autostart unit →
 // RecoveryJobDetached), stages a real previous binary the trigger's Prepare can

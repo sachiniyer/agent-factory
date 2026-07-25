@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // upgradeActivationSupervisorReadyGrace bounds how long the trigger waits for the
@@ -124,6 +126,10 @@ func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion 
 	if err != nil {
 		return upgradetxn.Plan{}, err
 	}
+	metadataPaths, err := upgradeMetadataPaths(home)
+	if err != nil {
+		return upgradetxn.Plan{}, err
+	}
 	snap := lifecycle.snapshot()
 	return upgradetxn.Plan{
 		ID:             id,
@@ -138,22 +144,55 @@ func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion 
 			Owner:      owner,
 			Listeners:  toListenerExpectation(snap.listeners),
 		},
-		RecoveryJob: recoveryJob,
-		// MetadataPaths is intentionally empty because R2b STARTS NO CANDIDATE — the
-		// trigger is wired to nothing yet, so no candidate daemon boots to write any
-		// metadata. It is NOT empty because probation makes divergence safe: probation
-		// blocks mutating RPCs, but migrate-on-load is not an RPC and runs anyway.
-		// config.LoadAndMigrateSchemaFile atomically REWRITES a state file as it reads
-		// it (config/schema_migration.go), and it runs at daemon load — before restore —
-		// for every per-repo instances.json (config.MigrateAllRepoInstancesForDaemonLoad)
-		// and for tasks.json (task/schema_migration.go). So a candidate that boots,
-		// migrates vN→vN+1, then FAILS validation would leave a binary-only rollback
-		// restoring the FromVersion daemon onto state files written in a schema it can no
-		// longer read. That gap is inert only while nothing is staged; it goes live the
-		// moment R3 stages a real candidate, so R3 MUST populate this manifest with those
-		// migrated paths (recorded as the R3 prerequisite on #2212). Capturing them here
-		// now, with no candidate to protect, would only be guessing at the set.
+		RecoveryJob:   recoveryJob,
+		MetadataPaths: metadataPaths,
 	}, nil
+}
+
+// upgradeMetadataPaths lists, relative to the upgrade home, every state file the
+// daemon MIGRATES IN PLACE at load — rewriting it to a newer schema as it reads it
+// (config.LoadAndMigrateSchemaFile). The transaction snapshots each so a
+// binary-only rollback to the FromVersion daemon restores state in a schema it can
+// still read; without them a candidate that boots, migrates vN→vN+1, then fails
+// validation leaves the rolled-back daemon unable to read its own sessions or tasks
+// (#2212 R3).
+//
+// The set is derived from the daemon-load migrators themselves — every per-repo
+// instances.json (config.RepoInstancesMigrateOnLoadPaths, the same directory walk
+// config.MigrateAllRepoInstancesForDaemonLoad runs) and tasks.json
+// (task.MigrateOnLoadPath) — so it cannot drift from what actually gets rewritten.
+// A new migrate-on-load store must add its path here. TUI state is excluded on
+// purpose: it migrates in memory only (config.decodeTUIStateFile via
+// MigrateSchemaBytes, no writeback) and is TUI-owned, never rewritten at daemon
+// load.
+//
+// Every path is package-built from config.GetConfigDir(), the same value bound to
+// the plan's HomeDir, so each resolves cleanly inside the home; a path that does
+// not is a loud error rather than a silently dropped file — an incomplete manifest
+// under-protects exactly the rollback this exists to guard.
+func upgradeMetadataPaths(home string) ([]string, error) {
+	instancePaths, err := config.RepoInstancesMigrateOnLoadPaths()
+	if err != nil {
+		return nil, fmt.Errorf("resolve per-repo instances migrate-on-load paths: %w", err)
+	}
+	tasksPath, err := task.MigrateOnLoadPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve tasks migrate-on-load path: %w", err)
+	}
+	absolute := make([]string, 0, len(instancePaths)+1)
+	absolute = append(absolute, instancePaths...)
+	absolute = append(absolute, tasksPath)
+
+	relative := make([]string, 0, len(absolute))
+	for _, path := range absolute {
+		rel, err := filepath.Rel(home, path)
+		if err != nil || !filepath.IsLocal(rel) {
+			return nil, fmt.Errorf("migrate-on-load path %q is not inside the upgrade home %q", path, home)
+		}
+		relative = append(relative, rel)
+	}
+	sort.Strings(relative)
+	return relative, nil
 }
 
 func newUpgradeTransactionID() (string, error) {
