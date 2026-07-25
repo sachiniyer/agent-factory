@@ -71,9 +71,19 @@ type rootEnsureState struct {
 	suppressLogged bool
 }
 
-// EnsureRootAgents runs one ensure pass over every repo configured in
-// root_agents. Called from the daemon poll loop after RefreshStatuses; a
-// no-op when nothing is configured or the initial restore has not finished.
+// EnsureRootAgents runs one ensure pass over every repo whose effective
+// root-agent profile is enabled. Called from the daemon poll loop after
+// RefreshStatuses; a no-op when nothing is configured or the initial restore
+// has not finished.
+//
+// The which-repos-and-what-profile decision routes through the canonical
+// config.ResolveRootAgent adapter (#2216 Phase 6) rather than reading the map
+// directly, so root-agent precedence lives in one place. Today the only source
+// is the legacy path-keyed root_agents map: every present entry resolves to
+// enabled with its own program, so this pass ensures exactly the same set, with
+// the same programs, that the direct map read did. Later phases add the global
+// and personal-project singleton layers to the resolver without touching this
+// loop.
 func (m *Manager) EnsureRootAgents() {
 	if len(m.cfg.RootAgents) == 0 || !m.Ready() {
 		return
@@ -84,7 +94,12 @@ func (m *Manager) EnsureRootAgents() {
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
-		m.ensureRootAgent(path, m.cfg.RootAgents[path])
+		legacy := m.cfg.RootAgents[path]
+		res := config.ResolveRootAgent(config.RootAgentInputs{Legacy: &legacy})
+		if !res.Enabled {
+			continue
+		}
+		m.ensureRootAgent(path, config.RootAgentConfig{Program: res.Program})
 	}
 }
 
