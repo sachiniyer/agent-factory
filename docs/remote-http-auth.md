@@ -400,11 +400,12 @@ hand-editing the global config:
 require_token = true
 ```
 
-Restart the daemon (`af daemon restart`) and network peers must present the token
-(401 without it); loopback peers stay exempt on a loopback bind unless you also
-set `require_loopback_token = true`. The web client picks the change up on its
-next load and shows its paste-token login. Get the credential with
-`af token show`.
+`af config set` applies the change to a running daemon live — network peers must
+then present the token (401 without it) on the next request; a raw hand-edit of
+config.toml takes effect on the next daemon start. Loopback peers stay exempt on
+a loopback bind unless you also set `require_loopback_token = true`. The web
+client picks the change up on its next load and shows its paste-token login. Get
+the credential with `af token show`.
 
 Set it whenever `listen_addr` is anything but loopback, unless you genuinely
 trust every host that can route to the port. af will not stop you either way —
