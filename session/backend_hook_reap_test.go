@@ -657,16 +657,15 @@ exit 0
 // TestHookLaunchDoesNotKillBackgroundedChildren is the mechanism behind the test
 // above, pinned separately so a regression names its own cause: the capture must
 // not kill a process launch_cmd deliberately backgrounded. A heartbeat file is the
-// liveness probe — it keeps ticking only while the child lives.
+// liveness probe — it keeps ticking only while the child lives, so requiring the
+// mtime to keep advancing after the script exits proves the capture left the child
+// alone.
 //
-// The child ticks for far longer than the polls below (300 * 50ms ≈ 15s), so its
-// liveness — never a race against its own natural exit — is what the assertions
-// measure. Liveness is asserted by POLLING for the heartbeat's mtime to advance,
-// not by comparing two fixed 250ms windows: a child the capture killed has a frozen
-// mtime that never advances no matter how long we wait, but a live child merely
-// DESCHEDULED under CI load can miss any single fixed window. The old two-window
-// form flaked exactly that way — a real non-deterministic false-negative, unrelated
-// to the reap path (launch exits 0 here, so no reap runs).
+// The test also OWNS that child's lifetime (the t.Cleanup reap below): a
+// backgrounded writer left running races t.TempDir()'s os.RemoveAll and fails the
+// test in cleanup with an ENOTEMPTY — the actual flake this file hit on CI, which
+// looks like a passing body followed by "TempDir RemoveAll cleanup: ... directory
+// not empty".
 func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 	shrinkHookTimeouts(t, 5*time.Second, 5*time.Second)
 	dir := t.TempDir()
@@ -674,36 +673,53 @@ func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 
 	h := hookState{dir: dir, launch: filepath.Join(dir, "launch.sh"), delete: filepath.Join(dir, "delete.sh")}
 	writeHookScript(t, h.launch, fmt.Sprintf(`
-( for i in $(seq 1 300); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
+( for i in $(seq 1 100); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, shellsuggest.Arg(hb)))
 	writeHookScript(t, h.delete, "true")
 
 	p := newHookProvisioner(h, "background child")
+	// Own the backgrounded child's lifetime. launch_cmd backgrounds a process that
+	// keeps writing into dir; if it is still writing when t.TempDir()'s cleanup runs
+	// os.RemoveAll(dir), the recreated entry makes rmdir return ENOTEMPTY and testing
+	// fails the test IN CLEANUP (Linux never retries — testing.removeAll only retries
+	// Windows-transient errors). Reap the launch process group so no writer survives
+	// into the removal. t.Cleanup is LIFO, so this runs BEFORE the TempDir removal
+	// registered by t.TempDir() above; launchPgid is populated by provisionOrReap
+	// below and read here at cleanup time.
+	t.Cleanup(func() {
+		if p.launchPgid != 0 {
+			_ = syscall.Kill(-p.launchPgid, syscall.SIGKILL)
+		}
+	})
 	_, err := p.provisionOrReap()
 	require.NoError(t, err)
 
-	// Baseline: the child has appended at least once (the file exists ⇒ it started).
-	// Poll rather than trust a single fixed delay, which starves under load.
-	var first os.FileInfo
-	require.Eventually(t, func() bool {
-		fi, statErr := os.Stat(hb)
-		if statErr != nil {
-			return false
-		}
-		first = fi
-		return true
-	}, 3*time.Second, 20*time.Millisecond, "the backgrounded child never ran")
+	// Let the script itself exit so what follows measures only the BACKGROUNDED
+	// child, then require the heartbeat to keep advancing. Asserting SUSTAINED
+	// ticking — several distinct advances at this later checkpoint, not a single
+	// early write — is deliberate: a capture-path kill lands at or just after Run()
+	// returns and freezes the mtime, so a first-advance-wins probe could observe one
+	// stale write and miss the regression. A brief scheduling stall is tolerated by
+	// the generous deadline; a killed child can never reach the required count.
+	time.Sleep(250 * time.Millisecond)
+	_, err = os.Stat(hb)
+	require.NoError(t, err, "the backgrounded child never ran")
 
-	// A live child keeps appending, so its mtime advances beyond the baseline; a
-	// killed child's mtime is frozen and never will. Poll generously so a child
-	// merely descheduled under load is not misread as a kill.
-	require.Eventually(t, func() bool {
-		fi, statErr := os.Stat(hb)
-		return statErr == nil && fi.ModTime().After(first.ModTime())
-	}, 4*time.Second, 20*time.Millisecond,
-		"the process launch_cmd backgrounded stopped writing — the output capture killed a child that was not ours to kill")
+	const wantAdvances = 3
+	var last time.Time
+	advances := 0
+	deadline := time.Now().Add(3 * time.Second)
+	for advances < wantAdvances && time.Now().Before(deadline) {
+		if fi, statErr := os.Stat(hb); statErr == nil && fi.ModTime().After(last) {
+			last = fi.ModTime()
+			advances++
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.GreaterOrEqual(t, advances, wantAdvances,
+		"the process launch_cmd backgrounded stopped ticking — the output capture killed a child that was not ours to kill")
 }
 
 // TestHookLaunchIsBounded proves the launch bound fires at all. It is the
