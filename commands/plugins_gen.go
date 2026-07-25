@@ -66,6 +66,7 @@ var pluginReleaseDigests = []string{
 	"951d1d7a412f6c4a28b9498c7b16bda79ff6fad12c5b40963b6cf68f637fcf91", // 3.1
 	"d5bf3050bea0bcdbcd41e436738b56d2dd4e25e82b508a751e3c2d1435473f09", // 3.2
 	"fb450d6ee2a3cf923ace4ef7dd693b5d9790bb52ec33328bc242fea910f0be95", // 3.3 — instance/session/tab/pane model + dispatched-parent escalation + tightened web-tab guidance (#2473)
+	"62b9f2661f7c23f7c5d53dbd7e3ed3a5b3339396663299419b356f9e63f07407", // 3.4 — remove the tmux-command guard hook; agents run unrestricted (#2175 precedent)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
@@ -294,15 +295,12 @@ func codexPluginFiles(version string) []pluginFile {
 		{path: codexPluginRoot + "/skills/" + session.AfSkillName + "/SKILL.md", content: afSkillMarkdown()},
 		{path: codexPluginRoot + "/hooks/hooks.json", content: mustJSON(codexHooks())},
 		{path: codexPluginRoot + "/hooks/af-preflight.sh", content: afPreflightHook(), mode: 0o755},
-		{path: codexPluginRoot + "/hooks/guard-tmux.sh", content: codexTmuxGuardHook(), mode: 0o755},
 		{path: ".agents/plugins/marketplace.json", content: mustJSON(marketplace)},
 	}
 }
 
 // codexHooks declares the plugin's optional lifecycle hooks. Codex does not
-// trust plugin hooks until the user reviews and accepts their exact definition;
-// once trusted, PreToolUse is the production delivery seam for the same native
-// tmux policy af injects into Claude sessions.
+// trust plugin hooks until the user reviews and accepts their exact definition.
 func codexHooks() map[string]any {
 	return map[string]any{
 		"hooks": map[string]any{
@@ -317,45 +315,8 @@ func codexHooks() map[string]any {
 					},
 				},
 			},
-			"PreToolUse": []any{
-				map[string]any{
-					"matcher": "Bash",
-					"hooks": []any{
-						map[string]any{
-							"type":          "command",
-							"command":       `if [ ! -x "${PLUGIN_ROOT}/hooks/guard-tmux.sh" ]; then echo 'Agent Factory tmux safety guard is unavailable; refusing the Bash command.' >&2; exit 2; fi; "${PLUGIN_ROOT}/hooks/guard-tmux.sh"`,
-							"statusMessage": "Checking tmux command safety",
-						},
-					},
-				},
-			},
 		},
 	}
-}
-
-// codexTmuxGuardHook delegates to af's agent-neutral native policy. Unlike the
-// runtime Claude plugin, an installable Codex plugin cannot pin the af binary
-// that generated it, so it resolves the user's installed af from PATH once and
-// invokes that exact path. Codex treats exit 2 from PreToolUse as a denial;
-// missing or broken policy delivery therefore fails closed instead of turning
-// a guard failure into permission to tear down the shared tmux server.
-func codexTmuxGuardHook() string {
-	return "#!/usr/bin/env bash\n" +
-		"# " + pluginGenBanner + "\n" +
-		"set -u\n" +
-		"\n" +
-		"guard_binary=$(type -P af || true)\n" +
-		"if [[ -z \"$guard_binary\" || ! -x \"$guard_binary\" ]]; then\n" +
-		"\techo 'Agent Factory tmux safety guard binary is unavailable; refusing the Bash command.' >&2\n" +
-		"\texit 2\n" +
-		"fi\n" +
-		"\n" +
-		"\"$guard_binary\" hook-guard-tmux\n" +
-		"status=$?\n" +
-		"if [[ \"$status\" -ne 0 ]]; then\n" +
-		"\techo 'Agent Factory tmux safety guard failed; refusing the Bash command.' >&2\n" +
-		"\texit 2\n" +
-		"fi\n"
 }
 
 // afPreflightHook reports whether af is on PATH, and nothing else.

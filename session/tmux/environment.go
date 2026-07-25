@@ -53,10 +53,10 @@ func (e CommandEnvironment) Override(name string) CommandEnvOverride {
 // the first detected agent token. When there is no supported agent token, it
 // resolves only the first executable provable through shell assignments and env
 // wrappers; it never guesses through an arbitrary wrapper's operand grammar.
-// Every GNU env invocation is parsed by the same closed-set parser used by
-// internal/tmuxguard. The only policy difference is explicit: receipt routing
-// models literal assignments, while the guard rejects all assignments because
-// they may alter executable resolution.
+// Every GNU env invocation is parsed by envcommand.Parse, the closed-set parser
+// af uses everywhere. Receipt routing models literal assignments
+// (Policy{AllowAssignments: true}) because they can alter which executable runs
+// and where its receipts land.
 //
 // Unknown options, split-string, dynamic values/chdirs, misplaced assignments,
 // and an agent token consumed as an env operand return an error. Receipt callers
