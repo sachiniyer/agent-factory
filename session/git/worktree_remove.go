@@ -92,7 +92,16 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 		// Remove the worktree FIRST (git refuses to delete a branch checked out in a
 		// worktree). Fall back to a manual directory removal if git can't (e.g. the
 		// worktree was relocated to the archive and is no longer registered).
-		if err := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).Run(); err != nil {
+		//
+		// CombinedOutput, not Run: the shared ownership gate below (mayDeleteWorktreeDir)
+		// classifies on git's "validation failed:" message, which git writes to STDERR.
+		// Run discards stderr — (*exec.ExitError).Error() is only "exit status N" — so
+		// the gate NEVER matched here, silently disabling the #726 corrupted-pointer
+		// allowance for the factory reset (it matched for Cleanup, which folds stderr via
+		// runGitCommandContext) and leaving the os.RemoveAll fallback below unreachable.
+		// Fold stderr into the error so both callers see the same evidence (#2531 review).
+		if out, runErr := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).CombinedOutput(); runErr != nil {
+			err := fmt.Errorf("git worktree remove failed: %s (%w)", strings.TrimSpace(string(out)), runErr)
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", worktreePath, err)
 
 			// Ownership check, restored from Cleanup (#2110). The reset's fallback
