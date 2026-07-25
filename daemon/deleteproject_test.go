@@ -106,6 +106,44 @@ func TestDeleteProject_UnknownProjectIsNoOp(t *testing.T) {
 	assert.Empty(t, result.Killed)
 }
 
+// TestDeleteProject_RefusesWhileASessionIsMidCreate is #2549: a session still
+// provisioning lives in m.pendingCreates, NOT m.instances (manager_create.go), so a
+// delete that walked only m.instances would MISS it, deregister the project, report
+// success, and let the create finish into a live orphan. DeleteProject instead FAILS
+// CLOSED before any mutation — it refuses, names the session, and changes NOTHING (the
+// durable registry record survives, so a retry once the create settles removes it).
+func TestDeleteProject_RefusesWhileASessionIsMidCreate(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	// Register the project so there is a durable record a buggy delete could orphan.
+	registered, err := config.RegisterProject(repoPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, registered.ID)
+
+	// Simulate a session still provisioning: present in pendingCreates, absent from
+	// m.instances — the exact window an m.instances snapshot misses (#2549).
+	manager.mu.Lock()
+	manager.pendingCreates[daemonInstanceKey(repoID, "starting")] = session.InstanceData{
+		ID:         session.NewInstanceID(),
+		Title:      "starting",
+		InFlightOp: session.OpCreating,
+	}
+	manager.mu.Unlock()
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.Error(t, err, "a delete must refuse while a session for the repo is mid-create")
+	assert.Contains(t, err.Error(), "still starting")
+	assert.Contains(t, err.Error(), "starting", "the refusal names the session")
+	assert.False(t, result.Deregistered)
+	assert.Empty(t, result.Archived)
+
+	// NOTHING changed (the P2-a property): the durable registry record survives.
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1, "the refused delete left the project registered")
+	assert.Equal(t, registered.ID, projects[0].ID)
+}
+
 // TestDeleteProject_RemovesRootAgentsOptInAndSuppressesRespawn: when the repo has
 // a persisted root_agents opt-in, delete removes it from config on disk AND
 // suppresses the daemon from re-ensuring the always-on root for the rest of its

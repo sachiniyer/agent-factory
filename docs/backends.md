@@ -281,11 +281,30 @@ back (see [Archive & restore](#archive--restore)).
 | `ssh.identity_file` | no | Path to the private key for auth. Empty ⇒ `ssh-agent` (`SSH_AUTH_SOCK`) and the default `~/.ssh` keys are tried. `~` is expanded. |
 | `ssh.known_hosts` | no | Path to the `known_hosts` file the remote's host key is verified against (default: `~/.ssh/known_hosts`). `~` is expanded. |
 
-**Host-key verification is always on** (secure by default — an unverified host
-could MITM the connection and capture the bearer token). There is no
-"insecure/ignore" option: for an ephemeral or freshly-provisioned host, seed its
-key first with `ssh-keyscan -H host >> ~/.ssh/known_hosts` (or point
-`ssh.known_hosts` at a dedicated file), then create the session.
+**Host-key verification is strict by default** (secure by default — an unverified
+host could MITM the connection and capture the bearer token). The operator can
+relax it with the global-only **`ssh_host_key_verification`** key:
+
+| `ssh_host_key_verification` | Behavior |
+|-----------------------------|----------|
+| `strict` (default) | Verify against a `known_hosts` file; refuse an unknown or changed key. Existing behavior — no change. |
+| `accept-new` | Trust-on-first-use: record an **unknown** host's key on first connect and proceed, but still refuse a **changed** key. This removes the pre-seed step for ephemeral hosts. |
+| `insecure` | No verification. A man-in-the-middle can capture the session bearer token; use only on a trusted network. |
+
+It is **global-only** (operator-owned), not part of the repo-settable `ssh` table:
+a repo selects `ssh.host`, but only the operator decides whether to relax
+verification — a repo-settable waiver combined with a repo-settable `ssh.host`
+would be a one-commit man-in-the-middle. Set it with
+`af config set ssh_host_key_verification accept-new`.
+
+`accept-new` records learned keys in an **af-owned store** under the AF home
+(`$AGENT_FACTORY_HOME/ssh_known_hosts`) by default — never your shared
+`~/.ssh/known_hosts` — or in `ssh.known_hosts` if you set that explicitly.
+
+If you keep the default `strict` and need to reach a freshly-provisioned host,
+either switch that host to `accept-new` for the first connect, or add its key to
+your `known_hosts` out of band (`ssh-keyscan -H host >> ~/.ssh/known_hosts`, or
+point `ssh.known_hosts` at a dedicated file), then create the session.
 
 The Go SSH client never forwards the daemon's environment. The remote
 agent-server and pane use credentials already present for the remote login

@@ -202,6 +202,18 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 		config.UpdateChannel = UpdateChannelStable
 	}
 
+	// detach_keys-style warn-and-default: an empty value means "unset → default"
+	// (no warning); a non-empty invalid value warns and falls back to strict. The
+	// fallback (strict) is the safe posture, so a bad hand-edit never silently
+	// weakens host-key verification (#2556).
+	if config.SSHHostKeyVerification == "" {
+		config.SSHHostKeyVerification = SSHHostKeyStrict
+	} else if !IsValidSSHHostKeyVerification(config.SSHHostKeyVerification) {
+		log.WarningLog.Printf("ssh_host_key_verification=%q is not one of [%s, %s, %s]; using default %q",
+			config.SSHHostKeyVerification, SSHHostKeyStrict, SSHHostKeyAcceptNew, SSHHostKeyInsecure, SSHHostKeyStrict)
+		config.SSHHostKeyVerification = SSHHostKeyStrict
+	}
+
 	// The [keys] keymap hard-errors on any problem (unknown action, bad key
 	// string, reserved key, conflict) rather than warn-and-default: a keymap
 	// that silently falls back to defaults is indistinguishable from a dead

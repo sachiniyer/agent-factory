@@ -70,6 +70,36 @@ func selectedProjectDisplayRoot(selector, resolvedRoot string) string {
 	}
 }
 
+// isRootAgentExplainKey reports whether key names the root_agent table or one of
+// its leaves. It matches "root_agent" and "root_agent.<leaf>" but deliberately
+// NOT "root_agents" (the legacy map is a distinct key).
+func isRootAgentExplainKey(key string) bool {
+	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
+}
+
+// rootAgentExplainValue returns the specialized four-layer root_agent resolution
+// for --explain: the whole table, or a projected leaf for a dotted key. It
+// mirrors what the daemon resolves (built-in/global/legacy/personal), unlike the
+// generic global<personal resolver. A dotted leaf is projected through the same
+// ResolvedValuePath machinery every other key uses, by wrapping the specialized
+// table in a throwaway ResolvedConfig — so the leaf trace and its per-source
+// winner render identically to, say, theme.accent.
+func rootAgentExplainValue(projectSelector, keyPath string) (config.ResolvedValue, error) {
+	parent, err := config.ResolveRootAgentForInspection(projectSelector)
+	if err != nil {
+		return config.ResolvedValue{}, err
+	}
+	if keyPath == "root_agent" {
+		return parent, nil
+	}
+	synthetic := &config.ResolvedConfig{Resolution: []config.ResolvedValue{parent}}
+	projected, ok := synthetic.ResolvedValuePath(keyPath)
+	if !ok {
+		return config.ResolvedValue{}, unknownConfigKeyError(keyPath)
+	}
+	return projected, nil
+}
+
 func configEntriesFromResolution(resolved *config.ResolvedConfig) []configEntry {
 	entries := make([]configEntry, 0, len(resolved.Resolution))
 	for _, value := range resolved.Resolution {

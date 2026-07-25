@@ -47,6 +47,34 @@ const (
 	UpdateChannelPreview = "preview"
 )
 
+// SSH host-key verification modes selectable via the ssh_host_key_verification
+// config key (#2556). The default (strict) matches OpenSSH's default posture, so
+// an existing backend=ssh user sees no change.
+const (
+	// SSHHostKeyStrict verifies the remote's key against a known_hosts file and
+	// refuses an unknown or changed key. The default.
+	SSHHostKeyStrict = "strict"
+	// SSHHostKeyAcceptNew records an UNKNOWN host's key on first connect
+	// (trust-on-first-use) but still refuses a CHANGED key. The learned key is
+	// written to an af-owned store (or ssh.known_hosts if set), never the user's
+	// shared ~/.ssh/known_hosts.
+	SSHHostKeyAcceptNew = "accept-new"
+	// SSHHostKeyInsecure skips host-key verification entirely. A man-in-the-middle
+	// can then capture the session bearer token; opt in only on a trusted network.
+	SSHHostKeyInsecure = "insecure"
+)
+
+// IsValidSSHHostKeyVerification reports whether v is one of the three supported
+// ssh_host_key_verification modes.
+func IsValidSSHHostKeyVerification(v string) bool {
+	switch v {
+	case SSHHostKeyStrict, SSHHostKeyAcceptNew, SSHHostKeyInsecure:
+		return true
+	default:
+		return false
+	}
+}
+
 // ExpandTilde expands a leading "~" or "~/" in path to the current user's home
 // directory: a bare "~" becomes the home dir and "~/foo" becomes <home>/foo.
 // Every other input is returned unchanged — absolute paths, relative paths, the
@@ -164,6 +192,17 @@ type Config struct {
 	// default; containment stays partial by design when on (the boundary still
 	// blocks everything else — this one credential file is the named exception).
 	DockerMountAgentCredentials bool `json:"docker_mount_agent_credentials,omitempty" toml:"docker_mount_agent_credentials,omitempty"`
+	// SSHHostKeyVerification controls how the ssh backend verifies a remote's
+	// host key: "strict" (default — verify against known_hosts, refuse an unknown
+	// or changed key), "accept-new" (trust-on-first-use: record an unknown key,
+	// still refuse a changed one), or "insecure" (no verification). It is
+	// deliberately global-only, the sibling of the other security-posture keys: a
+	// repository selects ssh.host, but only the operator decides whether to relax
+	// verification — a repo-settable waiver plus a repo-settable ssh.host would be
+	// a one-commit man-in-the-middle that captures the session bearer token.
+	// Default strict, so an existing backend=ssh user sees no change; accept-new
+	// writes learned keys to an af-owned store, never the user's ~/.ssh/known_hosts.
+	SSHHostKeyVerification string `json:"ssh_host_key_verification" toml:"ssh_host_key_verification"`
 	// AutoUpdate controls the startup self-update check. It defaults to true:
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.
@@ -472,21 +511,22 @@ func ResolveProgram(cfg *Config, agent string) string {
 // a bare agent enum name.
 func DefaultConfig() *Config {
 	cfg := &Config{
-		SchemaVersion:        GlobalConfigSchemaVersion,
-		DefaultProgram:       defaultProgram,
-		AutoUpdate:           true,
-		RequireToken:         false,
-		RequireLoopbackToken: false,
-		ListenAddr:           defaultListenAddr,
-		DaemonPollInterval:   defaultDaemonPollInterval,
-		LimitAutoResume:      false,
-		GlobalAgentSkills:    false,
-		LimitRetryInterval:   defaultLimitRetryInterval,
-		LogMaxSizeMB:         log.DefaultMaxSizeMB,
-		LogMaxBackups:        log.DefaultMaxBackups,
-		UpdateChannel:        UpdateChannelStable,
-		Theme:                DefaultThemeConfig(),
-		WorktreeRoot:         WorktreeRootSibling,
+		SchemaVersion:          GlobalConfigSchemaVersion,
+		DefaultProgram:         defaultProgram,
+		AutoUpdate:             true,
+		RequireToken:           false,
+		RequireLoopbackToken:   false,
+		ListenAddr:             defaultListenAddr,
+		DaemonPollInterval:     defaultDaemonPollInterval,
+		LimitAutoResume:        false,
+		GlobalAgentSkills:      false,
+		LimitRetryInterval:     defaultLimitRetryInterval,
+		LogMaxSizeMB:           log.DefaultMaxSizeMB,
+		LogMaxBackups:          log.DefaultMaxBackups,
+		UpdateChannel:          UpdateChannelStable,
+		SSHHostKeyVerification: SSHHostKeyStrict,
+		Theme:                  DefaultThemeConfig(),
+		WorktreeRoot:           WorktreeRootSibling,
 		BranchPrefix: func() string {
 			user, err := user.Current()
 			if err != nil || user == nil || user.Username == "" {

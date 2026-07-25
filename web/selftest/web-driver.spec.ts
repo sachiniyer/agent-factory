@@ -3868,6 +3868,82 @@ test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bou
   await expect(row(page, SESSION_A)).toBeVisible();
 });
 
+test("#2549: deleting a registered project whose session is still STARTING is REFUSED, not half-done — and converges on retry", REAL_FIXTURE, async () => {
+  test.setTimeout(90_000); // slow by design: the session stays mid-create ~8s, then a retry converges.
+  // The composed bug no unit test can see: a create lives in m.pendingCreates through its
+  // slow provisioning and only joins m.instances at the end, so a delete that snapshotted
+  // only m.instances MISSED it, deregistered the project, reported success, and let the
+  // create finish into a LIVE ORPHAN that kept the project in the switcher forever. The
+  // fix fails CLOSED — it refuses while a session is mid-create rather than half-delete.
+  // A "probe-create-slow" title makes the fixture agent stay in OpCreating (~8s), so the
+  // mid-create window is deterministic instead of a timing race.
+  const emptyRepo = process.env.AF_MOCK_REPO_EMPTY;
+  expect(emptyRepo, "the #2549 repro needs AF_MOCK_REPO_EMPTY (set by web-selftest-entry.sh)").toBeTruthy();
+
+  // Register a fresh empty project and switch to it (an earlier test may have
+  // registered/deleted mock-repo-empty already — re-adding mints a fresh identity).
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo").click();
+  await page.locator(".af-project-switch").click();
+  const add = page.locator(".af-project-menu .af-project-add");
+  await expect(add).toBeVisible();
+  await add.click();
+  const addModal = page.locator(".af-modal-card");
+  await addModal.locator('input[aria-label="Repository path"]').fill(emptyRepo!);
+  await addModal.locator("button.af-primary").click();
+  await expect(addModal).toBeHidden();
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo-empty").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo-empty");
+
+  // Create a session that STAYS mid-create for ~8s (the probe-create-slow fixture hook).
+  const slowTitle = `probe-create-slow-${Date.now().toString(36)}`;
+  await page.locator("button.af-rail-new").click();
+  const newModal = page.locator(".af-modal-card");
+  await expect(newModal).toBeVisible();
+  await newModal.locator('input[aria-label="Session title"]').fill(slowTitle);
+  await newModal.locator("button.af-primary").click();
+  await expect(newModal).toBeHidden();
+  // Wait for its provisional (creating) row to appear — proof the create is registered in
+  // pendingCreates — so the delete below provably races a mid-create session, not a
+  // create that has not started yet.
+  await expect(row(page, slowTitle)).toBeVisible({ timeout: 15_000 });
+
+  // Immediately delete the project — the session is provably still starting.
+  await page.locator(".af-project-switch").click();
+  const del = page.locator(".af-project-menu .af-project-delete");
+  await expect(del).toBeEnabled();
+  await del.click();
+  const delModal = page.locator(".af-modal-card");
+  await expect(delModal).toBeVisible();
+  await delModal.locator("button.af-danger").click();
+  // REFUSED (fail closed): the modal stays OPEN with an inline error naming the
+  // still-starting session, and nothing was changed — no half-delete, no orphan.
+  await expect(delModal.locator(".af-modal-error")).toContainText("still starting", { timeout: 15_000 });
+  await expect(delModal).toBeVisible();
+
+  // The refuse is transient — the create settles on its own (~8s). Clicking Delete again
+  // then CONVERGES (the retry contract), archiving the now-settled session and removing
+  // the project. The modal stays open through refusals, so retry the danger button until
+  // it closes on real success (which also cleans the fixture).
+  await expect(async () => {
+    await delModal.locator("button.af-danger").click();
+    await expect(delModal).toBeHidden({ timeout: 2500 });
+  }).toPass({ timeout: 45_000 });
+
+  // The project left the switcher and stays gone after a reload — the registry record
+  // was removed only because the session was actually archived (no orphan re-derives it).
+  await expect(page.locator(".af-project-switch-name")).not.toHaveText("mock-repo-empty", { timeout: 30_000 });
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await page.locator(".af-project-switch").click();
+  await expect(projectItem(page, "mock-repo-empty")).toHaveCount(0);
+  // The menu is open — selecting mock-repo both selects and closes it, leaving a
+  // deterministic selection for downstream tests.
+  await projectItem(page, "mock-repo").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
+});
+
 // NOTE on #1675 PR4 (ended PTY → "exited", not a reconnect loop): this is already
 // wired end-to-end — the daemon emits a MsgExit control frame on session-end
 // (daemon/ws_pty.go, covered by the Go handler tests), and terminal.ts settles to an

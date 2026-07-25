@@ -85,7 +85,13 @@ type RootAgentCandidate struct {
 	Source  RootAgentSource `json:"source"`
 	Present bool            `json:"present"`
 	Enabled bool            `json:"enabled"`
-	Program string          `json:"program,omitempty"`
+	// EnabledSet reports whether THIS layer set `enabled` (an explicit false
+	// counts). It distinguishes a layer that contributed enabled from one that
+	// left it to a lower layer, so the --explain trace can show each layer's own
+	// fields — e.g. a present-but-empty legacy entry as `enabled=true` with no
+	// program, rather than implying it also set enabled=false or a program.
+	EnabledSet bool   `json:"enabled_set"`
+	Program    string `json:"program,omitempty"`
 	// Result is one of "base", "winner", "shadowed", or "absent".
 	Result string `json:"result"`
 	Reason string `json:"reason"`
@@ -208,7 +214,7 @@ func ResolveRootAgent(in RootAgentInputs) RootAgentResolution {
 // rootAgentCandidate builds one trace row, classifying the source against the
 // resolved per-field origins.
 func rootAgentCandidate(source RootAgentSource, l rootAgentNormLayer, present bool, res RootAgentResolution) RootAgentCandidate {
-	c := RootAgentCandidate{Source: source, Present: present, Enabled: l.enabled, Program: l.program}
+	c := RootAgentCandidate{Source: source, Present: present, Enabled: l.enabled, EnabledSet: l.enabledSet, Program: l.program}
 	switch {
 	case source == RootAgentSourceBuiltIn:
 		c.Result = "base"

@@ -110,6 +110,13 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"limit_auto_resume":              {kind: cfgBool},
 	"global_agent_skills":            {kind: cfgBool},
 	"docker_mount_agent_credentials": {kind: cfgBool},
+	"ssh_host_key_verification": {kind: cfgString, validate: func(_, v string) error {
+		if !IsValidSSHHostKeyVerification(v) {
+			return fmt.Errorf("ssh_host_key_verification must be one of [%s, %s, %s], got %q",
+				SSHHostKeyStrict, SSHHostKeyAcceptNew, SSHHostKeyInsecure, v)
+		}
+		return nil
+	}},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},

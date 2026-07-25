@@ -34,27 +34,6 @@ const pluginManifest = `{
 }
 `
 
-// pluginHooks is loaded by Claude Code from an injected plugin's
-// hooks/hooks.json. Matching every Bash call is deliberate: the native handler
-// must see compound commands and wrapper forms, not just a narrow permission
-// pattern that an agent can accidentally route around (#2175).
-const pluginHooks = `{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "if [ ! -x \"${CLAUDE_PLUGIN_ROOT}/hooks/guard-tmux.sh\" ]; then echo 'Agent Factory tmux safety guard is unavailable; refusing the Bash command.' >&2; exit 2; fi; \"${CLAUDE_PLUGIN_ROOT}/hooks/guard-tmux.sh\""
-          }
-        ]
-      }
-    ]
-  }
-}
-`
-
 // pluginCommands defines the command files to write into the plugin directory.
 // ensurePluginDir writes this map to disk on every session launch and prunes any
 // .md file that isn't listed here, so adding/removing/editing a skill is as simple
@@ -77,14 +56,14 @@ var pluginCommands = map[string]string{
 		"User request (may be empty): $ARGUMENTS\n",
 }
 
-// ensurePluginDir creates the plugin directory with its manifest, slash command,
-// and PreToolUse safety hook, then returns its path. The directory is located at
-// <config-dir>/plugin/.
+// ensurePluginDir creates the plugin directory with its manifest and slash
+// command, then returns its path. The directory is located at <config-dir>/plugin/.
 //
 // This is called on every claude-based session launch (see injectSystemPrompt),
-// and rewrites the manifest, writes every file in pluginCommands, and prunes any
-// stray .md in commands/ that isn't in the map — so inserts, edits, and removes
-// in pluginCommands all propagate on the next session start.
+// and rewrites the manifest, writes every file in pluginCommands, prunes any
+// stray .md in commands/ that isn't in the map, and removes the stale hooks/
+// directory an older af wrote — so inserts, edits, and removes all propagate on
+// the next session start.
 func ensurePluginDir() (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
@@ -93,7 +72,6 @@ func ensurePluginDir() (string, error) {
 
 	pluginDir := filepath.Join(configDir, "plugin")
 	commandsDir := filepath.Join(pluginDir, "commands")
-	hooksDir := filepath.Join(pluginDir, "hooks")
 	manifestDir := filepath.Join(pluginDir, ".claude-plugin")
 
 	if err := os.MkdirAll(commandsDir, 0755); err != nil {
@@ -102,31 +80,21 @@ func ensurePluginDir() (string, error) {
 	if err := os.MkdirAll(manifestDir, 0755); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+
+	// Remove the hooks/ directory a prior af version wrote for the tmux-command
+	// guard (its hooks.json + guard-tmux.sh). This af installs no PreToolUse hook,
+	// and a lingering one would invoke the removed `af hook-guard-tmux` and fail
+	// CLOSED on every Bash call for an upgraded user — worse than the guard it
+	// replaced. Pruning here, on the next session launch after upgrade, is what
+	// keeps the removal safe for existing installs. RemoveAll is idempotent, so this
+	// is a clean no-op once the directory is gone.
+	if err := os.RemoveAll(filepath.Join(pluginDir, "hooks")); err != nil {
 		return "", err
 	}
 
 	// Write plugin manifest
 	manifestPath := filepath.Join(manifestDir, "plugin.json")
 	if err := config.AtomicWriteFile(manifestPath, []byte(pluginManifest), 0644); err != nil {
-		return "", err
-	}
-
-	// The hook delegates JSON parsing and shell-command validation to this af
-	// binary, avoiding optional runtime dependencies such as jq or Python. Its
-	// wrapper converts a missing/broken helper into exit 2, which Claude treats
-	// as blocking: guard failure must fail closed rather than silently permit a
-	// host-wide teardown.
-	executable, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	hooksPath := filepath.Join(hooksDir, "hooks.json")
-	if err := config.AtomicWriteFile(hooksPath, []byte(pluginHooks), 0644); err != nil {
-		return "", err
-	}
-	guardPath := filepath.Join(hooksDir, "guard-tmux.sh")
-	if err := config.AtomicWriteFile(guardPath, []byte(pluginTmuxGuardScript(executable)), 0755); err != nil {
 		return "", err
 	}
 
@@ -157,19 +125,4 @@ func ensurePluginDir() (string, error) {
 	}
 
 	return pluginDir, nil
-}
-
-func pluginTmuxGuardScript(executable string) string {
-	return "#!/bin/sh\n" +
-		"guard_binary=" + shellQuote(executable) + "\n" +
-		"if [ ! -x \"$guard_binary\" ]; then\n" +
-		"  echo 'Agent Factory tmux safety guard binary is unavailable; refusing the Bash command.' >&2\n" +
-		"  exit 2\n" +
-		"fi\n" +
-		"\"$guard_binary\" hook-guard-tmux\n" +
-		"status=$?\n" +
-		"if [ \"$status\" -ne 0 ]; then\n" +
-		"  echo 'Agent Factory tmux safety guard failed; refusing the Bash command.' >&2\n" +
-		"  exit 2\n" +
-		"fi\n"
 }

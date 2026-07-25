@@ -571,6 +571,7 @@ Settable keys:
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
   docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
+  ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
@@ -760,8 +761,14 @@ such unit there is nothing to adopt the daemon into. If the installed unit
 already owns the running daemon, adopt reports that and changes nothing.
 
 ```
-af daemon adopt
+af daemon adopt [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--force` |  | displace the running daemon even if af cannot confirm it is unsupervised (you assert it is yours to replace) |
 
 **Global flags**
 

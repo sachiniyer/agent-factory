@@ -105,6 +105,7 @@ var globalConfigReadOrder = []string{
 	"limit_auto_resume",
 	"global_agent_skills",
 	"docker_mount_agent_credentials",
+	"ssh_host_key_verification",
 	"limit_retry_interval",
 	"limit_patterns",
 	"keys",
@@ -195,6 +196,18 @@ prints the same resolved value with the complete source trace.`,
 			value, ok := resolved.ResolvedValuePath(args[0])
 			if !ok {
 				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
+			}
+			// root_agent resolves through FOUR layers in the daemon
+			// (built-in/global/legacy/personal), but the generic resolver only
+			// knows its two singleton layers. For --explain, swap in the daemon's
+			// real four-layer trace so the explanation matches what decides the
+			// root agent, not a narrower model of it (#2216).
+			if configGetExplainFlag && isRootAgentExplainKey(args[0]) {
+				specialized, err := rootAgentExplainValue(configGetProjectFlag, args[0])
+				if err != nil {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
+				value = specialized
 			}
 			if configGetExplainFlag {
 				if configJSONFlag {
@@ -328,6 +341,7 @@ Settable keys:
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
   docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
+  ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough / cors_allowed_origins lists have no single-scalar shape,
