@@ -20,6 +20,7 @@ import {
   killSession,
   listBackends,
   listPrograms,
+  listProjects,
   probeWebTab,
   registerProject,
   removeTask,
@@ -667,10 +668,14 @@ test("registerProject returns the daemon's resolved project", async () => {
 });
 
 test("registerProject surfaces a non-git path error for inline display", async () => {
+  // Model the daemon's REAL status: a non-git path decodes fine as a body, so the
+  // failure comes from the HANDLER, which rpcHandler maps to 500 (only a malformed
+  // body is 400). The modal renders this via errorText — the daemon's own message,
+  // never the login-framed "Login failed:" (index.ts openAddProject, #2543 P1).
   stubFetchResponse({
     ok: false,
-    status: 400,
-    statusText: "Bad Request",
+    status: 500,
+    statusText: "Internal Server Error",
     json: async () => ({ data: null, error: { message: "resolve git common directory: not a git repository" } }),
   });
   const err = await registerProject("/tmp/not-a-repo", "tok").then(
@@ -678,7 +683,60 @@ test("registerProject surfaces a non-git path error for inline display", async (
     (e: unknown) => e,
   );
   assert.ok(err instanceof ApiError);
-  assert.equal(err.status, 400);
+  assert.equal(err.status, 500);
   assert.match(err.message, /not a git repository/);
   assert.doesNotMatch(err.message, /\[object Object\]/);
+  // The message the modal actually renders is the daemon's, NOT wrapped in a login
+  // prefix — the exact P1 regression #2543 fixed (describeError -> errorText).
+  assert.equal(errorText(err), "resolve git common directory: not a git repository");
+  assert.doesNotMatch(errorText(err), /Login failed/);
+});
+
+// --- listProjects: the registry read half of the #2456 union -------------------
+//
+// The client ∪s these roots with the projects it derives from live sessions + tasks,
+// so a registered-but-sessionless project still shows in the switcher and is
+// creatable-into. See project.test.ts for the union derivation itself.
+
+test("listProjects reads the registry with an empty body", async () => {
+  const cap = stubFetch();
+  await listProjects("tok");
+  assert.ok(cap.url.endsWith("/v1/ListProjects"), `posted to ${cap.url}`);
+  assert.deepEqual(cap.body, {}, "ListProjects takes no arguments — the body is empty");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("listProjects returns the daemon's registered projects", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        projects: [
+          { id: "prj_1", checkout_id: "chk_1", root: "/repos/a", relative_root: ".", path_exists: true },
+          { id: "prj_2", checkout_id: "chk_2", root: "/repos/b", relative_root: ".", path_exists: false },
+        ],
+      },
+      error: null,
+    }),
+  });
+  const projects = await listProjects("tok");
+  assert.equal(projects.length, 2);
+  assert.deepEqual(
+    projects.map((p) => p.root),
+    ["/repos/a", "/repos/b"],
+    "the roots the union consumes come back intact",
+  );
+  assert.equal(projects[1]!.path_exists, false, "a registered repo whose path is gone still reports");
+});
+
+test("listProjects tolerates a null/absent projects array", async () => {
+  // The daemon marshals an empty registry as `null` (a nil Go slice), so the client
+  // must read that as [] rather than crash the switcher's union on `null.map`.
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: { projects: null }, error: null }),
+  });
+  assert.deepEqual(await listProjects("tok"), [], "an empty registry is an empty list, not a throw");
 });
