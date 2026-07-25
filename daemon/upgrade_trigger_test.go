@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,6 +21,11 @@ import (
 // binary path, candidate bytes).
 func stubTriggerEnv(t *testing.T) (string, string, []byte) {
 	t.Helper()
+	// A raw t.TempDir() home: on darwin it lives under /var/folders (a symlink to
+	// /private/var), so config.GetConfigDir() (unresolved) and journal.HomeDir
+	// (symlink-resolved by Prepare) spell it differently. recoveryHomeGuard now
+	// compares via pathutil.ResolveForCompare, so it accepts the same home under
+	// either spelling — do NOT canonicalize here, so this actually exercises that.
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	withAutostartTestEnv(t, "linux") // no unit file written → ad-hoc owner
@@ -144,6 +150,115 @@ func TestTriggerUpgradeActivation_NotReadyKeepsServing(t *testing.T) {
 	require.False(t, exited, "must not exit when the actor is not ready")
 	require.Equal(t, DaemonPhaseReady, lifecycle.snapshot().phase, "the daemon must keep serving")
 	require.NoError(t, lifecycle.mutationAdmissionError(), "a still-serving daemon must keep admitting work")
+}
+
+// A failed InstallAndStart must ABORT the prepared transaction — otherwise one
+// transient service-manager error strands active.json at 'prepared' and wedges every
+// future upgrade at "already active". The abort here is the REAL one, so the journal
+// is genuinely cleared.
+func TestTriggerUpgradeActivation_AbortsPreparedOnInstallFailure(t *testing.T) {
+	home, _, candidate := stubTriggerEnv(t)
+	lifecycle := readyLifecycle(t)
+
+	upgradeRecoveryJobControllerFn = func() upgradetxn.RecoveryJobController {
+		return upgradetxn.RecoveryJobController{
+			StartDetached: func(string, ...string) error { return errors.New("detached spawn failed") },
+			RunCommand:    func(context.Context, string, ...string) error { return nil },
+			UserID:        func() int { return os.Getuid() },
+		}
+	}
+	exited := false
+	err := triggerUpgradeActivation(context.Background(), lifecycle, func() { exited = true }, candidate, "1.0.200")
+	require.Error(t, err)
+	require.False(t, exited, "a failed install must not exit the daemon")
+	require.Equal(t, DaemonPhaseReady, lifecycle.snapshot().phase, "the daemon keeps serving")
+
+	_, loadErr := upgradetxn.Load(home)
+	require.ErrorIs(t, loadErr, upgradetxn.ErrNoActiveTransaction,
+		"a failed install must abort the prepared transaction, not wedge the upgrade path")
+}
+
+// recoveryHomeGuard tests home IDENTITY, not string spelling: the same home reached
+// through a symlink (macOS /var -> /private/var, or a symlinked home dir) is accepted,
+// while a genuinely different home is refused. Without ResolveForCompare the symlinked
+// case fails closed — every op StopUnknown, upgrades permanently wedged (#2212 R2b P1).
+func TestRecoveryHomeGuard_ComparesCanonically(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	require.NoError(t, os.MkdirAll(real, 0o755))
+	link := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(real, link))
+
+	t.Setenv("AGENT_FACTORY_HOME", link) // bound to the symlinked spelling
+	require.NoError(t, recoveryHomeGuard(upgradetxn.Journal{HomeDir: real}),
+		"the same home spelled via symlink vs resolved must pass the guard")
+
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(other, 0o755))
+	require.Error(t, recoveryHomeGuard(upgradetxn.Journal{HomeDir: other}),
+		"a genuinely different home must still be refused")
+}
+
+// upgradeRecoveryJobFor covers all three owner kinds via the canonical NewRecoveryJob
+// builder — the systemd and launchd branches, not just the ad-hoc default the trigger
+// tests exercise.
+func TestUpgradeRecoveryJobFor_AllKinds(t *testing.T) {
+	unitDir := withAutostartTestEnv(t, "linux")
+	const id = "upgrade-abc"
+
+	systemd, err := upgradeRecoveryJobFor(id, upgradetxn.SupervisionSystemd)
+	require.NoError(t, err)
+	require.Equal(t, upgradetxn.RecoveryJobSystemd, systemd.Kind)
+	require.Equal(t, "agent-factory-upgrade-recovery-"+id+".service", systemd.Name)
+	require.Equal(t, filepath.Join(unitDir, systemd.Name), systemd.UnitPath)
+
+	launchd, err := upgradeRecoveryJobFor(id, upgradetxn.SupervisionLaunchd)
+	require.NoError(t, err)
+	require.Equal(t, upgradetxn.RecoveryJobLaunchd, launchd.Kind)
+	require.Equal(t, "com.agent-factory.upgrade-recovery."+id, launchd.Name)
+	require.Equal(t, filepath.Join(unitDir, launchd.Name+".plist"), launchd.UnitPath)
+
+	adhoc, err := upgradeRecoveryJobFor(id, upgradetxn.SupervisionAdHoc)
+	require.NoError(t, err)
+	require.Equal(t, upgradetxn.RecoveryJobDetached, adhoc.Kind)
+	require.Empty(t, adhoc.UnitPath)
+}
+
+// upgradeDaemonOwner covers all three owner shapes: ad-hoc (no unit), systemd, and
+// launchd — the unit-owned branches being the DEFAULT install shape, fail-closed
+// against constants in another package, so drift must be caught by a test.
+func TestUpgradeDaemonOwner_AllOwners(t *testing.T) {
+	t.Run("ad-hoc when no unit serves the home", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		withAutostartTestEnv(t, "linux") // no unit file written
+		owner, err := upgradeDaemonOwner(home)
+		require.NoError(t, err)
+		require.Equal(t, upgradetxn.SupervisionAdHoc, owner.Kind)
+		require.Empty(t, owner.ServiceName)
+	})
+	t.Run("systemd when a home-serving unit is installed", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		unitDir := withAutostartTestEnv(t, "linux")
+		unit := systemdAutostartUnit("/opt/agent-factory/bin/af", "", "", home)
+		require.NoError(t, os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600))
+		owner, err := upgradeDaemonOwner(home)
+		require.NoError(t, err)
+		require.Equal(t, upgradetxn.SupervisionSystemd, owner.Kind)
+		require.Equal(t, autostartUnitName, owner.ServiceName)
+	})
+	t.Run("launchd when a home-serving agent is installed", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		dir := withAutostartTestEnv(t, "darwin")
+		plist := launchdAutostartPlist("/opt/agent-factory/bin/af", "", "", home, filepath.Join(dir, "daemon.log"))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, autostartLaunchdLabel+".plist"), []byte(plist), 0o600))
+		owner, err := upgradeDaemonOwner(home)
+		require.NoError(t, err)
+		require.Equal(t, upgradetxn.SupervisionLaunchd, owner.Kind)
+		require.Equal(t, autostartLaunchdLabel, owner.ServiceName)
+	})
 }
 
 // The Plan captured from the live daemon produces a REAL journal (via the real

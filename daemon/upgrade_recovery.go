@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -155,7 +156,17 @@ func recoveryHomeGuard(journal upgradetxn.Journal) error {
 	if err != nil {
 		return fmt.Errorf("resolve AF home for upgrade recovery: %w", err)
 	}
-	if dir != journal.HomeDir {
+	// Compare home IDENTITY, not string spelling. config.GetConfigDir returns
+	// AGENT_FACTORY_HOME verbatim (no symlink resolution), while upgradetxn.Prepare
+	// stored journal.HomeDir in its symlink-resolved form (canonicalExistingDir). A
+	// user whose home traverses a symlink — a symlinked home dir, or macOS
+	// /var -> /private/var — would otherwise spell the same home two ways and have
+	// EVERY op refused (StopUnknown), failing that box's upgrades closed forever with
+	// a baffling message. pathutil.ResolveForCompare canonicalizes both sides (incl.
+	// the missing-leaf case, #2110), so equal homes compare equal regardless of
+	// spelling. Today the actor's home is argv-pinned to the resolved journal.HomeDir
+	// so the raw compare happened to hold, but this removes the latent trap.
+	if pathutil.ResolveForCompare(dir) != pathutil.ResolveForCompare(journal.HomeDir) {
 		return fmt.Errorf(
 			"upgrade recovery is bound to AF home %q but the transaction recovers %q; refusing to act on the wrong daemon",
 			dir, journal.HomeDir)

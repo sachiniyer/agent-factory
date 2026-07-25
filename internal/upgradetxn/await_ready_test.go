@@ -29,10 +29,17 @@ func TestAwaitSupervisorReady(t *testing.T) {
 	awaitSupervisorReadyPoll = time.Millisecond
 	defer func() { awaitSupervisorReadyPoll = restore }()
 
-	// The actor holds the lease but is still at PhasePrepared: not ready. The
-	// deadline turns the missing proof into a loud error, never an assumed success.
+	// The actor holds the lease but has published NO status yet (tryAcquireRecoveryAs
+	// invalidated the predecessor's): the missing proof is a loud error.
 	require.Error(t, AwaitSupervisorReady(ctx, home, time.Now().Add(30*time.Millisecond)),
-		"a lease that has not reached supervisor_ready must not be read as ready")
+		"a lease with no published status must not be read as ready")
+
+	// A status that EXISTS but reports a phase short of supervisor_ready must ALSO be
+	// rejected — this exercises the phase check, distinct from the missing-status path
+	// above (Heartbeat writes whatever phase it is given, so no Advance is needed).
+	require.NoError(t, lease.Heartbeat(PhasePrepared, time.Now().Add(time.Minute)))
+	require.Error(t, AwaitSupervisorReady(ctx, home, time.Now().Add(30*time.Millisecond)),
+		"a published status short of supervisor_ready must be rejected on the phase check")
 
 	require.NoError(t, lease.Advance(PhaseSupervisorReady))
 	require.NoError(t, lease.Heartbeat(PhaseSupervisorReady, time.Now().Add(time.Minute)))

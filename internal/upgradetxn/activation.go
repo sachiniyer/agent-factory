@@ -19,14 +19,18 @@ var awaitSupervisorReadyPoll = 100 * time.Millisecond
 
 // AwaitSupervisorReady blocks until the previous-binary recovery actor has
 // POSITIVELY proven it reached supervisor_ready, or the bounded deadline elapses.
-// It runs the same validation AuthorizeActivation runs — the recovery lock is held
-// (the actor is alive), its readiness lock is published, its status reports
-// PhaseSupervisorReady, and that proof's deadline is still in the future — but
-// publishes nothing. It is the observation the old-daemon trigger makes BEFORE the
-// single AuthorizeActivation, so "the trigger fired" means the actor took the lease
-// and reached supervisor_ready, never that InstallAndStart returned. A missing,
-// stale, or dead-actor proof keeps polling; the deadline turns an unobservable
-// readiness into a loud error, never an assumed success.
+// It runs validateActivationRecoveryProof — the recovery lock is held (the actor is
+// alive), its readiness lock is published, its status reports PhaseSupervisorReady,
+// and that proof's deadline is still in the future — but publishes nothing. That is
+// the actor-liveness-and-readiness half of what AuthorizeActivation checks;
+// AuthorizeActivation additionally requires the active JOURNAL phase to be
+// PhaseSupervisorReady and the transaction id/nonce to match before it publishes,
+// and it re-runs this same proof — so the authorizing caller still gets the full
+// check. This is the observation the old-daemon trigger makes BEFORE the single
+// AuthorizeActivation, so "the trigger fired" means the actor took the lease and
+// reached supervisor_ready, never that InstallAndStart returned. A missing, stale,
+// or dead-actor proof keeps polling; the deadline turns an unobservable readiness
+// into a loud error, never an assumed success.
 func AwaitSupervisorReady(ctx context.Context, homeDir string, deadline time.Time) error {
 	var lastErr error
 	for {

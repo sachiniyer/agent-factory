@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ var (
 	upgradeAuthorizeActivationFn   = func(txn *upgradetxn.Transaction, transactionID, nonce string) error {
 		return txn.AuthorizeActivation(transactionID, nonce)
 	}
+	upgradeAbortPreparedFn = upgradetxn.AbortPreparedTransaction
 )
 
 // triggerUpgradeActivation is the OLD-daemon side of an upgrade activation, run
@@ -60,18 +62,33 @@ func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, r
 	if err != nil {
 		return fmt.Errorf("prepare upgrade transaction: %w", err)
 	}
-	if err := upgradeRecoveryJobControllerFn().InstallAndStart(ctx, txn); err != nil {
-		return fmt.Errorf("install and start the recovery actor: %w", err)
-	}
 	journal := txn.Journal()
+	// From here active.json is published (fsynced). Any failure BEFORE an actor takes
+	// authority must abort it, or one transient service-manager error wedges the
+	// upgrade path forever — every future Prepare fails "already active", with no
+	// actor able to clear it. abortPrepared refuses once an actor owns the
+	// transaction, so it is safe to call and a no-op past that point.
+	abortPrepared := func(cause error) error {
+		if abortErr := upgradeAbortPreparedFn(journal.HomeDir, journal.ID); abortErr != nil {
+			return errors.Join(cause, fmt.Errorf("abort the prepared upgrade transaction: %w", abortErr))
+		}
+		return cause
+	}
+	if err := upgradeRecoveryJobControllerFn().InstallAndStart(ctx, txn); err != nil {
+		return abortPrepared(fmt.Errorf("install and start the recovery actor: %w", err))
+	}
 	deadline := time.Now().Add(upgradeActivationSupervisorReadyGrace)
 	if err := upgradeAwaitSupervisorReadyFn(ctx, journal.HomeDir, deadline); err != nil {
 		// The actor never PROVED supervisor_ready. Do NOT authorize or exit: the
-		// daemon keeps serving. Surface it loudly — an unobservable readiness is a
-		// failure, never an assumed success.
-		return fmt.Errorf("upgrade recovery actor did not reach supervisor_ready; daemon keeps serving: %w", err)
+		// daemon keeps serving. Abort the prepared transaction (a no-op if an actor
+		// took it and its own deadline will drive teardown) so the upgrade path is not
+		// wedged, and surface the failure loudly — never an assumed success.
+		return abortPrepared(fmt.Errorf("upgrade recovery actor did not reach supervisor_ready; daemon keeps serving: %w", err))
 	}
 	if err := upgradeAuthorizeActivationFn(txn, journal.ID, journal.RecoveryNonce); err != nil {
+		// The actor is at supervisor_ready and owns the transaction; its own
+		// supervisor_ready deadline times out and aborts. Do not abort from here
+		// (abortPrepared would refuse anyway) — just surface the failure.
 		return fmt.Errorf("authorize upgrade activation: %w", err)
 	}
 	// Authorized: the actor is greenlit to replace us. Stop admitting new work so no
@@ -122,6 +139,15 @@ func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion 
 			Listeners:  toListenerExpectation(snap.listeners),
 		},
 		RecoveryJob: recoveryJob,
+		// MetadataPaths is intentionally empty for R2b, and this is a deferral, not a
+		// claim of completeness. Rollback only ever runs BEFORE commit; until commit
+		// the candidate is held in DaemonPhaseUpgradeProbation, which blocks every
+		// mutating RPC, and its startup restore is read-only — so no daemon-written
+		// metadata diverges from what the previous daemon left, and a binary-only
+		// restore is complete for that window. The full metadata manifest (guarding
+		// the residual migrate-on-load edge, where the new binary could rewrite a
+		// state file as it reads it) lands with the R3 release wiring that first
+		// stages a candidate; capturing it here now would be guessing at the set.
 	}, nil
 }
 
