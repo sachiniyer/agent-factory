@@ -18,13 +18,22 @@ import (
 // two can never drift.
 //
 // It handles ONLY the two socket keys. The auth/CORS keys
-// (require_token / require_loopback_token / cors_allowed_origins) are deliberately
-// NOT its concern: their handlers read live config per request (livePosture), so
-// they apply with no rebind and — the point of the split — whether or not any
-// rebind here succeeds. Routing a security tightening through the socket path would
-// couple it to a bind succeeding, and a bind failure keeps the OLD, weaker posture
-// serving: a tighten that silently fails permissive. Keeping the mechanisms
-// separate is what prevents that.
+// (require_token / require_loopback_token / cors_allowed_origins) read live config
+// per request (livePosture) and never rebind. Two reasons, and the first is a
+// CONSTRAINT — much harder for a future refactor to argue away than a preference:
+//
+//  1. Mechanically, they CANNOT rebind. The common change — require_token flipped
+//     with listen_addr UNCHANGED — would have to bind a new listener on the SAME
+//     address the old one still holds, which fails with "address already in use".
+//     The only way to bind that same port is to close the old FIRST — the exact
+//     close-then-bind ordering that bricks the daemon when the new bind then fails.
+//     So there is no bind-new-before-close available for a same-address posture
+//     change; the auth keys must apply WITHOUT touching the socket.
+//  2. And it is the right coupling anyway. Routing a security tightening through the
+//     socket path would couple it to a bind succeeding, and a failed bind keeps the
+//     OLD, weaker posture serving — a tighten that silently fails permissive.
+//     Live-read applies the tighten on the next request whether or not any rebind
+//     here succeeds.
 type webListeners struct {
 	manager *Manager
 	// webMux is the shared control-plane mux (also served on the unix socket). The
