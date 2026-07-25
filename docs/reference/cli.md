@@ -578,11 +578,8 @@ Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
 here. Ask the config assistant to change them (it edits the file and validates), or
 edit config.toml directly and run "af config validate".
-A settable key applies to a running daemon in place (#2480): the network
-listener keys apply live too (the auth/CORS keys are read per request; a
-`listen_addr`/`preview_listen_addr` change rebinds the listener), so only the
-structural keys above (`root_agents`/`root_agent`, `[theme]`, the `[keys]` rebind
-table, `branch_prefix`) take effect on the next daemon start.
+A settable key applies to a running daemon in place (#2480); the structural keys
+above and the network listener keys take effect on the next daemon start.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
