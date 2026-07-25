@@ -120,6 +120,52 @@ func TestControlServer_RegisterProject_RejectsNonGitPath(t *testing.T) {
 	assert.Empty(t, projects, "a rejected registration must persist nothing")
 }
 
+// TestControlServer_ListProjects_ReadsRegistry is #2456's read half — the source
+// the TUI/web switcher unions with their derived project lists. The RPC returns the
+// durable registry, empty when nothing is registered and reflecting a registration
+// once one lands.
+func TestControlServer_ListProjects_ReadsRegistry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: manager}
+
+	// An empty registry reads as an empty list (not an error).
+	var empty ListProjectsResponse
+	require.NoError(t, cs.ListProjects(ListProjectsRequest{}, &empty))
+	assert.Empty(t, empty.Projects, "an empty registry lists nothing")
+
+	var reg RegisterProjectResponse
+	require.NoError(t, cs.RegisterProject(RegisterProjectRequest{Path: repoPath}, &reg))
+
+	var resp ListProjectsResponse
+	require.NoError(t, cs.ListProjects(ListProjectsRequest{}, &resp))
+	require.Len(t, resp.Projects, 1, "the registered project must be listed")
+	assert.Equal(t, reg.Project.ID, resp.Projects[0].ID)
+	assert.Equal(t, filepath.Clean(repoPath), resp.Projects[0].Root)
+}
+
+// TestControlServer_ListProjects_NotGatedWhenWarming pins the flip side of
+// RegisterProject's admission gate: ListProjects is a pure READ, allowed during
+// probation (controlMethodPolicies), so a warming manager still answers it — where
+// RegisterProject would return the daemon-starting error. A read that blocked while
+// the daemon warmed would leave a client's switcher briefly, silently empty.
+func TestControlServer_ListProjects_NotGatedWhenWarming(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	shell, err := newManagerShell(config.DefaultConfig())
+	require.NoError(t, err)
+	require.False(t, shell.Ready(), "precondition: the manager shell must not report ready")
+
+	notReady := &controlServer{manager: shell}
+	var resp ListProjectsResponse
+	err = notReady.ListProjects(ListProjectsRequest{}, &resp)
+	require.NoError(t, err, "ListProjects is a read; it must answer even while the manager warms")
+	assert.Empty(t, resp.Projects)
+}
+
 // TestControlServer_RegisterProject_GatedWhenWarming: like every state mutation,
 // RegisterProject is refused while the manager is still warming up, with the
 // daemon-starting error clients retry on.
