@@ -78,6 +78,13 @@ const (
 	// `docker ps -aq -f label=af.session` (documented in docs/backends.md). The
 	// runtime reaps by container ID; the label is for operators.
 	dockerSessionLabel = "af.session"
+	// dockerHomeLabel scopes a container to the AF home (daemon) that created it,
+	// stamped with config.GetConfigDir() at `docker run`. The orphan sweeper
+	// (#2194) filters on it so a shared Docker engine hosting more than one af
+	// home never lets one daemon reap another's containers, and so a container
+	// with no af.home label (a pre-upgrade one) is treated as not-ours and left
+	// alone. The value is the AF home path — human-legible in `docker inspect`.
+	dockerHomeLabel = "af.home"
 	// dockerEngineIDFormat selects the daemon's stable, non-secret identity from
 	// `docker info`. Cleanup tombstones persist this value so a daemon restart
 	// cannot redirect `docker rm -f` to whichever engine the client happens to
@@ -206,12 +213,21 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// Resolve once in the trusted host process. The agent-server receives this
 	// exact command with --program-resolved and must not reinterpret its enum.
 	resolvedProgram := config.ResolveProgram(&cfg.Config, spec.Program)
+	// Stamp the AF home onto the container (af.home label) so the orphan sweeper
+	// can scope to this daemon's home. If it can't be resolved, omit the label —
+	// the container just won't be sweep-tracked, which is the safe direction.
+	homeID, homeErr := config.GetConfigDir()
+	if homeErr != nil {
+		log.WarningLog.Printf("backend=docker: cannot resolve the AF home for the af.home container label; this container will not be orphan-sweep-tracked: %v", homeErr)
+		homeID = ""
+	}
 	p := &dockerProvisioner{
 		spec:    spec,
 		image:   image,
 		runArgs: runArgs,
 		afBin:   afBin,
 		program: resolvedProgram,
+		homeID:  homeID,
 	}
 	// docker_mount_agent_credentials is a GLOBAL-only operator grant (config.Config,
 	// resolved from the global layer here — a repo cannot set it: the key is absent
@@ -247,6 +263,12 @@ type dockerProvisioner struct {
 	credentialMounts []string
 	afBin            string
 	program          string
+	// homeID is the AF home (config.GetConfigDir()) stamped into the af.home
+	// container label so the orphan sweeper can scope to this daemon's home
+	// (#2194). Empty when the home cannot be resolved — the label is then omitted
+	// and the container is simply never sweep-tracked (fail-safe: unlabelled is
+	// not-ours), never mis-attributed.
+	homeID string
 
 	containerID        string
 	engineID           string
@@ -330,6 +352,11 @@ func (p *dockerProvisioner) runContainer() error {
 		"--label", dockerSessionLabel + "=" + Slugify(p.spec.Title),
 		"-e", "HOME=" + dockerContainerHome,
 		"-p", "127.0.0.1::" + dockerAgentPort,
+	}
+	// Scope the container to this daemon's AF home for the orphan sweeper (#2194).
+	// Omitted when the home is unknown, so it is simply never sweep-tracked.
+	if p.homeID != "" {
+		args = append(args, "--label", dockerHomeLabel+"="+p.homeID)
 	}
 	for _, name := range p.containerEnvironmentNames() {
 		// Docker looks the value up in the CLI process's filtered environment;
