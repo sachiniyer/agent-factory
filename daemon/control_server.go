@@ -59,11 +59,14 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	return nil
 }
 
-// ReleaseUpgradeProbation clears this daemon's upgrade probation once its
-// previous-binary supervisor has validated it (#2212 R2). Only the supervisor,
-// which knows the transaction id, can call it; a mismatch or a non-probationary
-// daemon is refused. It is deliberately NOT gated on requireMutationAdmission —
-// probation is exactly what it lifts, so gating it on admission would deadlock.
+// ReleaseUpgradeProbation lifts this daemon's upgrade probation once its
+// previous-binary supervisor has validated it (#2212 R2). A release for a
+// non-matching or non-probationary transaction is refused. It is deliberately NOT
+// gated on requireMutationAdmission — probation is exactly what it lifts, so
+// gating it on admission would deadlock. (Authority rests on the control socket
+// being owner-only and already privileged, NOT on the transaction id being
+// secret: Ping reports that id, `af daemon status` prints it, and it rides argv
+// visible in /proc — it is an identity check, never a capability.)
 func (s *controlServer) ReleaseUpgradeProbation(req ReleaseUpgradeProbationRequest, resp *ReleaseUpgradeProbationResponse) error {
 	if s.manager == nil || s.manager.lifecycle == nil {
 		return fmt.Errorf("daemon has no lifecycle to release from upgrade probation")

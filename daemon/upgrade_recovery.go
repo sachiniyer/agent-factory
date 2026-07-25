@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -71,16 +72,18 @@ func HandleUpgradeRecoveryExec() {
 // upgradetxn cannot import without a cycle; SupervisorOperations is injectable
 // precisely to cross that boundary.
 func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.RecoveryInvocation) error {
-	// Capture whether an installed unit owns this home BEFORE the supervisor runs,
-	// because a successful commit removes the journal — and with it the owner —
-	// during Cleanup. A transaction that terminates through Supervisor.Run leaves
-	// the daemon serving; only a service-managed home needs the post-commit
-	// hand-off to the unit.
-	adoptToUnit := false
+	// Capture, BEFORE the supervisor runs, whether OUR transaction (id-matched, not
+	// a foreign or stale one that happens to be active) is owned by an installed
+	// unit — a successful commit removes the journal during Cleanup, taking the
+	// owner with it. Only a service-managed home needs the post-commit hand-off.
+	ourUnitTransaction := false
 	if txn, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
-		switch txn.Journal().Daemon.Owner.Kind {
-		case upgradetxn.SupervisionSystemd, upgradetxn.SupervisionLaunchd:
-			adoptToUnit = true
+		journal := txn.Journal()
+		if journal.ID == invocation.TransactionID {
+			switch journal.Daemon.Owner.Kind {
+			case upgradetxn.SupervisionSystemd, upgradetxn.SupervisionLaunchd:
+				ourUnitTransaction = true
+			}
 		}
 	}
 
@@ -89,16 +92,22 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 		return err
 	}
 
-	// The transaction terminated cleanly (commit, or a rollback that RunRecoveryActor
-	// maps to a clean exit) and its journal is gone, so a unit-started daemon no
-	// longer defers to the entrypoint gate. Hand a committed ad-hoc candidate to the
-	// installed unit; idempotent, so after a rollback (previous already
-	// unit-supervised) this no-ops. Best-effort: the upgrade already committed, so a
-	// failed hand-off leaves a serving-but-ad-hoc daemon, not a broken one.
-	if adoptToUnit {
-		if err := adoptAfterUpgradeCommitFn(); err != nil {
-			log.WarningLog.Printf("upgrade transaction finished but handing the daemon to the installed unit failed; it is serving ad-hoc (run `af daemon adopt`): %v", err)
-		}
+	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil for
+	// a clean stand-down (a foreign/stale transaction we had no authority over),
+	// ErrRecoveryActive, and a terminal rollback (which restores the previous daemon
+	// already under its unit). Hand off ONLY on a positive commit signal — this was
+	// OUR unit transaction AND its journal is now gone (Cleanup ran). rollback_failed
+	// deliberately RETAINS the journal, and a newer transaction leaves a different one
+	// — both leave a journal, so both are excluded here. The hand-off is additionally
+	// id-guarded so it can only ever stop our own committed candidate.
+	if !ourUnitTransaction {
+		return nil
+	}
+	if _, loadErr := upgradetxn.Load(invocation.HomeDir); !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
+		return nil // a journal is still present — not a completed commit of our transaction
+	}
+	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID); err != nil {
+		log.WarningLog.Printf("upgrade committed but handing the daemon to the installed unit did not complete; check `af daemon status` and `af doctor`: %v", err)
 	}
 	return nil
 }

@@ -34,21 +34,27 @@ var (
 	activationApprovedFn        = activationApproved
 	releaseCandidateProbationFn = releaseCandidateProbation
 	adoptAfterUpgradeCommitFn   = adoptAfterUpgradeCommit
+	adoptSupervisionProbeFn     = AutostartSupervision
 )
 
 // adoptAfterUpgradeCommit hands the just-committed candidate — which ran ad-hoc
 // through probation (Option A) — to the installed unit, reusing the #2168 adopt
 // lifecycle. It MUST run only after Supervisor.Run returns and the journal is
-// gone, so the unit-started daemon (runDaemon(cfg,"")) does not defer to the
-// still-active transaction in the entrypoint gate.
+// gone (the caller proves this), so the unit-started daemon (runDaemon(cfg,""))
+// does not defer to a still-active transaction in the entrypoint gate.
 //
-// Idempotent and identity-agnostic: it hands off only when an installed unit owns
-// this home AND the responder is not already unit-supervised, so after a ROLLBACK
-// (the previous daemon is already unit-supervised via startPreviousDaemon) it
-// no-ops. Best-effort: the commit is irreversible and the candidate is serving, so
-// a failed hand-off is warned by the caller, not fatal — `af daemon adopt` or the
-// next login re-supervises it.
-func adoptAfterUpgradeCommit() error {
+// It is guarded by IDENTITY, not just supervision state: it stops a daemon only
+// when that daemon IS our committed candidate — it reports expectedTransactionID,
+// which the candidate keeps for its whole boot (#1947). A responder that is a
+// different daemon (a foreign transaction's candidate, or an ordinary daemon with
+// no id) is never touched. And it stops a daemon only on a DEFINITE "not
+// unit-supervised" answer: an UNDETERMINED probe (a systemctl timeout, or an older
+// responder that reports no Ping pid — the normal rollback shape) must never be
+// read as "not supervised" and used to stop a live daemon.
+//
+// Best-effort: the commit is irreversible, so a failed hand-off is warned by the
+// caller, not fatal.
+func adoptAfterUpgradeCommit(expectedTransactionID string) error {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return err
@@ -59,15 +65,20 @@ func adoptAfterUpgradeCommit() error {
 	}
 	h := upgradeRecoveryHealthFn()
 	if h.PingErr != nil {
-		return nil // no responder to hand off (a committed candidate always serves)
+		return nil // no responder to hand off
 	}
-	supervised := false
-	ServingDaemonSupervised(h, AutostartSupervision()).Match(
-		func() { supervised = true },
-		func() {}, func() {}, func(error) {},
+	if h.TransactionID != expectedTransactionID {
+		return nil // the responder is not our committed candidate — leave it untouched
+	}
+	proceed := false
+	ServingDaemonSupervised(h, adoptSupervisionProbeFn()).Match(
+		func() {},                 // yes: already unit-supervised → nothing to do
+		func() { proceed = true }, // no: definitely ad-hoc → hand off to the unit
+		func() {},                 // not-found: manager has no record → do not stop it
+		func(error) {},            // undetermined: could not ask → do NOT stop a live daemon
 	)
-	if supervised {
-		return nil // the installed unit already owns the responder (e.g. after rollback)
+	if !proceed {
+		return nil
 	}
 	if _, err := StopDaemon(); err != nil {
 		return fmt.Errorf("stop the ad-hoc committed candidate before adopting: %w", err)

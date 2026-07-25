@@ -56,7 +56,11 @@ type daemonLifecycle struct {
 	transactionID string
 	phase         DaemonPhase
 	restored      bool
-	listeners     DaemonListenerStatus
+	// released is set when the previous-binary supervisor lifts this candidate's
+	// probation. It gates mutation ADMISSION; transactionID is kept for the whole
+	// boot as the supervisor's IDENTITY (#1947), so the two never conflate.
+	released  bool
+	listeners DaemonListenerStatus
 }
 
 const daemonBootIDBytes = 16
@@ -109,52 +113,71 @@ func (l *daemonLifecycle) markReady() error {
 	if !l.restored {
 		return fmt.Errorf("cannot mark daemon ready before instance restore completes")
 	}
-	if l.transactionID != "" {
+	if l.inProbationLocked() {
 		return fmt.Errorf("cannot mark a probationary daemon ready without a transaction supervisor")
 	}
 	l.phase = DaemonPhaseReady
 	return nil
 }
 
-// releaseUpgradeProbation clears an upgrade candidate's probation once its
-// previous-binary supervisor has validated it, so it admits ordinary daemon
-// work. expectedTransactionID must match the probation this daemon is actually
-// under — a mismatch means the request is for a different candidate and is
-// refused, so a stale or misdirected release can never arm the wrong daemon.
-// After the id is cleared the daemon is an ordinary daemon and reports ready.
+// releaseUpgradeProbation lifts an upgrade candidate's probation once its
+// previous-binary supervisor has validated it, so it admits ordinary daemon work.
+// expectedTransactionID must match the probation this daemon is under — a mismatch
+// means the request is for a different candidate and is refused, so a stale or
+// misdirected release can never arm the wrong daemon.
+//
+// It sets a `released` flag; it does NOT clear transactionID. That id is the
+// supervisor's identity for this candidate boot and must be reported by Ping for
+// the WHOLE boot, including after release, so the supervisor can still reject a
+// different daemon that answers the same socket (#1947, control_types.go). Erasing
+// it would make the supervisor's post-commit re-runs of StartCandidate/
+// ValidateCandidate — PhaseCommitted is fsynced before this and only cleared by
+// Cleanup, so any re-entry replays them — miss the candidate and never converge.
+// Admission is gated on `released` instead of on the id. Idempotent: a second
+// release for the same transaction is a no-op, so a re-run cannot fail.
 func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.transactionID == "" {
-		return fmt.Errorf("daemon is not in upgrade probation")
+		return fmt.Errorf("daemon is not an upgrade candidate")
 	}
 	if expectedTransactionID != l.transactionID {
 		return fmt.Errorf("upgrade probation release for transaction %q does not match this daemon's transaction %q",
 			expectedTransactionID, l.transactionID)
 	}
+	if l.released {
+		return nil // idempotent: already released for this transaction
+	}
 	if !l.restored {
 		return fmt.Errorf("cannot release upgrade probation before instance restore completes")
 	}
-	l.transactionID = ""
+	l.released = true
 	l.phase = DaemonPhaseReady
 	return nil
+}
+
+// inProbationLocked reports whether this daemon is an upgrade candidate that has
+// NOT yet been released. It is the admission predicate — separate from the
+// transaction identity, which is retained for the whole boot. Caller holds l.mu.
+func (l *daemonLifecycle) inProbationLocked() bool {
+	return l.transactionID != "" && !l.released
 }
 
 func (l *daemonLifecycle) isUpgradeProbation() bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.transactionID != ""
+	return l.inProbationLocked()
 }
 
-// mutationAdmissionError blocks every mutation for an upgrade candidate until
-// its previous-binary supervisor releases probation. Normal warm-up deliberately
+// mutationAdmissionError blocks every mutation for an upgrade candidate until its
+// previous-binary supervisor releases probation. Normal warm-up deliberately
 // remains allowed here: disk-backed task/config writes have always been safe
 // during restore, while session-state mutations are separately gated on
 // Manager.Ready by requireStateMutationAdmission.
 func (l *daemonLifecycle) mutationAdmissionError() error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	if l.transactionID != "" {
+	if l.inProbationLocked() {
 		return errDaemonUpgradeProbation(l.transactionID)
 	}
 	return nil

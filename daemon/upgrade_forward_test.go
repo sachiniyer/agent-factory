@@ -49,6 +49,7 @@ func stubForwardEnv(t *testing.T) string {
 	pRelease := releaseCandidateProbationFn
 	pAdopt := adoptAfterUpgradeCommitFn
 	pRun := runRecoveryActorFn
+	pAdoptSup := adoptSupervisionProbeFn
 	t.Cleanup(func() {
 		upgradeValidateGrace, upgradeValidatePoll = pg, pp
 		awaitActivationGrace, awaitActivationPoll = ag, ap
@@ -60,6 +61,7 @@ func stubForwardEnv(t *testing.T) string {
 		releaseCandidateProbationFn = pRelease
 		adoptAfterUpgradeCommitFn = pAdopt
 		runRecoveryActorFn = pRun
+		adoptSupervisionProbeFn = pAdoptSup
 	})
 	upgradeValidateGrace, upgradeValidatePoll = 500*time.Millisecond, time.Millisecond
 	awaitActivationGrace, awaitActivationPoll = 500*time.Millisecond, time.Millisecond
@@ -95,8 +97,10 @@ func TestUpgradeForward_CommitSequence(t *testing.T) {
 	}
 	released := false
 	releaseCandidateProbationFn = func(id string) error {
+		// Release lifts probation but KEEPS the transaction id — the candidate
+		// reports it for its whole boot (#1947), so the supervisor's post-commit
+		// re-runs still recognize it.
 		if id == state.txnID {
-			state.txnID = ""
 			released = true
 		}
 		return nil
@@ -120,8 +124,19 @@ func TestUpgradeForward_CommitSequence(t *testing.T) {
 	if err := approveCandidateDaemon(ctx, journal); err != nil {
 		t.Fatalf("ApproveCandidate: %v", err)
 	}
-	if !released || state.txnID != "" {
+	if !released {
 		t.Fatal("commit did not release the candidate from probation")
+	}
+	if state.txnID != journal.ID {
+		t.Fatal("release must KEEP the candidate's transaction id (#1947), not erase it")
+	}
+	// The supervisor re-runs StartCandidate/ValidateCandidate on any PhaseCommitted
+	// re-entry; both must still recognize the released candidate by its retained id.
+	if err := startCandidateDaemon(ctx, journal); err != nil {
+		t.Fatalf("StartCandidate re-run after release: %v", err)
+	}
+	if err := validateCandidateDaemon(ctx, journal); err != nil {
+		t.Fatalf("ValidateCandidate re-run after release must still recognize the candidate: %v", err)
 	}
 }
 
@@ -265,17 +280,97 @@ func TestReleaseUpgradeProbation(t *testing.T) {
 	}
 	lifecycle.markRestoreComplete() // → probation
 
+	if lifecycle.mutationAdmissionError() == nil {
+		t.Fatal("mutations must be blocked while in probation")
+	}
 	if err := lifecycle.releaseUpgradeProbation("other-txn"); err == nil {
 		t.Fatal("a mismatched transaction id must be refused")
 	}
 	if err := lifecycle.releaseUpgradeProbation("txn-1"); err != nil {
 		t.Fatalf("matching release: %v", err)
 	}
+	// Admission opens and probation is lifted, but the transaction id is KEPT for
+	// the whole boot (#1947): erasing it would break the supervisor's post-commit
+	// re-runs and its ability to reject a different daemon on the same socket.
 	if lifecycle.snapshot().phase != DaemonPhaseReady || lifecycle.isUpgradeProbation() {
-		t.Fatal("release must clear probation and mark ready")
+		t.Fatal("release must lift probation and mark ready")
 	}
-	if err := lifecycle.releaseUpgradeProbation("txn-1"); err == nil {
-		t.Fatal("releasing a daemon that is not in probation must be refused")
+	if lifecycle.mutationAdmissionError() != nil {
+		t.Fatal("mutations must be admitted after release")
+	}
+	if lifecycle.snapshot().transactionID != "txn-1" {
+		t.Fatal("release must KEEP the transaction id, not erase it (#1947)")
+	}
+	// Idempotent: a re-run of ApproveCandidate at PhaseCommitted must not fail.
+	if err := lifecycle.releaseUpgradeProbation("txn-1"); err != nil {
+		t.Fatalf("a second release for the same transaction must be a no-op, got %v", err)
+	}
+
+	// A daemon that never entered probation cannot be released.
+	ordinary, err := newDaemonLifecycle("", "", "")
+	if err != nil {
+		t.Fatalf("newDaemonLifecycle: %v", err)
+	}
+	ordinary.markRestoreComplete()
+	if err := ordinary.releaseUpgradeProbation("txn-1"); err == nil {
+		t.Fatal("releasing a daemon that is not an upgrade candidate must be refused")
+	}
+}
+
+// adoptAfterUpgradeCommit must stop a daemon ONLY when it is our committed
+// candidate (reports our transaction id) AND a DEFINITE probe says it is not
+// unit-supervised. A different daemon (identity guard) or an UNDETERMINED probe (a
+// systemctl timeout, or an older responder with no Ping pid — the rollback shape)
+// must leave the daemon alone: a fabricated "not supervised" would stop a live one.
+func TestAdoptAfterUpgradeCommit_OnlyStopsOurCandidateOnADefiniteAnswer(t *testing.T) {
+	activeUnit := SupervisionInfo{
+		Supported: true, UnitPresent: true, Active: AnswerYes(),
+		MainPID: 99, MainPIDPresent: AnswerYes(),
+	}
+	for _, tc := range []struct {
+		name        string
+		health      HealthStatus
+		supervised  SupervisionInfo
+		wantHandoff bool
+	}{
+		{
+			name:        "definite ad-hoc for our candidate → hand off",
+			health:      HealthStatus{DaemonVersion: "1.0.200", TransactionID: "txn-1", ServingPID: 42},
+			supervised:  activeUnit, // MainPID 99 != serving 42 → No → proceed
+			wantHandoff: true,
+		},
+		{
+			name:        "a different daemon is not touched (identity guard)",
+			health:      HealthStatus{DaemonVersion: "1.0.100", TransactionID: "other", ServingPID: 42},
+			supervised:  activeUnit,
+			wantHandoff: false,
+		},
+		{
+			name:        "undetermined supervision does not authorize a stop",
+			health:      HealthStatus{DaemonVersion: "1.0.100", TransactionID: "txn-1", ServingPID: 0}, // no pid → Undetermined
+			supervised:  activeUnit,
+			wantHandoff: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := stubForwardEnv(t)
+			unitDir := withAutostartTestEnv(t, "linux")
+			unit := systemdAutostartUnit("/opt/agent-factory/bin/af", "", "", home)
+			if err := os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600); err != nil {
+				t.Fatalf("write home-serving unit: %v", err)
+			}
+			upgradeRecoveryHealthFn = func() HealthStatus { return tc.health }
+			adoptSupervisionProbeFn = func() SupervisionInfo { return tc.supervised }
+			handedOff := false
+			startPreviousViaUnitFn = func() error { handedOff = true; return nil }
+
+			if err := adoptAfterUpgradeCommit("txn-1"); err != nil {
+				t.Fatalf("adoptAfterUpgradeCommit: %v", err)
+			}
+			if handedOff != tc.wantHandoff {
+				t.Fatalf("hand-off: got %v want %v", handedOff, tc.wantHandoff)
+			}
+		})
 	}
 }
 
@@ -285,15 +380,17 @@ func TestAdoptAfterUpgradeCommit_NoUnitOwnerNoOps(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	withAutostartTestEnv(t, "linux") // no unit file written → ad-hoc owner
-	if err := adoptAfterUpgradeCommit(); err != nil {
+	if err := adoptAfterUpgradeCommit("txn-1"); err != nil {
 		t.Fatalf("with no installed unit adopt must no-op, got %v", err)
 	}
 }
 
-// RunUpgradeRecoveryActor hands a unit-owned home's committed daemon to the
-// installed unit after Supervisor.Run returns, and skips the hand-off for an
-// ad-hoc home.
-func TestRunUpgradeRecoveryActor_AdoptsUnitOwnerAfterSuccess(t *testing.T) {
+// RunUpgradeRecoveryActor hands the committed daemon to the installed unit ONLY on
+// a positive commit signal: OUR unit transaction whose journal is gone afterward.
+// A nil return from a stand-down (journal still present) must NOT trigger the
+// hand-off — that conflation would let a stale recovery job kill a live daemon
+// from a different, in-flight transaction (the P1-b failure).
+func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 	systemdJob := upgradetxn.RecoveryJob{
 		Kind:     upgradetxn.RecoveryJobSystemd,
 		Name:     "agent-factory-upgrade-recovery-txn-1.service",
@@ -304,10 +401,12 @@ func TestRunUpgradeRecoveryActor_AdoptsUnitOwnerAfterSuccess(t *testing.T) {
 		ownerKind   upgradetxn.SupervisionKind
 		serviceName string
 		recoveryJob upgradetxn.RecoveryJob
+		committed   bool // whether the actor removed the journal (a real commit)
 		wantAdopt   bool
 	}{
-		{"systemd owner adopts", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, true},
-		{"ad-hoc owner does not adopt", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, false},
+		{"systemd owner, committed", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, true, true},
+		{"systemd owner, stand-down (journal retained)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, false, false},
+		{"ad-hoc owner, committed", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := stubForwardEnv(t)
@@ -328,17 +427,21 @@ func TestRunUpgradeRecoveryActor_AdoptsUnitOwnerAfterSuccess(t *testing.T) {
 			}
 
 			runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) error {
-				return nil // commit succeeded
+				if tc.committed {
+					// Simulate the commit path's lease.Cleanup() removing the journal.
+					_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+				}
+				return nil
 			}
 			adopted := false
-			adoptAfterUpgradeCommitFn = func() error { adopted = true; return nil }
+			adoptAfterUpgradeCommitFn = func(string) error { adopted = true; return nil }
 
 			if err := RunUpgradeRecoveryActor(context.Background(),
 				upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"}); err != nil {
 				t.Fatalf("RunUpgradeRecoveryActor: %v", err)
 			}
 			if adopted != tc.wantAdopt {
-				t.Fatalf("adopt-at-commit: got %v want %v for %s owner", adopted, tc.wantAdopt, tc.ownerKind)
+				t.Fatalf("hand-off: got adopted=%v want %v (%s)", adopted, tc.wantAdopt, tc.name)
 			}
 		})
 	}
