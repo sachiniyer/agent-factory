@@ -34,60 +34,70 @@ var (
 	activationApprovedFn        = activationApproved
 	releaseCandidateProbationFn = releaseCandidateProbation
 	adoptAfterUpgradeCommitFn   = adoptAfterUpgradeCommit
-	adoptSupervisionProbeFn     = AutostartSupervision
 )
 
-// adoptAfterUpgradeCommit hands the just-committed candidate — which ran ad-hoc
-// through probation (Option A) — to the installed unit, reusing the #2168 adopt
-// lifecycle. It MUST run only after Supervisor.Run returns and the journal is
-// gone (the caller proves this), so the unit-started daemon (runDaemon(cfg,""))
-// does not defer to a still-active transaction in the entrypoint gate.
+// adoptAfterUpgradeCommit replaces the just-committed candidate with a fresh
+// daemon that fully arms in place. The candidate ran ad-hoc through probation
+// (Option A), so at commit it is BLOCKED in runDaemon's probation branch: Ping and
+// `af daemon status` report it ready (releaseUpgradeProbation opened admission),
+// but nothing ever signalled that select, so it never armed its scheduler,
+// watchers, or session poll — a zombie that reports success. Stopping it and
+// starting a fresh daemon (which passes through the whole startup path) is what
+// arms the loops. This is NOT unit-only: an ad-hoc home has no unit to defer to,
+// so without this hand-off the parked candidate would be the permanent
+// post-upgrade daemon, and cron/watch/session-restore would silently never run.
 //
-// It is guarded by IDENTITY, not just supervision state: it stops a daemon only
+// It MUST run only after Supervisor.Run returns and the journal is gone (the
+// caller proves this), so a unit-started or ad-hoc daemon (runDaemon(cfg,"")) does
+// not defer to a still-active transaction in the entrypoint gate.
+//
+// The stop is guarded by IDENTITY, not supervision state: it stops a daemon only
 // when that daemon IS our committed candidate — it reports expectedTransactionID,
 // which the candidate keeps for its whole boot (#1947). A responder that is a
 // different daemon (a foreign transaction's candidate, or an ordinary daemon with
-// no id) is never touched. And it stops a daemon only on a DEFINITE "not
-// unit-supervised" answer: an UNDETERMINED probe (a systemctl timeout, or an older
-// responder that reports no Ping pid — the normal rollback shape) must never be
-// read as "not supervised" and used to stop a live daemon.
+// no id — the shape a rollback's restored previous daemon has) is never touched.
+// The identity guard is the whole protection: our committed candidate is always
+// the ad-hoc process we spawned, so once it is id-matched the stop is always
+// correct, and no supervision probe is needed (nor wanted — an UNDETERMINED probe
+// on a systemctl blip must not leave our own parked candidate un-replaced).
 //
-// Best-effort: the commit is irreversible, so a failed hand-off is warned by the
-// caller, not fatal.
-func adoptAfterUpgradeCommit(expectedTransactionID string) error {
+// The fresh daemon starts under whichever owner supervises this home. If the unit
+// start fails, it falls back to an ad-hoc spawn so a COMMITTED upgrade NEVER ends
+// with zero daemons — the candidate exited cleanly, so systemd would not restart
+// it, and the loops would stay dead until the next `af` invocation. Best-effort:
+// the commit is irreversible, so a failed hand-off is warned by the caller.
+func adoptAfterUpgradeCommit(expectedTransactionID, canonicalExecPath string) error {
+	h := upgradeRecoveryHealthFn()
+	if h.PingErr != nil {
+		return nil // the committed candidate should be serving; nothing answers → nothing to hand off
+	}
+	if h.TransactionID != expectedTransactionID {
+		return nil // not our committed candidate (a rollback's restored previous, or a different transaction)
+	}
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return err
 	}
-	owner, err := ResolveSupervisionOwner(configDir)
-	if err != nil || owner != OwnerUnit {
-		return nil // no installed unit serves this home — nothing to hand off to
+	// A resolve failure is unknown, not ad-hoc — but the candidate still must be
+	// replaced, and an ad-hoc spawn always leaves a daemon whether or not a unit
+	// exists, so fall through to it (the unit, if any, can re-adopt via `af daemon
+	// adopt`). Only a definite OwnerUnit takes the unit path.
+	owner, _ := ResolveSupervisionOwner(configDir)
+	if _, err := stopDaemonFn(); err != nil {
+		return fmt.Errorf("stop the committed candidate before handing it off: %w", err)
 	}
-	h := upgradeRecoveryHealthFn()
-	if h.PingErr != nil {
-		return nil // no responder to hand off
-	}
-	if h.TransactionID != expectedTransactionID {
-		return nil // the responder is not our committed candidate — leave it untouched
-	}
-	proceed := false
-	ServingDaemonSupervised(h, adoptSupervisionProbeFn()).Match(
-		func() {},                 // yes: already unit-supervised → nothing to do
-		func() { proceed = true }, // no: definitely ad-hoc → hand off to the unit
-		func() {},                 // not-found: manager has no record → do not stop it
-		func(error) {},            // undetermined: could not ask → do NOT stop a live daemon
-	)
-	if !proceed {
-		return nil
-	}
-	if _, err := StopDaemon(); err != nil {
-		return fmt.Errorf("stop the ad-hoc committed candidate before adopting: %w", err)
-	}
-	if err := WaitForShutdownCompletion(); err != nil {
+	if err := waitForShutdownFn(); err != nil {
 		return fmt.Errorf("the committed candidate did not release the control socket: %w", err)
 	}
-	if err := startPreviousViaUnitFn(); err != nil {
-		return fmt.Errorf("start the installed unit to supervise the committed candidate: %w", err)
+	if owner == OwnerUnit {
+		if unitErr := startPreviousViaUnitFn(); unitErr == nil {
+			return nil
+		} else {
+			log.WarningLog.Printf("upgrade committed but starting the installed unit failed; falling back to an ad-hoc daemon (run `af daemon adopt` to re-supervise): %v", unitErr)
+		}
+	}
+	if err := startPreviousAdHocFn(canonicalExecPath); err != nil {
+		return fmt.Errorf("start a daemon for the committed candidate: %w", err)
 	}
 	return nil
 }

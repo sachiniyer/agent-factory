@@ -49,7 +49,8 @@ func stubForwardEnv(t *testing.T) string {
 	pRelease := releaseCandidateProbationFn
 	pAdopt := adoptAfterUpgradeCommitFn
 	pRun := runRecoveryActorFn
-	pAdoptSup := adoptSupervisionProbeFn
+	pStop := stopDaemonFn
+	pWait := waitForShutdownFn
 	t.Cleanup(func() {
 		upgradeValidateGrace, upgradeValidatePoll = pg, pp
 		awaitActivationGrace, awaitActivationPoll = ag, ap
@@ -61,7 +62,8 @@ func stubForwardEnv(t *testing.T) string {
 		releaseCandidateProbationFn = pRelease
 		adoptAfterUpgradeCommitFn = pAdopt
 		runRecoveryActorFn = pRun
-		adoptSupervisionProbeFn = pAdoptSup
+		stopDaemonFn = pStop
+		waitForShutdownFn = pWait
 	})
 	upgradeValidateGrace, upgradeValidatePoll = 500*time.Millisecond, time.Millisecond
 	awaitActivationGrace, awaitActivationPoll = 500*time.Millisecond, time.Millisecond
@@ -79,6 +81,21 @@ func forwardJournal(home string) upgradetxn.Journal {
 	}
 }
 
+// wireStopToState makes the stop seam actually take the fake daemon down, so a
+// StopConfirmed assertion is LOAD-BEARING: the stop must clear the daemon AND the
+// wait must then observe it gone. If stopDaemonForRecovery ever regressed to
+// confirm a stop it never observed (the fabricated-confirmation class), the wait
+// would still see the daemon up and the sequence would report StopStillRunning.
+func wireStopToState(state *fakeDaemon) {
+	stopDaemonFn = func() (bool, error) { state.up = false; return true, nil }
+	waitForShutdownFn = func() error {
+		if state.up {
+			return errors.New("control socket still answering")
+		}
+		return nil
+	}
+}
+
 // TestUpgradeForward_CommitSequence drives the production forward ops in the order
 // Supervisor.Run invokes them, proving they interoperate: the candidate is
 // launched WITH the transaction id, validated at ToVersion, and released from
@@ -90,6 +107,7 @@ func TestUpgradeForward_CommitSequence(t *testing.T) {
 
 	state := &fakeDaemon{up: true, version: "1.0.100", httpBound: true} // previous daemon serving
 	upgradeRecoveryHealthFn = func() HealthStatus { return state.health() }
+	wireStopToState(state)
 	activationApprovedFn = func(upgradetxn.Journal) (bool, error) { return true, nil }
 	launchCandidateDaemonFn = func(_, id string) error {
 		*state = fakeDaemon{up: true, version: "1.0.200", txnID: id, httpBound: true}
@@ -151,6 +169,7 @@ func TestUpgradeForward_BrokenCandidateRollsBack(t *testing.T) {
 
 	state := &fakeDaemon{up: true, version: "1.0.100", httpBound: true}
 	upgradeRecoveryHealthFn = func() HealthStatus { return state.health() }
+	wireStopToState(state)
 	activationApprovedFn = func(upgradetxn.Journal) (bool, error) { return true, nil }
 	launchCandidateDaemonFn = func(_, id string) error {
 		*state = fakeDaemon{up: true, version: "9.9.9-broken", txnID: id, httpBound: true}
@@ -317,79 +336,109 @@ func TestReleaseUpgradeProbation(t *testing.T) {
 	}
 }
 
-// adoptAfterUpgradeCommit must stop a daemon ONLY when it is our committed
-// candidate (reports our transaction id) AND a DEFINITE probe says it is not
-// unit-supervised. A different daemon (identity guard) or an UNDETERMINED probe (a
-// systemctl timeout, or an older responder with no Ping pid — the rollback shape)
-// must leave the daemon alone: a fabricated "not supervised" would stop a live one.
-func TestAdoptAfterUpgradeCommit_OnlyStopsOurCandidateOnADefiniteAnswer(t *testing.T) {
-	activeUnit := SupervisionInfo{
-		Supported: true, UnitPresent: true, Active: AnswerYes(),
-		MainPID: 99, MainPIDPresent: AnswerYes(),
-	}
+// adoptAfterUpgradeCommit replaces the parked committed candidate with a fresh,
+// fully-armed daemon under whatever owns the home. The stop is identity-guarded —
+// only a responder reporting OUR transaction id is ever stopped — and every owner
+// (unit AND ad-hoc) is handed off, because the ad-hoc probation candidate would
+// otherwise stay parked forever (the P1 zombie). If the unit start fails after the
+// stop, it falls back to an ad-hoc spawn so a committed upgrade never ends with
+// zero daemons (P2).
+func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testing.T) {
+	const canonicalExec = "/opt/agent-factory/bin/af"
+	ourCandidate := HealthStatus{DaemonVersion: "1.0.200", TransactionID: "txn-1", ServingPID: 42}
 	for _, tc := range []struct {
-		name        string
-		health      HealthStatus
-		supervised  SupervisionInfo
-		wantHandoff bool
+		name           string
+		installUnit    bool // a home-serving unit exists → OwnerUnit, else OwnerAdHoc
+		health         HealthStatus
+		unitStartErr   error
+		wantStopped    bool
+		wantUnitStart  bool
+		wantAdHocStart bool
 	}{
 		{
-			name:        "definite ad-hoc for our candidate → hand off",
-			health:      HealthStatus{DaemonVersion: "1.0.200", TransactionID: "txn-1", ServingPID: 42},
-			supervised:  activeUnit, // MainPID 99 != serving 42 → No → proceed
-			wantHandoff: true,
+			name:          "unit owner: stop the ad-hoc candidate, start it under the unit",
+			installUnit:   true,
+			health:        ourCandidate,
+			wantStopped:   true,
+			wantUnitStart: true,
 		},
 		{
-			name:        "a different daemon is not touched (identity guard)",
+			// The P1 fix: an ad-hoc home has no unit, so without this hand-off the
+			// parked candidate would be the permanent daemon with its loops unarmed.
+			name:           "ad-hoc owner: stop the parked candidate, respawn it ad-hoc",
+			installUnit:    false,
+			health:         ourCandidate,
+			wantStopped:    true,
+			wantAdHocStart: true,
+		},
+		{
+			// The P2 fix: never leave zero daemons on a committed upgrade.
+			name:           "unit start fails → ad-hoc fallback",
+			installUnit:    true,
+			health:         ourCandidate,
+			unitStartErr:   errors.New("systemctl unavailable"),
+			wantStopped:    true,
+			wantUnitStart:  true,
+			wantAdHocStart: true,
+		},
+		{
+			name:        "a different daemon is never stopped (identity guard)",
+			installUnit: true,
 			health:      HealthStatus{DaemonVersion: "1.0.100", TransactionID: "other", ServingPID: 42},
-			supervised:  activeUnit,
-			wantHandoff: false,
 		},
 		{
-			name:        "undetermined supervision does not authorize a stop",
-			health:      HealthStatus{DaemonVersion: "1.0.100", TransactionID: "txn-1", ServingPID: 0}, // no pid → Undetermined
-			supervised:  activeUnit,
-			wantHandoff: false,
+			name:        "no responder → no-op",
+			installUnit: true,
+			health:      HealthStatus{PingErr: errors.New("no daemon")},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := stubForwardEnv(t)
 			unitDir := withAutostartTestEnv(t, "linux")
-			unit := systemdAutostartUnit("/opt/agent-factory/bin/af", "", "", home)
-			if err := os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600); err != nil {
-				t.Fatalf("write home-serving unit: %v", err)
+			if tc.installUnit {
+				unit := systemdAutostartUnit(canonicalExec, "", "", home)
+				if err := os.WriteFile(filepath.Join(unitDir, autostartUnitName), []byte(unit), 0o600); err != nil {
+					t.Fatalf("write home-serving unit: %v", err)
+				}
 			}
 			upgradeRecoveryHealthFn = func() HealthStatus { return tc.health }
-			adoptSupervisionProbeFn = func() SupervisionInfo { return tc.supervised }
-			handedOff := false
-			startPreviousViaUnitFn = func() error { handedOff = true; return nil }
+			stopped := false
+			stopDaemonFn = func() (bool, error) { stopped = true; return true, nil }
+			waitForShutdownFn = func() error { return nil }
+			unitStarted := false
+			startPreviousViaUnitFn = func() error { unitStarted = true; return tc.unitStartErr }
+			adhocStarted := false
+			startPreviousAdHocFn = func(execPath string) error {
+				adhocStarted = true
+				if execPath != canonicalExec {
+					t.Fatalf("ad-hoc respawn used %q, want the canonical path %q", execPath, canonicalExec)
+				}
+				return nil
+			}
 
-			if err := adoptAfterUpgradeCommit("txn-1"); err != nil {
+			if err := adoptAfterUpgradeCommit("txn-1", canonicalExec); err != nil {
 				t.Fatalf("adoptAfterUpgradeCommit: %v", err)
 			}
-			if handedOff != tc.wantHandoff {
-				t.Fatalf("hand-off: got %v want %v", handedOff, tc.wantHandoff)
+			if stopped != tc.wantStopped {
+				t.Fatalf("stopped: got %v want %v", stopped, tc.wantStopped)
+			}
+			if unitStarted != tc.wantUnitStart {
+				t.Fatalf("unit start: got %v want %v", unitStarted, tc.wantUnitStart)
+			}
+			if adhocStarted != tc.wantAdHocStart {
+				t.Fatalf("ad-hoc start: got %v want %v", adhocStarted, tc.wantAdHocStart)
 			}
 		})
 	}
 }
 
-func TestAdoptAfterUpgradeCommit_NoUnitOwnerNoOps(t *testing.T) {
-	// A throwaway home has no installed unit, so ResolveSupervisionOwner is ad-hoc
-	// and there is nothing to hand off to — a no-op success, never a StopDaemon.
-	home := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", home)
-	withAutostartTestEnv(t, "linux") // no unit file written → ad-hoc owner
-	if err := adoptAfterUpgradeCommit("txn-1"); err != nil {
-		t.Fatalf("with no installed unit adopt must no-op, got %v", err)
-	}
-}
-
-// RunUpgradeRecoveryActor hands the committed daemon to the installed unit ONLY on
-// a positive commit signal: OUR unit transaction whose journal is gone afterward.
-// A nil return from a stand-down (journal still present) must NOT trigger the
-// hand-off — that conflation would let a stale recovery job kill a live daemon
-// from a different, in-flight transaction (the P1-b failure).
+// RunUpgradeRecoveryActor arms the post-upgrade daemon ONLY on a positive commit
+// signal: OUR transaction whose journal is gone afterward. A nil return from a
+// stand-down (journal still present) must NOT trigger the hand-off — that
+// conflation would let a stale recovery job kill a live daemon from a different,
+// in-flight transaction (the P1-b failure). Both owner kinds hand off on commit:
+// the ad-hoc candidate is parked in probation and must be respawned too, not just
+// unit-owned homes.
 func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 	systemdJob := upgradetxn.RecoveryJob{
 		Kind:     upgradetxn.RecoveryJobSystemd,
@@ -406,7 +455,7 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 	}{
 		{"systemd owner, committed", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, true, true},
 		{"systemd owner, stand-down (journal retained)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, false, false},
-		{"ad-hoc owner, committed", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, true, false},
+		{"ad-hoc owner, committed", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := stubForwardEnv(t)
@@ -434,7 +483,7 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 				return nil
 			}
 			adopted := false
-			adoptAfterUpgradeCommitFn = func(string) error { adopted = true; return nil }
+			adoptAfterUpgradeCommitFn = func(string, string) error { adopted = true; return nil }
 
 			if err := RunUpgradeRecoveryActor(context.Background(),
 				upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"}); err != nil {

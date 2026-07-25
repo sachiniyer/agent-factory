@@ -29,6 +29,13 @@ var (
 	startPreviousViaUnitFn  = RestartAutostartUnit
 	startPreviousAdHocFn    = launchDaemonProcessAt
 	runRecoveryActorFn      = upgradetxn.RunRecoveryActor
+	// The stop is seamed separately from the health probe so a test's stop actually
+	// changes what the health probe then reports (the daemon going quiet). Bound to
+	// the real primitives, StopConfirmed hinges on WaitForShutdownCompletion
+	// OBSERVING the socket close — the fabricated-confirmation guard these ops exist
+	// to hold — so the seam must preserve that observe-then-confirm ordering.
+	stopDaemonFn      = StopDaemon
+	waitForShutdownFn = WaitForShutdownCompletion
 )
 
 // HandleUpgradeRecoveryExec consumes the internal __upgrade-recovery invocation
@@ -73,17 +80,20 @@ func HandleUpgradeRecoveryExec() {
 // precisely to cross that boundary.
 func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.RecoveryInvocation) error {
 	// Capture, BEFORE the supervisor runs, whether OUR transaction (id-matched, not
-	// a foreign or stale one that happens to be active) is owned by an installed
-	// unit — a successful commit removes the journal during Cleanup, taking the
-	// owner with it. Only a service-managed home needs the post-commit hand-off.
-	ourUnitTransaction := false
+	// a foreign or stale one that happens to be active) is the one recovering, and
+	// the canonical path its committed candidate occupies — a successful commit
+	// removes the journal during Cleanup, taking both with it. EVERY owner needs the
+	// post-commit hand-off, not just unit-owned homes: the candidate ran ad-hoc
+	// through probation and is parked in runDaemon's probation branch, so on an
+	// ad-hoc home the parked process would otherwise be the permanent post-upgrade
+	// daemon with its scheduler/watchers/session-restore never armed (#2212 R2a).
+	ourTransaction := false
+	var canonicalExecPath string
 	if txn, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
 		journal := txn.Journal()
 		if journal.ID == invocation.TransactionID {
-			switch journal.Daemon.Owner.Kind {
-			case upgradetxn.SupervisionSystemd, upgradetxn.SupervisionLaunchd:
-				ourUnitTransaction = true
-			}
+			ourTransaction = true
+			canonicalExecPath = journal.ExecutablePath
 		}
 	}
 
@@ -95,19 +105,19 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil for
 	// a clean stand-down (a foreign/stale transaction we had no authority over),
 	// ErrRecoveryActive, and a terminal rollback (which restores the previous daemon
-	// already under its unit). Hand off ONLY on a positive commit signal — this was
-	// OUR unit transaction AND its journal is now gone (Cleanup ran). rollback_failed
+	// under its own owner). Hand off ONLY on a positive commit signal — this was OUR
+	// transaction AND its journal is now gone (Cleanup ran). rollback_failed
 	// deliberately RETAINS the journal, and a newer transaction leaves a different one
 	// — both leave a journal, so both are excluded here. The hand-off is additionally
 	// id-guarded so it can only ever stop our own committed candidate.
-	if !ourUnitTransaction {
+	if !ourTransaction {
 		return nil
 	}
 	if _, loadErr := upgradetxn.Load(invocation.HomeDir); !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
 		return nil // a journal is still present — not a completed commit of our transaction
 	}
-	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID); err != nil {
-		log.WarningLog.Printf("upgrade committed but handing the daemon to the installed unit did not complete; check `af daemon status` and `af doctor`: %v", err)
+	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
+		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
 	}
 	return nil
 }
@@ -178,10 +188,10 @@ func stopDaemonForRecovery(journal upgradetxn.Journal, role string) (upgradetxn.
 	if err := recoveryHomeGuard(journal); err != nil {
 		return upgradetxn.StopUnknown, err
 	}
-	if _, err := StopDaemon(); err != nil {
+	if _, err := stopDaemonFn(); err != nil {
 		return upgradetxn.StopUnknown, fmt.Errorf("stop upgrade %s daemon: %w", role, err)
 	}
-	if err := WaitForShutdownCompletion(); err != nil {
+	if err := waitForShutdownFn(); err != nil {
 		// The socket is still answering at the deadline. Report it as still
 		// running rather than confirming a stop we could not observe.
 		return upgradetxn.StopStillRunning, nil
