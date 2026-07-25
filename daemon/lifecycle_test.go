@@ -251,6 +251,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"SpawnConfigAgent": blockedDuringProbation,
 	"TriggerTask":      blockedDuringProbation,
 	"UpdateTask":       blockedDuringProbation,
+	"ApplyConfig":      allowedDuringProbation,
 	"GetConfig":        allowedDuringProbation,
 	"ListBackends":     allowedDuringProbation,
 	"ListPrograms":     allowedDuringProbation,

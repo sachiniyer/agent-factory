@@ -17,7 +17,13 @@ import (
 // startup config m.cfg is deliberately separate — it backs only the keys that do
 // NOT hot-reload (root_agents, and the network listener keys until PR2).
 func (m *Manager) Config() *config.Config {
-	return m.live.Load()
+	if c := m.live.Load(); c != nil {
+		return c
+	}
+	// A manager built directly as &Manager{cfg: …} (some tests, and any path that
+	// skips newManagerShellForDaemon) never seeds live; fall back to the frozen
+	// startup config so Config() is never nil.
+	return m.cfg
 }
 
 // ApplyConfigResult reports the outcome of an in-place config apply (#2480), so a

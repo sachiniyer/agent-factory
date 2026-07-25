@@ -136,6 +136,14 @@ func TestManagerCreateSessionDoesNotPersistGlobalEnvironmentGrant(t *testing.T) 
 	if err := config.SaveConfig(current); err != nil {
 		t.Fatal(err)
 	}
+	// #2480: session_env_passthrough now reaches a create through the daemon's live
+	// config snapshot, applied on save, rather than a fresh per-create disk read (a
+	// deliberate, documented behavior change). Apply the new on-disk grant so the
+	// create's op-entry snapshot carries it — the security property below (grants
+	// are never persisted per-instance) is unchanged either way.
+	if _, err := manager.ApplyConfig(); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
 	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
 		Title:    "configured-env",
 		RepoPath: repoPath,

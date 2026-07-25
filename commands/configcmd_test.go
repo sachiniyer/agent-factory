@@ -392,10 +392,12 @@ func TestConfigSetWritesAndReflects(t *testing.T) {
 //  1. The echo line contains `key = value`. The briefing tells the agent to echo
 //     exactly that after every set so the user can see what changed; the CLI
 //     already prints it, which makes the shape a contract rather than a detail.
-//  2. `af config set` prints the restart note itself. The briefing tells the
-//     agent NOT to repeat it — an instruction that only makes sense while the CLI
-//     still prints it, so if this line ever disappears the briefing silently
-//     becomes wrong and the user stops being told to restart at all.
+//  2. `af config set` prints the apply/save note itself (#2480/#2479): it applies
+//     the change to a running daemon and states what took effect, and never tells
+//     the user to run a command. The briefing tells the agent NOT to repeat this
+//     line — an instruction that only makes sense while the CLI still prints it,
+//     so if it disappears the briefing silently becomes wrong and nobody tells the
+//     user what happened.
 //  3. The value round-trips through `af config get`, the file still loads, and
 //     the atomic write leaves no partial or temp file behind.
 func TestConfigSetEchoesKeyValueAndRoundTrips(t *testing.T) {
@@ -414,9 +416,13 @@ func TestConfigSetEchoesKeyValueAndRoundTrips(t *testing.T) {
 	if !strings.Contains(echo, "daemon_poll_interval = 2500") {
 		t.Errorf("`af config set` must echo the change as `key = value` (the shape the config agent mirrors), got: %q", echo)
 	}
-	if !strings.Contains(echo, "restart") {
-		t.Errorf("`af config set` must print the restart note itself — the config agent's briefing tells the "+
-			"agent not to repeat it, so dropping it here means nobody tells the user. Got: %q", echo)
+	if !strings.Contains(echo, "saved") {
+		t.Errorf("`af config set` must print the apply/save note itself (#2480/#2479) — it applies to a running "+
+			"daemon and states what took effect, and the config agent's briefing tells the agent not to repeat it, "+
+			"so dropping this line means nobody tells the user. Got: %q", echo)
+	}
+	if strings.Contains(echo, "af daemon restart") {
+		t.Errorf("`af config set` must NOT tell the user to run a command (#2479); it applies the change itself. Got: %q", echo)
 	}
 
 	// Round-trip: the value comes back through the read side.
