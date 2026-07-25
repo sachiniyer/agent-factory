@@ -55,8 +55,7 @@ clones the branch back (see [Archive & restore](#archive--restore)).
   "backend": "docker",
   "docker": {
     "image": "my-org/af-runtime:latest",
-    "run_args": ["--memory", "4g", "-e", "MY_VAR=1"],
-    "mount_agent_credentials": true
+    "run_args": ["--memory", "4g", "-e", "MY_VAR=1"]
   }
 }
 ```
@@ -65,7 +64,10 @@ clones the branch back (see [Archive & restore](#archive--restore)).
 |-----|----------|-------------|
 | `docker.image` | yes | The container image the session runs in (see requirements below). |
 | `docker.run_args` | no | Extra arguments appended verbatim to `docker run` (mounts, env, resource limits). |
-| `docker.mount_agent_credentials` | no | Bind-mount the daemon user's agent credential files read-only into the container so a containerised agent can authenticate. See [Agent credentials in a container](#agent-credentials-in-a-container). |
+
+Letting a containerised agent authenticate is **not** a `docker` key — it is the
+global-only, operator-owned `docker_mount_agent_credentials` grant. See
+[Agent credentials in a container](#agent-credentials-in-a-container).
 
 The Docker runtime does not copy the daemon's whole environment into the
 container. Because repository config selects the image and its binaries, af
@@ -83,21 +85,30 @@ session using environment-backed credentials may explicitly list
 `GH_TOKEN` and `OPENAI_API_KEY`; that keeps clone, `gh`, HTTPS push, and Codex
 authentication working after the operator has made that trust decision. If you
 use stored credentials instead, mount only the relevant config or
-credential-helper resources deliberately with `docker.run_args`, or set
-`docker.mount_agent_credentials` (below); host paths and native keyrings are not
-implicitly mounted into a container.
+credential-helper resources deliberately with `docker.run_args`, or set the
+global `docker_mount_agent_credentials` grant (below); host paths and native
+keyrings are not implicitly mounted into a container.
 
 ### Agent credentials in a container
 
 Most agents authenticate from a **file in the daemon user's home** (an OAuth
 token or an API key on disk), not from an environment variable — so the
 default-deny env boundary above, on its own, leaves a containerised agent
-unauthenticated. Setting **`docker.mount_agent_credentials: true`** bind-mounts
-those credential files **read-only** into the container at provision time:
+unauthenticated.
 
-| Agent | Host file(s) mounted (read-only) → container path under `/root` |
-|-------|-----------------------------------------------------------------|
-| claude | `~/.claude/.credentials.json`, `~/.claude.json` |
+The **operator** (not a repo) opts in by setting the global
+`docker_mount_agent_credentials`:
+
+```bash
+af config set docker_mount_agent_credentials true
+```
+
+When it is on, a docker session bind-mounts **read-only** the credential file
+for **that session's own agent** — and only that agent. The mapping is:
+
+| The session's agent | Host file(s) mounted read-only → container path under `/root` |
+|---------------------|---------------------------------------------------------------|
+| claude | `~/.claude/.credentials.json` |
 | codex | `~/.codex/auth.json` |
 | gemini | `~/.gemini/{oauth_creds,gemini-credentials,google_accounts}.json` (whichever exist) |
 | amp | `~/.config/amp/settings.json` |
@@ -105,33 +116,37 @@ those credential files **read-only** into the container at provision time:
 | aider | *(none — authenticates via API-key env vars; name it in `session_env_passthrough`)* |
 | devin | `~/.config/devin/config.json` *(no effect unless your image also carries the devin CLI)* |
 
-af resolves these under the daemon user's real home and mounts **only the files
-that exist**, so:
+**Exactly one row applies per session** — the one for the session's resolved
+agent. A codex session is never handed the Claude token, and vice versa (a docker
+session's agent is fixed for its life). af resolves the file under the daemon
+user's real home and mounts it only if it exists, so:
 
-- The committed `.agent-factory/config.json` stays **portable** — it carries no
-  absolute host path and no per-box username (a raw `-v` mount in `run_args`
-  could not, since Docker does not expand `~`). This is why it is a first-class
-  key rather than a documented `run_args` recipe.
-- It mounts **files, not whole directories** — deliberately. An agent writes its
-  own state and refreshes its token inside that directory at runtime, so a
-  read-only mount of the whole dir would break it; and some of those dirs reach
-  **gigabytes** of history (`~/.codex`, `~/.local/share/opencode`). Mounting just
-  the credential file is the minimum surface and leaves the surrounding
-  container directory writable.
-- Because the mount is **read-only**, the agent can authenticate but cannot
-  refresh or rewrite the host credential (a session-lifetime token still works;
-  the disposable container discards its own writes on kill regardless).
+- **Minimum surface, per agent.** It mounts the credential **file, not the whole
+  config directory**: an agent writes state and refreshes its token inside that
+  directory at runtime, so a read-only whole-dir mount would break it, and some of
+  those dirs reach **gigabytes** of history (`~/.codex`, `~/.local/share/opencode`).
+  `~/.claude.json` is deliberately **not** mounted — it is the config/privacy blob
+  (MCP server tokens, every project path and prompt history, account and machine
+  ids), not the credential; `~/.claude/.credentials.json` is what authenticates.
+- **Read-only.** The agent authenticates but cannot refresh or rewrite the host
+  credential (a session-lifetime token still works; the disposable container
+  discards its own writes on kill regardless).
 
-!!! warning "This is a deliberate, partial hole in the boundary"
-    `mount_agent_credentials` **re-exposes those credential files to the
-    configured image** — it is the named exception to the #2329 default-deny
-    boundary, not a relaxation of it: the boundary still blocks every other host
-    path, env var, and keyring. Containment is therefore **partial by design**.
-    Enable it only for an image **and** a repo you trust with read access to your
-    agent credentials (the same trust decision `docker.image` and `run_args`
-    already represent). A container process that can run arbitrary code can read
-    every mounted credential; that is the cost of letting the agent authenticate
-    at all.
+!!! warning "A global, operator-owned grant — and a deliberate partial hole"
+    `docker_mount_agent_credentials` is **global-only**: a repository selects the
+    docker image, but only the **operator** decides whether that image may see
+    their credentials. This is enforced by *source scoping*, not a trust gate —
+    the key simply is not a repo key, so a cloned `.agent-factory/config.json`
+    that sets it hits the standard "global setting, cannot be set per-repo" error
+    (the same model as `session_env_passthrough`). Were it repo-settable, a cloned
+    third-party repo could grant **itself** the operator's credentials by shipping
+    `backend=docker` + its own image + this flag — which is exactly what the
+    default-deny boundary (#2329) exists to prevent.
+
+    When on, it **re-exposes one credential file to the configured image** — the
+    named exception to the boundary, not a relaxation of it: everything else stays
+    blocked, so containment is **partial by design**. Turn it on only for images
+    you trust with read access to that agent's credential.
 
 ### Image requirements (bring-your-own image)
 

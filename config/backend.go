@@ -62,21 +62,12 @@ type DockerConfig struct {
 	Image string `json:"image,omitempty" toml:"image,omitempty"`
 	// RunArgs are extra arguments appended verbatim to `docker run` (e.g. extra
 	// mounts, env, or resource limits). Optional.
-	RunArgs []string `json:"run_args,omitempty" toml:"run_args,omitempty"`
-	// MountAgentCredentials, when true, bind-mounts the daemon user's on-disk
-	// agent credential files READ-ONLY into the container so a containerised
-	// claude/codex/… can authenticate (#2194). af resolves each agent's
-	// credential file under the daemon user's home at provision time and mounts
-	// only the ones that exist — so the committed config stays portable (no
-	// absolute host paths, no per-box username), which raw `run_args` mounts
-	// cannot be (Docker does not expand `~`).
 	//
-	// This is a deliberate, operator-controlled HOLE in the default-deny env
-	// boundary (#2329): it re-exposes those credential files to the configured
-	// image. Enable it only for an image and repo you trust with read access to
-	// your agent credentials. Containment stays PARTIAL by design — the boundary
-	// still blocks everything else; these creds are the named exception. Optional.
-	MountAgentCredentials bool `json:"mount_agent_credentials,omitempty" toml:"mount_agent_credentials,omitempty"`
+	// NOTE: mounting agent credentials into the container is NOT a docker key.
+	// It is the global-only `docker_mount_agent_credentials` operator grant
+	// (config.Config), deliberately kept out of this repo-owned table so a cloned
+	// repo cannot grant itself the operator's credentials (#2194). See that field.
+	RunArgs []string `json:"run_args,omitempty" toml:"run_args,omitempty"`
 }
 
 // SSHConfig parameterizes the ssh runtime (#1592 Phase 4 PR3 config surface; the

@@ -206,19 +206,22 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// Resolve once in the trusted host process. The agent-server receives this
 	// exact command with --program-resolved and must not reinterpret its enum.
 	resolvedProgram := config.ResolveProgram(&cfg.Config, spec.Program)
-	// Resolve the agent credential mounts here in the host process (it stats the
-	// daemon user's home), not in runContainer, so the argv assembly stays pure.
-	var credentialMounts []string
-	if cfg.Docker.MountAgentCredentials {
-		credentialMounts = resolveAgentCredentialMounts()
-	}
 	p := &dockerProvisioner{
-		spec:             spec,
-		image:            image,
-		runArgs:          runArgs,
-		credentialMounts: credentialMounts,
-		afBin:            afBin,
-		program:          resolvedProgram,
+		spec:    spec,
+		image:   image,
+		runArgs: runArgs,
+		afBin:   afBin,
+		program: resolvedProgram,
+	}
+	// docker_mount_agent_credentials is a GLOBAL-only operator grant (config.Config,
+	// resolved from the global layer here — a repo cannot set it: the key is absent
+	// from InRepoConfig, so a repo that tries hits the standard per-repo hard error).
+	// When on, mount ONLY this session's own agent's credential file, read-only, so a
+	// repo-selected image never sees another agent's credential or anything else the
+	// operator did not grant. Resolved here in the host process (it stats the daemon
+	// user's home) so runContainer's argv assembly stays pure.
+	if cfg.DockerMountAgentCredentials {
+		p.credentialMounts = resolveAgentCredentialMounts(p.agentName())
 	}
 	res, err := p.provision()
 	if err != nil {

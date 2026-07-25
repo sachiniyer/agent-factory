@@ -373,6 +373,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "docker_mount_agent_credentials",
+		Type:       "bool",
+		Default:    "false",
+		Purpose:    "Let a docker-backend session mount the operator's on-disk credential file for that session's own agent, read-only, so it can authenticate · global-only: a repo selects the image but only the operator grants it credential access.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalOnly,
+		Precedence: precedenceGlobal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "limit_retry_interval",
 		Type:       "string",
 		Default:    "30m",
