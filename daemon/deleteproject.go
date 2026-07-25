@@ -12,6 +12,40 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// repoSessionTitlesLocked returns the titles of the repo's sessions the daemon still
+// tracks, across BOTH maps a session can live in — m.pendingCreates (a create that has
+// passed validation but not finished provisioning, so it is NOT yet in m.instances,
+// #2549) and m.instances (its live, non-archived rows). This exists because
+// m.instances is not the universe (the same class the #1892 ghostTaskRuns comment in
+// manager.go warns about, reached through a different door): a delete that walked only
+// m.instances would miss a still-provisioning create, deregister the project, and let
+// the create finish into a live orphan.
+//
+// inFlightOnly selects the ones a delete cannot archive YET — every pending create,
+// plus any m.instances row with an op in flight — which is what the up-front fail-closed
+// gate refuses on. With inFlightOnly false it returns every live-or-pending session,
+// which is the concurrent-create re-check before the deregister. The caller holds m.mu.
+func (m *Manager) repoSessionTitlesLocked(repoID string, inFlightOnly bool) []string {
+	var titles []string
+	// A pending create is always in flight (still provisioning), so it counts either way.
+	for key := range m.pendingCreates {
+		if rid, title := splitDaemonInstanceKey(key); rid == repoID {
+			titles = append(titles, title)
+		}
+	}
+	for key, inst := range m.instances {
+		rid, title := splitDaemonInstanceKey(key)
+		if rid != repoID || inst == nil || inst.GetLiveness() == session.LiveArchived {
+			continue
+		}
+		if inFlightOnly && inst.GetInFlightOp() == session.OpNone {
+			continue
+		}
+		titles = append(titles, title)
+	}
+	return titles
+}
+
 // deregisterRootAgents is the durable root_agents removal DeleteProject runs. A
 // package var so tests can force a persist failure in isolation (exercising the
 // #1740-review fatal-on-config-failure path) without disturbing the real config.
@@ -83,6 +117,23 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	}
 	result := DeleteProjectResult{RepoID: repoID}
 
+	// FAIL CLOSED, before mutating ANY state, if a session for this repo is still being
+	// created (#2549). A create lives in m.pendingCreates through its slow provisioning
+	// and only joins m.instances at the end (manager_create.go), and ArchiveSession
+	// refuses a session with an in-flight op — so such a session can neither be seen by
+	// an m.instances snapshot nor archived. Rather than block the caller on an arbitrary
+	// clock (a git clone / image pull settles in minutes, not the seconds a bounded wait
+	// could afford), refuse immediately and name the session: the create settles on its
+	// own and a retry then removes the project cleanly. Because this runs before the
+	// durable removals below, "nothing was changed" is literally true.
+	m.mu.Lock()
+	starting := m.repoSessionTitlesLocked(repoID, true)
+	m.mu.Unlock()
+	if len(starting) > 0 {
+		sort.Strings(starting)
+		return result, fmt.Errorf("delete project %s: session(s) %v are still starting; nothing was changed — delete again once they are ready", repoID, starting)
+	}
+
 	// Durably drop the repo's root_agents opt-in FIRST, before mutating ANY state,
 	// and treat a failed write as FATAL to the whole delete (#1740 review): if this
 	// removal fails, a daemon restart would re-register the root and the project
@@ -96,20 +147,10 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
 	}
 
-	// Also drop the repo's durable #2355 registry record, if any (#2456) — the
-	// symmetric counterpart to RegisterProject. The registry is now a project source
-	// (buildProjectListFrom and the web switcher union read config.ListProjects), so a
-	// delete that left the record behind would re-list the project forever. Fatal for
-	// the same reason as root_agents: a surviving record reappears on the next list.
-	// req.RepoPath is the project's root (both the web and TUI send it); a project that
-	// was never registered is a false no-op. Recorded so the projects-changed publish
-	// fires even when no session was archived (a registered, sessionless project).
-	if deregistered, regErr := config.DeregisterProject(config.ExpandTilde(strings.TrimSpace(req.RepoPath))); regErr != nil {
-		return result, fmt.Errorf("delete project %s: could not remove its durable registry record — the project would reappear, so nothing was changed; retry: %w", repoID, regErr)
-	} else if deregistered {
-		result.Deregistered = true
-		log.InfoLog.Printf("delete project %s: removed its durable registry record", repoID)
-	}
+	// The repo's durable #2355 registry record is dropped LATER, only after every
+	// session it promised to archive is actually archived (#2549): deregistering here,
+	// before the archive, is what let a session still finishing its create survive as a
+	// live orphan in a repo no longer in the registry. See the archive loop below.
 
 	// The durable removal succeeded, so now apply the in-memory suppression that
 	// stops the ensure loop re-creating the always-on root (m.cfg is immutable
@@ -118,9 +159,11 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// failed write above never leaves a dangling suppression (#1740 review).
 	m.suppressRootAgent(repoID)
 
-	// Snapshot the repo's LIVE (non-archived) sessions under the lock, then act
-	// with the lock released — ArchiveSession/KillSession take their own
-	// per-session locks and would deadlock if called while holding m.mu.
+	// Archive/kill every live session for the repo BEFORE removing its durable identity,
+	// so no session outlives the project's registry entry (#2549). The phase-1 gate above
+	// already refused if any session was mid-create, so every live session here is settled
+	// and archivable. Acting with m.mu released — ArchiveSession/KillSession take their own
+	// per-session locks and would deadlock under it.
 	type target struct {
 		id       string
 		title    string
@@ -130,10 +173,7 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	m.mu.Lock()
 	for key, inst := range m.instances {
 		rid, title := splitDaemonInstanceKey(key)
-		if rid != repoID || inst == nil {
-			continue
-		}
-		if inst.GetLiveness() == session.LiveArchived {
+		if rid != repoID || inst == nil || inst.GetLiveness() == session.LiveArchived {
 			continue
 		}
 		targets = append(targets, target{id: inst.ID, title: title, external: inst.IsExternalWorktree()})
@@ -192,11 +232,49 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	}
 
 	if len(errs) > 0 {
-		// Partial: some sessions were busy or errored mid-teardown. The delete is
-		// idempotent, so re-running it finishes the rest. Report what did happen.
+		// A genuine teardown failure — including a session that raced into an in-flight op
+		// after the phase-1 gate and so refused to archive. The delete is idempotent, so a
+		// retry finishes the rest; the registry is NOT deregistered below, so no orphan is
+		// left behind.
 		return result, fmt.Errorf("delete project %s: archived %d, tore down %d, but %d session(s) could not be removed (retry to finish): %w",
 			repoID, len(result.Archived), len(result.Killed), len(errs), errors.Join(errs...))
 	}
+
+	// Concurrent-create guard (#2549): re-check under m.mu, immediately before the
+	// deregister, that no session appeared for the repo while the lock was released for the
+	// archive above. A create that BEGINS after the phase-1 gate — landing in
+	// m.pendingCreates, or completing into m.instances — would otherwise orphan the same
+	// way through a narrower window. If one appeared, abort WITHOUT deregistering: the
+	// sessions archived so far stay archived (idempotent), and a retry finishes once the
+	// new session settles. A create landing in the microseconds between this check and the
+	// DeregisterProject call below is the one remaining, deliberately documented window;
+	// closing it fully would mean holding m.mu across the registry file lock (an ABBA
+	// hazard) for a gap this narrow.
+	m.mu.Lock()
+	appeared := m.repoSessionTitlesLocked(repoID, false)
+	m.mu.Unlock()
+	if len(appeared) > 0 {
+		sort.Strings(appeared)
+		return result, fmt.Errorf("delete project %s: archived %d, tore down %d, but a session started for this project meanwhile (%v); the project was NOT removed — delete again to finish",
+			repoID, len(result.Archived), len(result.Killed), appeared)
+	}
+
+	// Every session for the repo is archived and none is starting — NOW drop the durable
+	// #2355 registry record (after the archive, #2549): the deregister must never land
+	// while a session survives, or the delete leaves a live orphan in a repo no longer in
+	// the registry. req.RepoPath is the project's root (both the web and TUI send it); a
+	// project that was never registered is a false no-op. Recorded so the projects-changed
+	// publish fires even when no session was archived (a registered, sessionless project).
+	if deregistered, regErr := config.DeregisterProject(config.ExpandTilde(strings.TrimSpace(req.RepoPath))); regErr != nil {
+		// SYMMETRIC to an archive failure, and NOT "nothing changed": the sessions are
+		// already archived here, so a retry re-archives nothing and finishes the deregister
+		// — at worst an empty-but-registered project, never a live orphan.
+		return result, fmt.Errorf("delete project %s: archived %d session(s) but could not remove its durable registry record — the project still lists; retry to finish, a retry re-archives nothing: %w", repoID, len(result.Archived), regErr)
+	} else if deregistered {
+		result.Deregistered = true
+		log.InfoLog.Printf("delete project %s: removed its durable registry record", repoID)
+	}
+
 	log.InfoLog.Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))
 	return result, nil
 }
