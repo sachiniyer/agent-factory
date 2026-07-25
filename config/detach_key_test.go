@@ -46,3 +46,32 @@ func TestParseDetachKey(t *testing.T) {
 		})
 	}
 }
+
+// TestSanitizeDetachKeys pins the #2556 warn-and-default behavior: a valid value
+// passes through, an invalid hand-edited value falls back to the default (never a
+// crash — the old os.Exit(1)), and empty is left as-is ("use the default" at the
+// attach site). This is the loader-side guarantee that lets the TUI trust the
+// value instead of aborting on a config typo.
+func TestSanitizeDetachKeys(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"valid passes through", "ctrl-q", "ctrl-q"},
+		{"valid non-alpha passes through", "ctrl-]", "ctrl-]"},
+		{"empty stays empty", "", ""},
+		{"whitespace-only stays as-is", "   ", "   "},
+		{"invalid falls back to default", "ctrl-1", defaultDetachKeys},
+		{"wrong prefix falls back to default", "alt-w", defaultDetachKeys},
+		{"garbage falls back to default", "not-a-key", defaultDetachKeys},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sanitizeDetachKeys(tt.input, "test-config"))
+		})
+	}
+	// The default we fall back to must itself parse, or the fallback is a lie.
+	_, err := ParseDetachKey(DefaultDetachKeys())
+	require.NoError(t, err, "DefaultDetachKeys() must parse")
+}

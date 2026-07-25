@@ -448,14 +448,19 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	}
 	applyTheme(appConfig.Theme)
 
-	// Apply configured detach key
+	// Apply configured detach key. The loader (sanitizeDetachKeys) already
+	// warns-and-defaults a bad hand-edited value, so this parse normally
+	// succeeds; if a value ever reaches here unparseable, fall back to the
+	// default rather than crashing the TUI on a config typo (#2556).
 	if appConfig.DetachKeys != "" {
-		b, err := config.ParseDetachKey(appConfig.DetachKeys)
+		detachKeys := appConfig.DetachKeys
+		b, err := config.ParseDetachKey(detachKeys)
 		if err != nil {
-			fmt.Printf("Invalid detach_keys %q in config: %v\n", appConfig.DetachKeys, err)
-			os.Exit(1)
+			log.WarningLog.Printf("invalid detach_keys %q (%v); using default", detachKeys, err)
+			detachKeys = config.DefaultDetachKeys()
+			b, _ = config.ParseDetachKey(detachKeys)
 		}
-		tmux.SetDetachKey(b, appConfig.DetachKeys)
+		tmux.SetDetachKey(b, detachKeys)
 	}
 
 	// Load application state (seen-help-screens flags; #960 PR 6 the TUI no
