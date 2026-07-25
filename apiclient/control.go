@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -183,4 +184,28 @@ func (c *Client) SnapshotWithAlarms(req daemon.SnapshotRequest) (daemon.Snapshot
 		return daemon.SnapshotResponse{}, err
 	}
 	return resp, nil
+}
+
+// ListProjects fetches the daemon's registered projects (#2456) — the read the
+// TUI unions with its derived (from-sessions) project list so a
+// registered-but-sessionless project still shows in the switcher and is
+// creatable-into. HTTP twin of the daemon's ListProjects RPC.
+func (c *Client) ListProjects() ([]config.Project, error) {
+	var resp daemon.ListProjectsResponse
+	if err := c.call("ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Projects, nil
+}
+
+// RegisterProject registers a git checkout as a durable project through the
+// daemon (#2456) — the single-writer path the TUI's add-project action routes
+// through, replacing the legacy in-process root_agents write. The path is
+// resolved on the daemon's filesystem. HTTP twin of RegisterProject.
+func (c *Client) RegisterProject(path string) (config.Project, error) {
+	var resp daemon.RegisterProjectResponse
+	if err := c.call("RegisterProject", daemon.RegisterProjectRequest{Path: path}, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
 }

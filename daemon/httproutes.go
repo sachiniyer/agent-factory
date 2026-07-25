@@ -150,6 +150,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:        http.MethodPost,
+		Path:          "/v1/ListProjects",
+		Description:   "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
+		RequestFields: jsonFields(reflect.TypeOf(ListProjectsRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProjects) },
+	},
+	{
+		Method:        http.MethodPost,
 		Path:          "/v1/DeliverPrompt",
 		Description:   "Deliver a prompt to a session, auto-creating it if it does not exist yet.",
 		RequestFields: jsonFields(reflect.TypeOf(DeliverPromptRequest{})),

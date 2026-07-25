@@ -495,13 +495,24 @@ export interface RegisteredProject {
  *  against, so the user supplies an absolute path and the daemon owns resolution.
  *
  *  Idempotent for a known checkout. On success the daemon emits projects.changed;
- *  the repo shows as a project once a session is created into it (the derived
- *  list), and surfacing the empty registration immediately awaits the
- *  registry-union slice. A non-git or unreadable path throws an ApiError carrying
- *  the daemon's actionable message, for inline display next to the input. */
+ *  the client refetches listProjects() and unions the registry into the derived
+ *  project list, so the registered repo appears in the switcher and is selectable
+ *  in the New session picker immediately — no session required (#2456 union). A
+ *  non-git or unreadable path throws an ApiError carrying the daemon's actionable
+ *  message, for inline display next to the input. */
 export async function registerProject(path: string, token: string): Promise<RegisteredProject> {
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RegisterProject", { path }, token);
   return resp.project;
+}
+
+/** Lists the daemon's registered projects (the #2355 registry) — the read half of
+ *  the #2456 union. The client ∪s these roots with the projects it derives from live
+ *  sessions and tasks, so a registered-but-sessionless project still shows in the
+ *  switcher and is creatable-into (projectSummaries / pickerProjects). Mirrors the
+ *  TUI's apiclient.ListProjects and the daemon's ListProjects RPC. */
+export async function listProjects(token: string): Promise<RegisteredProject[]> {
+  const resp = await af<{ projects: RegisteredProject[] | null }>("ListProjects", {}, token);
+  return resp.projects ?? [];
 }
 
 // --- tab mutations (#1592 Phase 5 PR7) -------------------------------------

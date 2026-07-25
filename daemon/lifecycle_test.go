@@ -254,6 +254,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"UpdateTask":       blockedDuringProbation,
 	"GetConfig":        allowedDuringProbation,
 	"ListBackends":     allowedDuringProbation,
+	"ListProjects":     allowedDuringProbation,
 	"ListPrograms":     allowedDuringProbation,
 	"ListTasks":        allowedDuringProbation,
 	"Ping":             allowedDuringProbation,

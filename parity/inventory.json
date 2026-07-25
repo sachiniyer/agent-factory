@@ -1428,6 +1428,7 @@
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListBackends": "backend.list",
+      "POST /v1/ListProjects": "project.list",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RegisterProject": "project.add",

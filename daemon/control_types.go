@@ -204,6 +204,24 @@ type RegisterProjectResponse struct {
 	Project config.Project `json:"project"`
 }
 
+// ListProjectsRequest asks the daemon for every durable project in ITS registry
+// (#2456). It carries no fields: the registry is machine-local and unscoped, so
+// there is one answer per daemon. This is the READ that makes the local project
+// list a union of derived-from-sessions projects and explicitly-registered ones
+// — a web/TUI client cannot call config.ListProjects in-process the way the CLI
+// does, so the union needs this RPC. It is the read half of #2491 (closed as not
+// worth it for remote parity alone; it turns out load-bearing for the LOCAL
+// union, a different rationale).
+type ListProjectsRequest struct{}
+
+// ListProjectsResponse carries every registered project, each a durable identity
+// plus its last-known root and whether that path still exists. Clients union
+// these roots with the projects they derive from live sessions/tasks so a
+// registered-but-sessionless project is still shown and creatable-into.
+type ListProjectsResponse struct {
+	Projects []config.Project `json:"projects"`
+}
+
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`

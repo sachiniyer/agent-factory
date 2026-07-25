@@ -141,6 +141,11 @@ export interface AppState {
   tabError: string | null;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
+  /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
+   *  input, beside sessions + tasks, that projectSummaries / pickerProjects union so a
+   *  registered-but-sessionless repo shows in the switcher and is creatable-into.
+   *  Refetched on connect and on every projects.changed event. */
+  registeredProjects: string[];
   /** the config manifest zipped with the user's live values (GetConfig), the config
    *  view's data. There is no local key list: this IS the description of config, so
    *  a key added to config_types.go arrives here with no change to the bundle. */
@@ -1227,16 +1232,12 @@ export class AppShell {
     this.renderFilterMenu(state, scoped);
     const list = this.railList;
     // No project selected ⇒ there are no projects at all (nothing has been created):
-    // the global empty rail, its copy pointing at how to create the first session.
+    // the global empty rail. Post-#2456 the coherent first step is registering a repo
+    // from the switcher's "+ Add project", not the TUI — the union then surfaces it
+    // and a session can be created into it here.
     if (!state.selectedProject) {
       list.replaceChildren(
-        h(
-          "li",
-          { class: "af-rail-empty" },
-          "No sessions yet — create one in the TUI or with ",
-          h("code", {}, "af sessions create"),
-          ".",
-        ),
+        h("li", { class: "af-rail-empty" }, "No projects yet — add one from the project switcher to get started."),
       );
       return;
     }
@@ -1444,7 +1445,7 @@ export class AppShell {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   private renderProjectSwitch(state: AppState): void {
-    const summaries = projectSummaries(state.sessions, state.tasks);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     // The switcher is ALWAYS openable, even with no projects (#2456): its menu now

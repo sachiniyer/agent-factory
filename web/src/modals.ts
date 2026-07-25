@@ -167,7 +167,10 @@ export function newSessionModal(
   const projectSelect = h("select", { class: "af-input" });
   projectSelect.setAttribute("aria-label", "Project");
   if (projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet — create a session in the TUI first");
+    // Post-#2456 the coherent zero-projects action is the switcher's "+ Add project",
+    // not the TUI: once a repo is registered it appears here (pickerProjects ∪ the
+    // registry), so point the user at it rather than at a different surface.
+    const opt = h("option", { value: "" }, "No projects yet — add one from the project switcher first");
     opt.disabled = true;
     opt.selected = true;
     projectSelect.append(opt);
@@ -545,8 +548,8 @@ export function confirmDeleteProjectModal(
  *  the daemon expands) — a browser has no shared cwd to resolve a relative path
  *  against, so the daemon owns resolution and validation. A non-git or unreadable
  *  path comes back as the daemon's actionable error, shown inline; on success the
- *  modal closes (the repo shows as a project once a session is created into it —
- *  surfacing the empty registration needs the registry-union slice).
+ *  modal closes and the repo appears in the switcher immediately (the #2456 union:
+ *  the derived project list ∪ the daemon's registry), no session required.
  *
  *  onSubmit is async in index.ts, which drives setBusy/setError around it. */
 export function addProjectModal(callbacks: {
@@ -592,6 +595,9 @@ export function addProjectModal(callbacks: {
     callbacks.onSubmit(path);
   });
 
+  // Focus the sole input so the user can type immediately, matching every other
+  // input modal (add-task, create-session, …) — no click required.
+  queueMicrotask(() => pathInput.focus());
   return handle;
 }
 
