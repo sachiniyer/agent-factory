@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,6 +42,7 @@ func stubForwardEnv(t *testing.T) string {
 
 	pg, pp := upgradeValidateGrace, upgradeValidatePoll
 	ag, ap := awaitActivationGrace, awaitActivationPoll
+	cg, cp := adoptConfirmGrace, adoptConfirmPoll
 	pHealth := upgradeRecoveryHealthFn
 	pUnit := startPreviousViaUnitFn
 	pAdHoc := startPreviousAdHocFn
@@ -51,9 +53,11 @@ func stubForwardEnv(t *testing.T) string {
 	pRun := runRecoveryActorFn
 	pStop := stopDaemonFn
 	pWait := waitForShutdownFn
+	pReady := waitForDaemonReadyFn
 	t.Cleanup(func() {
 		upgradeValidateGrace, upgradeValidatePoll = pg, pp
 		awaitActivationGrace, awaitActivationPoll = ag, ap
+		adoptConfirmGrace, adoptConfirmPoll = cg, cp
 		upgradeRecoveryHealthFn = pHealth
 		startPreviousViaUnitFn = pUnit
 		startPreviousAdHocFn = pAdHoc
@@ -64,9 +68,13 @@ func stubForwardEnv(t *testing.T) string {
 		runRecoveryActorFn = pRun
 		stopDaemonFn = pStop
 		waitForShutdownFn = pWait
+		waitForDaemonReadyFn = pReady
 	})
 	upgradeValidateGrace, upgradeValidatePoll = 500*time.Millisecond, time.Millisecond
 	awaitActivationGrace, awaitActivationPoll = 500*time.Millisecond, time.Millisecond
+	adoptConfirmGrace, adoptConfirmPoll = 500*time.Millisecond, time.Millisecond
+	// Ready by default: the arm-observation tests that care override this.
+	waitForDaemonReadyFn = func(time.Time) error { return nil }
 	return home
 }
 
@@ -208,7 +216,7 @@ func TestUpgradeForward_BrokenCandidateRollsBack(t *testing.T) {
 	}
 }
 
-// ValidateCandidate is the mirror of previousDaemonHealthy: it must REQUIRE the
+// ValidateCandidate is the mirror of validatePreviousDaemon: it must REQUIRE the
 // transaction id. A responder with an EMPTY id at ToVersion is the previous daemon
 // (or a surviving one after a from==to rebuild), not the candidate, and must be
 // rejected.
@@ -311,8 +319,13 @@ func TestReleaseUpgradeProbation(t *testing.T) {
 	// Admission opens and probation is lifted, but the transaction id is KEPT for
 	// the whole boot (#1947): erasing it would break the supervisor's post-commit
 	// re-runs and its ability to reject a different daemon on the same socket.
-	if lifecycle.snapshot().phase != DaemonPhaseReady || lifecycle.isUpgradeProbation() {
-		t.Fatal("release must lift probation and mark ready")
+	if lifecycle.isUpgradeProbation() {
+		t.Fatal("release must lift probation")
+	}
+	// The phase must NOT be Ready: this candidate is parked and never arms its
+	// operational loops, so reporting it ready would hide a failed/skipped hand-off.
+	if lifecycle.snapshot().phase != DaemonPhaseHandoffPending {
+		t.Fatalf("release must mark the candidate handoff-pending, not ready; got %q", lifecycle.snapshot().phase)
 	}
 	if lifecycle.mutationAdmissionError() != nil {
 		t.Fatal("mutations must be admitted after release")
@@ -336,13 +349,13 @@ func TestReleaseUpgradeProbation(t *testing.T) {
 	}
 }
 
-// adoptAfterUpgradeCommit replaces the parked committed candidate with a fresh,
-// fully-armed daemon under whatever owns the home. The stop is identity-guarded —
-// only a responder reporting OUR transaction id is ever stopped — and every owner
-// (unit AND ad-hoc) is handed off, because the ad-hoc probation candidate would
-// otherwise stay parked forever (the P1 zombie). If the unit start fails after the
-// stop, it falls back to an ad-hoc spawn so a committed upgrade never ends with
-// zero daemons (P2).
+// adoptAfterUpgradeCommit is the last step of the irreversible path, so it holds
+// itself to the rollback path's evidentiary discipline: it CONFIRMS the committed
+// candidate is serving before touching it (a dial timeout is not proof of absence),
+// stops only the identity-matched candidate, replaces it under whatever owns the
+// home, and OBSERVES the fresh daemon become ready — falling back to an ad-hoc spawn
+// if a unit fails to start OR to become ready (P2), and surfacing a state it could
+// not confirm as a loud error rather than a silent success.
 func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testing.T) {
 	const canonicalExec = "/opt/agent-factory/bin/af"
 	ourCandidate := HealthStatus{DaemonVersion: "1.0.200", TransactionID: "txn-1", ServingPID: 42}
@@ -351,9 +364,11 @@ func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testi
 		installUnit    bool // a home-serving unit exists → OwnerUnit, else OwnerAdHoc
 		health         HealthStatus
 		unitStartErr   error
+		readyResults   []error // successive waitForDaemonReady returns
 		wantStopped    bool
 		wantUnitStart  bool
 		wantAdHocStart bool
+		wantErr        bool
 	}{
 		{
 			name:          "unit owner: stop the ad-hoc candidate, start it under the unit",
@@ -372,7 +387,7 @@ func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testi
 			wantAdHocStart: true,
 		},
 		{
-			// The P2 fix: never leave zero daemons on a committed upgrade.
+			// The P2 fix: never leave zero daemons when the unit fails to START.
 			name:           "unit start fails → ad-hoc fallback",
 			installUnit:    true,
 			health:         ourCandidate,
@@ -382,14 +397,36 @@ func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testi
 			wantAdHocStart: true,
 		},
 		{
+			// The round-3 (2) fix: a fork is not a serving daemon. The unit forks but
+			// its daemon never answers → fall back to ad-hoc rather than report success.
+			name:           "unit starts but never becomes ready → ad-hoc fallback",
+			installUnit:    true,
+			health:         ourCandidate,
+			readyResults:   []error{errors.New("unit daemon never answered"), nil},
+			wantStopped:    true,
+			wantUnitStart:  true,
+			wantAdHocStart: true,
+		},
+		{
+			// The round-3 (1) fix: a DEFINITE absence (ECONNREFUSED) is the only "gone".
+			// Nothing to stop, but the home still must get a fresh daemon.
+			name:           "definite absence → start fresh without a stop",
+			installUnit:    false,
+			health:         HealthStatus{PingErr: syscall.ECONNREFUSED},
+			wantAdHocStart: true,
+		},
+		{
 			name:        "a different daemon is never stopped (identity guard)",
 			installUnit: true,
 			health:      HealthStatus{DaemonVersion: "1.0.100", TransactionID: "other", ServingPID: 42},
 		},
 		{
-			name:        "no responder → no-op",
+			// The round-3 (1) fix: an UNDETERMINED probe (a dial timeout) is NOT proof
+			// the candidate is gone — never silently skip; surface it loudly instead.
+			name:        "unconfirmed (timeout) → loud error, no action",
 			installUnit: true,
-			health:      HealthStatus{PingErr: errors.New("no daemon")},
+			health:      HealthStatus{PingErr: errors.New("dial tcp: i/o timeout")},
+			wantErr:     true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -415,9 +452,19 @@ func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testi
 				}
 				return nil
 			}
+			readyCall := 0
+			waitForDaemonReadyFn = func(time.Time) error {
+				var err error
+				if readyCall < len(tc.readyResults) {
+					err = tc.readyResults[readyCall]
+				}
+				readyCall++
+				return err
+			}
 
-			if err := adoptAfterUpgradeCommit("txn-1", canonicalExec); err != nil {
-				t.Fatalf("adoptAfterUpgradeCommit: %v", err)
+			err := adoptAfterUpgradeCommit("txn-1", canonicalExec)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("error: got %v want wantErr=%v", err, tc.wantErr)
 			}
 			if stopped != tc.wantStopped {
 				t.Fatalf("stopped: got %v want %v", stopped, tc.wantStopped)

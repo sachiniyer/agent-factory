@@ -10,13 +10,25 @@ import (
 
 // DaemonPhase is the daemon's startup/admission state reported by Ping. It is
 // deliberately separate from process liveness: the control socket answers in
-// every phase, but only DaemonPhaseReady admits ordinary daemon work.
+// every phase, but only a daemon that has armed its scheduler, watchers, status
+// poll, and home watcher reaches DaemonPhaseReady. Mutation admission is gated on
+// the released flag, NOT on this phase — a released upgrade candidate is
+// DaemonPhaseHandoffPending, which admits work yet is honestly not ready.
 type DaemonPhase string
 
 const (
 	DaemonPhaseWarming          DaemonPhase = "warming"
 	DaemonPhaseUpgradeProbation DaemonPhase = "upgrade_probation"
-	DaemonPhaseReady            DaemonPhase = "ready"
+	// DaemonPhaseHandoffPending is a released upgrade candidate. It ran ad-hoc
+	// through probation and is parked in RunDaemon's probation branch, so its
+	// scheduler, watcher supervisor, status poll, and home watcher are NOT armed and
+	// never will be — it exists only to be replaced by the post-commit hand-off.
+	// Reporting it as DaemonPhaseReady (which markReady documents as the full
+	// operational barrier) would be a fabricated health signal that hides a
+	// failed/skipped hand-off; it carries its own phase so Ping / af daemon status /
+	// af doctor / the HTTP health surface render it honestly (#2212 R2a).
+	DaemonPhaseHandoffPending DaemonPhase = "handoff_pending"
+	DaemonPhaseReady          DaemonPhase = "ready"
 )
 
 // DaemonListenerStatus reports which auxiliary HTTP surfaces this daemon
@@ -135,6 +147,12 @@ func (l *daemonLifecycle) markReady() error {
 // Cleanup, so any re-entry replays them — miss the candidate and never converge.
 // Admission is gated on `released` instead of on the id. Idempotent: a second
 // release for the same transaction is a no-op, so a re-run cannot fail.
+//
+// The phase becomes DaemonPhaseHandoffPending, NOT DaemonPhaseReady: this candidate
+// is parked and never arms its operational loops (markReady is unreachable for it),
+// so reporting it ready would let a skipped or failed post-commit hand-off pass as
+// a healthy daemon. The distinct phase keeps the readiness surfaces honest while
+// admission opens.
 func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -152,7 +170,7 @@ func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) 
 		return fmt.Errorf("cannot release upgrade probation before instance restore completes")
 	}
 	l.released = true
-	l.phase = DaemonPhaseReady
+	l.phase = DaemonPhaseHandoffPending
 	return nil
 }
 

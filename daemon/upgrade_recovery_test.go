@@ -42,10 +42,13 @@ func journalAt(home, fromVersion string, listeners upgradetxn.ListenerExpectatio
 	}
 }
 
-// previousDaemonHealthy is the rollback readiness gate: "something answered" is
+// previousDaemonIdentity is the rollback readiness gate: "something answered" is
 // not health (#1947). It must require the exact FromVersion, every listener that
 // was healthy before the upgrade, and — critically — that the responder is NOT a
-// surviving upgrade candidate (which carries a transaction id).
+// surviving upgrade candidate (which carries a transaction id). This drives the
+// SAME constructor validatePreviousDaemon uses in production (via
+// daemonMatchesIdentity), so the require-vs-reject-id polarity cannot regress here
+// while a byte-identical duplicate keeps the test green.
 func TestPreviousDaemonHealthy(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -106,7 +109,7 @@ func TestPreviousDaemonHealthy(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := previousDaemonHealthy(tc.health, tc.journal)
+			err := daemonMatchesIdentity(tc.health, previousDaemonIdentity(tc.journal))
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected an unhealthy verdict, got nil")
 			}

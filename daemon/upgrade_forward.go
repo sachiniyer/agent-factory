@@ -27,6 +27,17 @@ var (
 	awaitActivationPoll  = 100 * time.Millisecond
 )
 
+// adoptConfirmGrace bounds the re-poll that confirms the committed candidate is
+// actually serving before the hand-off touches it. Like the rollback path's
+// ValidatePrevious, this refuses to accept weak evidence: a single dial timeout on
+// a loaded box (a saturated accept backlog, #2039) is NOT proof the candidate is
+// gone, so we re-poll rather than conclude from one probe. Package vars so tests
+// can shorten the path.
+var (
+	adoptConfirmGrace = 10 * time.Second
+	adoptConfirmPoll  = 100 * time.Millisecond
+)
+
 // Indirection points so the forward ops can be driven without a real service
 // manager, a spawned candidate, or a live control socket.
 var (
@@ -34,70 +45,137 @@ var (
 	activationApprovedFn        = activationApproved
 	releaseCandidateProbationFn = releaseCandidateProbation
 	adoptAfterUpgradeCommitFn   = adoptAfterUpgradeCommit
+	waitForDaemonReadyFn        = waitForDaemonReady
 )
 
-// adoptAfterUpgradeCommit replaces the just-committed candidate with a fresh
-// daemon that fully arms in place. The candidate ran ad-hoc through probation
-// (Option A), so at commit it is BLOCKED in runDaemon's probation branch: Ping and
-// `af daemon status` report it ready (releaseUpgradeProbation opened admission),
-// but nothing ever signalled that select, so it never armed its scheduler,
-// watchers, or session poll — a zombie that reports success. Stopping it and
-// starting a fresh daemon (which passes through the whole startup path) is what
-// arms the loops. This is NOT unit-only: an ad-hoc home has no unit to defer to,
-// so without this hand-off the parked candidate would be the permanent
-// post-upgrade daemon, and cron/watch/session-restore would silently never run.
+// committedCandidateState is the DEFINITE answer confirmCommittedCandidate
+// re-polls for. It exists so the irreversible hand-off never acts on weak
+// evidence: a dial timeout is not proof of absence, and a fork is not proof of a
+// serving daemon.
+type committedCandidateState int
+
+const (
+	candidateConfirmed   committedCandidateState = iota // our committed candidate is answering
+	candidateForeign                                    // a live daemon answered, but it is not ours
+	candidateAbsent                                     // a DEFINITE absence — ENOENT/ECONNREFUSED
+	candidateUnconfirmed                                // no definite answer within the grace
+)
+
+// confirmCommittedCandidate re-polls the health probe for a DEFINITE answer about
+// the committed candidate, mirroring the rollback path's ValidatePrevious rather
+// than concluding from a single probe. A dial timeout — a saturated accept backlog
+// on a loaded box (#2039) — is Undetermined (ClassifyShutdownTarget), never proof
+// of absence, so it keeps polling; only ENOENT/ECONNREFUSED is a definite absence.
+func confirmCommittedCandidate(expectedTransactionID string) committedCandidateState {
+	deadline := time.Now().Add(adoptConfirmGrace)
+	for {
+		h := upgradeRecoveryHealthFn()
+		if h.PingErr == nil {
+			if h.TransactionID == expectedTransactionID {
+				return candidateConfirmed
+			}
+			return candidateForeign
+		}
+		absent := false
+		ClassifyShutdownTarget(h.PingErr).Match(
+			func() {},                // yes: unreachable, PingErr != nil
+			func() { absent = true }, // no: ENOENT/ECONNREFUSED — a definite absence
+			func() {},                // not-found: this classifier never returns it
+			func(error) {},           // undetermined: a timeout etc. — keep polling, do NOT conclude
+		)
+		if absent {
+			return candidateAbsent
+		}
+		if !time.Now().Before(deadline) {
+			return candidateUnconfirmed
+		}
+		time.Sleep(adoptConfirmPoll)
+	}
+}
+
+// adoptAfterUpgradeCommit replaces the just-committed candidate with a fresh daemon
+// that fully arms. The candidate ran ad-hoc through probation (Option A), so at
+// commit it is BLOCKED in runDaemon's probation branch: it admits work and reports
+// DaemonPhaseHandoffPending, but nothing ever signalled that select, so it never
+// armed its scheduler, watchers, or session poll. Stopping it and starting a fresh
+// daemon (which passes through the whole startup path) is what arms the loops. This
+// is NOT unit-only: an ad-hoc home has no unit to defer to, so without this the
+// parked candidate would be the permanent post-upgrade daemon and cron/watch/
+// session-restore would silently never run.
 //
-// It MUST run only after Supervisor.Run returns and the journal is gone (the
-// caller proves this), so a unit-started or ad-hoc daemon (runDaemon(cfg,"")) does
-// not defer to a still-active transaction in the entrypoint gate.
+// It MUST run only after Supervisor.Run returns and the journal is gone (the caller
+// proves this), so a unit-started or ad-hoc daemon (runDaemon(cfg,"")) does not
+// defer to a still-active transaction in the entrypoint gate.
 //
-// The stop is guarded by IDENTITY, not supervision state: it stops a daemon only
-// when that daemon IS our committed candidate — it reports expectedTransactionID,
-// which the candidate keeps for its whole boot (#1947). A responder that is a
-// different daemon (a foreign transaction's candidate, or an ordinary daemon with
-// no id — the shape a rollback's restored previous daemon has) is never touched.
-// The identity guard is the whole protection: our committed candidate is always
-// the ad-hoc process we spawned, so once it is id-matched the stop is always
-// correct, and no supervision probe is needed (nor wanted — an UNDETERMINED probe
-// on a systemctl blip must not leave our own parked candidate un-replaced).
-//
-// The fresh daemon starts under whichever owner supervises this home. If the unit
-// start fails, it falls back to an ad-hoc spawn so a COMMITTED upgrade NEVER ends
-// with zero daemons — the candidate exited cleanly, so systemd would not restart
-// it, and the loops would stay dead until the next `af` invocation. Best-effort:
-// the commit is irreversible, so a failed hand-off is warned by the caller.
+// This is the LAST step of the IRREVERSIBLE path, so — unlike a best-effort probe —
+// it holds itself to the rollback path's evidentiary discipline. It confirms the
+// committed candidate is genuinely serving before touching it (a dial timeout is
+// not proof of absence, so it re-polls); it stops a daemon only when that daemon IS
+// our committed candidate, identified by expectedTransactionID which the candidate
+// keeps for its whole boot (#1947); and it OBSERVES the fresh daemon become ready
+// rather than trusting a fork. A state it could not confirm is a loud error the
+// caller surfaces — never a silent success.
 func adoptAfterUpgradeCommit(expectedTransactionID, canonicalExecPath string) error {
-	h := upgradeRecoveryHealthFn()
-	if h.PingErr != nil {
-		return nil // the committed candidate should be serving; nothing answers → nothing to hand off
-	}
-	if h.TransactionID != expectedTransactionID {
-		return nil // not our committed candidate (a rollback's restored previous, or a different transaction)
-	}
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return err
 	}
-	// A resolve failure is unknown, not ad-hoc — but the candidate still must be
-	// replaced, and an ad-hoc spawn always leaves a daemon whether or not a unit
-	// exists, so fall through to it (the unit, if any, can re-adopt via `af daemon
-	// adopt`). Only a definite OwnerUnit takes the unit path.
+	switch confirmCommittedCandidate(expectedTransactionID) {
+	case candidateForeign:
+		// A live daemon that is not ours serves the home — never touch it. This is
+		// also the idempotent re-entry case: a prior hand-off's replacement answers
+		// with no transaction id.
+		return nil
+	case candidateUnconfirmed:
+		// Best-effort at an irreversible boundary must be VISIBLE, not a silent exit 0.
+		// We cannot stop (identity unconfirmed → the round-1 destructive-stop risk) or
+		// start (the candidate may be alive → a singleton-lock collision), so surface it.
+		return fmt.Errorf("could not confirm the committed candidate is serving this home within %s; not handing off blindly", adoptConfirmGrace)
+	case candidateConfirmed:
+		// Our parked candidate is up — stop it before replacing it.
+		if _, err := stopDaemonFn(); err != nil {
+			return fmt.Errorf("stop the committed candidate before handing it off: %w", err)
+		}
+		if err := waitForShutdownFn(); err != nil {
+			return fmt.Errorf("the committed candidate did not release the control socket: %w", err)
+		}
+	case candidateAbsent:
+		// The committed candidate is genuinely gone (it committed, then exited).
+		// Nothing to stop, but a fresh daemon still must be started so the home is
+		// not left daemonless after an irreversible commit.
+		log.WarningLog.Printf("committed upgrade candidate is no longer serving this home; starting a fresh daemon")
+	}
+	// A resolve failure is unknown, not ad-hoc — but the daemon still must arm, and
+	// an ad-hoc spawn always leaves one whether or not a unit exists, so a non-unit
+	// answer falls through to it. Only a definite OwnerUnit takes the unit path.
 	owner, _ := ResolveSupervisionOwner(configDir)
-	if _, err := stopDaemonFn(); err != nil {
-		return fmt.Errorf("stop the committed candidate before handing it off: %w", err)
-	}
-	if err := waitForShutdownFn(); err != nil {
-		return fmt.Errorf("the committed candidate did not release the control socket: %w", err)
-	}
+	return startArmedDaemonUnderOwner(owner, canonicalExecPath)
+}
+
+// startArmedDaemonUnderOwner starts a fresh daemon under the owner and OBSERVES
+// that it becomes ready. A fork/exec return proves neither a bound socket nor a
+// live daemon — startDaemonChild returns on cmd.Start(), and systemctl restart on a
+// Type=simple unit returns once the main process is forked — so the fresh daemon
+// could exit on any startup path (restore error, bind failure, a config the new
+// binary can no longer load) and leave the home daemonless after an irreversible
+// commit. The unit path falls back to an ad-hoc spawn if the unit fails to start OR
+// to become ready, so a committed upgrade never ends with zero daemons (P2); a
+// daemon that starts but never answers is a loud error the caller surfaces.
+func startArmedDaemonUnderOwner(owner SupervisionOwner, canonicalExecPath string) error {
 	if owner == OwnerUnit {
-		if unitErr := startPreviousViaUnitFn(); unitErr == nil {
-			return nil
-		} else {
+		if unitErr := startPreviousViaUnitFn(); unitErr != nil {
 			log.WarningLog.Printf("upgrade committed but starting the installed unit failed; falling back to an ad-hoc daemon (run `af daemon adopt` to re-supervise): %v", unitErr)
+		} else if readyErr := waitForDaemonReadyFn(time.Now().Add(daemonReadyTimeout)); readyErr != nil {
+			log.WarningLog.Printf("the installed unit was started but its daemon did not become ready; falling back to an ad-hoc daemon (run `af daemon adopt`): %v", readyErr)
+		} else {
+			return nil // unit daemon is up and answering
 		}
 	}
 	if err := startPreviousAdHocFn(canonicalExecPath); err != nil {
 		return fmt.Errorf("start a daemon for the committed candidate: %w", err)
+	}
+	if err := waitForDaemonReadyFn(time.Now().Add(daemonReadyTimeout)); err != nil {
+		return fmt.Errorf("started a daemon for the committed candidate but it did not become ready: %w", err)
 	}
 	return nil
 }

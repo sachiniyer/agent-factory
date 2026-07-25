@@ -231,11 +231,24 @@ func startPreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error 
 // no-spawn health probe within a bounded grace; a wrong version, a missing
 // listener, or no answer by the deadline is a rollback validation failure.
 func validatePreviousDaemon(ctx context.Context, journal upgradetxn.Journal) error {
-	return awaitDaemonIdentity(ctx, journal, daemonIdentity{
+	return awaitDaemonIdentity(ctx, journal, previousDaemonIdentity(journal))
+}
+
+// previousDaemonIdentity is what the restored previous daemon must be: FromVersion,
+// an EMPTY transaction id (an ordinary daemon, never a surviving probation
+// candidate — #1947), and every listener the journal recorded healthy. Production
+// (validatePreviousDaemon) and its table test both build the identity through THIS
+// one constructor, so the require-vs-reject-id polarity lives in exactly one place:
+// a change that wrongly required the id — catastrophic when FromVersion == ToVersion
+// (dev-install / re-published tag), where a surviving candidate would pass as the
+// restored previous daemon — fails the test instead of silently regressing a
+// byte-identical duplicate the test never exercised.
+func previousDaemonIdentity(journal upgradetxn.Journal) daemonIdentity {
+	return daemonIdentity{
 		role:      "previous",
 		version:   journal.FromVersion,
 		listeners: journal.Daemon.Listeners,
-	})
+	}
 }
 
 // awaitDaemonIdentity is the shared bounded poll for both directions: it holds
@@ -311,16 +324,6 @@ func daemonMatchesIdentity(h HealthStatus, want daemonIdentity) error {
 		return fmt.Errorf("%s daemon has not bound the configured TCP listener", want.role)
 	}
 	return nil
-}
-
-// previousDaemonHealthy holds the restored previous daemon to FromVersion, an
-// EMPTY transaction id (an ordinary daemon), and its recorded listeners.
-func previousDaemonHealthy(h HealthStatus, journal upgradetxn.Journal) error {
-	return daemonMatchesIdentity(h, daemonIdentity{
-		role:      "previous",
-		version:   journal.FromVersion,
-		listeners: journal.Daemon.Listeners,
-	})
 }
 
 // disableRecoveryJob disarms the persistent recovery job's restart policy after
