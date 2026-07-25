@@ -3,6 +3,7 @@ package config
 import (
 	"reflect"
 	"strconv"
+	"strings"
 )
 
 // This file is the GLOBAL manifest view's value-reading half: given a key from
@@ -53,8 +54,9 @@ func configFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 
 // CurrentValue returns cfg's live value for one global manifest key in the form
 // an editor should show and `af config set` would accept back: a string bare, a
-// bool as "true"/"false", an int in decimal, and a composite (a table or list)
-// as compact JSON.
+// bool as "true"/"false", an int in decimal, a comma-list key (isCommaListKey)
+// comma-joined, and any other composite (a table, or a list that has not opted
+// into the comma syntax) as compact JSON.
 //
 // ok is false for a nil cfg and for a key naming no toml-tagged field. Callers
 // must not substitute a default on !ok: showing a default as though it were the
@@ -67,6 +69,13 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 	field, ok := configFieldByTomlKey(cfg, key)
 	if !ok {
 		return "", false
+	}
+	// The comma-list form is per-key opt-in (isCommaListKey), never inferred from
+	// the []string type: a future list whose elements can contain a comma keeps the
+	// unambiguous compact-JSON rendering rather than silently displaying one entry
+	// as two.
+	if isCommaListKey(key) {
+		return commaListValue(field), true
 	}
 	return editorValue(field), true
 }
@@ -188,8 +197,8 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 //     bare key is NOT settable, but its leaves are — so the honest hint names
 //     the command that works, rather than sending someone to a text editor for
 //     something af can do for them.
-//   - A structural key (theme, root_agents, keys, session_env_passthrough,
-//     cors_allowed_origins) has no single-scalar `af config set` shape. The hint
+//   - A structural key (theme, root_agents, keys, session_env_passthrough) has no
+//     single-scalar `af config set` shape. The hint
 //     points at the config assistant, which edits these in the file for the user
 //     — the whole reason "hand-edit the file yourself" is no longer the answer
 //     (#2453 / #2454).
@@ -249,4 +258,21 @@ func editorValue(v reflect.Value) string {
 	default:
 		return compactJSON(v)
 	}
+}
+
+// commaListValue renders a []string field as the comma-joined form a
+// cfgStringList key is SET with and printed back (an empty/unset list ⇒ "", not
+// "[]" — an editor pre-filled with "[]" would write that literal). Only a key that
+// opted into the comma syntax (isCommaListKey) reaches here; every other slice
+// keeps editorValue's unambiguous compact-JSON rendering, so a []string key whose
+// elements can contain a comma cannot inherit comma-joining by its type alone.
+func commaListValue(field reflect.Value) string {
+	if field.Kind() != reflect.Slice || field.Type().Elem().Kind() != reflect.String {
+		return editorValue(field)
+	}
+	parts := make([]string, field.Len())
+	for i := range parts {
+		parts[i] = field.Index(i).String()
+	}
+	return strings.Join(parts, ",")
 }

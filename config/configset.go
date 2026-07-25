@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,13 +36,21 @@ import (
 // a daemon RPC. Changes apply exactly as a hand-edit does: on the next af /
 // daemon start (SetResult.RequiresRestart is always true).
 
-// cfgValueKind is the scalar type a settable key accepts.
+// cfgValueKind is the type a settable key accepts.
 type cfgValueKind int
 
 const (
 	cfgString cfgValueKind = iota
 	cfgInt
 	cfgBool
+	// cfgStringList is a []string key written as a single-line TOML array. The CLI
+	// value is comma-separated and REPLACES the whole list (the MergeListReplace
+	// semantic the manifest already declares) — an empty value clears the key. It
+	// is generic: any []string key whose elements cannot contain a comma can adopt
+	// it by adding a spec entry (see cors_allowed_origins). A list whose elements
+	// MAY contain commas (post_worktree_commands, shell commands) cannot, and stays
+	// hand-edited.
+	cfgStringList
 )
 
 // settableKeySpec describes one settable key (or one dynamic family such as
@@ -77,14 +86,12 @@ type settableKeySpec struct {
 //   - theme — a color table (see ThemeConfig); setting one slot at a time through
 //     the CLI is not how anyone edits a palette.
 //   - keys — array-capable rebinds (an action may map to a list of keys).
-//   - cors_allowed_origins — a LIST of origins, and the only excluded key that is
-//     otherwise scalar-ish. It needs real design first, not a spec entry: this
-//     file's machinery is scalar-only end to end (cfgValueKind has no list kind,
-//     canonicalizeScalar returns one encoded scalar, setTOMLScalar writes one
-//     `key = value` line), and a list also needs a decided WRITE SEMANTIC —
-//     whether `set` replaces the whole list, appends to it, or gets add/remove
-//     verbs — which is a CLI contract choice, not an implementation detail.
-//     Deferred rather than guessed.
+//   - session_env_passthrough / post_worktree_commands — []string lists left
+//     hand-edited for now. The comma-separated cfgStringList writer added for
+//     cors_allowed_origins (#2564) generalizes to session_env_passthrough (env var
+//     names carry no commas), but NOT to post_worktree_commands, whose
+//     shell-command elements may contain a comma the writer would mis-split.
+//     Wiring either is a separate per-key settability decision, not required here.
 var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
@@ -100,6 +107,21 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// second listener, any host:port binds it.
 	"preview_listen_addr": {kind: cfgString, validate: func(_, v string) error {
 		return validateListenAddrValue(v)
+	}},
+	// A []string written as a single-line TOML array, comma-separated on the CLI
+	// (empty clears it). Each element must be a well-formed browser origin
+	// (scheme://host[:port]); the writer rejects a malformed one eagerly so a typo
+	// cannot become an entry that then silently never matches a request Origin. The
+	// loader stays lenient on a hand-edit — validation lives here at the typed-input
+	// boundary, the same asymmetry #2562 and #2565 preserved. There is no default
+	// origin, so no fallback value to keep valid.
+	"cors_allowed_origins": {kind: cfgStringList, validate: func(_, v string) error {
+		for _, origin := range splitListValue(v) {
+			if err := validateCORSOrigin(origin); err != nil {
+				return err
+			}
+		}
+		return nil
 	}},
 	// Empty is meaningful (detect code-server/openvscode-server on PATH) and any
 	// non-empty value is a path the daemon resolves — including a "~" it expands
@@ -176,6 +198,59 @@ func requireNonNegativeInt(name, v string) error {
 		return fmt.Errorf("%s must be a non-negative integer, got %d", name, n)
 	}
 	return nil
+}
+
+// splitListValue parses a comma-separated CLI list value into its trimmed,
+// non-empty elements. Whitespace around a comma and a trailing comma are
+// tolerated (an empty element is dropped, not an error), so "a, b," and "a,b"
+// both yield [a b]. An empty or whitespace-only input yields no elements, which
+// the caller reads as "clear the list".
+func splitListValue(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// validateCORSOrigin rejects anything that is not a well-formed browser origin: a
+// bare scheme://host[:port] with no path, query, fragment, userinfo, opaque data,
+// or trailing slash. originAllowed (daemon/httpauth.go) matches the request Origin
+// EXACTLY, so a value carrying a path or a trailing slash parses fine yet can
+// never match a real browser Origin — a silent dead entry. Catching it here, at
+// `af config set`, makes that an immediate, actionable error; the loader stays
+// lenient for a hand-edit.
+func validateCORSOrigin(origin string) error {
+	shape := fmt.Errorf("cors_allowed_origins entry %q is not a valid browser origin; use scheme://host[:port] with no path or trailing slash (e.g. https://af.example.com)", origin)
+	u, err := url.Parse(origin)
+	if err != nil {
+		return shape
+	}
+	if u.Scheme == "" || u.Host == "" || u.User != nil ||
+		u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return shape
+	}
+	// The canonical scheme://host serialization must reproduce the input exactly,
+	// which rejects a trailing slash or anything url.Parse would otherwise tolerate.
+	if u.Scheme+"://"+u.Host != origin {
+		return shape
+	}
+	return nil
+}
+
+// isCommaListKey reports whether key is settable as a comma-separated list
+// (its spec kind is cfgStringList). It is the SINGLE per-key opt-in for the comma
+// syntax: the writer (canonicalizeScalar) comma-splits input for exactly these
+// keys, and the editor/get renderer (CurrentValue) comma-joins exactly these keys.
+// Both gate on this one property so they cannot drift, and a []string key that has
+// NOT opted in is never comma-split or comma-joined by its type alone — which
+// would silently mangle a value whose elements can contain a comma. A dynamic
+// family is never a comma list (its leaves are scalars).
+func isCommaListKey(key string) bool {
+	spec, ok := settableKeySpecs[key]
+	return ok && !spec.dynamic && spec.kind == cfgStringList
 }
 
 // SettableKeys returns the sorted, human-facing list of keys `config set`
@@ -325,7 +400,8 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyPath := prettyHomePath(tomlPath)
 
-	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded}
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded,
+		clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
 	writeErr := WithFileLock(tomlPath, func() error {
@@ -529,6 +605,11 @@ type scalarWrite struct {
 	canonical string
 	// encoded is its TOML encoding — the bytes that actually land in the file.
 	encoded string
+	// clear removes the key line instead of writing it. Set for an empty list
+	// value (`af config set cors_allowed_origins ""`): a nil/absent list and an
+	// empty one mean the same thing, so clearing keeps config.toml free of a
+	// `key = []` line and round-trips an unset list back to unset.
+	clear bool
 }
 
 // apply is SetGlobalConfigValue's critical section: re-read config.toml, make
@@ -563,7 +644,12 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
-	updated := setTOMLScalar(string(current), w.section, w.leaf, w.encoded)
+	updated := string(current)
+	if w.clear {
+		updated, _ = deleteTOMLScalar(updated, w.section, w.leaf)
+	} else {
+		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+	}
 	updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
 
 	// Final gate: the edited bytes must parse and validate exactly as the loader
@@ -626,6 +712,19 @@ func canonicalizeScalar(kind cfgValueKind, raw string) (canonical, encoded strin
 		}
 		s := strconv.Itoa(n)
 		return s, s, nil
+	case cfgStringList:
+		elems := splitListValue(raw)
+		encoded := "[]"
+		if len(elems) > 0 {
+			quoted := make([]string, len(elems))
+			for i, e := range elems {
+				quoted[i] = encodeTOMLString(e)
+			}
+			encoded = "[" + strings.Join(quoted, ", ") + "]"
+		}
+		// Canonical is the comma-joined trimmed elements — exactly the form the
+		// editor shows and `af config get` prints back, so a set→get round-trips.
+		return strings.Join(elems, ","), encoded, nil
 	default:
 		return raw, encodeTOMLString(raw), nil
 	}

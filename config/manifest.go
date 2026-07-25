@@ -415,7 +415,7 @@ var configManifest = []ManifestEntry{
 		Default:    "none",
 		Purpose:    "Other websites allowed to call this machine's API from a browser · empty blocks every one of them.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeListReplace,
