@@ -70,3 +70,33 @@ func TestEnsurePluginDir_ConcurrentStalePrune(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsurePluginDir_PrunesStaleGuardHooks is the upgrade-safety lock for the
+// tmux-guard removal. An af that shipped the guard left a hooks/ directory
+// (hooks.json + guard-tmux.sh) in the runtime Claude plugin. This af installs no
+// PreToolUse hook, so a lingering one would invoke the removed `af hook-guard-tmux`
+// and fail CLOSED on every Bash call for an upgraded user. ensurePluginDir must
+// remove it on the next launch after upgrade.
+func TestEnsurePluginDir_PrunesStaleGuardHooks(t *testing.T) {
+	tmpDir := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
+
+	// Seed the hooks/ directory a pre-removal af wrote.
+	hooksDir := filepath.Join(tmpDir, "plugin", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatalf("seed hooks dir: %v", err)
+	}
+	for _, name := range []string{"hooks.json", "guard-tmux.sh"} {
+		if err := os.WriteFile(filepath.Join(hooksDir, name), []byte("stale"), 0644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	if _, err := ensurePluginDir(); err != nil {
+		t.Fatalf("ensurePluginDir: %v", err)
+	}
+
+	if _, err := os.Stat(hooksDir); !os.IsNotExist(err) {
+		t.Errorf("stale hooks/ directory survived upgrade (err=%v); it would keep firing the removed guard against every Bash call", err)
+	}
+}

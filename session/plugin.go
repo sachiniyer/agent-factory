@@ -60,9 +60,10 @@ var pluginCommands = map[string]string{
 // command, then returns its path. The directory is located at <config-dir>/plugin/.
 //
 // This is called on every claude-based session launch (see injectSystemPrompt),
-// and rewrites the manifest, writes every file in pluginCommands, and prunes any
-// stray .md in commands/ that isn't in the map — so inserts, edits, and removes
-// in pluginCommands all propagate on the next session start.
+// and rewrites the manifest, writes every file in pluginCommands, prunes any
+// stray .md in commands/ that isn't in the map, and removes the stale hooks/
+// directory an older af wrote — so inserts, edits, and removes all propagate on
+// the next session start.
 func ensurePluginDir() (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
@@ -77,6 +78,17 @@ func ensurePluginDir() (string, error) {
 		return "", err
 	}
 	if err := os.MkdirAll(manifestDir, 0755); err != nil {
+		return "", err
+	}
+
+	// Remove the hooks/ directory a prior af version wrote for the tmux-command
+	// guard (its hooks.json + guard-tmux.sh). This af installs no PreToolUse hook,
+	// and a lingering one would invoke the removed `af hook-guard-tmux` and fail
+	// CLOSED on every Bash call for an upgraded user — worse than the guard it
+	// replaced. Pruning here, on the next session launch after upgrade, is what
+	// keeps the removal safe for existing installs. RemoveAll is idempotent, so this
+	// is a clean no-op once the directory is gone.
+	if err := os.RemoveAll(filepath.Join(pluginDir, "hooks")); err != nil {
 		return "", err
 	}
 
