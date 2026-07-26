@@ -66,7 +66,7 @@ The check is deliberately code-derived on all four halves:
 | CLI | `commands.NewRootCommand()` — the real cobra tree, walked for verbs and flags **after `initCobraDefaults` finishes building it** (see below) |
 | API | `daemon.HTTPRoutes()` — the same table that builds the live mux, with request fields reflected off the wire structs |
 | TUI | `keys.EffectiveBindings(nil)` — the canonical binding table |
-| Web | the `af<T>(method, body, token)` call sites in `web/src/api.ts`, the single chokepoint through which the SPA reaches the daemon |
+| Web | the `af<T>(method, body, token)` call sites in `web/src/api.ts` — `af()` is POST-only, so it is the chokepoint for the SPA's POST RPCs, and a static read of those call sites is what the audit derives. A few non-POST control-plane calls hand-roll `fetch` instead (e.g. the config-assistant reap's `DELETE /v1/config-assistant`, since `af()` cannot express a DELETE) and are NOT derived here; those routes are also kept out of `daemon.HTTPRoutes()` (registered directly on the mux like the stream routes), so the audit stays consistent |
 
 A hand-maintained table would drift, which is the failure this exists to catch.
 So the only hand-maintained part is the **verdict** — the judgment a machine
