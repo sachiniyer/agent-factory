@@ -30,6 +30,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
+		m.pendingBackend = ""
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -125,6 +126,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// rather than a stray newline delivered to the agent.
 		prompt := strings.TrimSpace(m.pendingPrompt)
 		m.pendingPrompt = ""
+		// Same reasoning for the backend picked in the ctrl+r field (#1933): read it
+		// on the loop, clear it with the rest of the naming state.
+		backend := m.pendingBackend
+		m.pendingBackend = ""
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -145,7 +150,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// which delivers it once the agent is ready — the same path
 				// `af sessions create --prompt` takes. Empty means "no prompt",
 				// exactly as before this field existed.
-				Prompt:      prompt,
+				Prompt: prompt,
+				// The backend picked in the naming form's ctrl+r field (#1933),
+				// forwarded verbatim as CreateSessionRequest.Backend — the field
+				// `af sessions create --backend` fills. Empty means "resolve from
+				// the repo's config", so an untouched field is byte-identical to
+				// every create before this field existed.
+				Backend:     backend,
 				ForceRemote: instance.Capabilities().Workspace == session.WorkspaceRemote,
 			}
 			started, err := start(instance, req)
@@ -180,6 +191,12 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.layoutPromptOverlay()
 		m.state = statePromptInput
 		return m, nil
+	case tea.KeyCtrlR:
+		// Open the backend field (#1933). Unlike the program and prompt fields this
+		// one needs the daemon's answer before it can render an honest list, so the
+		// keypress starts a fetch and the overlay opens when it lands — see
+		// openBackendPicker.
+		return m.openBackendPicker()
 	case tea.KeyRunes:
 		newTitle := instance.Title + string(msg.Runes)
 		if runewidth.StringWidth(newTitle) > 32 {
@@ -213,6 +230,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
+		m.pendingBackend = ""
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -230,10 +248,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // If remote is true, the instance is forced to use the remote hook backend.
 func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.pendingProgram = m.program
-	// Every create starts with an empty prompt field. The cancel paths clear it
-	// too, but this is the authoritative reset: it also covers a create that
-	// ended by any route other than Enter/Esc/ctrl+c.
+	// Every create starts with an empty prompt field and an unchosen backend. The
+	// cancel paths clear both too, but this is the authoritative reset: it also
+	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
+	m.pendingBackend = ""
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
@@ -288,6 +307,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.sidebar.SetNamingPlaceholder(instance, m.namingPlaceholder)
 	m.state = stateNew
 	m.menu.SetNamingHasPrompt(false)
+	m.menu.SetNamingBackend(false)
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
 }

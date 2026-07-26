@@ -338,6 +338,29 @@ af_send Escape                                # esc keeps the text (field, not d
 af_wait_for 'initial prompt ✓'
 ```
 
+The backend field (#1933) is the third field and needs a wide terminal: its hint
+sheds below ~93 columns (`ui/menu.go` hintDropOrder), so drive this at 120+ or the
+marker will legitimately be absent.
+
+```bash
+af_boot                                       # 120 cols or wider
+af_ensure_nav; af_focus_tree
+af_send n; af_wait_for 'backend'               # the field is advertised
+af_send C-r; af_wait_for 'Select backend'      # daemon round trip, then the list
+af_wait_for 'Repo default'                     # first row names the resolved default
+af_send Escape; af_wait_for 'submit name'      # esc backs out of the field only
+af_send C-r; af_wait_for 'Select backend'
+af_send Down; af_send Enter                    # pick the row below Repo default
+af_wait_for 'backend ✓'                        # hint confirms a non-default backend
+```
+
+A backend the repo cannot use is listed with `— unavailable` (or `— cannot check`)
+and refuses the pick with the daemon's own reason — the same sentence
+`af sessions create --backend <that one>` prints. Selecting it must leave the form
+open with the hint back to `backend` and no `✓`. Then finish a create on a backend
+the repo CAN use and confirm the session actually comes up there: the round trip is
+the whole point and no marker stands in for it.
+
 `enter newline` is the overlay's own hint row, used as the marker rather than
 its `Initial prompt` title: the status-bar hint underneath says `initial
 prompt` too, so the title alone cannot tell "field open" from "field

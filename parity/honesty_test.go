@@ -12,9 +12,13 @@ package parity
 // filed, and field-level. They are fixtures, not aspirations: if the derivation
 // cannot rediscover a gap we found by hand, it will not find the next one.
 //
-//	#1933  the web never sends CreateSessionRequest.backend  (and neither does the TUI)
+//	#1933  the web never sends CreateSessionRequest.backend  (and neither did the TUI)
 //	#1948  the CLI never sets PreviewRequest.Tab/TabID/Full
 //	#1935  the web's TaskUpdate omits project_path, nested inside a wrapper route
+//
+// Both halves of #1933 are now FIXED (#1968 for the web, the TUI's ctrl+r backend
+// field for the TUI), so both fixtures are repointed rather than deleted — see
+// each test for what it proves now.
 //
 // Each is deliberately a DIFFERENT derivation path — web request bodies, the Go
 // AST, and nested payloads behind a wrapper — so a hole in any one path fails
@@ -151,30 +155,47 @@ func TestWebPromptParityNamesTheLiveTerminalTransport(t *testing.T) {
 	}
 }
 
-// TestDerivationSeesTUIBackendGap pins the other half of #1933 through the Go
-// AST: the TUI's sessionStartRequest has no Backend field at all.
-func TestDerivationSeesTUIBackendGap(t *testing.T) {
+// TestDerivationTracksTUICreateFieldUse is the successor to the TUI half of the
+// #1933 fixture. That half ("the TUI's sessionStartRequest has no Backend field at
+// all") is now CLOSED — the naming form has a backend field (ctrl+r) whose choice
+// rides sessionStartRequest.Backend — and the old test said what to do when that
+// happened: retire the fixture deliberately.
+//
+// It is repointed rather than deleted, for the same reason the #1948 fixture below
+// was: deleting it would take the meta-check with it, and the post-fix state is a
+// strictly better fixture because one request type now exercises BOTH failure
+// directions at once.
+//
+//   - under-reporting: the TUI sets title/program/prompt/backend/force_remote, so a
+//     walk that missed real usage would report them unreached and manufacture a
+//     false gap — including reporting #1933 as still open after it was fixed.
+//   - over-reporting: the TUI sets no in_place (session.create.opt.inplace, still
+//     open), so a walk that credited construction it never saw would report nothing
+//     unreached and hide a real gap.
+func TestDerivationTracksTUICreateFieldUse(t *testing.T) {
 	use := deriveGoRequestUse(t, "tui")
 	typeUse := deriveTypeFieldUse(t, "tui")
 
 	u, ok := use["CreateSessionRequest"]
 	if !ok {
 		t.Fatal("AST found no TUI CreateSessionRequest construction — the walk is blind " +
-			"(expected app/session_control.go:101)")
+			"(expected app/session_control.go, startSessionThroughDaemon)")
 	}
 	unreached := unreachedFields(auditedRequests["CreateSessionRequest"], u, typeUse)
-	for _, f := range []string{"backend", "in_place"} {
+	// The remaining gap: --here has no TUI analogue (session.create.opt.inplace).
+	for _, f := range []string{"in_place"} {
 		if !contains(unreached, f) {
-			t.Errorf("derivation says the TUI reaches CreateSession.%s, but app/session_control.go:88-95 "+
+			t.Errorf("derivation says the TUI reaches CreateSession.%s, but sessionStartRequest "+
 				"has no such field. Either the gap was fixed (retire the fixture) or the AST "+
 				"walk is over-crediting.", f)
 		}
 	}
 	// Not blind: the TUI provably does set these.
-	for _, f := range []string{"program", "prompt", "force_remote"} {
+	for _, f := range []string{"program", "prompt", "force_remote", "backend"} {
 		if contains(unreached, f) {
 			t.Errorf("derivation says the TUI never sets CreateSession.%s, but it does "+
-				"(app/session_control.go:101-109) — the AST walk is under-reporting.", f)
+				"(app/session_control.go startSessionThroughDaemon) — the AST walk is "+
+				"under-reporting.", f)
 		}
 	}
 }

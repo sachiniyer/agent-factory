@@ -94,8 +94,8 @@
       "id": "session.create.opt.backend",
       "title": "Choose the session's backend (local/docker/ssh/hook) per session",
       "tui": {
-        "status": "no",
-        "pointer": "app/session_control.go:88-95 sessionStartRequest has no Backend field"
+        "status": "yes",
+        "pointer": "keys/keys.go KeySetBackend (ctrl+r) -> app/backend_picker.go openBackendPicker + handleStateSelectBackend -> app/session_control.go sessionStartRequest.Backend"
       },
       "web": {
         "status": "partial",
@@ -107,14 +107,14 @@
       },
       "verdict": "real-gap",
       "issue": "#1933",
-      "notes": "#1968 landed the web's backend picker: createSession now sends `backend` when the user picks one (absent = let the repo config decide, matching `af sessions create` with no --backend). web is `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest ListBackends picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. The TUI still cannot pick a backend per session (N is hook-only, app/session_control.go has no Backend field), so this stays a real-gap. See docs/surface-parity.md 'reachable != user-settable'."
+      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/surface-parity.md 'reachable != user-settable'."
     },
     {
       "id": "session.create.opt.remote",
       "title": "Force a session onto the remote hook backend",
       "tui": {
-        "status": "partial",
-        "pointer": "keys/keys.go:153 (N) -> app/handle_input.go:207 ForceRemote"
+        "status": "yes",
+        "pointer": "keys/keys.go:153 (N) -> app/handle_input.go ForceRemote; PLUS the naming form's backend field (ctrl+r) reaching backend='hook' — app/backend_picker.go"
       },
       "web": {
         "status": "partial",
@@ -126,7 +126,7 @@
       },
       "verdict": "real-gap",
       "issue": "#1933",
-      "notes": "TUI is 'partial' because ForceRemote resolves to the hook backend ONLY (session/instance_factory.go resolveBackendKind) — N cannot reach docker or ssh. The web is ALSO 'partial', not 'no': the hook backend is reachable from the browser via the #1968 backend picker (backend='hook'), which resolveBackendKind routes to the same BackendHook by a STRONGER path than force_remote — an explicit backend wins over ForceRemote, and both override the repo's backend config, so the picker's 'hook' is strictly more capable than the legacy selector. The dedicated force_remote FIELD is deliberately NOT sent by the web (it stays a field_coverage gap): it adds no capability over the picker, and an ungated 'remote hooks' checkbox reintroduces the 'offered then fails at provision' trap the picker's backendSelectable gate closes (#2406 was closed in favor of this ledger correction). Same unproven-provisioning caveat as session.create.opt.backend: reachable != proven to create a WORKING remote session from the browser (#1968)."
+      "notes": "TUI is now 'yes': `N` still resolves to the hook backend ONLY (session/instance_factory.go resolveBackendKind), but the naming form's backend field reaches backend='hook' explicitly, by the same STRONGER path described below for the web — and the TUI additionally sends the dedicated force_remote field, so it is a superset of both other surfaces here. The web is 'partial', not 'no': the hook backend is reachable from the browser via the #1968 backend picker (backend='hook'), which resolveBackendKind routes to the same BackendHook by a STRONGER path than force_remote — an explicit backend wins over ForceRemote, and both override the repo's backend config, so the picker's 'hook' is strictly more capable than the legacy selector. The dedicated force_remote FIELD is deliberately NOT sent by the web (it stays a field_coverage gap): it adds no capability over the picker, and an ungated 'remote hooks' checkbox reintroduces the 'offered then fails at provision' trap the picker's backendSelectable gate closes (#2406 was closed in favor of this ledger correction). Same unproven-provisioning caveat as session.create.opt.backend: reachable != proven to create a WORKING remote session from the browser (#1968)."
     },
     {
       "id": "session.create.opt.inplace",
@@ -1240,8 +1240,8 @@
       "id": "backend.list",
       "title": "Discover which backends are available for a repo (with availability + reason)",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "app/backend_picker.go openBackendPicker -> apiclient/control.go ListBackends -> the naming form's backend field renders label + status + reason"
       },
       "web": {
         "status": "yes",
@@ -1251,8 +1251,8 @@
         "status": "yes",
         "pointer": "api/sessions_backends.go:19 sessionsBackendsCmd -> daemon/control_client.go:332 ListBackends"
       },
-      "verdict": "deliberate",
-      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it) — one catalog, two transports, so the two surfaces cannot describe a repo's backends differently and a backend added server-side reaches both with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it — the flag advertised the enum but not which values this project can use. The TUI cell stays 'no' DELIBERATELY, and not as a second gap: the web's 'yes' here IS its create-time picker rendering availability, not a standalone catalog view, and the TUI has no backend surface at all (grep-verified — nothing under app/ or ui/ reads config.SupportedBackends or calls ListBackends). A TUI catalog with no way to select a backend would be a dead-end read, so the TUI's analogue is the create-time picker, tracked as session.create.opt.backend's TUI half; recording it here too would double-count one piece of work. This cell flips to 'yes' with that picker, not before."
+      "verdict": "parity",
+      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED by #2584: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it), so the surfaces cannot describe a repo's backends differently and a backend added server-side reaches all of them with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it. TUI half CLOSED by #1933's create-form backend field, which is exactly the flip #2584's note anticipated ('this cell flips to yes with that picker, not before'): the TUI reaches the same catalog over apiclient.ListBackends and renders the daemon's labels/statuses/reasons rather than deriving availability locally — which would answer about the CLIENT's host, since apiclient.NewTargeted may point at a REMOTE daemon. Note what 'yes' means uniformly here: on both UIs this capability IS the create-time picker rendering availability, not a standalone catalog view — a catalog with no way to act on it would be a dead-end read. The CLI's standalone verb is the shape that fits a scripting surface. Three surfaces, one catalog, one implementation: parity."
     },
     {
       "id": "config-agent",
@@ -1440,6 +1440,8 @@
       "down": "tui.navigation",
       "error_details": "tui.navigation",
       "expand": "tui.navigation",
+      "fixed:backend": "session.create.opt.backend",
+      "fixed:backend ✓": "session.create.opt.backend",
       "fixed:cancel": "session.create",
       "fixed:change program": "session.create.opt.program",
       "fixed:delete project": "project.delete",
@@ -1722,9 +1724,6 @@
           }
         },
         "tui": {
-          "backend": {
-            "gap": "session.create.opt.backend"
-          },
           "in_place": {
             "gap": "session.create.opt.inplace"
           }

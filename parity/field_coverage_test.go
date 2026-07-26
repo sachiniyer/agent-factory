@@ -7,7 +7,8 @@ package parity
 // actually live. Three found so far are the same shape — a field the daemon
 // accepts that a surface never sends:
 //
-//   #1933  the TUI never sets CreateSessionRequest.Backend
+//   #1933  the TUI never sets CreateSessionRequest.Backend  (fixed: the naming
+//          form's ctrl+r backend field; in_place is the field still unsent)
 //   #1948  the CLI never sets PreviewRequest.Tab/TabID/Full
 //
 // The earlier version of this check was hand-wired to CreateSession alone, so it

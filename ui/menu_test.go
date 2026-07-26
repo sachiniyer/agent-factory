@@ -273,6 +273,88 @@ func TestMenuNewInstancePromptHintSwapsAndDoesNotAlias(t *testing.T) {
 	}
 }
 
+// TestMenuNewInstanceBackendHintSwapsAndDoesNotAlias is the #1933 twin of the
+// test above, and it exists as its own test because the two swaps now share one
+// copy of the options slice: a second swap written in place would leak a "✓" into
+// every later naming form, and a swap that rebuilt from the shared slice would
+// undo its sibling.
+func TestMenuNewInstanceBackendHintSwapsAndDoesNotAlias(t *testing.T) {
+	m := NewMenu()
+	m.SetState(StateNewInstance)
+	m.SetSize(120, 1)
+
+	if out := m.String(); !strings.Contains(out, "backend") {
+		t.Fatalf("new-instance footer missing the backend hint:\n%s", out)
+	}
+	if out := m.String(); strings.Contains(out, "backend ✓") {
+		t.Fatalf("an unpicked backend must not be marked as attached:\n%s", out)
+	}
+
+	m.SetNamingBackend(true)
+	if out := m.String(); !strings.Contains(out, "backend ✓") {
+		t.Fatalf("footer must mark an explicitly picked backend:\n%s", out)
+	}
+
+	// Both optional fields marked at once: neither swap may drop the other.
+	m.SetNamingHasPrompt(true)
+	out := m.String()
+	if !strings.Contains(out, "backend ✓") || !strings.Contains(out, "initial prompt ✓") {
+		t.Fatalf("both field hints must survive together:\n%s", out)
+	}
+
+	fresh := NewMenu()
+	fresh.SetState(StateNewInstance)
+	fresh.SetSize(120, 1)
+	if out := fresh.String(); strings.Contains(out, "backend ✓") {
+		t.Fatalf("the backend-hint swap leaked into the shared options slice:\n%s", out)
+	}
+}
+
+// TestMenuNewInstanceShedsBackendHintBeforeThePromptHint pins the shed ORDER the
+// #1933 hint forced. Five hints take the naming row to ~92 cells, so an
+// 80-column bar can advertise exactly one of the two optional fields, and #1936
+// already committed that it would be the prompt: taking an affordance away from
+// users who have it is worse than a new field arriving unadvertised at that one
+// width. `esc cancel` — the only advertised way out of the form — survives every
+// width, which is the property the drop list exists for at all (#1083).
+func TestMenuNewInstanceShedsBackendHintBeforeThePromptHint(t *testing.T) {
+	// 93 is where the full five-hint row starts fitting; below it the backend
+	// hint sheds first and the prompt hint holds down to ~71.
+	for _, tc := range []struct {
+		width                   int
+		wantBackend, wantPrompt bool
+	}{
+		{200, true, true},
+		{120, true, true},
+		{95, true, true},
+		{88, false, true},
+		{80, false, true},
+		{70, false, false},
+	} {
+		m := NewMenu()
+		m.SetState(StateNewInstance)
+		m.SetSize(tc.width, 1)
+		out := m.String()
+
+		if got := strings.Contains(out, "backend"); got != tc.wantBackend {
+			t.Fatalf("width %d: backend hint present=%v, want %v:\n%s", tc.width, got, tc.wantBackend, out)
+		}
+		if got := strings.Contains(out, "initial prompt"); got != tc.wantPrompt {
+			t.Fatalf("width %d: prompt hint present=%v, want %v:\n%s", tc.width, got, tc.wantPrompt, out)
+		}
+		for _, want := range []string{"enter submit name", "tab change program", "esc cancel"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("width %d dropped the load-bearing hint %q:\n%s", tc.width, want, out)
+			}
+		}
+		for i, line := range strings.Split(out, "\n") {
+			if got := lipgloss.Width(line); got > tc.width {
+				t.Fatalf("width %d: hint row line %d is %d cells wide:\n%s", tc.width, i, got, out)
+			}
+		}
+	}
+}
+
 // (removed) TestMenuRemoteInstanceOmitsUnsupportedTabKeys — obsolete after
 // #1592 Phase 4 PR7: the remote HookBackend now reports full parity
 // (TabManagement=true), so a remote instance surfaces the t/w tab keys exactly

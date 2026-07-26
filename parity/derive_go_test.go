@@ -6,8 +6,10 @@ package parity
 // surface that calls the right verb while silently declining half its request —
 // which is where real parity gaps live: `af sessions preview` reaches the
 // Preview RPC but never sets Tab/TabID/Full, so the CLI can only ever see tab 0
-// (#1948), and the TUI reaches CreateSession but never sets Backend (#1933).
-// Same shape, different route.
+// (#1948), and the TUI reached CreateSession while never setting Backend, so no
+// TUI session could run anywhere but the repo default (#1933). Same shape,
+// different route. Both are now fixed; in_place is the one still open on
+// CreateSession (session.create.opt.inplace).
 //
 // Both Go surfaces build their requests as `daemon.XxxRequest{...}` composite
 // literals, so which fields a surface can populate is a fact in the AST. This

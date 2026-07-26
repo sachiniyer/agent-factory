@@ -140,6 +140,24 @@ const (
 	// its worktree and branch (#2013). Appended at the end of this iota block for
 	// the same reason KeyConfigAgent was.
 	KeyHandoff
+
+	// KeySetBackend and KeyEditBackend are the two faces of the naming form's
+	// backend field (#1933): the runtime the session will be created on, chosen
+	// from the daemon's own ListBackends catalog. Same display-only swap as
+	// KeySetPrompt/KeyEditPrompt — the picker is modal, so the status bar is the
+	// only place that can confirm a non-default backend is attached before Enter.
+	//
+	// ctrl+r, not the obvious ctrl+b: ctrl+b is tmux's DEFAULT PREFIX, so for every
+	// user running af inside tmux the terminal multiplexer would swallow it and the
+	// field would be unreachable — a shipped capability nobody can press. ctrl+r is
+	// unbound in af, unclaimed by tmux, and delivered in raw mode by every terminal
+	// we support; "r" reads as the runtime this picker selects (session.ResolveRuntime
+	// is the same concept the `backend` key names on the wire). It is deliberately NOT
+	// added to reservedKeys: a user whose [keys] table already binds ctrl+r keeps that
+	// binding everywhere except inside this modal form, exactly as tab/shift+tab are
+	// the form's keys while it is open.
+	KeySetBackend
+	KeyEditBackend
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -239,6 +257,8 @@ var specs = []spec{
 	{name: KeyChangeProgram, keys: []string{"tab"}, desc: "change program"},
 	{name: KeySetPrompt, keys: []string{"shift+tab"}, desc: "initial prompt"},
 	{name: KeyEditPrompt, keys: []string{"shift+tab"}, desc: "initial prompt ✓"},
+	{name: KeySetBackend, keys: []string{"ctrl+r"}, desc: "backend"},
+	{name: KeyEditBackend, keys: []string{"ctrl+r"}, desc: "backend ✓"},
 	{name: KeyCancelName, keys: []string{"esc"}, desc: "cancel"},
 }
 
