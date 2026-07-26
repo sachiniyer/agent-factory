@@ -126,18 +126,16 @@ func (b *FakeBackend) PrepareAgentSwap(_ *Instance, target string) (AgentSwapPla
 func (b *FakeBackend) SwapAgent(*Instance, AgentSwapPlan) error { return nil }
 func (b *FakeBackend) Type() string                             { return "local" }
 
-// Capabilities reports local full parity by default, mirroring LocalBackend so
-// the fake stands in for a local session (#1592 Phase 1). Test doubles that
-// impersonate a remote backend override this to return a WorkspaceRemote
-// descriptor.
+// Capabilities reports local full parity by default so the fake stands in for a
+// local session (#1592 Phase 1). Test doubles that impersonate a remote backend
+// override this to return a WorkspaceRemote descriptor.
+//
+// It DELEGATES to LocalBackend rather than restating the descriptor. A copy here
+// would only be a claim to mirror the local runtime, and nothing would check it:
+// a capability added to Capabilities and wired into LocalBackend would leave
+// every FakeBackend-driven test silently asserting against a stale descriptor —
+// the fake would keep reporting the op unsupported while the real local backend
+// supports it. Delegation makes the mirror true by construction.
 func (b *FakeBackend) Capabilities() Capabilities {
-	return Capabilities{
-		Workspace:        WorkspaceLocalWorktree,
-		Archive:          true,
-		Recover:          true,
-		TabManagement:    true,
-		TerminalTab:      true,
-		InteractiveInput: true,
-		Handoff:          true,
-	}
+	return (&LocalBackend{}).Capabilities()
 }
