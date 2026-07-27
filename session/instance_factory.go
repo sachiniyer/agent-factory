@@ -160,6 +160,40 @@ func BackendKindFor(opts InstanceOptions, absPath string) (BackendKind, error) {
 	return resolveBackendKind(opts, absPath)
 }
 
+// LocalPrereqsRequired reports whether a create with these options against
+// absPath will run its agent on THIS machine — the only case where the local
+// prerequisites (tmux, the agent binary on PATH) decide whether the create can
+// succeed. A docker/ssh/hook create runs tmux and the agent inside the sandbox,
+// so checking the client's PATH for them refuses a session that would have
+// worked (#2592).
+//
+// It is the ONE predicate behind that gate: the CLI's `sessions create` and
+// `send-prompt --create` and the TUI's naming form all ask this rather than
+// each deciding for itself which backends are local. That matters because the
+// selection has precedence rules (explicit --backend, then ForceRemote, then
+// the repo's `backend` key) and a surface that reimplements them drifts —
+// gating on the explicit flag alone silently misses the repo-config case, which
+// is the shape #2592 arrived in.
+//
+// The answer is THREE-valued, which is why it returns an error rather than a
+// bare bool. A backend value that names nothing resolvable is neither a local
+// create nor a sandbox one: the question has no answer, and neither default is
+// honest. Reporting it as "local" makes the user hear about missing tmux when
+// their `backend` key is the problem; reporting it as "sandbox" skips a check
+// that should have run. Callers surface the error.
+//
+// It answers from the backend KIND rather than a provisioned backend's
+// Capabilities on purpose: Capabilities is per-instance, so reading it means
+// having provisioned a runtime — the exact thing a pre-create gate must not do
+// (#2599).
+func LocalPrereqsRequired(opts InstanceOptions, absPath string) (bool, error) {
+	kind, err := BackendKindFor(opts, absPath)
+	if err != nil {
+		return false, err
+	}
+	return kind == BackendLocal, nil
+}
+
 // SetBackendFactoryForTest replaces the backend factory with f and returns a
 // restore function. Intended for use in tests that need to swap in a
 // FakeBackend so NewInstance-driven creation flows stay on the hot path. f

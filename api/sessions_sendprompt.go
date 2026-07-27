@@ -185,8 +185,19 @@ results.`,
 			} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
 				return jsonError(err)
 			}
-			if err := preflightLocalSession(&cfg.Config, program); err != nil {
+			// The local prerequisites (tmux, the agent binary on PATH) only
+			// decide this create when the agent will run on THIS box (#2592).
+			// send-prompt has no --backend flag, so the repo's `backend` key is
+			// the whole selection; a docker/ssh/hook repo runs the agent in the
+			// sandbox and must not be refused for a missing local one.
+			local, err := session.LocalPrereqsRequired(session.InstanceOptions{}, repo.Root)
+			if err != nil {
 				return jsonError(err)
+			}
+			if local {
+				if err := preflightLocalSession(&cfg.Config, program); err != nil {
+					return jsonError(err)
+				}
 			}
 
 			if _, err := deliverPromptViaDaemon(daemon.DeliverPromptRequest{

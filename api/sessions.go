@@ -329,10 +329,6 @@ pointing at one).`,
 		} else if err := config.ValidateProgramEnum("--program flag", "--program flag", program, ""); err != nil {
 			return jsonError(err)
 		}
-		if err := preflightLocalSession(&cfg.Config, program); err != nil {
-			return jsonError(err)
-		}
-
 		// Validate --backend up front so a typo fails on the client with a clear
 		// message rather than after a daemon round trip (#1592 Phase 4 PR3). An
 		// empty flag defers to the repo's `backend` config key.
@@ -341,6 +337,26 @@ pointing at one).`,
 		}
 		if inPlace && createBackendFlag != "" && createBackendFlag != config.BackendLocal {
 			return jsonError(fmt.Errorf("--here runs in the local working tree and is incompatible with --backend %s", createBackendFlag))
+		}
+
+		// Backend resolution now runs BEFORE preflight, because it decides
+		// whether preflight applies at all (#2592): a docker/ssh/hook session
+		// runs tmux and the agent inside the sandbox, so refusing the create
+		// for a missing local `claude` blocks a session that would have
+		// worked. The RAW flag goes in, not the parsed kind —
+		// ParseBackendKind turns "" into BackendLocal, and passing that
+		// through would override the repo's `backend` key with a default the
+		// user never typed.
+		local, err := session.LocalPrereqsRequired(session.InstanceOptions{
+			Backend: session.BackendKind(createBackendFlag),
+		}, repo.Root)
+		if err != nil {
+			return jsonError(err)
+		}
+		if local {
+			if err := preflightLocalSession(&cfg.Config, program); err != nil {
+				return jsonError(err)
+			}
 		}
 
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{

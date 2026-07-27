@@ -17,11 +17,33 @@ func (m *home) preflightSessionCreate(instance *session.Instance) error {
 	// than the create about to be submitted. Checking the local agent binary for a
 	// docker/ssh/hook create would refuse a session whose agent runs somewhere else
 	// entirely — the shape of #2592 on the CLI side.
-	if m.pendingBackend != "" && m.pendingBackend != config.BackendLocal {
+	//
+	// Both surfaces now ask the same question through session.LocalPrereqsRequired
+	// rather than each hand-rolling "is the picked backend local", so the
+	// precedence between an explicit pick and the repo's `backend` key is decided
+	// in exactly one place (#2592). Passing the pick RAW is what preserves that
+	// precedence: an untouched field is "", which defers to the repo's key, while
+	// an explicit `local` pick outranks it.
+	//
+	// The resolve error is deliberately not surfaced here, and the bool is still
+	// exactly right when it arrives: unresolvable is NOT local. The picker offers
+	// whatever the daemon's catalog lists, which may name a backend this process's
+	// enum has never heard of (#2600's anti-drift property) — refusing it here
+	// would substitute a client-side enum for the catalog the TUI deliberately
+	// does not hold. `local` is the one name this side can always recognize, so a
+	// name that does not resolve cannot be the local backend, and a missing local
+	// `claude` is not what is wrong with it. The daemon owns the verdict on a
+	// backend it could not resolve, and states it when the create is submitted.
+	local, _ := session.LocalPrereqsRequired(session.InstanceOptions{
+		Backend: session.BackendKind(m.pendingBackend),
+	}, m.repoRoot)
+	if !local {
 		return nil
 	}
-	// Local-session prerequisites (the agent binary, etc.) only apply to a
-	// backend that runs the agent on a local worktree.
+	// The legacy `N` selector is not a backend pick — it lives on the placeholder,
+	// which is provisioned as a remote runtime — so its locality still reads from
+	// the instance. Local-session prerequisites only apply to a backend that runs
+	// the agent on a local worktree.
 	if instance == nil || instance.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 		return nil
 	}
