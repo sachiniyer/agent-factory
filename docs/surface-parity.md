@@ -445,10 +445,15 @@ neither UI can run.
 
 `deliberate` is the one whose rule needed care, and it is worth reading before
 changing it. It legitimately coexists with *nothing missing*, because its
-deliberateness usually lives in an `n/a` cell — 21 rows are that shape. So it
-cannot join the `real-gap`/`unclear` rule ("something must be missing"); its rule
-is that the deliberateness must live **somewhere**. A row whose every cell is a
-plain `yes` has nothing deliberate left about it.
+deliberateness usually lives in an `n/a` cell — `af doctor` has no UI analogue by
+nature. So it cannot join the `real-gap`/`unclear` rule ("something must be
+missing"); its rule is that the deliberateness must live **somewhere**. A row
+whose every cell is a plain `yes` has nothing deliberate left about it.
+
+For how many rows that is, run `TestAuditCoverageReport` — this page does not
+restate the number. The first draft of this section did, in two places, and the
+two disagreed with each other and with the subset the sentence described, inside
+the PR that added the rule against unchecked claims. Derived tally or nothing.
 
 That rule is late ([#2609](https://github.com/sachiniyer/agent-factory/issues/2609)).
 Until it existed, `deliberate` fell through the switch and was the one verdict

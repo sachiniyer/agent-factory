@@ -328,9 +328,16 @@ var verdictRules = map[string]func(c verdictCells) string{
 	// This one cannot join real-gap/unclear above, and that is the trap worth
 	// naming: `deliberate` coexists legitimately with no missing surface, because
 	// its deliberateness usually lives in an "n/a" cell — `af doctor` has no UI
-	// analogue by nature, and 22 rows are that shape today. So the rule is not
-	// "something must be missing" but "the deliberateness must live SOMEWHERE": a
-	// row whose every cell is a plain "yes" has nothing deliberate left about it.
+	// analogue by nature. So the rule is not "something must be missing" but "the
+	// deliberateness must live SOMEWHERE": a row whose every cell is a plain "yes"
+	// has nothing deliberate left about it.
+	//
+	// How many rows are that shape is deliberately NOT written here. Run
+	// TestAuditCoverageReport for the live tally: a hand-written count in this
+	// file would be an unchecked claim inside the rule that exists to catch
+	// unchecked claims, and the first draft of this comment proved it — it shipped
+	// a count that was stale on arrival, and disagreed with the count its own docs
+	// page carried, before the PR introducing both had even merged.
 	"deliberate": func(c verdictCells) string {
 		if len(c.missing) == 0 && !c.hasNA {
 			return "verdict 'deliberate' but every surface reports yes. A deliberate omission " +
