@@ -216,11 +216,19 @@ positionally.
   declared, in both directions — a field a surface has quietly *started* sending
   also fails, so a fixed gap cannot keep being described as broken.
 - **The table cannot contradict itself.** A ledger mapping proves a surface
-  reaches a capability, so the row cannot still say that surface is `no`; and a
-  verdict cannot say `parity` while a surface is missing it, or `real-gap` once
-  every surface has it. Otherwise "add the ledger entry" would be enough to make
-  the check pass while the table went stale — which would make the inventory
-  lie in exactly the way it exists to prevent.
+  reaches a capability, so the row cannot still say that surface is `no`; and
+  every verdict is checked against its own cells (see Verdicts) — `parity` cannot
+  outlive a missing surface, `real-gap`/`unclear` cannot outlive the gap closing,
+  and a `deliberate` omission cannot outlive every surface making it. Otherwise
+  "add the ledger entry" would be enough to make the check pass while the table
+  went stale — which would make the inventory lie in exactly the way it exists to
+  prevent.
+- **No verdict passes by omission.** A verdict with no rule is reported as
+  `unchecked` and fails the run, so adding a fifth verdict value forces a decision
+  about what it promises rather than inheriting a silent pass.
+- **A declaration that silences a check must say why.** An `ok` in
+  `field_coverage` or `argument_shapes` carries the reason the absence is
+  correct; a blank one is rejected, so silencing is never free.
 - Quality bar: a surface marked `yes`/`partial` must cite code, a `deliberate`
   verdict must explain itself, and a `real-gap` must name an issue.
 
@@ -281,14 +289,14 @@ go test ./parity/ -v -run TestAuditCoverageReport
 ```
 === surface-parity audit coverage ===
   cli.arg-concepts                 87
-  cli.commands                     68
-  cli.flags                        177
+  cli.commands                     69
+  cli.flags                        178
   cli.noun-groups                  9
-  cli.verbs                        60
+  cli.verbs                        61
   daemon.audited-request-types     29
   daemon.public-routes             30
-  go.cli.files                     12
-  go.cli.request-sites             31
+  go.cli.files                     13
+  go.cli.request-sites             32
   go.tui.files                     47
   go.tui.request-sites             23
   inventory.capabilities           72
@@ -296,7 +304,7 @@ go test ./parity/ -v -run TestAuditCoverageReport
   web.hardcoded-enum-sites         0
   web.rpcs                         24
   web.source-files                 32
-  verdicts:  parity=31  deliberate=21  real-gap=8  unclear=12
+  verdicts:  deliberate=21  parity=32  real-gap=8  unclear=11  unchecked=0
   SKIPPED: none — every surface above was read
 ```
 
@@ -419,16 +427,36 @@ does, and every declared field must still exist on the wire struct.
 
 ## Verdicts
 
-| Verdict | Meaning |
-|---|---|
-| `parity` | every applicable surface exposes it |
-| `real-gap` | a surface should have it and does not — `issue` names the ticket |
-| `deliberate` | the surface legitimately cannot or should not; `notes` says why, so it is never re-reported as a gap |
-| `unclear` | needs an owner decision; not filed |
+Each verdict is a claim about the row's own cells, so each one owes those cells a
+check. The checks live in `verdictRules` (`parity/parity_test.go`) — a table, not
+a switch, because `TestAuditCoverageReport` reads it too, to count the rows whose
+verdict nothing checks:
+
+| Verdict | Meaning | What must be true of the cells |
+|---|---|---|
+| `parity` | every applicable surface exposes it | no surface is `no`/`partial` |
+| `real-gap` | a surface should have it and does not — `issue` names the ticket | some surface is `no`/`partial` |
+| `deliberate` | the surface legitimately cannot or should not; `notes` says why, so it is never re-reported as a gap | some surface is `no`/`partial`, **or** some surface is `n/a` |
+| `unclear` | needs an owner decision; not filed | some surface is `no`/`partial` |
 
 `n/a` as a *status* means the surface has no analogue by nature — `af doctor`
 diagnoses a broken install, including the case where the daemon is down and
 neither UI can run.
+
+`deliberate` is the one whose rule needed care, and it is worth reading before
+changing it. It legitimately coexists with *nothing missing*, because its
+deliberateness usually lives in an `n/a` cell — 21 rows are that shape. So it
+cannot join the `real-gap`/`unclear` rule ("something must be missing"); its rule
+is that the deliberateness must live **somewhere**. A row whose every cell is a
+plain `yes` has nothing deliberate left about it.
+
+That rule is late ([#2609](https://github.com/sachiniyer/agent-factory/issues/2609)).
+Until it existed, `deliberate` fell through the switch and was the one verdict
+never compared to its cells — so a row could keep asserting an omission that every
+surface had since closed, with the suite green. It was found when two PRs
+collided in `git` over one row, which is not a detector: two PRs touching
+*different* rows would have left it standing. Hence `unchecked=N` in the coverage
+report — the number that surfaces this class without needing a collision.
 
 ## What is deliberately NOT held to parity
 

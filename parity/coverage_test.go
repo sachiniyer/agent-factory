@@ -139,8 +139,17 @@ func TestAuditCoverageReport(t *testing.T) {
 	// --- Inventory ---------------------------------------------------------
 	c.count("inventory.capabilities", len(inv.Capabilities))
 	byVerdict := map[string]int{}
+	// uncheckedVerdicts counts rows whose verdict no rule in verdictRules judges.
+	// It is the audit's OWN denominator, and it is here because the coverage
+	// report is the only place that asks "what did we not look at" — the number
+	// that would have surfaced #2609 with no merge conflict to force it. A verdict
+	// nothing checks is a claim about the cells that the suite goes green over.
+	uncheckedVerdicts := 0
 	for _, cap := range inv.Capabilities {
 		byVerdict[cap.Verdict]++
+		if _, ok := verdictRules[cap.Verdict]; !ok {
+			uncheckedVerdicts++
+		}
 	}
 
 	// --- Report ------------------------------------------------------------
@@ -156,9 +165,12 @@ func TestAuditCoverageReport(t *testing.T) {
 		b.WriteString(fmt.Sprintf("  %-32s %d\n", k, c.Scanned[k]))
 	}
 	b.WriteString("  verdicts:")
-	for _, v := range []string{"parity", "deliberate", "real-gap", "unclear"} {
+	// Iterate the RULE TABLE, not a hand-written list: a verdict added without a
+	// rule then shows up in `unchecked` instead of quietly missing this line too.
+	for _, v := range strings.Split(verdictNames(), ", ") {
 		b.WriteString(fmt.Sprintf("  %s=%d", v, byVerdict[v]))
 	}
+	b.WriteString(fmt.Sprintf("  unchecked=%d", uncheckedVerdicts))
 	b.WriteString("\n")
 	if len(c.Skipped) == 0 {
 		b.WriteString("  SKIPPED: none — every surface above was read\n")
@@ -171,6 +183,15 @@ func TestAuditCoverageReport(t *testing.T) {
 		t.Errorf("audit blind spot: %s\n\nThis is under-coverage, which is worse than a missing "+
 			"check: the suite would go green while asserting parity over something it never "+
 			"read. Fix the derivation — do not silence this.", s)
+	}
+
+	// An unchecked verdict is the same blind spot one level in: the row is read,
+	// its verdict is spelled correctly, and nothing compares that verdict to the
+	// cells it makes a claim about.
+	if uncheckedVerdicts > 0 {
+		t.Errorf("%d capabilities carry a verdict with no rule in verdictRules (valid: %s). "+
+			"That verdict passes by omission — give it a rule rather than leaving the audit "+
+			"green over a claim it never evaluated (#2609).", uncheckedVerdicts, verdictNames())
 	}
 
 	// A denominator that collapses is itself a blind spot: these floors are the

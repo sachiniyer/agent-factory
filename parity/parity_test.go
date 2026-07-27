@@ -8,9 +8,11 @@ package parity
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -271,34 +273,120 @@ func TestLedgerAgreesWithSurfaceStatus(t *testing.T) {
 	check("web", inv.Ledger.WebRPCs, func(c capability) string { return c.Web.Status })
 }
 
+// verdictCells is what a verdict is judged against: the surfaces that lack the
+// capability, and whether any surface has no analogue for it at all.
+type verdictCells struct {
+	// missing lists the surfaces reporting "no" or "partial", as "web=no".
+	missing []string
+	// hasNA reports whether any surface is "n/a" — the cell that carries a
+	// deliberate omission ("this surface has no analogue by nature").
+	hasNA bool
+	// issue is the row's ticket, quoted back in the failure.
+	issue string
+}
+
+// verdictRules is the whole meaning of a verdict: the check each one owes its own
+// cells, keyed by verdict, returning "" when the row is consistent.
+//
+// It is a TABLE and not a switch because two readers need it — this file enforces
+// it, and TestAuditCoverageReport counts the rows whose verdict no rule covers. A
+// switch can only be read by the code inside it, so a `case` that validates
+// nothing is indistinguishable from a verdict nobody thought about. That is not
+// hypothetical: `deliberate` fell through the old switch silently, and the stale
+// verdict it permitted was caught by a MERGE CONFLICT rather than by this suite
+// (#2609 — two PRs touching different rows would have left it standing).
+//
+// Adding a verdict value now means adding its rule here, or the row is reported
+// as unchecked rather than passing by omission.
+var verdictRules = map[string]func(c verdictCells) string{
+	// Every applicable surface has it.
+	"parity": func(c verdictCells) string {
+		if len(c.missing) > 0 {
+			return fmt.Sprintf("verdict 'parity' but %v. An applicable surface is missing it — "+
+				"the verdict should be real-gap, deliberate, or unclear.", c.missing)
+		}
+		return ""
+	},
+	// A surface should have it and does not; the issue names the ticket.
+	"real-gap": func(c verdictCells) string {
+		if len(c.missing) == 0 {
+			return fmt.Sprintf("verdict 'real-gap' but every surface reports yes/n-a. If the gap "+
+				"was closed, flip the verdict to 'parity' and close %s.", c.issue)
+		}
+		return ""
+	},
+	// Needs an owner decision — which presupposes something still undecided.
+	"unclear": func(c verdictCells) string {
+		if len(c.missing) == 0 {
+			return "verdict 'unclear' but every surface reports yes/n-a. If the gap was closed, " +
+				"flip the verdict to 'parity'."
+		}
+		return ""
+	},
+	// The surface legitimately cannot or should not have it.
+	//
+	// This one cannot join real-gap/unclear above, and that is the trap worth
+	// naming: `deliberate` coexists legitimately with no missing surface, because
+	// its deliberateness usually lives in an "n/a" cell — `af doctor` has no UI
+	// analogue by nature, and 22 rows are that shape today. So the rule is not
+	// "something must be missing" but "the deliberateness must live SOMEWHERE": a
+	// row whose every cell is a plain "yes" has nothing deliberate left about it.
+	"deliberate": func(c verdictCells) string {
+		if len(c.missing) == 0 && !c.hasNA {
+			return "verdict 'deliberate' but every surface reports yes. A deliberate omission " +
+				"needs a surface that omits it (a 'no'/'partial' cell) or one with no analogue " +
+				"(an 'n/a' cell) — with all three present the row is at 'parity'."
+		}
+		return ""
+	},
+}
+
+// verdictNames lists the verdicts that have a rule, for error messages and the
+// coverage report — derived from the table so it cannot drift from it.
+func verdictNames() string {
+	names := make([]string, 0, len(verdictRules))
+	for v := range verdictRules {
+		names = append(names, v)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// verdictCellsOf reads a row's cells into the shape verdictRules judges.
+func verdictCellsOf(c capability) verdictCells {
+	cells := verdictCells{issue: c.Issue}
+	for name, s := range map[string]string{"tui": c.TUI.Status, "web": c.Web.Status, "cli": c.CLI.Status} {
+		switch s {
+		case "no", "partial":
+			cells.missing = append(cells.missing, name+"="+s)
+		case "n/a":
+			cells.hasNA = true
+		}
+	}
+	sort.Strings(cells.missing)
+	return cells
+}
+
 // TestVerdictAgreesWithStatuses stops a stale verdict outliving the statuses it
 // was derived from: a row cannot claim "parity" while an applicable surface is
-// still missing it, and cannot claim "real-gap" once every surface has it.
+// still missing it, cannot claim "real-gap" once every surface has it, and cannot
+// claim a "deliberate" omission that every surface now makes.
 func TestVerdictAgreesWithStatuses(t *testing.T) {
 	inv := loadInventory(t)
 
 	for _, c := range inv.Capabilities {
-		statuses := map[string]string{"tui": c.TUI.Status, "web": c.Web.Status, "cli": c.CLI.Status}
-
-		var missing []string
-		for name, s := range statuses {
-			if s == "no" || s == "partial" {
-				missing = append(missing, name+"="+s)
-			}
+		rule, ok := verdictRules[c.Verdict]
+		if !ok {
+			// Not merely an invalid value (TestCapabilitiesAreWellFormed reports
+			// that): a verdict with no rule is a claim nothing compares to the
+			// cells, which is the exact hole #2609 closed.
+			t.Errorf("%s: verdict %q has no rule in verdictRules, so nothing checks it against "+
+				"this row's cells. Add its rule rather than letting the verdict pass by "+
+				"omission.", c.ID, c.Verdict)
+			continue
 		}
-		sort.Strings(missing)
-
-		switch c.Verdict {
-		case "parity":
-			if len(missing) > 0 {
-				t.Errorf("%s: verdict 'parity' but %v. An applicable surface is missing it — "+
-					"the verdict should be real-gap, deliberate, or unclear.", c.ID, missing)
-			}
-		case "real-gap", "unclear":
-			if len(missing) == 0 {
-				t.Errorf("%s: verdict %q but every surface reports yes/n-a. If the gap was "+
-					"closed, flip the verdict to 'parity' and close %s.", c.ID, c.Verdict, c.Issue)
-			}
+		if msg := rule(verdictCellsOf(c)); msg != "" {
+			t.Errorf("%s: %s", c.ID, msg)
 		}
 	}
 }
@@ -308,7 +396,10 @@ func TestVerdictAgreesWithStatuses(t *testing.T) {
 func TestCapabilitiesAreWellFormed(t *testing.T) {
 	inv := loadInventory(t)
 	validStatus := map[string]bool{"yes": true, "no": true, "partial": true, "n/a": true}
-	validVerdict := map[string]bool{"parity": true, "real-gap": true, "deliberate": true, "unclear": true}
+	// The valid verdicts ARE the ones with a rule. Keeping a second hand-written
+	// list here would let a verdict be spelled correctly and checked by nothing —
+	// the pair of facts #2609 was about.
+	validVerdict := verdictRules
 
 	seen := map[string]bool{}
 	for _, c := range inv.Capabilities {
@@ -320,8 +411,8 @@ func TestCapabilitiesAreWellFormed(t *testing.T) {
 		if c.Title == "" {
 			t.Errorf("%s: missing title", c.ID)
 		}
-		if !validVerdict[c.Verdict] {
-			t.Errorf("%s: invalid verdict %q", c.ID, c.Verdict)
+		if _, ok := validVerdict[c.Verdict]; !ok {
+			t.Errorf("%s: invalid verdict %q (valid: %s)", c.ID, c.Verdict, verdictNames())
 		}
 		for name, cl := range map[string]cell{"tui": c.TUI, "web": c.Web, "cli": c.CLI} {
 			if !validStatus[cl.Status] {

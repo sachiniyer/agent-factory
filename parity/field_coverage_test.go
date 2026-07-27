@@ -71,6 +71,13 @@ func validateFieldDecls(t *testing.T, caps map[string]capability, surface, label
 			t.Errorf("%s field %q declares both gap and ok — pick one", label, f)
 		case d.Gap == "" && d.OK == "":
 			t.Errorf("%s field %q declares neither gap nor ok", label, f)
+		case strings.TrimSpace(d.OK) == "" && d.OK != "":
+			// The `ok` arm used to validate nothing beyond being non-empty, so a
+			// whitespace reason silenced the check while recording no reason at
+			// all — "add the declaration and it passes", the shape #2609 found in
+			// the verdict switch. An `ok` IS its reason; blank is not one.
+			t.Errorf("%s field %q declares ok with a blank reason. An `ok` silences this "+
+				"check, so it has to say WHY the absence is correct.", label, f)
 		case d.Gap != "":
 			c, ok := caps[d.Gap]
 			if !ok {

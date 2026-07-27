@@ -170,10 +170,21 @@ func TestArgumentShapeParity(t *testing.T) {
 				t.Errorf("%s declares both gap and ok — pick one", key)
 			case d.Gap == "" && d.OK == "":
 				t.Errorf("%s declares neither gap nor ok", key)
+			case strings.TrimSpace(d.OK) == "" && d.OK != "":
+				// Same tightening as field_coverage's ok arm (#2609): a declaration
+				// that silences a check must carry a reason, and whitespace is not one.
+				t.Errorf("%s declares ok with a blank reason. An `ok` silences this check, "+
+					"so it has to say WHY the two shapes are fine as they are.", key)
 			case d.Gap != "":
 				if _, ok := caps[d.Gap]; !ok {
 					t.Errorf("%s names unknown capability %q", key, d.Gap)
 				}
+				// Deliberately NOT the status-agreement check field_coverage's gap arm
+				// runs. There, a gap declaration asserts the surface cannot send a
+				// field, so the row saying that surface HAS the capability is a
+				// contradiction. Here the divergence is CLI-vs-CLI shape: a verb can
+				// fully have a capability (cli=yes) while its flag name still diverges
+				// from its siblings, so requiring cli != yes would invent one.
 			}
 		}
 	}
