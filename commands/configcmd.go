@@ -359,8 +359,8 @@ Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
 here. Ask the config assistant to change them (it edits the file and validates), or
 edit config.toml directly and run "af config validate".
-A settable key applies to a running daemon in place (#2480); the structural keys
-above and the network listener keys take effect on the next daemon start.
+A settable key applies to a running daemon in place (#2480); only the
+structural keys above take effect on the next daemon start.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that

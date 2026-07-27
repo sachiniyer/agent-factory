@@ -229,10 +229,10 @@ func editability(e ManifestEntry) (editable bool, hint string) {
 // The one sentence a save surface shows after a write is no longer a single
 // constant: #2480 made it PER-KEY (config.EffectNotice / KeyEffectClass in
 // effect.go), because the honest answer differs by key — a running daemon applies
-// some in place, the network listener keys and root_agents wait for the next
-// daemon start, and the client-side keys (update_channel, theme, …) are picked up
-// by af's own next launch and never touch the daemon at all. It deliberately never
-// tells the user to run a command (#2479).
+// some in place (the network listener keys among them since #2480 PR2), root_agents
+// and branch_prefix wait for the next daemon start, and the client-side keys
+// (update_channel, theme, …) are picked up by af's own next launch and never touch
+// the daemon at all. It deliberately never tells the user to run a command (#2479).
 
 // editorValue renders one config field in the editor form. It deliberately does
 // NOT share renderConfigValue's briefing decorations (`""`, "none") — see the

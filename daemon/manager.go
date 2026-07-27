@@ -16,9 +16,11 @@ import (
 type Manager struct {
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
-	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and the
-	// network listener keys (listen_addr/require_token/… — PR2's in-process
-	// listener reload). Everything hot-reloadable reads live via Config() instead.
+	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
+	// branch_prefix (the title-reservation helpers). The network listener keys
+	// used to read it too; #2480 PR2 made them applied-live (livePosture per
+	// request; listen_addr/preview_listen_addr rebind in place). Everything
+	// hot-reloadable reads live via Config() instead.
 	cfg *config.Config
 	// live is the hot-reloadable global config (#2480). ApplyConfig swaps it in
 	// place so a running daemon applies saved config without a restart or session

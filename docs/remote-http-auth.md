@@ -112,11 +112,8 @@ route to the port. af allows that and warns — it does not stop you — so omit
 token only if the network is one you fully trust (a private tailnet/VPN) or an
 authenticating proxy sits in front.
 
-Then restart the daemon so it binds the port:
-
-```bash
-af daemon restart   # live sessions keep running; the new daemon re-adopts them
-```
+`af config set listen_addr` rebinds the listener in place — no restart; a raw
+hand-edit of the block above still needs `af daemon restart`.
 
 On enable, the daemon logs a one-time banner with the bound address and the
 bearer token — the operator's channel to the freshly generated credential:
