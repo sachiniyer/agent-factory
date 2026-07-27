@@ -118,33 +118,48 @@ jobs:
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
 
-      # Warm the base image the integration docker/ssh round-trip tests build
-      # (FROM alpine:3.20) ONCE, with retry, so each per-test `docker build`
-      # resolves it from the local cache instead of hammering Docker Hub. A
-      # registry blip there reddened master twice in an hour (#2521); warming
-      # absorbs the transient blips that caused that. Each pull is bounded by
-      # `timeout` so a black-holed registry cannot hang the step; there is no
-      # sleep after the final attempt. Best-effort: if the registry stays down
-      # for the whole warm window the step still succeeds, and the test build
-      # then fails loudly on the real registry error rather than being silently
-      # skipped — a sustained outage is rare and honest, a misclassified skip is
-      # not.
-      - name: Warm the integration base image (alpine:3.20)
-        run: |
-          for i in 1 2 3 4 5; do
-            if timeout 120 docker pull alpine:3.20; then
-              echo "warmed alpine:3.20 on attempt $i"
-              exit 0
-            fi
-            if [ "$i" -lt 5 ]; then
-              echo "::warning::alpine:3.20 pull attempt $i failed; retrying"
-              sleep $((i * 5))
-            fi
-          done
-          echo "::warning::could not warm alpine:3.20 after 5 attempts; the integration docker builds will fail loudly if the registry stays unreachable (#2521)"
-
+      # There is deliberately no "warm alpine:3.20" step here any more (#2521).
+      # It used to live in this job alone, which was the whole problem: FOUR
+      # lanes run the full suite — this one, build.yml, auto-release.yml and
+      # stable-release.yml — and the warm only ever reached this one. Both
+      # observed failures landed on lanes that never had it, and the test's own
+      # "base image is pre-pulled by CI" message then misattributed them to
+      # buildkit re-resolving a cached tag. The base is now obtained by the test
+      # binary itself (integration/base_image_test.go), once, with retry, so
+      # every lane and every developer machine gets the same guarantee and no
+      # future workflow can forget it.
       - name: Run tests
         run: go test -v -race -count=1 ./...
+
+  # The round-trip image builds must resolve NOTHING against a registry (#2521).
+  #
+  # That property is an absence — no request went out — and the ordinary suite
+  # cannot tell an absent request from a healthy network, which is exactly how
+  # the first fix attempt shipped believing it had removed a dependency it had
+  # not. This job stands up a second docker daemon with its egress dropped and
+  # measures it directly: the block is proven real, the bug's own reproduction
+  # is re-run (the public base, absent locally, must still fail in `load
+  # metadata`), and only then are the real Dockerfiles built.
+  #
+  # It runs on every PR rather than behind an `integration/**` filter: the thing
+  # it protects is a property of the whole test harness, and the change most
+  # likely to reintroduce a registry fetch is a Dockerfile or workflow edit
+  # nobody thought of as touching integration.
+  registry-free:
+    name: Registry-free image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Prove the image builds need no registry
+        run: make registry-free-check
 
   # KillMode=process is the compatibility fence that keeps pre-scope tmux
   # servers alive, so the daemon's abrupt-failure cleanup cannot be proven by
@@ -330,7 +345,7 @@ jobs:
     # blocks anyway, since it demands conclusion === "success", but the native path
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
-    needs: [lint, test, test-systemd, test-macos, web]
+    needs: [lint, test, test-systemd, test-macos, web, registry-free]
     if: always()
     steps:
       - name: Gate on the jobs this check stands in for
@@ -339,7 +354,7 @@ jobs:
           echo "::error::A required job failed — failing Build so the required check goes RED rather than skipping."
           # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
           # parsed as subtraction, so the dotted form silently yields an empty string.
-          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }}"
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }} registry-free=${{ needs['registry-free'].result }}"
           exit 1
 
       - uses: actions/checkout@v6

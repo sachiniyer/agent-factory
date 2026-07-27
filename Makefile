@@ -6,7 +6,7 @@
 
 .PHONY: test-container remote-roundtrip-container ws-pty-roundtrip-container \
 	agent-server-roundtrip-container remote-agent-server-roundtrip-container \
-	backend-docker-roundtrip backend-ssh-roundtrip \
+	backend-docker-roundtrip backend-ssh-roundtrip registry-free-check \
 	playtest-container playtest-container-detached tui-driver tui-driver-selftest \
 	lifecycle-container lifecycle-selftest \
 	testbox-image testbox-clean testbox-selftest \
@@ -89,6 +89,16 @@ backend-docker-roundtrip:
 # where docker is unavailable. See docs/backends.md.
 backend-ssh-roundtrip:
 	go test ./integration -run 'TestSSHBackend(RoundTrip|ArchiveRestore)' -v -count=1 -timeout 20m
+
+# Registry-free build check (#2521): proves the round-trip image builds above
+# resolve NOTHING against a registry, by standing up a second docker daemon with
+# its egress dropped and building the real Dockerfiles inside it. It also runs
+# the bug's own reproduction every time — FROM the public base, with that base
+# absent, must still fail in `load metadata` — so the check can never pass by
+# measuring a network that was quietly reachable. Runs ON THE HOST (needs a real
+# docker daemon and privileged containers); SKIPS where docker is unavailable.
+registry-free-check:
+	AF_REGISTRY_BLOCKED_CHECK=1 go test ./integration -run TestImageBuildsWithRegistryBlocked -v -count=1 -timeout 20m
 
 # Session runtime image (#2194): the bring-your-own container image the docker
 # backend runs sessions in. There is NO af-published image (Sachin-locked

@@ -227,20 +227,18 @@ func buildDockerRoundTripImage(t *testing.T) string {
 	t.Helper()
 	const tag = "af-docker-roundtrip:test"
 	dir := t.TempDir()
-	dockerfile := "FROM alpine:3.20\nRUN apk add --no-cache git tmux bash\n"
+	// FROM a local-only base, so this build resolves no remote reference at all
+	// (#2521). requireRoundTripBaseImage is the one step that may reach a
+	// registry, and it has already run by the time the Dockerfile is written.
+	dockerfile := dockerRoundTripDockerfile(requireRoundTripBaseImage(t))
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
-	// The base image (FROM alpine:3.20) is pre-pulled by CI's warm step (pr.yml)
-	// with retry, so this build normally resolves it from the local cache and
-	// never touches the registry (#2521). A failure here therefore means either a
-	// real image/Dockerfile problem or the registry stayed unreachable for the
-	// whole run — both loud, neither silently skipped.
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the round-trip image failed (base image is pre-pulled by CI; a failure here is a real build error or a registry unreachable for the whole run): %v\n%s", err, out)
+		t.Fatalf("building the round-trip image failed. Its base is already in the local image store and its FROM names no registry, so this is a real build error, not a registry outage: %v\n%s", err, out)
 	}
 	return tag
 }

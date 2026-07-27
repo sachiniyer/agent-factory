@@ -245,6 +245,14 @@ kill. A second case commits real work on the session branch, **archives** it
 is present, and the session is drivable again). It skips cleanly where Docker is
 unavailable.
 
+These builds resolve nothing against a registry. The public base is fetched once
+per test binary, with retry, and retagged to a local-only name the Dockerfiles
+build `FROM`; a base that cannot be fetched at all skips, the same way a missing
+Docker daemon does. `make registry-free-check` proves it, by building the real
+Dockerfiles inside a second Docker daemon whose egress is dropped — and re-running
+this bug's own reproduction each time, so it cannot pass by measuring a network
+that was quietly reachable (#2521).
+
 ### Making docker the default backend for a repo
 
 To run a repo's sessions in containers by default, set `backend = "docker"` in

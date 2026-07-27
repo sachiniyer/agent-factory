@@ -229,10 +229,40 @@ finish_image_start() {
     release_image_lock
 }
 
+# retry_image_build — build an image, retrying a transient registry failure.
+#
+# Every image here sits on a public base (golang:1.25-bookworm, the playwright
+# image), and a build whose base is not already in the local store has to resolve
+# it through a registry — the failure mode that reddened master and blocked the
+# v1.0.211 release from the integration side (#2521). Unlike those round-trip
+# bases there is nothing to pre-seed: on a cold CI runner the base HAS to be
+# fetched, so these builds cannot be made registry-free, only resilient. The
+# blips in #2521 lasted seconds, which a few spaced attempts absorb.
+#
+# The Dockerfile path is a parameter rather than a `<` on the call because stdin
+# is CONSUMED by the first attempt — a retry redirected by the caller would feed
+# the second attempt an empty Dockerfile and "fail" for a reason of our own
+# making. Redirecting the caller's stdout is still fine; only stdin is spent.
+retry_image_build() {
+    local dockerfile="$1"
+    shift
+    local attempt
+    for attempt in 1 2 3; do
+        if "$ENGINE" build "$@" - <"$dockerfile"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            echo "testbox: image build attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+            sleep $((attempt * 5))
+        fi
+    done
+    return 1
+}
+
 build_image() {
     # Dockerfile via stdin: no build context is sent (the Dockerfile has no
     # COPY), so this is instant when layers are cached.
-    "$ENGINE" build -q --label "$LABEL" -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
+    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.test" -q --label "$LABEL" -t "$IMAGE" >/dev/null
 }
 
 # ensure_cache_volumes — create the named cache volumes up front, labelled.
@@ -446,7 +476,7 @@ fi
 
 case "$cmd" in
 build)
-    "$ENGINE" build --label "$LABEL" -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test"
+    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.test" --label "$LABEL" -t "$IMAGE"
     finish_image_start
     ;;
 test)
@@ -575,7 +605,7 @@ lifecycle)
     if [ "$lc_teardown" = yes ]; then
         trap lifecycle_teardown EXIT INT TERM
     fi
-    "$ENGINE" build -q --label "$LABEL" -t "$LIFECYCLE_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.test" >/dev/null
+    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.test" -q --label "$LABEL" -t "$LIFECYCLE_IMAGE" >/dev/null
     fix_cache_perms "$LIFECYCLE_IMAGE"
     rc=0
     watch_image_start "$LIFECYCLE_NAME"
@@ -596,7 +626,7 @@ web-selftest)
     # listener, and drives the embedded SPA in a headless Chromium. Everything
     # (daemon, tmux, browser) lives on 127.0.0.1 inside the container: no
     # published ports, no host tmux, no real AF home.
-    "$ENGINE" build -q --label "$LABEL" -t "$WEB_IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.web-selftest" >/dev/null
+    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.web-selftest" -q --label "$LABEL" -t "$WEB_IMAGE" >/dev/null
     # Dedicated cache volumes (not the shared testbox ones): this container runs
     # as root, so mixing caches would leave root-owned files the dev-user testbox
     # can't write. Chromium wants more memory + pids than the default suite.
