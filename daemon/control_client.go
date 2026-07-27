@@ -319,6 +319,24 @@ func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	return &resp.Instance, nil
 }
 
+// ListBackends asks the daemon which runtimes a create against req.RepoPath may
+// select, and which one an unspecified create resolves to. It is the read that
+// makes CreateSession's Backend field choosable rather than guessable, and it
+// answers from the same controlServer.ListBackends the web's picker reaches over
+// /v1/ListBackends — one catalog, two transports, so the CLI and the web can
+// never describe a repo's backends differently.
+//
+// Read-only: it provisions nothing and dials nothing. Like every other CLI
+// control call it goes to the LOCAL daemon, which is the daemon that would serve
+// the create it describes.
+func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
+	var resp ListBackendsResponse
+	if err := callDaemon("ListBackends", req, &resp); err != nil {
+		return ListBackendsResponse{}, err
+	}
+	return resp, nil
+}
+
 // CreateTab asks the daemon to spawn, persist, and report a new tab on an
 // existing session. Returning the response object keeps the daemon-minted ID
 // together with its resolved and tmux names across the gob transport.

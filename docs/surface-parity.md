@@ -33,19 +33,30 @@ audit (#1937) found gaps pointing in every direction:
   had no exit from the same `[limit]` state. `af sessions retry-limit <title>`
   now sends the same daemon action, closing that gap without duplicating the
   recovery logic client-side.
-- **Only the CLI** can choose a backend per session
-  ([#1933](https://github.com/sachiniyer/agent-factory/issues/1933)).
+- **Only the CLI** could choose a backend per session
+  ([#1933](https://github.com/sachiniyer/agent-factory/issues/1933)) — the web
+  gained a picker over the daemon's `ListBackends` catalog in #1968, and the TUI's
+  naming form gained the same field on `ctrl+r`. Both read the daemon's catalog
+  rather than a copy of the enum, for the reason the enum level below explains.
 
 The sharpest way to hold this: on `CreateSession`, **no surface is a superset of
-another**. All three accept different subsets of the same eight-field request.
+another**. All three accept different subsets of the same nine-field request — the
+TUI now sends a backend but still cannot send `title_base` or `auto_yes`, which
+the web does.
 
 | Create option | TUI | Web | CLI |
 |---|---|---|---|
 | Title, program | yes | yes | yes |
 | Initial prompt | yes | yes | yes |
-| Backend (docker/ssh/hook) | **no** | **no** | yes |
-| Force-remote (hook) | partial | **no** | yes |
+| Backend (docker/ssh/hook) | yes | partial | yes |
+| Force-remote (hook) | yes | partial | yes |
 | In-place (`--here`) | **no** | **no** | yes |
+
+The web's two `partial` cells are not missing controls: the browser sends
+`backend` and can select `hook`, but no one has yet shown a **working** remote
+session created from it (#1968 watched provisioning succeed and the session then
+time out waiting for its program). Reachable is not the same as proven — see
+"Known blind spots".
 
 So when this check fails, the question is never "does the web need to catch up?"
 It is "which surfaces should have this, and which deliberately should not?" —
@@ -66,7 +77,7 @@ The check is deliberately code-derived on all four halves:
 | CLI | `commands.NewRootCommand()` — the real cobra tree, walked for verbs and flags **after `initCobraDefaults` finishes building it** (see below) |
 | API | `daemon.HTTPRoutes()` — the same table that builds the live mux, with request fields reflected off the wire structs |
 | TUI | `keys.EffectiveBindings(nil)` — the canonical binding table |
-| Web | the `af<T>(method, body, token)` call sites in `web/src/api.ts`, the single chokepoint through which the SPA reaches the daemon |
+| Web | the `af<T>(method, body, token)` call sites in `web/src/api.ts` — `af()` is POST-only, so it is the chokepoint for the SPA's POST RPCs, and a static read of those call sites is what the audit derives. A few non-POST control-plane calls hand-roll `fetch` instead (e.g. the config-assistant reap's `DELETE /v1/config-assistant`, since `af()` cannot express a DELETE) and are NOT derived here; those routes are also kept out of `daemon.HTTPRoutes()` (registered directly on the mux like the stream routes), so the audit stays consistent |
 
 A hand-maintained table would drift, which is the failure this exists to catch.
 So the only hand-maintained part is the **verdict** — the judgment a machine
@@ -96,7 +107,9 @@ verb that looks present. Two of the same shape so far — a field the daemon
 accepts that a surface never sends:
 
 - [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the TUI
-  never sets `CreateSessionRequest.Backend`
+  never set `CreateSessionRequest.Backend`, so every TUI session ran on whatever
+  the repo's checked-in `backend` key said (now closed; its fixture stays,
+  repointed, and `in_place` is the field still unsent)
 - [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — the CLI
   never set `PreviewRequest.Tab` / `TabID` / `Full` (now closed; the fixture
   stays, repointed, in the honesty table below)
@@ -229,7 +242,7 @@ know are real, filed, and field-level — as fixtures, not aspirations:
 |---|---|
 | cobra's lazy surface — `af completion bash`, `af help`, `--help`, `--version` | the tree is walked **after** cobra finishes building it |
 | [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web now **does** send `CreateSession.backend` (#1968 landed), via a `const body` variable | the web body parser, incl. variable resolution |
-| #1933 (TUI half) — `sessionStartRequest` has no `Backend` | the Go AST walk |
+| #1933 (TUI half) — closed; `sessionStartRequest` now carries `Backend`, so the fixture is repointed to track that the walk still sees the TUI's use of `backend`/`prompt`/`force_remote` **and** its non-use of `in_place` | the Go AST walk |
 | [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — closed; the CLI now sets `Preview.Tab/TabID/TabName/Full`, so the fixture is repointed to track that the walk still sees both the CLI's usage and the TUI's non-use of `tab_name` | the AST **on an internal route**, invisible to the public catalog |
 | [#1935](https://github.com/sachiniyer/agent-factory/issues/1935) — the web's `TaskUpdate` omits `project_path` | nested recursion **behind a wrapper route**, plus the TS-interface read and the CLI's field-by-field assignment walk |
 
@@ -267,25 +280,28 @@ go test ./parity/ -v -run TestAuditCoverageReport
 
 ```
 === surface-parity audit coverage ===
-  cli.arg-concepts                 73
-  cli.commands                     59
-  cli.flags                        150
+  cli.arg-concepts                 87
+  cli.commands                     68
+  cli.flags                        177
   cli.noun-groups                  9
-  cli.verbs                        51
-  daemon.audited-request-types     24
-  daemon.public-routes             23
-  go.cli.files                     10
-  go.cli.request-sites             26
-  go.tui.files                     41
-  go.tui.request-sites             18
-  inventory.capabilities           67
-  tui.bindings                     44
-  web.enum-sites                   2
-  web.rpcs                         18
-  web.source-files                 26
-  verdicts:  parity=20  deliberate=20  real-gap=10  unclear=17
+  cli.verbs                        60
+  daemon.audited-request-types     29
+  daemon.public-routes             30
+  go.cli.files                     12
+  go.cli.request-sites             31
+  go.tui.files                     47
+  go.tui.request-sites             23
+  inventory.capabilities           72
+  tui.bindings                     49
+  web.hardcoded-enum-sites         0
+  web.rpcs                         24
+  web.source-files                 32
+  verdicts:  parity=31  deliberate=21  real-gap=8  unclear=12
   SKIPPED: none — every surface above was read
 ```
+
+(A sample, not a contract: the counts move with the program. Only the floors are
+enforced.)
 
 Three rules make that number honest:
 

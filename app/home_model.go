@@ -67,6 +67,11 @@ const (
 	// overlay stateSelectProgram uses at create time; the two differ only in what
 	// happens on submit — create stashes the choice, handoff confirms and swaps.
 	stateSelectHandoffAgent
+	// stateSelectBackend is the state when the backend field of the naming form
+	// is open (#1933): the runtime the session will be created on, listed from the
+	// daemon's ListBackends catalog. Like stateSelectProgram and statePromptInput
+	// it is a sub-state of stateNew — closing it returns to naming.
+	stateSelectBackend
 )
 
 type home struct {
@@ -415,6 +420,17 @@ type home struct {
 	// `af sessions create --prompt` fills. Reset by startNewInstance so a
 	// cancelled create can never leak its prompt into the next one.
 	pendingPrompt string
+	// pendingBackend tracks the backend picked during naming (#1933). "" means
+	// "let the repo config decide", which is what CreateSessionRequest.Backend
+	// omits on — the same defaulting `af sessions create` gets with no --backend,
+	// so an untouched field keeps today's behavior byte-identical. Reset by
+	// startNewInstance so a cancelled create cannot leak a backend into the next.
+	pendingBackend string
+	// backendPickerChoices is the option list the open backend picker is showing,
+	// held alongside the overlay for the same reason handoffChoices is: the list is
+	// built from the daemon's response (plus a leading "repo default" row), so the
+	// overlay's index cannot be mapped back through any local enum.
+	backendPickerChoices []backendChoice
 
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server

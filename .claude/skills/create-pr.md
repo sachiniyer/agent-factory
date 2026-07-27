@@ -38,6 +38,10 @@ Create a PR for the current branch against `master`.
 
    <1-3 bullet points describing what changed and why>
 
+   Closes #<issue>
+
+   <!-- If this PR closes nothing, write "no issue" rather than deleting the line. -->
+
    ## Test Plan
 
    - [x] `golangci-lint run --timeout=3m --fast` passes

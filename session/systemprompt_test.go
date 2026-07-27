@@ -557,6 +557,21 @@ func TestAfUsageReference_CoversFullSurface(t *testing.T) {
 	}
 }
 
+// TestAfUsageReference_ProgramEnumMatchesSupportedPrograms pins the hardcoded
+// --program enum in the usage text to tmux.SupportedPrograms. Every other
+// --program surface (CLI validation, the config manifest, the web picker)
+// derives from that slice, but this one is prose inside a const, so adding an
+// agent silently leaves it behind: #1959 had to fix the enum by hand when it
+// added opencode, and #2410 then added devin without touching it, so every
+// agent's af reference claimed devin was not a valid --program.
+func TestAfUsageReference_ProgramEnumMatchesSupportedPrograms(t *testing.T) {
+	want := "--program " + strings.Join(tmux.SupportedPrograms, "|")
+	if !strings.Contains(afUsageReference, want) {
+		t.Errorf("afUsageReference must spell the --program enum as %q; add the new agent to the "+
+			"'af sessions create' line in afUsageBody (it also feeds the generated plugin SKILL.md files)", want)
+	}
+}
+
 func TestEnsureAmpSkillDir(t *testing.T) {
 	// These agents write into the USER'S global config dir, which af only does
 	// under the global_agent_skills opt-in (#1977). Grant it: this test is about

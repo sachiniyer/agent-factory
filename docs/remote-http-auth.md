@@ -400,7 +400,10 @@ hand-editing the global config:
 require_token = true
 ```
 
-Restart the daemon (`af daemon restart`) and network peers must present the token
+`af config set` applies the change to a running daemon at once: the auth gate reads
+`require_token` from live config on every request, so it takes effect on the next
+request — no rebind, no restart (a raw hand-edit still needs `af daemon restart`).
+Network peers must then present the token
 (401 without it); loopback peers stay exempt on a loopback bind unless you also
 set `require_loopback_token = true`. The web client picks the change up on its
 next load and shows its paste-token login. Get the credential with

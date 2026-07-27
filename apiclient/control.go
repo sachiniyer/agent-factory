@@ -186,6 +186,28 @@ func (c *Client) SnapshotWithAlarms(req daemon.SnapshotRequest) (daemon.Snapshot
 	return resp, nil
 }
 
+// ListBackends asks the daemon which runtimes a create against this repo may
+// select, with the tri-state availability answer per backend (#1933). It is the
+// TUI's backend picker's only source of truth — the same route the web's picker
+// calls, so both surfaces render one catalog computed in one place. HTTP twin of
+// daemon.ListBackends, which `af sessions backends` takes over the gob socket
+// (#2584): three transports, one controlServer.ListBackends, no second catalog.
+//
+// This one IS a round trip, unlike the in-process reads described below, and the
+// difference is not stylistic: a backend's availability is a property of the box
+// that will PROVISION it (is `docker` on its PATH? does the repo's config parse
+// there?) and of the repo as the daemon sees it. apiclient.NewTargeted may point
+// at a REMOTE daemon, so deriving the answer from the client's own host would
+// confidently describe the wrong machine — the fabricated-answer failure the
+// tri-state exists to prevent.
+func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBackendsResponse, error) {
+	var resp daemon.ListBackendsResponse
+	if err := c.call("ListBackends", req, &resp); err != nil {
+		return daemon.ListBackendsResponse{}, err
+	}
+	return resp, nil
+}
+
 // There is deliberately no ListProjects here. The web reads the registry over HTTP
 // (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
 // but the two GO consumers read it in-process: the TUI's switcher union

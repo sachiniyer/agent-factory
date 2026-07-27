@@ -90,6 +90,11 @@ type Menu struct {
 	// initial prompt (#1936), which swaps the naming form's prompt hint to its
 	// "✓" variant. Only meaningful in StateNewInstance.
 	namingHasPrompt bool
+	// namingHasBackend: the session being named has an explicitly picked backend
+	// (#1933), so the backend hint renders its "✓" variant. Only meaningful in
+	// StateNewInstance. False for the repo default, which is not a choice the user
+	// needs confirmed — it is what every create did before the field existed.
+	namingHasBackend bool
 
 	// keyDown is the key which is pressed. The default is -1.
 	keyDown keys.KeyName
@@ -104,12 +109,13 @@ type Menu struct {
 
 var defaultMenuOptions = []keys.KeyName{keys.KeyNew, keys.KeyNewRemote, keys.KeySearch, keys.KeyHelp, keys.KeyQuit}
 
-// newInstanceMenuOptions are the naming-form hints. The third slot is the
-// initial-prompt field (#1936) and swaps its verb once a prompt is typed —
-// newInstanceOptions picks the variant, mirroring the archive/restore swap in
+// newInstanceMenuOptions are the naming-form hints. The third and fourth slots
+// are the form's optional fields — the initial prompt (#1936) and the backend
+// (#1933) — and each swaps its verb once the field holds a non-default value;
+// newInstanceOptions picks the variants, mirroring the archive/restore swap in
 // addInstanceOptions.
 var newInstanceMenuOptions = []keys.KeyName{
-	keys.KeySubmitName, keys.KeyChangeProgram, keys.KeySetPrompt, keys.KeyCancelName,
+	keys.KeySubmitName, keys.KeyChangeProgram, keys.KeySetPrompt, keys.KeySetBackend, keys.KeyCancelName,
 }
 
 // automationsMenuOptions are the status-bar hints while the in-rail
@@ -288,19 +294,23 @@ func (m *Menu) updateOptions() {
 	}
 }
 
-// newInstanceOptions returns the naming-form hints with the initial-prompt slot
-// reading "initial prompt ✓" once the pending prompt holds text. The overlay
-// that edits it is modal, so the status bar is the only surface that can tell
-// the user a prompt is attached before they press Enter (#1936).
+// newInstanceOptions returns the naming-form hints with each optional field's slot
+// reading "… ✓" once that field holds a non-default value: "initial prompt ✓" once
+// the pending prompt holds text (#1936), "backend ✓" once a backend other than the
+// repo default is picked (#1933). Both overlays are modal, so the status bar is the
+// only surface that can tell the user what is attached before they press Enter.
 func (m *Menu) newInstanceOptions() []keys.KeyName {
-	if !m.namingHasPrompt {
+	if !m.namingHasPrompt && !m.namingHasBackend {
 		return newInstanceMenuOptions
 	}
 	opts := make([]keys.KeyName, len(newInstanceMenuOptions))
 	copy(opts, newInstanceMenuOptions)
 	for i, name := range opts {
-		if name == keys.KeySetPrompt {
+		if name == keys.KeySetPrompt && m.namingHasPrompt {
 			opts[i] = keys.KeyEditPrompt
+		}
+		if name == keys.KeySetBackend && m.namingHasBackend {
+			opts[i] = keys.KeyEditBackend
 		}
 	}
 	return opts
@@ -313,6 +323,19 @@ func (m *Menu) SetNamingHasPrompt(has bool) {
 		return
 	}
 	m.namingHasPrompt = has
+	m.updateOptions()
+}
+
+// SetNamingBackend records whether the session being named carries an explicitly
+// picked backend (rather than the repo default), and rebuilds the hints if that
+// changed. Same purpose as SetNamingHasPrompt: the picker is modal, so the bar is
+// the only confirmation that the create is going somewhere other than the default
+// (#1933).
+func (m *Menu) SetNamingBackend(picked bool) {
+	if m.namingHasBackend == picked {
+		return
+	}
+	m.namingHasBackend = picked
 	m.updateOptions()
 }
 
@@ -505,7 +528,17 @@ func centerStart(box, content int) int {
 // list: it advertises an OPTIONAL field, and losing it costs a user far less
 // than losing the way out of the form. Submit/change-program/cancel stay absent
 // — those are the form's three load-bearing verbs.
+//
+// #1933's backend hint took the same row to ~91 cells, so it sheds BEFORE the
+// prompt hint — deliberately, and not because it matters less in the abstract.
+// An 80-column bar can advertise exactly one of the two, #1936 committed that it
+// would be the prompt (TestMenuNewInstanceDropsPromptHintBeforeTheWayOut pins the
+// 80-column case), and taking an affordance away from users who already have it is
+// worse than a new field arriving unadvertised at that one width. The field itself
+// still works when its hint is shed, and the help overlay names all three fields
+// at every width so the narrow case is not a dead end.
 var hintDropOrder = [][]keys.KeyName{
+	{keys.KeySetBackend, keys.KeyEditBackend},
 	{keys.KeySetPrompt, keys.KeyEditPrompt},
 	{keys.KeyShiftUp, keys.KeyShiftDown},
 	{keys.KeyAttach},

@@ -84,11 +84,18 @@ func httpCallRetryable(err error) bool {
 }
 
 type sessionStartRequest struct {
-	Title       string
-	TitleBase   string
-	RepoPath    string
-	Program     string
-	Prompt      string
+	Title     string
+	TitleBase string
+	RepoPath  string
+	Program   string
+	Prompt    string
+	// Backend is the runtime picked in the naming form's backend field (#1933),
+	// or "" to let the repo's `backend` config key decide — the same defaulting
+	// `af sessions create` applies when --backend is absent. It takes precedence
+	// over ForceRemote in the daemon (session/instance_factory.go
+	// resolveBackendKind), which is why the TUI can offer the whole catalog
+	// through one field while `N` keeps its hook-only shortcut.
+	Backend     string
 	ForceRemote bool
 }
 
@@ -102,6 +109,7 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 			RepoPath:    req.RepoPath,
 			Program:     req.Program,
 			Prompt:      req.Prompt,
+			Backend:     req.Backend,
 			ForceRemote: req.ForceRemote,
 		})
 		return e

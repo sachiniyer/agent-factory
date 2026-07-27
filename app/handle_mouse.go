@@ -632,6 +632,17 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.selectionOverlay.SetSelectedIndex(idx)
 			return m.handleStateSelectHandoffAgent(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// The backend picker (#1933) is the same selection overlay again, so it needs
+	// the same click routing — a list that answers the keyboard and ignores the
+	// mouse is the #1819 class.
+	case stateSelectBackend:
+		if m.selectionOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.selectionOverlay.SetSelectedIndex(idx)
+			return m.handleStateSelectBackend(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateSearch:
 		if m.searchOverlay == nil {
 			return m, nil
@@ -750,6 +761,11 @@ func keyMsgFromString(s string) (tea.KeyMsg, bool) {
 		return tea.KeyMsg{Type: tea.KeyCtrlD}, true
 	case "ctrl+p":
 		return tea.KeyMsg{Type: tea.KeyCtrlP}, true
+	// The naming form's backend hint (#1933) registers a click zone like every
+	// other hint; without this its zone would be decoration that swallows the
+	// click and does nothing.
+	case "ctrl+r":
+		return tea.KeyMsg{Type: tea.KeyCtrlR}, true
 	case "ctrl+]":
 		return tea.KeyMsg{Type: tea.KeyCtrlCloseBracket}, true
 	}

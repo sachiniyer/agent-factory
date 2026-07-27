@@ -146,6 +146,11 @@ func (h helpTypeGeneral) toContent() string {
 		{title: "Managing:", rows: []helpRow{
 			{helpKey(keys.KeyNew), "Create a new session"},
 			{helpKey(keys.KeyNewRemote), "Create a new remote session (requires remote_hooks config)"},
+			// The naming form's three optional fields, named here because its own
+			// status-bar hints shed by terminal width (ui/menu.go hintDropOrder): on a
+			// narrow bar this is the only surface that still advertises them.
+			{helpKey(keys.KeyChangeProgram) + " / " + helpKey(keys.KeySetPrompt) + " / " + helpKey(keys.KeySetBackend),
+				"While naming a new session: pick its agent / initial prompt / backend"},
 			{helpKey(keys.KeySwitchProject), "Switch to another project (repo) in place"},
 			{helpKey(keys.KeyTaskList), "Manage tasks (n inside the manager creates one, r runs one)"},
 			{helpKey(keys.KeyKill), "Kill (delete) the selected session"},

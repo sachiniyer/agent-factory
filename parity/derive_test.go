@@ -187,10 +187,13 @@ func deriveTUI(t *testing.T) map[string]binding {
 
 // --- Web -------------------------------------------------------------------
 
-// Every web control-plane call funnels through the one af<T>(method, body,
-// token) helper in web/src/api.ts, which POSTs /v1/<method>. That chokepoint is
-// what makes a static read of the call sites reliable: there is no other way
-// for the SPA to reach the daemon's JSON API.
+// Every web POST RPC funnels through the one af<T>(method, body, token) helper
+// in web/src/api.ts, which POSTs /v1/<method>. That chokepoint is what makes a
+// static read of the call sites reliable for POST RPCs: af() is POST-only, so a
+// non-POST control-plane call (e.g. the config-assistant reap's hand-rolled
+// fetch DELETE) bypasses it and is NOT derived here — it matches a route the
+// daemon also keeps out of HTTPRoutes() (registered directly on the mux like the
+// stream routes), so the audit stays consistent.
 //
 // Matches both `af<T>("Name", {...})` and the un-generic `af("Name", {...})`,
 // with the literal on the same line or the next.

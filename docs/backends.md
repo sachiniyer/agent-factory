@@ -15,8 +15,16 @@ fixed single agent tab.
 | `ssh` | a remote host over SSH | `backend = "ssh"` + `ssh.host` |
 | `hook` | wherever your provisioner scripts put it | `backend = "hook"` (see [Hook backend](#hook-backend-bring-your-own-provisioner)) |
 
-Select a backend per-repo in `.agent-factory/config.json`, or per-session with
-`af sessions create --backend <name>` (the flag overrides the repo config).
+Select a backend per-repo in `.agent-factory/config.json`, or per-session on any
+surface — each overrides the repo config for that one session:
+
+- **CLI** — `af sessions create --backend <name>`; `af sessions backends` first if
+  you want to see which values this repo can actually use.
+- **TUI** — press `ctrl+r` while naming the new session and pick from the list.
+  Its rows come from the daemon, so each one says whether *this* repo can use that
+  backend; picking one it cannot names the config key to fix. Leaving the field
+  alone (or choosing **Repo default**) keeps the repo's own setting.
+- **Web** — the backend select in the new-session modal, same list, same rule.
 
 !!! note "`af agent-server` is a backend, not the web UI"
     The non-local backends work by running an **`af agent-server`** in the remote

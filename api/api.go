@@ -612,7 +612,11 @@ func init() {
 	sessionsCreateCmd.Flags().StringVar(&createProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsCreateCmd.Flags().BoolVar(&createHereFlag, "here", false, "Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both)")
 	sessionsCreateCmd.Flags().BoolVar(&createInPlaceFlag, "in-place", false, "Alias for --here")
-	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.SupportedBackendsString()+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config)")
+	// The enum comes from config.SupportedBackendsString() so the help can never
+	// advertise a stale set — but knowing a backend EXISTS is not knowing this
+	// project can use it, which is what "af sessions backends" answers (#1933).
+	// Naming that verb here is the only place a --backend reader will look.
+	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.SupportedBackendsString()+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run \"af sessions backends\" for which of these this project can actually use, and why not")
 	sessionsCreateCmd.MarkFlagRequired("name")
 
 	// Tab addressing for `sessions preview` (#1948). The daemon's PreviewRequest
@@ -669,6 +673,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsListCmd)
 	SessionsCmd.AddCommand(sessionsGetCmd)
 	SessionsCmd.AddCommand(sessionsCreateCmd)
+	SessionsCmd.AddCommand(sessionsBackendsCmd)
 	SessionsCmd.AddCommand(sessionsSendPromptCmd)
 	SessionsCmd.AddCommand(sessionsTabCreateCmd)
 	SessionsCmd.AddCommand(sessionsTabDeleteCmd)

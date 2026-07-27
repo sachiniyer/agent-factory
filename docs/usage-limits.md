@@ -97,7 +97,9 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   rather than hammering an exhausted plan. Killing the session is always the
   off-ramp.
 - **Global-only.** `limit_auto_resume` and `limit_retry_interval` are rejected
-  in in-repo configs and take effect on the next daemon restart.
+  in in-repo configs. A save through `af config set` applies them to the running
+  daemon at once — no restart; a raw hand-edit of `config.toml` takes effect on
+  the next daemon start.
 
 Full config reference: [configuration.md](configuration.md#usage-limit-auto-resume).
 

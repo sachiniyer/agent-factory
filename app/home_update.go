@@ -386,6 +386,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case panePreviewStaleExpiredMsg:
 		m.expireStalePanePreview(msg)
 		return m, nil
+	case backendCatalogMsg:
+		// The naming form's backend field asked the daemon which backends this repo
+		// can use (#1933); open the picker over the answer, if the form is still open.
+		return m.handleBackendCatalog(msg)
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -504,6 +508,12 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			if strings.TrimSpace(m.pendingPrompt) != "" {
 				name = keys.KeyEditPrompt
 			}
+		case "ctrl+r":
+			// Same swap for the backend hint (#1933).
+			name = keys.KeySetBackend
+			if m.pendingBackend != repoDefaultBackend {
+				name = keys.KeyEditBackend
+			}
 		case "esc":
 			name = keys.KeyCancelName
 		default:
@@ -585,6 +595,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateInitialPrompt(msg)
 	case stateSelectHandoffAgent:
 		return m.handleStateSelectHandoffAgent(msg)
+	case stateSelectBackend:
+		return m.handleStateSelectBackend(msg)
 	case stateHooks:
 		return m.handleStateHooks(msg)
 	case stateTasks:
