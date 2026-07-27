@@ -330,7 +330,7 @@ enabled = false
 Semantics:
 
 - **Precedence (low → high): built-in `enabled=false` < global `[root_agent]` < legacy `root_agents[path]` < personal per-project `[root_agent]`.** Layers merge **by field**: a higher layer overrides `enabled` only if it set it (an explicit `false` counts) and `program` only if non-empty. So a personal `enabled = false` can disable a root that the global default — or a legacy `root_agents` entry — turned on.
-- **The global default reaches registered projects only.** It never scans disk for repositories; a project must be registered (`af projects register`) to receive it. Legacy `root_agents` entries keep working unchanged and forever.
+- **The global default reaches registered projects only.** It never scans disk for repositories; a project must be registered (`af projects add`) to receive it. Legacy `root_agents` entries keep working unchanged and forever.
 - **Hand-edited for now.** Like `[theme]`, `[root_agent]` is not writable with `af config set` yet (`af config get root_agent` reads it); editing through the CLI/TUI lands in a later phase. Edit the file (or use the config assistant) directly.
 - **Restart-to-apply**, exactly like `root_agents`: changes take effect on the next daemon start. All the always-ensure guarantees above (adopt-never-clobber, reserved name, kill respected, back-off-but-never-give-up) apply identically to a root the singleton enables.
 
@@ -536,8 +536,8 @@ so it is never committed and never imposed on collaborators. Because it is your 
 **It attaches to a registered project, not a path.** A project has a durable, opaque id (`prj_…`) that survives the checkout moving or being cloned twice, so a personal override does not silently stop applying when you move a repo. Register a repository once:
 
 ```bash
-af projects register ~/work/myrepo   # prints the project's prj_ id
-af projects list                     # every registered project
+af projects add ~/work/myrepo   # prints the project's prj_ id
+af projects list                # every registered project
 ```
 
 Then set and clear overrides. `--project` accepts either the `prj_` id or any path inside the registered repository:

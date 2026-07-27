@@ -2,7 +2,7 @@
 
 Agent Factory ships two first-class off-box backends — [`docker` and `ssh`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bastion with exotic auth, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 
-Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill — the one exception is tab management (see [Capabilities & the agent-server](#capabilities--the-agent-server)).
+Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill — the one exception is tab management (see [Capabilities & the agent-server](#capabilities-the-agent-server)).
 
 > **Transport:** the `af agent-server` serves **plain HTTP** (no TLS — af terminates none of its own). The URL must be `http://` (or `ws://`), and the bearer token travels over the connection, so your `launch_cmd` must make the agent-server reachable from the daemon over a private network or tunnel it controls (a container's published loopback port, an SSH forward, a tailnet address).
 
@@ -67,7 +67,7 @@ Provisions the workspace on your infrastructure, starts an `af agent-server` the
 | `--name <slug>` | Stable session slug (also passed to `delete_cmd`). |
 | `--title <title>` | The session title — pass it to `af agent-server --title` so the daemon dials the right workspace. |
 | `--repo <url>` | The repo's `origin` URL to clone the workspace from (GitHub is the durable store). |
-| `--branch <branch>` | **Only on restore** — the archived branch to materialize (see [Archive & restore](#archive--restore)). Absent on a fresh create. |
+| `--branch <branch>` | **Only on restore** — the archived branch to materialize (see [Archive & restore](#archive-restore)). Absent on a fresh create. |
 | `--program <p>` | The agent program to run (optional; forward to `af agent-server --program`). |
 | `--program-resolved` | Present with `--program`; forward it to `af agent-server` so the cloned repo cannot apply a second `program_overrides` lookup. |
 | `--session-env <name>` | Repeated for each global `session_env_passthrough` name; forward each one to `af agent-server --session-env`. Values are never command arguments. |
@@ -140,7 +140,7 @@ A script that exceeds its budget is killed and the operation fails.
 
 **A reap stops the whole launch tree first, then runs `delete_cmd`.** If your `launch_cmd` shells out to a provisioner (`terraform`, `gcloud`, `kubectl`) and is killed at its budget while that provisioner is still working, af kills the entire process group it started *before* running `delete_cmd`. Without that, the surviving provisioner would finish creating infrastructure **after** `delete_cmd` had already reaped and reported success — a resource that bills with nothing pointing at it, since a failed provision leaves af no record of the session.
 
-This applies only to a `launch_cmd` that **just failed**, where everything it started is garbage by definition. It never applies to one that succeeded — see [Backgrounding a tunnel](#backgrounding-a-tunnel-is-supported--you-need-do-nothing) — and it does not apply on kill or archive, where the launch ended long ago. Making `delete_cmd` idempotent is still worthwhile, and a `launch_cmd` that cleans up after itself on `EXIT`/`TERM` is still good practice.
+This applies only to a `launch_cmd` that **just failed**, where everything it started is garbage by definition. It never applies to one that succeeded — see [Backgrounding a tunnel](#backgrounding-a-tunnel-is-supported-you-need-do-nothing) — and it does not apply on kill or archive, where the launch ended long ago. Making `delete_cmd` idempotent is still worthwhile, and a `launch_cmd` that cleans up after itself on `EXIT`/`TERM` is still good practice.
 
 ### Backgrounding a tunnel is supported — you need do nothing
 

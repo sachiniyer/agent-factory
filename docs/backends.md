@@ -54,7 +54,7 @@ With `backend = "docker"`, a session runs entirely inside a container:
 The container is **disposable**: durability lives in GitHub (the workspace is a
 clone of `repo@origin`), not in the container filesystem — so archive pushes the
 branch and reaps the container, and restore re-provisions a fresh container that
-clones the branch back (see [Archive & restore](#archive--restore)).
+clones the branch back (see [Archive & restore](#archive-restore)).
 
 ### Configuration
 
@@ -312,7 +312,7 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 Like docker, the workspace is **disposable**: durability lives in GitHub (the
 workspace is a clone of `repo@origin`) — archive pushes the branch and reaps the
 remote session, and restore re-provisions a fresh remote that clones the branch
-back (see [Archive & restore](#archive--restore)).
+back (see [Archive & restore](#archive-restore)).
 
 ### Configuration
 

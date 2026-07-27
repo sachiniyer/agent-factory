@@ -40,9 +40,9 @@ audit (#1937) found gaps pointing in every direction:
   rather than a copy of the enum, for the reason the enum level below explains.
 
 The sharpest way to hold this: on `CreateSession`, **no surface is a superset of
-another**. All three accept different subsets of the same nine-field request — the
-TUI now sends a backend but still cannot send `title_base` or `auto_yes`, which
-the web does.
+another**. All three accept different subsets of the same eight-field request —
+the TUI now sends a backend but still cannot send `title_base`, which the web
+does.
 
 | Create option | TUI | Web | CLI |
 |---|---|---|---|
