@@ -57,9 +57,15 @@ const shellSafeChars = "_@%+=:,./-"
 // Values that need no quoting pass through, so the common suggestion stays clean
 // and readable (`af sessions restore captain`, not `af sessions restore 'captain'`)
 // — readability matters for a string whose whole purpose is to be read and pasted.
-// Anything else is single-quoted, with embedded single quotes escaped by the
-// standard POSIX idiom ('\”), which makes every other metacharacter — space, ",
-// $, backtick, ;, newline — literal in all three shells.
+// Anything else is single-quoted, with each embedded single quote escaped by
+// the standard POSIX idiom:
+//
+//	'   ->   '\''
+//
+// which makes every other metacharacter — space, ", $, backtick, ;, newline —
+// literal in all three shells. (The idiom is an indented code block because
+// gofmt rewrites a doubled quote in doc prose into a typographic ” character;
+// this comment used to read '\” for exactly that reason.)
 //
 // Prefer Command: a bare Arg still leaves a caller assembling a command by hand.
 // Arg is exported for the rare site that must interleave quoted values with

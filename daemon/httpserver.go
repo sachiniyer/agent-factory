@@ -304,8 +304,15 @@ func healthHandler(cs *controlServer) http.HandlerFunc {
 }
 
 // decodeHTTPRequest reads the size-capped body and unmarshals it into dst. An
-// empty body is treated as a zero-value request so no-argument RPCs (ListTasks,
-// an all-repo Snapshot, health) work with `curl -d ”` or no body at all.
+// empty body is treated as a zero-value request, so no-argument RPCs (ListTasks,
+// an all-repo Snapshot, health) work with no body at all — or with an explicit
+// empty one:
+//
+//	curl -d ''
+//
+// (Indented so gofmt cannot rewrite the doubled quote into a typographic ”
+// character, which is what this line used to print — a curl example that fails
+// if pasted.)
 //
 // Unknown-field handling depends on WHO sent the request, because the same
 // "unknown field" means opposite things to the two populations of caller:
