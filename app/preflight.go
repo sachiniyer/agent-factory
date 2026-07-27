@@ -10,7 +10,7 @@ import (
 
 var localSessionPreflight = preflight.LocalSessionPrereqs
 
-func (m *home) preflightSessionCreate(instance *session.Instance) error {
+func (m *home) preflightSessionCreate() error {
 	// A backend picked in the naming form's field (#1933) decides this, and the
 	// placeholder instance cannot: it is constructed when the form OPENS, before the
 	// user has chosen anything, so its capabilities describe the repo default rather
@@ -34,17 +34,19 @@ func (m *home) preflightSessionCreate(instance *session.Instance) error {
 	// name that does not resolve cannot be the local backend, and a missing local
 	// `claude` is not what is wrong with it. The daemon owns the verdict on a
 	// backend it could not resolve, and states it when the create is submitted.
+	//
+	// Every input is now a fact about the CREATE rather than about the placeholder
+	// (#2599): the picked backend, and `N` via m.pendingForceRemote. The placeholder
+	// used to answer the `N` half through its capabilities, which only worked
+	// because it had been provisioned as a hook runtime while the user was still
+	// typing a title. It is pinned local now and provisions nothing, so reading its
+	// capabilities would report every create local and refuse a docker/ssh/hook
+	// session for a missing local `claude` — #2592, reintroduced in the TUI.
 	local, _ := session.LocalPrereqsRequired(session.InstanceOptions{
-		Backend: session.BackendKind(m.pendingBackend),
+		Backend:     session.BackendKind(m.pendingBackend),
+		ForceRemote: m.pendingForceRemote,
 	}, m.repoRoot)
 	if !local {
-		return nil
-	}
-	// The legacy `N` selector is not a backend pick — it lives on the placeholder,
-	// which is provisioned as a remote runtime — so its locality still reads from
-	// the instance. Local-session prerequisites only apply to a backend that runs
-	// the agent on a local worktree.
-	if instance == nil || instance.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 		return nil
 	}
 	cfg, err := m.preflightConfig()

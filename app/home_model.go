@@ -426,6 +426,15 @@ type home struct {
 	// so an untouched field keeps today's behavior byte-identical. Reset by
 	// startNewInstance so a cancelled create cannot leak a backend into the next.
 	pendingBackend string
+	// pendingForceRemote records that this naming flow began with `N` (new remote)
+	// rather than `n`. It used to be read back off the naming placeholder's
+	// capabilities, which only worked because the placeholder was PROVISIONED with
+	// the hook runtime while the user was still typing a title (#2599). The
+	// placeholder no longer resolves any runtime, so the selector has to be
+	// remembered here — it is a fact about the keypress, not about a session that
+	// does not exist yet. Reset by startNewInstance and cleared on every way the
+	// naming flow ends, exactly like pendingBackend.
+	pendingForceRemote bool
 	// backendPickerChoices is the option list the open backend picker is showing,
 	// held alongside the overlay for the same reason handoffChoices is: the list is
 	// built from the daemon's response (plus a leading "repo default" row), so the

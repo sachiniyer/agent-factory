@@ -371,6 +371,29 @@ first input — that round trip is the whole point of the feature and no marker
 can stand in for it. Re-run `n` afterwards and confirm the hint is back to
 `initial prompt` with no `✓`: a prompt must never leak into the next session.
 
+**Test the form in a repo that declares a non-local backend, too (#2599).** The
+naming row used to be built by provisioning the create's runtime, so in a repo
+whose `.agent-factory/config.json` says `backend = "docker"` (or `ssh`/`hook`)
+pressing `n` ran a real provisioner and the form never opened at all. Every
+create-form gate above passes in a local repo while that is broken, which is why
+this is its own step:
+
+```bash
+mkdir -p "$AF_DRIVER_REPO/.agent-factory"
+printf '{"backend": "docker"}\n' >"$AF_DRIVER_REPO/.agent-factory/config.json"
+af_boot; af_ensure_nav; af_focus_tree
+af_send n; af_wait_for 'submit name'          # the form opens at all
+af_send_literal 'declared'; af_send Enter
+af_wait_for 'docker'                          # the DAEMON refuses, naming docker
+```
+
+The second wait is the load-bearing one. A create that succeeds here as a local
+session means the placeholder's backend was pinned local and the repo's declared
+backend went with it — which passes "the form opens" and silently gives the user
+a session their repo did not ask for. The refusal has to come from the daemon
+and has to name the backend. `scripts/tui-2599-scenario.sh` automates all three
+legs (form opens, backend honored, `ctrl+r` → `local` still creates).
+
 ### Tree / selection / focus changes (the #1156, #1084 class)
 
 ```bash

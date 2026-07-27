@@ -442,24 +442,23 @@ func TestNamingFormBackendAndForceRemoteAgree(t *testing.T) {
 	got := recordStartRequest(t)
 	stubBackends(t, twoUsableBackends(), nil)
 
-	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
-		if opts.ForceRemote {
-			return &session.HookBackend{}, nil
-		}
-		return &session.LocalBackend{}, nil
-	})
-	defer restore()
-
+	// `N` is now recorded on the model, not inferred from the naming row's
+	// provisioned runtime (#2599 — the row provisions nothing at all any more), so
+	// this is what startNewInstance(true) leaves behind. The end-to-end wiring from
+	// the keypress to this field is covered by
+	// TestStartNewRemoteThreadsForceRemoteFromTheKeypress; here it is set directly
+	// so the assertion stays about the request, not about how the flag got set.
 	remote, err := session.NewInstance(session.InstanceOptions{
-		Title:       "forced-remote",
-		Path:        t.TempDir(),
-		Program:     "claude",
-		ForceRemote: true,
+		Title:   "forced-remote",
+		Path:    t.TempDir(),
+		Program: "claude",
+		Backend: session.BackendLocal,
 	})
 	require.NoError(t, err)
 	h.store.AddInstance(remote)
 	h.namingInstance = remote
 	h.pendingProgram = "claude"
+	h.pendingForceRemote = true
 	h.state = stateNew
 
 	openBackendField(t, h)

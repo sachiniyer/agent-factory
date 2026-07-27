@@ -31,6 +31,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.pendingForceRemote = false
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -89,7 +90,22 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.handleError(fmt.Errorf("a session titled %q conflicts with existing session %q", title, other.Title))
 			}
 		}
-		if instance.Capabilities().Workspace == session.WorkspaceRemote {
+		// Which runtime this create lands on, resolved from the PENDING selection
+		// rather than read off the placeholder's capabilities (#2599): the
+		// placeholder is pinned local and provisions nothing, so it no longer knows.
+		// This is the same decision the daemon will make, by the same precedence,
+		// and it creates nothing — BackendKindFor exists for exactly this.
+		//
+		// A kind that does not resolve is left to the daemon. The backend field
+		// offers whatever the daemon's catalog lists (#2600), so a name this
+		// process's enum has never heard of is normal; refusing it here, or guessing
+		// that it is remote, would both be this side inventing an answer it does not
+		// have.
+		backendKind, backendKindErr := session.BackendKindFor(session.InstanceOptions{
+			Backend:     session.BackendKind(m.pendingBackend),
+			ForceRemote: m.pendingForceRemote,
+		}, instance.Path)
+		if backendKindErr == nil && backendKind != session.BackendLocal {
 			existing := make([]*session.Instance, 0, m.store.NumInstances())
 			for _, other := range m.store.GetInstances() {
 				if other == instance || other.Capabilities().Workspace != session.WorkspaceRemote {
@@ -106,7 +122,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// preflightSessionCreate reads only the backend/program, not the title, so it
 		// runs before the title is committed.
-		if err := m.preflightSessionCreate(instance); err != nil {
+		if err := m.preflightSessionCreate(); err != nil {
 			return m, m.handleError(err)
 		}
 		// Every gate passed — commit the resolved title exactly once.
@@ -130,6 +146,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// on the loop, clear it with the rest of the naming state.
 		backend := m.pendingBackend
 		m.pendingBackend = ""
+		// And for `N`. It is read from the model, not from instance.Capabilities(),
+		// because the placeholder no longer resolves a runtime to carry it (#2599) —
+		// this is the value that keeps a remote create remote.
+		forceRemote := m.pendingForceRemote
+		m.pendingForceRemote = false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -157,7 +178,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// the repo's config", so an untouched field is byte-identical to
 				// every create before this field existed.
 				Backend:     backend,
-				ForceRemote: instance.Capabilities().Workspace == session.WorkspaceRemote,
+				ForceRemote: forceRemote,
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
@@ -231,6 +252,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend = ""
+		m.pendingForceRemote = false
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -253,6 +275,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
+	m.pendingForceRemote = false
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
@@ -287,11 +310,36 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 				"remote sessions need a remote_hooks backend configured for this repo — press n for a local session, or configure remote_hooks and try again. Guide: https://sachiniyer.github.io/agent-factory/remote-hooks/"))
 		}
 	}
+	m.pendingForceRemote = remote
+	// The naming row needs a ROW, not a runtime (#2599).
+	//
+	// This instance exists so the rail has something to type a title into. It is
+	// thrown away on submit — startSessionThroughDaemon ignores it entirely and
+	// rebuilds the session from what the daemon returns — and killed on cancel. Yet
+	// NewInstance resolves the create's backend and PROVISIONS it, and for a
+	// non-local kind that is real work: dockerRuntime.Provision runs `docker run` +
+	// clone + `af agent-server`, hookRuntime.Provision runs the repo's launch_cmd.
+	// So in a repo whose config says backend = "docker"/"ssh"/"hook", pressing `n`
+	// was refused before the form ever opened, by an error thrown from inside a
+	// provisioner — the TUI could not create a session in that repo at all. It also
+	// contradicts #960: the daemon is the sole provisioner.
+	//
+	// Pinning the placeholder to the local runtime is what makes it inert.
+	// localRuntime.Provision is a pure constructor (ProvisionResult{Backend:
+	// &LocalBackend{}}) — no worktree, no tmux, no container, no git subprocess —
+	// so nothing is established anywhere until the daemon creates the real session.
+	//
+	// It costs no information: the placeholder's kind was never an input to the
+	// create. Both selectors travel to the daemon explicitly on
+	// sessionStartRequest — the naming form's backend field as Backend (#1933) and
+	// `N` as ForceRemote, now carried in m.pendingForceRemote rather than read back
+	// off this instance's capabilities — and the repo's own `backend` key is
+	// resolved daemon-side. All three still decide the session that gets built.
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:                          "",
 		Path:                           repoPath,
 		Program:                        m.pendingProgram,
-		ForceRemote:                    remote,
+		Backend:                        session.BackendLocal,
 		ProvisionSessionEnvPassthrough: append([]string(nil), m.appConfig.SessionEnvPassthrough...),
 	})
 	if err != nil {

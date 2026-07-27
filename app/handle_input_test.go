@@ -480,6 +480,8 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	})
 	defer restore()
 
+	// The ALREADY-CREATED session really is remote — it was provisioned by the
+	// daemon — so it keeps its hook runtime; that is what the collision is against.
 	existing, err := session.NewInstance(session.InstanceOptions{
 		Title:       "myapp",
 		Path:        t.TempDir(),
@@ -489,14 +491,19 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	require.NoError(t, err)
 	h.store.AddInstance(existing)
 
+	// The naming row does not. It provisions nothing (#2599), so `N` is carried on
+	// the model and the gate resolves the create's kind from that instead of from
+	// this instance's capabilities. A repo path with no `backend` key plus
+	// ForceRemote resolves to hook — the same answer the daemon will reach.
 	naming, err := session.NewInstance(session.InstanceOptions{
-		Title:       "my_app",
-		Path:        t.TempDir(),
-		Program:     "claude",
-		ForceRemote: true,
+		Title:   "my_app",
+		Path:    t.TempDir(),
+		Program: "claude",
+		Backend: session.BackendLocal,
 	})
 	require.NoError(t, err)
 	h.namingInstance = naming
+	h.pendingForceRemote = true
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 
