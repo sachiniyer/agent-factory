@@ -148,11 +148,39 @@ func (i *Instance) SetTabConversation(name string, conv AgentConversationData) b
 }
 
 func prepareLaunchConversation(i *Instance, program string) string {
-	rewritten, conversation := planLaunchConversation(i.ID, program)
+	rewritten, conversation := planCreateConversation(i, program)
 	if conversation.HasID() {
 		i.SetAgentConversation(conversation)
 	}
 	return rewritten
+}
+
+// planCreateConversation decides which conversation a FIRST launch comes up on.
+// A create carrying a previous record's conversation (#2616 — the root agent's
+// reap-and-recreate, the one heal that replaces the record instead of
+// re-spawning into it) resumes that conversation, exactly as
+// LocalBackend.respawn does for every other recovered session. Everything else
+// falls through to the ordinary fresh-injection plan, so no normal create
+// changes shape.
+//
+// The carry is honored only when the resolved command can actually express it.
+// ResumeProgramWithConversationID refuses when the recorded agent is not the one
+// the program will run (a root handed off to another agent, or a root_agents
+// program repointed) and when the command already pins its own
+// resume/session-id flag — both cases where forcing a resume would hand an id to
+// a provider that has never heard of it. Falling back to a fresh agent there is
+// the correct outcome; ensureRootAgent reports which of the two happened rather
+// than letting them read alike.
+func planCreateConversation(i *Instance, program string) (string, AgentConversationData) {
+	if carried := i.carriedConversation; carried.HasID() {
+		if rewritten, ok := tmux.ResumeProgramWithConversationID(program, carried.Agent, carried.ID); ok {
+			return rewritten, carried
+		}
+		// A command that pins its own resume flag also lands here, and must not be
+		// given a freshly injected --session-id on top of it — the injection helper
+		// declines for the same reason, so the fall-through below is a no-op there.
+	}
+	return planLaunchConversation(i.ID, program)
 }
 
 // planLaunchConversation is the side-effect-free half of

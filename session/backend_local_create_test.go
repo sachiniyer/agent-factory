@@ -236,3 +236,73 @@ func TestPrepareCreateLaunchDoesNotGuessCodexStoreForOpaqueOverride(t *testing.T
 	require.Empty(t, plan.conversationCapture.codexHome,
 		"a config label is not evidence that an opaque wrapper writes Codex rollouts")
 }
+
+// TestPrepareCreateLaunchResumesCarriedConversation pins the #2616 carry on the
+// REAL local create plan — the command the pane is actually spawned with. The
+// daemon's root-agent heal reaps the record holding agent_conversation and
+// creates a new one in its place, so unless the create plan resumes the carried
+// conversation the always-on root silently comes back with an empty context.
+func TestPrepareCreateLaunchResumesCarriedConversation(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initInPlaceRepo(t, "carried-create")
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude --dangerously-skip-permissions"}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	const priorID = "64ea06ed-7206-7fc2-803b-f7045e07a242"
+	inst, err := NewInstance(InstanceOptions{
+		Title:   "root",
+		Path:    repoRoot,
+		Program: tmux.ProgramClaude,
+		InPlace: true,
+		ResumeConversation: AgentConversationData{
+			Agent:       tmux.ProgramClaude,
+			ID:          priorID,
+			CapturedAt:  time.Date(2026, 7, 26, 21, 35, 39, 0, time.UTC),
+			CaptureKind: ConversationCaptureInjected,
+		},
+	})
+	require.NoError(t, err)
+
+	plan, err := inst.PrepareCreateLaunch()
+	require.NoError(t, err)
+
+	require.Equal(t, priorID, plan.conversation.ID,
+		"the create must come up on the carried conversation, not a freshly minted one")
+	require.Contains(t, plan.program, "--resume "+priorID)
+	require.NotContains(t, plan.program, "--session-id",
+		"a carried conversation is resumed, never re-injected as a new session id")
+}
+
+// TestPrepareCreateLaunchStartsFreshWhenTheCarriedAgentIsNotTheProgramsAgent:
+// the three-valued half of #2616. A recorded conversation the resolved command
+// cannot resume — here a codex conversation against a claude root program —
+// falls back to a fresh agent, because an always-on root that exists beats one
+// that never starts.
+func TestPrepareCreateLaunchStartsFreshWhenTheCarriedAgentIsNotTheProgramsAgent(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initInPlaceRepo(t, "mismatched-carry")
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude --dangerously-skip-permissions"}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	inst, err := NewInstance(InstanceOptions{
+		Title:   "root",
+		Path:    repoRoot,
+		Program: tmux.ProgramClaude,
+		InPlace: true,
+		ResumeConversation: AgentConversationData{
+			Agent:       tmux.ProgramCodex,
+			ID:          "64ea06ed-7206-7fc2-803b-f7045e07a242",
+			CaptureKind: ConversationCaptureCodexRollout,
+		},
+	})
+	require.NoError(t, err)
+
+	plan, err := inst.PrepareCreateLaunch()
+	require.NoError(t, err)
+
+	require.Equal(t, inst.ID, plan.conversation.ID, "a mismatched carry must fall back to a fresh conversation")
+	require.Contains(t, plan.program, "--session-id "+inst.ID)
+	require.NotContains(t, plan.program, "--resume")
+}

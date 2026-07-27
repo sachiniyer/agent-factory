@@ -1,5 +1,21 @@
 # Release Notes
 
+## A healed root agent keeps its conversation
+
+- When the root agent's tmux vanished, the daemon re-created it as a **brand-new
+  agent with no history**. Every other session that loses its tmux is re-spawned
+  with `--resume`, so the one always-on session — the target of every watch and
+  monitor delivery — was the only one that silently started over. It now carries
+  its recorded conversation across the re-create and comes back on it.
+- Nothing about the always-ensured guarantee changed: if the recorded
+  conversation cannot be resumed (the configured root program runs a different
+  agent, it pins its own resume flag, or the provider no longer has that
+  conversation), the root is created fresh rather than left down.
+- The application log now distinguishes the outcomes — resumed its prior
+  conversation, had none recorded, or did not come up on it — so a root that
+  restarted without its history is legible instead of reading exactly like one
+  that kept it.
+
 ## Config changes apply on save
 
 - Saving a config change via `af config set` or the web config editor now applies

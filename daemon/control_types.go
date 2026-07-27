@@ -58,6 +58,19 @@ type CreateSessionRequest struct {
 	// unexported fields, so no RPC client (TUI, CLI, API) can ever set it —
 	// only in-process daemon code can.
 	allowReserved bool
+
+	// resumeConversation carries a reaped record's provider conversation into its
+	// replacement (#2616). Set only by the root-agent ensure loop, which — unlike
+	// the general Lost-restore path — replaces the record rather than re-spawning
+	// into it, and would otherwise drop the one field that cannot be rebuilt.
+	//
+	// Unexported for the same reason as allowReserved: gob skips unexported
+	// fields, so no RPC client can hand the daemon a conversation id to launch a
+	// session on. Which conversation a session resumes is an assertion the daemon
+	// makes from its own records, never a claim a client gets to make — a
+	// settable one would let any caller point a new session at another session's
+	// transcript.
+	resumeConversation session.AgentConversationData
 }
 
 type CreateSessionResponse struct {

@@ -193,6 +193,19 @@ type Instance struct {
 	// external_worktree flag carries the semantics from then on).
 	inPlace bool
 
+	// carriedConversation is a provider conversation a PREVIOUS record held that
+	// this create should come up on instead of starting a new one (#2616). It
+	// exists for exactly one caller: the daemon's root-agent heal, which reaps
+	// the vanished root's record — and with it agent_conversation — and creates a
+	// replacement in place, where every other Lost session is re-spawned on its
+	// own surviving record. Write-once by NewInstance and read only while
+	// planning the first launch, so it needs no lock (the inPlace precedent).
+	//
+	// It is a REQUEST, not a fact: the recorded conversation is only honored when
+	// the resolved command can actually express it, and the conversation the
+	// session ends up with is whatever the launch plan committed to Tabs[0].
+	carriedConversation AgentConversationData
+
 	// userKilled is the kill-intent tombstone (#1108): set (and persisted)
 	// before an explicit kill's teardown begins, so a record that survives a
 	// daemon crash or teardown failure mid-kill is provably a corpse the user

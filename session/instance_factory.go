@@ -51,6 +51,13 @@ type InstanceOptions struct {
 	// git worktree+branch. The worktree is marked external so kill/cleanup
 	// never removes the user's tree or branch. Local backend only.
 	InPlace bool
+	// ResumeConversation asks the first launch to come up on a provider
+	// conversation a previous record held, rather than starting a new one
+	// (#2616). Set only by the daemon's root-agent heal, which replaces the
+	// vanished root's record instead of re-spawning it; every other Lost session
+	// keeps its record and resumes through Recover. Empty for every ordinary
+	// create, which is why the fresh-injection path is unchanged.
+	ResumeConversation AgentConversationData
 	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
 	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4 PR2)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
@@ -328,6 +335,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		preResolvedProgram:    resolvedProgramMarker(opts),
 		sessionEnvPassthrough: normalizedSessionEnv,
 		inPlace:               opts.InPlace,
+		carriedConversation:   opts.ResumeConversation,
 		backend:               backend,
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,
