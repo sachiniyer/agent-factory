@@ -140,9 +140,10 @@ remote development environment while you still want one local control surface.
 
 ## Usage-Limit Recovery
 
-Claude and Codex sessions can hit plan usage-limit windows. Agent Factory can
-mark those sessions with `[limit]`, preserve task runs as parked instead of
-failed, and optionally auto-resume when the reset window elapses.
+Claude, Codex, and Devin sessions can hit plan usage-limit windows. Agent Factory
+can mark those sessions with `[limit]`, preserve task runs as parked instead of
+failed, and optionally auto-resume — on the banner's reset time where it states
+one, or a fixed retry interval where it does not.
 
 This is especially useful for unattended task runs: a limit wall becomes a
 pause, not a false failure.

@@ -38,7 +38,9 @@ paragraph because it's why `af` doesn't corrupt itself:
   watch-script triggers — are hosted by the daemon. It arms the timers, watches
   the scripts, and delivers prompts on time, whether or not a TUI is open.
 - **Handles usage limits.** With auto-resume enabled, the daemon parks a session
-  that hit a Claude/Codex usage limit and resumes it once the window elapses —
+  that hit a `claude`, `codex`, or `devin` usage limit and resumes it — when the
+  banner's reset window elapses, or on the `limit_retry_interval` cadence for a
+  banner that states no reset time (every `devin` limit) —
   see [Usage limits](../usage-limits.md).
 - **Serves the HTTP/JSON API.** The daemon exposes every session and task
   operation over a local Unix socket — see the
