@@ -556,7 +556,7 @@ func TestResumeProgramWithConversationID(t *testing.T) {
 		// deliberately falls through to ok=false and Restore uses the
 		// latest-session path (resumeProgram's --continue) — the same degradation
 		// gemini and aider get. If opencode id capture is ever implemented, add a
-		// ProgramOpencode case returning `program + " --session " + shellQuoteArg(id)`
+		// ProgramOpencode case returning `program + " --session " + shellquote.Quote(id)`
 		// and flip this row.
 		{"opencode has no id-resume path in af", ProgramOpencode, "opencode", "opencode", false},
 		{"opencode with flag still no id-resume", ProgramOpencode, "opencode --model anthropic/claude-opus-4-5", "opencode --model anthropic/claude-opus-4-5", false},
@@ -596,12 +596,6 @@ func TestResumeProgramWithConversationIDQuotesUnsafeID(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
-}
-
-func TestShellQuoteArg(t *testing.T) {
-	require.Equal(t, "abc-123_./:@%+=", shellQuoteArg("abc-123_./:@%+="))
-	require.Equal(t, "'thread id?x=1&y=2'", shellQuoteArg("thread id?x=1&y=2"))
-	require.Equal(t, `'it'"'"'s'`, shellQuoteArg("it's"))
 }
 
 // TestResumeProgram_CodexProfileResumeFalsePositive guards #632: the codex

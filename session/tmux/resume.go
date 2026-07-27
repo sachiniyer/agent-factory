@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
 // resumeProgram derives a "resume the most recent session in cwd" variant of
@@ -243,7 +244,7 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 				return program, false
 			}
 		}
-		return program + " --resume " + shellQuoteArg(id), true
+		return program + " --resume " + shellquote.Quote(id), true
 	case ProgramCodex:
 		insertAt := agentIdx + 1
 		if insertAt < len(tokens) && tokens[insertAt] == "exec" {
@@ -253,28 +254,16 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 			return program, false
 		}
 		off := ends[insertAt-1]
-		return program[:off] + " resume " + shellQuoteArg(id) + program[off:], true
+		return program[:off] + " resume " + shellquote.Quote(id) + program[off:], true
 	case ProgramAmp:
 		insertAt, alreadyResume := ampResumeInsertIndex(tokens, agentIdx)
 		if alreadyResume || insertAt < 0 {
 			return program, false
 		}
 		off := ends[insertAt-1]
-		return program[:off] + " threads continue " + shellQuoteArg(id) + program[off:], true
+		return program[:off] + " threads continue " + shellquote.Quote(id) + program[off:], true
 	}
 	return program, false
-}
-
-func shellQuoteArg(arg string) string {
-	if arg != "" && strings.IndexFunc(arg, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') ||
-			(r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') ||
-			strings.ContainsRune("_@%+=:,./-", r))
-	}) == -1 {
-		return arg
-	}
-	return "'" + strings.ReplaceAll(arg, "'", `'"'"'`) + "'"
 }
 
 // ClaudeProgramWithSessionID appends Claude Code's explicit conversation id flag

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -33,7 +34,7 @@ const receiverReadyMarker = "AF-RECEIVER-READY"
 // that pastes before the DECSET lands would get an unbracketed paste for a
 // legitimate reason and blame the code under test.
 //
-// outPath is shell-quoted (shellQuoteArg, the package's existing POSIX quoter):
+// outPath is shell-quoted (shellquote.Quote, the shared POSIX quoter):
 // t.TempDir() inherits TMPDIR, so the path can hold a space or a metacharacter
 // even though Go sanitizes the subtest name out of it. Unquoted, `cat > /tmp/af
 // space dir/received.bin` redirects to `/tmp/af` — the fixture breaks, and it
@@ -49,7 +50,7 @@ const receiverReadyMarker = "AF-RECEIVER-READY"
 // test never skips in CI for want of an agent binary.
 func receiverProgram(outPath string) string {
 	return fmt.Sprintf(`stty raw -echo; printf "\033[?2004h%s\r\n"; cat > %s`,
-		receiverReadyMarker, shellQuoteArg(outPath))
+		receiverReadyMarker, shellquote.Quote(outPath))
 }
 
 // startReceiverPane brings up a real tmux session running the receiver and
@@ -139,11 +140,11 @@ func TestReceiverProgramQuotesOutputPath(t *testing.T) {
 			// through a real shell rather than asserting on the string: `sh -c`
 			// echoing the quoted arg answers the only question that matters —
 			// what the shell resolves it to.
-			out, err := exec.Command("sh", "-c", "printf %s "+shellQuoteArg(path)).Output()
+			out, err := exec.Command("sh", "-c", "printf %s "+shellquote.Quote(path)).Output()
 			require.NoError(t, err)
 			require.Equal(t, path, string(out),
 				"shell must resolve the quoted path back to exactly one intact word")
-			require.Contains(t, prog, shellQuoteArg(path),
+			require.Contains(t, prog, shellquote.Quote(path),
 				"receiver program must embed the QUOTED path, never the raw one")
 			require.NotContains(t, prog, "cat > "+path,
 				"receiver program must not splice the raw path into the redirect")

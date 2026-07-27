@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
 var processExec = syscall.Exec
@@ -25,7 +27,7 @@ func WrapCommand(executable, agent string, extras []string, command string) (str
 	args = append(args, command)
 	quoted := make([]string, len(args))
 	for idx, arg := range args {
-		quoted[idx] = shellQuote(arg)
+		quoted[idx] = shellquote.Quote(arg)
 	}
 	return strings.Join(quoted, " "), nil
 }
@@ -65,16 +67,4 @@ func execInvocation(args []string) error {
 	// interpret differently.
 	shell := "/bin/sh"
 	return processExec(shell, []string{shell, "-c", command}, environ)
-}
-
-func shellQuote(arg string) string {
-	if arg != "" && strings.IndexFunc(arg, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') ||
-			(r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') ||
-			strings.ContainsRune("_@%+=:,./-", r))
-	}) == -1 {
-		return arg
-	}
-	return "'" + strings.ReplaceAll(arg, "'", `'"'"'`) + "'"
 }

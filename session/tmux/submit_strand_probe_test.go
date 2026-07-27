@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -25,7 +26,7 @@ import (
 // "two separate submissions" from "one concatenated submission".
 func lineComposerProgram(outPath string) string {
 	return fmt.Sprintf(`stty -echo; printf "AF-RECEIVER-READY\r\n"; while IFS= read -r l; do printf "[%%s]" "$l" >> %s; done`,
-		shellQuoteArg(outPath))
+		shellquote.Quote(outPath))
 }
 
 func startLineComposerPane(t *testing.T, name string) (*TmuxSession, string) {

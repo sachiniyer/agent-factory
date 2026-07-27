@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
 // TestRealPaneEnvironmentIsFiltered reads variable names from the pane
@@ -87,7 +89,7 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 	}
 
 	session := NewTmuxSession("real-env-boundary", strings.Join([]string{
-		shellQuoteArg(agentPath), shellQuoteArg(namesPath), shellQuoteArg(workspacePath), shellQuoteArg(pushMarkerPath),
+		shellquote.Quote(agentPath), shellquote.Quote(namesPath), shellquote.Quote(workspacePath), shellquote.Quote(pushMarkerPath),
 	}, " "))
 	if err := session.SetEnvPassthrough([]string{customName}); err != nil {
 		t.Fatal(err)

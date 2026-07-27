@@ -26,9 +26,14 @@
 //
 // # Scope
 //
-// This is for commands we PRINT. Strings af itself feeds to a shell (ssh scripts,
-// tmux program strings) are a different job with different helpers; consolidating
-// those is #1529.
+// This is for commands we PRINT. Strings af itself feeds to a shell (ssh
+// scripts, tmux program strings) are a different job: internal/shellquote is the
+// shared quoter for the executed side. The two stay separate because Arg's zsh
+// start-of-word guards only earn their keep when the command lands in a human's
+// interactive shell, and they change the rendered string. The always-quote
+// helpers still in the tree (session.shellQuote, config.ShellQuotePath) render
+// differently again, so folding them in is a behavior-visible change tracked on
+// the structural audit (#1195), not a mechanical move.
 package shellsuggest
 
 import "strings"
