@@ -189,7 +189,9 @@ func (c *Client) SnapshotWithAlarms(req daemon.SnapshotRequest) (daemon.Snapshot
 // ListBackends asks the daemon which runtimes a create against this repo may
 // select, with the tri-state availability answer per backend (#1933). It is the
 // TUI's backend picker's only source of truth — the same route the web's picker
-// calls, so both surfaces render one catalog computed in one place.
+// calls, so both surfaces render one catalog computed in one place. HTTP twin of
+// daemon.ListBackends, which `af sessions backends` takes over the gob socket
+// (#2584): three transports, one controlServer.ListBackends, no second catalog.
 //
 // This one IS a round trip, unlike the in-process reads described below, and the
 // difference is not stylistic: a backend's availability is a property of the box

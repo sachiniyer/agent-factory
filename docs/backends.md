@@ -18,7 +18,8 @@ fixed single agent tab.
 Select a backend per-repo in `.agent-factory/config.json`, or per-session on any
 surface — each overrides the repo config for that one session:
 
-- **CLI** — `af sessions create --backend <name>`.
+- **CLI** — `af sessions create --backend <name>`; `af sessions backends` first if
+  you want to see which values this repo can actually use.
 - **TUI** — press `ctrl+r` while naming the new session and pick from the list.
   Its rows come from the daemon, so each one says whether *this* repo can use that
   backend; picking one it cannot names the config key to fix. Leaving the field

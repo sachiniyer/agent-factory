@@ -53,7 +53,14 @@ drive_backend_field() {
     _af_log 'assert OK: the backend field lists the daemon catalog with per-row status'
 
     # Esc backs out of the FIELD, not the create.
+    #
+    # Wait on the overlay being GONE, never on 'submit name': the naming form's
+    # status bar is painted UNDERNEATH the overlay, so a wait for it matches
+    # instantly and synchronizes nothing — the next keypress would race the close
+    # and land in whichever surface won. That level-vs-edge mistake is the whole
+    # reason this file waits the way it does.
     af_send Escape
+    af_wait_gone 'Select backend' "$AF_DRIVER_TIMEOUT" 'esc closed the field' || return 1
     af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'esc returns to naming' || return 1
 
     # Refusal path: docker is the row two below "Repo default" (local sits between
@@ -143,6 +150,10 @@ drive_backend_field_at_80_cols() {
     # the sandbox's C locale (#1994).
     af_wait_for 'esc cancel' "$AF_DRIVER_TIMEOUT" 'picker painted in full at 80 cols' || return 1
     af_send Escape
+    # Edge, not level — see the note in drive_backend_field. Without this the C-c
+    # below can arrive while the overlay still owns the keyboard, where it cancels
+    # the FIELD rather than the create.
+    af_wait_gone 'Select backend' "$AF_DRIVER_TIMEOUT" 'esc closed the field' || return 1
     af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'esc returns to naming' || return 1
     af_send C-c
     af_wait_gone 'submit name' "$AF_DRIVER_TIMEOUT" 'naming form cancelled' || return 1
