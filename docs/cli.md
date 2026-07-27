@@ -41,7 +41,7 @@ For the **session reads** that follow `--daemon-url`/`AF_DAEMON_URL` (`sessions 
 ## `af` — the TUI
 
 ```bash
-cd your-project    # must be a git repo
+cd your-project    # a git repo
 af                 # launch the TUI
 ```
 
