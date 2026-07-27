@@ -129,8 +129,21 @@ const afUsageOutroPlugin = `Finishing up: the sessions you create keep running a
 // afUsageOutro closes the reference for both audiences.
 const afUsageOutro = `Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.`
 
-// shellQuote wraps a string in single quotes, escaping any embedded single quotes
-// using the standard shell idiom: replace ' with '\"
+// shellQuote wraps a string in single quotes, escaping any embedded single
+// quote with the standard POSIX idiom:
+//
+//	'   ->   '\''
+//
+// The idiom is written above as an indented code block on purpose: gofmt
+// rewrites a doubled quote in doc PROSE into a typographic ” character, which
+// is how this very comment previously came to claim the escape was '\" — an
+// incorrect description of a security-relevant primitive, produced by the
+// formatter rather than by a typo.
+//
+// It quotes UNCONDITIONALLY, so the empty string renders as a quoted empty word
+// rather than vanishing — unlike config.ShellQuotePath, which returns ""
+// unchanged. See internal/shellquote for why the tree's quoters are not
+// interchangeable.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

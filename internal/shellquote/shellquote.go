@@ -9,14 +9,28 @@
 // understood and fixed at a single site while nine others kept interpolating raw
 // values. One home means one place to fix.
 //
-// Sibling, not duplicate: internal/shellsuggest quotes the commands af PRINTS
-// for a human to paste. Its Arg additionally guards zsh start-of-word expansions
-// because a pasted command lands in the reader's interactive shell, and that
-// guard changes the rendered string — so the two stay separate deliberately, not
-// by neglect. The other in-tree quoters (session.shellQuote,
-// config.ShellQuotePath) quote unconditionally and so also render differently
-// for the same input. Consolidating all of them is a behavior-visible change
-// tracked on the structural audit (#1195); this package is the home it lands in.
+// Siblings, not duplicates. Three other quoters remain in the tree, and NO TWO
+// OF THEM AGREE on some input — which is the whole reason none of them was
+// folded in here. Stated precisely, because the differences are one line each
+// and invisible to a reader merging them by eye:
+//
+//   - internal/shellsuggest.Arg quotes the commands af PRINTS for a human to
+//     paste. It additionally guards zsh start-of-word expansions, because a
+//     pasted command lands in the reader's interactive shell: Arg("=x") quotes,
+//     Quote("=x") does not.
+//   - session.shellQuote (session/systemprompt.go) quotes UNCONDITIONALLY, for
+//     the ssh/docker/sandbox provisioning scripts: shellQuote("x") is 'x' where
+//     Quote("x") is x. The empty string becomes a quoted empty word.
+//   - config.ShellQuotePath quotes unconditionally TOO, and uses the same escape
+//     idiom — but it carves out the empty string and returns it UNCHANGED. So
+//     the pair that looks most alike disagrees on "": one emits a quoted empty
+//     word, the other emits nothing at all. Folding them would break one caller
+//     or the other depending purely on which body survived, and an empty value
+//     reaching a shell is exactly where that stops being cosmetic.
+//
+// Folding any of them in is therefore a behavior-visible change, not a
+// mechanical move. It is tracked on the structural audit (#1195); this package
+// is the home it lands in when someone takes it deliberately.
 package shellquote
 
 import "strings"
