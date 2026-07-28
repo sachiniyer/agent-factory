@@ -417,13 +417,15 @@ before creating tabs instead of leaving an unexplained blank.
 
 ### Project switcher
 
-The **project switcher** in the top-right of the app bar lists every project (repo)
-af has a session or task in, each showing a per-project session + working count —
-the cross-project glance that replaces the old all-projects rail. Selecting a
-project scopes the rail and Tasks view to it; the choice persists across reloads.
-Projects with no live sessions show an empty-state prompt (`No active sessions in
-<project> — + New`). The reversible delete-project control sits in the switcher
-menu footer.
+The **project switcher** in the top-right of the app bar lists every project
+(repo) af knows about — those with a session or task, plus any registered
+project (the durable registry, so a freshly added repo shows before it has any
+sessions) — each showing a per-project session + working count, the
+cross-project glance that replaces the old all-projects rail. Selecting a
+project scopes the rail and Tasks view to it; the choice persists across
+reloads. Projects with no live sessions show an empty-state prompt (`No active
+sessions in <project> — + New`). The switcher menu footer holds the **+ Add
+project** affordance and the reversible delete-project control.
 
 ### Tasks view
 
