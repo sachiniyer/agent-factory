@@ -15,8 +15,51 @@ import (
 
 const testReleaseArchiveName = "agent-factory-linux-amd64.tar.gz"
 
+func TestExtractBinaryFromTarGz(t *testing.T) {
+	archive := testTarGz(t, map[string][]byte{
+		"agent-factory": []byte("binary-content"),
+		"README":        []byte("not the binary"),
+	})
+
+	got, err := ExtractBinaryFromTarGz(bytes.NewReader(archive), "agent-factory")
+	if err != nil {
+		t.Fatalf("ExtractBinaryFromTarGz returned error: %v", err)
+	}
+	if string(got) != "binary-content" {
+		t.Fatalf("extracted %q, want binary-content", string(got))
+	}
+}
+
+func TestExtractBinaryFromTarGzNestedPath(t *testing.T) {
+	archive := testTarGz(t, map[string][]byte{"dist/agent-factory": []byte("nested-binary")})
+
+	got, err := ExtractBinaryFromTarGz(bytes.NewReader(archive), "agent-factory")
+	if err != nil {
+		t.Fatalf("ExtractBinaryFromTarGz returned error: %v", err)
+	}
+	if string(got) != "nested-binary" {
+		t.Fatalf("extracted %q, want nested-binary", string(got))
+	}
+}
+
+func TestExtractBinaryFromTarGzMissingBinary(t *testing.T) {
+	archive := testTarGz(t, map[string][]byte{"other": []byte("content")})
+
+	_, err := ExtractBinaryFromTarGz(bytes.NewReader(archive), "agent-factory")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not found error, got %v", err)
+	}
+}
+
+func TestExtractBinaryFromTarGzInvalidGzip(t *testing.T) {
+	_, err := ExtractBinaryFromTarGz(strings.NewReader("not gzip"), "agent-factory")
+	if err == nil || !strings.Contains(err.Error(), "gzip") {
+		t.Fatalf("expected gzip error, got %v", err)
+	}
+}
+
 func TestCandidateStagerDownloadsNestedBinary(t *testing.T) {
-	archive := testTarGz(t, "dist/agent-factory", []byte("candidate-binary"))
+	archive := testTarGz(t, map[string][]byte{"dist/agent-factory": []byte("candidate-binary")})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/sha256sums.txt":
@@ -126,21 +169,23 @@ func testChecksumManifest(archiveName string, archive []byte) []byte {
 	return []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(archive), archiveName))
 }
 
-func testTarGz(t *testing.T, name string, contents []byte) []byte {
+func testTarGz(t *testing.T, files map[string][]byte) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
 	tarWriter := tar.NewWriter(gzipWriter)
-	if err := tarWriter.WriteHeader(&tar.Header{
-		Name:     name,
-		Mode:     0755,
-		Size:     int64(len(contents)),
-		Typeflag: tar.TypeReg,
-	}); err != nil {
-		t.Fatalf("write tar header: %v", err)
-	}
-	if _, err := tarWriter.Write(contents); err != nil {
-		t.Fatalf("write tar body: %v", err)
+	for name, contents := range files {
+		if err := tarWriter.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     0755,
+			Size:     int64(len(contents)),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tarWriter.Write(contents); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
 	}
 	if err := tarWriter.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)

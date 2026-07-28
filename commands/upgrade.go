@@ -373,9 +373,3 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		fmt.Fprintln(errOut, "Re-register this home's unit with `af daemon install` to restore supervision.")
 	}
 }
-
-// extractBinaryFromTarGz reads a tar.gz stream and returns the contents of the
-// file whose name matches binaryName (or ends with /binaryName).
-func extractBinaryFromTarGz(r io.Reader, binaryName string) ([]byte, error) {
-	return autoupdate.ExtractBinaryFromTarGz(r, binaryName)
-}

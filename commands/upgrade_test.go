@@ -46,53 +46,6 @@ func upgradeReleaseURL(t *testing.T, archive []byte, archiveHandler http.Handler
 	return server.URL + "/" + testUpgradeArchiveName
 }
 
-func TestExtractBinaryFromTarGz(t *testing.T) {
-	archive := makeTarGz(t, map[string][]byte{
-		"agent-factory": []byte("binary-content"),
-		"README":        []byte("not the binary"),
-	})
-
-	got, err := extractBinaryFromTarGz(bytes.NewReader(archive), "agent-factory")
-	if err != nil {
-		t.Fatalf("extractBinaryFromTarGz returned error: %v", err)
-	}
-	if string(got) != "binary-content" {
-		t.Fatalf("extracted %q, want binary-content", string(got))
-	}
-}
-
-func TestExtractBinaryFromTarGzNestedPath(t *testing.T) {
-	archive := makeTarGz(t, map[string][]byte{
-		"dist/agent-factory": []byte("nested-binary"),
-	})
-
-	got, err := extractBinaryFromTarGz(bytes.NewReader(archive), "agent-factory")
-	if err != nil {
-		t.Fatalf("extractBinaryFromTarGz returned error: %v", err)
-	}
-	if string(got) != "nested-binary" {
-		t.Fatalf("extracted %q, want nested-binary", string(got))
-	}
-}
-
-func TestExtractBinaryFromTarGzMissingBinary(t *testing.T) {
-	archive := makeTarGz(t, map[string][]byte{
-		"other": []byte("content"),
-	})
-
-	_, err := extractBinaryFromTarGz(bytes.NewReader(archive), "agent-factory")
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("expected not found error, got %v", err)
-	}
-}
-
-func TestExtractBinaryFromTarGzInvalidGzip(t *testing.T) {
-	_, err := extractBinaryFromTarGz(strings.NewReader("not gzip"), "agent-factory")
-	if err == nil || !strings.Contains(err.Error(), "gzip") {
-		t.Fatalf("expected gzip error, got %v", err)
-	}
-}
-
 // TestDownloadBinarySuccess covers the happy path: an httptest server serves
 // a valid tar.gz and downloadBinary returns the embedded bytes.
 func TestDownloadBinarySuccess(t *testing.T) {
