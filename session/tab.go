@@ -241,8 +241,11 @@ func newVSCodeTab() *Tab {
 //
 // An empty kind is deliberately absent: it is not a kind but the DEFAULT
 // (shell-or-process, chosen by the request's Shell flag), so callers handle "" on
-// its own before consulting this map.
+// its own before consulting this map. "shell" is the canonical explicit spelling
+// for the same shell path Shell=true selects; "Terminal" remains its
+// presentation-only label (TabLabel), not a second wire identifier.
 var tabKindNames = map[string]TabKind{
+	"shell":  TabKindShell,
 	"web":    TabKindWeb,
 	"vscode": TabKindVSCode,
 }

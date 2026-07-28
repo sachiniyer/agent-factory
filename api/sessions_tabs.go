@@ -22,9 +22,9 @@ var (
 // bindTabCreateFlags registers the tab-create flags on c, bound to the shared
 // globals. Called for both the hyphen verb and the tabs-create alias (#1192).
 func bindTabCreateFlags(c *cobra.Command) {
-	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in a process tab (required unless --kind web/vscode)")
-	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (defaults to the command basename, or \"web\"/\"vscode\" for those kinds)")
-	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: empty for a process tab, \"web\" for a URL/iframe tab, or \"vscode\" for a VS Code editor on the session's worktree")
+	c.Flags().StringVar(&tabCreateCommandFlag, "command", "", "Command to run in a process tab (required when --kind is empty)")
+	c.Flags().StringVar(&tabCreateNameFlag, "name", "", "Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell)")
+	c.Flags().StringVar(&tabCreateKindFlag, "kind", "", "Tab kind: \"shell\" for a $SHELL terminal, empty for a process command, \"web\" for a URL/iframe, or \"vscode\" for VS Code")
 	c.Flags().StringVar(&tabCreateURLFlag, "url", "", "Web tab target URL (with --kind web): a localhost dev-server address or an external https URL")
 	c.Flags().IntVar(&tabCreatePortFlag, "port", 0, "Web tab convenience for --url http://localhost:<port> (with --kind web)")
 }
@@ -38,8 +38,12 @@ func bindTabDeleteFlags(c *cobra.Command) {
 
 var sessionsTabCreateCmd = &cobra.Command{
 	Use:   "tab-create <title>",
-	Short: "Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session",
+	Short: "Spawn a shell, process, web, or VS Code tab in a session",
 	Long: `Create a new tab in an existing session.
+
+Shell tab (--kind shell): starts the user's $SHELL in the session's git
+worktree. This is the same Terminal tab the TUI and web UI open; "shell" is its
+canonical kind and name, while "Terminal" is only the label those UIs display.
 
 Process tab (default): runs --command in the session's git worktree (e.g. a data
 explorer TUI or a test watcher). If --name is omitted, a name is derived from the
@@ -55,12 +59,14 @@ renders as an iframe in the web UI and as a placeholder in the TUI.
 
 The tab persists and reconnects across a daemon/af restart like every other tab.
 
---name sets the tab's name — the handle every other tab verb addresses it by,
-not the label the TUI renders (agent and shell tabs always show "Agent" and
-"Terminal"). The name is sanitized before use: characters outside [A-Za-z0-9_-]
-become "-". It is then made unique within the session (auto-suffixed -2, -3, …).
-So the name you pass is not always the name you get — the resolved tab name is
-printed on success, and that is the one the other tab verbs address.
+--name sets a process, web, or VS Code tab's name — the handle every other tab
+verb addresses it by. A shell tab does not accept --name: its canonical name is
+"shell" (auto-suffixed on collision), while the TUI renders the
+presentation-only label "Terminal". Other names are sanitized before use:
+characters outside [A-Za-z0-9_-] become "-". The name is then made unique within
+the session (auto-suffixed -2, -3, …). So the name you pass is not always the
+name you get — the resolved tab name is printed on success, and that is the one
+the other tab verbs address.
 
 Not available for remote sessions: they have no local worktree.`,
 	Args: cobra.ExactArgs(1),
@@ -100,9 +106,19 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		if strings.TrimSpace(tabCreateCommandFlag) != "" {
 			return jsonError(fmt.Errorf("--command is not valid for a vscode tab (--kind vscode)"))
 		}
+	case explicitKind && kind == session.TabKindShell:
+		if strings.TrimSpace(tabCreateCommandFlag) != "" {
+			return jsonError(fmt.Errorf("--command is not valid for a shell tab (--kind shell): it runs $SHELL"))
+		}
+		if strings.TrimSpace(tabCreateNameFlag) != "" {
+			return jsonError(fmt.Errorf("--name is not valid for a shell tab (--kind shell): its canonical name is \"shell\" (shown as \"Terminal\" in the UIs)"))
+		}
+		if strings.TrimSpace(tabCreateURLFlag) != "" || tabCreatePortFlag != 0 {
+			return jsonError(fmt.Errorf("--url/--port are not valid for a shell tab (--kind shell)"))
+		}
 	default:
 		if strings.TrimSpace(tabCreateCommandFlag) == "" {
-			return jsonError(fmt.Errorf("--command is required (or pass --kind web with --url/--port, or --kind vscode)"))
+			return jsonError(fmt.Errorf("--command is required for a process tab (or pass --kind shell, --kind web with --url/--port, or --kind vscode)"))
 		}
 	}
 
@@ -115,12 +131,22 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		return jsonError(err)
 	}
 
+	// Normalize the CLI's canonical --kind spelling onto the exact Shell=true
+	// request the TUI and web send. The daemon also accepts Kind="shell" from
+	// direct API clients, and both forms meet at Manager.CreateTab's AddShellTab
+	// branch; there is one shell implementation, not one per surface.
+	isShell := explicitKind && kind == session.TabKindShell
+	wireKind := tabCreateKindFlag
+	if isShell {
+		wireKind = ""
+	}
 	created, err := createTabViaDaemon(daemon.CreateTabRequest{
 		Title:   args[0],
 		RepoID:  repoID,
 		Command: tabCreateCommandFlag,
 		Name:    tabCreateNameFlag,
-		Kind:    tabCreateKindFlag,
+		Shell:   isShell,
+		Kind:    wireKind,
 		URL:     tabCreateURLFlag,
 		Port:    tabCreatePortFlag,
 	})
@@ -354,7 +380,7 @@ var sessionsTabsReorderCmd = &cobra.Command{
 
 var sessionsTabsCreateCmd = &cobra.Command{
 	Use:   "create <title>",
-	Short: "Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session",
+	Short: "Spawn a shell, process, web, or VS Code tab in a session",
 	Long:  `Alias for "sessions tab-create". See "af sessions tab-create --help" for details.`,
 	Args:  cobra.ExactArgs(1),
 	RunE:  runTabCreate,

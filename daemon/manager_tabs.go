@@ -10,9 +10,9 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
-// CreateTab spawns a Process-kind tab running req.Command in the target
-// session's worktree, persists the grown tab list, and returns the resolved tab
-// name plus the tmux session it was spawned under (#930 PR 5). The two are
+// CreateTab spawns the requested tab kind in the target session's worktree,
+// persists the grown tab list, and returns the resolved tab name plus the tmux
+// session it was spawned under (#930 PR 5). The two are
 // independent namespaces and diverge after a rename (#1957), so the caller is
 // told BOTH rather than left to re-derive the second from the first — see
 // CreateTabResponse.TmuxName.
@@ -36,9 +36,10 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		return CreateTabResponse{}, fmt.Errorf("unknown tab kind %q (expected one of %s, or empty)",
 			req.Kind, strings.Join(session.TabKindNameList(), ", "))
 	}
+	isShell := req.Shell || explicitKind && kind == session.TabKindShell
 	isWeb := explicitKind && kind == session.TabKindWeb
 	isVSCode := explicitKind && kind == session.TabKindVSCode
-	if !explicitKind && !req.Shell && strings.TrimSpace(req.Command) == "" {
+	if !explicitKind && !isShell && strings.TrimSpace(req.Command) == "" {
 		return CreateTabResponse{}, fmt.Errorf("a process tab requires a non-empty command (--command)")
 	}
 	// A vscode tab always edits the session's own worktree, so a target is not
@@ -120,7 +121,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		tab, err = instance.AddWebTab(webURL, req.Name)
 	case isVSCode:
 		tab, err = instance.AddVSCodeTab(req.Name)
-	case req.Shell:
+	case isShell:
 		tab, err = instance.AddShellTab()
 	default:
 		tab, err = instance.AddProcessTab(req.Command, req.Name)

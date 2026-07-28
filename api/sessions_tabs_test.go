@@ -98,6 +98,124 @@ func TestSessionsTabsAliasesRegistered(t *testing.T) {
 	}
 }
 
+func setTabCreateFlagsForTest(t *testing.T, command, name, kind, url string, port int) {
+	t.Helper()
+	previousCommand, previousName, previousKind := tabCreateCommandFlag, tabCreateNameFlag, tabCreateKindFlag
+	previousURL, previousPort := tabCreateURLFlag, tabCreatePortFlag
+	t.Cleanup(func() {
+		tabCreateCommandFlag, tabCreateNameFlag, tabCreateKindFlag = previousCommand, previousName, previousKind
+		tabCreateURLFlag, tabCreatePortFlag = previousURL, previousPort
+	})
+	tabCreateCommandFlag, tabCreateNameFlag, tabCreateKindFlag = command, name, kind
+	tabCreateURLFlag, tabCreatePortFlag = url, port
+}
+
+// TestSessionsTabCreateShellUsesTheUIShellPath closes
+// session.tab.create.shell: --kind shell is the canonical CLI spelling, but the
+// request is normalized onto Shell=true — the same daemon path both UIs use —
+// instead of growing a second CLI-only shell implementation.
+func TestSessionsTabCreateShellUsesTheUIShellPath(t *testing.T) {
+	repoID := setupRepoForCmd(t)
+	setTabCreateFlagsForTest(t, "", "", "shell", "", 0)
+
+	var gotReq daemon.CreateTabRequest
+	prevCreate := createTabViaDaemon
+	createTabViaDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+		gotReq = req
+		return daemon.CreateTabResponse{Name: "shell"}, nil
+	}
+	defer func() { createTabViaDaemon = prevCreate }()
+
+	out, err := runCmdCaptureStdout(t, sessionsTabCreateCmd, []string{"worker"})
+	if err != nil {
+		t.Fatalf("tab-create --kind shell returned error: %v", err)
+	}
+	if gotReq.Title != "worker" || gotReq.RepoID != repoID || !gotReq.Shell {
+		t.Fatalf("shell request = %+v, want title=worker repo_id=%q Shell=true", gotReq, repoID)
+	}
+	if gotReq.Kind != "" || gotReq.Command != "" {
+		t.Fatalf("shell request grew a parallel kind/command path: %+v", gotReq)
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("output is not JSON (%q): %v", string(out), err)
+	}
+	if parsed["name"] != "shell" {
+		t.Fatalf("JSON name = %q, want shell", parsed["name"])
+	}
+}
+
+// TestSessionsTabCreateTerminalLabelIsNotAKind keeps the canonical vocabulary
+// honest: Terminal is a UI label, just as it is for tab addressing (#1986).
+// The rejection must lead the user to the working shell spelling.
+func TestSessionsTabCreateTerminalLabelIsNotAKind(t *testing.T) {
+	setTabCreateFlagsForTest(t, "", "", "terminal", "", 0)
+
+	called := false
+	prevCreate := createTabViaDaemon
+	createTabViaDaemon = func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+		called = true
+		return daemon.CreateTabResponse{}, nil
+	}
+	defer func() { createTabViaDaemon = prevCreate }()
+
+	err := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{"worker"})
+	if err == nil || !strings.Contains(err.Error(), "shell, vscode, web") {
+		t.Fatalf("Terminal label rejection = %v, want an error naming canonical kind shell", err)
+	}
+	if called {
+		t.Fatal("an invalid presentation label reached the daemon")
+	}
+}
+
+// TestSessionsTabCreateShellRejectsIgnoredOptions makes the new spelling
+// fail closed: AddShellTab owns the name and command, so accepting one of these
+// options would claim a customization the shared shell path silently ignores.
+func TestSessionsTabCreateShellRejectsIgnoredOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, tabName, url string
+		port                        int
+		want                        string
+	}{
+		{name: "command", command: "bash", want: "--command"},
+		{name: "name", tabName: "console", want: "--name"},
+		{name: "url", url: "https://example.com", want: "--url/--port"},
+		{name: "port", port: 3000, want: "--url/--port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setTabCreateFlagsForTest(t, tc.command, tc.tabName, "shell", tc.url, tc.port)
+
+			called := false
+			previousCreate := createTabViaDaemon
+			createTabViaDaemon = func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
+				called = true
+				return daemon.CreateTabResponse{}, nil
+			}
+			defer func() { createTabViaDaemon = previousCreate }()
+
+			err := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{"worker"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("shell with %s error = %v, want an error naming %s", tc.name, err, tc.want)
+			}
+			if called {
+				t.Fatalf("shell with invalid %s reached the daemon", tc.name)
+			}
+		})
+	}
+}
+
+// TestSessionsTabCreateMissingCommandNamesShellAlternative covers the original
+// #2619 dead end: an omitted process command must point at the working explicit
+// shell spelling rather than naming only web and VS Code.
+func TestSessionsTabCreateMissingCommandNamesShellAlternative(t *testing.T) {
+	setTabCreateFlagsForTest(t, "", "", "", "", 0)
+	err := sessionsTabCreateCmd.RunE(sessionsTabCreateCmd, []string{"worker"})
+	if err == nil || !strings.Contains(err.Error(), "--kind shell") {
+		t.Fatalf("missing-command error = %v, want it to name --kind shell", err)
+	}
+}
+
 // CLI seam tests for tab-rename/tab-reorder (#1813). They pin the two things the
 // cobra layer owns and the daemon cannot check on its behalf: that --repo
 // scoping reaches the request (#891 class — otherwise a same-titled session in

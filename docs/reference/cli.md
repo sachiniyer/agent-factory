@@ -51,12 +51,12 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
@@ -1185,7 +1185,7 @@ af sessions
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a session blocked at a usage limit
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
@@ -1629,9 +1629,13 @@ af sessions send-prompt <title> <prompt> [flags]
 
 ## af sessions tab-create
 
-Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
+Spawn a shell, process, web, or VS Code tab in a session
 
 Create a new tab in an existing session.
+
+Shell tab (--kind shell): starts the user's $SHELL in the session's git
+worktree. This is the same Terminal tab the TUI and web UI open; "shell" is its
+canonical kind and name, while "Terminal" is only the label those UIs display.
 
 Process tab (default): runs --command in the session's git worktree (e.g. a data
 explorer TUI or a test watcher). If --name is omitted, a name is derived from the
@@ -1647,12 +1651,14 @@ renders as an iframe in the web UI and as a placeholder in the TUI.
 
 The tab persists and reconnects across a daemon/af restart like every other tab.
 
---name sets the tab's name — the handle every other tab verb addresses it by,
-not the label the TUI renders (agent and shell tabs always show "Agent" and
-"Terminal"). The name is sanitized before use: characters outside [A-Za-z0-9_-]
-become "-". It is then made unique within the session (auto-suffixed -2, -3, …).
-So the name you pass is not always the name you get — the resolved tab name is
-printed on success, and that is the one the other tab verbs address.
+--name sets a process, web, or VS Code tab's name — the handle every other tab
+verb addresses it by. A shell tab does not accept --name: its canonical name is
+"shell" (auto-suffixed on collision), while the TUI renders the
+presentation-only label "Terminal". Other names are sanitized before use:
+characters outside [A-Za-z0-9_-] become "-". The name is then made unique within
+the session (auto-suffixed -2, -3, …). So the name you pass is not always the
+name you get — the resolved tab name is printed on success, and that is the one
+the other tab verbs address.
 
 Not available for remote sessions: they have no local worktree.
 
@@ -1664,9 +1670,9 @@ af sessions tab-create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--command` | `string` | Command to run in a process tab (required unless --kind web/vscode) |
-| `--kind` | `string` | Tab kind: empty for a process tab, "web" for a URL/iframe tab, or "vscode" for a VS Code editor on the session's worktree |
-| `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (defaults to the command basename, or "web"/"vscode" for those kinds) |
+| `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 
@@ -1817,7 +1823,7 @@ af sessions tabs
 
 **Subcommands**
 
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
@@ -1833,7 +1839,7 @@ af sessions tabs
 
 ## af sessions tabs create
 
-Spawn a process tab (a command), a web tab (a URL/iframe), or a VS Code tab in a session
+Spawn a shell, process, web, or VS Code tab in a session
 
 Alias for "sessions tab-create". See "af sessions tab-create --help" for details.
 
@@ -1845,9 +1851,9 @@ af sessions tabs create <title> [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--command` | `string` | Command to run in a process tab (required unless --kind web/vscode) |
-| `--kind` | `string` | Tab kind: empty for a process tab, "web" for a URL/iframe tab, or "vscode" for a VS Code editor on the session's worktree |
-| `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (defaults to the command basename, or "web"/"vscode" for those kinds) |
+| `--command` | `string` | Command to run in a process tab (required when --kind is empty) |
+| `--kind` | `string` | Tab kind: "shell" for a $SHELL terminal, empty for a process command, "web" for a URL/iframe, or "vscode" for VS Code |
+| `--name` | `string` | Tab name — sanitized to [A-Za-z0-9_-] and auto-suffixed on collision (not valid with --kind shell) |
 | `--port` | `int` | Web tab convenience for --url http://localhost:<port> (with --kind web) (default `0`) |
 | `--url` | `string` | Web tab target URL (with --kind web): a localhost dev-server address or an external https URL |
 

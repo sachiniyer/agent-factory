@@ -252,10 +252,10 @@ func TestCreateTab_SpawnsPersistsAndReturnsName(t *testing.T) {
 	}
 }
 
-// TestCreateTab_ShellSpawnsPersistsAndReturnsName verifies the shell-tab path
-// the TUI's `t` mutation routes to (#960 PR 2): Shell=true creates a Shell-kind
-// tab running $SHELL (ignoring Command), returns its auto-derived name, and
-// persists it so it survives a restart.
+// TestCreateTab_ShellSpawnsPersistsAndReturnsName verifies the canonical
+// Kind=shell spelling joins the shell-tab path the UIs reach with Shell=true
+// (#960 PR 2): it creates a Shell-kind tab running $SHELL, returns its
+// auto-derived name, and persists it so it survives a restart.
 func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
@@ -271,15 +271,21 @@ func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
 
 	const title = "shellworker"
 	agentName := "af_" + title + "_agent"
-	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, agentName)
 
-	// Shell=true ignores Command and creates a $SHELL tab named "shell".
-	created, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Shell: true})
+	created, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "shell"})
 	if err != nil {
 		t.Fatalf("CreateTab(shell): %v", err)
 	}
 	if created.Name != "shell" {
 		t.Fatalf("resolved shell tab name = %q, want %q", created.Name, "shell")
+	}
+	tabs := inst.GetTabs()
+	if len(tabs) != 2 || tabs[1].Kind != session.TabKindShell {
+		t.Fatalf("created roster = %+v, want an agent tab followed by a real shell tab", tabs)
+	}
+	if label := session.TabLabel(tabs[1]); label != "Terminal" {
+		t.Fatalf("shell tab label = %q, want the UI presentation label Terminal", label)
 	}
 
 	raw, err := config.LoadRepoInstances(repo.ID)

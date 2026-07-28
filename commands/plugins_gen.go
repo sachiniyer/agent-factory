@@ -68,6 +68,7 @@ var pluginReleaseDigests = []string{
 	"fb450d6ee2a3cf923ace4ef7dd693b5d9790bb52ec33328bc242fea910f0be95", // 3.3 — instance/session/tab/pane model + dispatched-parent escalation + tightened web-tab guidance (#2473)
 	"62b9f2661f7c23f7c5d53dbd7e3ed3a5b3339396663299419b356f9e63f07407", // 3.4 — remove the tmux-command guard hook; agents run unrestricted (#2175 precedent)
 	"a2b54cb9209becd766678828fd09ff7bd597b683802305850bcb40cefe61b9e7", // 3.5 — add the missing devin to the --program enum in the af usage reference (#2410 drift)
+	"1f781373e8d7964be4288de32c946098896b6fe3567dba73925fedc2fab995c1", // 3.6 — teach agents the canonical --kind shell parity path (#2619)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

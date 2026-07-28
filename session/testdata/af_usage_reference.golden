@@ -26,7 +26,8 @@ Sessions (one agent per isolated worktree):
   af sessions restore <title>                          Restore an archived, lost, or dead session
 
 Tabs (extra processes and views in your instance's worktree; max 9; not for remote sessions). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
-  af sessions tab-create <title> --command <cmd> [--name <tab>]   Terminal tab running <cmd> in the worktree; prints the tab name; persists across restarts
+  af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)
+  af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts
   af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)
   af sessions tab-create <title> --kind vscode                    VS Code editor tab on the worktree (no --url/--port); needs code-server installed
   af sessions tab-delete <title> --name <tab>                     Delete a tab; the agent tab can't be deleted (kill the session instead)

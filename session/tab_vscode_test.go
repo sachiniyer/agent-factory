@@ -131,7 +131,9 @@ func TestTabKindWireValues(t *testing.T) {
 // against and the daemon dispatches on — one source of truth, so a kind the CLI
 // accepts can never be one the daemon rejects.
 func TestParseTabKindName(t *testing.T) {
-	for name, want := range map[string]TabKind{"web": TabKindWeb, "vscode": TabKindVSCode} {
+	for name, want := range map[string]TabKind{
+		"shell": TabKindShell, "web": TabKindWeb, "vscode": TabKindVSCode,
+	} {
 		got, ok := ParseTabKindName(name)
 		assert.True(t, ok, "%q must be a known kind", name)
 		assert.Equal(t, want, got)
@@ -143,5 +145,5 @@ func TestParseTabKindName(t *testing.T) {
 	_, ok = ParseTabKindName("nope")
 	assert.False(t, ok)
 
-	assert.Equal(t, []string{"vscode", "web"}, TabKindNameList(), "sorted, for stable help text and error messages")
+	assert.Equal(t, []string{"shell", "vscode", "web"}, TabKindNameList(), "sorted, for stable help text and error messages")
 }

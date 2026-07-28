@@ -405,18 +405,18 @@
       "title": "Spawn a bare $SHELL tab with no command",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_control.go:286 Shell:true"
+        "pointer": "app/session_action_target.go:111 Shell:true"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:342 shell:true"
+        "pointer": "web/src/api.ts:563 shell:true"
       },
       "cli": {
-        "status": "no",
-        "pointer": "api/sessions_tabs.go:98-100 requires --command; no --shell flag, never sets Shell"
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:148 normalizes --kind shell to Shell:true"
       },
-      "verdict": "unclear",
-      "notes": "Both UIs open a shell tab in one gesture; the CLI must be told a command. `--command $SHELL` is a plausible workaround but is NOT verified equivalent — Shell:true is a distinct wire field the daemon may treat differently (naming, kind resolution). Needs an owner call, and checking that equivalence, before filing."
+      "verdict": "parity",
+      "notes": "Closed by #2619: `shell` is the canonical explicit kind, and the CLI normalizes `--kind shell` to the same Shell:true request the TUI/web send. That reaches Manager.CreateTab's single AddShellTab path, so it is a real bare $SHELL tab (TabKindShell), not the different `--command $SHELL` process-tab workaround. `Terminal` remains the presentation-only UI label, consistent with the tab identifier rule."
     },
     {
       "id": "wire.id-addressing",
@@ -1733,9 +1733,6 @@
         "cli": {
           "id": {
             "gap": "wire.id-addressing"
-          },
-          "shell": {
-            "gap": "session.tab.create.shell"
           }
         },
         "tui": {

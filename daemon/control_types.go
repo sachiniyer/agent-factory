@@ -294,7 +294,8 @@ type CreateTabRequest struct {
 	Name    string `json:"name"`
 	Shell   bool   `json:"shell"`
 	// Kind selects the tab type. Empty (the default) means a process tab (or a
-	// shell tab when Shell is set); "web" creates a URL/iframe tab with no PTY,
+	// shell tab when Shell is set); "shell" is the canonical explicit spelling
+	// for that same shell path; "web" creates a URL/iframe tab with no PTY,
 	// targeting URL (or Port as a localhost:<port> convenience); "vscode" creates
 	// a VS Code editor tab on the session's worktree, which takes no target. The
 	// vocabulary is session.ParseTabKindName — shared with the CLI, so the two
