@@ -305,8 +305,10 @@ the TUI:
   prefixes, and
 - the **branch** as a secondary `⎇` line.
 
-Rows are ordered exactly like the TUI: live sessions first (oldest created first),
-the archived group last (newest first). The header shows the count of the sessions
+Rows are ordered exactly like the TUI: the reserved root agent is pinned to the
+top, then live sessions (oldest created first), the archived group last
+(newest first), with a subtle hairline under the root agent when other rows
+follow it. The header shows the count of the sessions
 currently **shown**, the **filter** control (below), and a **`+ New`** button that
 opens the new-session modal (its project picker is seeded from the repos af has
 seen).
