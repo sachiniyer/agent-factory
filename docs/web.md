@@ -377,10 +377,18 @@ the daemon projects no lifecycle action, so neither the TUI nor web invents one:
 - **`⌫` Kill** — permanently tear the session down. Its resting treatment is
   muted, while the confirmation remains explicitly destructive.
 
-Both actions keep their confirmation step. A **Retry** button appears in the pane
-header only when the selected session is blocked at a usage limit; it is the escape
-from that wall and stays hidden in every other state. Send follow-up instructions by
-typing in the attached terminal (or with `af sessions send-prompt`).
+Both actions keep their confirmation step. The pane header also carries the
+conditional escapes a limit-blocked session needs: a **Retry** button, shown only
+when the selected session is parked at a usage limit (the "wait for the window"
+answer), and a **Handoff** button, shown whenever the selected session is
+handoff-capable — a local-worktree session whose agent can be swapped in place
+(the "switch agents" answer, the same swap as `af sessions handoff` and the TUI's
+`F`). A limit-blocked local session shows both; a normal local session shows
+Handoff alone. Picking an agent in the Handoff modal confirms the swap (the modal
+is the confirm, because a handoff stops a working agent); see
+[usage-limits.md](usage-limits.md#hand-off-to-another-agent). Send follow-up
+instructions by typing in the attached terminal (or with `af sessions
+send-prompt`).
 
 **Create** a session with **`+ New`**; the pending row appears immediately without
 destructive controls, then opens attached when creation completes. Kill, archive,
