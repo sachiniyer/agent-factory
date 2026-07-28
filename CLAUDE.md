@@ -55,8 +55,8 @@ Working style:
   hourly self-review.
 - Use `af sessions preview` to spot-check, `af sessions send-prompt` to
   refine, and `af sessions archive` as the default "done" action so the session
-  stays restorable. Use `af sessions kill --force` only when you explicitly mean
-  to permanently destroy the session and prune its branch. Don't let sessions
+  stays restorable. Use `af sessions kill` only when you explicitly mean to
+  permanently destroy the session and prune its owned branch. Don't let sessions
   accumulate.
 - Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
 - Run `golangci-lint run --timeout=3m --fast`, `gofmt -l .`, `go build ./...`,

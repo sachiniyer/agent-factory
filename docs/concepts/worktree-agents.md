@@ -23,8 +23,8 @@ Because each session gets its own worktree:
   Factory is in the way of `git diff`, `gh pr create`, or your CI.
 - **Finishing work is restorable by default.** Archive a session and `af` moves
   the worktree aside with the branch and changes intact, ready for restore. If
-  you really want to discard it, kill refuses recoverable branch/worktree work
-  unless you force the permanent cleanup.
+  you really want to discard it, kill permanently removes the session even when
+  its branch has uncommitted or unmerged work.
 
 ## The lifecycle of a session
 
@@ -43,10 +43,9 @@ Because each session gets its own worktree:
    and branch. Restore it later and the worktree comes back and the agent
    re-spawns.
 4. **Kill.** Killing a session permanently ends the agent, removes the worktree,
-   and deletes the branch when Agent Factory owns it. It refuses by default
-   unless it can confirm the worktree is clean and HEAD has no commits
-   unreachable from the session's base/default branch; use `--force` only when
-   you mean to discard that work.
+   and deletes the branch when Agent Factory owns it. It always destroys the
+   session, including uncommitted or unmerged work; use archive instead when you
+   need the work to remain restorable.
 
 ## In-place sessions
 

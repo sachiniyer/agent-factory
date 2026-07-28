@@ -88,7 +88,7 @@ af sessions archive <title>                               # default done action:
 af sessions archive --self                                # archive the current session (resolved via whoami)
 af sessions handoff <title> --to <agent>                  # continue under a different agent, same worktree/branch
 af sessions retry-limit <title>                           # retry a session parked at a usage-limit wall
-af sessions kill <title> [--force]                        # permanently destroy + prune branch
+af sessions kill <title>                                  # permanently destroy + prune owned branch
 af sessions restore <title>                               # restore an archived/lost/dead session
 ```
 
