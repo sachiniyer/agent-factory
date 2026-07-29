@@ -719,6 +719,7 @@ func init() {
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateWatchCmdFlag, "watch-cmd", "", "New watch command (clears cron)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateTargetSessionFlag, "target-session", "", "New target session; pass an empty value to revert to a new session per run")
 	tasksUpdateCmd.Flags().IntVar(&taskUpdateMaxConcurrentRunsFlag, "max-concurrent-runs", 0, "New in-flight session cap for this watch task; pass 0 to revert to unlimited")
+	tasksUpdateCmd.Flags().StringVar(&taskUpdateProjectPathFlag, "project-path", "", "Move the task to this git repository (distinct from --repo, which scopes its current project)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateEnabledFlag, "enabled", "", "Enable or disable the task (true/false)")
 	tasksUpdateCmd.Flags().StringVar(&taskUpdateProgramFlag, "program", "", "New program to run (one of: "+tmux.SupportedProgramsString()+"; leave unset to keep the current one)")
 

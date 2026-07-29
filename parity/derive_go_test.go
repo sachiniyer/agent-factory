@@ -104,7 +104,8 @@ const maxNestDepth = 3
 // AddTaskRequest is {task}. Counting only top-level fields would mark the whole
 // payload covered the moment a surface sends the wrapper — which is precisely how
 // task.TaskUpdate.ProjectPath stayed invisible: every surface "sends update", but
-// only the TUI can populate project_path.
+// at the time only the TUI could populate project_path. All three can now, and the
+// same recursion continues to expose still-missing nested fields independently.
 //
 // Keys are Go field paths ("Update.ProjectPath"), values the JSON path
 // ("update.project_path"). Mirrors the daemon's jsonFields semantics: skip
@@ -313,8 +314,9 @@ func typeExprName(e ast.Expr, pkgName string) string {
 // api/tasks.go:172 builds a task.Task composite literal, while
 // api/tasks.go:296 declares `var patch task.TaskUpdate` and assigns
 // `patch.Name = …` field by field. Both forms are read here, so
-// task.TaskUpdate.ProjectPath shows up as genuinely unreachable from the CLI
-// rather than being hidden behind a covered wrapper.
+// task.TaskUpdate.ProjectPath now shows up as genuinely reachable from the CLI;
+// fields a surface does not assign still remain visible as gaps rather than being
+// hidden behind a covered wrapper.
 func deriveTypeFieldUse(t *testing.T, surface string) map[string]map[string]bool {
 	t.Helper()
 	fset := token.NewFileSet()

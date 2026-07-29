@@ -1175,11 +1175,11 @@
         "pointer": "web/src/tasks.ts editTaskModal project picker (seeded, editable) -> web/src/index.ts openEditTask sends update.project_path"
       },
       "cli": {
-        "status": "no",
-        "pointer": "api/api.go:644-650 af tasks update has no --project-path flag"
+        "status": "yes",
+        "pointer": "api/api.go:723 --project-path -> api/tasks.go:538-550 TaskUpdate.ProjectPath -> daemonUpdateTask"
       },
-      "verdict": "unclear",
-      "notes": "The web half was subsumed by #1935 and is now closed: the edit form's project picker is seeded from the task and can move it to another project, so the edit call site sends update.project_path. The CLI still cannot — `af tasks update` has no --project-path flag. That remaining CLI gap overlaps #1891 (tasks add should surface and guard the resolved project binding), so it wants triaging with that rather than a fresh issue."
+      "verdict": "parity",
+      "notes": "The web half was subsumed by #1935: its seeded project picker sends update.project_path. The CLI now sends the same TaskUpdate.ProjectPath patch with `af tasks update --project-path`; `--repo` remains the authorization scope for the task's current project, so `--repo old --project-path new` is unambiguous. This also supplies a repair path for the wrong-project automation incident in #1891 without duplicating the daemon's rebind and RepoID logic."
     },
     {
       "id": "cli.shell-completion",
@@ -1675,6 +1675,7 @@
       "af tasks update --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks update --name": "task.edit",
       "af tasks update --program": "task.edit",
+      "af tasks update --project-path": "task.edit.project-path",
       "af tasks update --prompt": "task.edit",
       "af tasks update --target-session": "task.edit",
       "af tasks update --watch-cmd": "task.edit",
@@ -1833,11 +1834,6 @@
         }
       },
       "UpdateTaskRequest": {
-        "cli": {
-          "update.project_path": {
-            "gap": "task.edit.project-path"
-          }
-        },
         "tui": {
           "update.cron_expr": {
             "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."

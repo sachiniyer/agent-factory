@@ -110,10 +110,10 @@ Tasks (deliver a prompt on a cron schedule, or whenever a long-running watch scr
   af tasks get <id>                                    Fetch one task
   af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
   af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>] [--program <agent>]
-  af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--program ...] [--enabled true|false]
+  af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--project-path <repo>] [--program ...] [--enabled true|false]
   af tasks trigger <id>                                Run a cron task immediately
   af tasks remove <id>
-Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, and --target-session "" reverts to session-per-run. A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
+Without --target-session each run creates a fresh session; {{line}} in a watch prompt is replaced by the emitted stdout line. On update, setting one trigger clears the other, --target-session "" reverts to session-per-run, and --project-path moves the task to another project (--repo still scopes its current project). A task is bound to one project at creation and "tasks add" echoes the binding as project_path — check it matches the project you meant, and never create a task from a scratch clone of a repo, which binds the automation to the clone instead of the real project. The background daemon runs all schedules; "af daemon install" / "af daemon uninstall" manage its login autostart.
 
 Creating or prompting a session: the prompt is the entire contract, because the receiving agent inherits no context from your conversation. State everything it needs, including the expected output shape, e.g. "Open a PR titled X, link it back, do not merge" or "Write a report to <file> and stop; no code changes".`
 

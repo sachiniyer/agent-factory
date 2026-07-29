@@ -242,8 +242,9 @@ suite goes green — which is *worse than having no parity check*, because the
 green gets trusted. A detector that manufactures confidence is the failure mode
 this package exists to prevent, so it must not be one.
 
-`parity/honesty_test.go` therefore pins the derivation against gaps we already
-know are real, filed, and field-level — as fixtures, not aspirations:
+`parity/honesty_test.go` therefore pins the derivation against verified
+field-level behavior — both shipped reaches and declared gaps — as fixtures, not
+aspirations:
 
 | Fixture | Derivation path it proves |
 |---|---|
@@ -251,7 +252,7 @@ know are real, filed, and field-level — as fixtures, not aspirations:
 | [#1933](https://github.com/sachiniyer/agent-factory/issues/1933) — the web now **does** send `CreateSession.backend` (#1968 landed), via a `const body` variable | the web body parser, incl. variable resolution |
 | #1933 (TUI half) — closed; `sessionStartRequest` now carries `Backend`, so the fixture is repointed to track that the walk still sees the TUI's use of `backend`/`prompt`/`force_remote` **and** its non-use of `in_place` | the Go AST walk |
 | [#1948](https://github.com/sachiniyer/agent-factory/issues/1948) — closed; the CLI now sets `Preview.Tab/TabID/TabName/Full`, so the fixture is repointed to track that the walk still sees both the CLI's usage and the TUI's non-use of `tab_name` | the AST **on an internal route**, invisible to the public catalog |
-| [#1935](https://github.com/sachiniyer/agent-factory/issues/1935) — the web's `TaskUpdate` omits `project_path` | nested recursion **behind a wrapper route**, plus the TS-interface read and the CLI's field-by-field assignment walk |
+| [#1935](https://github.com/sachiniyer/agent-factory/issues/1935) — `TaskUpdate.project_path` is now sent by every surface; the web still omits `max_concurrent_runs` | nested recursion **behind a wrapper route**, plus the TS-interface read, web value walk, and the CLI's field-by-field assignment walk |
 
 Each fixture asserts in **both** directions: that the known gap is seen, *and*
 that a field the surface demonstrably does send is not reported as a gap. A

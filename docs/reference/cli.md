@@ -2202,7 +2202,7 @@ Update a task in the current project.
 
 The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Updating another project's task requires naming it with --repo. Outside a git repository there is no project context and the id resolves globally.
 
---repo only scopes which task may be updated; it never re-binds one. A task's project is fixed at creation.
+--repo scopes which task may be updated; it never re-binds one. Pass --project-path to move that task to another existing git repository. The new path becomes the task's working directory and project binding.
 
 ```
 af tasks update <id> [flags]
@@ -2217,6 +2217,7 @@ af tasks update <id> [flags]
 | `--max-concurrent-runs` | `int` | New in-flight session cap for this watch task; pass 0 to revert to unlimited (default `0`) |
 | `--name` | `string` | New task name |
 | `--program` | `string` | New program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; leave unset to keep the current one) |
+| `--project-path` | `string` | Move the task to this git repository (distinct from --repo, which scopes its current project) |
 | `--prompt` | `string` | New prompt |
 | `--target-session` | `string` | New target session; pass an empty value to revert to a new session per run |
 | `--watch-cmd` | `string` | New watch command (clears cron) |

@@ -8,13 +8,14 @@ package parity
 // under-reports and the suite goes green, which is worse than having no parity
 // check at all, because the green would be trusted.
 //
-// So these tests pin the derivation against gaps we already know are real,
-// filed, and field-level. They are fixtures, not aspirations: if the derivation
-// cannot rediscover a gap we found by hand, it will not find the next one.
+// So these tests pin the derivation against field-level behavior whose ground
+// truth we have verified, including both shipped reaches and declared gaps. They
+// are fixtures, not aspirations: if the derivation cannot rediscover a gap we
+// found by hand, it will not find the next one.
 //
 //	#1933  the web never sends CreateSessionRequest.backend  (and neither did the TUI)
 //	#1948  the CLI never sets PreviewRequest.Tab/TabID/Full
-//	#1935  the web's TaskUpdate omits project_path, nested inside a wrapper route
+//	#1935  TaskUpdate fields nested inside the UpdateTask wrapper
 //
 // Both halves of #1933 are now FIXED (#1968 for the web, the TUI's ctrl+r backend
 // field for the TUI), so both fixtures are repointed rather than deleted — see
@@ -258,19 +259,17 @@ func TestDerivationTracksPreviewTabUse(t *testing.T) {
 	}
 }
 
-// TestDerivationSeesNestedProjectPathGap pins the wrapper case that motivated
+// TestDerivationSeesNestedTaskUpdateFields pins the wrapper case that motivated
 // #1935. UpdateTask is {id, update}: a top-level-only check calls it covered the
-// moment the web sends `update`, hiding every option inside task.TaskUpdate —
+// moment a surface sends `update`, hiding every option inside task.TaskUpdate —
 // exactly how project_path stayed invisible.
 //
-// #1935 LANDED (like #1968 for the sibling fixture above): the web now edits tasks,
-// and its edit call site sends project_path as an inline literal. So this fixture
-// asserts the reverse of what it did before — project_path is IN the TS interface
-// AND reachable BY VALUE (the derivation real coverage uses) — while still proving
-// the recursion and the CLI-side assignment walk see what they must. The CLI has no
-// --project-path flag, so the assignment walk must still report TaskUpdate.ProjectPath
-// unreached: the surviving CLI half of task.edit.project-path.
-func TestDerivationSeesNestedProjectPathGap(t *testing.T) {
+// #1935 landed for the web, and the CLI now sends the same project_path field.
+// The fixture therefore proves both positive paths — inline web values and
+// field-by-field CLI assignments — while retaining a negative control: the web
+// still does not send max_concurrent_runs. A walk that credits the wrapper as
+// every nested field would fail that live task.max-concurrent-runs assertion.
+func TestDerivationSeesNestedTaskUpdateFields(t *testing.T) {
 	paths := jsonFieldPaths(auditedRequests["UpdateTaskRequest"])
 	var nested []string
 	for _, p := range paths {
@@ -319,19 +318,23 @@ func TestDerivationSeesNestedProjectPathGap(t *testing.T) {
 				f, reach.Sites)
 		}
 	}
+	if reach.Fields["max_concurrent_runs"] {
+		t.Error("derivation says the web reaches TaskUpdate.max_concurrent_runs, but its " +
+			"task form never sends that field — the nested value walk is over-crediting.")
+	}
 
 	// The CLI reaches the payload field-by-field (`patch.Name = …`), not as a
-	// literal, so this also proves the assignment-tracking half of the walk. It still
-	// has no --project-path flag, so ProjectPath must stay unreached.
+	// literal, so this also proves the assignment-tracking half of the walk. Both
+	// Name and the newly reachable ProjectPath must be visible to that walk.
 	typeUse := deriveTypeFieldUse(t, "cli")
 	fields := typeUse["task.TaskUpdate"]
 	if len(fields) == 0 {
 		t.Fatal("derivation sees the CLI populating NO task.TaskUpdate fields — the " +
 			"var-assignment walk is blind (expected api/tasks.go:296-320 `patch.Name = …`)")
 	}
-	if fields["ProjectPath"] {
-		t.Error("derivation says the CLI sets TaskUpdate.ProjectPath — `af tasks update` has " +
-			"no --project-path flag (api/api.go:644-650). Over-crediting.")
+	if !fields["ProjectPath"] {
+		t.Error("derivation says the CLI never sets TaskUpdate.ProjectPath, but " +
+			"`af tasks update --project-path` assigns patch.ProjectPath — under-reporting.")
 	}
 	if !fields["Name"] {
 		t.Error("derivation says the CLI never sets TaskUpdate.Name, but api/tasks.go does " +

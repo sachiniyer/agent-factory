@@ -417,6 +417,7 @@ var (
 	taskUpdateWatchCmdFlag          string
 	taskUpdateTargetSessionFlag     string
 	taskUpdateMaxConcurrentRunsFlag int
+	taskUpdateProjectPathFlag       string
 	taskUpdateEnabledFlag           string
 	taskUpdateProgramFlag           string
 )
@@ -429,8 +430,9 @@ var tasksUpdateCmd = &cobra.Command{
 		"the current directory's project. Updating another project's task requires " +
 		"naming it with --repo. Outside a git repository there is no project context " +
 		"and the id resolves globally.\n\n" +
-		"--repo only scopes which task may be updated; it never re-binds one. A " +
-		"task's project is fixed at creation.",
+		"--repo scopes which task may be updated; it never re-binds one. Pass " +
+		"--project-path to move that task to another existing git repository. The " +
+		"new path becomes the task's working directory and project binding.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -543,6 +545,26 @@ var tasksUpdateCmd = &cobra.Command{
 		// control socket because TaskUpdate round-trips through JSON (#1700).
 		if cmd.Flags().Changed("max-concurrent-runs") {
 			patch.MaxConcurrentRuns = intPtr(taskUpdateMaxConcurrentRunsFlag)
+		}
+		// --repo authorizes the task against its CURRENT project. Keep the new
+		// binding separate so a caller can say `--repo old --project-path new`
+		// without either path changing meaning. Resolve user shorthand at the CLI
+		// boundary, require the same real-git-repo invariant as the TUI editor,
+		// then send the existing ProjectPath patch through daemonUpdateTask — the
+		// same task.UpdateTask path every other surface already uses.
+		if cmd.Flags().Changed("project-path") {
+			rawPath := strings.TrimSpace(taskUpdateProjectPathFlag)
+			if rawPath == "" {
+				return jsonError(errors.New("project path must be non-empty"))
+			}
+			absPath, err := config.ResolveUserPath(rawPath)
+			if err != nil {
+				return jsonError(fmt.Errorf("failed to resolve --project-path %q: %w", taskUpdateProjectPathFlag, err))
+			}
+			if _, err := config.RepoFromPath(absPath); err != nil {
+				return jsonError(fmt.Errorf("--project-path %q is not a valid git repository: %w", absPath, err))
+			}
+			patch.ProjectPath = strPtr(absPath)
 		}
 
 		// Only patch Enabled when --enabled was passed: an absent flag must
