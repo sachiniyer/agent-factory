@@ -271,8 +271,8 @@ type Manager struct {
 // NewManager constructs a manager and synchronously restores all persisted
 // instances into it, returning only once the manager is ready. RunDaemon
 // deliberately does NOT use this: it builds the shell with newManagerShell,
-// binds the control socket, and only then runs RestoreInstances — the restore
-// can take minutes on remote-hook repos and must not delay the bind (#829).
+// binds the control socket, and only then runs RestoreInstances so rehydrating
+// persisted state cannot delay the bind (#829).
 func NewManager(cfg *config.Config) (*Manager, error) {
 	manager, err := newManagerShell(cfg)
 	if err != nil {
@@ -377,10 +377,9 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 }
 
 // RestoreInstances loads every repo's persisted instances into the manager
-// and marks it ready. This is the slow part of daemon startup — restoring a
-// remote-hook session shells out to the repo's list_cmd (often ssh) per
-// session — which is why RunDaemon runs it only after the control socket is
-// bound (#829). Replacing the instance map wholesale is safe: every RPC that
+// and marks it ready. RunDaemon does this only after the control socket is bound
+// (#829), keeping Ping and Shutdown available while persisted state is
+// rehydrated. Replacing the instance map wholesale is safe: every RPC that
 // mutates it is gated on Ready, and the refresh poll loop starts after the
 // restore completes.
 func (m *Manager) RestoreInstances() error {

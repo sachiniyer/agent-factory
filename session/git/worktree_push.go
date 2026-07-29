@@ -11,10 +11,10 @@ import (
 const archiveSnapshotMessage = "af: pre-archive snapshot (uncommitted work)"
 
 // SnapshotAndPushBranch makes the session's branch durable on origin (#1592
-// Phase 4 PR6) — the archive-side primitive for the disposable sandbox backends
-// (docker/ssh). Because a sandbox is thrown away on archive and re-cloned from
-// GitHub on restore, the branch on origin IS the durable workspace (epic
-// decision 4), so archive pushes it there before the sandbox is torn down.
+// Phase 4 PR6/PR7) — the archive-side primitive for the disposable off-box
+// backends (docker/ssh/hook). Because a sandbox is thrown away on archive and
+// re-cloned from GitHub on restore, the branch on origin IS the durable workspace
+// (epic decision 4), so archive pushes it there before the sandbox is torn down.
 //
 // It first snapshots any uncommitted work as a WIP commit so archive preserves
 // the working tree, matching the local worktree-move archive's "nothing lost"

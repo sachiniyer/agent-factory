@@ -50,9 +50,9 @@ import (
 // (agentproto.ReadMessage/WriteFrame), and the {data,error} envelope (apiproto).
 // The thin HTTP/WS plumbing below is the only local piece.
 //
-// DARK for users in PR2: no docker/ssh runtime provisions a sandbox to point one
-// at yet (PR3-PR5). It is proven by an out-of-process integration test that
-// starts a real `af agent-server` on loopback and drives it through here.
+// The off-box runtimes all terminate here after provisioning an `af agent-server`;
+// an out-of-process integration test also starts one on loopback and drives it
+// through this client.
 type remoteAgentServer struct {
 	rc *remoteAgentClient
 	// inst owns the authoritative stable-id→ordinal roster for daemon-created
@@ -60,11 +60,10 @@ type remoteAgentServer struct {
 	// holds inst's roster lock across the bounded REST capture (#2200). nil only
 	// for the transport-only NewRemoteAgentServer constructor used by integrations.
 	inst *Instance
-	// teardown reaps the sandbox the agent runs in AFTER the in-sandbox workspace
-	// is killed over REST (#1592 Phase 4 PR4): `docker rm -f` the container. nil
-	// for the PR2 out-of-process case (an `af agent-server` the test owns — nothing
-	// for this client to reap). Run best-effort in Kill so a session kill also
-	// removes its container; idempotent (the runtime guards it with a sync.Once).
+	// teardown reaps the off-box workspace AFTER its in-sandbox agent is killed over
+	// REST. nil for an out-of-process `af agent-server` the caller owns. Run
+	// best-effort in Kill so a session kill also removes its sandbox; idempotent
+	// (the runtime serializes it).
 	teardown func() error
 
 	mu sync.Mutex

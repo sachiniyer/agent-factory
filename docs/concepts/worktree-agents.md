@@ -62,10 +62,10 @@ attaches to a repo.
 
 Everything above describes **local** sessions — worktrees on the machine running
 `af`. Sessions can also run on a **remote** backend you define, through
-[remote hooks](../remote-hooks.md): your own scripts launch, list, attach to,
-and delete sessions elsewhere, and they show up in the same sidebar with the
-same Agent tab, attach, and kill experience. The worktree-isolation model is the same;
-only the machine changes.
+[remote hooks](../remote-hooks.md): your `launch_cmd` provisions a workspace and
+exposes an `af agent-server`, while `delete_cmd` tears that workspace down. The
+session shows up in the same sidebar with the same Agent tab, attach, and kill
+experience. The worktree-isolation model is the same; only the machine changes.
 
 ## Who owns the state
 

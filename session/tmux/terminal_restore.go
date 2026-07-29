@@ -5,15 +5,15 @@ package tmux
 // full-screen program leaves behind on exit: main screen, cursor visible, no
 // scroll region, no mouse/focus/paste reporting, and legacy keyboard encoding.
 //
-// A raw attach stream — the remote hook's attach_cmd PTY, or (since #1592 Phase
-// 2 PR7) the local session's clientless WS PTY stream — is copied byte-for-byte
-// to the local terminal, so whatever modes the streamed program set (tmux/agents
-// enter the alt screen, set a scroll region, enable mouse and focus reporting)
-// are set on the local terminal too. On a graceful exit the program emits its own
-// restore sequences, but the detach key ends the stream mid-flight and nothing
-// resets those modes — a caller that then repaints into the terminal inherits a
-// stale scroll region and screen buffer, the "messed up UI until I resize" of
-// #845. Both drivers write this on every exit path.
+// The clientless WS PTY stream — backed by local tmux or proxied from an off-box
+// AgentServer — is copied byte-for-byte to the local terminal, so whatever modes
+// the streamed program set (tmux/agents enter the alt screen, set a scroll region,
+// enable mouse and focus reporting) are set on the local terminal too. On a
+// graceful exit the program emits its own restore sequences, but the detach key
+// ends the stream mid-flight and nothing resets those modes — a caller that then
+// repaints into the terminal inherits a stale scroll region and screen buffer,
+// the "messed up UI until I resize" of #845. Both drivers write this on every exit
+// path.
 //
 // The keyboard-encoding modes matter for the same reason and were missed until
 // #1833 made them reachable: a modern agent CLI negotiates the kitty keyboard

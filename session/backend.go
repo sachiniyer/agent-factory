@@ -10,11 +10,11 @@ type WorkspaceKind int
 
 const (
 	// WorkspaceLocalWorktree: a git worktree on the daemon's own machine, driven
-	// by tmux (today's LocalBackend). Zero value — a backend-less instance reads
+	// by tmux (LocalBackend). Zero value — a backend-less instance reads
 	// as a local workspace.
 	WorkspaceLocalWorktree WorkspaceKind = iota
 	// WorkspaceRemote: the workspace lives off-box; there is no local worktree or
-	// tmux to drive (today's HookBackend; tomorrow's ssh/container runtimes).
+	// tmux to drive (docker, SSH, and remote-hook runtimes).
 	WorkspaceRemote
 )
 
@@ -41,9 +41,8 @@ type Capabilities struct {
 	Recover bool
 	// TabManagement: the user can add/close arbitrary tabs (new process tab).
 	TabManagement bool
-	// TerminalTab: an interactive terminal tab is available. May depend on
-	// per-session config (remote_hooks.terminal_cmd), so it is computed per
-	// instance rather than being a static per-type constant.
+	// TerminalTab: an interactive terminal surface is available. Off-box runtimes
+	// provide it through their AgentServer stream rather than a daemon-local tmux.
 	TerminalTab bool
 	// InteractiveInput: raw key / prompt injection works — SendKeys/
 	// SendPrompt drive a live PTY rather than returning "not supported".
@@ -60,17 +59,16 @@ type Capabilities struct {
 // callers can render the restriction rather than match on prose.
 var ErrHandoffUnsupported = errors.New("agent handoff is only supported for local-worktree sessions")
 
-// Backend abstracts the session lifecycle so that instances can be backed
-// by local tmux+git worktrees (the default) or by user-provided remote
-// hook scripts.
+// Backend abstracts the session lifecycle so instances can be backed by local
+// tmux+git worktrees (the default) or an off-box docker, SSH, or hook runtime.
 type Backend interface {
 	// Start initialises the session. When firstTimeSetup is true a brand-new
 	// session is created; otherwise an existing one is restored from storage.
 	//
 	// Each backend implements Start as two phases (#1592 Phase 1 PR4): a PROVISION
-	// step that establishes WHERE the agent runs (the local git worktree, or the
-	// remote workspace via launch_cmd) and a LAUNCH step that starts WHAT runs in
-	// it (the tmux/PTY/agent process and its tabs). Start is Provision then Launch.
+	// step that establishes WHERE the agent runs (the local git worktree, or a
+	// provisioned off-box workspace) and a LAUNCH step that starts WHAT runs in it
+	// (the tmux/PTY/agent process and its tabs). Start is Provision then Launch.
 	// The two halves are on the interface (#1592 Phase 2 PR4) so the local
 	// agent-server's provision-and-expose model can drive them separately; Start
 	// stays as the combined lifecycle entry point its existing callers use.
@@ -92,12 +90,11 @@ type Backend interface {
 	// Kill terminates the session and cleans up all associated resources.
 	Kill(instance *Instance) error
 
-	// CloseAttachOnly releases the resources this Instance opened to view or
-	// drive the session (a tmux attach PTY, a remote preview process) WITHOUT
-	// destroying the underlying session, worktree, or remote record. It is the
-	// non-destructive sibling of Kill, used to discard a duplicate Instance
-	// built from disk that lost a race to the canonical, still-tracked
-	// Instance — see the daemon's findSession (#867). Killing such a duplicate
+	// CloseAttachOnly releases resources this Instance opened to view or drive the
+	// session WITHOUT destroying the underlying session, worktree, or off-box
+	// workspace. It is the non-destructive sibling of Kill, used to discard a
+	// duplicate Instance built from disk that lost a race to the canonical,
+	// still-tracked Instance — see the daemon's findSession (#867). Killing such a duplicate
 	// would tear down state the canonical Instance shares; closing only its
 	// attach resources reclaims the PTY without that collateral damage.
 	CloseAttachOnly(instance *Instance) error
@@ -119,8 +116,8 @@ type Backend interface {
 	// HasUpdated reports whether the session output changed since the last
 	// check and whether the program is showing a prompt, and returns the raw
 	// captured pane content so the daemon's usage-limit detector (#1146) can
-	// inspect it without a second capture. content is "" for backends with no
-	// live pane (remote/hook) or when the capture is unavailable.
+	// inspect it without a second capture. content is "" when the capture or
+	// remote observation is unavailable.
 	HasUpdated(instance *Instance) (updated bool, hasPrompt bool, content string)
 
 	// SendPromptCommand sends a prompt using a reliable command-based approach
@@ -198,16 +195,14 @@ type Backend interface {
 	PrepareAgentSwap(instance *Instance, target string) (AgentSwapPlan, error)
 	SwapAgent(instance *Instance, plan AgentSwapPlan) error
 
-	// Type returns the backend type identifier ("local" or "remote"). Since
-	// #1592 Phase 1 this is the persisted serialization discriminator only (the
+	// Type returns the persisted backend identifier (local, docker, ssh, or
+	// remote). Since #1592 Phase 1 this is the serialization discriminator only (the
 	// load-time factory in instance_data.go) — runtime branching goes through
 	// Capabilities, never Type().
 	Type() string
 
 	// Capabilities reports which optional operations this backend can service,
-	// replacing Type()-based special-casing (#1592 Phase 1). Computed per
-	// instance because some capabilities (TerminalTab) depend on per-session
-	// config.
+	// replacing Type()-based special-casing (#1592 Phase 1).
 	Capabilities() Capabilities
 }
 

@@ -77,7 +77,7 @@ type TabAddressableServer interface {
 // bites.
 type AgentServer interface {
 	// Provision establishes WHERE the agent runs — the local git worktree for the
-	// local runtime, an off-box workspace for a future remote/container runtime.
+	// local runtime, or an off-box workspace for docker, SSH, and hook runtimes.
 	// It is the first half of Phase-1's Start split (backend provision phase).
 	Provision(firstTimeSetup bool) error
 	// Launch starts WHAT runs in the provisioned workspace — the agent process and
@@ -93,14 +93,14 @@ type AgentServer interface {
 	// Snapshot returns the current non-interactive observation the daemon's
 	// liveness poll reads each tick, dismissing any pending trust/permission
 	// prompt as a side effect (the poll always did both, in that order). See
-	// Observation. The local implementation never errors; the error is for a future
-	// remote runtime whose observation channel can fail.
+	// Observation. The local implementation never errors; off-box AgentServer
+	// observation can fail across the network.
 	Snapshot() (Observation, error)
 	// Preview returns tab `tab`'s visible output; full=true returns the entire
 	// scrollback history. tab 0 is the agent tab (the backend preview); tab>0 is a
-	// shell/process tab. This is the daemon's SOLE capture path for content the TUI
-	// can't stream live (remote/hook sessions, scroll-mode scrollback, the transient
-	// preview target) — the TUI no longer captures tmux itself (#1592 Phase 2 PR6).
+	// shell/process tab. This is the daemon's SOLE capture path for scroll-mode
+	// scrollback and the transient preview target — the TUI no longer captures tmux
+	// itself (#1592 Phase 2 PR6), and off-box snapshots use this same path.
 	Preview(tab int, full bool) (PreviewSnapshot, error)
 	// PreviewByID is Preview addressed by the tab's stable identity. Implementations
 	// must either bind directly to the identified capture target or keep identity
@@ -161,7 +161,7 @@ type AgentServer interface {
 	// Phase 4 PR6): it commits any uncommitted work and pushes the session branch
 	// to origin (GitHub is the durable workspace store, epic decision 4),
 	// returning the pushed branch so the orchestrator can clone it back on
-	// restore. It is the primitive the disposable sandbox runtimes (docker/ssh)
+	// restore. It is the primitive the disposable off-box runtimes (docker/ssh/hook)
 	// archive through — the daemon calls it over the wire, and the in-sandbox
 	// local agent-server pushes the branch it owns. The local in-process runtime
 	// implements it too (a plain commit+push of its worktree), but the daemon

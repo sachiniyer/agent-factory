@@ -158,8 +158,8 @@ func TestDockerRuntime_ConfigValidation(t *testing.T) {
 }
 
 // fakeRuntime is a Runtime that returns a fixed provision result — used to
-// exercise the interface contract, including the remote-endpoint half that the
-// real local/hook runtimes leave nil and docker/ssh don't reach yet.
+// exercise the interface contract, including the remote-endpoint half used by
+// every off-box runtime.
 type fakeRuntime struct {
 	res ProvisionResult
 	err error
@@ -169,8 +169,8 @@ func (f fakeRuntime) Provision(ProvisionSpec) (ProvisionResult, error) { return 
 
 // TestRuntimeContract_SurfacesEndpoint proves the Runtime contract carries a
 // remote agent-server endpoint end-to-end: a runtime that provisions a sandbox
-// returns its authed endpoint alongside the backend, which is exactly what the
-// docker/ssh runtimes will fill in PR4/PR5.
+// returns its authed endpoint alongside the backend, exactly as the real off-box
+// runtimes do.
 func TestRuntimeContract_SurfacesEndpoint(t *testing.T) {
 	ep := &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	var rt Runtime = fakeRuntime{res: ProvisionResult{Backend: &LocalBackend{}, Endpoint: ep}}

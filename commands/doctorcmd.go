@@ -49,8 +49,8 @@ accumulate silently on a machine running agent-factory:
     different af binary than yours, several af installs at different versions,
     sockets left behind with no daemon answering, and an autostart unit that
     is installed but not actually supervising anything
-  - remote-hook setup for the current repo: config completeness, hook-script
-    presence/executability, and a bounded list_cmd connectivity probe
+  - remote-hook setup for the current repo: config completeness and
+    launch_cmd/delete_cmd script presence/executability
     (skipped cleanly when no remote backend is configured)
 
 The version-skew check exists because a skewed daemon fails quietly: it keeps

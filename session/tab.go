@@ -211,9 +211,8 @@ func newShellTab(ts *tmux.TmuxSession) *Tab {
 
 // newRemoteAgentTab returns the Agent tab for a remote/hook-backed instance
 // (#930 PR 6). Like every remote tab it carries no tmux session: the agent
-// surface is driven by attach_cmd and the hook preview process, not a local
-// tmux session. It lets remote instances be tab-driven through the same Tabs
-// list as local ones.
+// surface is driven through the off-box AgentServer's WS stream, not a local
+// tmux session. It lets off-box instances use the same Tabs list as local ones.
 func newRemoteAgentTab() *Tab {
 	return &Tab{ID: newTabID(), Name: agentTabName, Kind: TabKindAgent}
 }

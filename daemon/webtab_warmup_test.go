@@ -11,12 +11,12 @@ import (
 // The warm-up contract (#1878): the web-tab proxy must not serve — or touch
 // session state — until the daemon's restore has finished.
 //
-// RunDaemon binds the HTTP listener long BEFORE the restore (#829, deliberately:
-// the restore shells out per remote-hook session and can take minutes). So a stale
-// iframe left open across a daemon restart starts re-requesting the instant the
-// port answers. Every one of those requests resolves through resolveStreamSession,
-// which calls refreshLocked and REPLACES the instance map from disk — the proxy
-// driving its own restore. RestoreInstances documents the invariant it broke:
+// RunDaemon binds the HTTP listener before the restore finishes (#829). So a
+// stale iframe left open across a daemon restart starts re-requesting the instant
+// the port answers. Every one of those requests resolves through
+// resolveStreamSession, which calls refreshLocked and REPLACES the instance map
+// from disk — the proxy driving its own restore. RestoreInstances documents the
+// invariant it broke:
 // "every RPC that mutates it is gated on Ready". This route is HTTP, not net/rpc,
 // so it slipped the gate entirely.
 

@@ -41,13 +41,12 @@ var configDirForReap = config.GetConfigDir
 // status (Ready/Dead/Running, #935/#960 PR 5).
 //
 // Startup ordering matters (#829): the control socket binds BEFORE the
-// instance restore, which can take minutes on remote-hook repos (list_cmd /
-// ssh per session). Pre-#829 the restore ran first, so every concurrent
-// EnsureDaemon found no socket and spawned another daemon that burned a full
+// instance restore. Pre-#829 the restore ran first, so every concurrent
+// EnsureDaemon found no socket and spawned another daemon that performed a full
 // restore before losing the bind race. During the warm-up window Ping and
-// Shutdown work and state-dependent RPCs return errDaemonStarting; the
-// scheduler, watcher supervisor, and session-status poll loop start only after the
-// restore because they act on restored state.
+// Shutdown work and state-dependent RPCs return errDaemonStarting; the scheduler,
+// watcher supervisor, and session-status poll loop start only after the restore
+// because they act on restored state.
 func RunDaemon(cfg *config.Config) error {
 	return runDaemon(cfg, "")
 }
@@ -239,8 +238,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Run the restore concurrently so a shutdown or signal during warm-up
-	// exits promptly instead of hanging behind minutes of list_cmd/ssh. The
+	// Run the restore concurrently so a shutdown or signal during warm-up exits
+	// promptly instead of waiting for the restore to finish. The
 	// warm-up exit paths deliberately skip SaveInstances: nothing has been
 	// restored, and saving the empty instance map would wipe every persisted
 	// session.

@@ -18,19 +18,17 @@ import (
 )
 
 // The headless single-workspace agent-server (#1592 Phase 4 PR1) — the process
-// that will later run INSIDE each docker/ssh sandbox (§1.1). It is the mirror
+// that runs inside each docker/SSH/hook workspace. It is the mirror
 // image of the daemon's in-process localAgentServer: where the daemon drives a
 // local session through session.AgentServer directly, this exposes ONE session's
 // AgentServer over the exact HTTP/WS+token wire the daemon already speaks, so
-// a remote daemon (PR2's remoteAgentServer) can drive it across the process
+// a remote daemon's remoteAgentServer can drive it across the process
 // boundary exactly like the in-process one.
 //
 // It is deliberately NOT the orchestrator (§1.1): no task scheduler, no watch
 // supervisor, no multi-session Manager, no disk-state ownership. It owns exactly
-// one live session.AgentServer and exposes it. The workspace is DARK in this PR:
-// nothing provisions a sandbox to run it (PR4/PR5) and nothing in the daemon
-// drives it yet (PR2) — it is a standalone `af agent-server` you run and hit
-// directly.
+// one live session.AgentServer and exposes it. Docker, SSH, and hook runtimes
+// provision this process; it can also be run directly for testing.
 //
 // Reuse, not reimplementation: the HTTP+token listener (startTCPListener), the
 // auth+CORS gate (withAuth), the WS PTY broker fan-out (servePTYStream), the
@@ -102,7 +100,7 @@ type AgentServerInfo struct {
 // listener's token is loopback-exempt): the agent-server exists to be reached
 // over the network by a remote daemon. The transport is plain HTTP (no TLS) — the
 // token travels over it, so a driver reaches the agent-server over a private
-// network or tunnel (the docker/ssh runtimes forward a loopback port). It reuses
+// network or tunnel controlled by the off-box runtime. It reuses
 // startTCPListener verbatim — the same token/gate wiring the daemon's
 // `listen_addr` opt-in uses.
 func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
@@ -134,9 +132,8 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		SessionEnvPassthrough: opts.SessionEnvPassthrough,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
-		// so a workspace whose repo config declares backend=docker/ssh (cloned into
-		// the container by the docker runtime, #1592 Phase 4 PR4) does not make the
-		// agent-server recursively try to provision another sandbox inside itself.
+		// so a workspace whose repo config declares backend=docker/ssh/hook does
+		// not recursively provision another sandbox inside itself.
 		Backend: session.BackendLocal,
 	})
 	if err != nil {

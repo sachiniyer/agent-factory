@@ -39,11 +39,11 @@ func defaultRemoteConfig() (*config.RemoteHooks, string, error) {
 }
 
 // checkRemoteSetup validates the remote-hook backend for the current repo:
-// config completeness, hook-script presence/executability, and a bounded
-// read-only connectivity probe via list_cmd. When no remote backend is
-// configured (the common case for local-only users), it records a single
-// informational "n/a" line and adds no findings — running `af doctor` outside
-// a remote setup must produce zero new noise.
+// config completeness and launch_cmd/delete_cmd script presence/executability.
+// There is no read-only connectivity probe in the provision-and-expose contract.
+// When no remote backend is configured (the common case for local-only users),
+// it records a single informational "n/a" line and adds no findings — running
+// `af doctor` outside a remote setup must produce zero new noise.
 func checkRemoteSetup(ctx *scanContext, report *Report) {
 	resolve := ctx.opts.remoteConfig
 	if resolve == nil {

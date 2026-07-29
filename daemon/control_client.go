@@ -31,8 +31,8 @@ const daemonUpgradeProbationErrText = "agent-factory daemon is validating an upg
 
 // errDaemonStarting is returned by state-dependent RPC handlers in the window
 // between the control-socket bind and the completion of the instance restore
-// (#829). The socket now binds before the restore, which can take minutes on
-// remote-hook repos, so this window is user-visible.
+// (#829). The socket now binds before the restore so this window is observable
+// without admitting state-dependent work against a partial instance map.
 func errDaemonStarting() error {
 	return errors.New(daemonStartingErrText)
 }

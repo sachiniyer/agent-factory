@@ -22,11 +22,10 @@ import (
 // the same repo can't race the tab list or derive a duplicate name. The new tab
 // is persisted immediately (ToInstanceData serializes its command + tmux name,
 // and restoreLocalTabs reconnects it by exact name on reload) so it survives a
-// daemon/af restart — Sachin's hard #930 requirement. Rejected for remote/hook
-// instances (no local worktree, and the hook protocol can't run arbitrary
-// commands — a remote session's only terminal tab is the terminal_cmd one), an
-// empty command, or an instance already at the soft cap (maxTabs, enforced by
-// AddProcessTab).
+// daemon/af restart — Sachin's hard #930 requirement. Rejected for off-box
+// instances, which have no daemon-side worktree from which to spawn a
+// user-managed tab; also rejected for an empty command or an instance already at
+// the soft cap (maxTabs, enforced by AddProcessTab).
 func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
 	// every explicit kind resolves through session.ParseTabKindName, the shared

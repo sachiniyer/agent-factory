@@ -338,11 +338,10 @@ func (i *Instance) RestoreFromArchive() error {
 	return nil
 }
 
-// CloseAttachOnly releases the resources this instance opened to view or drive
-// its session (a tmux attach PTY, a remote preview process) without destroying
-// the session, worktree, or remote record. Use it — never Kill — to discard a
-// duplicate Instance built from disk that lost a race to the canonical tracked
-// Instance (#867); see Backend.CloseAttachOnly.
+// CloseAttachOnly releases resources this instance opened to view or drive its
+// session without destroying the session, worktree, or off-box workspace. Use it
+// — never Kill — to discard a duplicate Instance built from disk that lost a
+// race to the canonical tracked Instance (#867); see Backend.CloseAttachOnly.
 func (i *Instance) CloseAttachOnly() error {
 	return i.currentBackend().CloseAttachOnly(i)
 }

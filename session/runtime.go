@@ -13,7 +13,7 @@ import (
 type BackendKind string
 
 const (
-	// BackendLocal is today's in-process runtime: the agent runs as a tmux
+	// BackendLocal is the in-process runtime: the agent runs as a tmux
 	// session in a git worktree on the daemon's own box. The default — an empty
 	// `backend` selection resolves here, unchanged from before Phase 4.
 	BackendLocal BackendKind = config.BackendLocal
@@ -47,12 +47,10 @@ func ParseBackendKind(s string) (BackendKind, error) {
 }
 
 // ProvisionSpec is the input a Runtime needs to establish a session's execution
-// environment. The local/hook runtimes provision from the repo root alone; the
-// sandboxed runtimes (docker/ssh) additionally need the session's identity
-// (Title/Program) to start an `af agent-server` for exactly one
-// workspace, and the clone source so the sandbox can pull the repo from GitHub
-// (epic decision 4: GitHub is the durable workspace store). They read their own
-// section (docker.*/ssh.*) from the repo's resolved config by RepoRoot.
+// environment. The local runtime provisions from the repo root; off-box runtimes
+// (docker/ssh/hook) additionally need the session identity (Title/Program), clone
+// source, and optional restore branch used to start an `af agent-server` for one
+// workspace. Each runtime reads its own settings from the resolved repo config.
 type ProvisionSpec struct {
 	// RepoRoot is the absolute repo root the session is created against.
 	RepoRoot string
@@ -64,20 +62,19 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
-	// CloneURL is the git remote the sandbox clones the workspace from — the
-	// repo's `origin` for a docker/ssh session (GitHub for a real repo, a
-	// file:// or bind-mounted path for a self-contained test). Empty for the
-	// in-process local/hook runtimes, which never clone. On a fresh create the
-	// sandbox clones its default branch and the in-sandbox worktree derives the
-	// session branch from Title.
+	// CloneURL is the git remote an off-box runtime clones the workspace from —
+	// the repo's `origin` for a real repo, or a file:// / bind-mounted path for a
+	// self-contained test. Empty for the in-process local runtime. On a fresh
+	// create the sandbox clones its default branch and the in-sandbox worktree
+	// derives the session branch from Title.
 	CloneURL string
 	// RestoreBranch, when set, makes this a RESTORE provision rather than a fresh
 	// create (#1592 Phase 4 PR6): after cloning, the sandbox materializes this
 	// exact branch (the one archive pushed to origin) as a LOCAL ref so the
 	// in-sandbox local backend's Setup reuses it — bringing the pushed commits
 	// back — instead of branching fresh off the default. Empty on a fresh create.
-	// Only the sandbox runtimes (docker/ssh) honor it; the in-process runtimes
-	// never clone, so it is a no-op for them.
+	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
+	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their
@@ -99,10 +96,10 @@ type ProvisionResult struct {
 	// exercises the non-nil path via a fake runtime.
 	Endpoint *AgentServerEndpoint
 	// Teardown reaps the sandbox this Runtime provisioned — `docker rm -f` the
-	// container (PR4), close the ssh tunnel + remove the remote dir (PR5). nil for
-	// an in-process runtime (nothing off-box to reap). NewInstance stashes it on
-	// the instance so the agent-server Kill path runs it AFTER tearing the remote
-	// workspace down over REST, and NewInstance itself runs it if wiring the
+	// container (PR4), close the ssh tunnel + remove the remote dir (PR5), or run
+	// the hook's delete_cmd (PR7). nil for the in-process local runtime. NewInstance
+	// stashes it on the instance so the agent-server Kill path runs it AFTER tearing
+	// the remote workspace down over REST, and NewInstance runs it if wiring the
 	// remote client fails, so a provisioned sandbox never leaks. Repeated calls are
 	// serialized by the runtime; docker/SSH latch answered outcomes and leave
 	// unknown outcomes retryable, while hook runs its idempotent delete once.
@@ -112,17 +109,14 @@ type ProvisionResult struct {
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session
 // spec it establishes the workspace/sandbox and exposes an agent-server in it,
 // returning the wiring a new Instance needs. It is the extensibility point the
-// docker and ssh runtimes plug into — the registry below maps a `backend` value
-// to a Runtime, and session creation resolves one from config instead of
-// hard-coding local-vs-hook.
+// docker, SSH, and hook runtimes plug into — the registry below maps a `backend`
+// value to a Runtime, and session creation resolves one from config.
 //
-// The local and hook runtimes provision in-process on the daemon's box, so they
-// expose an in-process endpoint (Endpoint nil) and the session keeps using the
-// local AgentServer over tmux — byte-identical to before Phase 4. The docker and
-// ssh runtimes (PR4/PR5) provision a real sandbox, start an `af agent-server`,
-// and expose its authed http:// URL; the session then drives it through the
-// remoteAgentServer client (PR2). Both satisfy this one interface, so the create
-// flow above does not branch on locality.
+// The local runtime exposes an in-process endpoint (Endpoint nil) and uses the
+// local AgentServer over tmux. Every off-box runtime provisions a workspace,
+// starts an `af agent-server`, and exposes its authed http:// URL; the session
+// then drives it through the remoteAgentServer client. All satisfy this one
+// interface, so the create flow does not branch on locality.
 type Runtime interface {
 	// Provision establishes the session's execution environment and returns the
 	// backend (+ optional remote endpoint) the instance is built with.
@@ -131,9 +125,8 @@ type Runtime interface {
 
 // runtimeRegistry maps a BackendKind to the constructor for its Runtime. It is
 // the single source of truth for "which runtimes exist"; ResolveRuntime looks a
-// kind up here. Keeping it a map (not a switch) is what makes the set
-// extensible — PR4/PR5 register real docker/ssh runtimes by swapping their
-// entries, and a future out-of-tree runtime could register here too.
+// kind up here. Keeping it a map (not a switch) also gives tests one seam for
+// substituting a runtime without changing production dispatch.
 var runtimeRegistry = map[BackendKind]func() Runtime{
 	BackendLocal:  func() Runtime { return localRuntime{} },
 	BackendHook:   func() Runtime { return hookRuntime{} },
@@ -173,7 +166,7 @@ func ResolveRuntime(kind BackendKind) (Runtime, error) {
 // localRuntime is the default in-process runtime: a git worktree + tmux agent on
 // the daemon's own box. Its Provision is exactly what defaultBackendFactory
 // returned for a non-remote session before Phase 4 — a bare LocalBackend, no
-// endpoint — so a local session is byte-identical to today.
+// endpoint — so the local session contract stays unchanged.
 type localRuntime struct{}
 
 func (localRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
@@ -201,8 +194,8 @@ func (localRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
 // an ssh local-forward tunnel. The type is declared there.
 
 // resolveRepoConfig loads the resolved config for the repo containing absPath.
-// Shared by the runtime resolver (to read the `backend` key) and the docker/ssh
-// runtimes (to read their sections).
+// Shared by the runtime resolver (to read the `backend` key) and off-box runtimes
+// (to read their docker, SSH, or hook settings).
 func resolveRepoConfig(absPath string) (*config.ResolvedConfig, error) {
 	repo, err := config.RepoFromPath(absPath)
 	if err != nil {

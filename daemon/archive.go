@@ -114,8 +114,8 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		return "", session.InstanceData{}, fmt.Errorf("session %q changed state before archive could start", req.Title)
 	}
 
-	// A sandbox session (docker/ssh) archives by pushing its branch to origin and
-	// reaping the sandbox, not by relocating a worktree it does not have (#1592
+	// An off-box session (docker/ssh/hook) archives by pushing its branch to origin
+	// and reaping the sandbox, not by relocating a worktree it does not have (#1592
 	// Phase 4 PR6). Route it to the remote body, which shares this method's guards,
 	// locks, and archive fence.
 	if instance.Capabilities().Workspace == session.WorkspaceRemote {
@@ -238,7 +238,7 @@ func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance
 	return nil
 }
 
-// archiveRemoteSession archives a sandbox-backed session (docker/ssh) by pushing
+// archiveRemoteSession archives an off-box session (docker/ssh/hook) by pushing
 // its branch to origin then reaping the sandbox (#1592 Phase 4 PR6) — the remote
 // analogue of ArchiveSession's worktree-move body, sharing its guards, locks, and
 // archive fence. GitHub holds the durable branch, so unlike the local path there
@@ -277,7 +277,7 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 	return branch, nil
 }
 
-// restoreRemoteSession restores an archived sandbox session (docker/ssh) by
+// restoreRemoteSession restores an archived off-box session (docker/ssh/hook) by
 // re-provisioning a fresh sandbox that clones the pushed branch back and
 // relaunching the agent (#1592 Phase 4 PR6) — the remote analogue of
 // RestoreArchived's worktree-move body, sharing its guards + locks. It reuses
@@ -379,8 +379,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
 
-	// A sandbox session (docker/ssh) restores by re-provisioning a fresh sandbox
-	// that clones the pushed branch back, not by moving a worktree it does not have
+	// An off-box session (docker/ssh/hook) restores by re-provisioning a fresh
+	// sandbox that clones the pushed branch back, not by moving a worktree it does
+	// not have
 	// (#1592 Phase 4 PR6). Route it to the remote body, which shares this method's
 	// guards + locks.
 	if instance.Capabilities().Workspace == session.WorkspaceRemote {

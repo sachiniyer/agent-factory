@@ -7,10 +7,11 @@
 //
 // It also validates the remote-hook backend (#1039) for the repository
 // containing the current working directory: config completeness, hook-script
-// presence/executability, and a bounded read-only connectivity probe via
-// list_cmd. When no remote backend is configured — the common case — the
-// remote checks record a single informational "n/a" line and add no findings,
-// so local-only users see no new noise.
+// presence, and executability. The provision-and-expose contract has no
+// read-only connectivity verb, so doctor does not run either mutating hook.
+// When no remote backend is configured — the common case — the remote checks
+// record a single informational "n/a" line and add no findings, so local-only
+// users see no new noise.
 //
 // The safety stance is asymmetric by design: detection is generous,
 // remediation is conservative. A process is only ever killed when its

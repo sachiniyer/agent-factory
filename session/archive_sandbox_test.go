@@ -354,7 +354,7 @@ func (r *specCapturingRuntime) Provision(s ProvisionSpec) (ProvisionResult, erro
 // a partial archive (push OK, teardown failed) the instance the daemon persists as
 // Lost is one whose subsequent re-provision — the exact call the Lost-restore loop
 // makes via Recover → recoverSandbox → reprovisionRemote — carries the PUSHED branch
-// as RestoreBranch. That is what makes the docker/ssh runtimes fetch the branch back
+// as RestoreBranch. That is what makes the off-box runtimes fetch the branch back
 // (backend_docker.go: an empty RestoreBranch skips the fetch and lands on the repo's
 // default branch) instead of silently recovering onto the wrong one.
 func TestArchiveSandbox_PartialFailureReprovisionsOnPushedBranch(t *testing.T) {

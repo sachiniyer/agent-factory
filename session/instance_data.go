@@ -83,14 +83,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
 
-	// Persist each tab so the full agent+shell tab list survives a restart
+	// Persist each tab so the full local agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
-	// each local tab's tmux session by its exact persisted name, reconnecting
-	// live sessions across an af/daemon restart. Remote tabs (agent + optional
-	// terminal) carry no tmux session, so they serialize with an empty TmuxName;
-	// on restore HookBackend.Start re-derives them from the live terminal_cmd
-	// config (syncRemoteTabs) rather than from this serialized list, so a
-	// terminal_cmd added or removed while af was down is honored.
+	// each local tab's tmux session by its exact persisted name. An off-box
+	// session's fixed Agent tab has no daemon-side tmux, so it serializes with an
+	// empty TmuxName and is re-seeded when the AgentServer is launched.
 	for _, tab := range i.Tabs {
 		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
 		if tab.tmux != nil {
@@ -311,7 +308,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		return instance, nil
 	}
 
-	// A non-archived sandbox session (docker/ssh) cannot be driven on load: its
+	// A non-archived sandbox session (docker/ssh/hook) cannot be driven on load: its
 	// container/remote is gone after a daemon restart and only its pushed branch
 	// on origin survives (#1592 Phase 4 PR6). Load it INERT + Lost — started stays
 	// false, so the status poll and the Lost-restore loop both pass it by (the

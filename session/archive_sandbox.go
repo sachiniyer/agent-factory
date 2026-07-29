@@ -32,8 +32,8 @@ func (i *Instance) pushBranchForArchive() (string, error) {
 	return gw.SnapshotAndPushBranch()
 }
 
-// ArchiveSandbox makes a sandbox-backed session (docker/ssh) durable and reaps
-// its sandbox (#1592 Phase 4 PR6): it pushes the branch to origin over the
+// ArchiveSandbox makes an off-box session (docker/ssh/hook) durable and reaps
+// its sandbox (#1592 Phase 4 PR6/PR7): it pushes the branch to origin over the
 // agent-server, then tears the in-sandbox workspace down and reaps the sandbox
 // (the AgentServer.Kill path), and finally clears the now-dead remote wiring so a
 // later restore rebuilds it. Returns the pushed branch, which the caller records
@@ -241,8 +241,8 @@ func (i *Instance) teardownAfterStartFailure() {
 }
 
 // isSandboxBackendType reports whether a persisted backend Type() names a
-// disposable sandbox runtime (docker/ssh) — the runtimes archive/restore
-// re-provision (#1592 Phase 4 PR6).
+// disposable sandbox runtime (docker/ssh/hook) — the runtimes archive/restore
+// re-provision (#1592 Phase 4 PR6/PR7).
 func isSandboxBackendType(t string) bool {
 	_, err := backendKindForType(t)
 	return err == nil

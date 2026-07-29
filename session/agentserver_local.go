@@ -157,9 +157,8 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 }
 
 func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) {
-	// The agent tab (0) keeps the backend preview path — a backend may format its
-	// agent output specially (e.g. the remote hook's sanitized stream). Shell/process
-	// tabs (>0) capture their own tmux session, mirroring TabPane's former
+	// The agent tab (0) keeps the backend preview path. Shell/process tabs (>0)
+	// capture their own tmux session, mirroring TabPane's former
 	// updateAgent/updateShell split now that the daemon is the sole capturer.
 	if tab != 0 {
 		return s.inst.PreviewTabSnapshot(tab, full)
@@ -426,7 +425,7 @@ func (s *localAgentServer) Resize(tab int, rows, cols uint16) error {
 
 // Archive commits any uncommitted work and pushes this session's branch to
 // origin (#1592 Phase 4 PR6). Running INSIDE a sandbox as the in-process
-// agent-server, this is where a docker/ssh session's push actually happens — it
+// agent-server, this is where an off-box session's push actually happens — it
 // owns the git worktree, so it can snapshot the working tree and push the branch
 // GitHub will hold as the durable workspace. Returns the pushed branch name.
 func (s *localAgentServer) Archive() (string, error) {

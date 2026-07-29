@@ -12,16 +12,15 @@ import (
 )
 
 // `af agent-server` (#1592 Phase 4 PR1) runs a headless, single-workspace
-// agent-server over the HTTP/WS+token protocol — the process that will later
-// run INSIDE each docker/ssh sandbox and be driven by a remote daemon over an
-// authed URL. It is the standalone, out-of-process form of the daemon's
+// agent-server over the HTTP/WS+token protocol — the process that runs inside
+// each docker/SSH/hook workspace and is driven by a remote daemon over an authed
+// URL. It is the standalone, out-of-process form of the daemon's
 // in-process local agent-server: one session's workspace (worktree + tmux),
 // exposed over the exact wire the daemon already speaks, behind a bearer token on
 // a plain-HTTP listener.
 //
-// It is DARK in this PR: nothing provisions a sandbox to run it and nothing in the
-// daemon drives it yet. Run it by hand and drive it directly to prove the process
-// boundary.
+// Docker, SSH, and hook runtimes provision it; it can also be run directly for
+// testing.
 
 var (
 	agentServerListen          string

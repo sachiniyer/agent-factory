@@ -10,13 +10,12 @@ import (
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
-// The Preview RPC (#1592 Phase 2 PR6) is the daemon's SOLE capture path for the
-// session content the TUI cannot stream live over the WS PTY plane: remote/hook
-// sessions (whose output is captured by the daemon-side hook process, not the
-// TUI), scroll-mode scrollback (the live stream carries only the visible screen),
-// the transient #1321 preview target, and any transitional state. Before PR6 the
-// TUI shelled out to `tmux capture-pane` itself; deleting that made the daemon the
-// one capturer, and this RPC is how the read-only TUI reaches it.
+// The Preview RPC (#1592 Phase 2 PR6) is the daemon's SOLE capture path for
+// scroll-mode scrollback (the live stream carries only the visible screen), the
+// transient #1321 preview target, and any transitional state. Local capture and
+// off-box AgentServer snapshots both terminate here. Before PR6 the TUI shelled
+// out to `tmux capture-pane` itself; deleting that made the daemon the one
+// capturer, and this RPC is how the read-only TUI reaches it.
 //
 // It is an internal, non-cataloged route (like the Pause/ResumeStatusPoll attach-
 // coordination RPCs): it is TUI render plumbing, not a client-facing `af` verb, so

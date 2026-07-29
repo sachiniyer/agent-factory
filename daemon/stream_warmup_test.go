@@ -14,11 +14,10 @@ import (
 // The warm-up contract for the WebSocket stream plane (#2109), the same contract
 // the web-tab proxy was brought under in #1878.
 //
-// RunDaemon binds the HTTP listener long BEFORE the restore finishes (#829,
-// deliberately: the restore shells out per remote-hook session and can take
-// minutes). Both stream routes are HTTP rather than net/rpc, so — exactly like the
-// proxy did — they slipped the requireManagerReady gate that every state-reading
-// RPC goes through. A stream request landing in that window runs
+// RunDaemon binds the HTTP listener before the restore finishes (#829). Both
+// stream routes are HTTP rather than net/rpc, so — exactly like the proxy did —
+// they slipped the requireManagerReady gate that every state-reading RPC goes
+// through. A stream request landing in that window runs
 // agentServerForStream → resolveStreamSession → refreshLocked, which builds
 // instances off disk and puts them in m.instances. RestoreInstances then rebuilds
 // that map from scratch, so the instance already handed to the client is no longer

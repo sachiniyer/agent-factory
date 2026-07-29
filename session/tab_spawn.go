@@ -255,9 +255,9 @@ func (i *Instance) appendReconciledTab(matchID, name string, tab *Tab) bool {
 // name is requestedName when non-empty, otherwise "web", made unique
 // within the instance ("web", "web-2", …). Local instances only, matching
 // shell/process tabs: a web tab is persisted on the local instance record and
-// rebuilt from it on restart, and remote/hook sessions rebuild their tabs from
-// hook config instead (callers reject non-TabManagement backends first). Errors
-// when the instance is not started/has no worktree or already holds maxTabs tabs.
+// rebuilt from it on restart. Off-box sessions have a fixed runtime-provided tab
+// roster instead (callers reject non-TabManagement backends first). Errors when
+// the instance is not started/has no worktree or already holds maxTabs tabs.
 func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, fmt.Errorf("a web tab requires a non-empty URL")
