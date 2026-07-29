@@ -73,7 +73,7 @@ func sanitizeThemeColors(config *Config, prettyConfigPath string) {
 		field := cfgValue.Field(i)
 		raw := strings.TrimSpace(field.String())
 		fallback := defaultValue.Field(i).String()
-		key := tomlTagName(cfgType.Field(i).Tag.Get("toml"))
+		key := structTagName(cfgType.Field(i).Tag.Get("toml"))
 		if key == "" {
 			key = cfgType.Field(i).Name
 		}
@@ -93,13 +93,4 @@ func sanitizeThemeColors(config *Config, prettyConfigPath string) {
 // nothing else pinning the two together.
 func ThemeSlotCount() int {
 	return reflect.TypeOf(ThemeConfig{}).NumField()
-}
-
-func tomlTagName(tag string) string {
-	for i := range tag {
-		if tag[i] == ',' {
-			return tag[:i]
-		}
-	}
-	return tag
 }

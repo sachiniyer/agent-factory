@@ -417,7 +417,7 @@ func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
 		if !field.IsExported() {
 			continue
 		}
-		if tomlTagName(field.Tag.Get("toml")) == key || jsonTagName(field.Tag.Get("json")) == key || field.Tag.Get("config") == key {
+		if structTagName(field.Tag.Get("toml")) == key || structTagName(field.Tag.Get("json")) == key || field.Tag.Get("config") == key {
 			return value.Field(i), true
 		}
 	}
@@ -496,7 +496,7 @@ func compositeNames(value reflect.Value) []string {
 			if !field.IsExported() {
 				continue
 			}
-			name := tomlTagName(field.Tag.Get("toml"))
+			name := structTagName(field.Tag.Get("toml"))
 			if name != "" && name != "-" {
 				names = append(names, name)
 			}

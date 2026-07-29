@@ -32,7 +32,7 @@ func manifestSchemaFields(t *testing.T, schema manifestSchema) map[string]reflec
 		if !field.IsExported() {
 			continue
 		}
-		key := tomlTagName(field.Tag.Get("toml"))
+		key := structTagName(field.Tag.Get("toml"))
 		switch key {
 		case "-":
 			continue
@@ -161,10 +161,10 @@ func TestAllManifestScalarDefaultsMatchBuiltInResolution(t *testing.T) {
 
 func formatsForManifestField(field reflect.StructField) FormatSet {
 	var formats FormatSet
-	if key := tomlTagName(field.Tag.Get("toml")); key != "" && key != "-" {
+	if key := structTagName(field.Tag.Get("toml")); key != "" && key != "-" {
 		formats |= FormatSet(1) << FormatTOML
 	}
-	if key := jsonTagName(field.Tag.Get("json")); key != "" && key != "-" {
+	if key := structTagName(field.Tag.Get("json")); key != "" && key != "-" {
 		formats |= FormatSet(1) << FormatJSON
 	}
 	return formats
@@ -324,7 +324,7 @@ func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 		if _, shared := repoFields[key]; !shared {
 			wantGlobalOnly[key] = true
 		}
-		if jsonTagName(field.Tag.Get("json")) == "-" {
+		if structTagName(field.Tag.Get("json")) == "-" {
 			wantTOMLOnly[key] = true
 		}
 	}

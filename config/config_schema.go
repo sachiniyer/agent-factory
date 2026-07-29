@@ -22,19 +22,10 @@ func knownJSONConfigKeys() map[string]bool {
 	out := map[string]bool{}
 	t := reflect.TypeOf(Config{})
 	for i := 0; i < t.NumField(); i++ {
-		name := jsonTagName(t.Field(i).Tag.Get("json"))
+		name := structTagName(t.Field(i).Tag.Get("json"))
 		if name != "" && name != "-" {
 			out[name] = true
 		}
 	}
 	return out
-}
-
-func jsonTagName(tag string) string {
-	for i := range tag {
-		if tag[i] == ',' {
-			return tag[:i]
-		}
-	}
-	return tag
 }

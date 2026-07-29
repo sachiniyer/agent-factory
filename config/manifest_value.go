@@ -44,7 +44,7 @@ func configFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 		if !f.IsExported() {
 			continue
 		}
-		if tomlTagName(f.Tag.Get("toml")) != key {
+		if structTagName(f.Tag.Get("toml")) != key {
 			continue
 		}
 		return rv.Field(i), true

@@ -57,8 +57,8 @@ func configTomlFields(t *testing.T) map[string]string {
 			continue
 		}
 		tag := f.Tag.Get("toml")
-		// tomlTagName strips the ",omitempty" suffix (config/theme.go).
-		key := tomlTagName(tag)
+		// structTagName strips the ",omitempty" suffix.
+		key := structTagName(tag)
 		if key == "-" {
 			continue // explicit opt-out: deliberately not a config key
 		}
@@ -267,7 +267,7 @@ func TestManifestTypeMatchesTheRealField(t *testing.T) {
 	for _, e := range Manifest() {
 		field, ok := rt.FieldByNameFunc(func(name string) bool {
 			f, found := rt.FieldByName(name)
-			return found && tomlTagName(f.Tag.Get("toml")) == e.Key
+			return found && structTagName(f.Tag.Get("toml")) == e.Key
 		})
 		if !ok {
 			// TestManifestCoversEveryConfigKey owns the phantom-entry failure;
