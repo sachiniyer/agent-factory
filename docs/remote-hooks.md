@@ -49,8 +49,9 @@ The `<name>` passed to hooks via `--name` is a slug derived from the session tit
 1. lowercase the title
 2. replace spaces with `-`
 3. drop every character that is not `[a-z0-9-]`
-4. trim leading/trailing `-`
-5. if empty, use `session`
+4. truncate to 200 bytes (so the slug stays a legal filesystem component for `mktemp`/`mkdir`)
+5. trim leading/trailing `-`
+6. if empty, use `session`
 
 Examples: `"Fix Auth Bug"` → `fix-auth-bug`, `"my_app"` → `myapp`, `"af-test"` stays `af-test`. Two titles that slugify to the same value are rejected at create time, since `delete_cmd` keys on the slug. There is no hidden hash suffix.
 
