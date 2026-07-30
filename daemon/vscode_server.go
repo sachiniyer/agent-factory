@@ -306,7 +306,8 @@ func htmlLinkify(message string) string {
 
 // vscodeServer is one supervised editor process serving one session's worktree.
 type vscodeServer struct {
-	worktree string
+	worktree   string
+	instanceID string
 	// socketPath is the editor's ONLY endpoint: a 0600 unix socket in a 0700
 	// directory. There is no host or port — the proxy's transport dials this.
 	socketPath string
@@ -324,6 +325,7 @@ type vscodeServer struct {
 	// transport with an empty pool, so no connection to the dead socket survives.
 	transport *http.Transport
 	cmd       *exec.Cmd
+	ownerPath string
 
 	// ready latches once the editor has accepted a connection. Until then the
 	// process is up but must not be proxied to, so callers see errVSCodeStarting
@@ -535,8 +537,17 @@ func newVSCodeSupervisor() *vscodeSupervisor {
 // tab recreated. It returns errVSCodeBinaryMissing when no editor is installed,
 // which callers render as the install hint.
 func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, error) {
+	return v.ensureServerForInstance(key, key, worktree)
+}
+
+// ensureServerForInstance is the production form: the stable instance id keeps
+// a same-title recreation from adopting or stopping its predecessor's editor.
+func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree string) (vscodeEndpoint, error) {
 	if strings.TrimSpace(worktree) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session has no worktree to open in VS Code")
+	}
+	if strings.TrimSpace(instanceID) == "" {
+		return vscodeEndpoint{}, fmt.Errorf("session has no stable identity for VS Code")
 	}
 
 	// Hold the supervisor lock for the whole call. It serializes concurrent
@@ -552,9 +563,10 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, e
 	// Reuse a live editor, but only while it still serves THIS worktree: a session
 	// restored to a different path (or a key reused after a kill) must never be
 	// handed an editor rooted at the old directory.
+	replacedRegistered := false
 	if s := v.servers[key]; s != nil {
 		switch {
-		case s.alive() && s.worktree == worktree:
+		case s.alive() && s.instanceID == instanceID && s.worktree == worktree:
 			if s.ready || v.probeReady(s) {
 				return s.endpoint(), nil
 			}
@@ -572,6 +584,7 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, e
 			neverReady := !s.ready && !s.alive()
 			delete(v.servers, key)
 			go s.stop()
+			replacedRegistered = true
 			// An editor that died having NEVER become ready is a broken start, not a
 			// crash to heal from — record it so the cooldown applies. Without this
 			// only spawnLocked's own errors were recorded, so an editor that outlived
@@ -585,6 +598,14 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, e
 					at:  v.now(),
 				}
 			}
+		}
+	}
+	// An empty in-memory slot does not prove no editor exists: a previous daemon
+	// may have died after persisting this process identity. Reconcile that exact
+	// stable session before spawning a second editor under the reused title.
+	if !replacedRegistered {
+		if err := v.stopPersistedForInstanceLocked(key, instanceID); err != nil {
+			return vscodeEndpoint{}, fmt.Errorf("reconciling a previous VS Code editor: %w", err)
 		}
 	}
 
@@ -601,7 +622,7 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, e
 		return vscodeEndpoint{}, err
 	}
 
-	server, err := v.spawnLocked(key, binary, worktree)
+	server, err := v.spawnLocked(key, instanceID, binary, worktree)
 	if err != nil {
 		v.failures[key] = vscodeFailure{err: err, at: v.now()}
 		return vscodeEndpoint{}, err
@@ -648,7 +669,7 @@ func (v *vscodeSupervisor) probeReady(s *vscodeServer) bool {
 // There is no retry loop. The TCP path needed one to re-roll a lost port race;
 // a socket path is chosen by the daemon inside a directory only the daemon can
 // write, so there is no race to lose and a failure here is a real failure (#1873).
-func (v *vscodeSupervisor) spawnLocked(key, binary, worktree string) (*vscodeServer, error) {
+func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string) (*vscodeServer, error) {
 	// Before the first editor of this daemon's life, clear out any left by the
 	// last one. Safe here precisely because nothing has spawned yet.
 	v.sweepAbandonedSockets()
@@ -656,7 +677,7 @@ func (v *vscodeSupervisor) spawnLocked(key, binary, worktree string) (*vscodeSer
 	if err != nil {
 		return nil, err
 	}
-	server, err := v.startOne(binary, flavorForBinary(binary), socketPath, worktree)
+	server, err := v.startOne(key, instanceID, binary, flavorForBinary(binary), socketPath, worktree)
 	if err != nil {
 		return nil, fmt.Errorf("starting %s failed: %w", filepath.Base(binary), err)
 	}
@@ -664,7 +685,7 @@ func (v *vscodeSupervisor) spawnLocked(key, binary, worktree string) (*vscodeSer
 }
 
 // startOne execs one editor and waits for its socket to accept connections.
-func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, socketPath, worktree string) (*vscodeServer, error) {
+func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscodeFlavor, socketPath, worktree string) (*vscodeServer, error) {
 	// Check the worktree before exec'ing. os/exec reports a missing cmd.Dir as
 	// ENOENT naming the BINARY ("fork/exec /usr/bin/code-server: no such file or
 	// directory"), which sends the user off debugging a code-server install that
@@ -697,11 +718,28 @@ func (v *vscodeSupervisor) startOne(binary string, flavor vscodeFlavor, socketPa
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("exec %s: %w", binary, err)
 	}
+	owner, err := captureVSCodeOwner(key, instanceID, cmd.Process.Pid)
+	if err == nil {
+		err = writeVSCodeOwner(vscodeOwnerPath(socketPath), owner)
+	}
+	if err != nil {
+		// Identity is the only safe cross-restart handle. Refuse to run an editor
+		// we could not durably identify; otherwise a daemon crash recreates #2668.
+		if v.killGroup != nil {
+			_ = v.killGroup(cmd.Process.Pid, syscall.SIGKILL)
+		} else {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("recording editor ownership: %w", err)
+	}
 	server := &vscodeServer{
 		worktree:   worktree,
+		instanceID: instanceID,
 		socketPath: socketPath,
 		transport:  newVSCodeTransport(socketPath),
 		cmd:        cmd,
+		ownerPath:  vscodeOwnerPath(socketPath),
 		exited:     make(chan struct{}),
 		// Copied in HERE, before the reaper below exists to read it — the seam has
 		// to be installed by construction rather than by a later assignment.
@@ -800,18 +838,34 @@ func hasAnyEnvPrefix(kv string, keys []string) bool {
 	return false
 }
 
-// stopFor tears down the editor for key, if any. Safe to call for a session that
-// never had one, so lifecycle paths can call it unconditionally.
+// stopFor is the package-test convenience form. Production lifecycle paths use
+// stopForInstance with the stable id; an empty id is intentionally a wildcard
+// only for tests that construct marker servers without persisted identity.
 func (v *vscodeSupervisor) stopFor(key string) {
+	_ = v.stopForInstance(key, "")
+}
+
+// stopForInstance tears down the editor belonging to exactly one stable session,
+// including a previous daemon's process when this supervisor's map is empty.
+func (v *vscodeSupervisor) stopForInstance(key, instanceID string) error {
 	v.mu.Lock()
 	server := v.servers[key]
-	delete(v.servers, key)
+	if server != nil && (instanceID == "" || server.instanceID == instanceID) {
+		delete(v.servers, key)
+	} else {
+		server = nil
+	}
+	var persistedErr error
+	if server == nil && instanceID != "" {
+		persistedErr = v.stopPersistedForInstanceLocked(key, instanceID)
+	}
 	v.mu.Unlock()
 	// Stop OUTSIDE the lock: it blocks for up to the stop grace, and holding the
 	// supervisor lock across it would stall every unrelated session's editor.
 	if server != nil {
 		server.stop()
 	}
+	return persistedErr
 }
 
 // Stop tears down every editor and refuses further spawns, so daemon shutdown

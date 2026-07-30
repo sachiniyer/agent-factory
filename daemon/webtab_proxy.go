@@ -199,6 +199,10 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	if m.vscode == nil {
 		return vscodeEndpoint{}, fmt.Errorf("daemon has no VS Code supervisor")
 	}
+	key := daemonInstanceKey(repoID, title)
+	if err := m.requireCurrentVSCodeInstance(instance, key, title); err != nil {
+		return vscodeEndpoint{}, err
+	}
 	// Never START an editor for a session that is archived or being torn down.
 	// This route is NOT serialized with KillSession/ArchiveSession — it must not
 	// be, since spawning blocks for seconds and would stall them — so without this
@@ -223,8 +227,7 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	if strings.TrimSpace(worktree) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session %q has no worktree to open in VS Code", title)
 	}
-	key := daemonInstanceKey(repoID, title)
-	endpoint, err := m.vscode.ensureServer(key, worktree)
+	endpoint, err := m.vscode.ensureServerForInstance(key, instance.ID, worktree)
 	// The post-spawn recheck below must run on errVSCodeStarting too, NOT just on
 	// success. ensureServer REGISTERS the server in v.servers before returning that
 	// sentinel, so a cold spawn that merely outran the start grace has left a LIVE,
@@ -282,6 +285,9 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 // goroutine reaches v.mu first.
 func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title string) error {
 	err := func() error {
+		if err := m.requireCurrentVSCodeInstance(instance, key, title); err != nil {
+			return err
+		}
 		if err := instance.TabSpawnBlocked(); err != nil {
 			return err
 		}
@@ -294,9 +300,29 @@ func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title st
 		return nil
 	}()
 	if err != nil {
-		m.vscode.stopFor(key)
+		m.stopVSCodeForInstance(key, instance.ID)
 	}
 	return err
+}
+
+// requireCurrentVSCodeInstance makes the manager's stable session resolution a
+// spawn fence. A stale pointer can retain live-looking tabs after a dead-root
+// reap or same-title recreation; pointer equality here proves it is still the
+// exact stable instance tracked under this key.
+func (m *Manager) requireCurrentVSCodeInstance(instance *session.Instance, key, title string) error {
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	if current != instance {
+		return fmt.Errorf("session %q changed identity before its VS Code editor could be served", title)
+	}
+	return nil
+}
+
+func (m *Manager) stopVSCodeForInstance(key, instanceID string) {
+	if err := m.vscode.stopForInstance(key, instanceID); err != nil {
+		log.WarningLog.Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
+	}
 }
 
 // webTabProxyHandler reverse-proxies /v1/webtab/{sessionId}/{tabId}/{rest...}

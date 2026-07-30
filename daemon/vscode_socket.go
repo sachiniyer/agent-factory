@@ -133,6 +133,11 @@ func (s *vscodeServer) releaseSocket() {
 			log.WarningLog.Printf("vscode: removing the editor socket %s failed: %v", s.socketPath, err)
 		}
 	}
+	if s.ownerPath != "" {
+		if err := os.Remove(s.ownerPath); err != nil && !os.IsNotExist(err) {
+			log.WarningLog.Printf("vscode: removing the editor owner %s failed: %v", s.ownerPath, err)
+		}
+	}
 	// The child is dead, so the kernel has closed these already; this releases the
 	// descriptors now rather than leaving them for the transport to discover
 	// lazily on a request that will never come.
@@ -284,13 +289,17 @@ func vscodeSocketPath(key string) (string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("generating the VS Code socket name failed: %w", err)
 	}
-	sum := sha256.Sum256([]byte(key))
-	name := hex.EncodeToString(sum[:4]) + "-" + hex.EncodeToString(nonce[:]) + vscodeSocketExt
+	name := vscodeSocketKeyPrefix(key) + "-" + hex.EncodeToString(nonce[:]) + vscodeSocketExt
 	path := filepath.Join(dir, name)
 	if err := sockpath.Check("VS Code socket", path); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+func vscodeSocketKeyPrefix(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:4])
 }
 
 // sweepAbandonedSockets removes every socket left behind by a PREVIOUS daemon.

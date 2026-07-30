@@ -274,7 +274,7 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		key := daemonInstanceKey(repoID, title)
 		defer func() {
 			if !instanceHasVSCodeTab(instance) {
-				m.vscode.stopFor(key)
+				m.stopVSCodeForInstance(key, instance.ID)
 			}
 		}()
 	}

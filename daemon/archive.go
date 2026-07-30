@@ -169,8 +169,8 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// here so the "archived ⇒ no editor" invariant does not depend on that being
 	// true forever.
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
-	defer m.vscode.stopFor(vscodeKey)
-	m.vscode.stopFor(vscodeKey)
+	defer m.stopVSCodeForInstance(vscodeKey, instance.ID)
+	m.stopVSCodeForInstance(vscodeKey, instance.ID)
 
 	// Tear down tmux and relocate the worktree in one call: the move is folded
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),

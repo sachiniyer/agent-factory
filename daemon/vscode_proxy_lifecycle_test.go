@@ -180,6 +180,46 @@ func TestEnsureVSCodeServer_StopsEditorForSessionKilledMidSpawn(t *testing.T) {
 	}
 }
 
+// TestEnsureVSCodeServer_StopsEditorForReplacedSessionMidSpawn covers the root
+// reap/title-reuse race. A request may retain the old *Instance while the manager
+// replaces that title with a new stable identity; the old pointer's tab and
+// lifecycle fields still look usable, so only a current-instance identity check
+// can stop the editor spawned for the now-untracked worktree.
+func TestEnsureVSCodeServer_StopsEditorForReplacedSessionMidSpawn(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	manager, _, _, _ := newVSCodeFixture(t, binary)
+	const title = "vscodeproxy"
+	inst, repo := vscodeFixtureInstance(t, manager, title)
+	key := daemonInstanceKey(repo, title)
+	replacement, err := session.NewInstance(session.InstanceOptions{
+		Title: title, Path: inst.Path, Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewInstance(replacement): %v", err)
+	}
+
+	var once sync.Once
+	manager.vscode.configuredBinary = func() string {
+		once.Do(func() {
+			manager.mu.Lock()
+			manager.instances[key] = replacement
+			manager.mu.Unlock()
+		})
+		return binary
+	}
+
+	_, err = manager.ensureVSCodeServer(inst, repo, title)
+	if err == nil {
+		t.Fatal("an editor was served for an instance replaced under the same title")
+	}
+	if !strings.Contains(err.Error(), "changed identity") {
+		t.Fatalf("err = %v, want one naming the replaced session identity", err)
+	}
+	if vscodeRegistered(manager, key) {
+		t.Fatal("the editor spawned for the replaced instance survived the post-spawn identity check")
+	}
+}
+
 // writeExitingVSCodeBinary writes an executable named "code-server" that exits at
 // once without ever listening — a broken install or a bad config. Deliberately
 // NOT the re-exec fake: the point is a binary that never gets as far as serving,

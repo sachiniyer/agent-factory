@@ -458,6 +458,14 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, err
 		return false, nil
 	}
 
+	// A reaped root's tabs are not carried into the replacement instance, so its
+	// per-session editor becomes unreachable even though both roots use the same
+	// repo checkout and daemon key. Stop before teardown and sweep again on return,
+	// mirroring KillSession/finishUserKill and closing a proxy spawn that resolved
+	// the dead root immediately before this pass took ownership.
+	defer m.stopVSCodeForInstance(key, inst.ID)
+	m.stopVSCodeForInstance(key, inst.ID)
+
 	// Best-effort by design (#478): tmux is already gone and an in-place
 	// worktree's Cleanup is a no-op, so failures Kill can ANSWER for only log
 	// inside Kill and never surface here.

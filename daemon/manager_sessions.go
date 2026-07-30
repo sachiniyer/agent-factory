@@ -131,9 +131,9 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// that window; the deferred sweep closes the rest, so "a killed session has no
 	// editor" holds on ordering rather than on timing.
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
-	defer m.vscode.stopFor(vscodeKey)
+	defer m.stopVSCodeForInstance(vscodeKey, instance.ID)
 	stage.set("stopping vscode editor")
-	m.vscode.stopFor(vscodeKey)
+	m.stopVSCodeForInstance(vscodeKey, instance.ID)
 
 	// Carried to the record delete below, which refuses on a non-nil teardown.
 	var teardownErr error

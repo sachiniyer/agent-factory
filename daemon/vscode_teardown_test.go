@@ -3,6 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 
@@ -17,9 +18,17 @@ import (
 
 // registerVSCodeMarker stands a marker editor in the supervisor for key.
 func registerVSCodeMarker(m *Manager, key string) {
+	m.mu.Lock()
+	instanceID := ""
+	if inst := m.instances[key]; inst != nil {
+		instanceID = inst.ID
+	}
+	m.mu.Unlock()
 	m.vscode.mu.Lock()
 	defer m.vscode.mu.Unlock()
-	m.vscode.servers[key] = &vscodeServer{worktree: "/nowhere", exited: make(chan struct{})}
+	m.vscode.servers[key] = &vscodeServer{
+		worktree: "/nowhere", instanceID: instanceID, exited: make(chan struct{}),
+	}
 }
 
 func vscodeServerRegistered(m *Manager, key string) bool {
@@ -58,6 +67,79 @@ func TestKillSession_StopsVSCodeEditor(t *testing.T) {
 
 	require.False(t, vscodeServerRegistered(manager, key),
 		"killing a session left its VS Code editor running")
+}
+
+// TestFinishUserKill_StopsVSCodeEditor covers the post-tombstone retry path:
+// a kill interrupted after committing its durable intent must converge to the
+// same no-editor end state as the synchronous KillSession tail.
+func TestFinishUserKill_StopsVSCodeEditor(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "worker", session.NewFakeBackend(), true, session.Ready)
+	key := daemonInstanceKey(repoID, "worker")
+	registerVSCodeMarker(manager, key)
+	require.NoError(t, manager.persistKillTombstone(repoID, inst, nil))
+
+	manager.finishUserKill(repoID, inst)
+
+	require.False(t, vscodeServerRegistered(manager, key),
+		"finishing a tombstoned kill left its VS Code editor running")
+}
+
+// TestFinishUserKill_StopsEditorOwnedByPreviousSupervisor models the daemon-crash
+// case that creates a tombstone retry. The restarted daemon has an empty
+// supervisor map, so the editor can be found only through durable process
+// ownership recorded by the daemon that spawned it.
+func TestFinishUserKill_StopsEditorOwnedByPreviousSupervisor(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	manager, _, _, _ := newVSCodeFixture(t, binary)
+	const title = "vscodeproxy"
+	inst, repoID := vscodeFixtureInstance(t, manager, title)
+	key := daemonInstanceKey(repoID, title)
+
+	if _, err := manager.ensureVSCodeServer(inst, repoID, title); err != nil {
+		t.Fatalf("ensureVSCodeServer: %v", err)
+	}
+	manager.vscode.mu.Lock()
+	previousEditor := manager.vscode.servers[key]
+	manager.vscode.mu.Unlock()
+	if previousEditor == nil || !previousEditor.alive() {
+		t.Fatal("precondition: previous supervisor did not own a live editor")
+	}
+	// Keep the session teardown itself inert so the only possible reaper is the
+	// restarted supervisor's durable-ownership path. A local backend may discover
+	// and reap processes rooted in its worktree, which would let this pass without
+	// proving stopFor found the previous daemon's editor.
+	inst.SetBackend(session.NewFakeBackend())
+
+	// Simulate the daemon restart: durable session state survives, but the new
+	// supervisor has no pointer to the old process.
+	manager.vscode = newVSCodeSupervisor()
+	require.NoError(t, manager.persistKillTombstone(repoID, inst, nil))
+	require.True(t, previousEditor.alive(), "persisting the tombstone unexpectedly reaped the editor")
+	manager.finishUserKill(repoID, inst)
+
+	select {
+	case <-previousEditor.exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("finishing the tombstoned kill could not reap the previous daemon's editor")
+	}
+}
+
+// TestReapDeadRoot_StopsVSCodeEditor is the adjacent automatic teardown path.
+// A dead root is removed and recreated under the same session key, but its old
+// vscode tabs are not carried forward, so retaining their editor leaks an
+// unreachable daemon child into the replacement root's lifetime.
+func TestReapDeadRoot_StopsVSCodeEditor(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, session.RootSessionTitle, session.NewFakeBackend(), true, session.Dead)
+	key := daemonInstanceKey(repoID, session.RootSessionTitle)
+	registerVSCodeMarker(manager, key)
+
+	reaped, err := manager.reapDeadRoot(repoID, inst)
+	require.NoError(t, err)
+	require.True(t, reaped)
+	require.False(t, vscodeServerRegistered(manager, key),
+		"reaping a dead root left its unreachable VS Code editor running")
 }
 
 // TestEnsureVSCodeServer_RefusesInertSessions is the codex P1 gate: the webtab

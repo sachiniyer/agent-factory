@@ -120,7 +120,9 @@ func TestCloseTab_StopsEditorOnlyWithTheLastVSCodeTab(t *testing.T) {
 	// Stand a marker in the supervisor's map for this session. stopFor deletes the
 	// entry, so its presence/absence is a faithful probe of whether the close path
 	// decided the editor was still needed — without spawning a real one.
-	manager.vscode.servers[key] = &vscodeServer{worktree: "/nowhere", exited: make(chan struct{})}
+	manager.vscode.servers[key] = &vscodeServer{
+		worktree: "/nowhere", instanceID: inst.ID, exited: make(chan struct{}),
+	}
 
 	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "one"}); err != nil {
 		t.Fatalf("CloseTab(one): %v", err)
@@ -152,7 +154,9 @@ func TestCloseTab_ShellTabLeavesEditorAlone(t *testing.T) {
 	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Shell: true}); err != nil {
 		t.Fatalf("CreateTab(shell): %v", err)
 	}
-	manager.vscode.servers[key] = &vscodeServer{worktree: "/nowhere", exited: make(chan struct{})}
+	manager.vscode.servers[key] = &vscodeServer{
+		worktree: "/nowhere", instanceID: manager.instances[key].ID, exited: make(chan struct{}),
+	}
 
 	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "shell"}); err != nil {
 		t.Fatalf("CloseTab(shell): %v", err)
@@ -174,7 +178,9 @@ func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
 	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
 		t.Fatalf("CreateTab(vscode): %v", err)
 	}
-	manager.vscode.servers[key] = &vscodeServer{worktree: "/nowhere", exited: make(chan struct{})}
+	manager.vscode.servers[key] = &vscodeServer{
+		worktree: "/nowhere", instanceID: manager.instances[key].ID, exited: make(chan struct{}),
+	}
 
 	// Force the persist to fail. Corrupting the on-disk JSON (rather than
 	// chmod-ing it read-only) is what makes this deterministic everywhere: the

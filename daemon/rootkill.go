@@ -142,6 +142,15 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		return
 	}
 
+	// Match KillSession's post-tombstone editor teardown. The kill is already
+	// committed, so even when the workspace teardown remains unknown and the
+	// record is retained for another retry, no daemon-owned editor should keep
+	// serving it. Stop twice to close the same proxy-spawn race KillSession does:
+	// UserKilled blocks new spawns, and the deferred sweep catches one that passed
+	// the check just before the tombstone became visible.
+	defer m.stopVSCodeForInstance(key, instance.ID)
+	m.stopVSCodeForInstance(key, instance.ID)
+
 	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
 	// Kill's own best-effort handling already swallows every failure tmux or git
 	// ANSWERED with, so anything that reaches here is a teardown that could not be
