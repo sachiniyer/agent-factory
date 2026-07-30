@@ -23,7 +23,9 @@ import (
 // restoreManagerForStartup is the warm-up restore entry point RunDaemon uses.
 // Package-level so tests can inject a slow or gated restore and prove the
 // control socket binds and serves before the restore completes (#829).
-var restoreManagerForStartup = func(m *Manager) error { return m.RestoreInstances() }
+// RunDaemon opens the manager's readiness barrier itself, after the startup
+// orphan sweep, so a concurrent create cannot manufacture a sweep candidate.
+var restoreManagerForStartup = func(m *Manager) error { return m.restoreInstances() }
 
 // sweepOrphanContainers reaps docker session containers this daemon leaked, at
 // startup (#2194 slice 4). Package-level so a test can assert startup passes the
@@ -263,6 +265,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
 		return nil
 	}
+	// Upgrade candidates deliberately park before the orphan sweep. Preserve the
+	// pre-existing probation contract: restored state is readable while every
+	// mutation remains blocked by the lifecycle gate.
+	if manager.lifecycle.snapshot().transactionID != "" {
+		manager.finishInstanceRestore()
+	}
 	if manager.lifecycle.isUpgradeProbation() {
 		log.InfoLog.Printf("instance restore complete; daemon is in upgrade probation")
 		select {
@@ -281,15 +289,18 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 
 	// Reap docker session containers this daemon leaked — a container that outlived
 	// its session because a previous daemon died without reaping, its record is
-	// gone, or a reap raced a create. Runs after the restore above so the live
-	// roster (and its pending-create window) is authoritative. Best-effort and
-	// non-fatal like sweepLegacyTaskUnits: a sweep problem must never block
-	// startup, and it no-ops when docker is not installed (#2194 slice 4).
+	// gone, or a reap raced a create. Runs after the restore above, but BEFORE the
+	// manager readiness barrier opens. Therefore every af.home-scoped container the
+	// sweep can see predates create admission; containers from a new CreateSession
+	// cannot appear midway through the destructive pass (#2632). Best-effort and
+	// non-fatal like sweepLegacyTaskUnits: a sweep problem must never block startup,
+	// and it no-ops when docker is not installed (#2194 slice 4).
 	if homeID, err := configDirForReap(); err != nil {
 		log.WarningLog.Printf("orphan sweep: cannot resolve the AF home; skipping: %v", err)
 	} else {
 		sweepOrphanContainers(homeID, manager.dockerReapProtectedSlugs())
 	}
+	manager.finishInstanceRestore()
 
 	// Start schedule evaluation only after the control server is up and the
 	// restore has finished: a task firing immediately goes through the

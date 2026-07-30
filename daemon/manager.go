@@ -64,9 +64,11 @@ type Manager struct {
 	// Load().
 	limitDetector atomic.Pointer[task.LimitDetector]
 
-	// ready is closed once the initial instance restore has completed. Until
-	// then the daemon is "warming up": the control socket is already bound
-	// (#829) but state-dependent RPCs return errDaemonStarting.
+	// ready is closed once restored state is safe for state-dependent RPCs. For
+	// RunDaemon that includes the startup orphan sweep as well as instance restore,
+	// so a create cannot race the destructive sweep (#2632). Until then the daemon
+	// is "warming up": the control socket is already bound (#829), but
+	// state-dependent RPCs return errDaemonStarting.
 	ready     chan struct{}
 	readyOnce sync.Once
 	// lifecycle is the daemon-wide health/admission state. Manager readiness
@@ -376,13 +378,21 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	return mgr, nil
 }
 
-// RestoreInstances loads every repo's persisted instances into the manager
-// and marks it ready. RunDaemon does this only after the control socket is bound
-// (#829), keeping Ping and Shutdown available while persisted state is
-// rehydrated. Replacing the instance map wholesale is safe: every RPC that
-// mutates it is gated on Ready, and the refresh poll loop starts after the
-// restore completes.
+// RestoreInstances loads every repo's persisted instances into a standalone
+// manager and marks it ready. RunDaemon uses restoreInstances directly and opens
+// readiness only after its startup orphan sweep (#2632).
 func (m *Manager) RestoreInstances() error {
+	if err := m.restoreInstances(); err != nil {
+		return err
+	}
+	m.finishInstanceRestore()
+	return nil
+}
+
+// restoreInstances loads persisted state without opening the readiness barrier.
+// RunDaemon binds its control socket first (#829), performs this load, then keeps
+// state RPCs gated until the startup orphan sweep is complete (#2632).
+func (m *Manager) restoreInstances() error {
 	instances, ghosts, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
@@ -391,6 +401,10 @@ func (m *Manager) RestoreInstances() error {
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
 	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) finishInstanceRestore() {
 	m.readyOnce.Do(func() { close(m.ready) })
 	// Publish the lifecycle phase only after the Manager readiness barrier is
 	// open. A Ping that says upgrade_probation must never race a Snapshot that
@@ -399,7 +413,6 @@ func (m *Manager) RestoreInstances() error {
 	if m.lifecycle != nil {
 		m.lifecycle.markRestoreComplete()
 	}
-	return nil
 }
 
 // Ready reports whether the initial instance restore has completed.
