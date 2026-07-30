@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -388,49 +389,75 @@ func hookOutputSuffix(out []byte) string {
 // object truncated after writing the bearer credential. Hook output is attached
 // to persistent session errors, so that tail must be safe too.
 func redactHookOutputTokens(output string) string {
+	ranges := hookTokenRedactionRanges(output)
+	if len(ranges) == 0 {
+		return output
+	}
+
 	var redacted strings.Builder
 	written := 0
-	for cursor := 0; cursor < len(output); {
+	for _, redaction := range ranges {
+		redacted.WriteString(output[written:redaction.start])
+		redacted.WriteString(`"[REDACTED]"`)
+		written = redaction.end
+	}
+	redacted.WriteString(output[written:])
+	return redacted.String()
+}
+
+type hookOutputRange struct {
+	start int
+	end   int
+}
+
+// hookTokenRedactionRanges examines every quote as a possible key boundary
+// before rewriting any bytes. Malformed prose can make a closing quote double
+// as the opening quote of a later real key, so no parse outcome may advance the
+// scanner past another candidate boundary.
+func hookTokenRedactionRanges(output string) []hookOutputRange {
+	var ranges []hookOutputRange
+	for cursor := 0; cursor < len(output); cursor++ {
 		if output[cursor] != '"' {
-			cursor++
 			continue
 		}
 
 		keyEnd, complete := jsonStringEnd(output, cursor)
 		if !complete {
-			break
+			continue
 		}
 		var key string
 		if err := json.Unmarshal([]byte(output[cursor:keyEnd]), &key); err != nil || !strings.EqualFold(key, "token") {
-			// This quote may be arbitrary malformed prose paired with the opening
-			// quote of a later JSON key. Advance one byte so every later quote can
-			// still be considered as a fresh key boundary.
-			cursor++
 			continue
 		}
 
 		separator := skipJSONWhitespace(output, keyEnd)
 		if separator >= len(output) || output[separator] != ':' {
-			cursor = keyEnd
 			continue
 		}
 		valueStart := skipJSONWhitespace(output, separator+1)
 		if valueStart >= len(output) || output[valueStart] != '"' {
-			cursor = keyEnd
 			continue
 		}
 
 		valueEnd, complete := jsonStringEnd(output, valueStart)
-		redacted.WriteString(output[written:valueStart])
-		redacted.WriteString(`"[REDACTED]"`)
+		ranges = append(ranges, hookOutputRange{start: valueStart, end: valueEnd})
 		if !complete {
-			return redacted.String()
+			break
 		}
-		written = valueEnd
-		cursor = valueEnd
 	}
-	redacted.WriteString(output[written:])
-	return redacted.String()
+
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start < ranges[j].start })
+	merged := ranges[:0]
+	for _, candidate := range ranges {
+		if len(merged) == 0 || candidate.start > merged[len(merged)-1].end {
+			merged = append(merged, candidate)
+			continue
+		}
+		if candidate.end > merged[len(merged)-1].end {
+			merged[len(merged)-1].end = candidate.end
+		}
+	}
+	return merged
 }
 
 func jsonStringEnd(input string, start int) (int, bool) {

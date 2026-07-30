@@ -651,6 +651,28 @@ func TestHookOutputSuffixRedactsTokenAfterUnmatchedQuote(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+// TestHookOutputSuffixRedactsAfterMalformedTokenCandidate covers overlapping
+// quotes where prose ends in a valid-looking "token" string but the same closing
+// quote is also the opening boundary of the real token key.
+func TestHookOutputSuffixRedactsAfterMalformedTokenCandidate(t *testing.T) {
+	const secret = "overlapping-token-must-not-leak"
+
+	suffix := hookOutputSuffix([]byte(`warning: "token"token":"overlapping-token-must-not-leak"`))
+	assert.NotContains(t, suffix, secret, "a malformed token candidate must not hide the next real token field")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
+// TestHookOutputSuffixRedactsAfterOverlappingValueBoundary covers malformed
+// text where the closing quote of a decoy token value is also the opening quote
+// of the real token key. Successful redaction must not skip that boundary.
+func TestHookOutputSuffixRedactsAfterOverlappingValueBoundary(t *testing.T) {
+	const secret = "overlapping-value-token-must-not-leak"
+
+	suffix := hookOutputSuffix([]byte(`warning: "token":"decoy"token":"overlapping-value-token-must-not-leak"`))
+	assert.NotContains(t, suffix, secret, "a redacted decoy value must not hide the next real token field")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
 // killed or interrupted while writing its endpoint JSON. The unmatched tail is
 // still diagnostic output, but a complete quoted token value inside it is just
