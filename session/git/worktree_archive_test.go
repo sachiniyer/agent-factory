@@ -624,6 +624,82 @@ func TestCopyFile_RejectsNamedPipeRaceWithoutBlocking(t *testing.T) {
 	})
 }
 
+// TestCopyTree_RejectsDirectoryToNamedPipeRaceWithoutBlocking covers the
+// traversal side of the metadata/open race. filepath.Walk inspects a directory
+// and then opens that pathname with a blocking call before invoking its callback.
+// The seam forces the equivalent inspect/open boundary in the descriptor walker:
+// replacing the directory with a FIFO there must be rejected without blocking.
+func TestCopyTree_RejectsDirectoryToNamedPipeRaceWithoutBlocking(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	dir := filepath.Join(src, "sub")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("tracked"), 0644))
+
+	originalHook := copyTreeBeforeSourceOpen
+	t.Cleanup(func() { copyTreeBeforeSourceOpen = originalHook })
+	swapped := false
+	copyTreeBeforeSourceOpen = func(path string) error {
+		if path != dir || swapped {
+			return nil
+		}
+		swapped = true
+		if err := os.Rename(dir, dir+".original"); err != nil {
+			return err
+		}
+		return syscall.Mkfifo(dir, 0600)
+	}
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	assertNamedPipeCopyFailsPromptly(t, dir, func() error {
+		return copyTree(src, dest)
+	})
+}
+
+// TestCopyFile_DoesNotFollowReplacementSymlink covers a regular path replaced
+// by a symlink between traversal metadata and open. The source open must reject
+// the link rather than archiving contents from outside the worktree.
+func TestCopyFile_DoesNotFollowReplacementSymlink(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside-secret")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0600))
+	src := filepath.Join(t.TempDir(), "raced-source")
+	require.NoError(t, os.Symlink(outside, src))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	err := copyFile(src, dest)
+	require.Error(t, err, "a replacement symlink must not be followed")
+	assert.Contains(t, err.Error(), src)
+	assert.NoFileExists(t, dest)
+}
+
+// TestCopyFile_RejectsRacedInDestinationNodes proves a destination node that
+// appears after the initial absence check is never opened. A symlink must not
+// redirect/truncate another file, and a FIFO must not block waiting for a reader.
+func TestCopyFile_RejectsRacedInDestinationNodes(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "source")
+	require.NoError(t, os.WriteFile(src, []byte("new contents"), 0644))
+
+	t.Run("symlink", func(t *testing.T) {
+		outside := filepath.Join(t.TempDir(), "outside")
+		require.NoError(t, os.WriteFile(outside, []byte("keep me"), 0600))
+		dest := filepath.Join(t.TempDir(), "raced-destination")
+		require.NoError(t, os.Symlink(outside, dest))
+
+		err := copyFile(src, dest)
+		require.Error(t, err, "a raced-in destination symlink must be rejected")
+		contents, readErr := os.ReadFile(outside)
+		require.NoError(t, readErr)
+		assert.Equal(t, "keep me", string(contents), "the symlink target must not be truncated")
+	})
+
+	t.Run("named pipe", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "raced-destination.fifo")
+		require.NoError(t, syscall.Mkfifo(dest, 0600))
+		assertNamedPipeDestinationFailsPromptly(t, dest, func() error {
+			return copyFile(src, dest)
+		})
+	})
+}
+
 func assertNamedPipeCopyFailsPromptly(t *testing.T, fifo string, copyFn func() error) {
 	t.Helper()
 	done := make(chan error, 1)
@@ -634,7 +710,7 @@ func assertNamedPipeCopyFailsPromptly(t *testing.T, fifo string, copyFn func() e
 	select {
 	case err := <-done:
 		require.Error(t, err, "a FIFO cannot be copied as a regular file")
-		assert.Contains(t, err.Error(), "unsupported file type")
+		assert.Contains(t, err.Error(), "cannot move worktree across filesystems")
 		assert.Contains(t, err.Error(), fifo)
 	case <-time.After(500 * time.Millisecond):
 		fd, unblockErr := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK, 0)
@@ -646,6 +722,32 @@ func assertNamedPipeCopyFailsPromptly(t *testing.T, fifo string, copyFn func() e
 			t.Fatalf("HUNG: copy blocked opening named pipe %s; nonblocking cleanup returned %v and the copy eventually returned %v", fifo, unblockErr, eventualErr)
 		case <-time.After(500 * time.Millisecond):
 			t.Fatalf("HUNG: copy blocked opening named pipe %s and did not return after bounded nonblocking cleanup (%v)", fifo, unblockErr)
+		}
+	}
+}
+
+func assertNamedPipeDestinationFailsPromptly(t *testing.T, fifo string, copyFn func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		done <- copyFn()
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "an existing destination FIFO must be rejected")
+		assert.Contains(t, err.Error(), fifo)
+	case <-time.After(500 * time.Millisecond):
+		fd, unblockErr := syscall.Open(fifo, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if unblockErr != nil {
+			t.Fatalf("HUNG: copy blocked opening destination named pipe %s and bounded cleanup could not open a reader: %v", fifo, unblockErr)
+		}
+		defer syscall.Close(fd)
+		select {
+		case eventualErr := <-done:
+			t.Fatalf("HUNG: copy blocked opening destination named pipe %s; after bounded cleanup supplied a reader, copy returned %v", fifo, eventualErr)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("HUNG: copy blocked opening destination named pipe %s and did not return after bounded cleanup", fifo)
 		}
 	}
 }

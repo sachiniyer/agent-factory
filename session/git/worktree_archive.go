@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
+	"golang.org/x/sys/unix"
 )
 
 // RestoreWorktreePath returns where an archived session's worktree should be
@@ -83,8 +85,9 @@ var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
 // Filesystem operation seams let tests force cross-device and cleanup-failure
 // paths deterministically. Production never reassigns them.
 var (
-	renamePath    = os.Rename
-	removeAllPath = os.RemoveAll
+	renamePath               = os.Rename
+	removeAllPath            = os.RemoveAll
+	copyTreeBeforeSourceOpen = func(string) error { return nil }
 )
 
 // MoveWorktree relocates this worktree's directory to dest and keeps git's
@@ -278,62 +281,198 @@ func (e *copiedWorktreeSourceCleanupError) Unwrap() error {
 
 // copyTree recursively copies the directory rooted at src to dest, preserving
 // regular files (contents + permission bits), subdirectories, and symlinks
-// (copied as links, never followed). It is only reached on the cross-device
-// fallback. Other node kinds are rejected before opening them: in particular,
-// opening a FIFO for reading would wait indefinitely for a writer (#2654).
+// (copied as links, never followed). Traversal stays anchored to open directory
+// descriptors: a worktree process can replace any pathname after it is
+// inspected, so every source open is nonblocking and no-follow, and every
+// destination node is created exclusively. This is only reached on the
+// cross-device fallback.
 func copyTree(src, dest string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dest, rel)
-		switch {
-		case info.IsDir():
-			return os.MkdirAll(target, info.Mode().Perm())
-		case info.Mode()&os.ModeSymlink != 0:
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(link, target)
-		case info.Mode().IsRegular():
-			return copyFile(path, target)
-		default:
-			return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (%s)", path, info.Mode().Type())
-		}
-	})
-}
-
-// copyFile copies a single regular file's contents and permission bits to dst.
-// The open is nonblocking and the resulting descriptor is validated before any
-// read: a worktree process can replace src after copyTree's Lstat, and a stale
-// "regular" result must never turn a replacement FIFO into a blocking open.
-func copyFile(src, dst string) error {
-	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	source, sourceInfo, err := openDirectoryPath(src, "source")
 	if err != nil {
 		return err
 	}
+	defer source.Close()
+	if err := copyTreeBeforeSourceOpen(src); err != nil {
+		return err
+	}
+
+	destParentPath := filepath.Dir(dest)
+	destParent, _, err := openDirectoryPath(destParentPath, "destination parent")
+	if err != nil {
+		return err
+	}
+	defer destParent.Close()
+	destName := filepath.Base(dest)
+	if err := unix.Mkdirat(int(destParent.Fd()), destName, uint32(sourceInfo.Mode().Perm())); err != nil {
+		return fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
+	}
+	destination, _, err := openDirectoryAt(destParent, destName, dest, "destination")
+	if err != nil {
+		return err
+	}
+	defer destination.Close()
+
+	return copyDirectoryContents(source, destination, src, dest)
+}
+
+func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) error {
+	names, err := source.Readdirnames(-1)
+	if err != nil {
+		return fmt.Errorf("cannot move worktree across filesystems: failed to enumerate source directory %s: %w", sourcePath, err)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		childSourcePath := filepath.Join(sourcePath, name)
+		childDestinationPath := filepath.Join(destinationPath, name)
+		var stat unix.Stat_t
+		if err := unix.Fstatat(int(source.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("cannot move worktree across filesystems: failed to inspect source entry %s: %w", childSourcePath, err)
+		}
+		if err := copyTreeBeforeSourceOpen(childSourcePath); err != nil {
+			return err
+		}
+
+		switch uint32(stat.Mode) & unix.S_IFMT {
+		case unix.S_IFDIR:
+			if err := copyDirectoryAt(source, destination, name, childSourcePath, childDestinationPath); err != nil {
+				return err
+			}
+		case unix.S_IFLNK:
+			link, err := readLinkAt(source, name, childSourcePath)
+			if err != nil {
+				return err
+			}
+			if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
+				return fmt.Errorf("cannot move worktree across filesystems: failed to create destination symlink %s exclusively: %w", childDestinationPath, err)
+			}
+		case unix.S_IFREG:
+			if err := copyRegularFileAt(source, destination, name, childSourcePath, childDestinationPath); err != nil {
+				return err
+			}
+		default:
+			return unsupportedSourceTypeError(childSourcePath, uint32(stat.Mode))
+		}
+	}
+	return nil
+}
+
+func copyDirectoryAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
+	sourceChild, sourceInfo, err := openDirectoryAt(source, name, sourcePath, "source")
+	if err != nil {
+		return err
+	}
+	defer sourceChild.Close()
+	if err := unix.Mkdirat(int(destination.Fd()), name, uint32(sourceInfo.Mode().Perm())); err != nil {
+		return fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", destinationPath, err)
+	}
+	destinationChild, _, err := openDirectoryAt(destination, name, destinationPath, "destination")
+	if err != nil {
+		return err
+	}
+	defer destinationChild.Close()
+	return copyDirectoryContents(sourceChild, destinationChild, sourcePath, destinationPath)
+}
+
+// copyFile is the path-based test entrypoint for the regular-file copier. The
+// production tree walker calls copyRegularFileAt with already-open parents.
+func copyFile(src, dst string) error {
+	sourceParent, _, err := openDirectoryPath(filepath.Dir(src), "source parent")
+	if err != nil {
+		return err
+	}
+	defer sourceParent.Close()
+	destinationParent, _, err := openDirectoryPath(filepath.Dir(dst), "destination parent")
+	if err != nil {
+		return err
+	}
+	defer destinationParent.Close()
+	return copyRegularFileAt(sourceParent, destinationParent, filepath.Base(src), src, dst)
+}
+
+func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
+	fd, err := unix.Openat(
+		int(source.Fd()), name,
+		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot move worktree across filesystems: failed to open source file %s without following links: %w", sourcePath, err)
+	}
+	in := os.NewFile(uintptr(fd), sourcePath)
 	defer in.Close()
 	info, err := in.Stat()
 	if err != nil {
 		return err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (%s)", src, info.Mode().Type())
+		return unsupportedSourceTypeError(sourcePath, uint32(info.Mode()))
 	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	outFD, err := unix.Openat(
+		int(destination.Fd()), filepath.Base(destinationPath),
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		uint32(info.Mode().Perm()),
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot move worktree across filesystems: failed to create destination file %s exclusively: %w", destinationPath, err)
 	}
+	out := os.NewFile(uintptr(outFD), destinationPath)
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
 		return err
 	}
 	return out.Close()
+}
+
+func openDirectoryPath(path, role string) (*os.File, os.FileInfo, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot move worktree across filesystems: failed to open %s directory %s safely: %w", role, path, err)
+	}
+	return openedDirectory(fd, path, role)
+}
+
+func openDirectoryAt(parent *os.File, name, path, role string) (*os.File, os.FileInfo, error) {
+	fd, err := unix.Openat(
+		int(parent.Fd()), name,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot move worktree across filesystems: failed to open %s directory %s safely: %w", role, path, err)
+	}
+	return openedDirectory(fd, path, role)
+}
+
+func openedDirectory(fd int, path, role string) (*os.File, os.FileInfo, error) {
+	dir := os.NewFile(uintptr(fd), path)
+	info, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return nil, nil, err
+	}
+	if !info.IsDir() {
+		_ = dir.Close()
+		return nil, nil, fmt.Errorf("cannot move worktree across filesystems: %s path %s is not a directory", role, path)
+	}
+	return dir, info, nil
+}
+
+func readLinkAt(parent *os.File, name, path string) (string, error) {
+	for size := 256; size <= 64*1024; size *= 2 {
+		buffer := make([]byte, size)
+		n, err := unix.Readlinkat(int(parent.Fd()), name, buffer)
+		if err != nil {
+			return "", fmt.Errorf("cannot move worktree across filesystems: failed to read source symlink %s safely: %w", path, err)
+		}
+		if n < len(buffer) {
+			return string(buffer[:n]), nil
+		}
+	}
+	return "", fmt.Errorf("cannot move worktree across filesystems: source symlink %s target is too long", path)
+}
+
+func unsupportedSourceTypeError(path string, mode uint32) error {
+	return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (mode %#o)", path, mode&unix.S_IFMT)
 }
 
 // pathExists reports whether p exists (best-effort: a stat error other than
