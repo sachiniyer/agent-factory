@@ -24,6 +24,44 @@ func TestSnapshotReconcilesModelChangeWithoutLivenessChange(t *testing.T) {
 	require.Nil(t, inst.AgentModelChange())
 }
 
+// TestSnapshotReconcilesUserKilledTombstone pins the same-session half of the
+// durable precedence rule. Cold materialization already goes through
+// FromInstanceData; an open TUI instead mutates its existing row in place and
+// must not leave a killed handoff behind a stale replacement fence or expose a
+// restore action after the daemon has scrubbed that transient op.
+func TestSnapshotReconcilesUserKilledTombstone(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		liveness       session.Liveness
+		localKilled    bool
+		snapshotKilled bool
+		snapshotOp     session.InFlightOp
+	}{
+		{name: "live snapshot carrying replacement op", liveness: session.LiveRunning, snapshotKilled: true, snapshotOp: session.OpReplacing},
+		{name: "post-restart snapshot with scrubbed op", liveness: session.LiveLost, snapshotKilled: true, snapshotOp: session.OpNone},
+		{name: "older snapshot cannot rearm an adopted tombstone", liveness: session.LiveRunning, localKilled: true, snapshotOp: session.OpReplacing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := instanceWithFakeBackend(t, "killed-handoff")
+			if tc.localKilled {
+				inst.MarkUserKilled()
+			}
+			inst.SetInFlightOpForTest(tc.snapshotOp)
+			data := inst.ToInstanceData()
+			data.Liveness = tc.liveness
+			data.InFlightOp = tc.snapshotOp
+			data.UserKilled = tc.snapshotKilled
+
+			require.True(t, h.updateInstanceFromSnapshot(inst, data))
+			require.True(t, inst.UserKilled(), "same-session reconcile lost the daemon's durable tombstone")
+			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "durable tombstone must clear every process-local operation")
+			require.True(t, inst.CanKill(), "tombstone lost its explicit teardown handle")
+			require.Equal(t, session.LifecycleActionNone, inst.LifecycleAction(), "tombstone exposed a competing archive/restore action")
+		})
+	}
+}
+
 // instanceWithFakeBackend builds an instance backed by FakeBackend, marked
 // Started and Running. Used by metadata-tick tests to exercise the loop body
 // without spinning up real tmux sessions.

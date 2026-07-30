@@ -104,6 +104,30 @@ func (i *Instance) MarkUserKilled() {
 	i.userKilled = true
 }
 
+// ReconcileUserKilledSnapshot applies the durable tombstone carried by a
+// daemon snapshot to an already-materialized projection row. Tombstones are
+// monotonic: an older snapshot cannot make a killed row live again. Once the
+// tombstone is present, any reconstructed operation marker belongs to the old
+// process and must be cleared; only the daemon that owns an active teardown may
+// temporarily keep its live operation fence alongside MarkUserKilled.
+func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	lv, op, resetAt := i.lifecycleStateLocked()
+	changed := false
+	if userKilled && !i.userKilled {
+		i.userKilled = true
+		changed = true
+	}
+	if i.userKilled && i.inFlightOp != OpNone {
+		i.inFlightOp = OpNone
+		changed = true
+	}
+	i.noteStateChangeLocked(lv, op, resetAt)
+	return changed
+}
+
 // UserKilled reports whether an explicit kill was recorded for this instance.
 func (i *Instance) UserKilled() bool {
 	i.mu.RLock()

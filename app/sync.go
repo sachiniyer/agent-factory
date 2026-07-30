@@ -627,7 +627,18 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		_ = inst.Transition(session.ObserveLiveness(lv))
 		changed = true
 	}
-	if reconcileSnapshotOp(inst, d.InFlightOp, lv) {
+	// A kill tombstone is durable while an operation marker is process-local.
+	// Adopt it monotonically and clear any old marker under one session lock, so
+	// a same-session row cannot briefly project a killed handoff as Loading. An
+	// older snapshot with UserKilled=false cannot roll an adopted tombstone back.
+	if inst.ReconcileUserKilledSnapshot(d.UserKilled) {
+		changed = true
+	}
+	snapshotOp := d.InFlightOp
+	if d.UserKilled || inst.UserKilled() {
+		snapshotOp = session.OpNone
+	}
+	if reconcileSnapshotOp(inst, snapshotOp, lv) {
 		changed = true
 	}
 	// Mirror the usage-limit reset time (#1146) alongside the liveness. It's
