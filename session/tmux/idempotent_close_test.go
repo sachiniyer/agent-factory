@@ -88,6 +88,10 @@ func TestCleanupSessions_ToleratesVanishedSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", "/owned-home")
 	const lsOutput = `af_gone: 1 windows (created Wed May 20 12:00:00 2026) [179x47]
 af_stuck: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
+	absentExit := exec.Command("sh", "-c", "exit 1").Run()
+	var tmuxExit *exec.ExitError
+	require.ErrorAs(t, absentExit, &tmuxExit)
+	require.Equal(t, 1, tmuxExit.ExitCode())
 
 	// af_stuck survives its kill; af_gone vanished before we got to it.
 	stillPresent := map[string]bool{"af_stuck": true}
@@ -119,7 +123,7 @@ af_stuck: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 					if stillPresent[nameOf(c)] {
 						return nil
 					}
-					return errExit1
+					return absentExit
 				}
 				return nil
 			},
@@ -149,7 +153,7 @@ af_stuck: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 					if stillPresent[nameOf(c)] {
 						return nil
 					}
-					return errExit1
+					return absentExit
 				}
 				return nil
 			},

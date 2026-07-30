@@ -222,3 +222,42 @@ esac
 		t.Fatalf("CleanupSessions error = %v, want ErrTmuxTimeout when the exact session re-probe does not answer", err)
 	}
 }
+
+// TestCleanupSessionsKillFailureReprobeFailureIsUnknown covers the adjacent
+// destructive call site. A failed kill followed by a generic has-session
+// failure does not prove that the session disappeared, so cleanup must not
+// report success and continue to process-tree reaping.
+func TestCleanupSessionsKillFailureReprobeFailureIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+ls)
+  echo 'af_owned: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+show-environment)
+  printf 'AF_HOME=%s\n' "$AGENT_FACTORY_HOME"
+  ;;
+list-panes)
+  ;;
+kill-session)
+  exit 97
+  ;;
+has-session)
+  [ "${2-}" = "-t=af_owned" ] || exit 99
+  exit 98
+  ;;
+*)
+  exit 96
+  ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	if err := CleanupSessions(cmd.MakeExecutor()); err == nil {
+		t.Fatal("CleanupSessions error = nil, want generic exact post-kill re-probe failure to remain unknown")
+	}
+}

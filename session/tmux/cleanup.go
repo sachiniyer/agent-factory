@@ -263,8 +263,16 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			}
 			// Idempotent teardown (#967): a session can vanish between the
 			// `tmux ls` above and this kill (TOCTOU). A gone session is the
-			// goal of cleanup, so only a survivor is a real failure.
-			if sessionExists(cmdExec, match) {
+			// goal of cleanup, but only an authoritative absence may turn the
+			// kill error into success. A failed re-probe leaves teardown unknown
+			// and must stop before process trees are reaped.
+			exists, known, probeErr := probeSessionStrict(cmdExec, match)
+			if !known {
+				killErr = fmt.Errorf("failed to kill tmux session %s and cannot determine whether it survived: %w",
+					match, errors.Join(killErrRaw, probeErr))
+				break
+			}
+			if exists {
 				killErr = fmt.Errorf("failed to kill tmux session %s: %v", match, killErrRaw)
 				break
 			}
