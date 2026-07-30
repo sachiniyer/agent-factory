@@ -68,6 +68,59 @@ func TestSaveInstances_KeepsTombstonedRowAlongsideStartedSibling(t *testing.T) {
 	}
 }
 
+// TestSaveInstances_RestoresReapedLocalTombstone covers the crash window after
+// a local kill has successfully torn down its tmux sessions and worktree, but
+// deleting the durable kill record fails. teardownKill has cleared the
+// gitWorktree pointer, so the shutdown checkpoint legitimately writes an empty
+// Worktree payload. The next daemon must still load that tombstone so its poll
+// can finish deleting the record; dropping it turns a retryable record-delete
+// failure into a permanent ghost.
+func TestSaveInstances_RestoresReapedLocalTombstone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	doomed := &Instance{
+		ID:       "reaped-local-id",
+		Title:    "reaped-local",
+		Path:     repoPath,
+		Program:  "claude",
+		liveness: LiveLost,
+		backend:  &LocalBackend{},
+		started:  false,
+	}
+	doomed.MarkUserKilled()
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{doomed}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+	rows := readDisk(t, state, repoPath)
+	if len(rows) != 1 {
+		t.Fatalf("SaveInstances persisted %d sessions, want the tombstone", len(rows))
+	}
+	if rows[0].Worktree.RepoPath != "" || rows[0].Worktree.WorktreePath != "" {
+		t.Fatalf("reaped tombstone persisted a worktree: %+v", rows[0].Worktree)
+	}
+
+	restored, err := storage.LoadInstances()
+	if err != nil {
+		t.Fatalf("LoadInstances: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("LoadInstances restored %d sessions, want the retained tombstone", len(restored))
+	}
+	if !restored[0].UserKilled() {
+		t.Fatal("restored local session lost its kill tombstone")
+	}
+	if got := restored[0].GetWorktreePath(); got != "" {
+		t.Fatalf("restored reaped tombstone worktree path = %q, want empty", got)
+	}
+}
+
 // TestSaveInstances_KeepsStartupUnknownRowAlongsideStartedSibling applies the
 // same retention rule to #2207's inert startup record. It has no kill tombstone
 // by design, so StartupStateUnknown must independently keep a wholesale storage

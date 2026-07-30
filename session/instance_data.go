@@ -252,19 +252,28 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			branchCreatedByUs = *data.Worktree.BranchCreatedByUs
 		}
 
-		gw, err := git.NewGitWorktreeFromStorage(
-			data.Worktree.RepoPath,
-			data.Worktree.WorktreePath,
-			data.Worktree.SessionName,
-			data.Worktree.BranchName,
-			data.Worktree.BaseCommitSHA,
-			data.Worktree.ExternalWorktree,
-			branchCreatedByUs,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to restore git worktree: %w", err)
+		// A completed local kill clears gitWorktree before deleting its durable
+		// tombstone. If that delete fails, the shutdown checkpoint writes both
+		// paths empty and the next daemon still needs the row so it can finish the
+		// delete. Accept only that exact terminal shape: a live row or a partially
+		// populated worktree remains unknown/corrupt and must not be treated as
+		// proof that no worktree exists.
+		worktreeReaped := data.UserKilled && data.Worktree.RepoPath == "" && data.Worktree.WorktreePath == ""
+		if !worktreeReaped {
+			gw, err := git.NewGitWorktreeFromStorage(
+				data.Worktree.RepoPath,
+				data.Worktree.WorktreePath,
+				data.Worktree.SessionName,
+				data.Worktree.BranchName,
+				data.Worktree.BaseCommitSHA,
+				data.Worktree.ExternalWorktree,
+				branchCreatedByUs,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to restore git worktree: %w", err)
+			}
+			instance.gitWorktree = gw
 		}
-		instance.gitWorktree = gw
 
 		// Rebuild the instance's tab list from disk so every tab (agent + shell)
 		// reconnects to its exact tmux session across an af/daemon restart — the
