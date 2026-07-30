@@ -88,12 +88,13 @@ type eventQueue struct {
 	curPath string // <dir>/<taskID>.cursor
 	remove  func(string) error
 
-	// appendRecord/truncate are the append and truncate seams. Production wires
-	// them to os.Truncate and a real O_APPEND write; tests inject them to
-	// simulate the partial-write + truncate-failure path that #1634 wedged on
-	// (a real short write is otherwise impossible to force on a local FS).
-	appendRecord func(path string, rec []byte) (int, error)
-	truncate     func(path string, size int64) error
+	// appendRecord/appendBoundary/truncate are the write seams. Production wires
+	// both appends to a real O_APPEND write and truncate to os.Truncate; tests
+	// inject them to simulate short writes, truncate failures, and deferred close
+	// errors that a local filesystem cannot force deterministically.
+	appendRecord   func(path string, rec []byte) (int, error)
+	appendBoundary func(path string, rec []byte) (int, error)
+	truncate       func(path string, size int64) error
 
 	mu      sync.Mutex
 	offset  int64 // byte offset of the first undelivered event
@@ -128,13 +129,14 @@ func eventQueueDir() (string, error) {
 // which is what lets a backlog survive a daemon restart or reload.
 func newEventQueue(dir, taskID string) *eventQueue {
 	q := &eventQueue{
-		taskID:       taskID,
-		path:         filepath.Join(dir, taskID+".jsonl"),
-		curPath:      filepath.Join(dir, taskID+".cursor"),
-		remove:       os.Remove,
-		appendRecord: appendRecordToFile,
-		truncate:     os.Truncate,
-		now:          time.Now,
+		taskID:         taskID,
+		path:           filepath.Join(dir, taskID+".jsonl"),
+		curPath:        filepath.Join(dir, taskID+".cursor"),
+		remove:         os.Remove,
+		appendRecord:   appendRecordToFile,
+		appendBoundary: appendRecordToFile,
+		truncate:       os.Truncate,
+		now:            time.Now,
 	}
 	q.load()
 	return q
@@ -198,8 +200,10 @@ func (q *eventQueue) load() {
 				// away so the next append starts on a record boundary instead
 				// of gluing two records into one corrupt line.
 				log.WarningLog.Printf("watch task %s: discarding %d bytes of torn trailing event-queue record", q.taskID, len(raw))
-				if terr := os.Truncate(q.path, scanned); terr != nil {
-					log.WarningLog.Printf("watch task %s: failed to truncate torn event-queue tail: %v", q.taskID, terr)
+				if terr := q.truncate(q.path, scanned); terr != nil {
+					// q.size already includes the torn bytes discovered during load;
+					// recoverTornRecordLocked accounts only for the new boundary byte.
+					q.recoverTornRecordLocked(len(raw), terr, true)
 				} else {
 					q.size = scanned
 				}
@@ -268,7 +272,7 @@ func (q *eventQueue) enqueue(line string) error {
 		// — same degradation as enqueue failing outright).
 		if n > 0 {
 			if terr := q.truncate(q.path, q.size); terr != nil {
-				q.recoverTornRecordLocked(n, terr)
+				q.recoverTornRecordLocked(n, terr, false)
 			}
 		}
 		return err
@@ -294,10 +298,10 @@ func appendRecordToFile(path string, rec []byte) (int, error) {
 	return n, err
 }
 
-// recoverTornRecordLocked salvages a short write whose truncate ALSO failed, so
-// the torn bytes (n of them, no trailing newline) are stuck on disk. Left as-is
-// they would permanently wedge the queue (#1634): the next O_APPEND merges its
-// record onto the torn bytes into one invalid line that no restart could clear.
+// recoverTornRecordLocked salvages torn bytes whose truncate ALSO failed. This
+// handles both a short write in enqueue and a torn tail found by load after a
+// restart. Left as-is, the next O_APPEND merges its record onto the torn bytes
+// into one invalid line that no restart could clear.
 // Best-effort recovery: append a single newline to force a record boundary, so
 // the torn fragment becomes its own (unparseable) line that peek() drops and
 // skips past instead of merging into the next event. The fragment is counted as
@@ -305,24 +309,32 @@ func appendRecordToFile(path string, rec []byte) (int, error) {
 // later good event would be miscounted and silently lost when the head is
 // skipped. If even the newline append fails, the reader's skip path is the final
 // backstop (a merged line is skippable too, only losing the following event).
-// Callers hold q.mu.
-func (q *eventQueue) recoverTornRecordLocked(n int, truncErr error) {
-	f, ferr := os.OpenFile(q.path, os.O_WRONLY|os.O_APPEND, 0644)
-	if ferr != nil {
-		log.WarningLog.Printf("watch task %s: failed to truncate short-written event record (%v); could not reopen to re-align it: %v", q.taskID, truncErr, ferr)
+// sizeIncludesTorn distinguishes load (q.size came from stat and already counts
+// the fragment) from enqueue (q.size is still the last good boundary). Callers
+// hold q.mu.
+func (q *eventQueue) recoverTornRecordLocked(n int, truncErr error, sizeIncludesTorn bool) {
+	written, werr := q.appendBoundary(q.path, []byte{'\n'})
+	if written < 1 {
+		if werr == nil {
+			werr = io.ErrShortWrite
+		}
+		log.WarningLog.Printf("watch task %s: failed to truncate torn event-queue record (%v); could not re-align it with a newline: %v", q.taskID, truncErr, werr)
 		return
 	}
-	_, werr := f.Write([]byte{'\n'})
-	if closeErr := f.Close(); werr == nil {
-		werr = closeErr
+	if !sizeIncludesTorn {
+		q.size += int64(n)
 	}
-	if werr != nil {
-		log.WarningLog.Printf("watch task %s: failed to truncate short-written event record (%v); could not re-align it with a newline: %v", q.taskID, truncErr, werr)
-		return
-	}
-	q.size += int64(n) + 1
+	q.size++ // the recovery newline
 	q.pending++
-	log.WarningLog.Printf("watch task %s: failed to truncate short-written event record (%v); re-aligned the torn %d bytes with a trailing newline so the queue stays readable", q.taskID, truncErr, n)
+	if werr != nil {
+		// The full boundary byte is visible and must be counted, just like a
+		// fully-written event record whose Close reports deferred writeback
+		// failure. Its crash durability is unknown, so keep that warning explicit;
+		// a restart will inspect and recover the tail again if it did not persist.
+		log.WarningLog.Printf("watch task %s: failed to truncate torn event-queue record (%v); re-aligned the torn %d bytes, but could not confirm the recovery newline on close: %v", q.taskID, truncErr, n, werr)
+		return
+	}
+	log.WarningLog.Printf("watch task %s: failed to truncate torn event-queue record (%v); re-aligned the torn %d bytes with a trailing newline so the queue stays readable", q.taskID, truncErr, n)
 }
 
 // resetCursorBeforeFreshAppendLocked removes or zeroes any leftover cursor

@@ -315,6 +315,131 @@ func TestEventQueue_TornTrailingRecordTruncated(t *testing.T) {
 	}
 }
 
+// TestEventQueue_LoadTruncateFailurePreservesNextEvent covers restart recovery
+// when a torn tail cannot be truncated. The recovery boundary must be appended
+// and counted before a later enqueue, or peek will consume the new event as part
+// of one corrupt merged line while decrementing its only pending count.
+func TestEventQueue_LoadTruncateFailurePreservesNextEvent(t *testing.T) {
+	dir := t.TempDir()
+	const taskID = "ab265901"
+	seed := newEventQueue(dir, taskID)
+	if err := seed.enqueue("whole"); err != nil {
+		t.Fatalf("enqueue whole: %v", err)
+	}
+	f, err := os.OpenFile(seed.path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("open queue tail: %v", err)
+	}
+	const torn = `{"seq":2,"ts":"2026-07-28T`
+	if _, err := f.WriteString(torn); err != nil {
+		_ = f.Close()
+		t.Fatalf("write torn tail: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close torn tail: %v", err)
+	}
+
+	truncateCalls := 0
+	reopened := &eventQueue{
+		taskID:         taskID,
+		path:           seed.path,
+		curPath:        seed.curPath,
+		remove:         os.Remove,
+		appendRecord:   appendRecordToFile,
+		appendBoundary: appendRecordToFile,
+		truncate: func(string, int64) error {
+			truncateCalls++
+			return errors.New("simulated load truncate failure")
+		},
+		now: time.Now,
+	}
+	reopened.load()
+	if got := reopened.pendingCount(); got != 2 {
+		t.Fatalf("pending after injected load truncate failure = %d, want 2 (whole record plus recovered torn fragment); truncate seam calls = %d", got, truncateCalls)
+	}
+	if truncateCalls != 1 {
+		t.Fatalf("load truncate seam calls = %d, want 1", truncateCalls)
+	}
+	if info, err := os.Stat(reopened.path); err != nil {
+		t.Fatalf("stat recovered queue: %v", err)
+	} else if reopened.size != info.Size() {
+		t.Fatalf("recovered in-memory size = %d, on-disk size = %d", reopened.size, info.Size())
+	}
+
+	if err := reopened.enqueue("after"); err != nil {
+		t.Fatalf("enqueue after failed load truncate: %v", err)
+	}
+	got := drainAllEvents(t, reopened)
+	want := []string{"whole", "after"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("drained after load truncate failure %v, want %v", got, want)
+	}
+}
+
+// TestEventQueue_LoadRecoveryCloseFailurePreservesNextEvent covers the second
+// failure in the restart recovery itself: the one-byte boundary write completes,
+// but Close reports a deferred writeback error. The newline is visible in the
+// file and must be counted, or the corrupt-head skip spends the next real event's
+// pending count and removes it without delivery.
+func TestEventQueue_LoadRecoveryCloseFailurePreservesNextEvent(t *testing.T) {
+	dir := t.TempDir()
+	const taskID = "ab265902"
+	seed := newEventQueue(dir, taskID)
+	if err := seed.enqueue("whole"); err != nil {
+		t.Fatalf("enqueue whole: %v", err)
+	}
+	f, err := os.OpenFile(seed.path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("open queue tail: %v", err)
+	}
+	const torn = `{"seq":2,"ts":"2026-07-28T`
+	if _, err := f.WriteString(torn); err != nil {
+		_ = f.Close()
+		t.Fatalf("write torn tail: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close torn tail: %v", err)
+	}
+
+	closeErr := errors.New("simulated recovery close failure")
+	reopened := &eventQueue{
+		taskID:       taskID,
+		path:         seed.path,
+		curPath:      seed.curPath,
+		remove:       os.Remove,
+		appendRecord: appendRecordToFile,
+		appendBoundary: func(path string, rec []byte) (int, error) {
+			n, err := appendRecordToFile(path, rec)
+			if err != nil {
+				return n, err
+			}
+			return n, closeErr
+		},
+		truncate: func(string, int64) error {
+			return errors.New("simulated load truncate failure")
+		},
+		now: time.Now,
+	}
+	reopened.load()
+	if got := reopened.pendingCount(); got != 2 {
+		t.Fatalf("pending after full recovery boundary write + close failure = %d, want 2", got)
+	}
+	if info, err := os.Stat(reopened.path); err != nil {
+		t.Fatalf("stat recovered queue: %v", err)
+	} else if reopened.size != info.Size() {
+		t.Fatalf("recovered in-memory size = %d, on-disk size = %d", reopened.size, info.Size())
+	}
+
+	if err := reopened.enqueue("after"); err != nil {
+		t.Fatalf("enqueue after recovery close failure: %v", err)
+	}
+	got := drainAllEvents(t, reopened)
+	want := []string{"whole", "after"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("drained after recovery close failure %v, want %v", got, want)
+	}
+}
+
 // drainAllEvents peeks+advances until the queue is empty, returning the lines
 // of every event delivered in order. peek self-heals corrupt head records
 // (#1634), so a wedged queue would surface here as a peek error, not a hang.
