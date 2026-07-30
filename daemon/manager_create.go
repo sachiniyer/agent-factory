@@ -250,7 +250,17 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, deleting := m.projectDeletes[repo.ID]; deleting {
-		return nil, "", nil, nil, fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repo.ID)
+		err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repo.ID)
+		// Both task-created shapes carry daemon-only provenance: TaskID for a
+		// targetless per-run session, TaskRepoID for DeliverPrompt auto-creating a
+		// missing shared target. Admission has not reserved a name, created a
+		// runtime, or sent a prompt, so this is provably not attempted. Preserve
+		// that third outcome across net/rpc with the wire-visible marker; ordinary
+		// client creates keep their existing plain error.
+		if req.TaskID != "" || req.TaskRepoID != "" {
+			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		}
+		return nil, "", nil, nil, err
 	}
 	if err := m.refreshLocked(); err != nil {
 		return nil, "", nil, nil, err

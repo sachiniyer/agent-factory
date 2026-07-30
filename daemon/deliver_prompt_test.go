@@ -59,6 +59,39 @@ func TestReserveCreate_RefusesTaskProjectBindingMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "prompt not delivered")
 }
 
+func TestReserveCreate_ProjectDeletionTaskRefusalIsNotAttempted(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	manager.mu.Lock()
+	manager.projectDeletes[repoID] = struct{}{}
+	manager.mu.Unlock()
+	t.Cleanup(func() {
+		manager.mu.Lock()
+		delete(manager.projectDeletes, repoID)
+		manager.mu.Unlock()
+	})
+
+	for _, tc := range []struct {
+		name string
+		req  CreateSessionRequest
+	}{
+		{name: "targetless task", req: CreateSessionRequest{TaskID: "task0001"}},
+		{name: "missing target task", req: CreateSessionRequest{TaskRepoID: repoID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.req.Title = "worker"
+			tc.req.RepoPath = repoPath
+			tc.req.Program = "claude"
+			_, _, release, _, err := manager.reserveCreate(tc.req)
+			if err == nil {
+				release()
+			}
+			require.Error(t, err)
+			assert.True(t, isNotAttemptedErr(err), "task create refused before admission must refund its rate slot")
+			assert.Contains(t, err.Error(), notDeliveredMarker, "classification must survive net/rpc flattening")
+		})
+	}
+}
+
 func TestDeliverPrompt_TaskBindingSurvivesPathRebindBeforeAutoCreate(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	rec := installRecordingBackend(t)

@@ -564,6 +564,38 @@ func TestDeleteProject_TargetedExternalSessionsArePreflightBlockers(t *testing.T
 	}
 }
 
+func TestDeleteProject_AbsentConfiguredRootTargetIsPreflightBlocker(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	cfg := config.DefaultConfig()
+	cfg.RootAgents = map[string]config.RootAgentConfig{repoPath: {}}
+	require.NoError(t, config.SaveConfig(cfg))
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	require.True(t, manager.repoRootAgentWillMaterialize(repo.ID))
+	manager.mu.Lock()
+	_, rootLoaded := manager.instances[daemonInstanceKey(repo.ID, session.RootSessionTitle)]
+	manager.mu.Unlock()
+	require.False(t, rootLoaded, "precondition: configured root is momentarily absent")
+	require.NoError(t, task.AddTask(archiveTargetTask(
+		"rootgone", "Absent Root Target", repoPath, session.RootSessionTitle, true,
+	)))
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repo.ID, RepoPath: repoPath})
+	require.Error(t, err, "deletion must not strand a task behind the reserved root title")
+	assert.Empty(t, result.Archived)
+	assert.Contains(t, err.Error(), "Absent Root Target")
+	stored, loadErr := config.LoadConfig()
+	require.NoError(t, loadErr)
+	assert.Contains(t, stored.RootAgents, repoPath, "blocker must precede root-agent config removal")
+	manager.mu.Lock()
+	_, suppressed := manager.deletedRootRepos[repo.ID]
+	manager.mu.Unlock()
+	assert.False(t, suppressed, "blocker must precede in-memory root suppression")
+}
+
 func TestDeleteProject_LoadsTaskTargetsOnce(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerArchivable(t, manager, repoID, repoPath, "alpha")

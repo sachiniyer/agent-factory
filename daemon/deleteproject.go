@@ -401,14 +401,24 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][]task.Task, error) {
 	m.mu.Lock()
 	var titles []string
+	hasRoot := false
 	for key, instance := range m.instances {
 		rid, title := splitDaemonInstanceKey(key)
 		if rid != repoID || instance == nil || instance.GetLiveness() == session.LiveArchived {
 			continue
 		}
 		titles = append(titles, title)
+		hasRoot = hasRoot || title == session.RootSessionTitle
 	}
 	m.mu.Unlock()
+	// An enabled root is part of the project's effective live-session set even
+	// while its process is momentarily absent: the ensure loop will recreate it,
+	// and task delivery waits for that same promise. Include the reserved target
+	// before the empty-roster return, or DeleteProject can suppress re-creation
+	// and strand a root-targeted task behind a title ordinary auto-create refuses.
+	if !hasRoot && m.repoRootAgentWillMaterialize(repoID) {
+		titles = append(titles, session.RootSessionTitle)
+	}
 	sort.Strings(titles)
 	if len(titles) == 0 {
 		return make(map[string][]task.Task), nil
