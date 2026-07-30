@@ -753,13 +753,10 @@ func TestRestoreLostSessions_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) 
 	}
 }
 
-// TestRestoreLostSessions_UnreachableRemoteSandboxIsReprovisioned is the
-// companion that keeps the #1794 recheck from becoming a blanket "never restore
-// remote sessions". A genuinely gone sandbox (nothing listening, so the probe is
-// refused outright) must still be re-provisioned — that recovery IS the feature
-// (#1108/#1782), and the recheck only exists to veto it when the sandbox proves
-// it is still there.
-func TestRestoreLostSessions_UnreachableRemoteSandboxIsReprovisioned(t *testing.T) {
+// TestRestoreLostSessions_UnreachableRemoteSandboxIsNotReprovisioned is the
+// #2589 last gate: an unreachable sandbox has not answered whether it is alive or
+// dead, so automatic recovery must preserve it and retry observation later.
+func TestRestoreLostSessions_UnreachableRemoteSandboxIsNotReprovisioned(t *testing.T) {
 	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
 	zeroRestoreBackoff(t)
 
@@ -768,7 +765,7 @@ func TestRestoreLostSessions_UnreachableRemoteSandboxIsReprovisioned(t *testing.
 
 	manager.RestoreLostSessions()
 
-	if got := backend.recoverCalls(); got != 1 {
-		t.Fatalf("Recover calls = %d, want 1 — an unreachable sandbox must still be recovered; the recheck is a veto on live sandboxes, not a block on remote restore", got)
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls = %d, want 0 — unreachable is not dead, so automatic restore must not discard the existing sandbox's unpushed work", got)
 	}
 }

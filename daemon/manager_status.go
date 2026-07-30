@@ -458,15 +458,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// a healthy sandbox errors identically, and acting on one is destructive —
 		// Lost feeds RestoreLostSessions in this same tick, whose remote Recover
 		// RE-PROVISIONS a fresh sandbox and orphans the running one along with its
-		// unpushed commits (#1794). So require DURABLE failure (see remoteloss.go)
-		// before even considering Lost.
+		// unpushed commits (#1794). So require durable failures before paying for
+		// a separate confirmation, and require that confirmation to ANSWER dead
+		// before considering Lost (#2589).
 		//
 		// Lost, not Dead (#1108): no kill intent is on record, so the session
 		// vanished out from under a live record and stays recovery-eligible.
-		// Without this the remote session kept its last-known liveness
-		// (Running/Ready) forever while its agent-server was gone, so the TUI
-		// showed a healthy row for a dead session (#1782).
-		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset)
+		// If both probes are unanswerable, the last-known liveness is deliberately
+		// retained: connectivity alone cannot distinguish a dead sandbox from a
+		// live one holding unpushed work.
+		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset, epoch)
 		return
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
@@ -521,23 +522,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// bad, not absent. #935's immediacy is unchanged for both runtimes.
 			_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
 		case probeUnknown:
-			// A REMOTE probe that never answered. It says nothing about the agent,
-			// and Lost here feeds a re-provision that orphans a possibly-live
-			// sandbox, so it only counts toward the debounce (#1794) — never
-			// settles anything by itself.
-			//
-			// Reaching this means the Snapshot answered on this same tick while the
-			// Alive probe did not: the transport worked a moment ago, so this is a
-			// blip between two calls, and the clear above has already reset the
-			// episode. The count therefore cannot climb here on its own — by
-			// design. A real outage takes Snapshot down too, and that path
-			// (settleRemoteProbeFailure) is where an episode accumulates. Recording
-			// it anyway keeps one honest definition of the counter — "probes that
-			// could not be answered" — so a degrading transport starts its episode
-			// at the first unanswered probe rather than the first failed Snapshot.
-			if m.noteRemoteProbeFailure(key, instance.Title) {
-				_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
-			}
+			// Snapshot answered on this tick but Alive did not. That is inconsistent
+			// transport evidence, not evidence that this specific sandbox is gone.
+			// Preserve the last-known liveness; Lost would authorize destructive
+			// remote re-provisioning from pushed state (#2589).
 		case probeAlive:
 			// The agent-server was asked and reports its agent RUNNING — the
 			// codebase's own affirmative signal, sitting one file away the whole time.

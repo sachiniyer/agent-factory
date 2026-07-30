@@ -89,6 +89,9 @@ type lostRestoreState struct {
 	// remoteLogged dedupes the "not restoring a remote session" note to once
 	// per Lost episode.
 	remoteLogged bool
+	// remoteUnknownLogged dedupes the safety note while a Lost remote sandbox
+	// remains unreachable. Unknown never authorizes destructive re-provisioning.
+	remoteUnknownLogged bool
 	// vanishedWorktreesLogged dedupes the high-visibility #1303 diagnostic to
 	// one ERROR per distinct missing worktree path during a Lost episode.
 	vanishedWorktreesLogged map[string]struct{}
@@ -319,10 +322,11 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// row may have gone Lost many ticks ago (restore is backoff-throttled out to
 	// 5 minutes) and the transport may have healed since. Re-probe NOW, against
 	// live state, rather than trusting a stale verdict: an agent-server that
-	// answers proves the sandbox is there, so heal the row and let the next poll
-	// settle its real liveness. Bounded, so a genuinely wedged remote cannot
-	// stall the poll loop here either.
-	if m.remoteSandboxAnswersAlive(inst) {
+	// answers alive proves the sandbox is there, while an answer of dead permits
+	// recovery. An unanswerable probe permits neither. Bounded, so a genuinely
+	// wedged remote cannot stall the poll loop here either.
+	switch m.remoteSandboxLiveness(inst) {
+	case probeAlive:
 		log.InfoLog.Printf("not re-provisioning lost remote session %q: its sandbox answers as alive (re-provisioning would orphan it and lose unpushed work) — clearing the Lost mark", inst.Title)
 		_ = inst.Transition(session.ObserveLiveness(session.LiveRunning))
 		// Clear before the persist, same ordering rule as the recovery path below:
@@ -335,6 +339,18 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		delete(m.lostRestoreStates, key)
 		m.mu.Unlock()
 		return
+	case probeUnknown:
+		m.mu.Lock()
+		logIt := !st.remoteUnknownLogged
+		st.remoteUnknownLogged = true
+		m.mu.Unlock()
+		if logIt {
+			log.WarningLog.Printf("not re-provisioning lost remote session %q: could not determine whether its existing sandbox is gone; unreachable is not dead, and replacement could discard unpushed work", inst.Title)
+		}
+		return
+	case probeDead:
+		// The sandbox answered that its agent is gone. This session-specific
+		// evidence, unlike a transport failure, permits recovery.
 	}
 
 	if err := inst.Recover(); err != nil {

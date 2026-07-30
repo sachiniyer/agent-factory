@@ -34,10 +34,10 @@ import (
 //     no amount of debouncing rescues a caller that cannot tell the two apart,
 //     which is why the limit-resume path needed the distinction rather than a
 //     debounce of its own.
-//  2. DEBOUNCE what remains. A run of probeUnknown could still be a real outage,
-//     so it must eventually settle Lost (that is #1782's guarantee). This is the
-//     only thing the counter tracks — consecutive UNANSWERABLE probes, never
-//     "looks dead" observations. Any answered probe clears it.
+//  2. DEBOUNCE before a second probe. A run of failed Snapshots earns one bounded
+//     Alive confirmation, but never manufactures death from silence. Only an
+//     ANSWERED probeDead may settle Lost; probeUnknown preserves last-known state
+//     because unreachable is not dead (#2589).
 //
 // The debounce demands the failure be DURABLE on two independent axes:
 //
@@ -49,20 +49,16 @@ import (
 //     N ticks in a couple of seconds, which is exactly the blip this is meant
 //     to survive.
 //
-// Both axes must be satisfied, so whichever is slower under the operator's
-// daemon_poll_interval governs — which is the point of having both. At the 1s
-// default the grace period dominates (a durably dead remote surfaces as Lost
-// after ~60s rather than ~3s); at a coarse interval the count does. Either way
-// the ceiling on how long a genuinely dead remote reads healthy is bounded and
-// small, which is the #1782 guarantee — 60s of stale green is a fair price for
-// never re-provisioning over a live sandbox.
+// Both axes must be satisfied before the confirmation call. If that call is also
+// unanswerable, the episode resets and later failures may try again; no number of
+// connectivity failures can authorize replacing a possibly-live sandbox.
 var (
-	// remoteLostFailureThreshold is the consecutive failed-probe count required
-	// before a remote session may be marked Lost. var, not const, so tests can
-	// drive the threshold directly.
+	// remoteLostFailureThreshold is the consecutive failed-Snapshot count required
+	// before the daemon pays for a separate Alive confirmation. var, not const, so
+	// tests can drive the threshold directly.
 	remoteLostFailureThreshold = 3
 	// remoteLostGracePeriod is the minimum wall-clock span the failures must
-	// persist before Lost is allowed, independent of how many ticks fit in it.
+	// persist before the confirmation, independent of how many ticks fit in it.
 	remoteLostGracePeriod = 60 * time.Second
 	// remoteLostConfirmTimeout bounds the confirmation Alive() probe. It is
 	// deliberately SHORT and unrelated to remoteAgentCallTimeout (30s): the
@@ -147,8 +143,7 @@ func (m *Manager) clearRemoteLoss(key string) {
 	m.mu.Unlock()
 }
 
-// remoteSandboxAnswersAlive reports whether a remote session's sandbox answers
-// as alive right now — the veto every re-provision must clear first.
+// remoteSandboxLiveness keeps all three outcomes of the final pre-recovery probe.
 //
 // A Lost mark is a claim about the past, and it can be minutes stale: restore
 // backs off to 5 minutes, and a user can hit restore by hand at any moment.
@@ -156,18 +151,17 @@ func (m *Manager) clearRemoteLoss(key string) {
 // sandbox never pushed, so the question that matters is not "was it lost?" but
 // "is it gone NOW?" — asked against live state, immediately before acting.
 //
-// probeAlive, specifically: an ANSWERED alive is proof the sandbox is there and
-// a re-provision would orphan it. probeDead and probeUnknown both fall through
-// to recovery — a sandbox that answers "my agent is gone", and one that answers
-// nothing at all after the debounce already judged it durably unreachable, are
-// both cases where recovery is what the user wants (#1108/#1782).
+// probeAlive proves the sandbox is there and heals the stale Lost row. probeDead
+// is session-specific evidence that replacement is safe. probeUnknown authorizes
+// nothing: unreachable is not dead, and collapsing it into probeDead is exactly
+// how a connectivity failure can discard unpushed work (#2589).
 //
 // Bounded, so a wedged remote cannot stall the poll goroutine here either.
-func (m *Manager) remoteSandboxAnswersAlive(instance *session.Instance) bool {
+func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProbe {
 	if !isRemoteWorkspace(instance) {
-		return false // a local session has no sandbox to orphan
+		return probeDead // a local session has no remote sandbox to preserve
 	}
-	return aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout) == probeAlive
+	return aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout)
 }
 
 // noteRuntimeReplaced retires observations owned by the prior runtime after a
@@ -259,7 +253,7 @@ func (m *Manager) sweepRemoteLossStates() {
 // rather than once per tick. That is also what keeps a wedged sandbox from
 // double-stalling the serial poll: it can no longer spend a full 30s Snapshot
 // AND a full 30s Alive on every single tick (#1794).
-func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session.Instance, before session.Liveness, beforeReset time.Time) {
+func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session.Instance, before session.Liveness, beforeReset time.Time, epoch uint64) {
 	if !isRemoteWorkspace(instance) {
 		// A local agent-server's Snapshot never errors; if that ever changes,
 		// an unexplained local error is not evidence of death. Leave it be.
@@ -291,9 +285,11 @@ func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session
 		log.WarningLog.Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
 		m.clearRemoteLoss(key)
 	case probeUnknown:
-		log.WarningLog.Printf("remote session %q: agent-server unreachable and still unanswerable after %s — marking it Lost", instance.Title, remoteLostGracePeriod)
+		log.WarningLog.Printf("remote session %q: agent-server unreachable and still unanswerable after %s — leaving its last-known status unchanged; unreachable is not evidence that this sandbox is gone", instance.Title, remoteLostGracePeriod)
+		m.clearRemoteLoss(key)
+		return
 	}
-	_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+	_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
 	m.persistPollChange(repoID, instance, before, beforeReset, false)
 }
 

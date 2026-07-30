@@ -95,8 +95,8 @@ func withRemoteLossThresholds(t *testing.T, count int, grace, confirm time.Durat
 }
 
 // driveDurableRemoteLoss runs enough failing ticks, spread over enough fake
-// wall-clock, to satisfy BOTH debounce axes — the "the sandbox really is gone"
-// signal.
+// wall-clock, to satisfy both axes and earn a separate Alive confirmation. The
+// confirmation's answer — never the failures themselves — decides liveness.
 func driveDurableRemoteLoss(m *Manager, advance func(time.Duration)) {
 	for i := 0; i < remoteLostFailureThreshold; i++ {
 		m.RefreshStatuses()
@@ -105,18 +105,41 @@ func driveDurableRemoteLoss(m *Manager, advance func(time.Duration)) {
 	m.RefreshStatuses()
 }
 
-// TestRefreshStatuses_UnreachableRemoteMarkedLost is the #1782 regression, held
-// intact across the #1794 debounce. A remote session's agent-server dies
-// (container killed, ssh forward dropped), so every REST probe fails with
-// ECONNREFUSED. The poll used to return on the first Snapshot error before any
-// liveness check ran, leaving the session pinned at its last-known Running/Ready
-// forever — the TUI showed a healthy row for a session that was gone. A DURABLE
-// unreachability must still settle to Lost; #1794 only changed how much evidence
-// that takes, never the destination.
+// confirmedDeadThenUnknownRemote returns an agent-server that initially answers
+// alive=false after each failed Snapshot, then can be switched to an unanswerable
+// posture to model a transport blip against a replacement runtime.
+func confirmedDeadThenUnknownRemote(t *testing.T) (string, func()) {
+	t.Helper()
+	var unknown atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/agent/snapshot":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "capture failed"},
+			})
+		case "/v1/agent/alive":
+			if unknown.Load() {
+				http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, func() { unknown.Store(true) }
+}
+
+// TestRefreshStatuses_UnreachableRemoteDoesNotMarkLost is the #2589 safety
+// boundary: even durable transport failure cannot say whether this particular
+// sandbox is gone. Lost authorizes destructive re-provisioning from pushed state,
+// so silence must preserve the last-known state rather than discard unpushed work.
 //
 // Port 1 on loopback has no listener, so every probe is refused immediately —
 // the "agent-server is unreachable" shape, with no timeout to wait out.
-func TestRefreshStatuses_UnreachableRemoteMarkedLost(t *testing.T) {
+func TestRefreshStatuses_UnreachableRemoteDoesNotMarkLost(t *testing.T) {
 	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
 	advance := withFrozenClock(t)
 	manager, repoID, repoPath := newStatusTestManager(t)
@@ -127,13 +150,78 @@ func TestRefreshStatuses_UnreachableRemoteMarkedLost(t *testing.T) {
 	driveDurableRemoteLoss(manager, advance)
 
 	inst := manager.instances[daemonInstanceKey(repoID, "remote-gone")]
-	if got := inst.GetLiveness(); got != session.LiveLost {
-		t.Fatalf("in-memory liveness = %v, want LiveLost (a durably unreachable agent-server must not keep reading as Running)", got)
+	if got := inst.GetLiveness(); got != session.LiveRunning {
+		t.Fatalf("in-memory liveness = %v, want LiveRunning left unchanged — unreachable is not evidence that this sandbox is gone", got)
 	}
-	// Persisted too, so the status survives a daemon reload and the restore loop
-	// can find it — Lost, not Dead: no kill intent, still recovery-eligible (#1108).
-	if got := persistedStatus(t, repoID, "remote-gone"); got != session.Lost {
-		t.Fatalf("persisted status = %v, want Lost", got)
+	if got := persistedStatus(t, repoID, "remote-gone"); got != session.Running {
+		t.Fatalf("persisted status = %v, want Running left unchanged", got)
+	}
+}
+
+func TestRefreshStatuses_IdleSnapshotWithUnanswerableAliveDoesNotMarkLost(t *testing.T) {
+	withRemoteLossThresholds(t, 1, 0, time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/agent/snapshot":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"updated": false, "has_prompt": false, "content": ""},
+			})
+		case "/v1/agent/alive":
+			http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-idle-unknown", srv.URL, session.Running)
+	manager.RefreshStatuses()
+
+	if got := inst.GetLiveness(); got != session.LiveRunning {
+		t.Fatalf("liveness = %v, want LiveRunning left unchanged — an unanswerable Alive probe is not evidence of death", got)
+	}
+}
+
+func TestRefreshStatuses_StaleRemoteDeadConfirmationDoesNotCrossEpoch(t *testing.T) {
+	withRemoteLossThresholds(t, 1, 0, 5*time.Second)
+	aliveStarted := make(chan struct{})
+	releaseAlive := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/agent/snapshot":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "capture failed"},
+			})
+		case "/v1/agent/alive":
+			once.Do(func() { close(aliveStarted) })
+			<-releaseAlive
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-stale-loss", srv.URL, session.Running)
+	done := make(chan struct{})
+	go func() {
+		manager.RefreshStatuses()
+		close(done)
+	}()
+	<-aliveStarted
+	if err := inst.Transition(session.BeginArchive()); err != nil {
+		t.Fatalf("authoritative transition while probe was blocked: %v", err)
+	}
+	close(releaseAlive)
+	<-done
+
+	if got := inst.GetLiveness(); got == session.LiveLost {
+		t.Fatal("stale remote-dead confirmation crossed a newer state epoch and marked the session Lost")
 	}
 }
 
@@ -360,12 +448,10 @@ func TestRefreshStatuses_ConfirmationProbeIsBounded(t *testing.T) {
 	if elapsed >= remoteCallTimeout {
 		t.Fatalf("threshold tick took %s — it waited out the full %s call timeout instead of the short confirmation bound", elapsed, remoteCallTimeout)
 	}
-	// A wedged agent-server that cannot answer a liveness ping on top of durable
-	// snapshot failure is unreachable by any useful definition — the bound must
-	// resolve it, not just abandon it.
+	// The timeout is an unknown result, not evidence that this sandbox is gone.
 	inst := manager.instances[daemonInstanceKey(repoID, "remote-wedged")]
-	if got := inst.GetLiveness(); got != session.LiveLost {
-		t.Fatalf("liveness = %v, want LiveLost — a bounded confirmation that times out still has to settle the session", got)
+	if got := inst.GetLiveness(); got != session.LiveRunning {
+		t.Fatalf("liveness = %v, want LiveRunning left unchanged — a bounded confirmation timeout is not evidence of death", got)
 	}
 }
 
@@ -384,6 +470,7 @@ func TestRefreshStatuses_ConfirmationProbeIsBounded(t *testing.T) {
 // One tick, Lost. The debounce is for absent evidence, not bad evidence.
 func TestRefreshStatuses_ReachableRemoteWithDeadAgentGoesLostImmediately(t *testing.T) {
 	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	zeroRestoreBackoff(t)
 
 	// The sandbox is healthy and answering. The agent inside it is not.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -404,13 +491,16 @@ func TestRefreshStatuses_ReachableRemoteWithDeadAgentGoesLostImmediately(t *test
 	defer srv.Close()
 
 	manager, repoID, repoPath := newStatusTestManager(t)
-	registerStartedRemote(t, manager, repoID, repoPath, "remote-agent-dead", srv.URL, session.Running)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-agent-dead", srv.URL, session.Running)
 
 	manager.RefreshStatuses() // exactly one tick
 
-	inst := manager.instances[daemonInstanceKey(repoID, "remote-agent-dead")]
 	if got := inst.GetLiveness(); got != session.LiveLost {
 		t.Fatalf("liveness after one tick = %v, want LiveLost — the sandbox ANSWERED that its agent is gone, which is authoritative; the debounce is for probes that could not be answered, not for answers we dislike", got)
+	}
+	manager.RestoreLostSessions()
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want 1 — the final pre-recovery probe answered that this specific agent is gone", got)
 	}
 }
 
@@ -434,8 +524,8 @@ func TestRestoreLostSessions_PostRecoverBlipDoesNotReprovisionAgain(t *testing.T
 	advance := withFrozenClock(t)
 
 	manager, repoID, repoPath := newStatusTestManager(t)
-	// Nothing listening: every probe is refused, so the loss is real and durable.
-	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-recovered", "http://127.0.0.1:1", session.Running)
+	url, makeUnknown := confirmedDeadThenUnknownRemote(t)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-recovered", url, session.Running)
 
 	// Durable loss -> Lost -> the restore loop re-provisions once. That part is
 	// the #1108/#1782 feature working correctly.
@@ -449,6 +539,7 @@ func TestRestoreLostSessions_PostRecoverBlipDoesNotReprovisionAgain(t *testing.T
 	}
 
 	// The fresh sandbox now takes ONE transport blip.
+	makeUnknown()
 	advance(time.Second)
 	manager.RefreshStatuses()
 	manager.RestoreLostSessions()
@@ -478,10 +569,13 @@ func TestRefreshStatuses_NewSessionDoesNotInheritDebounceState(t *testing.T) {
 	const title = "reused-title"
 	old, _ := registerStartedRemote(t, manager, repoID, repoPath, title, "http://127.0.0.1:1", session.Running)
 
-	// The doomed predecessor accumulates a threshold-satisfying failure history.
-	driveDurableRemoteLoss(manager, advance)
-	if got := old.GetLiveness(); got != session.LiveLost {
-		t.Fatalf("setup: predecessor liveness = %v, want LiveLost", got)
+	// The predecessor accumulates failures just below the confirmation threshold.
+	for i := 0; i < remoteLostFailureThreshold-1; i++ {
+		manager.RefreshStatuses()
+		advance(remoteLostGracePeriod)
+	}
+	if got := old.GetLiveness(); got == session.LiveLost {
+		t.Fatalf("setup: predecessor liveness = %v before any answered-dead confirmation", got)
 	}
 	manager.mu.Lock()
 	stale := len(manager.remoteLossStates)
@@ -500,7 +594,12 @@ func TestRefreshStatuses_NewSessionDoesNotInheritDebounceState(t *testing.T) {
 	// One blip against the newcomer.
 	advance(time.Second)
 	manager.RefreshStatuses()
-	manager.RestoreLostSessions()
+	manager.mu.Lock()
+	freshState := manager.remoteLossStates[remoteLossKey(repoID, fresh)]
+	manager.mu.Unlock()
+	if freshState == nil || freshState.consecutiveFailures != 1 {
+		t.Fatalf("new session failure state = %#v, want a fresh one-failure episode", freshState)
+	}
 
 	if got := fresh.GetLiveness(); got != session.LiveRunning {
 		t.Fatalf("new session's liveness = %v, want LiveRunning — it inherited the killed session's failure count through the repo/title key, so its FIRST blip marked it Lost (#1794)", got)
@@ -526,7 +625,8 @@ func TestRestoreSession_PostManualRecoverBlipDoesNotReprovision(t *testing.T) {
 	advance := withFrozenClock(t)
 
 	manager, repoID, repoPath := newStatusTestManager(t)
-	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-manual", "http://127.0.0.1:1", session.Running)
+	url, makeUnknown := confirmedDeadThenUnknownRemote(t)
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-manual", url, session.Running)
 
 	// A durable outage parks it at Lost with a threshold-satisfying history.
 	driveDurableRemoteLoss(manager, advance)
@@ -543,6 +643,7 @@ func TestRestoreSession_PostManualRecoverBlipDoesNotReprovision(t *testing.T) {
 	}
 
 	// One blip against the sandbox that restore just built.
+	makeUnknown()
 	advance(time.Second)
 	manager.RefreshStatuses()
 	manager.RestoreLostSessions()
@@ -572,8 +673,11 @@ func TestRestoreArchived_RemoteReprovisionClearsDebounce(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-archived", "http://127.0.0.1:1", session.Running)
 
-	// A durable outage leaves a threshold-satisfying history on the record.
-	driveDurableRemoteLoss(manager, advance)
+	// Leave a live, below-threshold failure episode on the record.
+	for i := 0; i < remoteLostFailureThreshold-1; i++ {
+		manager.RefreshStatuses()
+		advance(remoteLostGracePeriod)
+	}
 	manager.mu.Lock()
 	stale := len(manager.remoteLossStates)
 	manager.mu.Unlock()
@@ -643,6 +747,19 @@ func TestRestoreSession_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) {
 	}
 }
 
+func TestRestoreSession_UnreachableRemoteSandboxIsNotReprovisioned(t *testing.T) {
+	withRemoteLossThresholds(t, 3, time.Minute, time.Second)
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-restore-unknown", "http://127.0.0.1:1", session.Lost)
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-restore-unknown", RepoID: repoID}); err == nil {
+		t.Fatal("manual restore re-provisioned without evidence that the existing remote sandbox is gone")
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls = %d, want 0 — unreachable is not dead, so manual restore must not discard the existing sandbox's unpushed work", got)
+	}
+}
+
 // TestSweepRemoteLossStates_DropsArchivedRows is codex's P3 on 2ec7b52.
 //
 // The sweep took presence in m.instances as proof of liveness, but an archived
@@ -658,7 +775,10 @@ func TestSweepRemoteLossStates_DropsArchivedRows(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-shelved", "http://127.0.0.1:1", session.Running)
 
-	driveDurableRemoteLoss(manager, advance)
+	for i := 0; i < remoteLostFailureThreshold-1; i++ {
+		manager.RefreshStatuses()
+		advance(remoteLostGracePeriod)
+	}
 	manager.mu.Lock()
 	before := len(manager.remoteLossStates)
 	manager.mu.Unlock()

@@ -96,7 +96,8 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// really lost and healing the row delivers exactly what was asked for, without
 	// the destruction. A user who genuinely wants a new sandbox kills and
 	// recreates (#1794).
-	if m.remoteSandboxAnswersAlive(instance) {
+	switch m.remoteSandboxLiveness(instance) {
+	case probeAlive:
 		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		m.clearRemoteLoss(remoteLossKey(repoID, instance))
@@ -105,6 +106,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		delete(m.lostRestoreStates, key)
 		m.mu.Unlock()
 		return instance.GetWorktreePath(), nil
+	case probeUnknown:
+		return "", fmt.Errorf("cannot restore remote session %q: could not determine whether its existing sandbox is gone; refusing to re-provision while it is unreachable because that could discard unpushed work", title)
+	case probeDead:
+		// The sandbox answered that its agent is gone, so replacement is safe.
 	}
 
 	if err := instance.Recover(); err != nil {
