@@ -804,6 +804,14 @@ func (m *Manager) uniqueArchivedTitleLocked(repoID, repoPath, base, program stri
 }
 
 func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program string, namespace runtimeNameNamespace, diskData []session.InstanceData) (string, error) {
+	// Shape errors belong to the base, not to any candidate's availability.
+	// Validate once before the suffix walk so controls do not burn all 10,000
+	// rungs and whitespace cannot turn into a punctuation-only "   -2" title.
+	// allowReserved stays true here because a base of "root" deliberately skips
+	// the reserved bare candidate and resolves to "root-2" below.
+	if err := m.validateTitleShapeLocked(baseTitle, true); err != nil {
+		return "", err
+	}
 	// Session records are not the only thing that can make a candidate unusable
 	// (#2091). A branch already CHECKED OUT by some worktree cannot be checked
 	// out again, and archiving relocates a worktree rather than removing it
