@@ -642,6 +642,7 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 	// written; the shared REST transport remains free of a response-header bound.
 	wsTransport := c.transport.Clone()
 	wsTransport.ResponseHeaderTimeout = remoteAgentWSHandshakeTimeout
+	defer wsTransport.CloseIdleConnections()
 	wsClient := *c.httpClient
 	wsClient.Transport = wsTransport
 	opts.HTTPClient = &wsClient

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -339,6 +340,49 @@ func TestDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T) {
 		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
 	}
 	_ = sc.Conn.Close(websocket.StatusNormalClosure, "")
+}
+
+type closeNotifyConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *closeNotifyConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func TestDialStream_RejectedUpgradeClosesPerDialTransport(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upgrade rejected", http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := NewRemote(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	closed := make(chan struct{})
+	dial := c.remoteTransport.DialContext
+	c.remoteTransport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &closeNotifyConn{Conn: conn, closed: closed}, nil
+	}
+
+	if _, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0); err == nil {
+		t.Fatal("rejected WebSocket upgrade unexpectedly succeeded")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("rejected WebSocket upgrade left the per-dial transport connection idle")
+	}
 }
 
 // TestNewRemote_SlowButProgressingResponseNotKilled is the Greptile correctness

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,4 +114,47 @@ func TestRemoteAgentDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T)
 		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "")
+}
+
+type closeNotifyAgentConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *closeNotifyAgentConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func TestRemoteAgentDialStream_RejectedUpgradeClosesPerDialTransport(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upgrade rejected", http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: srv.URL, Token: "tok"}, "probe")
+	if err != nil {
+		t.Fatalf("newRemoteAgentClient: %v", err)
+	}
+	closed := make(chan struct{})
+	dial := rc.transport.DialContext
+	rc.transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &closeNotifyAgentConn{Conn: conn, closed: closed}, nil
+	}
+
+	if _, err := rc.dialStream(context.Background(), 0); err == nil {
+		t.Fatal("rejected agent-server WebSocket upgrade unexpectedly succeeded")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("rejected agent-server upgrade left the per-dial transport connection idle")
+	}
 }

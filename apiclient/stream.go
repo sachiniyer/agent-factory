@@ -83,6 +83,7 @@ func (c *Client) DialStream(ctx context.Context, title, repoID, tabID string, ta
 	if c.remoteTransport != nil {
 		wsTransport := c.remoteTransport.Clone()
 		wsTransport.ResponseHeaderTimeout = remoteWSHandshakeTimeout
+		defer wsTransport.CloseIdleConnections()
 		wsClient := *c.httpClient
 		wsClient.Transport = wsTransport
 		opts.HTTPClient = &wsClient
