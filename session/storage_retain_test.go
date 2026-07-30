@@ -1,10 +1,69 @@
 package session
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
+
+// TestSaveInstances_KeepsUnknownRuntimeCleanupAlongsideStartedSibling makes an
+// unanswerable sandbox teardown a durable retention claim. The row is inert and
+// not user-killed, but dropping it from a wholesale checkpoint also drops the
+// only identity that can prove the old sandbox gone before reprovisioning.
+func TestSaveInstances_KeepsUnknownRuntimeCleanupAlongsideStartedSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := &Instance{Title: "alive", Path: repoPath, started: true, liveness: LiveRunning}
+	uncertain := &Instance{
+		ID:       "unknown-cleanup-id",
+		Title:    "unknown-cleanup",
+		Path:     repoPath,
+		Program:  "claude",
+		started:  false,
+		liveness: LiveLost,
+		backend: &dockerBackend{
+			containerID: "possibly-live-container",
+			cleanup: &DockerRuntimeCleanupData{
+				ContainerID: "possibly-live-container",
+				EngineID:    "engine-id",
+			},
+		},
+		runtimeTeardown: func() error {
+			return fmt.Errorf("%w: teardown timed out", ErrWorkspaceStateUnknown)
+		},
+	}
+	if err := uncertain.teardownAfterStartFailure(); !TeardownStateUnknown(err) {
+		t.Fatalf("teardown outcome = %v, want unknown", err)
+	}
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, uncertain}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title != uncertain.Title {
+			continue
+		}
+		if row.RuntimeCleanup == nil {
+			t.Fatal("retained unknown-cleanup row lost its teardown identity")
+		}
+		if !row.RuntimeCleanupStateUnknown {
+			t.Fatal("retained unknown-cleanup row lost its durable state marker")
+		}
+		if row.UserKilled {
+			t.Fatal("unknown cleanup was collapsed into a user-kill tombstone")
+		}
+		return
+	}
+	t.Fatal("daemon checkpoint dropped the unknown-cleanup row and orphaned its possible sandbox")
+}
 
 // TestSaveInstances_KeepsTombstonedRowAlongsideStartedSibling is #1917 round-5
 // finding (1): the retain is undone by a writer in another layer.

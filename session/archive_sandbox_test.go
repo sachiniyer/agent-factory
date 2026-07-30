@@ -53,6 +53,7 @@ func assertRemoteRuntimeReset(t *testing.T, i *Instance) {
 	defer i.mu.RUnlock()
 	assert.Nil(t, i.remoteClient, "remoteClient cleared after Start-failure teardown")
 	assert.Nil(t, i.runtimeTeardown, "runtimeTeardown cleared after Start-failure teardown")
+	assert.False(t, i.runtimeCleanupStateUnknown, "completed teardown clears the unknown-cleanup marker")
 	assert.Nil(t, i.agentSrv, "cached agent-server cleared after Start-failure teardown")
 }
 
@@ -312,11 +313,37 @@ func TestArchiveSandbox_RecordsBranchOnKillFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), `pushed branch "root/s"`, "error names the branch that IS durable")
 	assert.Contains(t, err.Error(), "failed to tear the sandbox down", "error names the half that failed")
 	assert.Equal(t, 1, as.killCalls, "the teardown was attempted")
+	assert.False(t, i.ToInstanceData().RuntimeCleanupStateUnknown,
+		"an answered cleanup failure must not be collapsed into unknown state")
 
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	assert.Equal(t, "root/s", i.Branch,
 		"the durable branch must be recorded despite the teardown failure — Lost-restore re-provisions from i.Branch (#1781)")
+}
+
+// TestArchiveSandbox_UnknownKillCleanupSurvivesRestart covers the failure that
+// precedes restore: branch push succeeded, but sandbox teardown could not report
+// whether the old runtime still exists. The daemon persists the resulting Lost
+// session, so the cleanup identity must cross that restart before any restore
+// provisions a replacement.
+func TestArchiveSandbox_UnknownKillCleanupSurvivesRestart(t *testing.T) {
+	as := &stubAgentServer{
+		branch:  "root/s",
+		killErr: fmt.Errorf("%w: sandbox teardown timed out", ErrWorkspaceStateUnknown),
+	}
+	i := newStubbedSandboxInstance(as)
+	i.backend = &dockerBackend{
+		containerID: "possibly-live-container",
+		cleanup: &DockerRuntimeCleanupData{
+			ContainerID: "possibly-live-container",
+			EngineID:    "engine-id",
+		},
+	}
+
+	_, err := i.ArchiveSandbox()
+	require.ErrorIs(t, err, ErrWorkspaceStateUnknown)
+	assertUnknownCleanupSurvivesRestart(t, i)
 }
 
 // TestArchiveSandbox_RecordsBranchOnSuccess pins that moving the assignment earlier

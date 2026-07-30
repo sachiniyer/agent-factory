@@ -14,6 +14,14 @@ type orderedReprovisionRuntime struct {
 	res    ProvisionResult
 }
 
+type cleanupFailingStartBackend struct {
+	*dockerBackend
+}
+
+func (b *cleanupFailingStartBackend) Start(*Instance, bool) error {
+	return fmt.Errorf("start failed")
+}
+
 func (r *orderedReprovisionRuntime) Provision(ProvisionSpec) (ProvisionResult, error) {
 	*r.events = append(*r.events, "provision")
 	return r.res, nil
@@ -71,7 +79,13 @@ func TestReprovisionRemote_RetainsPreviousRuntimeWhenTeardownUnknown(t *testing.
 	restoreRuntime := SetRuntimeForTest(BackendDocker, func() Runtime { return rt })
 	defer restoreRuntime()
 
-	oldBackend := newInertSandboxBackend("docker")
+	oldBackend := &dockerBackend{
+		containerID: "old",
+		cleanup: &DockerRuntimeCleanupData{
+			ContainerID: "old",
+			EngineID:    "engine-id",
+		},
+	}
 	oldClient := &remoteAgentClient{title: "old"}
 	oldTeardown := func() error {
 		return fmt.Errorf("%w: cleanup timed out", ErrWorkspaceStateUnknown)
@@ -94,13 +108,20 @@ func TestReprovisionRemote_RetainsPreviousRuntimeWhenTeardownUnknown(t *testing.
 	assert.Same(t, oldBackend, i.backend)
 	assert.Same(t, oldClient, i.remoteClient)
 	assert.NotNil(t, i.runtimeTeardown, "the retryable cleanup handle must remain installed")
+	assertUnknownCleanupSurvivesRestart(t, i)
 }
 
 // TestRecoverSandbox_RetainsRuntimeWhenStartFailureCleanupUnknown covers the
 // adjacent replacement path: if the freshly provisioned sandbox cannot be
 // confirmed reaped after Start fails, retain its wiring instead of orphaning it.
 func TestRecoverSandbox_RetainsRuntimeWhenStartFailureCleanupUnknown(t *testing.T) {
-	freshBackend := &failingStartBackend{FakeBackend: NewFakeBackend(), typ: "docker"}
+	freshBackend := &cleanupFailingStartBackend{dockerBackend: &dockerBackend{
+		containerID: "fresh",
+		cleanup: &DockerRuntimeCleanupData{
+			ContainerID: "fresh",
+			EngineID:    "engine-id",
+		},
+	}}
 	ep := &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"}
 	rt := fakeRuntime{res: ProvisionResult{
 		Backend:  freshBackend,
@@ -129,6 +150,7 @@ func TestRecoverSandbox_RetainsRuntimeWhenStartFailureCleanupUnknown(t *testing.
 	assert.Same(t, freshBackend, i.backend)
 	assert.NotNil(t, i.remoteClient)
 	assert.NotNil(t, i.runtimeTeardown, "unknown cleanup must keep the handle available for retry")
+	assertUnknownCleanupSurvivesRestart(t, i)
 }
 
 // TestReprovisionRemote_RetainsNewRuntimeWhenBindFailureCleanupUnknown covers
@@ -136,7 +158,13 @@ func TestRecoverSandbox_RetainsRuntimeWhenStartFailureCleanupUnknown(t *testing.
 // validation failed, and cleanup could not establish whether the new sandbox
 // was reaped. Its handle must become the instance's next retry target.
 func TestReprovisionRemote_RetainsNewRuntimeWhenBindFailureCleanupUnknown(t *testing.T) {
-	freshBackend := &dockerBackend{containerID: "fresh"}
+	freshBackend := &dockerBackend{
+		containerID: "fresh",
+		cleanup: &DockerRuntimeCleanupData{
+			ContainerID: "fresh",
+			EngineID:    "engine-id",
+		},
+	}
 	rt := fakeRuntime{res: ProvisionResult{
 		Backend:  freshBackend,
 		Endpoint: &AgentServerEndpoint{URL: "://invalid", Token: "tok"},
@@ -163,4 +191,19 @@ func TestReprovisionRemote_RetainsNewRuntimeWhenBindFailureCleanupUnknown(t *tes
 	assert.Same(t, freshBackend, i.backend)
 	assert.Nil(t, i.remoteClient)
 	assert.NotNil(t, i.runtimeTeardown, "unknown cleanup must keep the new sandbox's handle")
+	assertUnknownCleanupSurvivesRestart(t, i)
+}
+
+// assertUnknownCleanupSurvivesRestart exercises the production storage
+// round-trip used by both automatic and manual restore failure paths. A cleanup
+// outcome that could not be determined must keep its exact teardown identity;
+// otherwise the next daemon provisions over a sandbox that may still exist.
+func assertUnknownCleanupSurvivesRestart(t *testing.T, i *Instance) {
+	t.Helper()
+	stored := i.ToInstanceData().ForStorage()
+	require.True(t, stored.RuntimeCleanupStateUnknown, "unknown cleanup lost its durable state marker")
+	require.NotNil(t, stored.RuntimeCleanup, "unknown cleanup lost its teardown identity at the storage boundary")
+	restored, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	require.NotNil(t, restored.runtimeTeardown, "unknown cleanup restored without a retryable teardown")
 }

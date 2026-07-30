@@ -11,13 +11,15 @@ import (
 )
 
 // RuntimeCleanupData is the storage-only teardown identity committed alongside a
-// remote session's kill tombstone. It is deliberately a tagged union rather than
-// a bag of shared strings: each backend restores only its own exact handle, and a
-// malformed record carrying two variants is refused instead of guessed at.
+// remote session's kill tombstone or an unknown cleanup outcome. It is
+// deliberately a tagged union rather than a bag of shared strings: each backend
+// restores only its own exact handle, and a malformed record carrying two
+// variants is refused instead of guessed at.
 //
 // InstanceData uses a private staging field to keep this out of daemon snapshots;
-// ForStorage publishes it only for UserKilled records. Bug reports drop it in
-// full because host names, command paths, and container ids are operator-private.
+// ForStorage publishes it only at those two retention boundaries. Bug reports
+// drop it in full because host names, command paths, and container ids are
+// operator-private.
 type RuntimeCleanupData struct {
 	Docker *DockerRuntimeCleanupData `json:"docker,omitempty"`
 	SSH    *SSHRuntimeCleanupData    `json:"ssh,omitempty"`

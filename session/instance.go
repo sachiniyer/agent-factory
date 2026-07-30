@@ -269,6 +269,12 @@ type Instance struct {
 	// over REST. nil only for local sessions. Each runtime serializes repeated
 	// calls; docker/SSH deliberately retry outcomes whose completion is unknown.
 	runtimeTeardown func() error
+	// runtimeCleanupStateUnknown is the durable third outcome of a sandbox reap:
+	// teardown neither confirmed success nor reported a completed failure, so the
+	// exact runtime identity above must survive storage and be retried before any
+	// replacement is provisioned. It is independent of userKilled: restore
+	// failures retain wanted sessions, not kill tombstones.
+	runtimeCleanupStateUnknown bool
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has

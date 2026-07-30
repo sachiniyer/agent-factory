@@ -82,6 +82,9 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    (container rm / remote dir cleanup + tunnel close) — the branch is durable,
 	//    the sandbox is disposable.
 	if err := as.Kill(); err != nil {
+		if TeardownStateUnknown(err) {
+			i.markRuntimeCleanupStateUnknown()
+		}
 		return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)
 	}
 	// 4. Drop the dead remote wiring so the instance is an inert archived record
@@ -226,6 +229,7 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	i.backend = res.Backend
 	i.remoteClient = rc
 	i.runtimeTeardown = res.Teardown
+	i.runtimeCleanupStateUnknown = false
 	i.mu.Unlock()
 	return nil
 }
@@ -240,6 +244,7 @@ func (i *Instance) retainProvisionResultCleanup(res ProvisionResult) {
 	i.backend = res.Backend
 	i.remoteClient = nil
 	i.runtimeTeardown = res.Teardown
+	i.runtimeCleanupStateUnknown = true
 	i.mu.Unlock()
 }
 
@@ -254,6 +259,17 @@ func (i *Instance) resetRemoteRuntime() {
 	i.agentSrv = nil
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
+	i.runtimeCleanupStateUnknown = false
+	i.mu.Unlock()
+}
+
+// markRuntimeCleanupStateUnknown makes an indeterminate reap durable without
+// changing the session's wanted/kill intent. The exact backend identity staged
+// by ToInstanceData then crosses storage so a restart must retry this cleanup
+// before provisioning a replacement.
+func (i *Instance) markRuntimeCleanupStateUnknown() {
+	i.mu.Lock()
+	i.runtimeCleanupStateUnknown = true
 	i.mu.Unlock()
 }
 
@@ -274,6 +290,7 @@ func (i *Instance) reapRemoteRuntimeForReplacement() error {
 	}
 	if err := teardown(); err != nil {
 		if TeardownStateUnknown(err) {
+			i.markRuntimeCleanupStateUnknown()
 			return err
 		}
 		log.WarningLog.Printf("session %q: previous sandbox teardown reported a completed error; continuing with replacement: %v", i.Title, err)

@@ -140,10 +140,16 @@ type InstanceData struct {
 	Worktree          GitWorktreeData        `json:"worktree"`
 	PRInfo            PRInfoData             `json:"pr_info,omitempty"`
 	BackendType       string                 `json:"backend_type,omitempty"`
-	// RuntimeCleanup is written only for a committed UserKilled tombstone. It is
-	// the durable identity finishUserKill needs to resume off-box teardown after a
-	// daemon restart; normal snapshots keep it nil and stage the live handle in the
-	// private field below until ForStorage sees the tombstone.
+	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
+	// teardown whose completion could not be determined. The next restore must
+	// retry RuntimeCleanup before it can safely provision a replacement. It is not
+	// a UserKilled tombstone: the session remains wanted after cleanup is settled.
+	RuntimeCleanupStateUnknown bool `json:"runtime_cleanup_state_unknown,omitempty"`
+	// RuntimeCleanup is written for a committed UserKilled tombstone or the
+	// unknown-cleanup state above. It is the durable identity needed to resume
+	// off-box teardown after a daemon restart; ordinary snapshots keep it nil and
+	// stage the live handle in the private field below until ForStorage reaches a
+	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
 }
@@ -186,10 +192,12 @@ func (d InstanceData) ForStorage() InstanceData {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown
 		// identity here would only preserve unused credentials until row deletion.
+		d.RuntimeCleanupStateUnknown = false
 		d.RuntimeCleanup = nil
-	case !d.UserKilled:
+	case !d.UserKilled && !d.RuntimeCleanupStateUnknown:
 		// Cleanup credentials/identities have no reason to live in ordinary session
-		// records. The kill tombstone is their only persistence boundary.
+		// records. Kill intent and an unknown teardown outcome are the two durable
+		// retention boundaries.
 		d.RuntimeCleanup = nil
 	case d.runtimeCleanup != nil:
 		d.RuntimeCleanup = d.runtimeCleanup.clone()
@@ -340,11 +348,12 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		data := inst.ToInstanceData()
 		status := data.Status
 		pendingHandoff := data.PendingHandoffMission != ""
+		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
 		// A pending mission is a durable recovery obligation and therefore a
 		// retention claim, not generic transient UI state. OpReplacing composes to
 		// Loading, but dropping that row would erase the only handle to a live
 		// incoming runtime. The explicit marker outranks the lossy legacy status.
-		if (status == Loading || status == Deleting) && !pendingHandoff {
+		if (status == Loading || status == Deleting) && !pendingHandoff && !unknownRuntimeCleanup {
 			continue
 		}
 		// The !Started() skip drops transient never-started junk (a create that
@@ -356,17 +365,18 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// the same repo is saved — would silently orphan the archived worktree.
 		// (Lost is unaffected: it loads started=true, so it already survives.)
 		//
-		// TOMBSTONED and startup-unknown instances are also kept (#1917/#2207).
-		// Both are started=false and not Archived while their workspace may still be
-		// live: one because teardown could not confirm the pane dead or finish a
-		// worktree removal, the other because startup never established the runtime's
-		// identity. The record is deliberately RETAINED as that workspace's only
+		// TOMBSTONED, startup-unknown, and runtime-cleanup-unknown instances are
+		// also kept (#1917/#2207). They are started=false and not Archived while
+		// their workspace may still be live: teardown could not confirm the pane
+		// dead or finish a worktree removal, startup never established the runtime's
+		// identity, or an off-box teardown did not establish whether its sandbox was
+		// reaped. The record is deliberately RETAINED as that workspace's only
 		// handle. Without this clause the next checkpoint triggered by any other
 		// started session in the repo would silently drop it, undoing the retention
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
 		if !inst.Started() && status != Archived && !data.UserKilled &&
-			!data.StartupStateUnknown && !pendingHandoff {
+			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup {
 			continue
 		}
 		root := inst.GetRepoPath()

@@ -58,13 +58,15 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		UserKilled:            i.userKilled,
 		StartupStateUnknown:   i.startupStateUnknown,
 	}
+	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
 
 	if i.backend != nil {
 		data.BackendType = i.backend.Type()
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
-			// ForStorage publishes it only when UserKilled is true, including the
-			// persistKillTombstone copy that flips the flag after this read.
+			// ForStorage publishes it only when UserKilled or an unknown cleanup
+			// outcome makes it durable, including the persistKillTombstone copy that
+			// flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
 	}
@@ -193,6 +195,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		userKilled:            data.UserKilled,
 		startupStateUnknown:   data.StartupStateUnknown,
 	}
+	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	worktreeReaped := false
 
 	// Pick backend based on persisted BackendType.
@@ -207,15 +210,16 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
 		instance.backend = newInertSandboxBackend(data.BackendType)
-		// A kill tombstone is a durable promise to FINISH teardown after a
-		// restart. Rebuild only that teardown handle — no endpoint, tunnel, or
-		// live sandbox client is dialled during load. Archived sandboxes were
-		// already reaped before becoming Archived, so deleting their record needs
-		// no remote cleanup handle.
-		if data.UserKilled && liveness != LiveArchived {
+		// A kill tombstone is a durable promise to FINISH teardown after a restart;
+		// an unknown cleanup outcome is the same obligation without terminal kill
+		// intent. Rebuild only that teardown handle — no endpoint, tunnel, or live
+		// sandbox client is dialled during load. Archived sandboxes were already
+		// reaped before becoming Archived, so deleting their record needs no remote
+		// cleanup handle.
+		if (data.UserKilled || data.RuntimeCleanupStateUnknown) && liveness != LiveArchived {
 			backend, teardown, cleanupErr := restoreRuntimeCleanup(data.Title, data.BackendType, data.RuntimeCleanup)
 			if cleanupErr != nil {
-				// Legacy/malformed tombstones fail closed. Keeping the inert backend
+				// Legacy/malformed retention records fail closed. Keeping the inert backend
 				// preserves classification while this closure makes Kill return the
 				// unknown-state sentinel, so finishUserKill retains the only record
 				// instead of laundering a missing handle into no-op success.
