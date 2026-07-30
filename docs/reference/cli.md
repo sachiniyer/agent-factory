@@ -1323,7 +1323,7 @@ working tree or branch. Requires running inside a git repository (or --repo
 pointing at one).
 
 ```
-af sessions create [flags]
+af sessions create [title] [flags]
 ```
 
 **Flags**
@@ -1333,7 +1333,7 @@ af sessions create [flags]
 | `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
 | `--in-place` |  | Alias for --here |
-| `--name` | `string` | Session name (required) |
+| `--name` | `string` | Session title (alternative to positional <title>) |
 | `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
 | `--prompt` | `string` | Initial prompt to send |
 

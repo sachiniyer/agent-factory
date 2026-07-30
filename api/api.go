@@ -607,7 +607,7 @@ func init() {
 	TasksCmd.PersistentFlags().BoolVar(&envelopeOutput, "json", false, jsonFlagUsage)
 
 	// Sessions
-	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session name (required)")
+	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session title (alternative to positional <title>)")
 	sessionsCreateCmd.Flags().StringVar(&createPromptFlag, "prompt", "", "Initial prompt to send")
 	sessionsCreateCmd.Flags().StringVar(&createProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
 	sessionsCreateCmd.Flags().BoolVar(&createHereFlag, "here", false, "Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both)")
@@ -617,7 +617,6 @@ func init() {
 	// project can use it, which is what "af sessions backends" answers (#1933).
 	// Naming that verb here is the only place a --backend reader will look.
 	sessionsCreateCmd.Flags().StringVar(&createBackendFlag, "backend", "", "Runtime to run the session on (one of: "+config.SupportedBackendsString()+"; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run \"af sessions backends\" for which of these this project can actually use, and why not")
-	sessionsCreateCmd.MarkFlagRequired("name")
 
 	// Tab addressing for `sessions preview` (#1948). The daemon's PreviewRequest
 	// always carried Tab/TabID/Full and the CLI sent none of them, so `af sessions

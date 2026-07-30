@@ -243,3 +243,23 @@ func TestSendPromptAcceptsPromptFlag(t *testing.T) {
 			"caller and script.")
 	}
 }
+
+// TestSessionCreateAcceptsPositionalTitle pins the additive half of #1972:
+// create keeps --name for existing scripts while accepting the positional
+// <title> shape shared by every sibling session verb.
+func TestSessionCreateAcceptsPositionalTitle(t *testing.T) {
+	derived := deriveCLI(t)
+	create := derived["af sessions create"]
+
+	if !strings.Contains(create.Use, "[title]") && !strings.Contains(create.Use, "<title>") {
+		t.Error("`af sessions create` no longer accepts a positional title; that re-opens " +
+			"the #1972 argument-shape gap with its sibling session verbs")
+	}
+	for _, flag := range create.Flags {
+		if flag == "name" {
+			return
+		}
+	}
+	t.Error("`af sessions create --name` is gone. Positional <title> was added as an " +
+		"alias; removing --name would break existing callers and scripts")
+}

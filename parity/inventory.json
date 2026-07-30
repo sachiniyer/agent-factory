@@ -1229,12 +1229,12 @@
         "pointer": ""
       },
       "cli": {
-        "status": "partial",
-        "pointer": "api/api.go:584,590 create --name (required flag) vs <title> positional on its 10 sibling verbs"
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsCreateCmd accepts create [title] and the existing --name alias"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#1972",
-      "notes": "The CLI-vs-CLI axis: `af sessions create --name X` is the only sessions verb that takes the title as a FLAG, and the only one that calls the concept `name` rather than `title`. Ten siblings take `<title>` positionally. A user who learns one cannot predict the other — the same failure as the --prompt trap, which is fixed in this PR. Filed rather than fixed to keep #1937 to the audit plus one fix. tui/web are n/a: this is about CLI argument shape, and neither UI has arguments."
+      "notes": "Closed additively: `af sessions create <title>` now shares the positional title shape and vocabulary of its ten sibling verbs, while `--name <title>` remains an alias so existing scripts do not break. Both forms resolve once, before dispatch, into the same CreateSessionRequest.Title path. tui/web are n/a: this is about CLI argument shape, and neither UI has arguments."
     },
     {
       "id": "backend.list",
@@ -2059,10 +2059,6 @@
     "synonyms": {
       "af sessions create name": "title"
     },
-    "declared": {
-      "af sessions title": {
-        "gap": "cli.argshape.session-title"
-      }
-    }
+    "declared": {}
   }
 }

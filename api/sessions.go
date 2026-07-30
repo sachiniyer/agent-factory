@@ -1,8 +1,8 @@
 package api
 
 import (
+	"errors"
 	"fmt"
-
 	"os/exec"
 	"strings"
 
@@ -267,8 +267,30 @@ var (
 	createBackendFlag string
 )
 
+func resolveCreateTitle(args []string, nameFlag string) (string, error) {
+	if len(args) > 1 {
+		return "", fmt.Errorf("accepts at most one positional <title>, received %d", len(args))
+	}
+
+	var positional string
+	if len(args) == 1 {
+		positional = args[0]
+	}
+
+	switch {
+	case positional == "" && nameFlag == "":
+		return "", errors.New("session title is required: pass <title> positionally or with --name <title>")
+	case positional != "" && nameFlag != "":
+		return "", errors.New("session title was provided twice: use either positional <title> or --name <title>, not both")
+	case positional != "":
+		return positional, nil
+	default:
+		return nameFlag, nil
+	}
+}
+
 var sessionsCreateCmd = &cobra.Command{
-	Use:   "create",
+	Use:   "create [title]",
 	Short: "Create a new session",
 	Long: `Create a new session running an agent in its own git worktree.
 
@@ -277,9 +299,15 @@ existing working tree at its current branch: no worktree or branch is created,
 the agent runs in the repo root, and killing the session never removes the
 working tree or branch. Requires running inside a git repository (or --repo
 pointing at one).`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		createTitle, err := resolveCreateTitle(args, createNameFlag)
+		if err != nil {
+			return jsonError(err)
+		}
 
 		inPlace := createHereFlag || createInPlaceFlag
 
@@ -302,20 +330,20 @@ pointing at one).`,
 		// Fail fast on the reserved root-agent title (#1106) before any
 		// daemon round trip. The authoritative gate lives in the daemon's
 		// reserveCreate; this mirrors its message for a snappier CLI error.
-		if session.IsReservedTitle(createNameFlag) {
-			return jsonError(fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", createNameFlag))
+		if session.IsReservedTitle(createTitle) {
+			return jsonError(fmt.Errorf("session title %q is reserved for the daemon-managed root agent; pick another name (to run a root agent on this repo, add it to root_agents in ~/.agent-factory/config.json)", createTitle))
 		}
 
 		// Best-effort per-repo pre-check to fail fast on duplicate titles
 		// before we spend time creating a tmux session and git worktree we'd
 		// just have to tear down. The authoritative race-safe check still
 		// happens inside the daemon under the per-repo file lock.
-		exists, err := repoHasInstanceTitle(repo.ID, createNameFlag)
+		exists, err := repoHasInstanceTitle(repo.ID, createTitle)
 		if err != nil {
 			return jsonError(err)
 		}
 		if exists {
-			return jsonError(fmt.Errorf("session with title %q already exists", createNameFlag))
+			return jsonError(fmt.Errorf("session with title %q already exists", createTitle))
 		}
 
 		cfg, err := config.ResolveConfig(repo.Root)
@@ -360,7 +388,7 @@ pointing at one).`,
 		}
 
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
-			Title:    createNameFlag,
+			Title:    createTitle,
 			RepoPath: repo.Root,
 			Program:  program,
 			Prompt:   createPromptFlag,

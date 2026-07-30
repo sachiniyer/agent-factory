@@ -198,11 +198,10 @@ purpose: `--name` on `create` means the session title, but `--name` on
 `tab-create <title> --name <tabname>` means the tab. A global `name → title` rule
 invents a divergence that is not there.
 
-Still open and declared, not silent:
-[#1972](https://github.com/sachiniyer/agent-factory/issues/1972) — `af sessions
-create --name` is the only sessions verb taking the title as a flag, and the only
-one calling it *name* rather than *title*, while ten siblings take `<title>`
-positionally.
+The same additive rule closed
+[#1972](https://github.com/sachiniyer/agent-factory/issues/1972): `af sessions
+create <title>` now shares the positional shape and vocabulary of its ten
+siblings, while `--name <title>` remains an alias for existing scripts.
 
 ## What the check enforces
 
