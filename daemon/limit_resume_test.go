@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -280,6 +281,33 @@ func TestResumeFromLimit_RespawnArm_ClearsLimitDurablyOnSuccess(t *testing.T) {
 	}
 	if !rec.LimitResetAt.IsZero() {
 		t.Fatalf("persisted reset time = %v, want zero (a cleared limit must not carry a stale window to disk)", rec.LimitResetAt)
+	}
+}
+
+// TestResumeFromLimit_PublishesRunningTransition pins the event-plane half of a
+// successful limit resume. The resume mutates and persists the session directly,
+// so the next status poll snapshots LiveRunning as its "before" state and cannot
+// reconstruct the missing LimitReached -> Running transition for other clients.
+func TestResumeFromLimit_PublishesRunningTransition(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "resume-event", backend, true, session.Running)
+	inst.SetLimitReached(time.Now().Add(30 * time.Minute).UTC())
+
+	_, events := manager.events.subscribe()
+	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "resume-event", RepoID: repoID}); err != nil {
+		t.Fatalf("resumeFromLimit returned %v, want nil", err)
+	}
+
+	updated := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
+	if updated.Liveness != session.LiveRunning {
+		t.Fatalf("session.updated liveness = %v, want LiveRunning", updated.Liveness)
+	}
+	if updated.ID != inst.ID || updated.Title != inst.Title {
+		t.Fatalf("session.updated identity = (%q, %q), want (%q, %q)", updated.ID, updated.Title, inst.ID, inst.Title)
+	}
+	if rec := recordFor(t, repoID, "resume-event"); rec == nil || rec.Liveness != session.LiveRunning {
+		t.Fatalf("persisted resumed session = %+v, want LiveRunning", rec)
 	}
 }
 

@@ -509,7 +509,18 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// The cleared limit is itself durable state worth a checkpoint. On the respawn
 	// arm this is the second write; that is deliberate — the first one records the
 	// rebuilt worktree of a session still parked at the wall, this one records the
-	// resume that actually landed.
-	m.persistInstance(repoID, instance)
+	// resume that actually landed. Publish the same snapshot while still holding
+	// the repo ordering lock: session.updated replaces the client's whole session
+	// projection, so letting this event race a newer tab mutation could put the
+	// client back on an older roster.
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	data := instance.ToInstanceData()
+	persistErr := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	repoStartLock.Unlock()
+	if persistErr != nil {
+		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+	}
 	return resumePerformed, nil
 }
