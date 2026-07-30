@@ -402,7 +402,10 @@ func redactHookOutputTokens(output string) string {
 		}
 		var key string
 		if err := json.Unmarshal([]byte(output[cursor:keyEnd]), &key); err != nil || !strings.EqualFold(key, "token") {
-			cursor = keyEnd
+			// This quote may be arbitrary malformed prose paired with the opening
+			// quote of a later JSON key. Advance one byte so every later quote can
+			// still be considered as a fresh key boundary.
+			cursor++
 			continue
 		}
 

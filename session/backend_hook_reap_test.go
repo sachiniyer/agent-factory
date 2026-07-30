@@ -639,6 +639,18 @@ func TestHookOutputSuffixPreservesNumbersWhileRedactingTokens(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+// TestHookOutputSuffixRedactsTokenAfterUnmatchedQuote covers arbitrary prose
+// before endpoint output. A stray quote must not phase-shift the scanner and
+// make every later JSON string look like the end of the preceding one.
+func TestHookOutputSuffixRedactsTokenAfterUnmatchedQuote(t *testing.T) {
+	const secret = "misaligned-token-must-not-leak"
+
+	suffix := hookOutputSuffix([]byte("warning: unmatched \"\n" +
+		`{"url":"","token":"misaligned-token-must-not-leak"}`))
+	assert.NotContains(t, suffix, secret, "malformed diagnostic text must not bypass token redaction")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
 // killed or interrupted while writing its endpoint JSON. The unmatched tail is
 // still diagnostic output, but a complete quoted token value inside it is just
