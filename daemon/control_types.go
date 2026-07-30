@@ -276,10 +276,13 @@ type DeliverPromptResponse struct {
 //   - Process tab (Shell=false, the #930 PR 5 default): runs Command in the
 //     worktree. Name is the optional display name (a default is derived from
 //     Command's basename when empty). Command must be non-empty.
-//   - Shell tab (Shell=true): runs $SHELL in the worktree, exactly like the TUI's
-//     `t` key (Instance.AddShellTab). Command/Name are ignored; the name is the
-//     auto-derived unique "shell"/"shell-2"/… The TUI routes its `t` mutation
-//     here so the daemon — not the TUI — owns the tab write (#960 PR 2).
+//   - Shell tab (Shell=true, with an empty Kind): runs $SHELL in the worktree,
+//     exactly like the TUI's `t` key (Instance.AddShellTab). This legacy shape
+//     remains permissive of unused fields for compatibility; the canonical
+//     Kind="shell" shape rejects Command/Name/URL/Port instead of silently
+//     discarding them. The name is the auto-derived unique
+//     "shell"/"shell-2"/… The TUI routes its `t` mutation here so the daemon —
+//     not the TUI — owns the tab write (#960 PR 2).
 //   - Web tab (Kind="web"): an iframe/URL tab with no PTY. URL is the target
 //     (or Port as a localhost:<port> convenience). See the Kind/URL/Port fields.
 //   - VS Code tab (Kind="vscode"): a code-server editor on the session's
@@ -297,7 +300,8 @@ type CreateTabRequest struct {
 	Shell   bool   `json:"shell"`
 	// Kind selects the tab type. Empty (the default) means a process tab (or a
 	// shell tab when Shell is set); "shell" is the canonical explicit spelling
-	// for that same shell path; "web" creates a URL/iframe tab with no PTY,
+	// for that same shell path and rejects fields AddShellTab cannot honor; "web"
+	// creates a URL/iframe tab with no PTY,
 	// targeting URL (or Port as a localhost:<port> convenience); "vscode" creates
 	// a VS Code editor tab on the session's worktree, which takes no target. The
 	// vocabulary is session.ParseTabKindName — shared with the CLI, so the two

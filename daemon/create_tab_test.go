@@ -316,6 +316,66 @@ func TestCreateTab_ShellSpawnsPersistsAndReturnsName(t *testing.T) {
 	}
 }
 
+// TestCreateTab_ExplicitShellRejectsIncompatibleFields pins the direct daemon
+// contract for the canonical Kind=shell shape. These fields cannot affect an
+// AddShellTab call, so accepting them would report success after silently
+// discarding part of the request. Each rejection must happen before session
+// lookup: the deliberately missing title would otherwise produce a lookup error.
+func TestCreateTab_ExplicitShellRejectsIncompatibleFields(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  CreateTabRequest
+		want string
+	}{
+		{"command", CreateTabRequest{Command: "bash -lc true"}, "--command is not valid for a shell tab"},
+		{"name", CreateTabRequest{Name: "terminal"}, "--name is not valid for a shell tab"},
+		{"url", CreateTabRequest{URL: "http://localhost:3000"}, "--url/--port are not valid for a shell tab"},
+		{"port", CreateTabRequest{Port: 3000}, "--url/--port are not valid for a shell tab"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := tc.req
+			req.Title = "missing"
+			req.Kind = "shell"
+			_, err := manager.CreateTab(req)
+			if err == nil {
+				t.Fatalf("CreateTab(%+v) succeeded; want a rejection", req)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want one containing %q before session lookup", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestCreateTab_ExplicitKindRejectsConflictingLegacyShellFlag covers the other
+// selector-level silent discard: an explicit non-shell Kind wins dispatch over
+// Shell today, so accepting both would ignore a true legacy selector. The empty
+// Kind + Shell=true compatibility shape remains valid and is covered by the
+// shell creation tests above.
+func TestCreateTab_ExplicitKindRejectsConflictingLegacyShellFlag(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	for _, tc := range []CreateTabRequest{
+		{Title: "missing", Kind: "web", URL: "http://localhost:3000", Shell: true},
+		{Title: "missing", Kind: "vscode", Shell: true},
+	} {
+		_, err := manager.CreateTab(tc)
+		if err == nil || !strings.Contains(err.Error(), "shell=true") {
+			t.Errorf("CreateTab(%+v) err = %v, want conflicting-selector rejection before session lookup", tc, err)
+		}
+	}
+}
+
 // TestCreateTab_ShellRejectsRemoteInstance verifies the shell path also refuses
 // remote sessions (no local worktree), matching the process path and the TUI's
 // `t` rule.

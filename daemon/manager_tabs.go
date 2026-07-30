@@ -35,7 +35,26 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		return CreateTabResponse{}, fmt.Errorf("unknown tab kind %q (expected one of %s, or empty)",
 			req.Kind, strings.Join(session.TabKindNameList(), ", "))
 	}
-	isShell := req.Shell || explicitKind && kind == session.TabKindShell
+	isExplicitShell := explicitKind && kind == session.TabKindShell
+	if req.Shell && explicitKind && !isExplicitShell {
+		return CreateTabResponse{}, fmt.Errorf("shell=true conflicts with explicit tab kind %q", req.Kind)
+	}
+	// Kind=shell is the strict daemon/API spelling. AddShellTab cannot consume
+	// any of these fields, so reject them before session lookup rather than
+	// returning success after silently discarding part of the request. Keep the
+	// historical empty-Kind + Shell=true shape permissive for compatibility.
+	if isExplicitShell {
+		if strings.TrimSpace(req.Command) != "" {
+			return CreateTabResponse{}, fmt.Errorf("--command is not valid for a shell tab (--kind shell): it runs $SHELL")
+		}
+		if strings.TrimSpace(req.Name) != "" {
+			return CreateTabResponse{}, fmt.Errorf("--name is not valid for a shell tab (--kind shell): its canonical name is \"shell\"")
+		}
+		if strings.TrimSpace(req.URL) != "" || req.Port != 0 {
+			return CreateTabResponse{}, fmt.Errorf("--url/--port are not valid for a shell tab (--kind shell)")
+		}
+	}
+	isShell := req.Shell || isExplicitShell
 	isWeb := explicitKind && kind == session.TabKindWeb
 	isVSCode := explicitKind && kind == session.TabKindVSCode
 	if !explicitKind && !isShell && strings.TrimSpace(req.Command) == "" {
@@ -67,6 +86,9 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 				return CreateTabResponse{}, perr
 			}
 			target = portURL
+		}
+		if strings.TrimSpace(req.Command) != "" {
+			return CreateTabResponse{}, fmt.Errorf("--command is not valid for a web tab (--kind web); use --url or --port")
 		}
 		normalized, nerr := session.NormalizeWebTabURL(target)
 		if nerr != nil {

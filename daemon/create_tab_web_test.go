@@ -115,6 +115,25 @@ func TestCreateTab_WebRejectsMissingTarget(t *testing.T) {
 	}
 }
 
+// TestCreateTab_WebRejectsCommandBeforeLookup closes the adjacent direct-client
+// silent-discard path: AddWebTab consumes URL/Port and Name, but never Command.
+// The CLI already rejects this combination; the daemon contract must do the
+// same before looking up or mutating a session.
+func TestCreateTab_WebRejectsCommandBeforeLookup(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	_, err = manager.CreateTab(CreateTabRequest{
+		Title: "missing", Kind: "web", URL: "http://localhost:3000", Command: "npm run dev",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--command is not valid for a web tab") {
+		t.Fatalf("err = %v, want command rejection before session lookup", err)
+	}
+}
+
 // TestCreateTab_WebRejectsUnknownKind verifies an unrecognized --kind is refused.
 func TestCreateTab_WebRejectsUnknownKind(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
