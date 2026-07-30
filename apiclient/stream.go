@@ -89,7 +89,8 @@ func (c *Client) DialStream(ctx context.Context, title, repoID, tabID string, ta
 	}
 	conn, resp, err := websocket.Dial(dialCtx, u, &opts)
 	if err != nil {
-		return nil, &TransportError{Err: fmt.Errorf("apiclient: dial pty stream: %w", err)}
+		return nil, &TransportError{Err: fmt.Errorf("apiclient: dial pty stream: %w",
+			agentproto.RedactAccessTokenError(err, c.token))}
 	}
 	// Raise the read limit off the 32 KiB default: a full-screen repaint of a wide
 	// pane, or a ?since replay of the whole ring, is a single large binary frame.

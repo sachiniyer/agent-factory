@@ -1,10 +1,42 @@
 package daemon
 
 import (
+	"bytes"
+	stdlog "log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	aflog "github.com/sachiniyer/agent-factory/log"
 )
+
+func TestWebTabProxyFailureDoesNotLogTargetAccessToken(t *testing.T) {
+	const token = "af-sentinel-webtab-target"
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	targetURL := dead.URL + "/app?view=2&access_token=" + token
+	dead.Close()
+
+	var warnings bytes.Buffer
+	previous := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "", 0)
+	t.Cleanup(func() { aflog.WarningLog = previous })
+
+	mux, sessionID, tabID := newWebTabProxyFixture(t, targetURL)
+	rec := proxyGet(t, mux, sessionID, tabID, "app?view=2")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if strings.Contains(warnings.String(), token) {
+		t.Fatalf("web-tab proxy log exposed the target access_token: %s", warnings.String())
+	}
+	if !strings.Contains(warnings.String(), "access_token=REDACTED") {
+		t.Fatalf("web-tab proxy log lost its redaction marker: %s", warnings.String())
+	}
+	if strings.Contains(rec.Body.String(), token) {
+		t.Fatalf("web-tab proxy error response exposed the target access_token: %s", rec.Body.String())
+	}
+}
 
 // The #1909 gate: an af-GENERATED proxy failure must be distinguishable from an
 // upstream-generated one that happens to carry the same status.

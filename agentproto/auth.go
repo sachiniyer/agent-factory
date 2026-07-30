@@ -1,6 +1,7 @@
 package agentproto
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,7 +22,87 @@ const (
 	// request headers on a WebSocket handshake, so the token rides the URL for the
 	// web client (§4.4); it must be part of the design now, not retrofitted.
 	AccessTokenQueryParam = "access_token"
+	accessTokenRedaction  = "REDACTED"
 )
+
+// RedactAccessTokenURL replaces every access_token query value in raw while
+// preserving the rest of the URL for diagnostics. url.URL.Redacted is not a
+// substitute: it redacts userinfo only and leaves query parameters untouched.
+func RedactAccessTokenURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		// An unparseable URL cannot be safely separated from its credential.
+		return "[url redacted]"
+	}
+	q := parsed.Query()
+	if _, ok := q[AccessTokenQueryParam]; !ok {
+		// URL.Query discards malformed query pairs. The text pass still catches
+		// an exact access_token field without trusting a partially parsed query.
+		return RedactAccessTokenText(raw)
+	}
+	q.Set(AccessTokenQueryParam, accessTokenRedaction)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
+}
+
+// RedactAccessTokenError strips an access_token from a failed request while
+// retaining the original error chain whenever structured redaction is enough.
+// net/http and WebSocket dial failures commonly contain a *url.Error whose URL
+// includes the full query string.
+func RedactAccessTokenError(err error, token string) error {
+	if err == nil {
+		return nil
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		urlErr.URL = RedactAccessTokenURL(urlErr.URL)
+	}
+
+	message := RedactAccessTokenText(err.Error())
+	if token != "" {
+		message = strings.ReplaceAll(message, token, accessTokenRedaction)
+	}
+	if message != err.Error() {
+		// A non-URL error carried the credential somewhere the structured pass
+		// could not reach. Drop its type rather than retain the secret.
+		return errors.New(message)
+	}
+	return err
+}
+
+// RedactAccessTokenText is the logging-boundary backstop for an access_token
+// query embedded in otherwise unstructured text. Call sites that know they are
+// handling a URL or request error must still use the structured helpers above.
+func RedactAccessTokenText(text string) string {
+	needle := AccessTokenQueryParam + "="
+	if !strings.Contains(text, needle) {
+		return text
+	}
+
+	var redacted strings.Builder
+	rest := text
+	for {
+		i := strings.Index(rest, needle)
+		if i < 0 {
+			redacted.WriteString(rest)
+			return redacted.String()
+		}
+		valueStart := i + len(needle)
+		if i > 0 && rest[i-1] != '?' && rest[i-1] != '&' {
+			redacted.WriteString(rest[:valueStart])
+			rest = rest[valueStart:]
+			continue
+		}
+
+		valueEnd := valueStart
+		for valueEnd < len(rest) && !strings.ContainsRune("& \t\r\n#\"'", rune(rest[valueEnd])) {
+			valueEnd++
+		}
+		redacted.WriteString(rest[:valueStart])
+		redacted.WriteString(accessTokenRedaction)
+		rest = rest[valueEnd:]
+	}
+}
 
 // BearerToken extracts the token from an Authorization header value, matching the
 // scheme case-insensitively. It returns "" when the value is absent or not a

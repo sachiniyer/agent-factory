@@ -709,6 +709,18 @@ func TestClickCommittingWebTabPreviewShowsGuardNotAttach(t *testing.T) {
 	assert.False(t, h.interactive, "a web tab cannot embed either")
 }
 
+func TestWebTabAttachGuardDoesNotExposeAccessToken(t *testing.T) {
+	const token = "af-sentinel-webtab-guard"
+	inst := startedLocalInstance(t, "web-host")
+	_, err := inst.AddWebTab("http://localhost:3000/app?access_token="+token+"&view=2", "")
+	require.NoError(t, err)
+
+	err = webTabAttachGuard(inst, len(inst.GetTabs())-1)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), token)
+	assert.Contains(t, err.Error(), "access_token=REDACTED")
+}
+
 // TestAttachFocusedBrowserOnlyPaneShowsGuardNotAttach pins webTabAttachGuard on
 // the FOCUSED-PANE attach path (handleEnterPane, #1817) — the one path into
 // attachInstanceTab that nothing else fences.

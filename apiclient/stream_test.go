@@ -19,6 +19,34 @@ import (
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
+func TestDialStreamErrorDoesNotExposeAccessToken(t *testing.T) {
+	const token = "af-sentinel-2644-do-not-log"
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	c, err := NewRemote("http://"+addr, token)
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	_, err = c.DialStream(context.Background(), "probe", "", "", 0, 0)
+	if err == nil {
+		t.Fatal("dial against a closed port returned nil error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("failed remote WebSocket dial exposed its access_token query value: %s", err)
+	}
+	if !strings.Contains(err.Error(), addr) {
+		t.Fatalf("redaction removed the failed endpoint needed for diagnosis: %s", err)
+	}
+}
+
 // previewServer stands up a Unix-socket HTTP server answering POST /v1/Preview
 // like the daemon does, and returns a Client dialing it plus a pointer to the
 // last request it saw (so a test can assert the tab/full/title were carried).

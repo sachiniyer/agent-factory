@@ -55,9 +55,9 @@ func (d dirtyWriter) Write(p []byte) (int, error) {
 // real file/stderr loggers. Without this, code paths like `af upgrade` that
 // forget to call Initialize crash inside the SIGTERM fallback (#514).
 func init() {
-	InfoLog = log.New(io.Discard, "", 0)
-	WarningLog = log.New(io.Discard, "", 0)
-	ErrorLog = log.New(io.Discard, "", 0)
+	InfoLog = log.New(redactedLogSink(io.Discard), "", 0)
+	WarningLog = log.New(redactedLogSink(io.Discard), "", 0)
+	ErrorLog = log.New(redactedLogSink(io.Discard), "", 0)
 }
 
 // mu guards writes to globalLogFile and the exported *log.Logger pointers
@@ -428,13 +428,13 @@ func Initialize(daemon bool) {
 	// through to stderr instead of being dropped.
 	if globalLogFile != nil {
 		if InfoLog != nil {
-			InfoLog.SetOutput(os.Stderr)
+			InfoLog.SetOutput(redactedLogSink(os.Stderr))
 		}
 		if WarningLog != nil {
-			WarningLog.SetOutput(os.Stderr)
+			WarningLog.SetOutput(redactedLogSink(os.Stderr))
 		}
 		if ErrorLog != nil {
-			ErrorLog.SetOutput(os.Stderr)
+			ErrorLog.SetOutput(redactedLogSink(os.Stderr))
 		}
 		_ = globalLogFile.Close()
 		globalLogFile = nil
@@ -456,9 +456,9 @@ func Initialize(daemon bool) {
 		if daemon {
 			fmtS = "[DAEMON] %s"
 		}
-		InfoLog = log.New(os.Stderr, fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
-		WarningLog = log.New(dirtyWriter{os.Stderr}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
-		ErrorLog = log.New(dirtyWriter{os.Stderr}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+		InfoLog = log.New(redactedLogSink(os.Stderr), fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
+		WarningLog = log.New(dirtyWriter{redactedLogSink(os.Stderr)}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
+		ErrorLog = log.New(dirtyWriter{redactedLogSink(os.Stderr)}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
 		return
 	}
 
@@ -474,9 +474,9 @@ func Initialize(daemon bool) {
 	if daemon {
 		fmtS = "[DAEMON] %s"
 	}
-	InfoLog = log.New(w, fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
-	WarningLog = log.New(dirtyWriter{w}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
-	ErrorLog = log.New(dirtyWriter{w}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
+	InfoLog = log.New(redactedLogSink(w), fmt.Sprintf(fmtS, "INFO:"), log.Ldate|log.Ltime|log.Lshortfile)
+	WarningLog = log.New(dirtyWriter{redactedLogSink(w)}, fmt.Sprintf(fmtS, "WARNING:"), log.Ldate|log.Ltime|log.Lshortfile)
+	ErrorLog = log.New(dirtyWriter{redactedLogSink(w)}, fmt.Sprintf(fmtS, "ERROR:"), log.Ldate|log.Ltime|log.Lshortfile)
 
 	globalLogFile = w
 }
@@ -527,13 +527,13 @@ func closeWithReport(report bool) {
 	// guarantees no Printf ever lands on a closed fd. Reversing this order
 	// loses messages logged in the gap between Close and SetOutput (#642).
 	if InfoLog != nil {
-		InfoLog.SetOutput(os.Stderr)
+		InfoLog.SetOutput(redactedLogSink(os.Stderr))
 	}
 	if WarningLog != nil {
-		WarningLog.SetOutput(os.Stderr)
+		WarningLog.SetOutput(redactedLogSink(os.Stderr))
 	}
 	if ErrorLog != nil {
-		ErrorLog.SetOutput(os.Stderr)
+		ErrorLog.SetOutput(redactedLogSink(os.Stderr))
 	}
 	// Only claim a file was written when one was actually opened. When
 	// Initialize fell back to stderr (or was never called), globalLogFile is

@@ -30,8 +30,8 @@ import (
 // Authorization header on a WS handshake, so the token rides ?access_token= exactly
 // as /v1/sessions/{id}/stream does. Neither handler logs the request URL, so the
 // token never reaches a log (#2461). If a future error path must log a URL here, it
-// MUST scrub it with redactAccessTokenInURL — url.Redacted() leaves a query token
-// intact (see session/agentserver_remote.go). Known, accepted limitation (per the
+// MUST scrub it with agentproto.RedactAccessTokenURL — url.Redacted() leaves a query token
+// intact (see agentproto/auth.go). Known, accepted limitation (per the
 // #2467 decision): the durable token still rides every stream URL repo-wide, which
 // is fine behind the tailnet-only listener; a repo-wide move to WS tickets is not
 // in scope.

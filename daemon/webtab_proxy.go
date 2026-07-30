@@ -470,12 +470,14 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	// confused-deputy hole this transport closes.
 	if !target.isUnixSocket() && !session.IsLoopbackWebTarget(target.URL) {
 		writeHTTPError(w, r, http.StatusBadRequest,
-			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied", target.URL))
+			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied",
+				agentproto.RedactAccessTokenURL(target.URL)))
 		return
 	}
 	targetURL, err := url.Parse(target.URL)
 	if err != nil {
-		writeHTTPError(w, r, http.StatusInternalServerError, fmt.Errorf("invalid web tab target: %w", err))
+		writeHTTPError(w, r, http.StatusInternalServerError, fmt.Errorf("invalid web tab target: %w",
+			agentproto.RedactAccessTokenError(err, "")))
 		return
 	}
 
@@ -628,7 +630,10 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			log.WarningLog.Printf("web tab proxy to %s failed: %v", targetURL.Redacted(), err)
+			safeErr := agentproto.RedactAccessTokenError(err,
+				agentproto.AccessTokenFromQuery(targetURL.Query()))
+			log.WarningLog.Printf("web tab proxy to %s failed: %v",
+				agentproto.RedactAccessTokenURL(targetURL.String()), safeErr)
 			// Mark this 502 as AF's OWN before writing it (#1909). Reaching here means
 			// the upstream never answered — the transport failed, or ModifyResponse
 			// rejected the response — so no upstream header has been copied to w and
@@ -640,7 +645,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// no longer reach the client.
 			w.Header().Set(webtabErrorHeader, webtabErrorUpstreamUnreachable)
 			writeHTTPError(w, r, http.StatusBadGateway,
-				fmt.Errorf("web tab dev server at %s is unreachable: %w", targetURL.Host, err))
+				fmt.Errorf("web tab dev server at %s is unreachable: %w", targetURL.Host, safeErr))
 		},
 	}
 	proxy.ServeHTTP(w, r)

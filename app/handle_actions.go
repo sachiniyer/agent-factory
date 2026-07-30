@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -842,7 +843,8 @@ func webTabAttachGuard(inst *session.Instance, tabIdx int) error {
 	}
 	switch tabs[tabIdx].Kind {
 	case session.TabKindWeb:
-		return fmt.Errorf("this is a web tab (%s) — view it in the web UI or open the URL in a browser", tabs[tabIdx].URL)
+		return fmt.Errorf("this is a web tab (%s) — view it in the web UI or open the URL in a browser",
+			agentproto.RedactAccessTokenURL(tabs[tabIdx].URL))
 	case session.TabKindVSCode:
 		return fmt.Errorf("this is a VS Code tab — view it in the web UI; a terminal can't render the editor")
 	default:
