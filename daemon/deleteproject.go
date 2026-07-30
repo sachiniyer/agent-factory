@@ -213,7 +213,20 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			result.Killed = append(result.Killed, session.InstanceData{ID: killed.ID, Title: killed.Title})
 			continue
 		}
-		_, archived, err := m.ArchiveSession(ArchiveSessionRequest{Title: t.title, RepoID: repoID})
+		// Carry the same snapshotted stable identity into archive that the
+		// external-session kill path above carries into KillSession. A title-only
+		// lookup here can resolve a NEW same-title session created after the
+		// snapshot and archive work the user never confirmed deleting.
+		_, archived, err := m.ArchiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID})
+		if errors.Is(err, errSessionNotFound) {
+			// Snapshot-gated idempotency, exactly like the kill path: this target
+			// existed under m.mu and is now authoritatively absent by stable ID, so
+			// the original is already gone. Do not infer anything about a possible
+			// replacement; the live-session re-check below observes it separately
+			// and keeps the project registered for a fresh delete decision.
+			archived = session.InstanceData{ID: t.id, Title: t.title}
+			err = nil
+		}
 		// A target that is ALREADY archived is idempotent SUCCESS, not a failure
 		// (#2108). The snapshot above is a point-in-time read taken under m.mu and
 		// then acted on with the lock released, so a concurrent ArchiveSession can

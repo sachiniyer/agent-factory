@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -308,6 +309,67 @@ func TestDeleteProject_ConcurrentlyArchivedTargetIsSuccess(t *testing.T) {
 	assert.Equal(t, session.Archived, beta.GetStatus())
 	assert.True(t, exists(betaSrc), "the seam only flipped liveness; this delete must not re-move an archived worktree")
 	assert.Empty(t, liveProjectRoots(manager.Snapshot(repoID)), "no live session ⇒ the project drops out of the active list")
+}
+
+// TestDeleteProject_DoesNotArchiveSameTitleReplacement covers the stable-ID
+// half of the snapshot contract. DeleteProject captures beta, then releases
+// m.mu while it archives alpha. If beta is killed and recreated in that window,
+// the replacement is a new session that was never part of the user's confirmed
+// delete. It must survive; the final concurrent-create guard must then keep the
+// project registered so a retry can make a fresh decision about that session.
+func TestDeleteProject_DoesNotArchiveSameTitleReplacement(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "alpha")
+	beta, _ := registerArchivable(t, manager, repoID, repoPath, "beta")
+	require.NoError(t, manager.SaveInstances())
+
+	originalBetaID := beta.ID
+	var replacement *session.Instance
+	var replacementPath string
+	recreated := false
+	orig := archivePersist
+	t.Cleanup(func() { archivePersist = orig })
+	archivePersist = func(m *Manager, rid string, inst *session.Instance) error {
+		if inst.Title == "alpha" && !recreated {
+			recreated = true
+			_, err := m.KillSession(KillSessionRequest{ID: originalBetaID, Title: "beta", RepoID: repoID})
+			require.NoError(t, err)
+
+			replacementPath = filepath.Join(filepath.Dir(repoPath), "wt-beta-replacement")
+			const replacementBranch = "af/beta-replacement"
+			out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", replacementBranch, replacementPath).CombinedOutput()
+			require.NoError(t, err, string(out))
+			gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, replacementPath, "beta", replacementBranch, "", false, true)
+			require.NoError(t, err)
+			replacement, err = session.NewInstance(session.InstanceOptions{Title: "beta", Path: repoPath, Program: "claude"})
+			require.NoError(t, err)
+			replacement.SetBackend(session.NewFakeBackend())
+			replacement.SetGitWorktreeForTest(gw)
+			replacement.SetStartedForTest(true)
+			replacement.SetStatusForTest(session.Ready)
+			m.mu.Lock()
+			m.instances[daemonInstanceKey(repoID, "beta")] = replacement
+			m.mu.Unlock()
+			require.NotEqual(t, originalBetaID, replacement.ID)
+			require.NoError(t, appendInstanceData(repoID, replacement.ToInstanceData()),
+				"a completed recreation durably records the replacement identity")
+		}
+		return orig(m, rid, inst)
+	}
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.Error(t, err, "a replacement session must keep the project registered for a fresh delete decision")
+	assert.Contains(t, err.Error(), "a session started for this project meanwhile")
+	require.NotNil(t, replacement)
+	assert.NotEqual(t, session.Archived, replacement.GetStatus(), "the recreated session must not be archived for the old target")
+	assert.True(t, exists(replacementPath), "the recreated session's worktree must stay in place")
+
+	archivedIDs := make(map[string]bool, len(result.Archived))
+	for _, data := range result.Archived {
+		archivedIDs[data.ID] = true
+	}
+	assert.True(t, archivedIDs[originalBetaID], "the already-gone snapshotted beta counts as completed")
+	assert.False(t, archivedIDs[replacement.ID], "the replacement identity was never in the delete snapshot")
 }
 
 // TestDeleteProject_GenuineArchiveFailureStillReportsPartialFailure is the
