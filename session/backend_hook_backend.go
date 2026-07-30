@@ -388,6 +388,7 @@ func hookOutputSuffix(out []byte) string {
 // object truncated after writing the bearer credential. Hook output is attached
 // to persistent session errors, so that tail must be safe too.
 func redactHookOutputTokens(output string) string {
+	output = redactCompleteHookJSON(output)
 	ranges := hookTokenRedactionRanges(output)
 	if len(ranges) == 0 {
 		return output
@@ -402,6 +403,89 @@ func redactHookOutputTokens(output string) string {
 	}
 	redacted.WriteString(output[written:])
 	return redacted.String()
+}
+
+// redactCompleteHookJSON handles structured log records that serialize another
+// JSON document into a string field. The byte-oriented fallback below cannot
+// recognize the escaped delimiters in that inner document, so decode complete
+// values first and recursively sanitize JSON-bearing strings. UseNumber keeps
+// unrelated resource IDs exact when a sanitized value is re-encoded.
+func redactCompleteHookJSON(output string) string {
+	var redacted strings.Builder
+	written := 0
+	for cursor := 0; cursor < len(output); {
+		candidate, next := extractJSONAt(output, cursor)
+		if candidate == "" {
+			break
+		}
+		start := next - len(candidate)
+		replacement, changed := redactHookJSONDocument(candidate)
+		if changed {
+			redacted.WriteString(output[written:start])
+			redacted.WriteString(replacement)
+			written = next
+		}
+		cursor = next
+	}
+	if written == 0 {
+		return output
+	}
+	redacted.WriteString(output[written:])
+	return redacted.String()
+}
+
+func redactHookJSONDocument(document string) (string, bool) {
+	decoder := json.NewDecoder(strings.NewReader(document))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return document, false
+	}
+
+	value, changed := redactHookJSONValue(value)
+	if !changed {
+		return document, false
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return document, false
+	}
+	return string(encoded), true
+}
+
+func redactHookJSONValue(value any) (any, bool) {
+	switch value := value.(type) {
+	case map[string]any:
+		changed := false
+		for key, child := range value {
+			if strings.EqualFold(key, "token") {
+				value[key] = "[REDACTED]"
+				changed = true
+				continue
+			}
+			redacted, childChanged := redactHookJSONValue(child)
+			if childChanged {
+				value[key] = redacted
+				changed = true
+			}
+		}
+		return value, changed
+	case []any:
+		changed := false
+		for index, child := range value {
+			redacted, childChanged := redactHookJSONValue(child)
+			if childChanged {
+				value[index] = redacted
+				changed = true
+			}
+		}
+		return value, changed
+	case string:
+		redacted := redactCompleteHookJSON(value)
+		return redacted, redacted != value
+	default:
+		return value, false
+	}
 }
 
 type hookOutputRange struct {

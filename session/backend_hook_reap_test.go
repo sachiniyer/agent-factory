@@ -685,6 +685,41 @@ func TestHookOutputSuffixHandlesEscapedQuoteFlood(t *testing.T) {
 	assert.Equal(t, "; its output was:\n"+output, suffix)
 }
 
+// TestHookOutputSuffixRedactsJSONEscapedToken covers structured loggers that
+// serialize endpoint JSON into a string field. The inner bearer token is still
+// sensitive even though its delimiters are escaped by the outer JSON object.
+func TestHookOutputSuffixRedactsJSONEscapedToken(t *testing.T) {
+	const secret = "json-escaped-token-must-not-leak"
+	output := `{"endpoint":"{\"url\":\"\",\"token\":\"json-escaped-token-must-not-leak\"}"}`
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "a serialized endpoint object must not expose its bearer token")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
+// TestExtractJSONAtHandlesMalformedDelimiterFlood keeps endpoint selection
+// linear after a valid JSON log. No unmatched opener can produce a complete
+// value, so retrying a suffix scan from each one is pure quadratic work.
+func TestExtractJSONAtHandlesMalformedDelimiterFlood(t *testing.T) {
+	const logRecord = `{"level":"info"}`
+	output := logRecord + strings.Repeat("{", 50_000)
+
+	first, next := extractJSONAt(output, 0)
+	require.Equal(t, logRecord, first)
+	started := time.Now()
+	value, end := extractJSONAt(output, next)
+	assert.Less(t, time.Since(started), time.Second, "unmatched delimiters must be scanned in linear time")
+	assert.Empty(t, value)
+	assert.Equal(t, len(output), end)
+
+	balanced := strings.Repeat("[", 50_000) + "not-json" + strings.Repeat("]", 50_000)
+	started = time.Now()
+	value, end = extractJSONAt(balanced, 0)
+	assert.Less(t, time.Since(started), time.Second, "balanced malformed nesting must be scanned in linear time")
+	assert.Empty(t, value)
+	assert.Equal(t, len(balanced), end)
+}
+
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
 // killed or interrupted while writing its endpoint JSON. The unmatched tail is
 // still diagnostic output, but a complete quoted token value inside it is just

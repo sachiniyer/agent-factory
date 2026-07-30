@@ -87,49 +87,92 @@ func extractJSON(output string) string {
 // extractJSONAt returns the first complete JSON value at or after start and the
 // byte offset immediately after it. The cursor lets shape-aware callers inspect
 // every value in a combined stdout/stderr stream without rescanning prior output.
+type jsonCandidateRange struct {
+	start  int
+	end    int
+	parent int
+}
+
 func extractJSONAt(output string, start int) (string, int) {
-	for i := start; i < len(output); i++ {
-		if output[i] != '{' && output[i] != '[' {
+	var candidates []jsonCandidateRange
+	var stack []int
+	inString := false
+	escape := false
+	for cursor := start; cursor < len(output); cursor++ {
+		c := output[cursor]
+		if len(stack) == 0 {
+			if c != '{' && c != '[' {
+				continue
+			}
+			candidates = append(candidates[:0], jsonCandidateRange{start: cursor, parent: -1})
+			stack = append(stack[:0], 0)
+			inString = false
+			escape = false
 			continue
 		}
 
-		var depth int
-		inString := false
-		escape := false
-
-		for j := i; j < len(output); j++ {
-			c := output[j]
-
-			if escape {
-				escape = false
-				continue
-			}
-			if c == '\\' && inString {
-				escape = true
-				continue
-			}
-			if c == '"' {
-				inString = !inString
-				continue
-			}
-
-			if !inString {
-				if c == '{' || c == '[' {
-					depth++
-				}
-				if c == '}' || c == ']' {
-					depth--
-					if depth == 0 {
-						candidate := output[i : j+1]
-						var test interface{}
-						if json.Unmarshal([]byte(candidate), &test) == nil {
-							return candidate, j + 1
-						}
-						break
-					}
-				}
-			}
+		if escape {
+			escape = false
+			continue
 		}
+		if c == '\\' && inString {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+
+		if c == '{' || c == '[' {
+			candidates = append(candidates, jsonCandidateRange{
+				start:  cursor,
+				parent: stack[len(stack)-1],
+			})
+			stack = append(stack, len(candidates)-1)
+			continue
+		}
+		if c != '}' && c != ']' {
+			continue
+		}
+
+		candidateIndex := stack[len(stack)-1]
+		candidates[candidateIndex].end = cursor + 1
+		stack = stack[:len(stack)-1]
+		if len(stack) != 0 {
+			continue
+		}
+
+		candidate := candidates[0]
+		if json.Valid([]byte(output[candidate.start:candidate.end])) {
+			return output[candidate.start:candidate.end], candidate.end
+		}
+		candidates = candidates[:0]
+	}
+	if candidate, ok := firstRecoverableJSONCandidate(output, candidates); ok {
+		return output[candidate.start:candidate.end], candidate.end
 	}
 	return "", len(output)
+}
+
+// If an outer delimiter never closed, a later complete JSON value would
+// otherwise be hidden inside it. Only validate completed direct children of an
+// unresolved candidate. Those ranges are disjoint, which preserves recovery
+// without repeatedly validating every nested suffix of malformed output.
+func firstRecoverableJSONCandidate(output string, candidates []jsonCandidateRange) (jsonCandidateRange, bool) {
+	for _, candidate := range candidates {
+		if candidate.end <= candidate.start {
+			continue
+		}
+		if candidate.parent >= 0 && candidates[candidate.parent].end != 0 {
+			continue
+		}
+		if json.Valid([]byte(output[candidate.start:candidate.end])) {
+			return candidate, true
+		}
+	}
+	return jsonCandidateRange{}, false
 }
