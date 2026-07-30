@@ -93,6 +93,49 @@ func TestPane_AutoHideViaPreviewFocusStartsClearTimer(t *testing.T) {
 		"updatePanePreview returns the clear-timer cmd so the notice auto-clears after 3s (#1685)")
 }
 
+// TestPane_AutoHideViaPreviewCommitToOpenTabStartsClearTimer is the #2639
+// regression: a preview target can become open in another pane before Enter
+// commits it. commitPanePreviewReplace then focuses that already-open pane,
+// whose relayout hides the preview owner at narrow widths. The notice must be
+// consumed and its clear timer returned just like every other focus relayout.
+func TestPane_AutoHideViaPreviewCommitToOpenTabStartsClearTimer(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, layout.MultiPaneMinWidth-1, 24) // only one pane fits
+
+	visible, hidden := openPanesForBothAndReturnHidden(t, h)
+	owner := h.store.FindOpenPane(visible, 0)
+	target := h.store.FindOpenPane(hidden, 0)
+	require.NotNil(t, owner)
+	require.NotNil(t, target)
+	require.NotSame(t, owner, target)
+
+	w := h.paneWindows[owner.ID()]
+	require.NotNil(t, w)
+	original := paneBinding{instance: visible, tab: 0}
+	preview := paneBinding{instance: hidden, tab: 0}
+	seq := w.SetPreview(preview.instance, preview.tab, paneBindingLabel(original))
+	h.panePreviewTxn = &panePreviewTxn{
+		ownerPaneID: owner.ID(),
+		original:    original,
+		target:      preview,
+		seq:         seq,
+	}
+
+	// Reset the notice left by setup so only the commit relayout is measured.
+	h.errBox.Clear()
+	h.pendingPaneAutoHideStatus = ""
+	h.paneAutoHideNoticeID = 0
+
+	committed, cmd := h.commitPanePreviewReplace()
+
+	require.Same(t, target, committed, "the preview commits to the pane that already owns the target tab")
+	require.NotEmpty(t, h.errBox.FullError(), "the commit relayout reports the newly hidden preview owner")
+	assert.Equal(t, "", h.pendingPaneAutoHideStatus,
+		"the preview-commit path consumes the pending status instead of leaving it forever (#2639)")
+	require.NotNil(t, cmd,
+		"preview commit returns the clear-timer cmd so the notice auto-clears after 3s (#2639)")
+}
+
 // TestPane_OpenFocusRefreshProducedStatusStillClears guards the Greptile edge on
 // PR #1771: a status produced by the SUBSEQUENT selectionChanged refresh during
 // an open-or-focus must still be drained + timed. Here focusOpenPane on the

@@ -384,7 +384,10 @@ func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {
 		m.store.TouchOpenPane(existing)
 		m.relayout()
 		m.focusRegion(layout.PaneRegion(existing.ID()))
-		return existing, m.panesRefresh(m.attached.Load())
+		return existing, tea.Batch(
+			m.panesRefresh(m.attached.Load()),
+			m.consumePaneAutoHideStatus(),
+		)
 	}
 	w := m.paneWindows[owner.ID()]
 	m.panePreviewTxn = nil
@@ -399,7 +402,13 @@ func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {
 	m.lastPaneCapture[owner.ID()] = time.Time{}
 	m.relayout()
 	m.focusRegion(layout.PaneRegion(owner.ID()))
-	return owner, m.panesRefresh(m.attached.Load())
+	// Both successful commit branches relayout directly rather than through
+	// focusOpenPane/openOrFocusPane. Drain any auto-hide status here so neither
+	// branch can leave a notice without its clear timer (#2639).
+	return owner, tea.Batch(
+		m.panesRefresh(m.attached.Load()),
+		m.consumePaneAutoHideStatus(),
+	)
 }
 
 func (m *home) commitPanePreviewAlongside() tea.Cmd {
