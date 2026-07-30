@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -172,6 +173,12 @@ func (m *Manager) validateTitleShapeLocked(title string, allowReserved bool) err
 	// before the emptiness gate; the TUI naming flow applies the same check.
 	if strings.TrimSpace(title) == "" {
 		return fmt.Errorf("session title is required")
+	}
+	// Titles render as one sidebar row in every TUI client. Reject control
+	// characters at the authoritative create boundary so CLI/API callers cannot
+	// bypass the TUI's pasted-rune sanitization and create multi-line rows (#2640).
+	if strings.IndexFunc(title, unicode.IsControl) >= 0 {
+		return fmt.Errorf("session title must be a single line and contain no control characters")
 	}
 	// The "root" title belongs to the daemon-managed root agent (#1106).
 	// Every creation path lands here — TUI, `af sessions create`, task

@@ -76,6 +76,33 @@ func TestHandleStateNewKeySpaceUnderLimit(t *testing.T) {
 	assert.Equal(t, "hello ", homeModel.namingInstance.Title)
 }
 
+// TestHandleStateNewMultiLinePasteKeepsTitleSingleLine reproduces #2640 at the
+// Bubble Tea boundary: bracketed paste is ONE KeyRunes message, not a sequence
+// of per-character key events. Control runes in that one payload must not enter
+// the title and turn a single sidebar row into several terminal lines.
+func TestHandleStateNewMultiLinePasteKeepsTitleSingleLine(t *testing.T) {
+	h := &home{
+		ctx:       context.Background(),
+		state:     stateNew,
+		appConfig: config.DefaultConfig(),
+		errBox:    ui.NewErrBox(),
+	}
+	instance, err := session.NewInstance(session.InstanceOptions{
+		Path: t.TempDir(), Program: "claude",
+	})
+	require.NoError(t, err)
+	h.namingInstance = instance
+
+	_, _ = h.handleStateNew(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Paste: true,
+		Runes: []rune("alpha\nbeta\r\t\x1b"),
+	})
+
+	assert.Equal(t, "alphabeta", instance.Title,
+		"a single pasted KeyRunes payload must not retain layout-breaking control characters")
+}
+
 func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 	h := newTestHome(t)
 	h.state = stateNew

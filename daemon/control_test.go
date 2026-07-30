@@ -366,6 +366,30 @@ func TestValidateTitleAvailableLockedRejectsWhitespace(t *testing.T) {
 	}
 }
 
+// TestValidateTitleAvailableLockedRejectsControlCharacters keeps the daemon's
+// title admission authoritative for every client. The TUI strips controls from
+// pasted titles, but CLI/API callers must not be able to create the same
+// multi-line sidebar corruption by sending them directly (#2640).
+func TestValidateTitleAvailableLockedRejectsControlCharacters(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	manager, err := newManagerShell(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("newManagerShell: %v", err)
+	}
+
+	for _, title := range []string{"alpha\nbeta", "alpha\rbeta", "alpha\tbeta", "alpha\x1bbeta"} {
+		manager.mu.Lock()
+		err := manager.validateTitleAvailableLocked("repo-id", "/tmp/repo", title, "claude", runtimeNamespaceLocalTmux, false, nil)
+		manager.mu.Unlock()
+		if err == nil {
+			t.Fatalf("expected title containing controls %q to be rejected", title)
+		}
+		if !strings.Contains(err.Error(), "single line") || !strings.Contains(err.Error(), "control") {
+			t.Fatalf("title %q: expected a single-line control-character error, got: %v", title, err)
+		}
+	}
+}
+
 // TestManagerCreateSessionRejectsCaseVariantTitleFromDisk covers the disk-side
 // branch of the #605 fix: a case-variant title persisted to disk from a prior
 // daemon run must still be rejected when the manager loads fresh and a new

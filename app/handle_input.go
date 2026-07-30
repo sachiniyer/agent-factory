@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/namegen"
 	"github.com/sachiniyer/agent-factory/log"
@@ -219,7 +220,16 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// openBackendPicker.
 		return m.openBackendPicker()
 	case tea.KeyRunes:
-		newTitle := instance.Title + string(msg.Runes)
+		// Bracketed paste arrives as ONE KeyRunes message and may contain
+		// newlines or other control runes. Titles are sidebar rows, so keep only
+		// printable content from the whole payload before measuring it (#2640).
+		cleanRunes := make([]rune, 0, len(msg.Runes))
+		for _, r := range msg.Runes {
+			if !unicode.IsControl(r) {
+				cleanRunes = append(cleanRunes, r)
+			}
+		}
+		newTitle := instance.Title + string(cleanRunes)
 		if runewidth.StringWidth(newTitle) > 32 {
 			return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
 		}
