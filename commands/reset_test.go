@@ -620,6 +620,9 @@ func TestFactoryReset_ResilientPartialFailure(t *testing.T) {
 	if summary.branches != 2 {
 		t.Errorf("branches = %d, want 2", summary.branches)
 	}
+	if summary.tasks != 0 {
+		t.Errorf("tasks = %d, want 0 because the task-store removal did not complete", summary.tasks)
+	}
 
 	// Clear the injected failure and re-run: a clean run completes.
 	if err := os.RemoveAll(tasksPath); err != nil {

@@ -96,6 +96,9 @@ type resetPlan struct {
 	worktrees               int                 // AF-managed worktrees (excludes external --here trees)
 	repoRoots               map[string]struct{} // distinct repos with AF records (display only)
 	branches                map[string][]string // repoRoot -> AF-created branch names to prune
+	// sessionCountsByRepo lets execution count only records whose repo-level
+	// delete/retain write completed, instead of echoing the planned totals.
+	sessionCountsByRepo map[string]resetSessionCounts
 
 	// worktreeTargets are the SPECIFIC worktree dirs AF created for its sessions
 	// (from the records), each paired with its repo root. Reset removes exactly
@@ -117,9 +120,15 @@ type resetPlan struct {
 // root git needs to operate on it and the repoID whose record set describes it
 // (the record is retained when the removal is blocked — see #2110).
 type worktreeTarget struct {
-	repoID string
-	root   string
-	path   string
+	repoID   string
+	root     string
+	path     string
+	archived bool // category of the owning record, for blocked-result accounting
+}
+
+type resetSessionCounts struct {
+	sessions int
+	archived int
 }
 
 func (p *resetPlan) branchCount() int {
@@ -466,10 +475,11 @@ func planFactoryReset() (*resetPlan, error) {
 	}
 
 	plan := &resetPlan{
-		configDir: dir,
-		storage:   storage,
-		repoRoots: make(map[string]struct{}),
-		branches:  make(map[string][]string),
+		configDir:           dir,
+		storage:             storage,
+		repoRoots:           make(map[string]struct{}),
+		branches:            make(map[string][]string),
+		sessionCountsByRepo: make(map[string]resetSessionCounts),
 	}
 
 	all, err := state.GetAllInstances()
@@ -502,11 +512,16 @@ func planFactoryReset() (*resetPlan, error) {
 			if root == "" {
 				root = r.Path
 			}
-			if session.IsArchivedData(r) {
+			archived := session.IsArchivedData(r)
+			counts := plan.sessionCountsByRepo[repoID]
+			if archived {
 				plan.archived++
+				counts.archived++
 			} else {
 				plan.sessions++
+				counts.sessions++
 			}
+			plan.sessionCountsByRepo[repoID] = counts
 			// Target ONLY the worktree dirs AF created for its sessions. An
 			// external (--here) session IS the user's live tree, so it is never a
 			// target. This record-driven list is why reset never removes the
@@ -514,7 +529,7 @@ func planFactoryReset() (*resetPlan, error) {
 			if r.Worktree.WorktreePath != "" && !r.Worktree.ExternalWorktree && root != "" {
 				plan.worktrees++
 				plan.worktreeTargets = append(plan.worktreeTargets,
-					worktreeTarget{repoID: repoID, root: root, path: r.Worktree.WorktreePath})
+					worktreeTarget{repoID: repoID, root: root, path: r.Worktree.WorktreePath, archived: archived})
 			}
 			if root == "" {
 				continue
@@ -627,16 +642,15 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		projectsRemoved = plan.projects
 	}
 
-	// Snapshot which AF-created branches exist up front, so the final count is
-	// accurate even though branch deletion happens AFTER worktree removal.
+	// Collect the AF-created branch targets before worktree removal. The deletion
+	// primitive reports whether each branch was actually removed, which is the
+	// only result included in the final summary.
 	type branchRef struct{ root, name string }
 	var planned []branchRef
-	existedBefore := make(map[branchRef]bool)
 	for root, names := range plan.branches {
 		for _, b := range names {
 			ref := branchRef{root, b}
 			planned = append(planned, ref)
-			existedBefore[ref] = git.LocalBranchExists(root, b)
 		}
 	}
 
@@ -652,11 +666,24 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// the record here is what made the old "re-run to finish" guidance a lie — the
 	// re-run planned nothing and the branch stayed blocked forever.
 	blockedWorktrees := make(map[string][]string) // repoID -> worktree paths still registered
+	blockedSessions := make(map[string]resetSessionCounts)
+	worktreesRemoved := 0
 	for _, wt := range plan.worktreeTargets {
-		if _, err := git.RemoveWorktreeDir(wt.root, wt.path); err != nil {
+		removed, err := git.RemoveWorktreeDir(wt.root, wt.path)
+		if removed {
+			worktreesRemoved++
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("remove worktree %s: %w", wt.path, err))
 			if errors.Is(err, git.ErrWorktreeStillRegistered) {
 				blockedWorktrees[wt.repoID] = append(blockedWorktrees[wt.repoID], wt.path)
+				counts := blockedSessions[wt.repoID]
+				if wt.archived {
+					counts.archived++
+				} else {
+					counts.sessions++
+				}
+				blockedSessions[wt.repoID] = counts
 			}
 		}
 	}
@@ -665,19 +692,15 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// archived), gated on BranchCreatedByUs at plan time. After worktree removal
 	// + prune above, a live session's branch is no longer checked out, so
 	// `git branch -D` succeeds. Best-effort per branch.
-	for _, ref := range planned {
-		if _, err := git.DeleteLocalBranch(ref.root, ref.name); err != nil {
-			log.WarningLog.Printf("reset: %v", err)
-			errs = append(errs, fmt.Errorf("delete branch %s in %s: %w", ref.name, ref.root, err))
-		}
-	}
-
-	// A planned branch that existed before and is gone now was removed by this
-	// reset.
 	branchesDeleted := 0
 	for _, ref := range planned {
-		if existedBefore[ref] && !git.LocalBranchExists(ref.root, ref.name) {
+		removed, err := git.DeleteLocalBranch(ref.root, ref.name)
+		if removed {
 			branchesDeleted++
+		}
+		if err != nil {
+			log.WarningLog.Printf("reset: %v", err)
+			errs = append(errs, fmt.Errorf("delete branch %s in %s: %w", ref.name, ref.root, err))
 		}
 	}
 
@@ -695,20 +718,33 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	for rid := range blockedWorktrees {
 		preserveRepoIDs = append(preserveRepoIDs, rid)
 	}
+	removedSessions := resetSessionCounts{}
 	if len(preserveRepoIDs) == 0 {
 		if err := plan.storage.DeleteAllInstances(); err != nil {
 			errs = append(errs, fmt.Errorf("reset session storage: %w", err))
+		} else {
+			removedSessions.sessions = plan.sessions
+			removedSessions.archived = plan.archived
 		}
 	} else {
 		for _, rid := range plan.processedRepoIDs {
 			if paths, blocked := blockedWorktrees[rid]; blocked {
 				if err := retainBlockedInstances(rid, paths); err != nil {
 					errs = append(errs, fmt.Errorf("retain blocked session records for repo %s: %w", rid, err))
+				} else {
+					plannedCounts := plan.sessionCountsByRepo[rid]
+					blockedCounts := blockedSessions[rid]
+					removedSessions.sessions += max(0, plannedCounts.sessions-blockedCounts.sessions)
+					removedSessions.archived += max(0, plannedCounts.archived-blockedCounts.archived)
 				}
 				continue
 			}
 			if err := config.DeleteRepoInstances(rid); err != nil {
 				errs = append(errs, fmt.Errorf("delete instances for repo %s: %w", rid, err))
+			} else {
+				counts := plan.sessionCountsByRepo[rid]
+				removedSessions.sessions += counts.sessions
+				removedSessions.archived += counts.archived
 			}
 		}
 	}
@@ -727,8 +763,11 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	errs = append(errs, removeArchivedDirs(plan.configDir, preserveRepoIDs)...)
 
 	// Delete the task store (removes <AF_HOME>/tasks.json).
+	tasksRemoved := 0
 	if err := task.DeleteAllTasks(); err != nil {
 		errs = append(errs, fmt.Errorf("reset tasks: %w", err))
+	} else {
+		tasksRemoved = plan.tasks
 	}
 
 	// Remove the remaining AF state trees/files, leaving config (config.toml,
@@ -757,11 +796,11 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		blockedCount += len(paths)
 	}
 	summary := &resetSummary{
-		sessions:  plan.sessions,
-		archived:  plan.archived,
-		tasks:     plan.tasks,
+		sessions:  removedSessions.sessions,
+		archived:  removedSessions.archived,
+		tasks:     tasksRemoved,
 		projects:  projectsRemoved,
-		worktrees: plan.worktrees,
+		worktrees: worktreesRemoved,
 		branches:  branchesDeleted,
 		corrupt:   len(plan.corruptRepoIDs),
 		blocked:   blockedCount,

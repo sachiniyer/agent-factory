@@ -57,6 +57,10 @@ func TestFactoryReset_LockedWorktreeIsRecoverable(t *testing.T) {
 	if summary.blocked != 1 {
 		t.Errorf("summary.blocked = %d, want 1", summary.blocked)
 	}
+	if summary.sessions != 2 || summary.archived != 1 || summary.worktrees != 2 {
+		t.Errorf("summary removed sessions/archived/worktrees = %d/%d/%d, want 2/1/2; the blocked live session and worktree were retained",
+			summary.sessions, summary.archived, summary.worktrees)
+	}
 
 	// --- Ownership safety: git still owns that path, so AF left it alone ---
 	if _, statErr := os.Stat(liveWT); statErr != nil {
@@ -130,5 +134,48 @@ func TestFactoryReset_LockedWorktreeIsRecoverable(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(home, "archived")); !os.IsNotExist(statErr) {
 		t.Errorf("archived/ should be gone after the recovery re-run, stat: %v", statErr)
+	}
+}
+
+// TestFactoryReset_LockedArchivedWorktreeIsNotReportedRemoved guards #2605:
+// a blocked archive keeps both its session record and its worktree, so neither
+// may be included in the summary's completed-removal counts.
+func TestFactoryReset_LockedArchivedWorktreeIsNotReportedRemoved(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+
+	repo, liveWT, reusedWT := seedMockRepo(t, home)
+	repoID := config.RepoIDFromRoot(repo)
+	archivedWT := filepath.Join(home, "archived", repoID, "arch")
+	runGit(t, repo, "worktree", "add", "-q", archivedWT, "af-session-2")
+	seedAFState(t, home, repo, liveWT, reusedWT)
+	runGit(t, repo, "worktree", "lock", archivedWT, "--reason", "still in use")
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("planFactoryReset: %v", err)
+	}
+	summary, err := executeFactoryReset(plan)
+	if !errors.Is(err, git.ErrWorktreeStillRegistered) {
+		t.Fatalf("executeFactoryReset error = %v, want ErrWorktreeStillRegistered", err)
+	}
+	if summary.sessions != 3 || summary.archived != 0 || summary.worktrees != 2 || summary.blocked != 1 {
+		t.Errorf("summary = %+v, want 3 sessions, 0 archived, 2 worktrees, and 1 blocked; the archived record and worktree remain", *summary)
+	}
+
+	if _, statErr := os.Stat(archivedWT); statErr != nil {
+		t.Errorf("locked archived worktree must survive, stat: %v", statErr)
+	}
+	raw, loadErr := config.LoadRepoInstances(repoID)
+	if loadErr != nil {
+		t.Fatalf("LoadRepoInstances: %v", loadErr)
+	}
+	var kept []session.InstanceData
+	if unmarshalErr := json.Unmarshal(raw, &kept); unmarshalErr != nil {
+		t.Fatalf("unmarshal retained records: %v", unmarshalErr)
+	}
+	if len(kept) != 1 || !session.IsArchivedData(kept[0]) {
+		t.Fatalf("retained records = %+v, want exactly the blocked archived session", kept)
 	}
 }
