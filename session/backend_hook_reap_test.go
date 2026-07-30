@@ -589,6 +589,7 @@ func TestHookProvisionSelectsEndpointAmongJSONLogs(t *testing.T) {
 	h := newHookState(t, `
 echo '{"level":"info","msg":"connecting"}' >&2
 echo '{"level":"info","url":"http://wrong.invalid","token":"logged-secret"}' >&2
+echo '{"URL":"http://case-variant.invalid","TOKEN":"case-variant-secret"}' >&2
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 echo '{"level":"info","msg":"tunnel ready"}' >&2
 exit 0
@@ -623,6 +624,19 @@ exit 0
 	assert.Contains(t, err.Error(), "[REDACTED]", "the diagnostic should show that sensitive output was removed")
 	assert.True(t, h.deleteRan(t), "invalid endpoint output must reap the provisioned sandbox")
 	assert.NoDirExists(t, h.sandbox(p.slug))
+}
+
+// TestHookOutputSuffixPreservesNumbersWhileRedactingTokens guards diagnostic
+// fidelity: token redaction must not decode and re-encode unrelated JSON values,
+// which can round large integer resource IDs through float64.
+func TestHookOutputSuffixPreservesNumbersWhileRedactingTokens(t *testing.T) {
+	const resourceID = "9223372036854775807"
+	const secret = "diagnostic-token-must-not-leak"
+
+	suffix := hookOutputSuffix([]byte(`{"resource_id":9223372036854775807,"token":"diagnostic-token-must-not-leak"}`))
+	assert.Contains(t, suffix, resourceID, "redaction must preserve the exact remote resource identifier")
+	assert.NotContains(t, suffix, secret, "redaction must remove the bearer token")
+	assert.Contains(t, suffix, "[REDACTED]")
 }
 
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
