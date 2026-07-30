@@ -62,8 +62,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		m.mu.Unlock()
 	}()
 
-	opLock := m.opLockFor(key)
-	opLock.Lock()
+	opLock, err := m.lockSessionOperationWithin(key, "restore", title)
+	if err != nil {
+		return "", err
+	}
 	defer opLock.Unlock()
 
 	m.mu.Lock()

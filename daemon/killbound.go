@@ -40,13 +40,13 @@ import (
 // finishes the kill with no daemon restart. Bounding the wait is what re-arms
 // the self-heal; the two are the same fix.
 
-// opLockTimeout bounds how long KillSession waits for a session's operation lock
-// before giving up. The lock serializes a kill against an in-flight Recover
-// (#1108) and that exclusion is load-bearing — a kill must never interleave with
-// a respawn — so this stays a real mutual exclusion and NOT a race. What changes
-// is only the failure mode: an unbounded Lock() turns a peer's slow operation
-// into a permanent wedge of this session, while a bounded wait turns it into a
-// retryable error the user can act on.
+// opLockTimeout bounds how long a kill, archive, or manual restore waits for a
+// session's operation lock before giving up. The lock serializes these actions
+// against an in-flight Recover (#1108) and that exclusion is load-bearing — they
+// must never interleave with a respawn — so this stays a real mutual exclusion
+// and NOT a race. What changes is only the failure mode: an unbounded Lock()
+// inside killsInFlight turns a peer's slow operation into a permanent wedge of
+// this session, while a bounded wait releases the guard with a retryable error.
 //
 // Generous on purpose: a healthy Recover holds this lock for as long as a tmux
 // respawn takes, and a kill that waits a few seconds behind one is CORRECT
@@ -66,9 +66,9 @@ var opLockPollInterval = 5 * time.Millisecond
 // every opLockPollInterval while contended, and the loss of the mutex's
 // starvation-avoidance fairness (TryLock never queues), so a caller can in
 // principle lose several races to a lock that is handed off rapidly. That is
-// acceptable here and nowhere near the hot path: the only bounded acquirer is a
-// user-initiated kill, the poll cost lasts only as long as the contention, and
-// the alternative it replaces is waiting forever.
+// acceptable here and nowhere near the hot path: the bounded acquirers are
+// user-initiated lifecycle operations, the poll cost lasts only as long as the
+// contention, and the alternative it replaces is waiting forever.
 func lockWithin(mu *sync.Mutex, d time.Duration) bool {
 	if mu.TryLock() {
 		return true
@@ -89,6 +89,20 @@ func lockWithin(mu *sync.Mutex, d time.Duration) bool {
 			return false
 		}
 	}
+}
+
+// lockSessionOperationWithin takes the per-session operation lock with the same
+// bound for archive and both manual restore paths. Each caller has registered in
+// killsInFlight but has not mutated the session yet, so timeout is a known no-op:
+// the requested action did not start, the deferred guard cleanup can run, and a
+// later kill or retry remains possible (#2641).
+func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*sync.Mutex, error) {
+	opLock := m.opLockFor(key)
+	if !lockWithin(opLock, opLockTimeout) {
+		log.WarningLog.Printf("%s of session %q could not acquire its operation lock within %s; another operation on this session is not releasing it", operation, title, opLockTimeout)
+		return nil, fmt.Errorf("%s of session %q timed out after %s waiting for another operation on it to finish; the requested %s did not start and made no changes — retry", operation, title, opLockTimeout, operation)
+	}
+	return opLock, nil
 }
 
 // killWatchdogDelay is how long a kill may run before the watchdog reports the

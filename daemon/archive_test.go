@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -216,6 +217,98 @@ func TestArchiveSession_RejectsWhenOperationInFlight(t *testing.T) {
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "in progress")
+}
+
+// TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely is the
+// #2641 regression across every archive/restore path that registers in
+// killsInFlight before acquiring the per-session operation lock. A wedged peer
+// may delay these operations, but it must not make the session undeletable for
+// the daemon's lifetime.
+//
+// PRE-FIX: each case misses the deadline below because it waits in opLock.Lock.
+func TestArchiveRestore_StuckPeerOperation_DoesNotHoldKillGuardIndefinitely(t *testing.T) {
+	prev := opLockTimeout
+	opLockTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { opLockTimeout = prev })
+
+	t.Run("archive", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		inst, _ := registerArchivable(t, manager, repoID, repoPath, "archive-wait")
+		key := daemonInstanceKey(repoID, inst.Title)
+
+		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+			_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: inst.Title, RepoID: repoID})
+			return err
+		})
+		assert.Equal(t, session.Ready, inst.GetStatus(), "a timed-out archive must not change session state")
+	})
+
+	t.Run("archived restore", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		inst, _ := registerArchivable(t, manager, repoID, repoPath, "archived-restore-wait")
+		inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+		_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: inst.Title, RepoID: repoID})
+		require.NoError(t, err)
+		key := daemonInstanceKey(repoID, inst.Title)
+
+		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+			_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: inst.Title, RepoID: repoID})
+			return err
+		})
+		assert.Equal(t, session.Archived, inst.GetStatus(), "a timed-out restore must leave the session archived")
+	})
+
+	t.Run("lost restore", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+		inst := registerStarted(t, manager, repoID, repoPath, "lost-restore-wait", backend, true, session.Lost)
+		key := daemonInstanceKey(repoID, inst.Title)
+
+		assertGuardedOperationLockWaitBounded(t, manager, key, func() error {
+			_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: inst.Title, RepoID: repoID})
+			return err
+		})
+		assert.Equal(t, session.Lost, inst.GetStatus(), "a timed-out restore must leave the session lost")
+	})
+}
+
+func assertGuardedOperationLockWaitBounded(t *testing.T, manager *Manager, key string, operation func() error) {
+	t.Helper()
+	opLock := manager.opLockFor(key)
+	opLock.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			opLock.Unlock()
+		}
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- operation()
+	}()
+	require.Eventually(t, func() bool { return killGuardHeld(manager, key) }, time.Second, 5*time.Millisecond,
+		"operation never registered its killsInFlight guard")
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "operation cannot succeed without acquiring its lock")
+		assert.Contains(t, err.Error(), "timed out")
+		assert.Contains(t, err.Error(), "retry")
+		assert.False(t, killGuardHeld(manager, key), "timed-out operation left the session undeletable")
+		opLock.Unlock()
+		locked = false
+	case <-time.After(2 * time.Second):
+		// Prevent the pre-fix operation from mutating the instance after the test
+		// releases the lock solely to let its goroutine return.
+		manager.mu.Lock()
+		delete(manager.instances, key)
+		manager.mu.Unlock()
+		opLock.Unlock()
+		locked = false
+		eventualErr := <-done
+		t.Fatalf("HUNG: operation did not return while a peer held its operation lock; after the lock was released it returned %v", eventualErr)
+	}
 }
 
 // TestArchiveSession_RejectsExternalWorktree (#1028 Greptile P1): an

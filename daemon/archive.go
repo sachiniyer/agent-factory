@@ -101,8 +101,10 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		m.mu.Unlock()
 	}()
 
-	opLock := m.opLockFor(key)
-	opLock.Lock()
+	opLock, err := m.lockSessionOperationWithin(key, "archive", req.Title)
+	if err != nil {
+		return "", session.InstanceData{}, err
+	}
 	defer opLock.Unlock()
 
 	// Re-verify under the op-lock: findSession released m.mu, so a racing kill
@@ -360,8 +362,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		m.mu.Unlock()
 	}()
 
-	opLock := m.opLockFor(key)
-	opLock.Lock()
+	opLock, err := m.lockSessionOperationWithin(key, "restore", req.Title)
+	if err != nil {
+		return "", err
+	}
 	defer opLock.Unlock()
 
 	// Re-verify under the op-lock (findSession released m.mu).
