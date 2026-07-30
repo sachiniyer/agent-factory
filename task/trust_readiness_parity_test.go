@@ -15,9 +15,8 @@ import (
 // disjunction of a trust predicate and some other ready signal, so a second
 // signal hiding in here would satisfy a label check for the wrong reason.
 // TestTrustDialogFixtureCarriesOnlyATrustSignal guards that, via nonTrustTwin.
-const docTrustDialogFixture = `Add https://aider.chat/docs/faq.html to the chat?
-Open documentation url for more info
-(Y)es/(N)o/(D)on't ask again [Yes]:`
+const docTrustDialogFixture = "\x1b[7mhttps://aider.chat/docs/faq.html\x1b[0m\n" +
+	"Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:"
 
 // Which predicate isReadyContent's arm for an agent uses to decide a trust
 // dialog means "ready". This is a fact about AF's code, greppable in runner.go —

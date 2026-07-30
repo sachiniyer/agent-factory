@@ -304,23 +304,28 @@ func CodexTrustPromptPresent(content string) bool {
 // DocTrustPromptPresent reports whether content ends at the documentation-link
 // confirmation prompt shared by aider/gemini:
 //
-//	https://aider.chat/docs/...
+//	<reverse-video>https://aider.chat/docs/...
 //	<question text> (Y)es/(N)o/(D)on't ask again [Yes]:
 //
 // aider's InputOutput.confirm_ask accepts caller-controlled question text, then
-// appends the confirmation prefix above. InputOutput.offer_url separately renders
-// the URL subject before asking. Match those renderer invariants: the final
-// non-empty line must end at the full confirmation prefix, and a URL must be in
-// its immediate prompt context. Do not key daemon input on the overridable prose.
-// In particular, this source file contains the old prose and affordance together;
-// a strings.Contains matcher lets repo-controlled text inject D+Enter (#2638).
+// appends the confirmation suffix above. InputOutput.offer_url separately renders
+// its URL subject in reverse video before asking. Match that renderer-owned SGR
+// prefix immediately before the final prompt line. Do not key daemon input on the
+// overridable prose. In particular, this source file contains the old prose and
+// affordance together; a strings.Contains matcher lets repo-controlled text inject
+// D+Enter (#2638).
 //
-// The immediate-context and final-line requirements both matter. The affordance
-// appears on unrelated aider confirmations, while a URL or a copied fixture can
-// appear in ordinary output. Together they describe the rendered URL prompt, not
-// merely strings that appeared somewhere in the visible pane. Ambiguity is a
-// negative here: a miss costs one manual keypress, while a false positive types
-// into a running agent on every daemon poll (#1952).
+// The reverse-video URL subject and final-line requirements both matter. The
+// affordance appears on unrelated aider confirmations, while an ordinary URL can
+// appear immediately before one. Without the renderer prefix those two unrelated
+// lines compose a false positive. A no-color or otherwise ambiguous capture is not
+// proof of a prompt and stays false.
+//
+// This is deliberately conservative because the two errors are asymmetric. A miss
+// costs one manual keypress, and the real dialog remains visible for the next poll
+// to retry. A false positive types D+Enter into a live agent that asked nothing; it
+// can answer a different question or modify the agent's input, and the daemon's
+// continuous poll repeats it while the text remains visible (#1952).
 //
 // This is the single copy, shared with task's readiness check (task/runner.go
 // isReadyContent) so the dismissal and the readiness signal can never drift apart
@@ -329,25 +334,41 @@ func CodexTrustPromptPresent(content string) bool {
 // reverse edge would be an import cycle.
 func DocTrustPromptPresent(content string) bool {
 	const confirmPrefix = "(Y)es/(N)o/(D)on't ask again [Yes]:"
-	content = ansiCSISequence.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
 	last := len(lines) - 1
-	for last >= 0 && strings.TrimSpace(lines[last]) == "" {
+	for last >= 0 && strings.TrimSpace(ansiCSISequence.ReplaceAllString(lines[last], "")) == "" {
 		last--
 	}
-	if last < 0 || !strings.HasSuffix(strings.TrimSpace(lines[last]), confirmPrefix) {
+	if last < 1 || !strings.HasSuffix(
+		strings.TrimSpace(ansiCSISequence.ReplaceAllString(lines[last], "")), confirmPrefix,
+	) {
 		return false
 	}
-	first := last - 2
-	if first < 0 {
-		first = 0
-	}
-	for _, line := range lines[first : last+1] {
-		if strings.Contains(line, "https://") || strings.Contains(line, "http://") {
-			return true
+	return reverseVideoURLSubject(lines[last-1])
+}
+
+func reverseVideoURLSubject(line string) bool {
+	reverse := false
+	remaining := line
+	for strings.HasPrefix(remaining, "\x1b[") {
+		end := strings.IndexByte(remaining, 'm')
+		if end < 2 {
+			return false
 		}
+		for _, code := range strings.Split(remaining[2:end], ";") {
+			switch code {
+			case "", "0", "27":
+				reverse = false
+			case "7":
+				reverse = true
+			}
+		}
+		remaining = remaining[end+1:]
 	}
-	return false
+	visible := strings.TrimSpace(ansiCSISequence.ReplaceAllString(remaining, ""))
+	return reverse && !strings.ContainsAny(visible, " \t") &&
+		(strings.HasPrefix(visible, "https://") || strings.HasPrefix(visible, "http://"))
 }
 
 // claudeTrustPromptPresent reports whether the captured pane content is showing

@@ -62,8 +62,8 @@ func TestIsReadyContent(t *testing.T) {
 		{
 			name:  "claude doc trust prompt",
 			agent: "claude",
-			content: "Open documentation url for more info: https://docs/\n" +
-				"(Y)es/(N)o/(D)on't ask again [Yes]:",
+			content: "\x1b[7mhttps://docs/\x1b[0m\n" +
+				"Review docs? (Y)es/(N)o/(D)on't ask again [Yes]:",
 			want: true,
 		},
 		{"claude not ready", "claude", "installing dependencies...\nready soon", false},
@@ -103,8 +103,8 @@ func TestIsReadyContent(t *testing.T) {
 		{
 			name:  "aider doc trust prompt",
 			agent: "aider",
-			content: "Open documentation url for more info: https://aider.chat/docs/\n" +
-				"(Y)es/(N)o/(D)on't ask again [Yes]:",
+			content: "\x1b[7mhttps://aider.chat/docs/\x1b[0m\n" +
+				"Review docs? (Y)es/(N)o/(D)on't ask again [Yes]:",
 			want: true,
 		},
 		{"aider not ready", "aider", "loading model weights…", false},
@@ -112,10 +112,11 @@ func TestIsReadyContent(t *testing.T) {
 		// gemini (best-guess box-border signal — see #714)
 		{"gemini box frame", "gemini", "╭──╮\n│ Gemini │\n╰──╯", true},
 		{
-			name:    "gemini doc trust prompt",
-			agent:   "gemini",
-			content: "Gemini CLI\nhttps://docs.example.test/\nReview docs? (Y)es/(N)o/(D)on't ask again [Yes]:",
-			want:    true,
+			name:  "gemini doc trust prompt",
+			agent: "gemini",
+			content: "Gemini CLI\n\x1b[7mhttps://docs.example.test/\x1b[0m\n" +
+				"Review docs? (Y)es/(N)o/(D)on't ask again [Yes]:",
+			want: true,
 		},
 		{"gemini not ready", "gemini", "starting gemini-cli…", false},
 
@@ -125,7 +126,7 @@ func TestIsReadyContent(t *testing.T) {
 		{"amp high-mode input box", "amp", "╭──────── high ────────╮\n│ > \n╰──────── /tmp/repo ─────╯", true},
 		{"amp box without prompt anchor", "amp", "╭ downloading tools ╮\n╰ please wait ─────╯", false},
 		{"amp prompt top without input line", "amp", "╭──────── medium ────────╮\nloading plugins", false},
-		{"amp doc trust prompt", "amp", "https://docs.example.test/\nReview docs? (Y)es/(N)o/(D)on't ask again [Yes]:", true},
+		{"amp doc trust prompt", "amp", "\x1b[7mhttps://docs.example.test/\x1b[0m\nReview docs? (Y)es/(N)o/(D)on't ask again [Yes]:", true},
 		{"amp not ready on arbitrary output", "amp", "loading settings", false},
 
 		// opencode — the composer frame is the ready signal. The real-capture
