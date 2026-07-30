@@ -674,6 +674,17 @@ func TestHookOutputSuffixRedactsAfterOverlappingValueBoundary(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+// TestHookOutputSuffixHandlesEscapedQuoteFlood keeps malformed diagnostic
+// scanning linear. Every quote below is escaped, so rescanning the remaining
+// suffix from each one is quadratic even though there is no token to redact.
+func TestHookOutputSuffixHandlesEscapedQuoteFlood(t *testing.T) {
+	output := strings.Repeat(`\"`, 50_000)
+	started := time.Now()
+	suffix := hookOutputSuffix([]byte(output))
+	assert.Less(t, time.Since(started), time.Second, "escaped-quote diagnostics must be scanned in linear time")
+	assert.Equal(t, "; its output was:\n"+output, suffix)
+}
+
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
 // killed or interrupted while writing its endpoint JSON. The unmatched tail is
 // still diagnostic output, but a complete quoted token value inside it is just

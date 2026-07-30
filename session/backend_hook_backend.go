@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -410,10 +409,11 @@ type hookOutputRange struct {
 	end   int
 }
 
-// hookTokenRedactionRanges examines every quote as a possible key boundary
-// before rewriting any bytes. Malformed prose can make a closing quote double
-// as the opening quote of a later real key, so no parse outcome may advance the
-// scanner past another candidate boundary.
+// hookTokenRedactionRanges examines every quote outside a value already marked
+// for redaction as a possible key boundary. Token keys have a fixed, bounded
+// encoded length, so malformed escaped-quote floods cannot make key detection
+// rescan the remaining output. A recognized value is scanned once, then skipped
+// because every byte inside it will be replaced.
 func hookTokenRedactionRanges(output string) []hookOutputRange {
 	var ranges []hookOutputRange
 	for cursor := 0; cursor < len(output); cursor++ {
@@ -421,12 +421,8 @@ func hookTokenRedactionRanges(output string) []hookOutputRange {
 			continue
 		}
 
-		keyEnd, complete := jsonStringEnd(output, cursor)
-		if !complete {
-			continue
-		}
-		var key string
-		if err := json.Unmarshal([]byte(output[cursor:keyEnd]), &key); err != nil || !strings.EqualFold(key, "token") {
+		keyEnd, ok := hookTokenKeyEnd(output, cursor)
+		if !ok {
 			continue
 		}
 
@@ -440,24 +436,49 @@ func hookTokenRedactionRanges(output string) []hookOutputRange {
 		}
 
 		valueEnd, complete := jsonStringEnd(output, valueStart)
-		ranges = append(ranges, hookOutputRange{start: valueStart, end: valueEnd})
+		candidate := hookOutputRange{start: valueStart, end: valueEnd}
+		if len(ranges) > 0 && candidate.start <= ranges[len(ranges)-1].end {
+			if candidate.end > ranges[len(ranges)-1].end {
+				ranges[len(ranges)-1].end = candidate.end
+			}
+		} else {
+			ranges = append(ranges, candidate)
+		}
 		if !complete {
 			break
 		}
+		// Reconsider the closing quote as a possible overlapping key boundary.
+		cursor = valueEnd - 2
 	}
+	return ranges
+}
 
-	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start < ranges[j].start })
-	merged := ranges[:0]
-	for _, candidate := range ranges {
-		if len(merged) == 0 || candidate.start > merged[len(merged)-1].end {
-			merged = append(merged, candidate)
-			continue
-		}
-		if candidate.end > merged[len(merged)-1].end {
-			merged[len(merged)-1].end = candidate.end
+// A five-character JSON key is at most 32 bytes when every character uses a
+// six-byte \u escape, including the surrounding quotes. Bounding this scan is
+// what keeps malformed output linear while still accepting JSON-equivalent key
+// spellings and case variants for redaction.
+func hookTokenKeyEnd(input string, start int) (int, bool) {
+	limit := start + 32
+	if limit > len(input) {
+		limit = len(input)
+	}
+	escaped := false
+	for cursor := start + 1; cursor < limit; cursor++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[cursor] == '\\':
+			escaped = true
+		case input[cursor] == '"':
+			end := cursor + 1
+			var key string
+			if err := json.Unmarshal([]byte(input[start:end]), &key); err != nil || !strings.EqualFold(key, "token") {
+				return 0, false
+			}
+			return end, true
 		}
 	}
-	return merged
+	return 0, false
 }
 
 func jsonStringEnd(input string, start int) (int, bool) {
