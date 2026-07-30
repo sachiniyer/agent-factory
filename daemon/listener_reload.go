@@ -49,7 +49,8 @@ type webListeners struct {
 	webConfigAddr string
 	// webGen distinguishes listener generations so a superseded listener's Serve
 	// returning cannot clear the lifecycle bound-state the NEW listener just set. A
-	// done-watcher clears only while its own generation is still current.
+	// done-watcher clears health and binding state only while its own generation is
+	// still current, allowing an unchanged configured address to be rebound.
 	webGen uint64
 
 	previewClose      func() error
@@ -129,15 +130,19 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	gen := wl.webGen
 	if wl.manager.lifecycle != nil {
 		wl.manager.lifecycle.setTCPBound(info.Addr)
-		go func() {
-			<-info.done
-			wl.mu.Lock()
-			if wl.webGen == gen {
+	}
+	go func() {
+		<-info.done
+		wl.mu.Lock()
+		if wl.webGen == gen {
+			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearTCPBound()
 			}
-			wl.mu.Unlock()
-		}()
-	}
+			wl.webClose = nil
+			wl.webConfigAddr = ""
+		}
+		wl.mu.Unlock()
+	}()
 	if old != nil {
 		_ = old()
 	}
@@ -196,15 +201,19 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 	gen := wl.previewGen
 	if wl.manager.lifecycle != nil {
 		wl.manager.lifecycle.setPreviewBound(info.Addr)
-		go func() {
-			<-info.done
-			wl.mu.Lock()
-			if wl.previewGen == gen {
+	}
+	go func() {
+		<-info.done
+		wl.mu.Lock()
+		if wl.previewGen == gen {
+			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearPreviewBound()
 			}
-			wl.mu.Unlock()
-		}()
-	}
+			wl.previewClose = nil
+			wl.previewConfigAddr = ""
+		}
+		wl.mu.Unlock()
+	}()
 	if old != nil {
 		_ = old()
 	}

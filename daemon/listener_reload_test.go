@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -152,6 +153,56 @@ func TestWebListenerRebindFailureKeepsOldListenerServing(t *testing.T) {
 		"bind-new-before-close: a failed rebind must keep the old listener serving")
 	require.Equal(t, oldAddr, m.lifecycle.snapshot().listeners.TCPBoundAddr,
 		"lifecycle must still report the old address after a failed rebind")
+}
+
+func TestWebListenersRebindSameAddressAfterListenerDeath(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.PreviewListenAddr = "127.0.0.1:0"
+	m, wl, _ := boundWebListeners(t, cfg)
+
+	tests := []struct {
+		name      string
+		getCloser func() func() error
+		isBound   func() bool
+	}{
+		{
+			name: "control",
+			getCloser: func() func() error {
+				wl.mu.Lock()
+				defer wl.mu.Unlock()
+				closer := wl.webClose
+				return closer
+			},
+			isBound: func() bool { return m.lifecycle.snapshot().listeners.TCPBound },
+		},
+		{
+			name: "preview",
+			getCloser: func() func() error {
+				wl.mu.Lock()
+				defer wl.mu.Unlock()
+				closer := wl.previewClose
+				return closer
+			},
+			isBound: func() bool { return m.lifecycle.snapshot().listeners.PreviewBound },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			closer := tt.getCloser()
+			require.NotNil(t, closer)
+			require.NoError(t, closer())
+			require.Eventually(t, func() bool { return !tt.isBound() }, time.Second, 10*time.Millisecond,
+				"the done watcher must observe listener death")
+
+			failed, err := wl.reconcile(m.Config())
+			require.NoError(t, err)
+			require.Empty(t, failed)
+			require.Eventually(t, tt.isBound, time.Second, 10*time.Millisecond,
+				"reconciling the unchanged configured address must replace the dead listener")
+		})
+	}
 }
 
 // TestApplyConfigTokenlessNetworkWarnsAndBinds: a tokenless non-loopback address is
