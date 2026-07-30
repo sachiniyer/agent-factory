@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -35,9 +36,10 @@ import (
 // documented log-file-readability consideration, gated behind the explicit
 // listen_addr opt-in.
 type tcpListenerInfo struct {
-	Addr  string // the resolved bound address (host:port, port filled in for :0)
-	Token string // the bearer token clients must present
-	done  <-chan struct{}
+	Addr           string // the resolved bound address (host:port, port filled in for :0)
+	Token          string // the bearer token clients must present
+	done           <-chan struct{}
+	closeRequested func() bool
 }
 
 // tokenGatePolicy is how a TCP listener's bearer-token gate treats peers. Its
@@ -191,6 +193,14 @@ type livePosture struct {
 // token rotate` takes effect for new connections without a daemon restart. An
 // override supplies its own already-minted credential and is compared as-is.
 func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture) (func() error, tcpListenerInfo, error) {
+	return startTCPListenerWithListen(mux, addr, cfg, policy, shell, auth, live, net.Listen)
+}
+
+// startTCPListenerWithListen is startTCPListener with the socket constructor
+// supplied by the restartable-listener owner. Production uses net.Listen; the
+// seam lets lifecycle tests fail the listener underneath http.Server without
+// conflating that path with calling the returned server closer.
+func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, listen func(network, address string) (net.Listener, error)) (func() error, tcpListenerInfo, error) {
 	var token string
 	var expectedToken func() (string, error)
 	var expectedForRequest func(*http.Request) (string, error)
@@ -219,7 +229,7 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 	}
 	// A plain TCP listener — net.Listen (not tls.Listen). Addr() reports the
 	// concrete port even when addr requests :0 (used by the integration test).
-	listener, err := net.Listen("tcp", addr)
+	listener, err := listen("tcp", addr)
 	if err != nil {
 		return nil, tcpListenerInfo{}, fmt.Errorf("bind TCP listener on %q: %w", addr, err)
 	}
@@ -282,6 +292,7 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	done := make(chan struct{})
+	var closeRequested atomic.Bool
 	go func() {
 		defer close(done)
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -290,9 +301,16 @@ func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy 
 	}()
 
 	info := tcpListenerInfo{
-		Addr:  listener.Addr().String(),
-		Token: token,
-		done:  done,
+		Addr:           listener.Addr().String(),
+		Token:          token,
+		done:           done,
+		closeRequested: closeRequested.Load,
 	}
-	return srv.Close, info, nil
+	closeServer := func() error {
+		// Set before Close so the Serve watcher can distinguish our teardown from
+		// an underlying listener failure even when Serve returns immediately.
+		closeRequested.Store(true)
+		return srv.Close()
+	}
+	return closeServer, info, nil
 }

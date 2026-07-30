@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 
@@ -39,18 +40,25 @@ type webListeners struct {
 	// webMux is the shared control-plane mux (also served on the unix socket). The
 	// preview listener builds its own mux fresh per bind (newPreviewMux is stateless).
 	webMux http.Handler
+	// listenTCP is the bind boundary for both restartable listeners. Keeping it
+	// on the owner lets lifecycle tests distinguish an underlying listener death
+	// from the owner's server-close path while exercising the real HTTP server.
+	listenTCP func(network, address string) (net.Listener, error)
 
 	mu sync.Mutex
-	// webClose/webConfigAddr describe the currently-bound web listener. webConfigAddr
-	// is the CONFIG value that produced it (not the resolved bound address), so
-	// reconcile compares like-for-like and does not rebind on an unchanged setting.
-	// "" ⇒ not serving (the listen_addr="" opt-out).
+	// webClose owns all accepted connections for the latest generation, so an
+	// unexpected Serve exit does not make it stale. webConfigAddr describes only
+	// the live binding: it is the CONFIG value that produced the listener (not the
+	// resolved bound address), so reconcile compares like-for-like. "" means not
+	// accepting (or the listen_addr="" opt-out).
 	webClose      func() error
 	webConfigAddr string
 	// webGen distinguishes listener generations so a superseded listener's Serve
 	// returning cannot clear the lifecycle bound-state the NEW listener just set. A
 	// done-watcher clears health and binding state only while its own generation is
-	// still current, allowing an unchanged configured address to be rebound.
+	// still current, allowing an unchanged configured address to be rebound. It
+	// clears the closer only after our Close initiated the exit; after listener
+	// failure the closer remains the handle to accepted connections.
 	webGen uint64
 
 	previewClose      func() error
@@ -61,7 +69,7 @@ type webListeners struct {
 // newWebListeners builds the manager (never binds — startHTTPServer's initial
 // bind and ApplyConfig's rebinds both go through reconcileFromLocked/bind* below).
 func newWebListeners(manager *Manager, webMux http.Handler) *webListeners {
-	return &webListeners{manager: manager, webMux: webMux}
+	return &webListeners{manager: manager, webMux: webMux, listenTCP: net.Listen}
 }
 
 // reconcile brings the two socket listeners in line with newCfg, rebinding only
@@ -116,8 +124,8 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// require_loopback_token live per request, so this value never enforces auth.
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
-	closer, info, err := startTCPListener(wl.webMux, addr, cfg, policy, withWebShell, nil,
-		&livePosture{snapshot: wl.manager.Config, policyFromConfig: true})
+	closer, info, err := startTCPListenerWithListen(wl.webMux, addr, cfg, policy, withWebShell, nil,
+		&livePosture{snapshot: wl.manager.Config, policyFromConfig: true}, wl.listenTCP)
 	if err != nil {
 		return fmt.Errorf("apply listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
 	}
@@ -138,7 +146,9 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearTCPBound()
 			}
-			wl.webClose = nil
+			if info.closeRequested() {
+				wl.webClose = nil
+			}
 			wl.webConfigAddr = ""
 		}
 		wl.mu.Unlock()
@@ -189,8 +199,8 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 	cfg := wl.manager.Config()
 	policy := previewListenerPolicy(cfg)
 	notice := config.PreviewListenerExposureNotice(cfg)
-	closer, info, err := startTCPListener(newPreviewMux(), addr, cfg, policy, previewShell, previewListenerAuth(wl.manager),
-		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false})
+	closer, info, err := startTCPListenerWithListen(newPreviewMux(), addr, cfg, policy, previewShell, previewListenerAuth(wl.manager),
+		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false}, wl.listenTCP)
 	if err != nil {
 		return fmt.Errorf("apply preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))
 	}
@@ -209,7 +219,9 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearPreviewBound()
 			}
-			wl.previewClose = nil
+			if info.closeRequested() {
+				wl.previewClose = nil
+			}
 			wl.previewConfigAddr = ""
 		}
 		wl.mu.Unlock()
