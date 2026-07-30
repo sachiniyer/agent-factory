@@ -594,8 +594,8 @@ func TestCopyTree_PreservesModesAndSymlinks(t *testing.T) {
 // though it were a regular file waits for a writer forever. Special files must
 // instead fail promptly so ArchiveSession can release its operation/kill guards.
 //
-// PRE-FIX: copyTree does not return before the deadline. The writer below then
-// unblocks it solely so the test process can finish and report the hang cleanly.
+// PRE-FIX: copyTree does not return before the deadline. The bounded, nonblocking
+// cleanup below attempts to release it solely so the test can report the hang.
 func TestCopyTree_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.MkdirAll(src, 0755))
@@ -603,9 +603,32 @@ func TestCopyTree_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 	require.NoError(t, syscall.Mkfifo(fifo, 0600))
 
 	dest := filepath.Join(t.TempDir(), "dest")
+	assertNamedPipeCopyFailsPromptly(t, fifo, func() error {
+		return copyTree(src, dest)
+	})
+}
+
+// TestCopyFile_RejectsNamedPipeRaceWithoutBlocking closes the Lstat/open race in
+// #2689's first fix. A worktree process can replace a path after copyTree sees a
+// regular file but before copyFile opens it; copyFile must validate the object it
+// actually opened without ever making a blocking FIFO open.
+//
+// PRE-FIX: copyFile blocks until the helper supplies a writer, then returns nil.
+func TestCopyFile_RejectsNamedPipeRaceWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "events.fifo")
+	require.NoError(t, syscall.Mkfifo(fifo, 0600))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	assertNamedPipeCopyFailsPromptly(t, fifo, func() error {
+		return copyFile(fifo, dest)
+	})
+}
+
+func assertNamedPipeCopyFailsPromptly(t *testing.T, fifo string, copyFn func() error) {
+	t.Helper()
 	done := make(chan error, 1)
 	go func() {
-		done <- copyTree(src, dest)
+		done <- copyFn()
 	}()
 
 	select {
@@ -614,10 +637,15 @@ func TestCopyTree_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 		assert.Contains(t, err.Error(), "unsupported file type")
 		assert.Contains(t, err.Error(), fifo)
 	case <-time.After(500 * time.Millisecond):
-		writer, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-		require.NoError(t, err, "open a writer only to release the pre-fix blocked reader")
-		require.NoError(t, writer.Close())
-		eventualErr := <-done
-		t.Fatalf("HUNG: copyTree blocked opening named pipe %s; after a writer released it, copyTree returned %v", fifo, eventualErr)
+		fd, unblockErr := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if unblockErr == nil {
+			unblockErr = syscall.Close(fd)
+		}
+		select {
+		case eventualErr := <-done:
+			t.Fatalf("HUNG: copy blocked opening named pipe %s; nonblocking cleanup returned %v and the copy eventually returned %v", fifo, unblockErr, eventualErr)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("HUNG: copy blocked opening named pipe %s and did not return after bounded nonblocking cleanup (%v)", fifo, unblockErr)
+		}
 	}
 }

@@ -301,22 +301,31 @@ func copyTree(src, dest string) error {
 			}
 			return os.Symlink(link, target)
 		case info.Mode().IsRegular():
-			return copyFile(path, target, info.Mode().Perm())
+			return copyFile(path, target)
 		default:
 			return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (%s)", path, info.Mode().Type())
 		}
 	})
 }
 
-// copyFile copies a single regular file's contents to dst, creating it with the
-// given permission bits.
-func copyFile(src, dst string, perm os.FileMode) error {
-	in, err := os.Open(src)
+// copyFile copies a single regular file's contents and permission bits to dst.
+// The open is nonblocking and the resulting descriptor is validated before any
+// read: a worktree process can replace src after copyTree's Lstat, and a stale
+// "regular" result must never turn a replacement FIFO into a blocking open.
+func copyFile(src, dst string) error {
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (%s)", src, info.Mode().Type())
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
