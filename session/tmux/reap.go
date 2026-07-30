@@ -81,6 +81,9 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
 		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", "#{pane_pid}")
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+		}
 		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)
 	}
 	snap, err := proctree.Snapshot()
@@ -129,23 +132,24 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 	return procs, errors.Join(captureErrs...)
 }
 
-// markedOrphanProcesses finds same-user processes whose immutable launch
-// environment proves they belong to this exact tmux session and AF home. It is
-// the fallback after tmux authoritatively reports that a session vanished
-// before its pane tree could be captured: AF_SESSION recovers the lost session
-// identity, while AF_HOME keeps a same-named process from another install out
-// of the reap set.
+// markedOrphanProcesses filters a previously captured pane process tree down to
+// processes whose immutable launch environment proves they belong to this exact
+// tmux session and AF home. The capture happens while the listed session still
+// exists; if ownership lookup then loses the session, AF_SESSION and AF_HOME
+// provide the authority that the vanished tmux environment no longer can.
 //
-// An unreadable environment on a live same-user process is UNKNOWN, not an
-// absent marker. Returning both the processes we did prove and an error lets
-// cleanup reap known-owned orphans while still refusing worktree deletion when
-// it could not rule out another one. Processes owned by another uid cannot have
-// been launched by this user's reset target and are skipped before reading
-// their environment.
-func markedOrphanProcesses(sanitizedName, ownHome string) ([]proctree.Process, error) {
+// The candidate set is load-bearing. Scanning every same-user process would
+// turn an unrelated unreadable /proc environment into a possible helper and
+// make successful absence impossible on hardened hosts. Within the captured
+// tree, unreadable or mismatched provenance is genuinely UNKNOWN and blocks
+// worktree deletion rather than being collapsed into "not ours".
+func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string) ([]proctree.Process, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return nil, fmt.Errorf("cannot inspect processes after tmux session vanished: %w", err)
+		return nil, fmt.Errorf("cannot inspect captured processes after tmux session vanished: %w", err)
 	}
 	selfUID, selfUIDKnown := proctree.UID(os.Getpid())
 	if !selfUIDKnown {
@@ -155,33 +159,41 @@ func markedOrphanProcesses(sanitizedName, ownHome string) ([]proctree.Process, e
 	cleanHome := filepath.Clean(ownHome)
 	var owned []proctree.Process
 	var inspectErrs []error
-	for _, process := range snap {
+	for _, process := range candidates {
+		if !proctree.AliveSame(process) {
+			continue
+		}
 		uid, uidKnown := proctree.UID(process.PID)
 		if !uidKnown {
-			if proctree.AliveSame(process) {
-				inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine owner of live pid %d", process.PID))
-			}
+			inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine owner of captured live pid %d", process.PID))
 			continue
 		}
 		if uid != selfUID {
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d belongs to uid %d, not reset uid %d",
+				process.PID, uid, selfUID))
 			continue
 		}
 
 		environ, envErr := proctree.Environ(process.PID)
 		if envErr != nil {
-			if proctree.AliveSame(process) {
-				inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine whether live pid %d belongs to session %s: %w",
-					process.PID, sanitizedName, envErr))
-			}
+			inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine whether captured live pid %d belongs to session %s: %w",
+				process.PID, sanitizedName, envErr))
 			continue
 		}
 		processSession, hasSession := processEnvValue(environ, EnvMarkerSession)
-		if !hasSession || processSession != sanitizedName {
+		if !hasSession {
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d has no %s marker for vanished session %s",
+				process.PID, EnvMarkerSession, sanitizedName))
+			continue
+		}
+		if processSession != sanitizedName {
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s instead of vanished session %s",
+				process.PID, processSession, sanitizedName))
 			continue
 		}
 		processHome, hasHome := processEnvValue(environ, EnvMarkerHome)
 		if !hasHome {
-			inspectErrs = append(inspectErrs, fmt.Errorf("live pid %d marks session %s but has no %s ownership marker",
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no %s ownership marker",
 				process.PID, sanitizedName, EnvMarkerHome))
 			continue
 		}

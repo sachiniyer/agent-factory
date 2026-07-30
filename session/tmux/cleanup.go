@@ -209,6 +209,25 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	for i, match := range prefixed {
 		prefixed[i] = match[:strings.Index(match, ":")]
 	}
+	// Capture every listed session's verified pane process tree before marker
+	// lookup. If the session vanishes during that lookup, tmux can no longer
+	// recover its pane ancestry; this is the last authoritative opportunity to
+	// bind any detached helper to the session. Capture errors are retained for
+	// the vanished-session branch; a live owned session is captured again just
+	// before kill, and a foreign session's unreadable panes never block this
+	// home's sweep.
+	preMarkerProcesses := make(map[string][]proctree.Process, len(prefixed))
+	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
+	for _, match := range prefixed {
+		preMarkerProcesses[match], preMarkerCaptureErrs[match] = captureSessionProcessTrees(cmdExec, match)
+		if errors.Is(preMarkerCaptureErrs[match], ErrTmuxTimeout) {
+			// The server is already known to be wedged. Do not launch the
+			// ownership probe against it and pay another full timeout for an
+			// answer that still could not authorize deletion.
+			return fmt.Errorf("cannot capture tmux session %s processes before ownership lookup; refusing to continue cleanup: %w",
+				match, preMarkerCaptureErrs[match])
+		}
+	}
 
 	// Home-scope the sweep (#1122): the af_ prefix alone does not prove this
 	// home owns the session — another install or an escaped test process can
@@ -235,7 +254,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// reaper, so the absent branch performs an ownership-scoped process sweep.
 			exists, known, probeErr := probeSessionStrict(cmdExec, match)
 			if known && !exists {
-				if reapErr := reapVanishedSessionProcesses(match, ownHome); reapErr != nil {
+				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match], preMarkerCaptureErrs[match]); reapErr != nil {
 					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
 						match, reapErr)
 				}
@@ -328,8 +347,8 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	return killErr
 }
 
-func reapVanishedSessionProcesses(match, ownHome string) error {
-	marked, inspectErr := markedOrphanProcesses(match, ownHome)
+func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
+	marked, inspectErr := markedOrphanProcesses(candidates, match, ownHome)
 	remaining := reapLeakedProcesses(match, marked, reapGraceWait, reapTermWait)
 	if len(remaining) > 0 {
 		pids := make([]string, 0, len(remaining))
@@ -339,17 +358,8 @@ func reapVanishedSessionProcesses(match, ownHome string) error {
 		inspectErr = errors.Join(inspectErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
 			strings.Join(pids, ", ")))
 	}
-	// Re-snapshot after signalling. A helper can fork between the first snapshot
-	// and SIGTERM; only a second affirmative empty result proves the sweep did
-	// not leave a newly detached marked child behind.
-	left, verifyErr := markedOrphanProcesses(match, ownHome)
-	if len(left) > 0 {
-		pids := make([]string, 0, len(left))
-		for _, process := range left {
-			pids = append(pids, fmt.Sprintf("%d", process.PID))
-		}
-		verifyErr = errors.Join(verifyErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",
-			strings.Join(pids, ", ")))
+	if captureErr != nil {
+		captureErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
 	}
-	return errors.Join(inspectErr, verifyErr)
+	return errors.Join(captureErr, inspectErr)
 }

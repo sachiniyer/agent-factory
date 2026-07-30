@@ -52,6 +52,49 @@ esac
 	}
 }
 
+// TestCleanupSessionsPreMarkerCaptureTimeoutStopsBeforeOwnershipProbe guards
+// the process-capture phase added for vanished-session helpers. A tripped
+// list-panes deadline already proves the server is wedged; launching the marker
+// lookup afterward would wait on the same server for a second full timeout and
+// still could not establish safe cleanup state.
+func TestCleanupSessionsPreMarkerCaptureTimeoutStopsBeforeOwnershipProbe(t *testing.T) {
+	dir := t.TempDir()
+	markerProbe := filepath.Join(dir, "show-environment-called")
+	script := `#!/bin/sh
+case "$1" in
+ls)
+  echo 'af_owned: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+list-panes)
+  sleep 300 &
+  wait
+  ;;
+show-environment)
+  : > "$MARKER_PROBE"
+  printf 'AF_HOME=%s\n' "$AGENT_FACTORY_HOME"
+  ;;
+*)
+  exit 97
+  ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("MARKER_PROBE", markerProbe)
+	shortTmuxTimeout(t, 200*time.Millisecond)
+
+	err := CleanupSessions(cmd.MakeExecutor())
+	if !errors.Is(err, ErrTmuxTimeout) {
+		t.Fatalf("CleanupSessions error = %v, want ErrTmuxTimeout from pre-marker process capture", err)
+	}
+	if _, err := os.Stat(markerProbe); !os.IsNotExist(err) {
+		t.Fatalf("capture timeout launched ownership marker probe, stat error = %v", err)
+	}
+}
+
 // TestCleanupSessionsOwnershipCheckFailureIsUnknown covers the adjacent
 // non-timeout case. Unfiltered show-environment reports a genuinely absent
 // marker with successful output, so a command failure means ownership was not
@@ -174,6 +217,8 @@ case "$1" in
 ls)
   echo 'af_gone: 1 windows (created Thu Jan 1 00:00:00 1970)'
   ;;
+list-panes)
+  ;;
 show-environment)
   exit 1
   ;;
@@ -208,6 +253,8 @@ func TestCleanupSessionsToleratesLastSessionGoneDuringMarkerLookup(t *testing.T)
 case "$1" in
 ls)
   echo 'af_gone: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+list-panes)
   ;;
 show-environment)
   printf 'no server running on /tmp/tmux-1001/test\n' >&2
