@@ -183,10 +183,11 @@ func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
 // the retained row while leaving its remote process and directory behind.
 func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	p := &sshProvisioner{
-		spec:       ProvisionSpec{Title: "restart-reap"},
-		cfg:        config.SSHConfig{Host: "cleanup.example.test", User: "remote"},
-		sessionDir: "/home/remote/.af-sessions/restart-reap.1234",
-		remotePID:  "4242",
+		spec:                ProvisionSpec{Title: "restart-reap"},
+		cfg:                 config.SSHConfig{Host: "cleanup.example.test", User: "remote"},
+		hostKeyVerification: config.SSHHostKeyAcceptNew,
+		sessionDir:          "/home/remote/.af-sessions/restart-reap.1234",
+		remotePID:           "4242",
 	}
 	teardown := p.reap
 	inst := &Instance{
@@ -197,9 +198,10 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
 			cleanup: &SSHRuntimeCleanupData{
-				Config:     p.cfg,
-				SessionDir: p.sessionDir,
-				RemotePID:  p.remotePID,
+				Config:              p.cfg,
+				SessionDir:          p.sessionDir,
+				RemotePID:           p.remotePID,
+				HostKeyVerification: p.hostKeyVerification,
 			},
 		},
 		runtimeTeardown: teardown,
@@ -226,6 +228,9 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "runtime_cleanup") {
 		t.Fatalf("kill tombstone omitted its durable cleanup handle: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"host_key_verification":"accept-new"`) {
+		t.Fatalf("kill tombstone omitted the SSH host-key posture needed to reuse the af-owned known_hosts store after restart: %s", raw)
 	}
 	// The live attempt sends the identity-guarded kill, then loses certainty while
 	// removing the directory. The raw tombstone above is what a daemon restart
@@ -261,6 +266,9 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 		t.Fatalf("restored backend has no SSH reaper: %T", restored.backend)
 	}
 	restoredP := restoredBackend.provisioner
+	if restoredP.hostKeyVerification != config.SSHHostKeyAcceptNew {
+		t.Fatalf("restored SSH cleanup posture = %q, want %q", restoredP.hostKeyVerification, config.SSHHostKeyAcceptNew)
+	}
 	restoredP.client = &ssh.Client{}
 	var killCalls, rmCalls int
 	restoredP.reapRunKill = func(_ time.Duration, script string) (bool, error) {
@@ -283,6 +291,29 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	}
 	if killCalls != 1 || rmCalls != 1 {
 		t.Fatalf("restored cleanup work: kill=%d rm=%d, want 1/1", killCalls, rmCalls)
+	}
+}
+
+func TestLegacySSHCleanupHandleDefaultsHostKeyVerificationToStrict(t *testing.T) {
+	missingKnownHosts := filepath.Join(t.TempDir(), "missing-known-hosts")
+	backend, _, err := restoreRuntimeCleanup("legacy-ssh-cleanup", "ssh", &RuntimeCleanupData{
+		SSH: &SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{Host: "legacy.example.test", KnownHosts: missingKnownHosts},
+			SessionDir: "/srv/af/legacy",
+		},
+	})
+	if err != nil {
+		t.Fatalf("restore legacy SSH cleanup: %v", err)
+	}
+	sshBackend, ok := backend.(*sshBackend)
+	if !ok || sshBackend.provisioner == nil {
+		t.Fatalf("restored backend has no SSH provisioner: %T", backend)
+	}
+	if _, err := sshBackend.provisioner.hostKeyCallback(); err == nil {
+		t.Fatal("legacy cleanup without a stored posture did not default to strict; strict must refuse a missing known_hosts file")
+	}
+	if _, err := os.Stat(missingKnownHosts); !os.IsNotExist(err) {
+		t.Fatalf("legacy strict fallback created an accept-new host-key store: %v", err)
 	}
 }
 

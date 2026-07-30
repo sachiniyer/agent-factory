@@ -268,9 +268,10 @@ func (p *sshProvisioner) provision() (ProvisionResult, error) {
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
 			cleanup: &SSHRuntimeCleanupData{
-				Config:     p.cfg,
-				SessionDir: p.sessionDir,
-				RemotePID:  p.remotePID,
+				Config:              p.cfg,
+				SessionDir:          p.sessionDir,
+				RemotePID:           p.remotePID,
+				HostKeyVerification: p.hostKeyVerification,
 			},
 		},
 		Endpoint: endpoint,
