@@ -191,17 +191,16 @@ func stableTabTargetID(tab *session.Tab, title string) (string, error) {
 	return tab.ID, nil
 }
 
-// Rollback on persist failure: rename and reorder DO roll back, CloseTab
-// deliberately does not, and CreateTab does. Since the existing verbs resolve
-// this in opposite directions, a new tab verb has to decide rather than copy.
+// Rollback on persist failure: every tab verb keeps memory/runtime aligned with
+// the last durable roster, but the mechanism depends on its side effects. A new
+// tab verb has to choose its commit boundary deliberately rather than copy.
 //
 // The rule is what the mutation left OUTSIDE memory. CreateTab rolls back
 // because it has already spawned a live tmux session: keeping it after a failed
 // persist would orphan a process that vanishes from the roster on restart.
-// CloseTab does NOT roll back because it has already killed the tab's tmux
-// session — that is irreversible, so the in-memory list (tab gone) is the more
-// accurate state and the stale disk record is harmless (its session is dead and
-// won't reconnect).
+// CloseTab instead stages the removal, persists that smaller roster, and only
+// then ends the stream/tmux session. A failed persist restores the still-live tab;
+// killing first would leave a stale disk row that Restore can respawn (#2669).
 //
 // Rename and reorder are the third case: pure in-memory metadata, no tmux, no
 // side effect, and exactly reversible. So memory can and should be put back —

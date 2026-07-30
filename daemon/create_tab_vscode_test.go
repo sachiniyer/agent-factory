@@ -236,11 +236,10 @@ func TestCloseTab_ShellTabLeavesEditorAlone(t *testing.T) {
 	}
 }
 
-// TestCloseTab_StopsEditorEvenWhenPersistFails is the codex P2 fix. CloseTab
-// removes the tab from the live instance BEFORE persisting, so a persist failure
-// (disk full, permissions) leaves a session with no reachable vscode tab — and,
-// without this, an editor running until daemon shutdown that nothing can ever
-// reach again or clean up.
+// TestCloseTab_StopsEditorEvenWhenPersistFails keeps #2669's rollback compatible
+// with #2668's retry-handle rule. The last VS Code tab is restored if persistence
+// fails, but only after its editor has been confirmed stopped; a later access can
+// start a fresh editor without leaking the old process.
 func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
 	manager, repoID, title := newVSCodeCreateFixture(t)
 	key := daemonInstanceKey(repoID, title)
@@ -269,6 +268,9 @@ func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
 		t.Fatal("CloseTab succeeded despite a persist failure; the test's premise is wrong")
 	}
 	if _, ok := manager.vscode.servers[key]; ok {
-		t.Fatal("the editor is still running after its last vscode tab was closed and the persist failed; nothing can reach or reap it until daemon shutdown")
+		t.Fatal("the editor is still running after its last VS Code tab was staged and the persist failed")
+	}
+	if !instanceHasVSCodeTab(manager.instances[key]) {
+		t.Fatal("persist failure did not restore the vscode tab for retry")
 	}
 }

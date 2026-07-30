@@ -47,30 +47,56 @@ func (i *Instance) CloseTabByID(tabID string) error {
 	return i.closeRemovedTab(tab)
 }
 
-// RestoreClosedVSCodeTab reinserts the exact metadata-only tab removed by a
-// CloseTabByID whose final editor sweep stayed unknown. VS Code tabs own no tmux
-// process or PTY, so restoring the roster entry restores the durable retry
-// handle without reviving anything already torn down. The daemon holds its
-// per-instance operation lock across close and rollback; this lock still guards
-// the slice for readers and rejects any inconsistent insertion.
-func (i *Instance) RestoreClosedVSCodeTab(tab *Tab, idx int) error {
-	if tab == nil || tab.Kind != TabKindVSCode || tab.tmux != nil {
-		return fmt.Errorf("only a metadata-only VS Code tab can be restored after close")
-	}
+// CommittedTabClose separates the durable roster decision from the best-effort
+// runtime teardown that follows it. A nil TeardownErr confirms both the PTY
+// stream and tmux close completed; a non-nil value means the tab is durably
+// absent but runtime teardown could not be confirmed. Callers must not turn the
+// latter into a failed commit and retry the state mutation as though it never
+// happened.
+type CommittedTabClose struct {
+	TeardownErr error
+}
+
+// CloseTabByIDWithCommit stages removal of the stable tab, calls commit with the
+// resulting InstanceData, and only then performs irreversible stream/tmux
+// teardown. If commit fails, the exact tab is restored at its original position
+// before the error is returned, leaving both the roster and runtime available
+// for a safe retry (#2669).
+//
+// Selection, staging, snapshotting, and commit run under the same instance lock.
+// Besides keeping the rollback exact, this prevents another tab mutation from
+// producing a projection between the staged roster and the one commit receives.
+// commit must not call back into Instance: it receives the already-built
+// projection for that reason.
+func (i *Instance) CloseTabByIDWithCommit(
+	tabID string,
+	commit func(InstanceData) error,
+) (CommittedTabClose, error) {
 	i.mu.Lock()
-	defer i.mu.Unlock()
-	if idx <= 0 || idx > len(i.Tabs) {
-		return fmt.Errorf("cannot restore VS Code tab %q at index %d", tab.Name, idx)
+	idx, exists := i.tabIndexByIDLocked(tabID)
+	if !exists {
+		i.mu.Unlock()
+		return CommittedTabClose{}, fmt.Errorf("session %q tab id %q: %w", i.Title, tabID, ErrTabGone)
 	}
-	for _, current := range i.Tabs {
-		if current.ID == tab.ID || current.Name == tab.Name {
-			return fmt.Errorf("cannot restore VS Code tab %q: its identity or name is already present", tab.Name)
-		}
+	if idx == 0 {
+		i.mu.Unlock()
+		return CommittedTabClose{}, fmt.Errorf("tab cannot be closed")
 	}
-	i.Tabs = append(i.Tabs, nil)
-	copy(i.Tabs[idx+1:], i.Tabs[idx:])
-	i.Tabs[idx] = tab
-	return nil
+
+	tab := i.removeTabLocked(idx)
+	data := i.toInstanceDataLocked()
+	if err := commit(data); err != nil {
+		// Nothing can change the roster while i.mu is held, so reinserting at idx
+		// restores the precise pre-close order and the same live tab object.
+		i.Tabs = append(i.Tabs, nil)
+		copy(i.Tabs[idx+1:], i.Tabs[idx:])
+		i.Tabs[idx] = tab
+		i.mu.Unlock()
+		return CommittedTabClose{}, err
+	}
+	i.mu.Unlock()
+
+	return CommittedTabClose{TeardownErr: i.closeRemovedTab(tab)}, nil
 }
 
 // removeTabLocked detaches idx from the roster and returns the exact tab object

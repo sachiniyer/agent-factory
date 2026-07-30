@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,64 @@ func TestCloseTab_RemovesNonAgentTabAndPersists(t *testing.T) {
 		if tab.Kind == session.TabKindProcess {
 			t.Fatalf("persisted record still carries process tab %q after close", tab.Name)
 		}
+	}
+}
+
+// TestCloseTab_PersistFailureKeepsTmuxTabForRetry is the #2669 durability
+// regression. A close is not committed until the shrunken roster reaches disk:
+// if that write fails, the live roster and its tmux session must remain intact
+// so the user can retry. Killing first leaves the old row on disk, and a daemon
+// restart then respawns the supposedly closed tab from that stale row.
+func TestCloseTab_PersistFailureKeepsTmuxTabForRetry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	const title = "worker"
+	agentName := "af_" + title + "_agent"
+	mockExec, tmuxAlive := closeBlockingTabExec(
+		map[string]bool{agentName: true}, "never-block", nil, nil)
+	inst := startedLocalTabInstanceWithExec(t, manager, repo.ID, repoPath, title, agentName, mockExec)
+	created, err := manager.CreateTab(CreateTabRequest{
+		Title: title, RepoID: repo.ID, Command: "btop -t",
+	})
+	if err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+	if !tmuxAlive(created.TmuxName) {
+		t.Fatalf("precondition: process tmux %q was not started", created.TmuxName)
+	}
+
+	// Corrupt validly located storage so persistInstanceData fails deterministically
+	// even in the root-running container suite. The manager has already resolved
+	// the live instance, so the failure lands at the commit boundary under test.
+	path, err := config.RepoInstancesPath(repo.ID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{ not json"), 0o600); err != nil {
+		t.Fatalf("corrupting the instances file: %v", err)
+	}
+
+	_, err = manager.CloseTab(CloseTabRequest{
+		Title: title, RepoID: repo.ID, TabID: created.ID,
+	})
+	if err == nil {
+		t.Fatal("CloseTab succeeded despite a persist failure; the test's premise is wrong")
+	}
+	if got := inst.TabCount(); got != 2 {
+		t.Fatalf("persist failure left %d tabs, want 2: the close must remain retryable", got)
+	}
+	if !tmuxAlive(created.TmuxName) {
+		t.Fatalf("persist failure killed process tmux %q; stale disk state can resurrect it on restart", created.TmuxName)
 	}
 }
 

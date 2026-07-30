@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -229,10 +228,10 @@ func tabTmuxNameByID(tabs []session.TabData, id string) string {
 // resolve onto a reused name doesn't mislabel a tab, it kills the wrong tmux
 // session. The agent tab (index 0) is unclosable — KillSession tears down the
 // whole session instead — matching the TUI's `w` rule (handleCloseTab). Returns
-// the resolved name of the closed tab. Unlike CreateTab there is no rollback on persist failure: CloseTab
-// has already killed the tab's tmux session, so there is nothing live left to
-// orphan — the in-memory list (tab removed) is the more accurate state, and the
-// stale disk record is harmless (its session is dead and won't reconnect).
+// the resolved name of the closed tab. The roster removal is committed to disk
+// before irreversible stream/tmux teardown. A persist failure restores the exact
+// live tab for retry; otherwise stale disk state could respawn a killed tab on a
+// daemon restart (#2669).
 func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	instance, repoID, title, release, err := m.tabMutationTarget(req.ID, req.Title, req.RepoID,
 		tabMutationLabels{action: "close a tab", op: "tab close"})
@@ -264,8 +263,6 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	closedTab := tabs[idx]
-
 	var vscodeKey string
 	if lastVSCode {
 		// Stop before removing the last durable UI retry handle. An unknown result
@@ -276,28 +273,32 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		}
 	}
 
-	if err := instance.CloseTabByID(targetID); err != nil {
+	var data session.InstanceData
+	committed, err := instance.CloseTabByIDWithCommit(targetID, func(staged session.InstanceData) error {
+		// A proxy that resolved the tab before the first stop can still reach
+		// editor admission without the session op-lock. Sweep again while the
+		// roster is staged but before committing it. An unknown result makes the
+		// transaction restore the exact tab, preserving its durable retry handle.
+		if lastVSCode {
+			if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
+				return fmt.Errorf("final editor teardown stayed unknown: %w", err)
+			}
+		}
+		if err := persistInstanceData(repoID, staged); err != nil {
+			return fmt.Errorf("failed to persist tab close: %w", err)
+		}
+		data = staged
+		return nil
+	})
+	if err != nil {
 		return "", err
 	}
-
-	// A proxy that resolved the tab before the first stop can still reach editor
-	// admission without the session op-lock. Sweep again after the roster change,
-	// and propagate uncertainty before persisting the close. A persist failure is
-	// still safe: the live roster has no tab and this final sweep stopped its
-	// editor; a restart restores the old tab and lazily starts a new one.
-	if lastVSCode {
-		if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
-			stopErr := fmt.Errorf("could not confirm final editor teardown after closing the VS Code tab: %w", err)
-			if restoreErr := instance.RestoreClosedVSCodeTab(closedTab, idx); restoreErr != nil {
-				return "", errors.Join(stopErr, fmt.Errorf("restoring the VS Code retry tab: %w", restoreErr))
-			}
-			return "", fmt.Errorf("restored the VS Code tab because final editor teardown stayed unknown: %w", stopErr)
-		}
-	}
-
-	data := instance.ToInstanceData()
-	if err := persistInstanceData(repoID, data); err != nil {
-		return "", fmt.Errorf("failed to persist tab close: %w", err)
+	if committed.TeardownErr != nil {
+		// The durable decision succeeded, but teardown did not provide evidence
+		// that the tmux process is gone. Report that third state in diagnostics
+		// without presenting the committed close as retryable: a restart reads the
+		// shrunken roster and will not resurrect this tab.
+		log.WarningLog.Printf("CloseTab %q committed, but runtime teardown could not be confirmed: %v", name, committed.TeardownErr)
 	}
 
 	// Announce the shrunk roster (#1812) — the close-side counterpart of
