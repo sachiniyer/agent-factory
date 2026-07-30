@@ -170,11 +170,28 @@ func SessionMembers(snap map[int]Process, sid int) []Process {
 // whether to keep WAITING, and waiting forever on a process we cannot see is
 // worse than stopping early on one that is somehow still there.
 func AliveSame(p Process) bool {
-	cur, err := readProc(p.PID)
+	same, _ := SameIdentity(p)
+	return same
+}
+
+// SameIdentity is AliveSame without its deliberate error collapse. It reports
+// a definitive false only when the process exited, became a zombie, or the PID
+// now names a different process instance. A denied or malformed identity read
+// remains an error so destructive callers never turn "could not check" into
+// permission to delete the process's workspace.
+func SameIdentity(p Process) (bool, error) {
+	return sameIdentity(p, readProc)
+}
+
+func sameIdentity(p Process, read func(int) (Process, error)) (bool, error) {
+	cur, err := read(p.PID)
 	if err != nil {
-		return false
+		if errors.Is(err, ErrProcessExited) || errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		}
+		return false, fmt.Errorf("cannot revalidate pid %d identity: %w", p.PID, err)
 	}
-	return cur.StartID == p.StartID
+	return cur.StartID == p.StartID, nil
 }
 
 // ErrIdentityChanged is returned by Signal when the PID no longer names the

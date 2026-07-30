@@ -150,6 +150,23 @@ func TestSignalVerifiesIdentity(t *testing.T) {
 	}
 }
 
+// TestSameIdentityReadFailureIsUnknown distinguishes an unreadable identity
+// from a process that definitively exited or recycled its PID. Destructive
+// callers use this error-bearing form; AliveSame deliberately keeps collapsing
+// the same read failure to false for wait loops.
+func TestSameIdentityReadFailureIsUnknown(t *testing.T) {
+	readErr := errors.New("identity read denied")
+	same, err := sameIdentity(Process{PID: 42, StartID: 7}, func(int) (Process, error) {
+		return Process{}, readErr
+	})
+	if same {
+		t.Fatal("sameIdentity reported an unreadable process as the same identity")
+	}
+	if !errors.Is(err, readErr) {
+		t.Fatalf("sameIdentity error = %v, want read failure to remain reachable", err)
+	}
+}
+
 // TestSignalReapedInTOCTOUWindow simulates the process being reaped in the
 // unavoidable window between the identity check and the delivery of the
 // signal: AliveSame passes (the child is genuinely alive) but the kernel

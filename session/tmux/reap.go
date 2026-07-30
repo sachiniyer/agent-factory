@@ -160,12 +160,25 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 	var owned []proctree.Process
 	var inspectErrs []error
 	for _, process := range candidates {
-		if !proctree.AliveSame(process) {
+		same, identityErr := proctree.SameIdentity(process)
+		if identityErr != nil {
+			inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine whether captured pid %d is still the same process: %w",
+				process.PID, identityErr))
+			continue
+		}
+		if !same {
 			continue
 		}
 		uid, uidKnown := proctree.UID(process.PID)
 		if !uidKnown {
-			inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine owner of captured live pid %d", process.PID))
+			sameAfter, recheckErr := proctree.SameIdentity(process)
+			switch {
+			case recheckErr != nil:
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot recheck captured pid %d after owner lookup failed: %w",
+					process.PID, recheckErr))
+			case sameAfter:
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine owner of captured live pid %d", process.PID))
+			}
 			continue
 		}
 		if uid != selfUID {
@@ -176,8 +189,15 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 
 		environ, envErr := proctree.Environ(process.PID)
 		if envErr != nil {
-			inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine whether captured live pid %d belongs to session %s: %w",
-				process.PID, sanitizedName, envErr))
+			sameAfter, recheckErr := proctree.SameIdentity(process)
+			switch {
+			case recheckErr != nil:
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot recheck captured pid %d after environment lookup failed: %w",
+					process.PID, errors.Join(envErr, recheckErr)))
+			case sameAfter:
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine whether captured live pid %d belongs to session %s: %w",
+					process.PID, sanitizedName, envErr))
+			}
 			continue
 		}
 		processSession, hasSession := processEnvValue(environ, EnvMarkerSession)
@@ -208,6 +228,54 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		owned = append(owned, process)
 	}
 	return owned, errors.Join(inspectErrs...)
+}
+
+// refreshOrphanCandidates closes the capture-to-marker TOCTOU window. A pane
+// can launch another helper after the pre-marker snapshot but before the marker
+// lookup observes that tmux removed the session. Once absence is authoritative,
+// no pane remains to launch more work, so a fresh process-table snapshot can add
+// every process still tied to the captured kernel sessions/trees plus any
+// readable process carrying the exact AF_SESSION marker.
+//
+// Environment failures on unrelated processes are deliberately ignored: they
+// are not evidence of membership. Failures on captured/SID/descendant
+// candidates remain visible when markedOrphanProcesses validates the bounded
+// set, preserving unknown without making hardened hosts globally unreadable.
+func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string) ([]proctree.Process, error) {
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		return captured, fmt.Errorf("cannot refresh processes after tmux session %s vanished: %w", sanitizedName, err)
+	}
+	seen := make(map[int]bool, len(captured))
+	refreshed := make([]proctree.Process, 0, len(captured))
+	add := func(process proctree.Process) {
+		if !seen[process.PID] {
+			seen[process.PID] = true
+			refreshed = append(refreshed, process)
+		}
+	}
+	for _, process := range captured {
+		add(process)
+		current, alive := snap[process.PID]
+		if alive && current.StartID == process.StartID {
+			for _, descendant := range proctree.TreeOf(snap, process.PID) {
+				add(descendant)
+			}
+		}
+		for _, member := range proctree.SessionMembers(snap, process.SID) {
+			add(member)
+		}
+	}
+	for _, process := range snap {
+		environ, envErr := proctree.Environ(process.PID)
+		if envErr != nil {
+			continue
+		}
+		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName {
+			add(process)
+		}
+	}
+	return refreshed, nil
 }
 
 func processEnvValue(environ []string, name string) (string, bool) {

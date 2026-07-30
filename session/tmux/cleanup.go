@@ -348,18 +348,39 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
-	marked, inspectErr := markedOrphanProcesses(candidates, match, ownHome)
-	remaining := reapLeakedProcesses(match, marked, reapGraceWait, reapTermWait)
-	if len(remaining) > 0 {
-		pids := make([]string, 0, len(remaining))
-		for _, process := range remaining {
+	var sweepErr error
+	if captureErr != nil {
+		sweepErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
+	}
+	// Two refresh/reap passes cover a helper that appears after the pre-marker
+	// snapshot and a child it forks during the first bounded grace period. A
+	// final non-destructive refresh below is the evidence that cleanup finished.
+	for range 2 {
+		refreshed, refreshErr := refreshOrphanCandidates(candidates, match)
+		sweepErr = errors.Join(sweepErr, refreshErr)
+		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome)
+		sweepErr = errors.Join(sweepErr, inspectErr)
+		remaining := reapLeakedProcesses(match, marked, reapGraceWait, reapTermWait)
+		if len(remaining) > 0 {
+			pids := make([]string, 0, len(remaining))
+			for _, process := range remaining {
+				pids = append(pids, fmt.Sprintf("%d", process.PID))
+			}
+			sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
+				strings.Join(pids, ", ")))
+		}
+		candidates = refreshed
+	}
+	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match)
+	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome)
+	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
+	if len(left) > 0 {
+		pids := make([]string, 0, len(left))
+		for _, process := range left {
 			pids = append(pids, fmt.Sprintf("%d", process.PID))
 		}
-		inspectErr = errors.Join(inspectErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
+		sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",
 			strings.Join(pids, ", ")))
 	}
-	if captureErr != nil {
-		captureErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
-	}
-	return errors.Join(captureErr, inspectErr)
+	return sweepErr
 }
