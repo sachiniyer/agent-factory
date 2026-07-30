@@ -94,8 +94,11 @@ func RedactAccessTokenText(text string) string {
 			continue
 		}
 
+		// A preceding semicolon can introduce a legacy query field, but a semicolon
+		// inside the value is ambiguous. Redact through the next unambiguous boundary
+		// rather than risk preserving credential material after it.
 		valueEnd := valueStart
-		for valueEnd < len(rest) && !strings.ContainsRune("&; \t\r\n#\"'", rune(rest[valueEnd])) {
+		for valueEnd < len(rest) && !strings.ContainsRune("& \t\r\n#\"'", rune(rest[valueEnd])) {
 			valueEnd++
 		}
 		redacted.WriteString(rest[:valueStart])
