@@ -153,3 +153,72 @@ esac
 		t.Fatal("CleanupSessions error = nil, want transient targeted marker failure to remain unknown")
 	}
 }
+
+// TestCleanupSessionsToleratesSessionGoneDuringMarkerLookup guards #2706's
+// ls-to-ownership-probe race. A session that definitively vanished is already
+// clean; only a surviving session or an unanswered existence probe should abort
+// reset.
+func TestCleanupSessionsToleratesSessionGoneDuringMarkerLookup(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+ls)
+  echo 'af_gone: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+show-environment)
+  exit 1
+  ;;
+has-session)
+  [ "${2-}" = "-t=af_gone" ] || exit 98
+  exit 1
+  ;;
+*)
+  exit 97
+  ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	if err := CleanupSessions(cmd.MakeExecutor()); err != nil {
+		t.Fatalf("CleanupSessions error = %v, want a definitively vanished session to be tolerated", err)
+	}
+}
+
+// TestCleanupSessionsMarkerErrorReprobeTimeoutIsUnknown guards the second
+// half of #2706's tri-state: failure to answer the exact existence re-probe is
+// not evidence that the session vanished and must stop destructive reset work.
+func TestCleanupSessionsMarkerErrorReprobeTimeoutIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+ls)
+  echo 'af_unknown: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+show-environment)
+  exit 97
+  ;;
+has-session)
+  sleep 300 &
+  wait
+  ;;
+*)
+  exit 98
+  ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	shortTmuxTimeout(t, 200*time.Millisecond)
+
+	err := CleanupSessions(cmd.MakeExecutor())
+	if !errors.Is(err, ErrTmuxTimeout) {
+		t.Fatalf("CleanupSessions error = %v, want ErrTmuxTimeout when the exact session re-probe does not answer", err)
+	}
+}

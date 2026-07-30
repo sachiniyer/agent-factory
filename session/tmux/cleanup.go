@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -109,6 +110,28 @@ func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	return false, true
 }
 
+// probeSessionStrict is the non-lossy existence probe for CleanupSessions'
+// ownership gate. Unlike probeSession, it does not treat every non-timeout
+// execution failure as absence: only tmux's ordinary exit 1 is a determinate
+// "no such session" answer. Any other failure remains unknown and cannot
+// authorize reset to continue to worktree deletion.
+func probeSessionStrict(cmdExec cmd.Executor, name string) (exists bool, known bool, err error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	err = runTmuxBoundedWith(ctx, cmdExec, "has-session", fmt.Sprintf("-t=%s", name))
+	if err == nil {
+		return true, true, nil
+	}
+	if ctx.Err() != nil {
+		return false, false, fmt.Errorf("%w: has-session %s after %s", ErrTmuxTimeout, name, tmuxCommandTimeout)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, true, nil
+	}
+	return false, false, fmt.Errorf("has-session for %s did not return a usable answer: %w", name, err)
+}
+
 // exactTarget builds an exact-match `-t` target spec for the named session.
 //
 // tmux resolves a bare `-t name` by exact match first and then PREFIX match, so
@@ -181,6 +204,18 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	for _, match := range prefixed {
 		home, ok, markerErr := sessionHomeMarker(cmdExec, match)
 		if markerErr != nil {
+			// The session may have disappeared after `tmux ls`. Re-probe the
+			// exact name after EVERY marker error: only an authoritative
+			// has-session absence turns this race into a successful no-op.
+			exists, known, probeErr := probeSessionStrict(cmdExec, match)
+			if known && !exists {
+				log.InfoLog.Printf("tmux session %s vanished during ownership lookup; nothing remains to clean", match)
+				continue
+			}
+			if !known {
+				return fmt.Errorf("cannot determine tmux session %s ownership or whether it survived; refusing to continue cleanup: %w",
+					match, errors.Join(markerErr, probeErr))
+			}
 			return fmt.Errorf("cannot determine tmux session %s ownership; refusing to continue cleanup: %w", match, markerErr)
 		}
 		switch {

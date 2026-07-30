@@ -68,7 +68,7 @@ func sessionEnvFlags(sanitizedName string) []string {
 // an unrelated value as a forged-looking AF_HOME line. If the targeted query
 // fails, an unfiltered query is used only to prove that the session answered and
 // the named variable was absent. If neither query answers, ownership remains
-// unknown and cleanup stops before destructive reset work.
+// unknown and cleanup decides whether the exact session has since vanished.
 func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
 	ctx, cancel := tmuxTimeoutContext()
 	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome)
