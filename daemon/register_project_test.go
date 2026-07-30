@@ -203,6 +203,37 @@ func TestControlServer_DeleteProject_RemovesRegistryRecordAndPublishes(t *testin
 	assert.Empty(t, projects, "the deleted project's registry record is gone, so the switcher drops it")
 }
 
+// TestControlServer_DeleteProject_RepoIDOnlyRemovesRegistryRecord pins the
+// documented direct-client shape that omits RepoPath. Success is not evidence of
+// deletion here: the bug returned OK while passing an empty path to
+// DeregisterProject, so assert the durable registry state itself.
+func TestControlServer_DeleteProject_RepoIDOnlyRemovesRegistryRecord(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: manager}
+
+	var reg RegisterProjectResponse
+	require.NoError(t, cs.RegisterProject(RegisterProjectRequest{Path: repoPath}, &reg))
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1, "precondition: the sessionless project is registered")
+
+	var del DeleteProjectResponse
+	require.NoError(t, cs.DeleteProject(DeleteProjectRequest{RepoID: repo.ID}, &del))
+	require.True(t, del.OK)
+	assert.Equal(t, 0, del.ArchivedCount)
+	assert.Equal(t, 0, del.KilledCount)
+
+	projects, err = config.ListProjects()
+	require.NoError(t, err)
+	assert.Empty(t, projects, "RepoID-only success must remove the durable registry record")
+}
+
 // TestControlServer_RegisterProject_GatedWhenWarming: like every state mutation,
 // RegisterProject is refused while the manager is still warming up, with the
 // daemon-starting error clients retry on.

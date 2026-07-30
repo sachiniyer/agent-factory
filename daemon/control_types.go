@@ -153,9 +153,11 @@ type RestoreSessionResponse struct {
 // registration or root opt-in.
 //
 // RepoPath is the repo root (the stable project id clients group by:
-// worktree.repo_path). RepoID is the precomputed id; when empty the daemon
-// derives it from RepoPath. At least one must be set. Deleting an unknown project
-// is a clean no-op; a registered project with no live sessions is deregistered.
+// worktree.repo_path). RepoID is the precomputed id; when either is omitted the
+// daemon derives it from RepoPath or its durable registry record, respectively.
+// When both are set they must identify the same project. At least one must be
+// set. Deleting an unknown project is a clean no-op; a registered project with no
+// live sessions is deregistered.
 type DeleteProjectRequest struct {
 	RepoPath string `json:"repo_path"`
 	RepoID   string `json:"repo_id"`

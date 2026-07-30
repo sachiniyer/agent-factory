@@ -191,6 +191,47 @@ func TestDeleteProject_DerivesRepoIDFromPath(t *testing.T) {
 	assert.Empty(t, liveProjectRoots(manager.Snapshot(repoID)))
 }
 
+// TestDeleteProject_RepoIDOnlyRegistryReadFailureLeavesProjectIntact pins the
+// unknown outcome while resolving the omitted RepoPath. A corrupt registry is
+// not evidence that no matching registration exists: fail before archiving or
+// suppressing anything so the caller can repair and retry atomically.
+func TestDeleteProject_RepoIDOnlyRegistryReadFailureLeavesProjectIntact(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, source := registerArchivable(t, manager, repoID, repoPath, "worker")
+
+	registered, err := config.RegisterProject(repoPath)
+	require.NoError(t, err)
+	metadata := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), config.ProjectRegistryDirName, registered.ID, "project.json")
+	require.NoError(t, os.WriteFile(metadata, []byte("{ not json"), 0o600))
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID})
+	require.Error(t, err, "an unreadable registry makes RepoID-only resolution unknown")
+	assert.Contains(t, err.Error(), "registered root")
+	assert.Empty(t, result.Archived, "resolution failure must happen before any session mutation")
+	assert.Equal(t, session.LiveReady, inst.GetLiveness())
+	_, statErr := os.Stat(source)
+	assert.NoError(t, statErr, "the live worktree must remain in place")
+}
+
+// TestDeleteProject_RejectsMismatchedRepoIDAndPath prevents a split-target
+// delete: RepoID selects the sessions/root-agent state, while RepoPath selects
+// the durable registry row. If they describe different projects, fail before
+// either half is mutated instead of reporting success for a partial request.
+func TestDeleteProject_RejectsMismatchedRepoIDAndPath(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, source := registerArchivable(t, manager, repoID, repoPath, "worker")
+	other := filepath.Join(t.TempDir(), "different-project")
+	require.NotEqual(t, repoID, config.RepoIDFromRoot(other))
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: other})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match")
+	assert.Empty(t, result.Archived)
+	assert.Equal(t, session.LiveReady, inst.GetLiveness())
+	_, statErr := os.Stat(source)
+	assert.NoError(t, statErr, "a mismatched request must not move the worktree")
+}
+
 // TestDeleteProject_NonCanonicalPathStillMatches: a path-only request whose path
 // is NOT the canonical repo root (here a subdirectory of the repo — hashing it
 // raw would miss) still targets the right project, because the daemon resolves it

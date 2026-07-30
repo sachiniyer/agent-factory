@@ -69,6 +69,41 @@ type DeleteProjectResult struct {
 	Deregistered bool
 }
 
+// normalizeDeleteProjectPath resolves an existing path to its canonical main
+// repo root and identity. A stale/missing path falls back to its cleaned spelling
+// so deleting an unknown or moved project remains an idempotent no-op.
+func normalizeDeleteProjectPath(path string) (string, string) {
+	root := config.ExpandTilde(strings.TrimSpace(path))
+	if repo, err := config.RepoFromPath(root); err == nil {
+		return repo.Root, repo.ID
+	}
+	root = filepath.Clean(root)
+	return root, config.RepoIDFromRoot(root)
+}
+
+// registeredProjectRootForRepoID resolves the path needed by
+// config.DeregisterProject when a direct client supplies only the daemon's
+// repo identity. Registry read failure is an unknown outcome, not evidence that
+// no matching registration exists, so callers must treat an error as fatal
+// before mutating sessions or root-agent state.
+func registeredProjectRootForRepoID(repoID string) (string, error) {
+	projects, err := config.ListProjects()
+	if err != nil {
+		return "", fmt.Errorf("read durable project registry: %w", err)
+	}
+	var root string
+	for _, project := range projects {
+		if config.RepoIDFromRoot(project.Root) != repoID {
+			continue
+		}
+		if root != "" && filepath.Clean(root) != filepath.Clean(project.Root) {
+			return "", fmt.Errorf("repo id %s matches multiple registered roots %q and %q; cannot determine which project to deregister", repoID, root, project.Root)
+		}
+		root = project.Root
+	}
+	return root, nil
+}
+
 // DeleteProject deletes a project — a repo grouping of sessions (#1735) — with
 // archive-then-remove semantics under the single-writer daemon:
 //
@@ -83,9 +118,9 @@ type DeleteProjectResult struct {
 //   - The repo's root_agents opt-in is dropped (in-memory suppression for this
 //     daemon's life + removed from config on disk) so the project does not linger
 //     empty in the picker and no always-on root respawns.
-//   - A durable project registration whose root matches req.RepoPath is removed
-//     after every session settles, so a registered-but-sessionless project also
-//     disappears.
+//   - A durable project registration whose root matches RepoPath — or whose root
+//     the daemon resolves from a RepoID-only request — is removed after every
+//     session settles, so a registered-but-sessionless project also disappears.
 //
 // The user's real git repository is never touched. Because the active-projects
 // list is derived from LIVE sessions, archiving them all removes the project from
@@ -95,16 +130,15 @@ type DeleteProjectResult struct {
 // a zero-count success; a registered project with no sessions is deregistered.
 func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
 	repoID := strings.TrimSpace(req.RepoID)
+	repoPath := strings.TrimSpace(req.RepoPath)
 	if repoID == "" {
-		root := strings.TrimSpace(req.RepoPath)
-		if root == "" {
+		if repoPath == "" {
 			return DeleteProjectResult{}, fmt.Errorf("delete project: repo_id or repo_path is required")
 		}
 		// Expand a leading ~ BEFORE canonicalizing: git (RepoFromPath) does not do
 		// tilde expansion — the shell normally would — so a literal "~/repo" request
 		// (a root_agents key spelling, or a hand-typed CLI arg) must be expanded here
 		// or it resolves to nothing and silently misses (#1740 review).
-		root = config.ExpandTilde(root)
 		// Canonicalize the path the SAME way the daemon keys repos everywhere:
 		// resolve it to the main-repo root (git toplevel) and hash THAT, so a
 		// symlinked / trailing-slash / relative / subdirectory / ".."-laden form of
@@ -113,10 +147,21 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		// typo'd project) fall back to hashing the cleaned path: that yields no
 		// match, which is the clean idempotent no-op deleting an unknown project
 		// must be (Sachin's locked semantics), not a wrong-project hit.
-		if repo, rerr := config.RepoFromPath(root); rerr == nil {
-			repoID = repo.ID
-		} else {
-			repoID = config.RepoIDFromRoot(filepath.Clean(root))
+		repoPath, repoID = normalizeDeleteProjectPath(repoPath)
+	} else if repoPath == "" {
+		var err error
+		repoPath, err = registeredProjectRootForRepoID(repoID)
+		if err != nil {
+			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
+		}
+	} else {
+		// Both selectors must describe one project. Otherwise RepoID chooses the
+		// sessions/root-agent state while RepoPath chooses a potentially different
+		// registry row — a split-target partial delete hidden behind success.
+		var pathRepoID string
+		repoPath, pathRepoID = normalizeDeleteProjectPath(repoPath)
+		if pathRepoID != repoID {
+			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}
 	}
 	result := DeleteProjectResult{RepoID: repoID}
@@ -266,17 +311,23 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// Every session for the repo is archived and none is starting — NOW drop the durable
 	// #2355 registry record (after the archive, #2549): the deregister must never land
 	// while a session survives, or the delete leaves a live orphan in a repo no longer in
-	// the registry. req.RepoPath is the project's root (both the web and TUI send it); a
-	// project that was never registered is a false no-op. Recorded so the projects-changed
-	// publish fires even when no session was archived (a registered, sessionless project).
-	if deregistered, regErr := config.DeregisterProject(config.ExpandTilde(strings.TrimSpace(req.RepoPath))); regErr != nil {
-		// SYMMETRIC to an archive failure, and NOT "nothing changed": the sessions are
-		// already archived here, so a retry re-archives nothing and finishes the deregister
-		// — at worst an empty-but-registered project, never a live orphan.
-		return result, fmt.Errorf("delete project %s: archived %d session(s) but could not remove its durable registry record — the project still lists; retry to finish, a retry re-archives nothing: %w", repoID, len(result.Archived), regErr)
-	} else if deregistered {
-		result.Deregistered = true
-		log.InfoLog.Printf("delete project %s: removed its durable registry record", repoID)
+	// the registry. repoPath is either caller-provided and canonicalized, or resolved from
+	// the daemon's durable registry for the documented RepoID-only form. An empty root
+	// means no matching registration existed at resolution time, so there is nothing to
+	// deregister. Recorded so the projects-changed publish fires even when no session was
+	// archived (a registered, sessionless project).
+	if repoPath != "" {
+		deregistered, regErr := config.DeregisterProject(repoPath)
+		if regErr != nil {
+			// SYMMETRIC to an archive failure, and NOT "nothing changed": the sessions are
+			// already archived here, so a retry re-archives nothing and finishes the deregister
+			// — at worst an empty-but-registered project, never a live orphan.
+			return result, fmt.Errorf("delete project %s: archived %d session(s) but could not remove its durable registry record — the project still lists; retry to finish, a retry re-archives nothing: %w", repoID, len(result.Archived), regErr)
+		}
+		if deregistered {
+			result.Deregistered = true
+			log.InfoLog.Printf("delete project %s: removed its durable registry record", repoID)
+		}
 	}
 
 	log.InfoLog.Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))
