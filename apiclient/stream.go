@@ -80,6 +80,7 @@ func (c *Client) DialStream(ctx context.Context, title, repoID, tabID string, ta
 	// clone is WS-only: putting this bound on the shared REST transport would sever
 	// a slow synchronous CreateSession before provisioning finishes. The local Unix
 	// socket keeps its existing transport unchanged.
+	dialCtx := ctx
 	if c.remoteTransport != nil {
 		wsTransport := c.remoteTransport.Clone()
 		wsTransport.ResponseHeaderTimeout = remoteWSHandshakeTimeout
@@ -87,8 +88,15 @@ func (c *Client) DialStream(ctx context.Context, title, repoID, tabID string, ta
 		wsClient := *c.httpClient
 		wsClient.Transport = wsTransport
 		opts.HTTPClient = &wsClient
+		// ResponseHeaderTimeout starts only after net/http finishes writing the
+		// upgrade request. Keep a larger overall backstop for a peer that connects
+		// but stops reading: dial + upgrade may each consume their full independent
+		// budgets, while request writing can never hang forever.
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, remoteDialTimeout+remoteWSHandshakeTimeout)
+		defer cancel()
 	}
-	conn, resp, err := websocket.Dial(ctx, u, &opts)
+	conn, resp, err := websocket.Dial(dialCtx, u, &opts)
 	if err != nil {
 		return nil, &TransportError{Err: fmt.Errorf("apiclient: dial pty stream: %w",
 			agentproto.RedactAccessTokenError(err, c.token))}

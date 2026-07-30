@@ -72,6 +72,42 @@ func TestRemoteAgentDialStream_StalledHandshakeTimesOut(t *testing.T) {
 	}
 }
 
+func TestRemoteAgentDialStream_StalledRequestWriteTimesOut(t *testing.T) {
+	origDial, origHandshake := remoteAgentDialTimeout, remoteAgentWSHandshakeTimeout
+	remoteAgentDialTimeout = 250 * time.Millisecond
+	remoteAgentWSHandshakeTimeout = 250 * time.Millisecond
+	t.Cleanup(func() {
+		remoteAgentDialTimeout, remoteAgentWSHandshakeTimeout = origDial, origHandshake
+	})
+
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: "http://pipe.invalid", Token: "tok"}, "probe")
+	if err != nil {
+		t.Fatalf("newRemoteAgentClient: %v", err)
+	}
+	client, peer := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = peer.Close()
+	})
+	rc.transport.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		return client, nil
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := rc.dialStream(context.Background(), 0)
+		errc <- err
+	}()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("stalled agent-server WebSocket request write unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HANG: agent-server dial did not return while the peer stopped reading the upgrade request")
+	}
+}
+
 // TestRemoteAgentDialStream_SlowTCPDialKeepsFullHandshakeBudget audits #2670's
 // adjacent daemon-to-agent-server stream dial. Its TCP connect and WebSocket
 // upgrade must receive independent timeout budgets too.

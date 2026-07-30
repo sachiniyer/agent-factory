@@ -501,10 +501,10 @@ const remoteWSWriteTimeout = 10 * time.Second
 
 // remoteAgentDialTimeout bounds the TCP connect to the sandbox (a real network
 // hop), and remoteAgentCallTimeout bounds a whole control REST round-trip.
-const (
-	remoteAgentDialTimeout = 10 * time.Second
-	remoteAgentCallTimeout = 30 * time.Second
-)
+const remoteAgentCallTimeout = 30 * time.Second
+
+// var, not const, so transport phase-bound tests can shrink the dial budget.
+var remoteAgentDialTimeout = 10 * time.Second
 
 // remoteAgentWSHandshakeTimeout bounds the WS UPGRADE handshake on the internal
 // daemon→agent-server stream dial — the 101 exchange after the TCP connect. Plain
@@ -646,7 +646,12 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 	wsClient := *c.httpClient
 	wsClient.Transport = wsTransport
 	opts.HTTPClient = &wsClient
-	conn, _, err := websocket.Dial(ctx, u, opts)
+	// ResponseHeaderTimeout does not cover a blocked request write. The larger
+	// overall backstop lets TCP connect and the 101 response each use their full
+	// independent budget while still bounding a peer that stops reading.
+	dialCtx, cancel := context.WithTimeout(ctx, remoteAgentDialTimeout+remoteAgentWSHandshakeTimeout)
+	defer cancel()
+	conn, _, err := websocket.Dial(dialCtx, u, opts)
 	if err != nil {
 		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w",
 			agentproto.RedactAccessTokenError(err, c.token))

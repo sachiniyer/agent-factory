@@ -297,6 +297,45 @@ func TestDialStream_StalledHandshakeTimesOut(t *testing.T) {
 	}
 }
 
+// TestDialStream_StalledRequestWriteTimesOut covers the pre-header half of the
+// handshake. ResponseHeaderTimeout has not started while net/http is still
+// writing the upgrade request, so the dial also needs an overall backstop.
+func TestDialStream_StalledRequestWriteTimesOut(t *testing.T) {
+	origDial, origHandshake := remoteDialTimeout, remoteWSHandshakeTimeout
+	remoteDialTimeout = 250 * time.Millisecond
+	remoteWSHandshakeTimeout = 250 * time.Millisecond
+	t.Cleanup(func() {
+		remoteDialTimeout, remoteWSHandshakeTimeout = origDial, origHandshake
+	})
+
+	c, err := NewRemote("http://pipe.invalid", "tok")
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	client, peer := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = peer.Close()
+	})
+	c.remoteTransport.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		return client, nil
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+		errc <- err
+	}()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("stalled WebSocket request write unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HANG: DialStream did not return while the peer stopped reading the upgrade request")
+	}
+}
+
 // TestDialStream_SlowTCPDialKeepsFullHandshakeBudget is the #2670 regression:
 // the remote TCP connect and WebSocket upgrade have independent budgets. A TCP
 // connect that consumes more than the upgrade budget but less than the dial
