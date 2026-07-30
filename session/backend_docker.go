@@ -632,8 +632,10 @@ func (p *dockerProvisioner) reap() error {
 	// success (err == nil) never reaches here.
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// Unknown-state, and NOT latched: RETAIN the row now and re-run on the next
-		// reap. (#2049 classification + #2063-review retry.)
-		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+		// reap. exec.CommandContext reports the killed process, not the context
+		// sentinel, so join ctx.Err explicitly and keep the deadline classifiable by
+		// callers (#2049 classification + #2063 review + #2590 review).
+		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, errors.Join(reapErr, ctx.Err()))
 		log.WarningLog.Printf("%v", reapErr)
 		return reapErr
 	}

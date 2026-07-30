@@ -61,7 +61,9 @@ func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
 		case "rm":
 			reapCalls.Add(1)
 			<-ctx.Done()
-			return nil, ctx.Err()
+			// exec.CommandContext reports the killed process (for example,
+			// "signal: killed"), not ctx.Err(); reap must add the deadline.
+			return nil, errors.New("signal: killed")
 		default:
 			return nil, fmt.Errorf("unexpected docker command: %v", args)
 		}
@@ -91,9 +93,9 @@ func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
 // so TeardownStateUnknown returns true and the daemon RETAINS the row.
 //
 // The injected dockerExec faithfully models a deadline kill: it blocks until the
-// caller's context is cancelled and returns ctx.Err() (context.DeadlineExceeded),
-// exactly as exec.CommandContext's kill surfaces to reap via ctx.Err(). Before the
-// fix reap returned a plain error and TeardownStateUnknown was false.
+// caller's context is cancelled, then returns the killed process error rather
+// than ctx.Err(), exactly as exec.CommandContext does. reap must add the context
+// deadline itself. Before the fix it returned only a plain process error.
 func TestDockerReapTimeoutIsWorkspaceStateUnknown(t *testing.T) {
 	withShortDockerReapTimeout(t, 150*time.Millisecond)
 	restore := SetDockerExecForTest(func(ctx context.Context, _ []string, args ...string) ([]byte, error) {
@@ -101,7 +103,7 @@ func TestDockerReapTimeoutIsWorkspaceStateUnknown(t *testing.T) {
 			return []byte(dockerReapTestEngineID + "\n"), nil
 		}
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return nil, errors.New("signal: killed")
 	})
 	defer restore()
 
@@ -122,6 +124,9 @@ func TestDockerReapTimeoutIsWorkspaceStateUnknown(t *testing.T) {
 	}
 	if !errors.Is(err, ErrWorkspaceStateUnknown) {
 		t.Fatalf("a wedged/timed-out reap must wrap ErrWorkspaceStateUnknown so the row is retained (#2049); got a plain error: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a timed-out reap must preserve the actual context deadline, got %v", err)
 	}
 	if !TeardownStateUnknown(err) {
 		t.Fatalf("TeardownStateUnknown must be true for a timed-out reap so KillSession/deleteSessionRecord RETAIN the row instead of orphaning the leaked container; got false for: %v", err)
@@ -206,7 +211,7 @@ func TestDockerReapTimeoutIsReRunnable(t *testing.T) {
 		}
 		atomic.AddInt32(&calls, 1)
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return nil, errors.New("signal: killed")
 	})
 	defer restore()
 
@@ -255,7 +260,7 @@ func TestDockerReapTimeoutThenSuccessClears(t *testing.T) {
 		atomic.AddInt32(&calls, 1)
 		if wedged.Load() {
 			<-ctx.Done()
-			return nil, ctx.Err()
+			return nil, errors.New("signal: killed")
 		}
 		return []byte("deadbeefcafe0000\n"), nil
 	})
