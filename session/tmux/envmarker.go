@@ -1,8 +1,10 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,28 +63,65 @@ func sessionEnvFlags(sanitizedName string) []string {
 // Bounded by tmuxCommandTimeout (#2099): CleanupSessions calls this once per
 // discovered session, so an unbounded stall on any one of them wedges the whole
 // sweep — and `af reset` runs that sweep synchronously in a short-lived CLI
-// process, where the only way out is ^C. The unfiltered form is deliberate:
-// `show-environment AF_HOME` reports an absent variable as a generic command
-// failure, while unfiltered `show-environment` succeeds and simply omits it.
-// That preserves absent separately from a timeout or other probe failure.
+// process, where the only way out is ^C. The targeted query is the only output
+// trusted as the marker: unfiltered environment output can render a newline in
+// an unrelated value as a forged-looking AF_HOME line. If the targeted query
+// fails, an unfiltered query is used only to prove that the session answered and
+// the named variable was absent. If neither query answers, ownership remains
+// unknown and cleanup stops before destructive reset work.
 func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
 	ctx, cancel := tmuxTimeoutContext()
-	defer cancel()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName))
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+	out, markerErr := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome)
+	markerTimedOut := ctx.Err() != nil
+	cancel()
+	if markerErr == nil {
+		line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
+		if line == "-"+EnvMarkerHome {
+			return "", false, nil
 		}
-		return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: %w", EnvMarkerHome, sanitizedName, err)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if home, ok := strings.CutPrefix(strings.TrimSuffix(line, "\r"), EnvMarkerHome+"="); ok {
-			return home, true, nil
+		if strings.ContainsAny(line, "\r\n") {
+			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed multiline response", EnvMarkerHome, sanitizedName)
 		}
+		home, ok := strings.CutPrefix(line, EnvMarkerHome+"=")
+		if !ok {
+			return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: malformed response %q", EnvMarkerHome, sanitizedName, line)
+		}
+		return home, true, nil
 	}
-	// A leading '-' (variable marked for removal), unrelated environment
-	// entries, or empty output all authoritatively mean no active marker.
-	return "", false, nil
+	if markerTimedOut {
+		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+	}
+	if !missingSessionEnvMarker(markerErr) {
+		return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: %w", EnvMarkerHome, sanitizedName, markerErr)
+	}
+
+	// The targeted result itself identified an absent variable. Ask for the
+	// environment without consuming its ambiguous contents: success confirms the
+	// session answered and the marker alone was absent. A generic targeted error
+	// never reaches this fallback, even if this second command would succeed.
+	allCtx, allCancel := tmuxTimeoutContext()
+	_, allErr := outputTmuxBoundedWith(allCtx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName))
+	allTimedOut := allCtx.Err() != nil
+	allCancel()
+	if allErr == nil {
+		return "", false, nil
+	}
+	if allTimedOut {
+		return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+	}
+
+	return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: targeted query: %v; environment query: %w",
+		EnvMarkerHome, sanitizedName, markerErr, allErr)
+}
+
+// missingSessionEnvMarker recognizes tmux's explicit absent-variable answer
+// from the TARGETED query. Exit status alone is insufficient: a transient
+// wrapper/server failure may also be nonzero, and a later command succeeding
+// cannot retroactively determine why the first failed.
+func missingSessionEnvMarker(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) &&
+		strings.TrimSpace(string(exitErr.Stderr)) == "unknown variable: "+EnvMarkerHome
 }
 
 var (

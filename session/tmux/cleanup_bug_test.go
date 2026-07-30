@@ -95,6 +95,7 @@ af_theirs: 1 windows (created Wed May 20 12:01:00 2026) [179x47]
 af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 
 	var killedSessions []string
+	missingMarkerErr := tmuxMissingEnvironmentError(t)
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			for i, arg := range cmd.Args {
@@ -112,8 +113,11 @@ af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 				case strings.Contains(strings.Join(cmd.Args, " "), "af_theirs"):
 					return []byte("AF_HOME=/another-home\n"), nil
 				default:
-					// Unfiltered show-environment authoritatively represents a
-					// missing marker by succeeding without an AF_HOME line.
+					if cmd.Args[len(cmd.Args)-1] == EnvMarkerHome {
+						return nil, missingMarkerErr
+					}
+					// The unfiltered fallback authoritatively represents a missing
+					// marker by succeeding; its contents are never authorization.
 					return []byte("PATH=/usr/bin\n"), nil
 				}
 			}
@@ -125,4 +129,14 @@ af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 	require.NoError(t, err)
 	require.Equal(t, []string{"=af_mine:"}, killedSessions,
 		"only the session carrying this home's AF_HOME marker may be killed; foreign-home and marker-less sessions must survive (#1122)")
+}
+
+func tmuxMissingEnvironmentError(t *testing.T) error {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", "printf 'unknown variable: AF_HOME\\n' >&2; exit 1")
+	_, err := cmd.Output()
+	if err == nil {
+		t.Fatal("missing-variable command unexpectedly succeeded")
+	}
+	return err
 }
