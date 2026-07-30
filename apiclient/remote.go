@@ -54,12 +54,14 @@ import (
 //     provisioning; a truly wedged connection is still bounded (just not
 //     instantly), and the fast-fail case is already covered by the dial above.
 //
-// Notably there is NO transport-level ResponseHeaderTimeout and NO
-// http.Client.Timeout: a shared ResponseHeaderTimeout would fire mid-provision on
-// a slow synchronous create (Greptile #1734), and http.Client.Timeout would
-// additionally kill an established WS stream (coder/websocket warns against it).
-// WS/stream dials are EXEMPT from the overall deadline entirely — they carry only
-// the dial bound, so a long-lived PTY subscription is never severed.
+// Notably there is NO SHARED transport-level ResponseHeaderTimeout and NO
+// http.Client.Timeout: a ResponseHeaderTimeout on the REST transport would fire
+// mid-provision on a slow synchronous create (Greptile #1734), and
+// http.Client.Timeout would additionally kill an established WS stream
+// (coder/websocket warns against it). DialStream clones the remote transport and
+// puts ResponseHeaderTimeout only on that one WS handshake. WS/stream dials are
+// EXEMPT from the overall REST deadline entirely, so a long-lived PTY
+// subscription is never severed.
 //
 // They are vars (not consts) only so a test can shrink them to prove the bound
 // fires without waiting the full budget — the same pattern attach.go's
@@ -81,6 +83,7 @@ func NewRemote(daemonURL, token string) (*Client, error) {
 		return nil, err
 	}
 	dialer := &net.Dialer{Timeout: remoteDialTimeout}
+	transport := &http.Transport{DialContext: dialer.DialContext}
 	return &Client{
 		httpClient: &http.Client{
 			// No http.Client.Timeout: it fires on the whole request lifetime, which
@@ -88,14 +91,13 @@ func NewRemote(daemonURL, token string) (*Client, error) {
 			// (coder/websocket warns against it). The overall REST bound is applied
 			// per-call as a request-context deadline instead (call(), remote-only),
 			// so WS/stream dials stay exempt.
-			Transport: &http.Transport{
-				DialContext: dialer.DialContext,
-			},
+			Transport: transport,
 		},
-		token:          token,
-		httpBase:       httpBase,
-		wsBase:         wsBase,
-		requestTimeout: remoteRequestTimeout,
+		remoteTransport: transport,
+		token:           token,
+		httpBase:        httpBase,
+		wsBase:          wsBase,
+		requestTimeout:  remoteRequestTimeout,
 	}, nil
 }
 

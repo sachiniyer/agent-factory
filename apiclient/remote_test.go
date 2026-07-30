@@ -296,6 +296,51 @@ func TestDialStream_StalledHandshakeTimesOut(t *testing.T) {
 	}
 }
 
+// TestDialStream_SlowTCPDialKeepsFullHandshakeBudget is the #2670 regression:
+// the remote TCP connect and WebSocket upgrade have independent budgets. A TCP
+// connect that consumes more than the upgrade budget but less than the dial
+// budget must not make an otherwise immediate upgrade time out.
+func TestDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T) {
+	origHandshake := remoteWSHandshakeTimeout
+	remoteWSHandshakeTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { remoteWSHandshakeTimeout = origHandshake })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := NewRemote(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewRemote: %v", err)
+	}
+	transport := c.httpClient.Transport.(*http.Transport)
+	dial := transport.DialContext
+	dialDelay := 2 * remoteWSHandshakeTimeout
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		timer := time.NewTimer(dialDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return dial(ctx, network, address)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	sc, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+	if err != nil {
+		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
+	}
+	_ = sc.Conn.Close(websocket.StatusNormalClosure, "")
+}
+
 // TestNewRemote_SlowButProgressingResponseNotKilled is the Greptile correctness
 // guard for a slow SYNCHRONOUS create: a valid RPC whose server does real work for
 // a while and answers JUST UNDER the overall deadline (like a remote docker/ssh

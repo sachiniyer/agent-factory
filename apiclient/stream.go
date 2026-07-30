@@ -74,20 +74,20 @@ func (c *Client) DialStream(ctx context.Context, title, repoID, tabID string, ta
 	if enc := q.Encode(); enc != "" {
 		u += "?" + enc
 	}
-	// A REMOTE target bounds the UPGRADE handshake so a peer that accepts the TCP
-	// connection but never answers the 101 can't hang the attach path (which dials
-	// with context.Background()) — plain HTTP has no TLS handshake timeout to lean
-	// on. The deadline governs ONLY the handshake: coder/websocket's Dial does not
-	// use the context for the established stream, so cancelling it after Dial
-	// returns never severs the live subscription. The local unix socket keeps
-	// context.Background() (the socket is local — there or not, bounded by dial).
-	dialCtx := ctx
-	if c.requestTimeout > 0 {
-		var cancel context.CancelFunc
-		dialCtx, cancel = context.WithTimeout(ctx, remoteWSHandshakeTimeout)
-		defer cancel()
+	// A REMOTE target bounds the UPGRADE response separately from the TCP connect.
+	// ResponseHeaderTimeout starts only after the request has been written, so a
+	// slow-but-valid connect cannot consume the 101 exchange's budget (#2670). The
+	// clone is WS-only: putting this bound on the shared REST transport would sever
+	// a slow synchronous CreateSession before provisioning finishes. The local Unix
+	// socket keeps its existing transport unchanged.
+	if c.remoteTransport != nil {
+		wsTransport := c.remoteTransport.Clone()
+		wsTransport.ResponseHeaderTimeout = remoteWSHandshakeTimeout
+		wsClient := *c.httpClient
+		wsClient.Transport = wsTransport
+		opts.HTTPClient = &wsClient
 	}
-	conn, resp, err := websocket.Dial(dialCtx, u, &opts)
+	conn, resp, err := websocket.Dial(ctx, u, &opts)
 	if err != nil {
 		return nil, &TransportError{Err: fmt.Errorf("apiclient: dial pty stream: %w",
 			agentproto.RedactAccessTokenError(err, c.token))}

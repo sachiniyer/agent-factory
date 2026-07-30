@@ -117,7 +117,8 @@ const localWSBase = "ws://unix"
 // bearer token on every call (#1592 Phase 3 PR4); httpBase/wsBase then carry the
 // real http://host:port / ws://host:port authority. A zero Client is not usable.
 type Client struct {
-	httpClient *http.Client
+	httpClient      *http.Client
+	remoteTransport *http.Transport
 	// token is the bearer credential threaded on every REST call (Authorization
 	// header) and WS dial (header + ?access_token=) for a REMOTE target. It is
 	// empty for the local unix socket, whose peer is trusted (0600 perms are the
@@ -138,8 +139,8 @@ type Client struct {
 	// socket, which keeps its blocking-read semantics (the socket is either there
 	// or not, bounded by dialTimeout, and the in-memory snapshot returns promptly).
 	// WS stream dials never consult this field — they are bounded only by the
-	// transport's dial + handshake timeouts, so a long-lived stream is never
-	// severed by an overall deadline.
+	// transport's independent dial + handshake timeouts, so a long-lived stream
+	// is never severed by an overall deadline.
 	requestTimeout time.Duration
 }
 

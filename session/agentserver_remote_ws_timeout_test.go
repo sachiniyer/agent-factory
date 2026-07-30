@@ -3,8 +3,12 @@ package session
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // TestRemoteAgentDialStream_StalledHandshakeTimesOut is the #1730 guard on the
@@ -65,4 +69,48 @@ func TestRemoteAgentDialStream_StalledHandshakeTimesOut(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("HANG: dialStream did not return on a stalled agent-server upgrade (#1730 regression on the internal hop)")
 	}
+}
+
+// TestRemoteAgentDialStream_SlowTCPDialKeepsFullHandshakeBudget audits #2670's
+// adjacent daemon-to-agent-server stream dial. Its TCP connect and WebSocket
+// upgrade must receive independent timeout budgets too.
+func TestRemoteAgentDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T) {
+	orig := remoteAgentWSHandshakeTimeout
+	remoteAgentWSHandshakeTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { remoteAgentWSHandshakeTimeout = orig })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: srv.URL, Token: "tok"}, "probe")
+	if err != nil {
+		t.Fatalf("newRemoteAgentClient: %v", err)
+	}
+	transport := rc.httpClient.Transport.(*http.Transport)
+	dial := transport.DialContext
+	dialDelay := 2 * remoteAgentWSHandshakeTimeout
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		timer := time.NewTimer(dialDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return dial(ctx, network, address)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	conn, err := rc.dialStream(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
 }

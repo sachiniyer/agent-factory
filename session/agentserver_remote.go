@@ -523,6 +523,7 @@ var remoteAgentWSHandshakeTimeout = 10 * time.Second
 // pieces that define the contract through the agentproto/apiproto leaves.
 type remoteAgentClient struct {
 	httpClient *http.Client
+	transport  *http.Transport
 	httpBase   string // http://host:port
 	wsBase     string // ws://host:port
 	token      string
@@ -542,16 +543,16 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 		return nil, err
 	}
 	dialer := &net.Dialer{Timeout: remoteAgentDialTimeout}
+	transport := &http.Transport{DialContext: dialer.DialContext}
 	return &remoteAgentClient{
 		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: dialer.DialContext,
-			},
+			Transport: transport,
 		},
-		httpBase: httpBase,
-		wsBase:   wsBase,
-		token:    ep.Token,
-		title:    title,
+		transport: transport,
+		httpBase:  httpBase,
+		wsBase:    wsBase,
+		token:     ep.Token,
+		title:     title,
 	}, nil
 }
 
@@ -636,13 +637,15 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int) (*websocket
 		HTTPClient: c.httpClient,
 		HTTPHeader: http.Header{agentproto.AuthHeader: []string{agentproto.BearerScheme + c.token}},
 	}
-	// Bound the UPGRADE handshake so a wedged agent-server (TCP accepted, 101 never
-	// sent) can't hang this dial forever. coder/websocket's Dial context bounds only
-	// the handshake — the established stream reads use the parent ctx (passed into
-	// readLoop), so cancelling this after Dial returns never severs the live stream.
-	dialCtx, cancel := context.WithTimeout(ctx, remoteAgentWSHandshakeTimeout)
-	defer cancel()
-	conn, _, err := websocket.Dial(dialCtx, u, opts)
+	// Bound the UPGRADE response independently of the TCP connect (#2670). The
+	// WebSocket-only clone starts ResponseHeaderTimeout after the request is
+	// written; the shared REST transport remains free of a response-header bound.
+	wsTransport := c.transport.Clone()
+	wsTransport.ResponseHeaderTimeout = remoteAgentWSHandshakeTimeout
+	wsClient := *c.httpClient
+	wsClient.Transport = wsTransport
+	opts.HTTPClient = &wsClient
+	conn, _, err := websocket.Dial(ctx, u, opts)
 	if err != nil {
 		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w",
 			agentproto.RedactAccessTokenError(err, c.token))
