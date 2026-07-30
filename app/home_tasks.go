@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -63,10 +64,12 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	}
 	// Route the create through the daemon (#1029 PR 6): it is the sole writer of
 	// tasks.json among clients (#960) and re-arms its own scheduler/watchers in
-	// the same RPC, so there is no separate ReloadTasks poke — the write and its
-	// schedule refresh are one atomic daemon call.
-	if err := addTaskThroughDaemon(t); err != nil {
-		return m.handleError(fmt.Errorf("failed to save task: %v", err))
+	// the same RPC, so there is no separate ReloadTasks poke. The task-file write
+	// is the durable commit; a later refresh failure is classified so this caller
+	// can accept the saved task without presenting a retryable create form.
+	addErr := addTaskThroughDaemon(t)
+	if addErr != nil && !apiclient.IsMutationCommitted(addErr) {
+		return m.handleError(fmt.Errorf("failed to save task: %v", addErr))
 	}
 	// Refresh sidebar and task pane
 	tasks, err := task.LoadTasksForCurrentRepo()
@@ -75,6 +78,9 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		sp.SetTasks(tasks)
 		// Reflow so the new automation grows the rail's section (#1126).
 		m.relayout()
+	}
+	if addErr != nil {
+		return m.handleError(fmt.Errorf("task was saved, but the daemon could not refresh its schedules: %w", addErr))
 	}
 	return nil
 }

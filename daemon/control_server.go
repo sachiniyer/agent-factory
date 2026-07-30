@@ -28,13 +28,21 @@ type controlServer struct {
 
 // mutationCommittedError preserves the otherwise-ambiguous outcome of a
 // durable mutation whose non-transactional follow-up failed. HTTP exposes its
-// code additively; net/rpc clients retain the same human-readable error text.
+// code additively; net/rpc carries the server-owned prefix that the control
+// client narrowly restores to the same three-valued marker.
 type mutationCommittedError struct {
 	err error
 }
 
-func (e *mutationCommittedError) Error() string { return e.err.Error() }
-func (e *mutationCommittedError) Unwrap() error { return e.err }
+const (
+	taskAddCommittedErrorPrefix    = "task add committed, but failed to reload task schedules:"
+	taskUpdateCommittedErrorPrefix = "task update committed, but failed to reload task schedules:"
+	taskRemoveCommittedErrorPrefix = "task removal committed, but failed to reload task schedules:"
+)
+
+func (e *mutationCommittedError) Error() string           { return e.err.Error() }
+func (e *mutationCommittedError) Unwrap() error           { return e.err }
+func (e *mutationCommittedError) MutationCommitted() bool { return true }
 func (e *mutationCommittedError) APIErrorCode() string {
 	return apiproto.ErrorCodeMutationCommitted
 }
@@ -297,11 +305,15 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 	if err := task.AddTask(req.Task); err != nil {
 		return err
 	}
-	if err := s.reloadTaskSchedulesLocked(); err != nil {
-		return err
-	}
 	resp.OK = true
+	// The task-file write is the durable commit. Publish it before the
+	// non-transactional scheduler/watch reload so other clients never remain
+	// stale when that follow-up fails.
 	s.manager.publishEvent(agentproto.EventTaskCreated, req.Task)
+	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
+		return &mutationCommittedError{err: fmt.Errorf(
+			"%s %w", taskAddCommittedErrorPrefix, reloadErr)}
+	}
 	return nil
 }
 
@@ -330,7 +342,7 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		return nil
 	}
 	return &mutationCommittedError{err: fmt.Errorf(
-		"task update committed, but failed to reload task schedules: %w", reloadErr)}
+		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)}
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
@@ -345,11 +357,14 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	if err := task.RemoveTask(req.ID, req.Expect); err != nil {
 		return err
 	}
-	if err := s.reloadTaskSchedulesLocked(); err != nil {
-		return err
-	}
 	resp.OK = true
+	// Removal is already durable at this point. Announce that commit even when
+	// the scheduler/watch reload cannot apply it in-process.
 	s.manager.publishEvent(agentproto.EventTaskRemoved, task.Task{ID: req.ID})
+	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
+		return &mutationCommittedError{err: fmt.Errorf(
+			"%s %w", taskRemoveCommittedErrorPrefix, reloadErr)}
+	}
 	return nil
 }
 

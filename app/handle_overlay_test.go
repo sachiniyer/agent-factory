@@ -616,6 +616,87 @@ func TestHandleTaskCreate_RoutesThroughDaemonRPC(t *testing.T) {
 	assert.Empty(t, disk, "TUI must not write tasks.json directly (#960 sole writer)")
 }
 
+// TestHandleTaskCreate_CommittedReloadFailureRefreshesAndWarns covers the
+// three-valued AddTask outcome: the durable write succeeded, but the daemon's
+// scheduler/watcher refresh did not. The TUI must accept and reload the created
+// task instead of leaving the form looking retryable and inviting a duplicate.
+func TestHandleTaskCreate_CommittedReloadFailureRefreshesAndWarns(t *testing.T) {
+	h := newTestHome(t)
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	t.Cleanup(SetTaskAdderForTest(func(tk task.Task) error {
+		require.NoError(t, task.AddTask(tk))
+		return committedTaskMutationTestError{}
+	}))
+
+	tp := h.automations.TaskPane()
+	tp.SetTasks(nil)
+	_, _ = h.showTasksOverlay()
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("committed-task")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // trigger selector
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // schedule picker
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // prompt
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do a thing")})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // target session
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // path
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // program
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab}) // save
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Len(t, h.store.GetTasks(), 1,
+		"a committed add must refresh the TUI instead of leaving a retryable form")
+	assert.Equal(t, "committed-task", h.store.GetTasks()[0].Name)
+	assert.False(t, tp.IsCreating(), "the committed task must leave create mode")
+	assert.Contains(t, h.errBox.FullError(), "scheduler reload failed after commit",
+		"the post-commit refresh failure must still be visible")
+	assert.NotContains(t, h.errBox.FullError(), "failed to save task",
+		"a committed add must not be presented as a failed save")
+}
+
+func TestSaveContentPaneState_CommittedRemovalRefreshesAndWarns(t *testing.T) {
+	h := newTestHome(t)
+	repoDir := setupRealRepo(t)
+	t.Chdir(repoDir)
+	repo, err := config.CurrentRepo()
+	require.NoError(t, err)
+	h.repoID = repo.ID
+
+	removed := task.Task{
+		ID: "committed-remove", Name: "remove me", Prompt: "p", CronExpr: "0 9 * * *",
+		ProjectPath: repo.Root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+	}
+	require.NoError(t, task.AddTask(removed))
+	loaded, err := task.LoadTasksForCurrentRepo()
+	require.NoError(t, err)
+	h.store.SetTasks(loaded)
+	tp := h.automations.TaskPane()
+	tp.SetTasks(loaded)
+	_, _ = h.showTasksOverlay()
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+
+	t.Cleanup(SetTaskRemoverForTest(func(id string) error {
+		require.NoError(t, task.RemoveTask(id, task.ProjectExpectation{}))
+		return committedTaskMutationTestError{}
+	}))
+	err = h.saveContentPaneState()
+	require.Error(t, err, "the post-commit schedule failure must remain visible")
+	assert.Contains(t, err.Error(), "was removed, but the daemon could not refresh its schedules")
+	assert.NotContains(t, err.Error(), "failed to remove task",
+		"a committed removal must not be presented as retryable")
+	assert.Empty(t, h.store.GetTasks(), "the TUI projection must refresh to the durable removal")
+}
+
+type committedTaskMutationTestError struct{}
+
+func (committedTaskMutationTestError) Error() string           { return "scheduler reload failed after commit" }
+func (committedTaskMutationTestError) MutationCommitted() bool { return true }
+
 // TestSaveContentPaneState_RoutesThroughDaemonRPC is the #1029 PR 6 guard for
 // the edit/delete path: closing the task manager with dirty edits must persist
 // them through the daemon RPCs (update + remove), not by writing tasks.json

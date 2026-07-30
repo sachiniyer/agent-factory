@@ -124,6 +124,15 @@ func (m *home) saveContentPaneState() error {
 	}
 	for _, tsk := range sp.ConsumeDeleted() {
 		if err := removeTaskThroughDaemon(tsk.ID); err != nil {
+			if apiclient.IsMutationCommitted(err) {
+				// The durable removal landed and the reload below will project
+				// it. Keep the schedule failure visible without telling the user
+				// to retry a deletion that already happened.
+				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
+				saveErr = errors.Join(saveErr, fmt.Errorf(
+					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
+				continue
+			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
 		}

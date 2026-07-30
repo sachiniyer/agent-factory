@@ -296,8 +296,41 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	}
 	client := rpc.NewClient(conn)
 	defer client.Close()
-	return client.Call(controlServiceName+"."+method, req, resp)
+	return classifyTaskMutationRPCError(method, client.Call(controlServiceName+"."+method, req, resp))
 }
+
+// classifyTaskMutationRPCError restores the one machine-readable outcome that
+// net/rpc drops: rpc.ServerError carries only Error(), not the concrete server
+// type. Classification is deliberately narrow — both the RPC method and the
+// exact server-owned prefix must match — so a transport failure or an arbitrary
+// application error remains unknown rather than being promoted to committed.
+func classifyTaskMutationRPCError(method string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var prefix string
+	switch method {
+	case "AddTask":
+		prefix = taskAddCommittedErrorPrefix
+	case "UpdateTask":
+		prefix = taskUpdateCommittedErrorPrefix
+	case "RemoveTask":
+		prefix = taskRemoveCommittedErrorPrefix
+	default:
+		return err
+	}
+	var serverErr rpc.ServerError
+	if !errors.As(err, &serverErr) || !strings.HasPrefix(serverErr.Error(), prefix+" ") {
+		return err
+	}
+	return &rpcMutationCommittedError{err: err}
+}
+
+type rpcMutationCommittedError struct{ err error }
+
+func (e *rpcMutationCommittedError) Error() string           { return e.err.Error() }
+func (e *rpcMutationCommittedError) Unwrap() error           { return e.err }
+func (e *rpcMutationCommittedError) MutationCommitted() bool { return true }
 
 // RequestApplyConfig asks a RUNNING daemon to apply the on-disk global config to
 // itself in place (#2480). It deliberately never STARTS a daemon: a config write

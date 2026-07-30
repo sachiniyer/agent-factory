@@ -3,9 +3,11 @@ package api
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
@@ -36,6 +38,15 @@ var (
 	daemonRestartTask      = daemon.RestartTask
 	daemonTriggerTask      = daemon.TriggerTask
 )
+
+// warnCommittedTaskMutation keeps a post-commit schedule failure visible while
+// the command returns success for the durable task change. In particular, the
+// warning says not to retry: AddTask generates a fresh ID on every invocation,
+// so treating this definite outcome as an ordinary failure can create a
+// duplicate scheduled task.
+func warnCommittedTaskMutation(err error) {
+	fmt.Fprintf(os.Stderr, "warning: %v; the task change is saved and must not be retried\n", err)
+}
 
 // strPtr / boolPtr build the pointer fields of a task.TaskUpdate patch. The CLI
 // sends a field-level patch (#1700): only the flags the user actually passed
@@ -240,7 +251,10 @@ var tasksAddCmd = &cobra.Command{
 		// own scheduler/watchers in-process, so no separate reload poke is needed
 		// (#1029 PR 3). The on-disk tasks.json format is unchanged.
 		if err := daemonAddTask(s); err != nil {
-			return jsonError(fmt.Errorf("failed to add task: %w", err))
+			if !apiclient.IsMutationCommitted(err) {
+				return jsonError(fmt.Errorf("failed to add task: %w", err))
+			}
+			warnCommittedTaskMutation(err)
 		}
 
 		// Echo the resolved binding, not just the id (#1891). The id alone left
@@ -281,7 +295,10 @@ var tasksRemoveCmd = &cobra.Command{
 		// it was a moment ago, and only the daemon can re-verify it atomically
 		// with the delete.
 		if err := daemonRemoveTask(args[0], expect); err != nil {
-			return jsonError(fmt.Errorf("failed to remove task: %w", err))
+			if !apiclient.IsMutationCommitted(err) {
+				return jsonError(fmt.Errorf("failed to remove task: %w", err))
+			}
+			warnCommittedTaskMutation(err)
 		}
 
 		return jsonOut(map[string]bool{"ok": true})
@@ -550,7 +567,19 @@ var tasksUpdateCmd = &cobra.Command{
 
 		updated, err := daemonUpdateTask(args[0], patch, expect)
 		if err != nil {
-			return jsonError(fmt.Errorf("failed to update task: %w", err))
+			if !apiclient.IsMutationCommitted(err) {
+				return jsonError(fmt.Errorf("failed to update task: %w", err))
+			}
+			warnCommittedTaskMutation(err)
+			// net/rpc discards the response body whenever the server returns an
+			// error, even for this definite committed outcome. Read the durable
+			// record back so the update command preserves its normal output.
+			stored, readErr := task.GetTask(args[0])
+			if readErr != nil {
+				return jsonError(fmt.Errorf(
+					"task update committed, but its durable value could not be read back: %w", readErr))
+			}
+			updated = *stored
 		}
 
 		return jsonOut(updated)

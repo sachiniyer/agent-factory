@@ -2889,6 +2889,46 @@ test("#2381: the manual-trigger fixture cannot also fire from its cron during th
   }
 });
 
+test("#2588: a committed add refreshes and warns instead of inviting a duplicate", REAL_FIXTURE, async () => {
+  let listCalls = 0;
+  await page.route("**/v1/ListTasks", async (route) => {
+    listCalls += 1;
+    await route.continue();
+  });
+  await page.route("**/v1/AddTask", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: null,
+        error: { message: "task was saved, but scheduler reload failed", code: "mutation_committed" },
+      }),
+    });
+  });
+
+  try {
+    await page.locator('.af-viewtab[data-view="tasks"]').click();
+    const tasks = page.locator(".af-tasks");
+    await tasks.locator(".af-tasks-add").click();
+    const modal = page.locator(".af-modal-card");
+    await modal.locator('input[aria-label="Task name"]').fill("committed-add-probe");
+    await setCustomCron(modal, manualTriggerFixtureCron(new Date()));
+    await modal.locator('textarea[aria-label="Prompt"]').fill("echo committed");
+
+    const beforeSubmit = listCalls;
+    await modal.locator("button.af-primary").click();
+
+    await expect(modal, "a committed add must leave the retryable create form").toBeHidden();
+    await expect.poll(() => listCalls, { message: "a committed add must refresh the task projection" }).toBeGreaterThan(
+      beforeSubmit,
+    );
+    await expect(page.locator(".af-toast")).toContainText("scheduler reload failed");
+  } finally {
+    await page.unroute("**/v1/AddTask");
+    await page.unroute("**/v1/ListTasks");
+  }
+});
+
 test("tasks view (#1592 PR8): list the seeded task; add / trigger / remove round-trips", REAL_FIXTURE, async () => {
   // Capture the task-mutation request bodies so we can prove every mutation carries
   // the STABLE task id — the add mints it client-side, and trigger/remove must send

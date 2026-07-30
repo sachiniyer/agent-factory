@@ -1304,6 +1304,12 @@ function openAddTask(): void {
             refreshTasks();
           })
           .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              closeModal();
+              refreshTasks();
+              surfaceTabError(e);
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });

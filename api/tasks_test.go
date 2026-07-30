@@ -271,6 +271,30 @@ func TestTasksAdd_DaemonWriteFailureFailsAdd(t *testing.T) {
 	assert.Zero(t, calls.writes, "no successful write is recorded when the RPC fails")
 }
 
+func TestTasksAdd_CommittedReloadFailureIsNotRetryable(t *testing.T) {
+	useTempConfig(t)
+	resetAddFlags(t)
+	stubDaemon(t)
+	repo := setupAddRepo(t)
+
+	daemonAddTask = func(tk task.Task) error {
+		require.NoError(t, task.AddTask(tk))
+		return committedTaskMutationTestError{}
+	}
+	taskAddNameFlag = "committed-add"
+	taskAddPromptFlag = "p"
+	taskAddCronFlag = "0 9 * * *"
+	taskAddProgramFlag = "claude"
+
+	err := tasksAddCmd.RunE(tasksAddCmd, nil)
+	require.NoError(t, err, "a durable add must not be reported as a retryable command failure")
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "committed-add", tasks[0].Name)
+	assert.Equal(t, repo, tasks[0].ProjectPath)
+}
+
 // TestTasksAdd_RejectsEmptyPrompt is the regression guard for #517: Cobra's
 // MarkFlagRequired only checks flag presence, so --prompt "" (or
 // whitespace-only) used to slip through and create a task that no-ops when
@@ -590,6 +614,27 @@ func TestTasksRemove_RemovesTaskViaDaemon(t *testing.T) {
 	assert.Empty(t, tasks)
 	assert.Equal(t, 1, calls.writes, "remove must dispatch the write to the daemon")
 }
+
+func TestTasksRemove_CommittedReloadFailureIsNotRetryable(t *testing.T) {
+	useTempConfig(t)
+	stubDaemon(t)
+	seedTask(t, task.Task{ID: "committed-remove", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+
+	daemonRemoveTask = func(id string, expect task.ProjectExpectation) error {
+		require.NoError(t, task.RemoveTask(id, expect))
+		return committedTaskMutationTestError{}
+	}
+	err := tasksRemoveCmd.RunE(tasksRemoveCmd, []string{"committed-remove"})
+	require.NoError(t, err, "a durable removal must not be reported as a retryable command failure")
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+}
+
+type committedTaskMutationTestError struct{}
+
+func (committedTaskMutationTestError) Error() string           { return "scheduler reload failed after commit" }
+func (committedTaskMutationTestError) MutationCommitted() bool { return true }
 
 func TestTasksRemove_MissingTaskErrors(t *testing.T) {
 	useTempConfig(t)

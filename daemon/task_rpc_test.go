@@ -135,6 +135,72 @@ func TestControlUpdateTask_PostCommitFailureStillPublishes(t *testing.T) {
 	}
 }
 
+func TestControlAddTask_PostCommitFailureStillPublishes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	ready := make(chan struct{})
+	close(ready)
+	manager := &Manager{events: newEventsHub(), ready: ready}
+	_, events := manager.events.subscribe()
+	srv := &controlServer{
+		manager:   manager,
+		scheduler: failingReloadTaskScheduler(),
+	}
+	created := enabledCronTask("bbbb0099", "")
+
+	var resp AddTaskResponse
+	err := srv.AddTask(AddTaskRequest{Task: created}, &resp)
+	stored, getErr := task.GetTask(created.ID)
+	require.NoError(t, getErr)
+	assert.Equal(t, created.ID, stored.ID)
+
+	select {
+	case event := <-events:
+		require.Equal(t, agentproto.EventTaskCreated, event.Type)
+		var got task.Task
+		require.NoError(t, json.Unmarshal(event.Data, &got))
+		assert.Equal(t, created.ID, got.ID)
+	default:
+		t.Fatal("committed task create was not published before the post-commit error returned")
+	}
+	require.ErrorContains(t, err, "task add committed")
+	var committed *mutationCommittedError
+	require.ErrorAs(t, err, &committed)
+	assert.True(t, resp.OK, "the response must acknowledge the durable commit")
+}
+
+func TestControlRemoveTask_PostCommitFailureStillPublishes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	removed := enabledCronTask("dddd0099", "")
+	require.NoError(t, task.AddTask(removed))
+	ready := make(chan struct{})
+	close(ready)
+	manager := &Manager{events: newEventsHub(), ready: ready}
+	_, events := manager.events.subscribe()
+	srv := &controlServer{
+		manager:   manager,
+		scheduler: failingReloadTaskScheduler(),
+	}
+
+	var resp RemoveTaskResponse
+	err := srv.RemoveTask(RemoveTaskRequest{ID: removed.ID}, &resp)
+	_, getErr := task.GetTask(removed.ID)
+	require.Error(t, getErr, "the task must remain durably removed")
+
+	select {
+	case event := <-events:
+		require.Equal(t, agentproto.EventTaskRemoved, event.Type)
+		var got task.Task
+		require.NoError(t, json.Unmarshal(event.Data, &got))
+		assert.Equal(t, removed.ID, got.ID)
+	default:
+		t.Fatal("committed task removal was not published before the post-commit error returned")
+	}
+	require.ErrorContains(t, err, "task removal committed")
+	var committed *mutationCommittedError
+	require.ErrorAs(t, err, &committed)
+	assert.True(t, resp.OK, "the response must acknowledge the durable commit")
+}
+
 // TestControlRemoveTask_WritesAndDisarms pins that RemoveTask deletes the task
 // and drops it from the scheduler in the same call.
 func TestControlRemoveTask_WritesAndDisarms(t *testing.T) {
