@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -159,6 +160,96 @@ func TestPersistedVSCodeStop_DoesNotHoldSupervisorLockWhileWaiting(t *testing.T)
 	if blocked {
 		t.Fatal("persisted owner teardown held the supervisor-wide mutex while waiting for a process group")
 	}
+}
+
+func TestPersistedVSCodeOwner_DoesNotEscalateAfterLeaderExit(t *testing.T) {
+	shortAFHome(t)
+	cmd, process := startOwnedSleep(t)
+	bootID, err := proctree.BootID()
+	require.NoError(t, err)
+	path := writeVSCodeOwnerFixture(t, "leader-exit", "instance-1", bootID, process)
+	owner, err := readVSCodeOwner(path)
+	require.NoError(t, err)
+
+	v := newVSCodeSupervisor()
+	v.stopGrace = 20 * time.Millisecond
+	// Model the old numeric PGID being observed as live after the recorded leader
+	// exits. It may be a surviving old child or a reused unrelated group; neither
+	// fact authorizes a signal once the stable leader identity is gone.
+	v.groupAlive = func(int) (bool, error) { return true, nil }
+	var signals []syscall.Signal
+	v.killGroup = func(pgid int, sig syscall.Signal) error {
+		signals = append(signals, sig)
+		if sig == syscall.SIGTERM {
+			require.NoError(t, syscall.Kill(-pgid, sig))
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				if _, lookupErr := proctree.Lookup(cmd.Process.Pid); lookupErr != nil {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+		return nil
+	}
+	err = v.stopPersistedOwner(owner)
+	require.Error(t, err, "a visible group without the recorded leader must remain unknown")
+	require.Equal(t, []syscall.Signal{syscall.SIGTERM}, signals,
+		"persisted teardown escalated after losing the stable leader identity")
+}
+
+func TestVSCodeSupervisor_StopReapsEditorOwnedByPreviousSupervisor(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	previous := newTestVSCodeSupervisor(t, binary)
+	const (
+		key        = "previous-daemon"
+		instanceID = "instance-1"
+	)
+	_, err := previous.ensureServerForInstance(key, instanceID, t.TempDir())
+	require.NoError(t, err)
+	previous.mu.Lock()
+	previousEditor := previous.servers[key]
+	previous.mu.Unlock()
+	require.NotNil(t, previousEditor)
+	require.True(t, previousEditor.alive())
+
+	restarted := newVSCodeSupervisor()
+	restarted.Stop()
+	select {
+	case <-previousEditor.exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor shutdown ignored an editor owned by the previous daemon")
+	}
+}
+
+func TestVSCodeSupervisor_StopDoesNotCreateMissingHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "missing-af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	newVSCodeSupervisor().Stop()
+
+	_, err := os.Stat(home)
+	require.ErrorIs(t, err, os.ErrNotExist, "editor shutdown recreated a missing Agent Factory home")
+}
+
+func TestStopForInstance_ReportsUnconfirmedLiveEditorExit(t *testing.T) {
+	shortAFHome(t)
+	cmd, _ := startOwnedSleep(t)
+	v := newVSCodeSupervisor()
+	v.servers["stuck"] = &vscodeServer{
+		worktree:   "/stuck-editor",
+		instanceID: "instance-1",
+		cmd:        cmd,
+		exited:     make(chan struct{}),
+		stopGrace:  20 * time.Millisecond,
+		// Model a process group that accepts both signals but never exits. The
+		// lifecycle caller must receive UNKNOWN rather than permission to mutate
+		// the editor's worktree.
+		killGroup: func(int, syscall.Signal) error { return nil },
+	}
+
+	err := v.stopForInstance("stuck", "instance-1")
+	require.Error(t, err, "an unconfirmed editor exit must block destructive session teardown")
 }
 
 // TestArchiveSession_StopsVSCodeEditor: archiving MOVES the worktree, and the

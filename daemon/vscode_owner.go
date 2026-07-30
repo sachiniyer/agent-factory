@@ -66,22 +66,24 @@ func captureVSCodeOwner(key, instanceID string, pid int) (vscodeOwnerRecord, err
 	}, nil
 }
 
-// persistedVSCodeOwners returns only regular owner files whose hash prefix
-// matches key. The full key and stable instance id are verified after decoding;
-// the short filename hash is discovery, never destructive authority.
-func persistedVSCodeOwners(key string) ([]string, error) {
-	dir, err := vscodeSocketDir()
+// allPersistedVSCodeOwners returns only regular files with the exact owner-file
+// shape. Callers decode and validate their contents before acting; the filename
+// is discovery, never destructive authority.
+func allPersistedVSCodeOwners() ([]string, error) {
+	dir, err := vscodeSocketDirPath()
 	if err != nil {
 		return nil, err
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	prefix := vscodeSocketKeyPrefix(key) + "-"
 	var paths []string
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), prefix) || !vscodeOwnerNamePattern.MatchString(entry.Name()) {
+		if !vscodeOwnerNamePattern.MatchString(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -97,6 +99,21 @@ func persistedVSCodeOwners(key string) ([]string, error) {
 		paths = append(paths, filepath.Join(dir, entry.Name()))
 	}
 	return paths, nil
+}
+
+func persistedVSCodeOwners(key string) ([]string, error) {
+	paths, err := allPersistedVSCodeOwners()
+	if err != nil {
+		return nil, err
+	}
+	prefix := vscodeSocketKeyPrefix(key) + "-"
+	kept := paths[:0]
+	for _, path := range paths {
+		if strings.HasPrefix(filepath.Base(path), prefix) {
+			kept = append(kept, path)
+		}
+	}
+	return kept, nil
 }
 
 func readVSCodeOwner(path string) (vscodeOwnerRecord, error) {
@@ -126,10 +143,17 @@ func processGroupAlive(pgid int) (bool, error) {
 	}
 }
 
-func waitForProcessGroupExit(pgid int, timeout time.Duration) (bool, error) {
+func (v *vscodeSupervisor) processGroupAlive(pgid int) (bool, error) {
+	if v.groupAlive != nil {
+		return v.groupAlive(pgid)
+	}
+	return processGroupAlive(pgid)
+}
+
+func (v *vscodeSupervisor) waitForProcessGroupExit(pgid int, timeout time.Duration) (bool, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		alive, err := processGroupAlive(pgid)
+		alive, err := v.processGroupAlive(pgid)
 		if err != nil || !alive {
 			return !alive, err
 		}
@@ -173,7 +197,7 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 		if err := syscall.Kill(owner.PID, 0); err == nil || !errors.Is(err, syscall.ESRCH) {
 			return fmt.Errorf("could not determine whether pid %d still has the recorded editor identity", owner.PID)
 		}
-		alive, groupErr := processGroupAlive(owner.PID)
+		alive, groupErr := v.processGroupAlive(owner.PID)
 		if groupErr != nil {
 			return fmt.Errorf("could not determine whether editor process group %d survived: %w", owner.PID, groupErr)
 		}
@@ -189,15 +213,40 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 	if err := signal(syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("stopping previous editor process group %d: %w", owner.PID, err)
 	}
-	if gone, err := waitForProcessGroupExit(owner.PID, vscodeStopGrace); err != nil {
+	if gone, err := v.waitForProcessGroupExit(owner.PID, v.stopGrace); err != nil {
 		return fmt.Errorf("confirming previous editor process group %d stopped: %w", owner.PID, err)
 	} else if gone {
+		return nil
+	}
+	// TERM may have removed the recorded leader while a numeric group with the
+	// same id remains visible. Do not trust that number: the old group may have
+	// emptied and the PGID may already belong to an unrelated process. Only the
+	// exact live (boot, PID, StartID) leader pins the group for a safe escalation.
+	bootID, err = proctree.BootID()
+	if err != nil {
+		return fmt.Errorf("could not revalidate kernel boot identity before escalating editor pid %d: %w", owner.PID, err)
+	}
+	if bootID != owner.BootID {
+		return nil
+	}
+	current, identityErr := proctree.Lookup(owner.PID)
+	if identityErr != nil {
+		alive, groupErr := v.processGroupAlive(owner.PID)
+		if groupErr != nil {
+			return fmt.Errorf("could not determine whether editor process group %d survived before escalation: %w", owner.PID, groupErr)
+		}
+		if !alive {
+			return nil
+		}
+		return fmt.Errorf("could not safely escalate editor process group %d after losing its recorded leader identity: %w", owner.PID, identityErr)
+	}
+	if current.StartID != owner.StartID {
 		return nil
 	}
 	if err := signal(syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("killing previous editor process group %d: %w", owner.PID, err)
 	}
-	if gone, err := waitForProcessGroupExit(owner.PID, vscodeStopGrace); err != nil {
+	if gone, err := v.waitForProcessGroupExit(owner.PID, v.stopGrace); err != nil {
 		return fmt.Errorf("confirming previous editor process group %d was killed: %w", owner.PID, err)
 	} else if !gone {
 		return fmt.Errorf("previous editor process group %d still exists after SIGKILL", owner.PID)
@@ -227,12 +276,47 @@ func (v *vscodeSupervisor) stopPersistedForInstance(key, instanceID string) erro
 			errs = append(errs, err)
 			continue
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("removing stopped editor owner %s: %w", path, err))
+		if err := removePersistedVSCodeOwner(path); err != nil {
+			errs = append(errs, err)
 		}
-		socketPath := strings.TrimSuffix(path, vscodeOwnerExt) + vscodeSocketExt
-		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("removing stopped editor socket %s: %w", socketPath, err))
+	}
+	return errors.Join(errs...)
+}
+
+func removePersistedVSCodeOwner(path string) error {
+	var errs []error
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("removing stopped editor owner %s: %w", path, err))
+	}
+	socketPath := strings.TrimSuffix(path, vscodeOwnerExt) + vscodeSocketExt
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("removing stopped editor socket %s: %w", socketPath, err))
+	}
+	return errors.Join(errs...)
+}
+
+// stopAllPersisted reaps editors that survived an earlier daemon before this
+// supervisor finishes a graceful shutdown. At this point admission is closed
+// and current in-memory servers have already stopped, so every remaining valid
+// owner is stale daemon infrastructure rather than an active editor to preserve.
+func (v *vscodeSupervisor) stopAllPersisted() error {
+	paths, err := allPersistedVSCodeOwners()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, path := range paths {
+		owner, err := readVSCodeOwner(path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("could not determine ownership from %s during shutdown: %w", path, err))
+			continue
+		}
+		if err := v.stopPersistedOwner(owner); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := removePersistedVSCodeOwner(path); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

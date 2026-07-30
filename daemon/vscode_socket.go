@@ -178,6 +178,23 @@ func secureVSCodeSocket(socketPath string) error {
 // Together with the 0600 socket this gives the editor exactly the posture of the
 // daemon's own control socket: reachable by the owning user, nobody else.
 func vscodeSocketDir() (string, error) {
+	sockDir, err := vscodeSocketDirPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		return "", fmt.Errorf("creating the VS Code socket directory failed: %w", err)
+	}
+	if err := os.Chmod(sockDir, 0o700); err != nil {
+		return "", fmt.Errorf("securing the VS Code socket directory failed: %w", err)
+	}
+	return sockDir, nil
+}
+
+// vscodeSocketDirPath resolves the socket directory without creating it. Cleanup
+// discovery uses this form so a daemon shutting down because its AF home was
+// deleted cannot resurrect that home merely by checking for persisted editors.
+func vscodeSocketDirPath() (string, error) {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
@@ -203,14 +220,7 @@ func vscodeSocketDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving the af home %q to an absolute path failed: %w", dir, err)
 	}
-	sockDir := filepath.Join(abs, vscodeSocketDirName)
-	if err := os.MkdirAll(sockDir, 0o700); err != nil {
-		return "", fmt.Errorf("creating the VS Code socket directory failed: %w", err)
-	}
-	if err := os.Chmod(sockDir, 0o700); err != nil {
-		return "", fmt.Errorf("securing the VS Code socket directory failed: %w", err)
-	}
-	return sockDir, nil
+	return filepath.Join(abs, vscodeSocketDirName), nil
 }
 
 // vscodeSocketNamePattern matches the socket names vscodeSocketPath mints, and

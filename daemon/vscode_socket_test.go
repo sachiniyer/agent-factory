@@ -252,7 +252,7 @@ func TestVSCodeSocket_StartOneEvictsSquatter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startOne over a squatted socket: %v", err)
 	}
-	t.Cleanup(server.stop)
+	t.Cleanup(func() { _ = server.stop() })
 
 	client := &http.Client{Transport: server.transport, Timeout: 5 * time.Second}
 	resp, err := client.Get(vscodeUpstreamURL + "/")
