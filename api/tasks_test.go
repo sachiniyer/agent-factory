@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -405,6 +406,40 @@ func TestTasksUpdate_DisablePersistsViaDaemon(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got.Enabled)
 	assert.Equal(t, 1, calls.writes, "update must dispatch the write to the daemon")
+}
+
+func TestTasksUpdate_CommittedReadbackFailureIsNotRetryable(t *testing.T) {
+	useTempConfig(t)
+	resetUpdateFlags(t)
+	stubDaemon(t)
+
+	seedTask(t, task.Task{ID: "committed-update", Name: "before", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+	taskUpdateNameFlag = "after"
+	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+		_, err := task.UpdateTask(id, update, expect)
+		require.NoError(t, err)
+		// Model another client removing the task after this update committed but
+		// before the CLI's post-error readback. The update outcome is still known:
+		// retrying it would be wrong even though its final value is no longer readable.
+		require.NoError(t, task.RemoveTask(id, expect))
+		return task.Task{}, committedTaskMutationTestError{}
+	}
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = tasksUpdateCmd.RunE(tasksUpdateCmd, []string{"committed-update"})
+	})
+	require.NoError(t, runErr, "a committed update must remain successful when its follow-up readback is inconclusive")
+
+	var result struct {
+		ID                string `json:"id"`
+		MutationCommitted bool   `json:"mutation_committed"`
+		ValueReadBack     bool   `json:"value_read_back"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &result), "the degraded success path must still emit valid JSON")
+	assert.Equal(t, "committed-update", result.ID)
+	assert.True(t, result.MutationCommitted)
+	assert.False(t, result.ValueReadBack)
 }
 
 func TestTasksUpdate_SwitchWatchToCronAndDisableWithoutPrompt(t *testing.T) {

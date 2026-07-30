@@ -576,8 +576,19 @@ var tasksUpdateCmd = &cobra.Command{
 			// record back so the update command preserves its normal output.
 			stored, readErr := task.GetTask(args[0])
 			if readErr != nil {
-				return jsonError(fmt.Errorf(
-					"task update committed, but its durable value could not be read back: %w", readErr))
+				// The mutation outcome is known even though the task's current value
+				// is not: another client may have removed it after this commit, or the
+				// disk read may have failed transiently. Preserve a successful exit so
+				// callers do not retry an update that definitely committed, and make
+				// the missing readback explicit instead of inventing a task snapshot.
+				fmt.Fprintf(os.Stderr,
+					"warning: task update committed, but its durable value could not be read back: %v; the final task value is unknown\n",
+					readErr)
+				return jsonOut(map[string]any{
+					"id":                 args[0],
+					"mutation_committed": true,
+					"value_read_back":    false,
+				})
 			}
 			updated = *stored
 		}
