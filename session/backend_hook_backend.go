@@ -360,7 +360,8 @@ func (p *hookProvisioner) cleanupData() *HookRuntimeCleanupData {
 }
 
 // hookOutputSuffix renders a hook script's combined output for an error
-// message, and says so explicitly when there was none.
+// message, redacting JSON token fields, and says so explicitly when there was
+// no output.
 //
 // launch_cmd runs on the user's own infrastructure, so its output is the ONLY
 // window onto what went wrong out there — af has no other source. When a Mac
@@ -373,12 +374,80 @@ func (p *hookProvisioner) cleanupData() *HookRuntimeCleanupData {
 // handling rather than at af. (The timeout case is carried by the wrapped error
 // from runHookScript — "signal: killed" — so it is not re-derived here.)
 func hookOutputSuffix(out []byte) string {
-	trimmed := strings.TrimSpace(string(out))
+	trimmed := strings.TrimSpace(redactHookOutputTokens(string(out)))
 	if trimmed == "" {
 		return "; it printed nothing — a hook script must report its own errors, " +
 			"or the cause reaches nobody (see docs/remote-hooks.md)"
 	}
 	return fmt.Sprintf("; its output was:\n%s", trimmed)
+}
+
+// redactHookOutputTokens preserves the hook's diagnostic text while replacing
+// every token field in each complete JSON value. hook output is attached to
+// persistent session errors, so even an unusable endpoint must not put its
+// agent-server bearer credential into logs or API responses.
+func redactHookOutputTokens(output string) string {
+	var redacted strings.Builder
+	written := 0
+	for cursor := 0; cursor < len(output); {
+		candidate, next := extractJSONAt(output, cursor)
+		if candidate == "" {
+			break
+		}
+		start := next - len(candidate)
+		redacted.WriteString(output[written:start])
+		redacted.WriteString(redactJSONTokenFields(candidate))
+		written = next
+		cursor = next
+	}
+	redacted.WriteString(output[written:])
+	return redacted.String()
+}
+
+func redactJSONTokenFields(candidate string) string {
+	var value any
+	if err := json.Unmarshal([]byte(candidate), &value); err != nil || !redactTokenFields(value) {
+		return candidate
+	}
+
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return candidate
+	}
+	return string(encoded)
+}
+
+func redactTokenFields(value any) bool {
+	changed := false
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if strings.EqualFold(key, "token") {
+				typed[key] = "[REDACTED]"
+				changed = true
+				continue
+			}
+			changed = redactTokenFields(child) || changed
+		}
+	case []any:
+		for _, child := range typed {
+			changed = redactTokenFields(child) || changed
+		}
+	}
+	return changed
+}
+
+func decodeHookEndpointJSON(candidate string) (hookEndpointJSON, bool) {
+	var endpoint hookEndpointJSON
+	decoder := json.NewDecoder(strings.NewReader(candidate))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&endpoint); err != nil {
+		return hookEndpointJSON{}, false
+	}
+	if strings.TrimSpace(endpoint.URL) == "" || strings.TrimSpace(endpoint.Token) == "" {
+		return hookEndpointJSON{}, false
+	}
+	return endpoint, true
 }
 
 // launch runs the user's launch_cmd with the provision spec as flags, then
@@ -450,11 +519,12 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 		cursor = next
 		sawJSON = true
 
-		var ej hookEndpointJSON
-		if err := json.Unmarshal([]byte(jsonStr), &ej); err != nil {
-			continue
-		}
-		if strings.TrimSpace(ej.URL) == "" || strings.TrimSpace(ej.Token) == "" {
+		// The documented endpoint schema itself is the discriminator. Reject
+		// unknown fields so a structured log that merely includes url and token
+		// cannot win. First match is deliberate: logs may also follow the endpoint,
+		// so choosing by last position would only reverse the ambiguity.
+		ej, ok := decodeHookEndpointJSON(jsonStr)
+		if !ok {
 			continue
 		}
 		// ej.TLSFingerprint is intentionally not read — TLS was removed; an old

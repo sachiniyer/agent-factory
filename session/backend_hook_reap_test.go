@@ -588,6 +588,7 @@ func TestHookProvisionSucceedsWhenLaunchLeavesOutputPipeOpen(t *testing.T) {
 func TestHookProvisionSelectsEndpointAmongJSONLogs(t *testing.T) {
 	h := newHookState(t, `
 echo '{"level":"info","msg":"connecting"}' >&2
+echo '{"level":"info","url":"http://wrong.invalid","token":"logged-secret"}' >&2
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 echo '{"level":"info","msg":"tunnel ready"}' >&2
 exit 0
@@ -601,6 +602,27 @@ exit 0
 	assert.Equal(t, "secret", res.Endpoint.Token)
 	assert.False(t, h.deleteRan(t), "valid endpoint output must not reap the working sandbox")
 	assert.DirExists(t, h.sandbox(p.slug))
+}
+
+// TestHookProvisionRedactsEndpointTokenFromParseError covers the failure path
+// where launch_cmd emits JSON but never supplies a usable endpoint. The raw
+// aggregate output reaches durable error reporting, so bearer tokens in any JSON
+// candidate must be redacted before the error leaves this package.
+func TestHookProvisionRedactsEndpointTokenFromParseError(t *testing.T) {
+	const secret = "must-not-reach-the-error"
+	h := newHookState(t, `
+echo '{"level":"info","msg":"connecting"}' >&2
+echo '{"url":"","token":"must-not-reach-the-error"}'
+exit 0
+`, "")
+	p := newHookProvisioner(h, "invalid endpoint")
+
+	_, err := p.provisionOrReap()
+	require.Error(t, err, "an empty endpoint URL must fail provisioning")
+	assert.NotContains(t, err.Error(), secret, "agent-server bearer tokens must never enter reported errors")
+	assert.Contains(t, err.Error(), "[REDACTED]", "the diagnostic should show that sensitive output was removed")
+	assert.True(t, h.deleteRan(t), "invalid endpoint output must reap the provisioned sandbox")
+	assert.NoDirExists(t, h.sandbox(p.slug))
 }
 
 // TestHookProvisionKeepsASuccessfulLaunchsTunnelAlive is the #1966-review P2: a
