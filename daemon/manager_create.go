@@ -809,7 +809,7 @@ func (m *Manager) nextAvailableTitleLocked(repoID, repoPath, baseTitle, program 
 	// rungs and whitespace cannot turn into a punctuation-only "   -2" title.
 	// allowReserved stays true here because a base of "root" deliberately skips
 	// the reserved bare candidate and resolves to "root-2" below.
-	if err := m.validateTitleShapeLocked(baseTitle, true); err != nil {
+	if err := m.validateTitleShapeLocked(baseTitle, namespace, true); err != nil {
 		return "", err
 	}
 	// Session records are not the only thing that can make a candidate unusable

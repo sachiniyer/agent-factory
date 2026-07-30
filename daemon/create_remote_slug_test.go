@@ -119,3 +119,22 @@ func TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric(t *testing.T) {
 		t.Fatalf("non-hook sandbox titles do not claim the global hook namespace: %v", err)
 	}
 }
+
+// TestNextAvailableTitleRejectsGenericRemoteHookSlug covers TitleBase creates,
+// which validate the unsuffixed base before walking collision suffixes. That
+// early shape check must use the caller's runtime namespace too: suffixing a
+// generic fallback would silently turn an invalid hook title into a different
+// externally visible name.
+func TestNextAvailableTitleRejectsGenericRemoteHookSlug(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	manager.mu.Lock()
+	got, err := manager.nextAvailableTitleLocked(repoID, repoPath, "日本語", "claude", runtimeNamespaceRemoteHook, nil)
+	manager.mu.Unlock()
+	if err == nil {
+		t.Fatalf("remote hook TitleBase without a specific slug resolved to %q", got)
+	}
+	if !strings.Contains(err.Error(), "ASCII letter or digit") {
+		t.Fatalf("remote hook TitleBase returned an unclear error: %v", err)
+	}
+}
