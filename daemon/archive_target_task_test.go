@@ -238,6 +238,83 @@ func TestTaskMutations_TargetWriteFailsClosedDuringWarmup(t *testing.T) {
 	}
 }
 
+// TestTaskMutations_RefusePersistedUnloadedTarget covers the ready-manager
+// counterpart to the warm-up test. A persisted row can fail to materialize
+// because its worktree/backend metadata is broken; absence from m.instances is
+// then unknown, not proof the target is available for a new enabled task.
+func TestTaskMutations_RefusePersistedUnloadedTarget(t *testing.T) {
+	states := []struct {
+		name      string
+		status    session.Status
+		liveness  session.Liveness
+		wantError string
+	}{
+		{name: "archived", status: session.Archived, liveness: session.LiveArchived, wantError: "archiv"},
+		{name: "unavailable", status: session.Ready, liveness: session.LiveReady, wantError: "could not determine"},
+	}
+	actions := []struct {
+		name string
+		seed func(string) error
+		act  func(*controlServer, string) error
+	}{
+		{
+			name: "add",
+			seed: func(string) error { return nil },
+			act: func(server *controlServer, repoPath string) error {
+				return server.AddTask(AddTaskRequest{Task: archiveTargetTask(
+					"ghostadd", "Ghost Add", repoPath, "worker", true,
+				)}, &AddTaskResponse{})
+			},
+		},
+		{
+			name: "enable",
+			seed: func(repoPath string) error {
+				return task.AddTask(archiveTargetTask("ghostenb", "Ghost Enable", repoPath, "worker", false))
+			},
+			act: func(server *controlServer, _ string) error {
+				enabled := true
+				return server.UpdateTask(UpdateTaskRequest{
+					ID: "ghostenb", Update: task.TaskUpdate{Enabled: &enabled},
+				}, &UpdateTaskResponse{})
+			},
+		},
+	}
+
+	for _, state := range states {
+		for _, action := range actions {
+			t.Run(state.name+"/"+action.name, func(t *testing.T) {
+				t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+				repoPath := setupControlRepo(t)
+				repo, err := config.RepoFromPath(repoPath)
+				require.NoError(t, err)
+				require.NoError(t, action.seed(repoPath))
+				require.NoError(t, appendInstanceData(repo.ID, session.InstanceData{
+					ID: "ghost-session", Title: "worker", Path: repoPath, Program: "claude",
+					Status: state.status, Liveness: state.liveness, BackendType: "local",
+				}))
+				failLoadFor(t, "worker")
+
+				manager, err := NewManager(config.DefaultConfig())
+				require.NoError(t, err)
+				require.True(t, manager.Ready())
+				manager.mu.Lock()
+				_, loaded := manager.instances[daemonInstanceKey(repo.ID, "worker")]
+				manager.mu.Unlock()
+				require.False(t, loaded, "precondition: persisted target must have failed to materialize")
+				before, err := task.LoadTasks()
+				require.NoError(t, err)
+
+				err = action.act(archiveTaskControlServer(manager), repoPath)
+				require.Error(t, err, "persisted target absence from memory must not be accepted as a missing target")
+				assert.Contains(t, err.Error(), state.wantError)
+				after, loadErr := task.LoadTasks()
+				require.NoError(t, loadErr)
+				assert.Equal(t, before, after, "refused target mutation must not commit")
+			})
+		}
+	}
+}
+
 // TestTaskMutations_LegacyTaskScopeStillValidatesTarget covers tasks written
 // before RepoID was retained. Enabling one without also patching ProjectPath
 // must resolve its existing path before checking the archived target.
@@ -485,4 +562,23 @@ func TestDeleteProject_TargetedExternalSessionsArePreflightBlockers(t *testing.T
 			assert.True(t, stillTracked)
 		})
 	}
+}
+
+func TestDeleteProject_LoadsTaskTargetsOnce(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "alpha")
+	registerArchivable(t, manager, repoID, repoPath, "beta")
+
+	orig := loadTasksForRepoID
+	loads := 0
+	loadTasksForRepoID = func(gotRepoID string) ([]task.Task, error) {
+		loads++
+		return orig(gotRepoID)
+	}
+	t.Cleanup(func() { loadTasksForRepoID = orig })
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.NoError(t, err)
+	assert.Len(t, result.Archived, 2)
+	assert.Equal(t, 1, loads, "project deletion must scope and index its task snapshot once")
 }

@@ -31,28 +31,48 @@ var ErrAlreadyArchived = errors.New("already archived")
 // task snapshot and the archive fence. Production leaves it as a no-op.
 var archiveTargetTasksChecked = func() {}
 
+// loadTasksForRepoID is a test seam for proving lifecycle operations do not
+// repeatedly reload and freshly resolve the same project task set.
+var loadTasksForRepoID = task.LoadTasksForRepoID
+
 // enabledTasksTargetingSession returns enabled tasks in repoID whose canonical
 // target is exactly title. Names are sorted for a deterministic, complete
 // archive refusal. A load error stays unknown and must fail the archive before
 // any session mutation.
 func enabledTasksTargetingSession(repoID, title string) ([]task.Task, error) {
-	tasks, err := task.LoadTasksForRepoID(repoID)
+	targets, err := loadEnabledTaskTargets(repoID)
 	if err != nil {
 		return nil, err
 	}
-	var targeted []task.Task
+	return targets[title], nil
+}
+
+// loadEnabledTaskTargets loads and freshly scopes a project's task store once,
+// then indexes every enabled target. DeleteProject reuses this snapshot for its
+// preflight and each subsequent archive while holding taskTargetMu, so projects
+// with many sessions do not repeat tasks x path-resolution work.
+func loadEnabledTaskTargets(repoID string) (map[string][]task.Task, error) {
+	tasks, err := loadTasksForRepoID(repoID)
+	if err != nil {
+		return nil, err
+	}
+	targets := make(map[string][]task.Task)
 	for _, t := range tasks {
-		if t.Enabled && task.CanonicalTargetSession(t.TargetSession) == title {
-			targeted = append(targeted, t)
+		target := task.CanonicalTargetSession(t.TargetSession)
+		if t.Enabled && target != "" {
+			targets[target] = append(targets[target], t)
 		}
 	}
-	sort.Slice(targeted, func(i, j int) bool {
-		if targeted[i].Name == targeted[j].Name {
-			return targeted[i].ID < targeted[j].ID
-		}
-		return targeted[i].Name < targeted[j].Name
-	})
-	return targeted, nil
+	for target := range targets {
+		targeted := targets[target]
+		sort.Slice(targeted, func(i, j int) bool {
+			if targeted[i].Name == targeted[j].Name {
+				return targeted[i].ID < targeted[j].ID
+			}
+			return targeted[i].Name < targeted[j].Name
+		})
+	}
+	return targets, nil
 }
 
 func describeTargetTasks(tasks []task.Task) string {
@@ -88,12 +108,14 @@ func describeTargetTasks(tasks []task.Task) string {
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
 	m.taskTargetMu.Lock()
 	defer m.taskTargetMu.Unlock()
-	return m.archiveSession(req)
+	return m.archiveSession(req, nil)
 }
 
 // archiveSession performs ArchiveSession while taskTargetMu is already held.
-// DeleteProject uses it inside its wider, preflight-to-commit task transaction.
-func (m *Manager) archiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
+// DeleteProject uses it inside its wider, preflight-to-commit task transaction
+// and passes the project-wide target index it loaded once during preflight.
+// A nil taskTargets means the caller has not supplied a serialized snapshot.
+func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[string][]task.Task) (string, session.InstanceData, error) {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", session.InstanceData{}, err
@@ -144,9 +166,13 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// every enabled task the caller must disable or retarget. This also makes
 	// DeleteProject fail visibly for the affected session rather than leaving an
 	// enabled task in the same permanent retry loop (#2646).
-	targeted, taskErr := enabledTasksTargetingSession(repoID, req.Title)
-	if taskErr != nil {
-		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: could not determine whether enabled tasks target it; nothing was changed: %w", req.Title, taskErr)
+	targeted := taskTargets[req.Title]
+	if taskTargets == nil {
+		var taskErr error
+		targeted, taskErr = enabledTasksTargetingSession(repoID, req.Title)
+		if taskErr != nil {
+			return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: could not determine whether enabled tasks target it; nothing was changed: %w", req.Title, taskErr)
+		}
 	}
 	if len(targeted) > 0 {
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: enabled task(s) target it: %s; disable or retarget them, then archive again", req.Title, describeTargetTasks(targeted))
@@ -329,15 +355,27 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task) error {
 	m.mu.Lock()
 	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
 	m.mu.Unlock()
-	if instance == nil {
-		return nil
+	loaded := instance != nil
+	var state session.InstanceData
+	if loaded {
+		state = instance.ToInstanceData()
+	} else {
+		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
+		if errors.Is(err, errSessionNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("cannot enable task %q: could not determine target session %q state from storage; nothing was changed: %w", t.ID, target, err)
+		}
+		state = *persisted
 	}
-	state := instance.ToInstanceData()
 	switch {
 	case state.InFlightOp == session.OpArchiving:
 		return fmt.Errorf("cannot enable task %q: target session %q is being archived; wait for the archive, then restore it or choose a different target", t.ID, target)
 	case state.Liveness == session.LiveArchived:
 		return fmt.Errorf("cannot enable task %q: target session %q is archived; restore it or choose a different target", t.ID, target)
+	case !loaded:
+		return fmt.Errorf("cannot enable task %q: could not determine whether target session %q can receive prompts; it is recorded on disk but unavailable in the daemon — repair or remove that session, or choose a different target; nothing was changed", t.ID, target)
 	default:
 		return nil
 	}

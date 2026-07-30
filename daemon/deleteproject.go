@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // repoSessionTitlesLocked returns the titles of the repo's sessions the daemon still
@@ -228,7 +229,8 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// remove root_agents and suppress respawn before returning the error. The
 	// caller then had neither a deleted project nor its previous lifecycle
 	// configuration. taskTargetMu keeps this preflight stable through the loop.
-	if err := m.preflightDeleteProjectTaskTargets(repoID); err != nil {
+	taskTargets, err := m.preflightDeleteProjectTaskTargets(repoID)
+	if err != nil {
 		return result, err
 	}
 
@@ -311,7 +313,7 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		// external-session kill path above carries into KillSession. A title-only
 		// lookup here can resolve a NEW same-title session created after the
 		// snapshot and archive work the user never confirmed deleting.
-		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID})
+		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID}, taskTargets)
 		if errors.Is(err, errSessionNotFound) {
 			// Snapshot-gated idempotency, exactly like the kill path: this target
 			// existed under m.mu and is now authoritatively absent by stable ID, so
@@ -396,7 +398,7 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	return result, nil
 }
 
-func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) error {
+func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][]task.Task, error) {
 	m.mu.Lock()
 	var titles []string
 	for key, instance := range m.instances {
@@ -408,21 +410,26 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) error {
 	}
 	m.mu.Unlock()
 	sort.Strings(titles)
+	if len(titles) == 0 {
+		return make(map[string][]task.Task), nil
+	}
+
+	taskTargets, err := loadEnabledTaskTargets(repoID)
+	if err != nil {
+		return nil, fmt.Errorf("delete project %s: could not determine whether enabled tasks target its sessions; nothing was changed: %w", repoID, err)
+	}
 
 	var blockers []string
 	for _, title := range titles {
-		targeted, err := enabledTasksTargetingSession(repoID, title)
-		if err != nil {
-			return fmt.Errorf("delete project %s: could not determine whether enabled tasks target session %q; nothing was changed: %w", repoID, title, err)
-		}
+		targeted := taskTargets[title]
 		if len(targeted) > 0 {
 			blockers = append(blockers, fmt.Sprintf("session %q: %s", title, describeTargetTasks(targeted)))
 		}
 	}
 	if len(blockers) > 0 {
-		return fmt.Errorf("delete project %s: enabled task(s) target session(s) it must remove: %s; disable or retarget them, then delete the project again; nothing was changed", repoID, strings.Join(blockers, "; "))
+		return nil, fmt.Errorf("delete project %s: enabled task(s) target session(s) it must remove: %s; disable or retarget them, then delete the project again; nothing was changed", repoID, strings.Join(blockers, "; "))
 	}
-	return nil
+	return taskTargets, nil
 }
 
 // suppressRootAgent marks repoID's project as deleted for the rest of this
