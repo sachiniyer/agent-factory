@@ -50,6 +50,13 @@ func newRepoScope(repoRoot string) *repoScope {
 	}
 }
 
+// newRepoScopeForID builds the same membership test when the caller already
+// holds the daemon's canonical repo identity but may not have a local worktree
+// path (for example, an archived remote session).
+func newRepoScopeForID(repoID string) *repoScope {
+	return &repoScope{id: repoID, seen: map[string]string{}}
+}
+
 // matches reports whether t belongs to this scope.
 func (s *repoScope) matches(t Task) bool {
 	// The RETAINED id wins when present: it was resolved at bind time, while the

@@ -88,7 +88,8 @@ type KillSessionResponse struct {
 
 // ArchiveSessionRequest asks the daemon to archive a session (#1028): tear down
 // its tmux, relocate its worktree to the global archive dir, and mark it
-// Archived while preserving the record.
+// Archived while preserving the record. The daemon refuses the archive before
+// mutation when an enabled task targets the session and names every blocker.
 type ArchiveSessionRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`

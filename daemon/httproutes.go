@@ -96,7 +96,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/ArchiveSession",
-		Description:   "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record.",
+		Description:   "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it.",
 		RequestFields: jsonFields(reflect.TypeOf(ArchiveSessionRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ArchiveSession) },
 	},

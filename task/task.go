@@ -484,11 +484,21 @@ func LoadTasksForCurrentRepo() ([]Task, error) {
 // SUBDIRECTORY or a linked worktree of repoRoot belongs to it, because that is
 // what git says (#2098). See repo_scope.go.
 func LoadTasksForRepo(repoRoot string) ([]Task, error) {
+	return loadTasksForScope(newRepoScope(repoRoot))
+}
+
+// LoadTasksForRepoID returns tasks belonging to an already-resolved repo ID.
+// It is the path-independent counterpart to LoadTasksForRepo for daemon
+// lifecycle checks, including remote sessions with no local git worktree.
+func LoadTasksForRepoID(repoID string) ([]Task, error) {
+	return loadTasksForScope(newRepoScopeForID(repoID))
+}
+
+func loadTasksForScope(scope *repoScope) ([]Task, error) {
 	all, err := LoadTasks()
 	if err != nil {
 		return nil, err
 	}
-	scope := newRepoScope(repoRoot)
 	var filtered []Task
 	for _, t := range all {
 		if scope.matches(t) {

@@ -19,7 +19,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/SuggestSessionName` | — | Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder. |
 | `POST` | `/v1/Snapshot` | `repo_id` | List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos). |
 | `POST` | `/v1/KillSession` | `title`, `repo_id`, `id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
-| `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record. |
+| `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id`, `id` | Restore an archived, Lost, or Dead session. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt`, `id` | Send a prompt to an existing session's agent. |

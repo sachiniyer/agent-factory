@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // ErrAlreadyArchived is returned by ArchiveSession when its target is already in
@@ -24,6 +26,42 @@ import (
 // misleading partial failure. Only in-process callers can match it; over the
 // control RPC it degrades to its (unchanged) message.
 var ErrAlreadyArchived = errors.New("already archived")
+
+// enabledTasksTargetingSession returns enabled tasks in repoID whose canonical
+// target is exactly title. Names are sorted for a deterministic, complete
+// archive refusal. A load error stays unknown and must fail the archive before
+// any session mutation.
+func enabledTasksTargetingSession(repoID, title string) ([]task.Task, error) {
+	tasks, err := task.LoadTasksForRepoID(repoID)
+	if err != nil {
+		return nil, err
+	}
+	var targeted []task.Task
+	for _, t := range tasks {
+		if t.Enabled && task.CanonicalTargetSession(t.TargetSession) == title {
+			targeted = append(targeted, t)
+		}
+	}
+	sort.Slice(targeted, func(i, j int) bool {
+		if targeted[i].Name == targeted[j].Name {
+			return targeted[i].ID < targeted[j].ID
+		}
+		return targeted[i].Name < targeted[j].Name
+	})
+	return targeted, nil
+}
+
+func describeTargetTasks(tasks []task.Task) string {
+	parts := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		if strings.TrimSpace(t.Name) == "" {
+			parts = append(parts, fmt.Sprintf("task %s", t.ID))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%q (task %s)", t.Name, t.ID))
+	}
+	return strings.Join(parts, ", ")
+}
 
 // ArchiveSession archives a session (#1028): it tears down the session's tmux
 // (agent + shell/process tabs; web tabs have none and are preserved with their
@@ -86,6 +124,20 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	}
 	if instance.GetInFlightOp() != session.OpNone {
 		return "", session.InstanceData{}, fmt.Errorf("session %q is busy (%v); try again in a moment", req.Title, instance.GetStatus())
+	}
+
+	// Archiving is deliberate quiescence. Never auto-restore the target behind
+	// the user's back, and never silently disable an automation as an archive
+	// side effect. Refuse once, before the archive fence or teardown, and name
+	// every enabled task the caller must disable or retarget. This also makes
+	// DeleteProject fail visibly for the affected session rather than leaving an
+	// enabled task in the same permanent retry loop (#2646).
+	targeted, taskErr := enabledTasksTargetingSession(repoID, req.Title)
+	if taskErr != nil {
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: could not determine whether enabled tasks target it; nothing was changed: %w", req.Title, taskErr)
+	}
+	if len(targeted) > 0 {
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: enabled task(s) target it: %s; disable or retarget them, then archive again", req.Title, describeTargetTasks(targeted))
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
