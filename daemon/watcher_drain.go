@@ -194,6 +194,10 @@ func (w *taskWatcher) drainLoop() {
 		// The park is over — re-arm the notice so the NEXT episode logs on entry
 		// instead of being silently swallowed by the previous one's throttle window.
 		parkLog.reset()
+		// Backoff tracks consecutive delivery failures, not queue cursor ownership.
+		// A successful delivery resets it even if a concurrent head move makes this
+		// drainer's cursor stale and advance asks us to re-peek.
+		backoff = w.sup.drainBaseBackoff
 		advanced, err := w.queue.advance(cursor)
 		if err != nil {
 			log.ErrorLog.Printf("watch task %s: failed to advance the event queue; replay parked until the next reload: %v", w.taskID, err)
@@ -204,6 +208,5 @@ func (w *taskWatcher) drainLoop() {
 			continue
 		}
 		replayed++
-		backoff = w.sup.drainBaseBackoff
 	}
 }

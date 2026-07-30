@@ -853,6 +853,76 @@ func TestWatcherDrainLogsExpiryCountWhenStoppedMidBackoff(t *testing.T) {
 	}
 }
 
+// TestWatcherDrain_StaleCursorSuccessResetsBackoff proves delivery health is
+// independent of queue-head ownership. A concurrent queue mutation can move the
+// head while deliver is in flight, making this drainer's cursor stale even though
+// the target accepted the event. The next failure must restart at base backoff.
+func TestWatcherDrain_StaleCursorSuccessResetsBackoff(t *testing.T) {
+	const taskID = "ab265501"
+	var w *taskWatcher
+	attempts := 0
+	hookErr := make(chan error, 1)
+	postSuccessFailure := make(chan struct{})
+	w = newRateSlotWatcher(t, taskID, func(_, _ string) error {
+		attempts++
+		switch attempts {
+		case 1, 2:
+			return errors.New("initial outage")
+		case 3:
+			// Move the queue head between the drain loop's peek and advance,
+			// reproducing the stale cursor an overflow race can create.
+			_, cursor, ok, err := w.queue.peek()
+			if err != nil || !ok {
+				hookErr <- fmt.Errorf("peek queued event for stale-cursor hook: ok=%v err=%v", ok, err)
+				return nil
+			}
+			advanced, err := w.queue.advance(cursor)
+			if err != nil || !advanced {
+				hookErr <- fmt.Errorf("advance queued event for stale-cursor hook: advanced=%v err=%v", advanced, err)
+			}
+			return nil
+		default:
+			select {
+			case <-postSuccessFailure:
+			default:
+				close(postSuccessFailure)
+			}
+			return errors.New("outage after successful stale-cursor delivery")
+		}
+	})
+	w.sup.drainBaseBackoff = 40 * time.Millisecond
+	w.sup.drainMaxBackoff = 160 * time.Millisecond
+	for _, line := range []string{"first", "second"} {
+		if err := w.queue.enqueue(line); err != nil {
+			t.Fatalf("enqueue %q: %v", line, err)
+		}
+	}
+
+	warn, _ := captureWatcherLogs(t)
+	w.wg.Add(1)
+	go w.drainLoop()
+	select {
+	case <-postSuccessFailure:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainer never reached the post-success failure")
+	}
+	waitUntil(t, 5*time.Second, "post-success retry log", func() bool {
+		return strings.Contains(warn.String(), "outage after successful stale-cursor delivery")
+	})
+	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.wg.Wait()
+
+	select {
+	case err := <-hookErr:
+		t.Fatal(err)
+	default:
+	}
+	if got := warn.String(); !strings.Contains(got,
+		"retrying in 40ms: outage after successful stale-cursor delivery") {
+		t.Fatalf("post-success retry did not restart at base backoff:\n%s", got)
+	}
+}
+
 // flakyDeliver fails every delivery until healed, then records successes. It
 // drives the outage→recovery shape end to end through a real watcher.
 type flakyDeliver struct {
