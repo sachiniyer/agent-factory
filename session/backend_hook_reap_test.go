@@ -590,6 +590,7 @@ func TestHookProvisionSelectsEndpointAmongJSONLogs(t *testing.T) {
 echo '{"level":"info","msg":"connecting"}' >&2
 echo '{"level":"info","url":"http://wrong.invalid","token":"logged-secret"}' >&2
 echo '{"URL":"http://case-variant.invalid","TOKEN":"case-variant-secret"}' >&2
+echo '{"url":"http://first-duplicate.invalid","url":"http://last-duplicate.invalid","token":"duplicate-secret"}' >&2
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 echo '{"level":"info","msg":"tunnel ready"}' >&2
 exit 0

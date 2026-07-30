@@ -488,16 +488,40 @@ func skipJSONWhitespace(input string, start int) int {
 }
 
 func decodeHookEndpointJSON(candidate string) (hookEndpointJSON, bool) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(candidate), &fields); err != nil || fields == nil {
+	decoder := json.NewDecoder(strings.NewReader(candidate))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
 		return hookEndpointJSON{}, false
 	}
-	for key := range fields {
+
+	fields := make(map[string]struct{}, 3)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return hookEndpointJSON{}, false
+		}
+		key, ok := token.(string)
+		if !ok {
+			return hookEndpointJSON{}, false
+		}
 		switch key {
 		case "url", "token", "tls_fingerprint":
 		default:
 			return hookEndpointJSON{}, false
 		}
+		if _, duplicate := fields[key]; duplicate {
+			return hookEndpointJSON{}, false
+		}
+		fields[key] = struct{}{}
+
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return hookEndpointJSON{}, false
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return hookEndpointJSON{}, false
 	}
 	if _, ok := fields["url"]; !ok {
 		return hookEndpointJSON{}, false
