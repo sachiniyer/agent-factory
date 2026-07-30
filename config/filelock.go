@@ -40,6 +40,13 @@ func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
 		return false, fmt.Errorf("failed to acquire file lock on %s: %w", lockPath, err)
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	current, err := lockFileIsCurrent(f, lockPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to validate file lock on %s: %w", lockPath, err)
+	}
+	if !current {
+		return false, fmt.Errorf("file lock on %s was replaced while acquiring it", lockPath)
+	}
 
 	return true, fn()
 }
@@ -65,8 +72,10 @@ var ErrLockTimeout = errors.New("timed out waiting for file lock")
 // no timed acquire: a blocking Flock cannot be interrupted or given a deadline.
 // Polling costs a wakeup every lockPollInterval while contended and trades away
 // flock's (already unspecified) queueing fairness; the caller's budget bounds how
-// long that lasts. The fd is opened ONCE and reused across attempts so a
-// contended retry does not churn the lock file.
+// long that lasts. A contended fd is reused across polling attempts, then its
+// identity is compared with the lock path after acquisition. If the path was
+// replaced while waiting, the stale inode is unlocked and the current path is
+// opened before retrying.
 func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) error {
 	lockPath := path + ".lock"
 
@@ -74,32 +83,49 @@ func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) er
 		return fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
-	}
-	defer f.Close()
-
 	deadline := time.Now().Add(timeout)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-			return fn()
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return fmt.Errorf("failed to acquire file lock on %s: %w", lockPath, err)
+		for {
+			err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			if err == nil {
+				current, validateErr := lockFileIsCurrent(f, lockPath)
+				if validateErr != nil {
+					_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+					_ = f.Close()
+					return fmt.Errorf("failed to validate file lock on %s: %w", lockPath, validateErr)
+				}
+				if current {
+					defer f.Close()
+					defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+					return fn()
+				}
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+				if !time.Now().Before(deadline) {
+					return fmt.Errorf("%w on %s after %s (lock file was replaced while waiting)", ErrLockTimeout, lockPath, timeout)
+				}
+				break
+			}
+			if !errors.Is(err, syscall.EWOULDBLOCK) {
+				_ = f.Close()
+				return fmt.Errorf("failed to acquire file lock on %s: %w", lockPath, err)
+			}
+			if !time.Now().Before(deadline) {
+				_ = f.Close()
+				return fmt.Errorf("%w on %s after %s (another agent-factory process is holding it)", ErrLockTimeout, lockPath, timeout)
+			}
+			// Sleep no longer than the remaining budget, so the effective wait
+			// matches the caller's timeout instead of overshooting by up to a poll.
+			wait := lockPollInterval
+			if remaining := time.Until(deadline); remaining < wait {
+				wait = remaining
+			}
+			time.Sleep(wait)
 		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("%w on %s after %s (another agent-factory process is holding it)", ErrLockTimeout, lockPath, timeout)
-		}
-		// Sleep no longer than the remaining budget, so the effective wait
-		// matches the caller's timeout instead of overshooting by up to a poll.
-		wait := lockPollInterval
-		if remaining := time.Until(deadline); remaining < wait {
-			wait = remaining
-		}
-		time.Sleep(wait)
 	}
 }
 
@@ -120,18 +146,44 @@ func WithFileLock(path string, fn func() error) error {
 		return fmt.Errorf("failed to create lock directory: %w", err)
 	}
 
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("failed to acquire file lock on %s: %w", lockPath, err)
+		}
+		current, validateErr := lockFileIsCurrent(f, lockPath)
+		if validateErr != nil {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+			return fmt.Errorf("failed to validate file lock on %s: %w", lockPath, validateErr)
+		}
+		if current {
+			defer f.Close()
+			defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			return fn()
+		}
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}
+}
+
+func lockFileIsCurrent(f *os.File, lockPath string) (bool, error) {
+	openedInfo, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("failed to open lock file %s: %w", lockPath, err)
+		return false, err
 	}
-	defer f.Close()
-
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("failed to acquire file lock on %s: %w", lockPath, err)
+	pathInfo, err := os.Stat(lockPath)
+	if os.IsNotExist(err) {
+		return false, nil
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-
-	return fn()
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(openedInfo, pathInfo), nil
 }
 
 // AtomicWriteFile writes data to a temporary file in the same directory as path
