@@ -108,6 +108,15 @@ func Snapshot() (map[int]Process, error) {
 	return snapshot()
 }
 
+// Lookup returns the current process instance for pid. Unlike Snapshot, which
+// contains only live processes, Lookup preserves ErrProcessExited so callers
+// can distinguish a confirmed startup exit from a process they could not
+// inspect. The returned StartID is the stable half of the (PID, StartID)
+// identity used before signalling across daemon restarts.
+func Lookup(pid int) (Process, error) {
+	return readProc(pid)
+}
+
 // TreeOf returns root plus every descendant of root present in snap, in BFS
 // order (root first). Returns nil when root is not in the snapshot.
 func TreeOf(snap map[int]Process, root int) []Process {

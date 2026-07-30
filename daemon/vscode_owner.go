@@ -43,12 +43,17 @@ func writeVSCodeOwner(path string, owner vscodeOwnerRecord) error {
 }
 
 func captureVSCodeOwner(key, instanceID string, pid int) (vscodeOwnerRecord, error) {
-	snapshot, err := proctree.Snapshot()
+	process, err := proctree.Lookup(pid)
 	if err != nil {
+		if errors.Is(err, proctree.ErrProcessExited) {
+			// A child that is already a zombie is known to have exited, not an
+			// unknown identity. Preserve the existing startup-exit sentinel so
+			// the proxy renders its actionable notice and cooldowns the retry.
+			return vscodeOwnerRecord{}, errVSCodeStartExited
+		}
 		return vscodeOwnerRecord{}, fmt.Errorf("could not determine editor process identity: %w", err)
 	}
-	process, ok := snapshot[pid]
-	if !ok || process.StartID == 0 {
+	if process.StartID == 0 {
 		return vscodeOwnerRecord{}, fmt.Errorf("could not determine editor process identity for pid %d", pid)
 	}
 	return vscodeOwnerRecord{
