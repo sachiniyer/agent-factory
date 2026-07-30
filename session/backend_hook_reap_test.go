@@ -625,6 +625,27 @@ exit 0
 	assert.NoDirExists(t, h.sandbox(p.slug))
 }
 
+// TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch
+// killed or interrupted while writing its endpoint JSON. The unmatched tail is
+// still diagnostic output, but a complete quoted token value inside it is just
+// as sensitive as one in a complete JSON object.
+func TestHookProvisionRedactsTokenFromIncompleteEndpointOutput(t *testing.T) {
+	const secret = "truncated-token-must-not-leak"
+	h := newHookState(t, `
+echo '{"level":"info","msg":"connecting"}' >&2
+echo '{"url":"","token":"truncated-token-must-not-leak"'
+exit 0
+`, "")
+	p := newHookProvisioner(h, "truncated endpoint")
+
+	_, err := p.provisionOrReap()
+	require.Error(t, err, "an incomplete endpoint object must fail provisioning")
+	assert.NotContains(t, err.Error(), secret, "an incomplete JSON tail must not expose its bearer token")
+	assert.Contains(t, err.Error(), "[REDACTED]", "the diagnostic should show that sensitive output was removed")
+	assert.True(t, h.deleteRan(t), "invalid endpoint output must reap the provisioned sandbox")
+	assert.NoDirExists(t, h.sandbox(p.slug))
+}
+
 // TestHookProvisionKeepsASuccessfulLaunchsTunnelAlive is the #1966-review P2: a
 // launch_cmd that SUCCEEDS and leaves a tunnel running must end with a REACHABLE
 // endpoint. The tunnel is not a leak — it is the product, the thing making the

@@ -383,58 +383,78 @@ func hookOutputSuffix(out []byte) string {
 }
 
 // redactHookOutputTokens preserves the hook's diagnostic text while replacing
-// every token field in each complete JSON value. hook output is attached to
-// persistent session errors, so even an unusable endpoint must not put its
-// agent-server bearer credential into logs or API responses.
+// every quoted JSON token field it can recognize. It intentionally does not
+// require a complete JSON value: a killed launch_cmd may leave its endpoint
+// object truncated after writing the bearer credential. Hook output is attached
+// to persistent session errors, so that tail must be safe too.
 func redactHookOutputTokens(output string) string {
 	var redacted strings.Builder
 	written := 0
 	for cursor := 0; cursor < len(output); {
-		candidate, next := extractJSONAt(output, cursor)
-		if candidate == "" {
+		if output[cursor] != '"' {
+			cursor++
+			continue
+		}
+
+		keyEnd, complete := jsonStringEnd(output, cursor)
+		if !complete {
 			break
 		}
-		start := next - len(candidate)
-		redacted.WriteString(output[written:start])
-		redacted.WriteString(redactJSONTokenFields(candidate))
-		written = next
-		cursor = next
+		var key string
+		if err := json.Unmarshal([]byte(output[cursor:keyEnd]), &key); err != nil || !strings.EqualFold(key, "token") {
+			cursor = keyEnd
+			continue
+		}
+
+		separator := skipJSONWhitespace(output, keyEnd)
+		if separator >= len(output) || output[separator] != ':' {
+			cursor = keyEnd
+			continue
+		}
+		valueStart := skipJSONWhitespace(output, separator+1)
+		if valueStart >= len(output) || output[valueStart] != '"' {
+			cursor = keyEnd
+			continue
+		}
+
+		valueEnd, complete := jsonStringEnd(output, valueStart)
+		redacted.WriteString(output[written:valueStart])
+		redacted.WriteString(`"[REDACTED]"`)
+		if !complete {
+			return redacted.String()
+		}
+		written = valueEnd
+		cursor = valueEnd
 	}
 	redacted.WriteString(output[written:])
 	return redacted.String()
 }
 
-func redactJSONTokenFields(candidate string) string {
-	var value any
-	if err := json.Unmarshal([]byte(candidate), &value); err != nil || !redactTokenFields(value) {
-		return candidate
+func jsonStringEnd(input string, start int) (int, bool) {
+	escaped := false
+	for cursor := start + 1; cursor < len(input); cursor++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[cursor] == '\\':
+			escaped = true
+		case input[cursor] == '"':
+			return cursor + 1, true
+		}
 	}
-
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return candidate
-	}
-	return string(encoded)
+	return len(input), false
 }
 
-func redactTokenFields(value any) bool {
-	changed := false
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			if strings.EqualFold(key, "token") {
-				typed[key] = "[REDACTED]"
-				changed = true
-				continue
-			}
-			changed = redactTokenFields(child) || changed
-		}
-	case []any:
-		for _, child := range typed {
-			changed = redactTokenFields(child) || changed
+func skipJSONWhitespace(input string, start int) int {
+	for start < len(input) {
+		switch input[start] {
+		case ' ', '\t', '\r', '\n':
+			start++
+		default:
+			return start
 		}
 	}
-	return changed
+	return start
 }
 
 func decodeHookEndpointJSON(candidate string) (hookEndpointJSON, bool) {
