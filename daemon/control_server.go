@@ -302,7 +302,13 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 		return err
 	}
 	defer unlock()
-	if err := task.AddTask(req.Task); err != nil {
+	var validate func(task.Task) error
+	if s.manager != nil {
+		s.manager.taskTargetMu.Lock()
+		defer s.manager.taskTargetMu.Unlock()
+		validate = s.manager.validateEnabledTaskTarget
+	}
+	if err := task.AddTaskChecked(req.Task, validate); err != nil {
 		return err
 	}
 	resp.OK = true
@@ -326,7 +332,13 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		return err
 	}
 	defer unlock()
-	merged, err := task.UpdateTask(req.ID, req.Update, req.Expect)
+	var validate func(task.Task) error
+	if s.manager != nil {
+		s.manager.taskTargetMu.Lock()
+		defer s.manager.taskTargetMu.Unlock()
+		validate = s.manager.validateEnabledTaskTarget
+	}
+	merged, err := task.UpdateTaskChecked(req.ID, req.Update, req.Expect, validate)
 	if err != nil {
 		return err
 	}

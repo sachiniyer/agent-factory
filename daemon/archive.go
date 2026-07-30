@@ -27,6 +27,10 @@ import (
 // control RPC it degrades to its (unchanged) message.
 var ErrAlreadyArchived = errors.New("already archived")
 
+// archiveTargetTasksChecked is a test seam for pinning the interval between the
+// task snapshot and the archive fence. Production leaves it as a no-op.
+var archiveTargetTasksChecked = func() {}
+
 // enabledTasksTargetingSession returns enabled tasks in repoID whose canonical
 // target is exactly title. Names are sorted for a deterministic, complete
 // archive refusal. A load error stays unknown and must fail the archive before
@@ -82,6 +86,14 @@ func describeTargetTasks(tasks []task.Task) string {
 // instead of depending on a second Snapshot request (#2680). Its stable id still
 // prevents cross-repo title misrouting (#1592 Phase 5).
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
+	m.taskTargetMu.Lock()
+	defer m.taskTargetMu.Unlock()
+	return m.archiveSession(req)
+}
+
+// archiveSession performs ArchiveSession while taskTargetMu is already held.
+// DeleteProject uses it inside its wider, preflight-to-commit task transaction.
+func (m *Manager) archiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", session.InstanceData{}, err
@@ -139,6 +151,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	if len(targeted) > 0 {
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: enabled task(s) target it: %s; disable or retarget them, then archive again", req.Title, describeTargetTasks(targeted))
 	}
+	archiveTargetTasksChecked()
 
 	key := daemonInstanceKey(repoID, req.Title)
 	m.mu.Lock()
@@ -291,6 +304,33 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// and publish before this older Archived projection (#2680 Codex review).
 	m.publishEvent(agentproto.EventSessionArchived, archived)
 	return archivedPath, archived, nil
+}
+
+// validateEnabledTaskTarget is the task-writer side of taskTargetMu's fence.
+// Missing targets remain legal (delivery auto-creates them), but a known target
+// that is archiving or already archived would retry forever and is refused
+// before the task-store commit. RepoID has already been derived by the checked
+// task write; an unresolved project retains its existing AddTask behavior.
+func (m *Manager) validateEnabledTaskTarget(t task.Task) error {
+	target := task.CanonicalTargetSession(t.TargetSession)
+	if !t.Enabled || target == "" || t.RepoID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
+	m.mu.Unlock()
+	if instance == nil {
+		return nil
+	}
+	state := instance.ToInstanceData()
+	switch {
+	case state.InFlightOp == session.OpArchiving:
+		return fmt.Errorf("cannot enable task %q: target session %q is being archived; wait for the archive, then restore it or choose a different target", t.ID, target)
+	case state.Liveness == session.LiveArchived:
+		return fmt.Errorf("cannot enable task %q: target session %q is archived; restore it or choose a different target", t.ID, target)
+	default:
+		return nil
+	}
 }
 
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a

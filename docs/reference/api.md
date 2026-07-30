@@ -37,8 +37,8 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/GetConfig` | — | List every user-facing global config key with its purpose, type, default, and current value. |
 | `POST` | `/v1/SetConfigValue` | `key`, `value` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
-| `POST` | `/v1/AddTask` | `task` | Append a new task and re-arm the scheduler. |
-| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields. |
+| `POST` | `/v1/AddTask` | `task` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
+| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/RemoveTask` | `id`, `expect` | Remove a task by ID. |
 | `POST` | `/v1/RestartTask` | `id`, `expect` | Stop and replace one enabled watch task without overlapping its process tree. |
 | `POST` | `/v1/TriggerTask` | `id`, `expect` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |

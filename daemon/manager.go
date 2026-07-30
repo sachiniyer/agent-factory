@@ -76,9 +76,17 @@ type Manager struct {
 	// later barrier where scheduler, watcher, and status work may run.
 	lifecycle *daemonLifecycle
 
-	mu        sync.Mutex
-	storage   *session.Storage
-	instances map[string]*session.Instance
+	mu sync.Mutex
+	// taskTargetMu makes the enabled-task snapshot and a session archive one
+	// transaction with respect to AddTask/UpdateTask. Archive/DeleteProject hold
+	// it through their lifecycle mutation; task writers hold it through validation
+	// and commit. A writer that wins is visible to archive, while an archive that
+	// wins leaves an OpArchiving/Archived fence the writer must reject (#2646).
+	// Scheduler-owned status writes do not change Enabled, TargetSession, or repo
+	// membership and therefore do not participate.
+	taskTargetMu sync.Mutex
+	storage      *session.Storage
+	instances    map[string]*session.Instance
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
 	// from instances: a docker/ssh/hook backend may block inside NewInstance before

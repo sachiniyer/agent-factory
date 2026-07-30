@@ -307,6 +307,15 @@ func saveTasks(tasks []Task) error {
 }
 
 func AddTask(t Task) error {
+	return AddTaskChecked(t, nil)
+}
+
+// AddTaskChecked is AddTask with a final pre-commit validator. The validator
+// runs after RepoID derivation and trigger validation, under the tasks-file
+// lock, so an error guarantees that no task was appended. It must not shell out
+// or recursively access the task store. The daemon uses this to make target-
+// session lifecycle validation atomic with archive fencing (#2646).
+func AddTaskChecked(t Task, validate func(Task) error) error {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return err
 	}
@@ -341,6 +350,11 @@ func AddTask(t Task) error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
+		}
+		if validate != nil {
+			if err := validate(t); err != nil {
+				return err
+			}
 		}
 		tasks = append(tasks, t)
 		return saveTasks(tasks)
@@ -800,6 +814,13 @@ func DiffTask(old, cur Task) TaskUpdate {
 // same locked operation, that the task is still bound to the project the caller
 // authorized it against — see ProjectExpectation.
 func UpdateTask(id string, update TaskUpdate, expect ProjectExpectation) (Task, error) {
+	return UpdateTaskChecked(id, update, expect, nil)
+}
+
+// UpdateTaskChecked is UpdateTask with a validator applied to the authoritative
+// merged record immediately before commit. A validator error leaves the stored
+// task unchanged. See AddTaskChecked for the callback constraints.
+func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, validate func(Task) error) (Task, error) {
 	if err := ValidateTaskID(id); err != nil {
 		return Task{}, err
 	}
@@ -846,6 +867,11 @@ func UpdateTask(id string, update TaskUpdate, expect ProjectExpectation) (Task, 
 				// same tolerance UpdateTaskStatus applies to legacy records).
 				if update.Program != nil && merged.Program != "" {
 					if err := config.ValidateProgramEnum("task program", "task program", merged.Program, ""); err != nil {
+						return err
+					}
+				}
+				if validate != nil {
+					if err := validate(merged); err != nil {
 						return err
 					}
 				}

@@ -129,6 +129,14 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 // unknown project archives nothing, drops no opt-in or registration, and returns
 // a zero-count success; a registered project with no sessions is deregistered.
 func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
+	m.taskTargetMu.Lock()
+	defer m.taskTargetMu.Unlock()
+	return m.deleteProject(req)
+}
+
+// deleteProject performs DeleteProject while taskTargetMu is already held from
+// blocker preflight through the final session mutation.
+func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	repoPath := strings.TrimSpace(req.RepoPath)
 	if repoID == "" {
@@ -181,6 +189,15 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	if len(starting) > 0 {
 		sort.Strings(starting)
 		return result, fmt.Errorf("delete project %s: session(s) %v are still starting; nothing was changed — delete again once they are ready", repoID, starting)
+	}
+
+	// A task-target refusal is predictable and must precede BOTH stores this
+	// operation mutates. Discovering it inside the later archive loop used to
+	// remove root_agents and suppress respawn before returning the error. The
+	// caller then had neither a deleted project nor its previous lifecycle
+	// configuration. taskTargetMu keeps this preflight stable through the loop.
+	if err := m.preflightDeleteProjectTaskTargets(repoID); err != nil {
+		return result, err
 	}
 
 	// Durably drop the repo's root_agents opt-in FIRST, before mutating ANY state,
@@ -262,7 +279,7 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		// external-session kill path above carries into KillSession. A title-only
 		// lookup here can resolve a NEW same-title session created after the
 		// snapshot and archive work the user never confirmed deleting.
-		_, archived, err := m.ArchiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID})
+		_, archived, err := m.archiveSession(ArchiveSessionRequest{ID: t.id, Title: t.title, RepoID: repoID})
 		if errors.Is(err, errSessionNotFound) {
 			// Snapshot-gated idempotency, exactly like the kill path: this target
 			// existed under m.mu and is now authoritatively absent by stable ID, so
@@ -345,6 +362,35 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 
 	log.InfoLog.Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))
 	return result, nil
+}
+
+func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) error {
+	m.mu.Lock()
+	var titles []string
+	for key, instance := range m.instances {
+		rid, title := splitDaemonInstanceKey(key)
+		if rid != repoID || instance == nil || instance.GetLiveness() == session.LiveArchived || instance.IsExternalWorktree() {
+			continue
+		}
+		titles = append(titles, title)
+	}
+	m.mu.Unlock()
+	sort.Strings(titles)
+
+	var blockers []string
+	for _, title := range titles {
+		targeted, err := enabledTasksTargetingSession(repoID, title)
+		if err != nil {
+			return fmt.Errorf("delete project %s: could not determine whether enabled tasks target session %q; nothing was changed: %w", repoID, title, err)
+		}
+		if len(targeted) > 0 {
+			blockers = append(blockers, fmt.Sprintf("session %q: %s", title, describeTargetTasks(targeted)))
+		}
+	}
+	if len(blockers) > 0 {
+		return fmt.Errorf("delete project %s: enabled task(s) target session(s) it must archive: %s; disable or retarget them, then delete the project again; nothing was changed", repoID, strings.Join(blockers, "; "))
+	}
+	return nil
 }
 
 // suppressRootAgent marks repoID's project as deleted for the rest of this
