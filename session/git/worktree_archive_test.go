@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -586,4 +587,37 @@ func TestCopyTree_PreservesModesAndSymlinks(t *testing.T) {
 	linkTarget, err := os.Readlink(filepath.Join(dest, "link"))
 	require.NoError(t, err, "symlink must be copied as a link, not followed")
 	assert.Equal(t, "a.txt", linkTarget)
+}
+
+// TestCopyTree_RejectsNamedPipeWithoutBlocking is the #2654 regression. The
+// cross-device move fallback copies a worktree node by node; opening a FIFO as
+// though it were a regular file waits for a writer forever. Special files must
+// instead fail promptly so ArchiveSession can release its operation/kill guards.
+//
+// PRE-FIX: copyTree does not return before the deadline. The writer below then
+// unblocks it solely so the test process can finish and report the hang cleanly.
+func TestCopyTree_RejectsNamedPipeWithoutBlocking(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.MkdirAll(src, 0755))
+	fifo := filepath.Join(src, "events.fifo")
+	require.NoError(t, syscall.Mkfifo(fifo, 0600))
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	done := make(chan error, 1)
+	go func() {
+		done <- copyTree(src, dest)
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a FIFO cannot be copied as a regular file")
+		assert.Contains(t, err.Error(), "unsupported file type")
+		assert.Contains(t, err.Error(), fifo)
+	case <-time.After(500 * time.Millisecond):
+		writer, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		require.NoError(t, err, "open a writer only to release the pre-fix blocked reader")
+		require.NoError(t, writer.Close())
+		eventualErr := <-done
+		t.Fatalf("HUNG: copyTree blocked opening named pipe %s; after a writer released it, copyTree returned %v", fifo, eventualErr)
+	}
 }

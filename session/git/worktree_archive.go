@@ -279,8 +279,8 @@ func (e *copiedWorktreeSourceCleanupError) Unwrap() error {
 // copyTree recursively copies the directory rooted at src to dest, preserving
 // regular files (contents + permission bits), subdirectories, and symlinks
 // (copied as links, never followed). It is only reached on the cross-device
-// fallback; a git worktree contains exactly these node kinds (including the
-// `.git` pointer file, which `git worktree repair` rewrites afterwards).
+// fallback. Other node kinds are rejected before opening them: in particular,
+// opening a FIFO for reading would wait indefinitely for a writer (#2654).
 func copyTree(src, dest string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -300,8 +300,10 @@ func copyTree(src, dest string) error {
 				return err
 			}
 			return os.Symlink(link, target)
-		default:
+		case info.Mode().IsRegular():
 			return copyFile(path, target, info.Mode().Perm())
+		default:
+			return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (%s)", path, info.Mode().Type())
 		}
 	})
 }
