@@ -106,10 +106,19 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			Backend:     session.BackendKind(m.pendingBackend),
 			ForceRemote: m.pendingForceRemote,
 		}, instance.Path)
-		if backendKindErr == nil && backendKind != session.BackendLocal {
+		if backendKindErr == nil && backendKind == session.BackendHook {
+			if !session.RemoteHookTitleHasASCIIAlnum(title) {
+				return m, m.handleError(fmt.Errorf(
+					"remote hook session title %q must contain at least one ASCII letter or digit (A-Z, a-z, or 0-9)",
+					title,
+				))
+			}
 			existing := make([]*session.Instance, 0, m.store.NumInstances())
 			for _, other := range m.store.GetInstances() {
-				if other == instance || other.Capabilities().Workspace != session.WorkspaceRemote {
+				// Only hook sessions own this global slug namespace. Docker and
+				// SSH are remote workspaces too, but their same-looking slugs are
+				// repo-scoped paths or labels and cannot collide with --name.
+				if other == instance || !other.ToInstanceData().IsRemoteHook() {
 					continue
 				}
 				existing = append(existing, other)

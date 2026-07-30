@@ -139,7 +139,7 @@ func (m *Manager) titlesCollide(a, b string) bool {
 // inline here, so the pre-rename path picks it up automatically — a check added
 // only to this function is exactly how #2415 happened.
 func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData) error {
-	if err := m.validateTitleShapeLocked(title, allowReserved); err != nil {
+	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
 		return err
 	}
 	if err := m.findTitleRecordConflictLocked(repoID, repoPath, title, namespace, diskData); err != nil {
@@ -159,15 +159,15 @@ func (m *Manager) validateTitleAvailableLocked(repoID, repoPath, title, program 
 // an archived row never owns a live tmux name, and anything the probe finds is a
 // genuine orphan the rename has no effect on.
 func (m *Manager) validateTitleClaimableLocked(repoID, repoPath, title, program string, namespace runtimeNameNamespace, allowReserved bool, diskData []session.InstanceData, ignore *session.Instance) error {
-	if err := m.validateTitleShapeLocked(title, allowReserved); err != nil {
+	if err := m.validateTitleShapeLocked(title, namespace, allowReserved); err != nil {
 		return err
 	}
 	return m.validateTitleNamespacesLocked(repoID, repoPath, title, program, namespace, diskData, ignore)
 }
 
-// validateTitleShapeLocked rejects titles that are malformed or reserved,
-// independent of any existing session.
-func (m *Manager) validateTitleShapeLocked(title string, allowReserved bool) error {
+// validateTitleShapeLocked rejects titles that are malformed for the selected
+// runtime namespace or reserved, independent of any existing session.
+func (m *Manager) validateTitleShapeLocked(title string, namespace runtimeNameNamespace, allowReserved bool) error {
 	// Whitespace-only titles (e.g. "   ") are non-empty and so slip past a bare
 	// == "" check, creating sessions with effectively blank names (#973). Trim
 	// before the emptiness gate; the TUI naming flow applies the same check.
@@ -179,6 +179,14 @@ func (m *Manager) validateTitleShapeLocked(title string, allowReserved bool) err
 	// bypass the TUI's pasted-rune sanitization and create multi-line rows (#2640).
 	if strings.IndexFunc(title, unicode.IsControl) >= 0 {
 		return fmt.Errorf("session title must be a single line and contain no control characters")
+	}
+	// Hook scripts receive one globally shared --name derived by Slugify. A title
+	// with no ASCII alphanumeric content collapses to the generic "session"
+	// fallback, so reject it before collision checks or provisioning. Docker and
+	// SSH may use the same slug helper for repo-scoped paths or labels, but do not
+	// claim this global hook namespace and therefore keep accepting Unicode titles.
+	if namespace == runtimeNamespaceRemoteHook && !session.RemoteHookTitleHasASCIIAlnum(title) {
+		return fmt.Errorf("remote hook session title %q must contain at least one ASCII letter or digit (A-Z, a-z, or 0-9); add an ASCII component so it derives a specific hook name", title)
 	}
 	// The "root" title belongs to the daemon-managed root agent (#1106).
 	// Every creation path lands here — TUI, `af sessions create`, task

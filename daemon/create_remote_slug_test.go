@@ -77,3 +77,40 @@ func TestCreateSessionRejectsRemoteSlugCollisionWithInMemoryInstance(t *testing.
 		t.Fatalf("rejection must name the remote hook-name collision, got: %v", err)
 	}
 }
+
+// TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric is the daemon-side
+// #2594 regression. Hook names are global and Slugify falls back to "session"
+// when no ASCII letter or digit survives, so admitting two such titles makes
+// unrelated sandboxes claim the same external name.
+func TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	for _, title := range []string{"日本語", "مرحبا", "!!!"} {
+		manager.mu.Lock()
+		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil)
+		manager.mu.Unlock()
+		if err == nil {
+			t.Errorf("remote hook title %q contains no ASCII letter or digit but was accepted", title)
+			continue
+		}
+		if !strings.Contains(err.Error(), "ASCII letter or digit") {
+			t.Errorf("remote hook title %q returned an unclear error: %v", title, err)
+		}
+	}
+
+	for _, title := range []string{"SESSION!", "日本語-2"} {
+		manager.mu.Lock()
+		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil)
+		manager.mu.Unlock()
+		if err != nil {
+			t.Errorf("remote hook title %q has an ASCII component and must remain valid: %v", title, err)
+		}
+	}
+
+	manager.mu.Lock()
+	err := manager.validateTitleAvailableLocked(repoID, repoPath, "日本語", "claude", runtimeNamespaceSandbox, false, nil)
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatalf("non-hook sandbox titles do not claim the global hook namespace: %v", err)
+	}
+}

@@ -17,6 +17,23 @@ var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
 // (#2528). The slug is ASCII ([a-z0-9-]), so a byte truncation is rune-safe.
 const maxSlugLen = 200
 
+// RemoteHookTitleHasASCIIAlnum reports whether a title can derive a hook name
+// from its own content. Hook names accept ASCII only; without a letter or digit,
+// Slugify has to use its compatibility fallback "session", which is not unique
+// enough for the hook backend's global namespace.
+//
+// Do not infer this from Slugify(title) == "session": valid titles such as
+// "SESSION!" deliberately derive that same slug.
+func RemoteHookTitleHasASCIIAlnum(title string) bool {
+	for i := 0; i < len(title); i++ {
+		c := title[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
 // Slugify converts a title to a slug-safe string for the remote hook scripts.
 // The slug is the stable identifier launch_cmd and delete_cmd receive via
 // --name (docs/remote-hooks.md): launch_cmd tags the provisioned sandbox with

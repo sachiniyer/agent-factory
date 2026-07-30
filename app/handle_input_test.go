@@ -540,6 +540,98 @@ func TestHandleStateNewRejectsRemoteSlugCollision(t *testing.T) {
 	assert.Contains(t, h.errBox.String(), "myapp")
 }
 
+type remoteNonHookNamingBackend struct {
+	*session.FakeBackend
+	typeName string
+}
+
+func (b *remoteNonHookNamingBackend) Type() string { return b.typeName }
+
+func (b *remoteNonHookNamingBackend) Capabilities() session.Capabilities {
+	return (&session.HookBackend{}).Capabilities()
+}
+
+func TestHandleStateNewHookSlugIgnoresNonHookRemoteSessions(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh"} {
+		t.Run(backendType, func(t *testing.T) {
+			h := newTestHome(t)
+			h.state = stateNew
+			h.errBox.SetSize(120, 1)
+
+			existing, err := session.NewInstance(session.InstanceOptions{
+				Title:   "myapp",
+				Path:    t.TempDir(),
+				Program: "claude",
+			})
+			require.NoError(t, err)
+			existing.SetBackend(&remoteNonHookNamingBackend{
+				FakeBackend: session.NewFakeBackend(),
+				typeName:    backendType,
+			})
+			h.store.AddInstance(existing)
+
+			naming, err := session.NewInstance(session.InstanceOptions{
+				Title:   "my_app",
+				Path:    t.TempDir(),
+				Program: "claude",
+				Backend: session.BackendLocal,
+			})
+			require.NoError(t, err)
+			h.namingInstance = naming
+			h.pendingForceRemote = true
+
+			_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+			assert.Equal(t, stateDefault, h.state)
+			assert.Nil(t, h.namingInstance, "a non-hook sandbox does not own a hook slug")
+			assert.NotNil(t, cmd, "a free hook name should submit the create")
+		})
+	}
+}
+
+func TestHandleStateNewRejectsRemoteHookTitleWithoutASCIIAlphanumeric(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+	h.errBox.SetSize(120, 1)
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "日本語",
+		Path:    t.TempDir(),
+		Program: "claude",
+		Backend: session.BackendLocal,
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+	h.pendingForceRemote = true
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateNew, h.state)
+	require.Same(t, naming, h.namingInstance, "a rejected title must remain editable")
+	assert.Contains(t, h.errBox.String(), "ASCII letter or digit")
+}
+
+func TestHandleStateNewAllowsNonASCIITitleForNonHookSandbox(t *testing.T) {
+	h := newTestHome(t)
+	h.state = stateNew
+
+	naming, err := session.NewInstance(session.InstanceOptions{
+		Title:   "日本語",
+		Path:    t.TempDir(),
+		Program: "claude",
+		Backend: session.BackendLocal,
+	})
+	require.NoError(t, err)
+	h.namingInstance = naming
+	h.pendingBackend = string(session.BackendDocker)
+
+	_, cmd := h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, stateDefault, h.state)
+	assert.Nil(t, h.namingInstance, "a Docker title does not claim the global hook namespace")
+	assert.NotNil(t, cmd, "an accepted title should submit the create")
+}
+
 // TestNamingCreateFlow_NoDoubleTransition guards the #1350 regression: the
 // naming→create flow must raise the optimistic OpCreating exactly once. When the
 // naming flow began, startNewInstance already raised BeginCreate; the Enter
