@@ -106,6 +106,11 @@ func TestExtractJSON(t *testing.T) {
 			in:   "noise { not json } more\n" + `{"name": "remote-one"}`,
 			want: `{"name": "remote-one"}`,
 		},
+		{
+			name: "recovers valid value inside balanced malformed prose",
+			in:   `noise { not json {"name": "remote-one"} still bad }`,
+			want: `{"name": "remote-one"}`,
+		},
 	}
 
 	for _, tc := range cases {

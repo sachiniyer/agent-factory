@@ -150,12 +150,30 @@ func extractJSONAt(output string, start int) (string, int) {
 		if json.Valid([]byte(output[candidate.start:candidate.end])) {
 			return output[candidate.start:candidate.end], candidate.end
 		}
+		if candidate, ok := firstValidJSONChild(output, candidates, 0); ok {
+			return output[candidate.start:candidate.end], candidate.end
+		}
 		candidates = candidates[:0]
 	}
 	if candidate, ok := firstRecoverableJSONCandidate(output, candidates); ok {
 		return output[candidate.start:candidate.end], candidate.end
 	}
 	return "", len(output)
+}
+
+// Direct children are disjoint. If a balanced outer candidate is malformed,
+// validating only that level recovers JSON embedded in surrounding prose while
+// keeping the total number of inspected bytes linear.
+func firstValidJSONChild(output string, candidates []jsonCandidateRange, parent int) (jsonCandidateRange, bool) {
+	for _, candidate := range candidates {
+		if candidate.parent != parent || candidate.end <= candidate.start {
+			continue
+		}
+		if json.Valid([]byte(output[candidate.start:candidate.end])) {
+			return candidate, true
+		}
+	}
+	return jsonCandidateRange{}, false
 }
 
 // If an outer delimiter never closed, a later complete JSON value would
