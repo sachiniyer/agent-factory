@@ -208,3 +208,27 @@ func TestCreateTab_ShellRejectedAfterArchive(t *testing.T) {
 	assert.Contains(t, err.Error(), "archived")
 	assert.False(t, isAlive(agentName+"__shell"), "no shell tmux session may be spawned into the moved-away worktree")
 }
+
+// TestCreateTab_RejectedForRestoredKillTombstone covers the restart window
+// after kill intent was persisted but before teardown completed. A restored
+// local tombstone is started so the daemon can display and finish it, while its
+// durable UserKilled marker is the only terminal fence: the pre-crash op-lock
+// and transient OpKilling value are gone. CreateTab must honor that marker and
+// never create a sibling tmux session that the next status poll immediately
+// tears down.
+func TestCreateTab_RejectedForRestoredKillTombstone(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	const title, agentName = "worker", "af_worker_agent"
+	inst, _, isAlive := registerArchivableWithTmux(t, manager, repoID, repoPath, title, agentName)
+
+	// Exact post-restart lifecycle shape: FromInstanceData + Start(false) keeps a
+	// tombstoned local row started, but disk persistence scrubbed its in-flight op.
+	inst.MarkUserKilled()
+	require.True(t, inst.Started())
+	require.Equal(t, session.OpNone, inst.GetInFlightOp())
+
+	_, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Command: "btop"})
+	require.Error(t, err, "CreateTab on a restored kill tombstone must be rejected")
+	assert.Contains(t, err.Error(), "killed")
+	assert.False(t, isAlive(agentName+"__btop"), "no process tmux session may be spawned for a killed session")
+}

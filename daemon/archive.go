@@ -451,11 +451,16 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 // returns an error: an archive/kill that beat us to the op-lock has fully
 // completed by the time we acquire it (it held the lock across its entire
 // teardown+move), so a mid-archive Deleting is never observed — only the terminal
-// Archived. A completed kill leaves the stale instance started=false, which
-// AddShellTab/AddProcessTab reject downstream.
+// Archived. A restored kill tombstone has no in-flight op-lock state and may
+// still be started, so UserKilled must be checked explicitly under this newly
+// acquired lock rather than left to the instance-level started guard.
 func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance) (*sync.Mutex, error) {
 	opLock := m.opLockFor(key)
 	opLock.Lock()
+	if instance.UserKilled() {
+		opLock.Unlock()
+		return nil, fmt.Errorf("cannot create a tab on killed session %q", instance.Title)
+	}
 	if err := instance.TabSpawnBlocked(); err != nil {
 		opLock.Unlock()
 		return nil, err
