@@ -140,17 +140,19 @@ func TestReserveCreate_ReservedHookNameRefusesBeforeArchivedRename(t *testing.T)
 func TestReserveCreate_UnclaimableGuardStaysOutOfTheWay(t *testing.T) {
 	manager, _, repoPath := newStatusTestManager(t)
 
-	orphan := tmux.SanitizedNameForRepo("solo", repoPath)
+	const title = "My Session"
+	orphan := tmux.SanitizedNameForRepo(title, repoPath)
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", orphan, "sh").CombinedOutput()
 	require.NoError(t, err, string(out))
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+orphan).Run() })
 
-	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: "solo", Program: "claude"})
+	_, _, release, renamed, err := manager.reserveCreate(CreateSessionRequest{RepoPath: repoPath, Title: title, Program: "claude"})
 	if release != nil {
 		release()
 	}
 	require.Error(t, err, "an orphan tmux session still blocks a create with no archived collision")
-	assert.Contains(t, err.Error(), "conflicting tmux session")
+	assert.Contains(t, err.Error(), "conflicting tmux session \""+orphan+"\" is already running",
+		"the descriptive session name must be the real tmux target, not the unsanitized title")
 	assert.Nil(t, renamed)
 }
 

@@ -304,7 +304,8 @@ func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program
 		// No creator will ever finish it, so this stays a plain error (not
 		// errConcurrentCreate): DeliverPrompt must fail fast with cleanup
 		// guidance rather than wait out waitForTargetSession's timeout (#916).
-		return fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: %s", title, shellsuggest.Command("tmux", "kill-session", "-t", tmuxSession.SanitizedName()))
+		tmuxName := tmuxSession.SanitizedName()
+		return fmt.Errorf("conflicting tmux session %q is already running; no agent-factory session owns it. Clean it up with: %s", tmuxName, shellsuggest.Command("tmux", "kill-session", "-t", tmuxName))
 	}
 	return nil
 }
