@@ -97,6 +97,10 @@ type jsonCandidateRange struct {
 }
 
 func extractJSONAt(output string, start int) (string, int) {
+	return extractJSONAtWithEOFResync(output, start, true)
+}
+
+func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (string, int) {
 	var candidates []jsonCandidateRange
 	var stack []int
 	inString := false
@@ -211,6 +215,9 @@ func extractJSONAt(output string, start int) (string, int) {
 		}
 		candidates = candidates[:0]
 		stringCandidateStart = -1
+	}
+	if allowEOFResync && stringCandidateStart >= 0 && !lineRescanned {
+		return extractJSONAtWithEOFResync(output, stringCandidateStart, false)
 	}
 	if len(candidates) > 0 {
 		unfinished := candidates[0]

@@ -389,7 +389,7 @@ func hookOutputSuffix(out []byte) string {
 // to persistent session errors, so that tail must be safe too.
 func redactHookOutputTokens(output string) string {
 	output = redactCompleteHookJSON(output)
-	output = redactTopLevelHookJSONStrings(output)
+	output = redactSerializedHookJSONStrings(output)
 	ranges := hookTokenRedactionRanges(output)
 	if len(ranges) == 0 {
 		return output
@@ -406,45 +406,52 @@ func redactHookOutputTokens(output string) string {
 	return redacted.String()
 }
 
-// redactTopLevelHookJSONStrings handles JSON log streams where the record is a
-// string containing serialized endpoint JSON rather than an object with a
-// string field. Hook JSON records are newline-delimited; requiring the whole
-// trimmed line to decode as a string avoids treating arbitrary quoted prose as
-// a structured value.
-func redactTopLevelHookJSONStrings(output string) string {
+// redactSerializedHookJSONStrings handles a JSON string containing serialized
+// endpoint JSON whether it is a top-level record, an object field, or surrounded
+// by logger metadata. Only quotes whose decoded value begins with an object or
+// array are candidates. The scanner examines every byte once and reconsiders a
+// malformed candidate's closing quote as a possible overlapping opener.
+func redactSerializedHookJSONStrings(output string) string {
 	var redacted strings.Builder
 	written := 0
-	for lineStart := 0; lineStart < len(output); {
-		lineEnd := lineStart + strings.IndexByte(output[lineStart:], '\n')
-		if lineEnd < lineStart {
-			lineEnd = len(output)
+	candidateStart := -1
+	escaped := false
+	for cursor := 0; cursor < len(output); cursor++ {
+		if candidateStart < 0 {
+			if serializedJSONQuoteAt(output, cursor) {
+				candidateStart = cursor
+				escaped = false
+			}
+			continue
 		}
-		nextLine := lineEnd
-		if nextLine < len(output) {
-			nextLine++
+		if escaped {
+			escaped = false
+			continue
+		}
+		if output[cursor] == '\\' {
+			escaped = true
+			continue
+		}
+		if output[cursor] != '"' {
+			continue
 		}
 
-		valueStart := lineStart
-		for valueStart < lineEnd && isJSONWhitespace(output[valueStart]) {
-			valueStart++
-		}
-		valueEnd := lineEnd
-		for valueEnd > valueStart && isJSONWhitespace(output[valueEnd-1]) {
-			valueEnd--
-		}
-		if valueStart < valueEnd && output[valueStart] == '"' {
-			var decoded string
-			if json.Unmarshal([]byte(output[valueStart:valueEnd]), &decoded) == nil {
-				sanitized := redactHookOutputTokens(decoded)
-				if sanitized != decoded {
-					encoded, _ := json.Marshal(sanitized)
-					redacted.WriteString(output[written:valueStart])
-					redacted.Write(encoded)
-					written = valueEnd
-				}
+		candidateEnd := cursor + 1
+		var decoded string
+		if json.Unmarshal([]byte(output[candidateStart:candidateEnd]), &decoded) == nil {
+			sanitized := redactHookOutputTokens(decoded)
+			if sanitized != decoded {
+				encoded, _ := json.Marshal(sanitized)
+				redacted.WriteString(output[written:candidateStart])
+				redacted.Write(encoded)
+				written = candidateEnd
 			}
 		}
-		lineStart = nextLine
+		candidateStart = -1
+		if serializedJSONQuoteAt(output, cursor) {
+			candidateStart = cursor
+			escaped = false
+		}
 	}
 	if written == 0 {
 		return output
@@ -453,13 +460,9 @@ func redactTopLevelHookJSONStrings(output string) string {
 	return redacted.String()
 }
 
-func isJSONWhitespace(value byte) bool {
-	switch value {
-	case ' ', '\t', '\r', '\n':
-		return true
-	default:
-		return false
-	}
+func serializedJSONQuoteAt(output string, quote int) bool {
+	return quote >= 0 && quote+1 < len(output) && output[quote] == '"' &&
+		(output[quote+1] == '{' || output[quote+1] == '[')
 }
 
 // redactCompleteHookJSON handles structured log records that serialize another

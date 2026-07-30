@@ -724,6 +724,17 @@ func TestHookOutputSuffixRedactsTopLevelSerializedEndpoint(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+// TestHookOutputSuffixRedactsPrefixedSerializedEndpoint covers conventional
+// logger metadata around a JSON string literal containing endpoint output.
+func TestHookOutputSuffixRedactsPrefixedSerializedEndpoint(t *testing.T) {
+	const secret = "prefixed-json-string-token-must-not-leak"
+	output := `INFO endpoint="{\"url\":\"\",\"token\":\"prefixed-json-string-token-must-not-leak\"}" ready`
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "a prefixed serialized endpoint must not expose its bearer token")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
 // TestExtractJSONAtHandlesMalformedDelimiterFlood keeps endpoint selection
 // linear after a valid JSON log. No unmatched opener can produce a complete
 // value, so retrying a suffix scan from each one is pure quadratic work.
