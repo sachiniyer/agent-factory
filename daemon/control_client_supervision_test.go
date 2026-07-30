@@ -20,11 +20,14 @@ import (
 
 func TestRunEnsureManagerCommand_DeadlineDuringWaitDelayStillSucceeds(t *testing.T) {
 	manager := filepath.Join(t.TempDir(), "manager")
-	if err := os.WriteFile(manager, []byte("#!/bin/sh\nsleep 1\nsleep 30 &\n"), 0o700); err != nil {
+	if err := os.WriteFile(manager, []byte("#!/bin/sh\nsleep 30 >&1 2>&1 &\n"), 0o700); err != nil {
 		t.Fatalf("write fake manager: %v", err)
 	}
 
-	if err := runEnsureManagerCommand(time.Now().Add(1100*time.Millisecond), manager, "start"); err != nil {
+	// The shell exits immediately; the child explicitly retains the capture
+	// pipes. This gives Wait ample time to observe the completed command before
+	// the deadline lands inside the 250ms WaitDelay cleanup window.
+	if err := runEnsureManagerCommand(time.Now().Add(200*time.Millisecond), manager, "start"); err != nil {
 		t.Fatalf("the manager exited zero before the deadline; only pipe cleanup crossed it: %v", err)
 	}
 }

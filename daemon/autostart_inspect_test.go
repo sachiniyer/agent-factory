@@ -624,9 +624,12 @@ func TestAutostartProbe_WaitDelayStragglerIsStillAnAnswer(t *testing.T) {
 }
 
 func TestAutostartProbe_DeadlineDuringWaitDelayIsStillAnAnswer(t *testing.T) {
-	withProbeTimeout(t, 300*time.Millisecond)
+	// Leave ample time for the shell's successful exit to be observed before
+	// the context fires. The child explicitly retains both capture pipes, so the
+	// deadline still lands during WaitDelay cleanup on both Linux and macOS.
+	withProbeTimeout(t, time.Second)
 
-	res := runAutostartProbeCommand("sh", "-c", "sleep 0.2; echo active; sleep 30 &")
+	res := runAutostartProbeCommand("sh", "-c", "echo active; sleep 30 >&1 2>&1 &")
 
 	require.NoError(t, res.Cause(), "the probe answered before the deadline; only pipe cleanup crossed it")
 	out, ok := res.Output()
