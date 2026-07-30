@@ -2,6 +2,7 @@ package session
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -292,9 +293,18 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		if err != nil {
 			// The sandbox is already up (backendFactory provisioned it); a bad
 			// endpoint here would strand it, so reap it before failing rather than
-			// leaking a container/remote workspace.
+			// leaking a container/remote workspace. No Instance exists to retain a
+			// retry handle, so preserve every cleanup failure in the returned chain
+			// and call out an unknown outcome as a possible orphan.
 			if res.Teardown != nil {
-				_ = res.Teardown()
+				if cleanupErr := res.Teardown(); cleanupErr != nil {
+					if TeardownStateUnknown(cleanupErr) {
+						return nil, fmt.Errorf("failed to build remote agent-server client and sandbox cleanup state is unknown; a sandbox may still be running: %w",
+							errors.Join(err, cleanupErr))
+					}
+					return nil, fmt.Errorf("failed to build remote agent-server client and sandbox cleanup failed: %w",
+						errors.Join(err, cleanupErr))
+				}
 			}
 			return nil, fmt.Errorf("failed to build remote agent-server client: %w", err)
 		}

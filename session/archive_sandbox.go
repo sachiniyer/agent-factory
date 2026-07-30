@@ -1,7 +1,10 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Archive/restore for the disposable sandbox backends (#1592 Phase 4 PR6),
@@ -105,7 +108,10 @@ func (i *Instance) RestoreSandbox() error {
 		// The sandbox is up but the agent failed to launch on it — reap the
 		// freshly provisioned sandbox and clear its wiring so a retry re-provisions
 		// from a clean state instead of stranding a container/remote (#1726).
-		i.teardownAfterStartFailure()
+		if cleanupErr := i.teardownAfterStartFailure(); cleanupErr != nil {
+			return fmt.Errorf("agent start failed and the replacement sandbox's cleanup state is unknown: %w",
+				errors.Join(err, cleanupErr))
+		}
 		return err
 	}
 	return nil
@@ -128,7 +134,10 @@ func recoverSandbox(i *Instance) error {
 		// remote wiring on a Start failure so the Lost-restore loop's next retry
 		// re-provisions cleanly rather than stacking a second sandbox on the first
 		// still-running one (#1726).
-		i.teardownAfterStartFailure()
+		if cleanupErr := i.teardownAfterStartFailure(); cleanupErr != nil {
+			return fmt.Errorf("agent start failed and the replacement sandbox's cleanup state is unknown: %w",
+				errors.Join(err, cleanupErr))
+		}
 		return err
 	}
 	_ = i.Transition(ConfirmLive())
@@ -163,15 +172,31 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
 	}
+	// A failed archive/recovery can leave the old sandbox wiring live. Reap it
+	// before provisioning a replacement so bindProvisionResult never discards its
+	// only cleanup handle. An unknown outcome keeps the old wiring installed for a
+	// real retry instead of provisioning a second sandbox on a guess.
+	if err := i.reapRemoteRuntimeForReplacement(); err != nil {
+		return fmt.Errorf("cannot re-provision session %q: previous sandbox cleanup state is unknown: %w", i.Title, err)
+	}
 	res, err := rt.Provision(spec)
 	if err != nil {
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
 	if err := i.bindProvisionResult(res); err != nil {
 		// The sandbox is up but its endpoint could not be wired — reap it so a
-		// bad restore never leaks a container/remote.
+		// bad restore never leaks a container/remote. An unknown reap keeps the
+		// new backend + cleanup handle installed (without its invalid client) so
+		// the next restore retries that cleanup before provisioning again.
 		if res.Teardown != nil {
-			_ = res.Teardown()
+			if cleanupErr := res.Teardown(); cleanupErr != nil {
+				if TeardownStateUnknown(cleanupErr) {
+					i.retainProvisionResultCleanup(res)
+					return fmt.Errorf("failed to bind re-provisioned sandbox for session %q and its cleanup state is unknown: %w",
+						i.Title, errors.Join(err, cleanupErr))
+				}
+				log.WarningLog.Printf("session %q: unbound replacement sandbox teardown reported a completed error: %v", i.Title, cleanupErr)
+			}
 		}
 		return fmt.Errorf("failed to bind re-provisioned sandbox for session %q: %w", i.Title, err)
 	}
@@ -205,6 +230,19 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	return nil
 }
 
+// retainProvisionResultCleanup installs only the identity and cleanup handle of
+// a provisioned sandbox whose endpoint could not be bound and whose teardown
+// outcome was unknown. The invalid client is deliberately omitted; AgentServer
+// rebuilds as a deadRemoteAgentServer whose Kill can retry this exact cleanup.
+func (i *Instance) retainProvisionResultCleanup(res ProvisionResult) {
+	i.mu.Lock()
+	i.agentSrv = nil
+	i.backend = res.Backend
+	i.remoteClient = nil
+	i.runtimeTeardown = res.Teardown
+	i.mu.Unlock()
+}
+
 // resetRemoteRuntime clears the instance's remote-runtime wiring after its
 // sandbox has been reaped (archive), leaving an inert record whose backend still
 // classifies it as a remote sandbox (#1592 Phase 4 PR6). A subsequent restore
@@ -219,25 +257,36 @@ func (i *Instance) resetRemoteRuntime() {
 	i.mu.Unlock()
 }
 
-// teardownAfterStartFailure reaps a freshly re-provisioned sandbox after the
-// agent Start failed on the restore/recover path, then clears the remote-runtime
-// wiring (#1726). It mirrors reprovisionRemote's bind-failure discipline —
-// run the stored Teardown so the container/remote is reclaimed — and reuses the
-// SAME i.mu ownership as bindProvisionResult/resetRemoteRuntime (#1729): the
-// teardown is read under i.mu.RLock and invoked OUTSIDE the lock (it may block on
-// docker/ssh I/O), then resetRemoteRuntime clears remoteClient/runtimeTeardown/
-// agentSrv together so a retry starts from a clean, unbound state and never
-// stacks a second sandbox on the first. Each runtime serializes teardown, so a
-// later Kill cannot overlap it; docker/SSH latch completed outcomes and leave an
-// outcome whose completion was unknown deliberately retryable.
-func (i *Instance) teardownAfterStartFailure() {
+// reapRemoteRuntimeForReplacement reaps the currently bound sandbox before its
+// wiring is replaced. Teardown has three outcomes: success and a completed,
+// known-state error both follow the runtimes' existing best-effort contract and
+// clear the binding; an unknown-state error preserves the binding and handle so
+// the next restore can retry instead of stacking another sandbox on it.
+//
+// The teardown is read under i.mu and invoked outside the lock because docker/SSH
+// I/O may block. Each runtime serializes and conditionally latches its own reap.
+func (i *Instance) reapRemoteRuntimeForReplacement() error {
 	i.mu.RLock()
 	teardown := i.runtimeTeardown
 	i.mu.RUnlock()
-	if teardown != nil {
-		_ = teardown()
+	if teardown == nil {
+		return nil
+	}
+	if err := teardown(); err != nil {
+		if TeardownStateUnknown(err) {
+			return err
+		}
+		log.WarningLog.Printf("session %q: previous sandbox teardown reported a completed error; continuing with replacement: %v", i.Title, err)
 	}
 	i.resetRemoteRuntime()
+	return nil
+}
+
+// teardownAfterStartFailure applies the same replacement rule to a freshly
+// provisioned sandbox whose agent failed to start: clear it after a known
+// teardown outcome, but retain an unknown cleanup handle for the next retry.
+func (i *Instance) teardownAfterStartFailure() error {
+	return i.reapRemoteRuntimeForReplacement()
 }
 
 // isSandboxBackendType reports whether a persisted backend Type() names a

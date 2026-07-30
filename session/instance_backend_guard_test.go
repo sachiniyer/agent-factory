@@ -18,7 +18,8 @@ import (
 // goroutine.
 //
 //   - currentBackend / capabilitiesLocked — the synchronized accessors themselves.
-//   - SetBackend / bindProvisionResult — the writers; both take i.mu.Lock.
+//   - SetBackend / bindProvisionResult / retainProvisionResultCleanup — the
+//     writers; all take i.mu.Lock.
 //   - AgentServer / reprovisionRemote / toInstanceDataLocked — read inside an
 //     i.mu section their callers established.
 //   - PreviewTabSnapshotByID — snapshots the backend while its stable tab target
@@ -27,15 +28,16 @@ import (
 //   - FromInstanceData — a constructor. It populates a local *Instance that no
 //     other goroutine can observe yet, so there is nothing to synchronize with.
 var backendReadersUnderLock = map[string]bool{
-	"currentBackend":         true,
-	"capabilitiesLocked":     true,
-	"SetBackend":             true,
-	"bindProvisionResult":    true,
-	"AgentServer":            true,
-	"reprovisionRemote":      true,
-	"toInstanceDataLocked":   true,
-	"PreviewTabSnapshotByID": true,
-	"FromInstanceData":       true,
+	"currentBackend":               true,
+	"capabilitiesLocked":           true,
+	"SetBackend":                   true,
+	"bindProvisionResult":          true,
+	"retainProvisionResultCleanup": true,
+	"AgentServer":                  true,
+	"reprovisionRemote":            true,
+	"toInstanceDataLocked":         true,
+	"PreviewTabSnapshotByID":       true,
+	"FromInstanceData":             true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.
