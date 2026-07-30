@@ -85,11 +85,13 @@ func runEnsureManagerCommand(deadline time.Time, name string, args ...string) er
 	if cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
+		// The manager exited zero. A deadline that fires while WaitDelay is
+		// cleaning inherited pipes cannot retroactively make the command time out.
+		return nil
+	}
 	if ctx.Err() != nil {
 		return fmt.Errorf("%s %s timed out: %w", name, strings.Join(args, " "), ctx.Err())
-	}
-	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
-		return nil
 	}
 	return fmt.Errorf("%s %s failed: %w\n%s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 }

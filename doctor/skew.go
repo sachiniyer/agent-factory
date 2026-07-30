@@ -930,16 +930,16 @@ func execBinaryVersion(path string) (string, error) {
 	if cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // reap stragglers
 	}
+	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
+		// The binary exited zero and its answer is in out. ErrWaitDelay means
+		// only that inherited-pipe cleanup outlived the process; a context
+		// deadline racing that cleanup cannot turn the answer into a timeout.
+		return parseAFVersion(string(out)), nil
+	}
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("%s version timed out after %s: %w", path, binaryProbeTimeout, ctx.Err())
 	}
-	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
-		// ErrWaitDelay alone means the binary answered and only a straggler held
-		// the pipe — the answer is in `out`, and the reap above killed the
-		// straggler. A real failure surfaces as an ExitError instead.
-		return "", err
-	}
-	return parseAFVersion(string(out)), nil
+	return "", err
 }
 
 // afVersionPattern is the exact shape `af version` prints. Requiring the full

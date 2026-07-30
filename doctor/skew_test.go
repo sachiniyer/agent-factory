@@ -799,6 +799,17 @@ func TestExecBinaryVersion_StragglerStillYieldsTheAnswer(t *testing.T) {
 	require.Equal(t, "1.0.192", got)
 }
 
+func TestExecBinaryVersion_DeadlineDuringWaitDelayStillYieldsTheAnswer(t *testing.T) {
+	bin := fakeAFBinary(t, "sleep 4\necho 'agent-factory version 1.0.192'\nsleep 60 &\n")
+
+	start := time.Now()
+	got, err := execBinaryVersion(bin)
+
+	require.Less(t, time.Since(start), 8*time.Second)
+	require.NoError(t, err, "the binary answered before the deadline; only pipe cleanup crossed it")
+	require.Equal(t, "1.0.192", got)
+}
+
 func TestParseAFVersion_ShapeIsRequired(t *testing.T) {
 	// Accepted: our real output, including the released two-line form and an
 	// unreleased build.

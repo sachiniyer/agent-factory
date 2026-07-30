@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -127,6 +128,11 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 	cmd := exec.CommandContext(ctx, coderPath, "whoami")
 	cmd.WaitDelay = 500 * time.Millisecond
 	out, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// coder exited zero and answered; only a descendant held the capture
+		// pipe. The completed answer wins even if cleanup reaches the deadline.
+		err = nil
+	}
 	if err != nil {
 		detail := "coder whoami failed"
 		if ctx.Err() == context.DeadlineExceeded {

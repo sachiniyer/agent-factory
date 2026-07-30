@@ -18,6 +18,17 @@ import (
 // fake systemctl binary. The AF home, unit file, socket, and manager process are
 // all private to the testbox; no host daemon or service manager is touched.
 
+func TestRunEnsureManagerCommand_DeadlineDuringWaitDelayStillSucceeds(t *testing.T) {
+	manager := filepath.Join(t.TempDir(), "manager")
+	if err := os.WriteFile(manager, []byte("#!/bin/sh\nsleep 1\nsleep 30 &\n"), 0o700); err != nil {
+		t.Fatalf("write fake manager: %v", err)
+	}
+
+	if err := runEnsureManagerCommand(time.Now().Add(1100*time.Millisecond), manager, "start"); err != nil {
+		t.Fatalf("the manager exited zero before the deadline; only pipe cleanup crossed it: %v", err)
+	}
+}
+
 func TestEnsureDaemonPrefersHomeServingUnit(t *testing.T) {
 	marker, home := installEnsureTestUnitAndManager(t, false)
 	pidPath := filepath.Join(home, "daemon.pid")

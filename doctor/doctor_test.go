@@ -709,6 +709,25 @@ func TestRemoteCoderWhoamiWarnsWithoutFailingDoctor(t *testing.T) {
 	require.Zero(t, report.UnresolvedCount(), "coder auth warnings must not fail doctor")
 }
 
+func TestRemoteCoderWhoami_WaitDelayStillUsesTheAnswer(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "coder", "#!/bin/sh\necho 'alice'\nsleep 30 &\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
+	report, err := Run(withRemote(testOptions(t, false),
+		&config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}))
+	require.NoError(t, err)
+
+	checks := findCheckRows(report, "coder")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusPass, checks[0].Status,
+		"coder answered; a child holding the output pipe is cleanup, not probe failure")
+	require.Equal(t, "alice", checks[0].Detail)
+}
+
 // TestDaemonPingTimeoutIsAdvisoryNotFail is the #2040 fail-first: when the
 // control socket EXISTS but the ping DIAL times out — a live daemon momentarily
 // backlogged under heavy RPC load looks exactly like this — doctor must not read

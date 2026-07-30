@@ -623,6 +623,17 @@ func TestAutostartProbe_WaitDelayStragglerIsStillAnAnswer(t *testing.T) {
 	require.Contains(t, out, "active", "and its answer must survive")
 }
 
+func TestAutostartProbe_DeadlineDuringWaitDelayIsStillAnAnswer(t *testing.T) {
+	withProbeTimeout(t, 300*time.Millisecond)
+
+	res := runAutostartProbeCommand("sh", "-c", "sleep 0.2; echo active; sleep 30 &")
+
+	require.NoError(t, res.Cause(), "the probe answered before the deadline; only pipe cleanup crossed it")
+	out, ok := res.Output()
+	require.True(t, ok, "an answered probe must expose its output")
+	require.Contains(t, out, "active")
+}
+
 // The same shape, all the way through the classifier: a straggler must not turn
 // "active" into "inactive".
 func TestAutostartSupervision_WaitDelayStragglerDoesNotInvertTheAnswer(t *testing.T) {

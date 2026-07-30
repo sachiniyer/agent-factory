@@ -661,26 +661,27 @@ func runAutostartProbeCommand(name string, args ...string) probeResult {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // reap stragglers
 	}
 
-	// Killed on the deadline: whatever it managed to print is not an answer.
-	if ctx.Err() != nil {
-		return probeResult{cause: fmt.Errorf("%s %s timed out after %s: %w",
-			name, strings.Join(args, " "), autostartProbeTimeout, ctx.Err())}
-	}
-	// Never ran, or died on a signal: also not an answer. Only an ExitError
-	// means the command itself decided how to end.
 	var exitErr *exec.ExitError
 	switch {
 	case err == nil, errors.Is(err, exec.ErrWaitDelay):
-		// ErrWaitDelay: the command finished and its answer is in out; only a
-		// straggler held the pipe, and the reap above killed it (#676/#914).
+		// The command finished and its answer is in out. ErrWaitDelay means only
+		// a straggler held the pipe; a deadline racing that cleanup cannot turn
+		// the completed answer into an unknown timeout (#676/#914).
 		return probeResult{completed: true, output: string(out), exitCode: 0}
-	case errors.As(err, &exitErr):
-		if exitErr.ExitCode() < 0 {
-			return probeResult{cause: fmt.Errorf("%s %s was killed before answering: %w",
-				name, strings.Join(args, " "), err)}
-		}
+	case errors.As(err, &exitErr) && exitErr.ExitCode() >= 0:
+		// A non-zero exit is still a completed service-manager answer. Preserve
+		// it even when inherited-pipe cleanup crosses the context deadline.
 		return probeResult{completed: true, output: string(out), exitCode: exitErr.ExitCode()}
+	case ctx.Err() != nil:
+		// The command itself did not complete before the deadline. Partial output
+		// is not an answer and remains structurally unreachable.
+		return probeResult{cause: fmt.Errorf("%s %s timed out after %s: %w",
+			name, strings.Join(args, " "), autostartProbeTimeout, ctx.Err())}
+	case errors.As(err, &exitErr):
+		return probeResult{cause: fmt.Errorf("%s %s was killed before answering: %w",
+			name, strings.Join(args, " "), err)}
 	default:
+		// Never ran or failed outside an ordinary process exit: no answer.
 		return probeResult{cause: fmt.Errorf("could not run %s %s: %w",
 			name, strings.Join(args, " "), err)}
 	}
