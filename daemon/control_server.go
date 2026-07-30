@@ -336,7 +336,32 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	if s.manager != nil {
 		s.manager.taskTargetMu.Lock()
 		defer s.manager.taskTargetMu.Unlock()
-		validate = s.manager.validateEnabledTaskTarget
+		// Legacy rows have no retained RepoID. Resolve the current authoritative
+		// ProjectPath before UpdateTaskChecked takes the tasks-file lock (git must
+		// never run under that lock), then lend that identity to validation. The
+		// task-control lock makes this stable against every supported writer; the
+		// path equality check fails closed if an out-of-band edit races us.
+		existing, getErr := task.GetTask(req.ID)
+		if getErr != nil {
+			return getErr
+		}
+		legacyPath := ""
+		legacyRepoID := ""
+		if existing.RepoID == "" && req.Update.ProjectPath == nil {
+			legacyPath = existing.ProjectPath
+			if repo, repoErr := config.RepoFromPath(legacyPath); repoErr == nil {
+				legacyRepoID = repo.ID
+			}
+		}
+		validate = func(candidate task.Task) error {
+			if candidate.RepoID == "" && candidate.ProjectPath == legacyPath {
+				candidate.RepoID = legacyRepoID
+			}
+			if candidate.Enabled && task.CanonicalTargetSession(candidate.TargetSession) != "" && candidate.RepoID == "" {
+				return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", candidate.ID, candidate.TargetSession)
+			}
+			return s.manager.validateEnabledTaskTarget(candidate)
+		}
 	}
 	merged, err := task.UpdateTaskChecked(req.ID, req.Update, req.Expect, validate)
 	if err != nil {

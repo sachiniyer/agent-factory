@@ -503,7 +503,9 @@ func LoadTasksForRepo(repoRoot string) ([]Task, error) {
 
 // LoadTasksForRepoID returns tasks belonging to an already-resolved repo ID.
 // It is the path-independent counterpart to LoadTasksForRepo for daemon
-// lifecycle checks, including remote sessions with no local git worktree.
+// lifecycle checks, including remote sessions with no local git worktree. Legacy
+// rows without a retained RepoID are resolved freshly: lifecycle mutations may
+// not reuse the display scope's intentionally stale positive path cache.
 func LoadTasksForRepoID(repoID string) ([]Task, error) {
 	return loadTasksForScope(newRepoScopeForID(repoID))
 }

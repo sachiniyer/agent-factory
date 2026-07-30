@@ -310,10 +310,20 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest) (string, session.Ins
 // Missing targets remain legal (delivery auto-creates them), but a known target
 // that is archiving or already archived would retry forever and is refused
 // before the task-store commit. RepoID has already been derived by the checked
-// task write; an unresolved project retains its existing AddTask behavior.
+// add path or supplied from a freshly resolved legacy update; an unresolved new
+// project retains its existing AddTask behavior.
 func (m *Manager) validateEnabledTaskTarget(t task.Task) error {
 	target := task.CanonicalTargetSession(t.TargetSession)
-	if !t.Enabled || target == "" || t.RepoID == "" {
+	if !t.Enabled || target == "" {
+		return nil
+	}
+	// During restore, absence from m.instances is unknown rather than proof that
+	// the target does not exist. Keep the historical warm-up allowance for
+	// disabled/untargeted task writes, but fail target-dependent writes closed.
+	if !m.Ready() {
+		return errDaemonStarting()
+	}
+	if t.RepoID == "" {
 		return nil
 	}
 	m.mu.Lock()

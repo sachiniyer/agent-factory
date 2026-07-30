@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -179,6 +181,90 @@ func TestTaskMutations_RefuseArchivedTarget(t *testing.T) {
 	}
 }
 
+// TestTaskMutations_TargetWriteFailsClosedDuringWarmup pins the persisted-state
+// side of the archive fence. A task write that depends on target liveness may
+// not treat the manager's still-empty restore map as proof that the target is
+// absent. Untargeted task writes retain their historical warm-up behavior.
+func TestTaskMutations_TargetWriteFailsClosedDuringWarmup(t *testing.T) {
+	tests := []struct {
+		name string
+		act  func(*controlServer, string) error
+	}{
+		{
+			name: "add",
+			act: func(server *controlServer, repoPath string) error {
+				return server.AddTask(AddTaskRequest{Task: archiveTargetTask(
+					"warmadd1", "Warm Add", repoPath, "worker", true,
+				)}, &AddTaskResponse{})
+			},
+		},
+		{
+			name: "enable",
+			act: func(server *controlServer, _ string) error {
+				enabled := true
+				return server.UpdateTask(UpdateTaskRequest{
+					ID: "warmup01", Update: task.TaskUpdate{Enabled: &enabled},
+				}, &UpdateTaskResponse{})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			live, repoID, repoPath := newStatusTestManager(t)
+			registerArchivable(t, live, repoID, repoPath, "worker")
+			if tc.name == "enable" {
+				require.NoError(t, task.AddTask(archiveTargetTask(
+					"warmup01", "Warm Enable", repoPath, "worker", false,
+				)))
+			}
+			_, _, err := live.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+			require.NoError(t, err)
+
+			warming, err := newManagerShell(config.DefaultConfig())
+			require.NoError(t, err)
+			require.False(t, warming.Ready(), "precondition: persisted sessions have not been restored")
+			before, loadErr := task.LoadTasks()
+			require.NoError(t, loadErr)
+
+			err = tc.act(archiveTaskControlServer(warming), repoPath)
+			require.Error(t, err, "target-dependent mutation must not infer absence from an unrestored manager")
+			assert.Contains(t, err.Error(), "starting")
+			after, loadErr := task.LoadTasks()
+			require.NoError(t, loadErr)
+			assert.Equal(t, before, after, "unknown target state must leave the task store unchanged")
+		})
+	}
+}
+
+// TestTaskMutations_LegacyTaskScopeStillValidatesTarget covers tasks written
+// before RepoID was retained. Enabling one without also patching ProjectPath
+// must resolve its existing path before checking the archived target.
+func TestTaskMutations_LegacyTaskScopeStillValidatesTarget(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+
+	legacy := archiveTargetTask("legacy01", "Legacy Enable", repoPath, "worker", false)
+	require.Empty(t, legacy.RepoID)
+	raw, err := json.Marshal([]task.Task{legacy})
+	require.NoError(t, err)
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, raw, 0o600))
+
+	enabled := true
+	err = archiveTaskControlServer(manager).UpdateTask(UpdateTaskRequest{
+		ID: legacy.ID, Update: task.TaskUpdate{Enabled: &enabled},
+	}, &UpdateTaskResponse{})
+	require.Error(t, err, "legacy empty RepoID must not bypass archived-target validation")
+	assert.Contains(t, err.Error(), "archiv")
+	stored, loadErr := task.GetTask(legacy.ID)
+	require.NoError(t, loadErr)
+	assert.False(t, stored.Enabled, "rejected legacy update must not commit")
+}
+
 // TestDeleteProject_TaskBlockerIsPreflight preserves the project's lifecycle
 // configuration when a predictable blocker makes deletion impossible. The
 // root-agent opt-in and in-memory respawn policy must be unchanged.
@@ -206,4 +292,71 @@ func TestDeleteProject_TaskBlockerIsPreflight(t *testing.T) {
 	assert.Equal(t, session.LiveReady, inst.GetLiveness())
 	_, statErr := os.Stat(source)
 	assert.NoError(t, statErr)
+}
+
+// TestDeleteProject_FencesCreateAfterTaskPreflight reproduces the gap where an
+// enabled task targets a currently missing session and a create reserves that
+// title after DeleteProject's blocker snapshot but before its first mutation.
+// Admission must lose once deletion owns the repo lifecycle fence.
+func TestDeleteProject_FencesCreateAfterTaskPreflight(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	require.NoError(t, task.AddTask(archiveTargetTask(
+		"create01", "Create Race", repoPath, "worker", true,
+	)))
+
+	mutationReached := make(chan struct{})
+	resumeDelete := make(chan struct{})
+	orig := deregisterRootAgents
+	deregisterRootAgents = func(string) ([]string, error) {
+		close(mutationReached)
+		<-resumeDelete
+		return nil, errors.New("forced stop before mutation")
+	}
+	t.Cleanup(func() { deregisterRootAgents = orig })
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+		deleteDone <- err
+	}()
+	select {
+	case <-mutationReached:
+	case <-time.After(5 * time.Second):
+		close(resumeDelete)
+		t.Fatal("DeleteProject did not reach its first mutation")
+	}
+
+	_, _, release, _, reserveErr := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath, Title: "worker", Program: "claude",
+	})
+	if reserveErr == nil {
+		release()
+	}
+	close(resumeDelete)
+	require.Error(t, <-deleteDone, "test seam stops deletion before any real mutation")
+	require.Error(t, reserveErr, "session creation must not cross an active project-deletion fence")
+	assert.Contains(t, reserveErr.Error(), "delet")
+	_, _, retryRelease, _, retryErr := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath, Title: "worker", Program: "claude",
+	})
+	require.NoError(t, retryErr, "a failed deletion must release its short-lived create fence")
+	retryRelease()
+}
+
+// TestDeleteProject_RefusesCreateAlreadyReservedBeforeFence covers the other
+// ordering edge. A create that has reserved its title but has not yet published
+// pendingCreates is still in flight, so deletion must refuse without mutation.
+func TestDeleteProject_RefusesCreateAlreadyReservedBeforeFence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath, Title: "worker", Program: "claude",
+	})
+	require.NoError(t, err)
+	defer release()
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.Error(t, err, "an admitted create must be visible before its pending projection is published")
+	assert.Empty(t, result.Archived)
+	assert.Contains(t, err.Error(), "still starting")
+	assert.Contains(t, err.Error(), "worker")
 }

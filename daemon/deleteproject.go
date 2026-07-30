@@ -13,24 +13,31 @@ import (
 )
 
 // repoSessionTitlesLocked returns the titles of the repo's sessions the daemon still
-// tracks, across BOTH maps a session can live in — m.pendingCreates (a create that has
-// passed validation but not finished provisioning, so it is NOT yet in m.instances,
-// #2549) and m.instances (its live, non-archived rows). This exists because
-// m.instances is not the universe (the same class the #1892 ghostTaskRuns comment in
-// manager.go warns about, reached through a different door): a delete that walked only
-// m.instances would miss a still-provisioning create, deregister the project, and let
-// the create finish into a live orphan.
+// tracks, across every create phase: m.reservedTitles (admitted but not yet projected),
+// m.pendingCreates (provisioning, so not yet in m.instances, #2549), and m.instances
+// (live, non-archived rows). m.instances is not the universe (the same class the #1892
+// ghostTaskRuns comment in manager.go warns about, reached through a different door): a
+// delete that walked only it would miss a still-provisioning create, deregister the
+// project, and let the create finish into a live orphan.
 //
 // inFlightOnly selects the ones a delete cannot archive YET — every pending create,
 // plus any m.instances row with an op in flight — which is what the up-front fail-closed
 // gate refuses on. With inFlightOnly false it returns every live-or-pending session,
 // which is the concurrent-create re-check before the deregister. The caller holds m.mu.
 func (m *Manager) repoSessionTitlesLocked(repoID string, inFlightOnly bool) []string {
-	var titles []string
+	titleSet := make(map[string]struct{})
+	// A successful reservation is already an admitted create, even during the
+	// narrow interval before CreateSession publishes pendingCreates. Counting it
+	// here makes the delete fence decision atomic with reserveCreate under m.mu.
+	for key := range m.reservedTitles {
+		if rid, title := splitDaemonInstanceKey(key); rid == repoID {
+			titleSet[title] = struct{}{}
+		}
+	}
 	// A pending create is always in flight (still provisioning), so it counts either way.
 	for key := range m.pendingCreates {
 		if rid, title := splitDaemonInstanceKey(key); rid == repoID {
-			titles = append(titles, title)
+			titleSet[title] = struct{}{}
 		}
 	}
 	for key, inst := range m.instances {
@@ -41,6 +48,10 @@ func (m *Manager) repoSessionTitlesLocked(repoID string, inFlightOnly bool) []st
 		if inFlightOnly && inst.GetInFlightOp() == session.OpNone {
 			continue
 		}
+		titleSet[title] = struct{}{}
+	}
+	titles := make([]string, 0, len(titleSet))
+	for title := range titleSet {
 		titles = append(titles, title)
 	}
 	return titles
@@ -185,11 +196,22 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// durable removals below, "nothing was changed" is literally true.
 	m.mu.Lock()
 	starting := m.repoSessionTitlesLocked(repoID, true)
+	if len(starting) == 0 {
+		if m.projectDeletes == nil {
+			m.projectDeletes = make(map[string]struct{})
+		}
+		m.projectDeletes[repoID] = struct{}{}
+	}
 	m.mu.Unlock()
 	if len(starting) > 0 {
 		sort.Strings(starting)
 		return result, fmt.Errorf("delete project %s: session(s) %v are still starting; nothing was changed — delete again once they are ready", repoID, starting)
 	}
+	defer func() {
+		m.mu.Lock()
+		delete(m.projectDeletes, repoID)
+		m.mu.Unlock()
+	}()
 
 	// A task-target refusal is predictable and must precede BOTH stores this
 	// operation mutates. Discovering it inside the later archive loop used to

@@ -246,6 +246,9 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, deleting := m.projectDeletes[repo.ID]; deleting {
+		return nil, "", nil, nil, fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repo.ID)
+	}
 	if err := m.refreshLocked(); err != nil {
 		return nil, "", nil, nil, err
 	}

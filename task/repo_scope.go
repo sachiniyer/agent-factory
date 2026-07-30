@@ -30,6 +30,10 @@ import (
 type repoScope struct {
 	root string
 	id   string
+	// fresh bypasses the process-wide display cache for lifecycle decisions. A
+	// positive cache entry may intentionally stay stale for UI polling, but archive
+	// blockers must follow a legacy path's current repository binding.
+	fresh bool
 	// seen memoizes resolution within this load. The process-level cache below
 	// carries positives ACROSS loads, which is what keeps the poll cheap.
 	seen map[string]string
@@ -54,7 +58,7 @@ func newRepoScope(repoRoot string) *repoScope {
 // holds the daemon's canonical repo identity but may not have a local worktree
 // path (for example, an archived remote session).
 func newRepoScopeForID(repoID string) *repoScope {
-	return &repoScope{id: repoID, seen: map[string]string{}}
+	return &repoScope{id: repoID, fresh: true, seen: map[string]string{}}
 }
 
 // matches reports whether t belongs to this scope.
@@ -86,6 +90,9 @@ func (s *repoScope) resolve(projectPath string) string {
 		return got
 	}
 	id := resolveProjectID(projectPath)
+	if s.fresh {
+		id = resolveProjectIDFresh(projectPath)
+	}
 	s.seen[projectPath] = id
 	return id
 }
@@ -117,4 +124,11 @@ func resolveProjectID(projectPath string) string {
 		projectIDMemo.Store(projectPath, resolved.ID)
 	}
 	return resolved.ID
+}
+
+// resolveProjectIDFresh deliberately bypasses projectIDMemo. Retained Task.RepoID
+// remains authoritative and never reaches this path; this is only for legacy
+// rows whose current ProjectPath binding must be known at a lifecycle boundary.
+func resolveProjectIDFresh(projectPath string) string {
+	return config.ResolveProjectPath(projectPath).ID
 }

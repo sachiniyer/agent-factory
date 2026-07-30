@@ -1,6 +1,7 @@
 package task
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -173,4 +174,34 @@ func TestLoadTasksForRepo_NonRepoPathsFallBackToPathEquality(t *testing.T) {
 	none, err := LoadTasksForRepo("/repos/absent")
 	require.NoError(t, err)
 	assert.Empty(t, none)
+}
+
+// TestLoadTasksForRepoID_LegacyPathRebindUsesFreshResolution protects lifecycle
+// checks from the display scope's intentionally stale positive cache. If a
+// legacy task's symlinked ProjectPath is rebound, archive blockers must follow
+// its current repo rather than the repo that path resolved to on an earlier UI
+// load.
+func TestLoadTasksForRepoID_LegacyPathRebindUsesFreshResolution(t *testing.T) {
+	alpha := mkScopeRepo(t, "alpha")
+	beta := mkScopeRepo(t, "beta")
+	bound := filepath.Join(t.TempDir(), "bound")
+	require.NoError(t, os.Symlink(alpha, bound))
+	projectIDMemo.Delete(bound)
+	t.Cleanup(func() { projectIDMemo.Delete(bound) })
+
+	setupTestTasks(t, []Task{{
+		ID: "rebind01", Name: "rebound", Prompt: "p", CronExpr: "0 * * * *",
+		ProjectPath: bound, Enabled: true, CreatedAt: time.Now(),
+	}})
+
+	alphaTasks, err := LoadTasksForRepoID(repoIDForPath(alpha))
+	require.NoError(t, err)
+	require.Len(t, alphaTasks, 1, "precondition: first lifecycle lookup primes the positive path cache")
+	require.NoError(t, os.Remove(bound))
+	require.NoError(t, os.Symlink(beta, bound))
+
+	betaTasks, err := LoadTasksForRepoID(repoIDForPath(beta))
+	require.NoError(t, err)
+	require.Len(t, betaTasks, 1, "lifecycle lookup must resolve the rebound legacy path freshly")
+	assert.Equal(t, "rebind01", betaTasks[0].ID)
 }

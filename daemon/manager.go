@@ -94,6 +94,12 @@ type Manager struct {
 	// mutation lookups do not, so a half-built runtime cannot be acted on.
 	pendingCreates map[string]session.InstanceData
 	reservedTitles map[string]struct{}
+	// projectDeletes is a short-lived admission fence keyed by repo ID. A delete
+	// installs it under m.mu in the same decision that proves no create is already
+	// reserved or pending; reserveCreate checks it under that lock before any title
+	// reuse or reservation mutation. This closes the preflight-to-first-mutation
+	// gap without holding m.mu across config, task, or archive I/O.
+	projectDeletes map[string]struct{}
 	// reservedTmuxNames closes the second namespace a local create claims. Titles
 	// such as "a/b" and "a_b" can derive distinct git branches but the same
 	// positive-policy tmux name; reserving only the raw title leaves that collision
@@ -340,6 +346,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		instances:              make(map[string]*session.Instance),
 		pendingCreates:         make(map[string]session.InstanceData),
 		reservedTitles:         make(map[string]struct{}),
+		projectDeletes:         make(map[string]struct{}),
 		reservedTmuxNames:      make(map[string]string),
 		reservedRemoteNames:    make(map[string]struct{}),
 		reservedTaskRuns:       make(map[string]int),
