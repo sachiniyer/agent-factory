@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,27 +52,37 @@ func sessionEnvFlags(sanitizedName string) []string {
 }
 
 // sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
-// environment (stamped via `new-session -e` at creation). Returns ("", false)
-// when the session carries no marker — created by a pre-marker build or by a
-// tmux older than 3.2, which cannot set session environment at creation.
+// environment (stamped via `new-session -e` at creation). A false present value
+// means tmux answered and the session carries no marker — created by a pre-marker
+// build or by a tmux older than 3.2, which cannot set session environment at
+// creation. A non-nil error means tmux did not answer authoritatively, so the
+// caller must keep ownership UNKNOWN rather than treating the marker as absent.
 //
 // Bounded by tmuxCommandTimeout (#2099): CleanupSessions calls this once per
 // discovered session, so an unbounded stall on any one of them wedges the whole
 // sweep — and `af reset` runs that sweep synchronously in a short-lived CLI
-// process, where the only way out is ^C. A tripped deadline reports "no marker",
-// which is the safe direction: the sweep leaves any session it cannot PROVE this
-// home owns (#1122), and a wedged server proves nothing.
-func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (string, bool) {
+// process, where the only way out is ^C. The unfiltered form is deliberate:
+// `show-environment AF_HOME` reports an absent variable as a generic command
+// failure, while unfiltered `show-environment` succeeds and simply omits it.
+// That preserves absent separately from a timeout or other probe failure.
+func sessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	out, err := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName), EnvMarkerHome)
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "show-environment", "-t", exactTarget(sanitizedName))
 	if err != nil {
-		// show-environment exits non-zero when the variable is unset.
-		return "", false
+		if ctx.Err() != nil {
+			return "", false, fmt.Errorf("%w: show-environment %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+		}
+		return "", false, fmt.Errorf("read %s ownership marker for tmux session %s: %w", EnvMarkerHome, sanitizedName, err)
 	}
-	// One line of the form AF_HOME=/path; a leading '-' (variable marked for
-	// removal) or any other shape counts as no marker.
-	return strings.CutPrefix(strings.TrimSpace(string(out)), EnvMarkerHome+"=")
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if home, ok := strings.CutPrefix(strings.TrimSuffix(line, "\r"), EnvMarkerHome+"="); ok {
+			return home, true, nil
+		}
+	}
+	// A leading '-' (variable marked for removal), unrelated environment
+	// entries, or empty output all authoritatively mean no active marker.
+	return "", false, nil
 }
 
 var (

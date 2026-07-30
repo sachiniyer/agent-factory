@@ -179,7 +179,10 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	}
 	matches := make([]string, 0, len(prefixed))
 	for _, match := range prefixed {
-		home, ok := sessionHomeMarker(cmdExec, match)
+		home, ok, markerErr := sessionHomeMarker(cmdExec, match)
+		if markerErr != nil {
+			return fmt.Errorf("cannot determine tmux session %s ownership; refusing to continue cleanup: %w", match, markerErr)
+		}
 		switch {
 		case !ok:
 			log.InfoLog.Printf("leaving tmux session %s: no AF_HOME ownership marker (pre-marker build or tmux <3.2); kill manually with: %s", match,

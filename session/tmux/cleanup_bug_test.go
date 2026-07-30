@@ -112,8 +112,9 @@ af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 				case strings.Contains(strings.Join(cmd.Args, " "), "af_theirs"):
 					return []byte("AF_HOME=/another-home\n"), nil
 				default:
-					// tmux exits non-zero when the variable is unset.
-					return nil, errExit1
+					// Unfiltered show-environment authoritatively represents a
+					// missing marker by succeeding without an AF_HOME line.
+					return []byte("PATH=/usr/bin\n"), nil
 				}
 			}
 			return []byte(tmuxOutput), nil

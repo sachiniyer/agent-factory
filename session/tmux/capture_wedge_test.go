@@ -280,10 +280,9 @@ func TestCleanupSessionsDoesNotHangOnWedgedServer(t *testing.T) {
 }
 
 // TestSessionHomeMarkerDoesNotHangOnWedgedServer covers the ownership probe the
-// sweep runs once PER discovered session. It is best-effort (no error to return),
-// so the contract is simply that it returns — and returns "no marker", since a
-// wedged server proves nothing about ownership and the sweep's safe direction is
-// to leave a session it cannot prove it owns (#1122).
+// sweep runs once PER discovered session. A wedged server proves nothing about
+// ownership, so it must return UNKNOWN as ErrTmuxTimeout rather than laundering
+// the missing answer into "no marker" (#1122/#2633).
 func TestSessionHomeMarkerDoesNotHangOnWedgedServer(t *testing.T) {
 	stallingTmuxOnPath(t)
 	shortTmuxTimeout(t, 200*time.Millisecond)
@@ -291,17 +290,21 @@ func TestSessionHomeMarkerDoesNotHangOnWedgedServer(t *testing.T) {
 	type result struct {
 		home string
 		ok   bool
+		err  error
 	}
 	done := make(chan result, 1)
 	go func() {
-		home, ok := sessionHomeMarker(cmd.MakeExecutor(), "af_wedged")
-		done <- result{home, ok}
+		home, ok, err := sessionHomeMarker(cmd.MakeExecutor(), "af_wedged")
+		done <- result{home, ok, err}
 	}()
 
 	select {
 	case got := <-done:
 		if got.ok {
 			t.Fatalf("a wedged server must not be read as proof of ownership, got home %q", got.home)
+		}
+		if !errors.Is(got.err, ErrTmuxTimeout) {
+			t.Fatalf("a wedged ownership probe must remain unknown as ErrTmuxTimeout, got %v", got.err)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("sessionHomeMarker hung against a stalled tmux: CleanupSessions calls it once " +
