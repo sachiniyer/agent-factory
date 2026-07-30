@@ -463,8 +463,7 @@ func (i *Instance) TabSpawnBlocked() error {
 // the banner carried none) for the sidebar badge and PR3's auto-resume
 // scheduler. There is no legacy Status value for SetStatus to decompose onto, so
 // the daemon single-writer (#960) sets the liveness axis directly here. Skips a
-// row mid create/kill teardown so it never clobbers an in-flight op, mirroring
-// SetStatusIfNotDeleting.
+// row with any operation in flight so it never clobbers that operation's fence.
 func (i *Instance) SetLimitReached(resetAt time.Time) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -492,14 +491,13 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, epoch uint64) bool 
 }
 
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
-// record its reset time, skipping a row mid create/kill teardown so it never
-// clobbers an in-flight op. Reports whether it applied. Caller holds i.mu.
+// record its reset time, skipping a row with any operation in flight so it never
+// clobbers that operation's fence. Reports whether it applied. Caller holds i.mu.
 func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
-	if s := i.statusLocked(); s == Loading || s == Deleting {
+	if i.inFlightOp != OpNone {
 		return false
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
-	i.inFlightOp = OpNone
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
 	i.noteStateChangeLocked(lv, op, prevReset)

@@ -47,6 +47,24 @@ func TestSetLimitReached_SkipsTransient(t *testing.T) {
 	}
 }
 
+// TestSetLimitReached_SkipsRestore: a usage-limit observation must not destroy
+// the OpRestoring fence or its LiveLost liveness while a restore is in flight.
+func TestSetLimitReached_SkipsRestore(t *testing.T) {
+	i, err := NewInstance(InstanceOptions{Title: "restoring", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	require.NoError(t, i.Transition(BeginArchive()))
+	require.NoError(t, i.Transition(CommitArchive()))
+	require.NoError(t, i.Transition(BeginRestore()))
+	require.Equal(t, LiveLost, i.GetLiveness())
+	require.Equal(t, OpRestoring, i.GetInFlightOp())
+
+	i.SetLimitReached(time.Now().Add(time.Hour))
+
+	require.Equal(t, OpRestoring, i.GetInFlightOp(), "SetLimitReached must preserve an active restore fence")
+	require.Equal(t, LiveLost, i.GetLiveness(), "SetLimitReached must preserve restore liveness")
+	require.False(t, i.LimitReached(), "an in-flight restore must not be marked limit-reached")
+}
+
 // TestClearLimitReached moves a limit-blocked instance back to Running and drops
 // the reset time; it is a no-op on a non-limit instance.
 func TestClearLimitReached(t *testing.T) {
