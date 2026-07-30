@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -152,9 +153,11 @@ func (m *Manager) clearRemoteLoss(key string) {
 // "is it gone NOW?" — asked against live state, immediately before acting.
 //
 // probeAlive proves the sandbox is there and heals the stale Lost row. probeDead
-// is session-specific evidence that replacement is safe. probeUnknown authorizes
-// nothing: unreachable is not dead, and collapsing it into probeDead is exactly
-// how a connectivity failure can discard unpushed work (#2589).
+// is session-specific evidence that replacement is safe: either the server
+// answered false or af's clientless sentinel says this runtime is explicitly not
+// provisioned. probeUnknown authorizes nothing: unreachable is not dead, and
+// collapsing it into probeDead is exactly how a connectivity failure can discard
+// unpushed work (#2589).
 //
 // Bounded, so a wedged remote cannot stall the poll goroutine here either.
 func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProbe {
@@ -302,9 +305,9 @@ type livenessProbe int
 const (
 	// probeAlive: the agent answered and is running.
 	probeAlive livenessProbe = iota
-	// probeDead: the agent-server answered and reports its agent gone. This is
-	// AUTHORITATIVE — the sandbox is reachable, it looked, and the agent is not
-	// there. Callers may act on it immediately.
+	// probeDead: session-specific evidence says the runtime is absent. Either the
+	// agent-server answered and reports its agent gone, or af has an explicit
+	// not-provisioned sentinel for this session. Callers may act on it immediately.
 	probeDead
 	// probeUnknown: the probe could not be answered — a transport failure or a
 	// timeout. NOT evidence of death. Only repetition over time (the debounce)
@@ -358,6 +361,8 @@ func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
 	select {
 	case r := <-done:
 		switch {
+		case errors.Is(r.err, session.ErrRemoteSandboxNotProvisioned):
+			return probeDead
 		case r.err != nil:
 			return probeUnknown
 		case r.alive:

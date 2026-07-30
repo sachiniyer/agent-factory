@@ -107,7 +107,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		m.mu.Unlock()
 		return instance.GetWorktreePath(), nil
 	case probeUnknown:
-		return "", fmt.Errorf("cannot restore remote session %q: could not determine whether its existing sandbox is gone; refusing to re-provision while it is unreachable because that could discard unpushed work", title)
+		return "", fmt.Errorf("cannot restore remote session %q: could not determine whether its existing sandbox is gone; refusing to re-provision while it is unreachable because that could discard unpushed work (if you know it is permanently gone, explicitly kill this session and create a replacement)", title)
 	case probeDead:
 		// The sandbox answered that its agent is gone, so replacement is safe.
 	}

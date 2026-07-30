@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -767,5 +768,75 @@ func TestRestoreLostSessions_UnreachableRemoteSandboxIsNotReprovisioned(t *testi
 
 	if got := backend.recoverCalls(); got != 0 {
 		t.Fatalf("Recover calls = %d, want 0 — unreachable is not dead, so automatic restore must not discard the existing sandbox's unpushed work", got)
+	}
+}
+
+func registerKnownUnprovisionedRemote(t *testing.T, manager *Manager, repoID, repoPath, title string) (*session.Instance, *remoteWorkspaceBackend) {
+	t.Helper()
+	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	backend := &remoteWorkspaceBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(backend)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Lost)
+	seedDiskInstance(t, repoID, title, repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, title)] = inst
+	manager.mu.Unlock()
+	return inst, backend
+}
+
+func TestRestoreLostSessions_KnownUnprovisionedRemoteIsReprovisioned(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, backend := registerKnownUnprovisionedRemote(t, manager, repoID, repoPath, "inert-auto")
+
+	manager.RestoreLostSessions()
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want 1 for a remote runtime explicitly known to be unprovisioned", got)
+	}
+}
+
+func TestRestoreSession_KnownUnprovisionedRemoteIsReprovisioned(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, backend := registerKnownUnprovisionedRemote(t, manager, repoID, repoPath, "inert-manual")
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "inert-manual", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreSession: %v", err)
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("Recover calls = %d, want 1 for a remote runtime explicitly known to be unprovisioned", got)
+	}
+}
+
+func TestRestoreLostSessions_UnreachableRemoteProbeBacksOff(t *testing.T) {
+	prevBase, prevMax := lostRestoreBackoffBase, lostRestoreBackoffMax
+	lostRestoreBackoffBase, lostRestoreBackoffMax = time.Hour, time.Hour
+	t.Cleanup(func() { lostRestoreBackoffBase, lostRestoreBackoffMax = prevBase, prevMax })
+
+	var aliveCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agent/alive" {
+			aliveCalls.Add(1)
+			http.Error(w, "temporarily unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-blackhole", srv.URL, session.Lost)
+
+	manager.RestoreLostSessions()
+	manager.RestoreLostSessions()
+
+	if got := aliveCalls.Load(); got != 1 {
+		t.Fatalf("Alive calls = %d, want 1 while the unknown observation is in backoff", got)
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("Recover calls = %d, want 0 because the sandbox never answered", got)
 	}
 }

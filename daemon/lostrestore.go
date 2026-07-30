@@ -92,6 +92,10 @@ type lostRestoreState struct {
 	// remoteUnknownLogged dedupes the safety note while a Lost remote sandbox
 	// remains unreachable. Unknown never authorizes destructive re-provisioning.
 	remoteUnknownLogged bool
+	// remoteUnknownAttempts backs off repeated safety probes independently from
+	// actual Recover failures. An unanswered liveness check did not attempt a
+	// restore and must not inflate the restore failure/escalation diagnostics.
+	remoteUnknownAttempts int
 	// vanishedWorktreesLogged dedupes the high-visibility #1303 diagnostic to
 	// one ERROR per distinct missing worktree path during a Lost episode.
 	vanishedWorktreesLogged map[string]struct{}
@@ -343,6 +347,8 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.mu.Lock()
 		logIt := !st.remoteUnknownLogged
 		st.remoteUnknownLogged = true
+		st.remoteUnknownAttempts++
+		st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
 		m.mu.Unlock()
 		if logIt {
 			log.WarningLog.Printf("not re-provisioning lost remote session %q: could not determine whether its existing sandbox is gone; unreachable is not dead, and replacement could discard unpushed work", inst.Title)
@@ -350,7 +356,12 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		return
 	case probeDead:
 		// The sandbox answered that its agent is gone. This session-specific
-		// evidence, unlike a transport failure, permits recovery.
+		// evidence, unlike a transport failure, permits recovery. An explicit
+		// not-provisioned sentinel reaches the same arm for inert records.
+		m.mu.Lock()
+		st.remoteUnknownAttempts = 0
+		st.nextAttempt = time.Time{}
+		m.mu.Unlock()
 	}
 
 	if err := inst.Recover(); err != nil {
@@ -443,14 +454,7 @@ func (m *Manager) lostRestoreFailed(key string, st *lostRestoreState, title stri
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st.consecutiveFailures++
-	backoff := lostRestoreBackoffMax
-	// Guard the shift: past ~16 doublings the exponential form has no meaning
-	// and would overflow.
-	if shift := st.consecutiveFailures - 1; shift < 16 {
-		if b := lostRestoreBackoffBase << shift; b < backoff {
-			backoff = b
-		}
-	}
+	backoff := lostRestoreBackoff(st.consecutiveFailures)
 	st.nextAttempt = time.Now().Add(backoff)
 	if st.consecutiveFailures == lostRestoreEscalationThreshold {
 		if path, ok := missingWorktreePath(err); ok && st.vanishedWorktreeWasLogged(path) {
@@ -461,6 +465,18 @@ func (m *Manager) lostRestoreFailed(key string, st *lostRestoreState, title stri
 		return
 	}
 	log.WarningLog.Printf("restore of lost session %q failed (attempt %d), retrying in %s: %v", title, st.consecutiveFailures, backoff, err)
+}
+
+func lostRestoreBackoff(attempt int) time.Duration {
+	backoff := lostRestoreBackoffMax
+	// Guard the shift: past ~16 doublings the exponential form has no meaning
+	// and would overflow.
+	if shift := attempt - 1; shift >= 0 && shift < 16 {
+		if b := lostRestoreBackoffBase << shift; b < backoff {
+			backoff = b
+		}
+	}
+	return backoff
 }
 
 // recordLostRestoreFailure is the single failure-accounting path for automatic

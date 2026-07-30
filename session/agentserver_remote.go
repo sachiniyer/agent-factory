@@ -289,8 +289,14 @@ type deadRemoteAgentServer struct {
 
 var _ AgentServer = (*deadRemoteAgentServer)(nil)
 
+// ErrRemoteSandboxNotProvisioned marks the clientless AgentServer sentinel used
+// when af knows this session has no provisioned runtime to contact. It is
+// session-specific absence evidence, unlike a transport error from an endpoint
+// that may still be alive behind a broken network path.
+var ErrRemoteSandboxNotProvisioned = errors.New("remote sandbox is not provisioned")
+
 func (s *deadRemoteAgentServer) err() error {
-	return fmt.Errorf("session %q has no live agent-server: its sandbox is not provisioned", s.title)
+	return fmt.Errorf("%w for session %q", ErrRemoteSandboxNotProvisioned, s.title)
 }
 
 func (s *deadRemoteAgentServer) Provision(bool) error            { return s.err() }
@@ -304,11 +310,9 @@ func (s *deadRemoteAgentServer) PreviewByID(string, bool) (PreviewSnapshot, erro
 	return PreviewSnapshot{}, s.err()
 }
 
-// Alive returns (false, err) = UNKNOWN, never an authoritative "the agent is gone":
-// there is no sandbox to answer, so a caller must not treat this false as proof of
-// death and act destructively on it (#1794). remoteSandboxAnswersAlive reads it as
-// "did not answer alive", so the restore loop keeps re-provisioning rather than
-// declaring the row un-recoverable.
+// Alive returns the typed not-provisioned error rather than an ordinary transport
+// error. Restore must re-provision an inert record after restart or a failed
+// recovery, while a real endpoint that merely cannot answer remains unknown.
 func (s *deadRemoteAgentServer) Alive() (bool, error) { return false, s.err() }
 
 func (s *deadRemoteAgentServer) SendPrompt(string) error { return s.err() }

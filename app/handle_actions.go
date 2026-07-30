@@ -432,10 +432,11 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 // A restore is dispatched IMMEDIATELY (no confirmation) only where it is provably
 // safe: a local session re-spawns its tmux in place, and an archived session
 // restores from the branch the archive already pushed. But a Lost/Dead REMOTE
-// session's restore re-provisions a fresh sandbox when the old one can't be reached,
-// discarding any unpushed work on it (#1794) — so that one is gated behind a
-// confirmation that names the risk. Enter, `o`, and a mouse double-click all funnel
-// here, so none can silently discard work.
+// session's restore may re-provision a fresh sandbox after session-specific dead
+// evidence, discarding any unpushed work on the old one (#1794) — so that one is
+// gated behind a confirmation that names the risk. Mere unreachability blocks the
+// replacement. Enter, `o`, and a mouse double-click all funnel here, so none can
+// silently discard work.
 //
 // Scope: the tree ROW verbs and the pane-preview commit reached from them. The
 // focused-pane guards (activateInteractive, handleEnterPane) are a distinct, rarer
@@ -464,7 +465,7 @@ func (m *home) restoreIfResting(selected *session.Instance) (tea.Cmd, bool) {
 func (m *home) confirmReprovisioningRestore(selected *session.Instance) tea.Cmd {
 	title := selected.Title
 	target := captureSessionActionTarget(selected, m.repoID)
-	message := fmt.Sprintf("[!] Restore remote session '%s'?\n\nIf its sandbox can't be reached, restore provisions a fresh one from the last pushed commit and discards any changes on the old sandbox that were never pushed. A reachable sandbox just reconnects, losing nothing.", title)
+	message := fmt.Sprintf("[!] Restore remote session '%s'?\n\nIf its sandbox can't be reached, restore refuses to replace it because unreachability is not proof that it is gone. If the sandbox answers that its agent is gone, restore provisions a fresh one from the last pushed commit and discards any changes on the old sandbox that were never pushed. A reachable live sandbox just reconnects, losing nothing.", title)
 	return m.confirmAction(message, func() tea.Msg {
 		inst := m.resolveSessionActionTarget(target)
 		if inst == nil {

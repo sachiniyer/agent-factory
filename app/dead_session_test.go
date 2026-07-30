@@ -191,6 +191,10 @@ func TestHandleEnter_RemoteLostRowConfirmsBeforeReprovision(t *testing.T) {
 
 			rendered := strings.Join(strings.Fields(h.confirmationOverlay.Render()), " ")
 			require.Contains(t, rendered, "never pushed", "the confirmation names the unpushed-work risk")
+			require.Contains(t, rendered, "can't be reached", "the confirmation names the unknown-connectivity case")
+			require.Contains(t, rendered, "refuses", "the confirmation says unknown connectivity blocks replacement")
+			require.NotContains(t, rendered, "can't be reached, restore provisions",
+				"the confirmation must not promise replacement from mere unreachability")
 
 			// Confirming raises the optimistic op and dispatches the restore off the
 			// event loop via startRestoreMsg (mirrors handleStateConfirm forwarding).
