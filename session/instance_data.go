@@ -193,6 +193,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		userKilled:            data.UserKilled,
 		startupStateUnknown:   data.StartupStateUnknown,
 	}
+	worktreeReaped := false
 
 	// Pick backend based on persisted BackendType.
 	switch {
@@ -258,7 +259,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// delete. Accept only that exact terminal shape: a live row or a partially
 		// populated worktree remains unknown/corrupt and must not be treated as
 		// proof that no worktree exists.
-		worktreeReaped := data.UserKilled && data.Worktree.RepoPath == "" && data.Worktree.WorktreePath == ""
+		worktreeReaped = data.UserKilled && data.Worktree.RepoPath == "" && data.Worktree.WorktreePath == ""
 		if !worktreeReaped {
 			gw, err := git.NewGitWorktreeFromStorage(
 				data.Worktree.RepoPath,
@@ -290,6 +291,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			State:  data.PRInfo.State,
 			Branch: data.PRInfo.Branch,
 		}
+	}
+
+	// The local runtime and worktree are already gone. Keep this terminal row
+	// inert until the daemon retries only the failed record deletion; starting it
+	// would synthesize a fresh conventional tmux name and make the retry target a
+	// session that never belonged to this tombstone.
+	if worktreeReaped {
+		return instance, nil
 	}
 
 	// An uncertain startup loads INERT. Re-running Start(false) would probe or

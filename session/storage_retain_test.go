@@ -116,6 +116,9 @@ func TestSaveInstances_RestoresReapedLocalTombstone(t *testing.T) {
 	if !restored[0].UserKilled() {
 		t.Fatal("restored local session lost its kill tombstone")
 	}
+	if restored[0].Started() {
+		t.Fatal("reaped tombstone was started and synthesized a new tmux teardown target")
+	}
 	if got := restored[0].GetWorktreePath(); got != "" {
 		t.Fatalf("restored reaped tombstone worktree path = %q, want empty", got)
 	}
