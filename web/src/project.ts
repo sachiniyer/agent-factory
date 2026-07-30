@@ -61,9 +61,9 @@ export function projectName(root: string): string {
  * Two deliberate consequences:
  *  - An ARCHIVED-only repo (no live session, no task) is NOT a project — it drops out
  *    the moment its last session is archived, exactly as the daemon's DeleteProject
- *    reversible contract intends (deleting a project archives its live sessions, and
- *    the project disappears). So the switcher never shows a stale archived-only entry
- *    whose delete would be a silent no-op.
+ *    contract intends (deleting a project archives its regular live sessions, removes
+ *    its durable registration, and the project disappears). So the switcher never
+ *    shows a stale archived-only entry whose delete would be a silent no-op.
  *  - A TASK-only repo (a task but no session) IS a project, so its tasks stay
  *    reachable (the Tasks view scopes to it); its rail is the empty state.
  *

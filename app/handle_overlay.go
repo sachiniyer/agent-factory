@@ -183,8 +183,9 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		m.focusRegion(layout.RegionTree)
 		return m, nil, true
 	}
-	// Delete the cursor's project (#1735): archive-then-remove, reversible. Routed
-	// explicitly like `/` so the captive-section no-op below does not swallow it.
+	// Delete the cursor's project (#1735): archive restorable worktree sessions,
+	// tear down in-place ones, and remove its project registration. Routed explicitly
+	// like `/` so the captive-section no-op below does not swallow it.
 	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyDeleteProject]) {
 		if proj, ok := m.projects.SelectedProject(); ok {
 			mod, cmd := m.handleDeleteProject(proj)

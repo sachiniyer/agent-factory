@@ -70,7 +70,7 @@ type DeleteProjectResult struct {
 }
 
 // DeleteProject deletes a project — a repo grouping of sessions (#1735) — with
-// ARCHIVE-THEN-REMOVE, reversible semantics, under the single-writer daemon:
+// archive-then-remove semantics under the single-writer daemon:
 //
 //   - Every LIVE session of the repo is ARCHIVED (tmux torn down, worktree moved
 //     to the archive dir, branch + state preserved) so it stays restorable via
@@ -83,12 +83,16 @@ type DeleteProjectResult struct {
 //   - The repo's root_agents opt-in is dropped (in-memory suppression for this
 //     daemon's life + removed from config on disk) so the project does not linger
 //     empty in the picker and no always-on root respawns.
+//   - A durable project registration whose root matches req.RepoPath is removed
+//     after every session settles, so a registered-but-sessionless project also
+//     disappears.
 //
 // The user's real git repository is never touched. Because the active-projects
 // list is derived from LIVE sessions, archiving them all removes the project from
-// it; restoring any archived session brings the project back — the reversible
-// contract. Idempotent: deleting an unknown or already-empty project archives
-// nothing, drops no opt-in, and returns a zero-count success.
+// it; restoring any archived session makes the repo active again, but does not
+// restore its durable registration or root_agents opt-in. Idempotent: deleting an
+// unknown project archives nothing, drops no opt-in or registration, and returns
+// a zero-count success; a registered project with no sessions is deregistered.
 func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	if repoID == "" {

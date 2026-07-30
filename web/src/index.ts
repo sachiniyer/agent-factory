@@ -730,8 +730,9 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
   );
 }
 
-/** Opens the reversible delete-project confirm for a project row (#1735). On
- *  confirm it archives the repo's live sessions via DeleteProject; the archived
+/** Opens the delete-project confirm for a project row (#1735). On confirm it
+ *  archives the repo's regular live sessions, tears down in-place ones, and
+ *  removes any durable project registration via DeleteProject; the lifecycle
  *  events + projects.changed resync the rail and drop the project from the view. */
 function openDeleteProject(root: string, label: string, sessionCount: number): void {
   openModal(

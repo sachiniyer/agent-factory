@@ -479,10 +479,10 @@ export interface DeleteProjectResult {
   killed_count: number;
 }
 
-/** Deletes a project (mirrors `af projects delete`) — archive-then-remove and
- *  reversible: the repo's live sessions are archived (restorable), it drops out
- *  of the projects view, and its real git repo is untouched. `root` is the repo
- *  path (worktree.repo_path, the stable project id). The per-session archived
+/** Deletes a project (mirrors `af projects delete`): regular live sessions are
+ *  archived (restorable), in-place sessions are torn down, and any durable
+ *  project registration is removed. The real git repo is untouched. `root` is
+ *  the repo path (worktree.repo_path, the stable project id). The per-session
  *  events + the projects.changed event trigger a rail/projects resync. */
 export async function deleteProject(root: string, token: string): Promise<DeleteProjectResult> {
   return af("DeleteProject", { repo_path: root, repo_id: "" }, token);

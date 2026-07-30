@@ -34,7 +34,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
-- [`af projects delete`](#af-projects-delete) — Archive and remove a project's sessions (reversibly)
+- [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
@@ -985,7 +985,7 @@ af projects
 **Subcommands**
 
 - [`af projects add`](#af-projects-add) — Add a project: register a repo by path with a stable local identity
-- [`af projects delete`](#af-projects-delete) — Archive and remove a project's sessions (reversibly)
+- [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
 
@@ -1042,26 +1042,28 @@ af projects add <path>
 
 ## af projects delete
 
-Archive and remove a project's sessions (reversibly)
+Delete a project, archiving its restorable sessions
 
-Archive and remove every live session for a git repository.
+Delete a project for a git repository and remove its live sessions.
 
-This is archive-then-remove and reversible. Every live session of the repo is
-archived (its tmux is torn down and its worktree moved to the archive dir, but
-its branch and uncommitted changes are preserved), and its always-on root agent
-(if any) is stopped and its root-agent opt-in removed. In-place sessions (the
-root agent, 'af sessions create --here') are torn down instead of archived —
-their cleanup never touches your working tree or branch.
+Every regular worktree session is archived (its tmux is torn down and its
+worktree moved to the archive dir, but its branch and uncommitted changes are
+preserved). The always-on root agent (if any) is stopped and its root-agent
+opt-in removed. In-place sessions (the root agent, 'af sessions create --here')
+are torn down instead of archived — their cleanup never touches your working
+tree or branch.
 
-The durable project registration, if any, is preserved. This command removes
-session state; it does not unregister the project.
+The durable project registration, if any, is removed so the project leaves the
+project list. Restoring an archived session makes its repository active again,
+but does not restore the durable registration or root-agent opt-in.
 
 Your real git repository is never touched. To undo a mis-click, restore any
 archived session with 'af sessions restore <title>'.
 
 [repo] is a path inside the repository to delete (default: the current repo).
-Deleting an unknown or already-empty project is a clean no-op. Prints how many
-sessions were archived.
+Deleting an unknown project is a clean no-op; deleting a registered project
+with no live sessions still removes its registration. Prints how many sessions
+were archived.
 
 ```
 af projects delete [repo]

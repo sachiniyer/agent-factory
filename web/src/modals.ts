@@ -543,9 +543,9 @@ export function confirmModal(
   return handle;
 }
 
-/** A reversible delete-project confirm modal (#1735): a normal confirm (NOT a
- *  typed-name gate) because the action is reversible — the project's live
- *  sessions are archived (restorable) and its real git repo is untouched. */
+/** Delete-project confirmation (#1735): archived sessions remain restorable and
+ *  the real git repo is untouched, while the durable project registration is
+ *  removed. */
 export function confirmDeleteProjectModal(
   opts: { projectLabel: string; sessionCount: number; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {

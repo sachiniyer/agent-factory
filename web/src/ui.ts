@@ -278,8 +278,9 @@ export interface Actions {
   triggerTask(task: TaskData): void;
   /** Removes a task via RemoveTask. */
   removeTask(task: TaskData): void;
-  /** Opens the reversible delete-project confirm for a project row (#1735); on
-   *  confirm index.ts calls DeleteProject, which archives its live sessions. */
+  /** Opens the delete-project confirm for a project row (#1735); on confirm
+   *  index.ts calls DeleteProject, which removes the project registration and
+   *  archives each restorable live session. */
   deleteProject(root: string, label: string, sessionCount: number): void;
   /** Opens the add-project modal (#2456): register a git checkout by path via
    *  RegisterProject so it appears as an empty project you can create into. */
@@ -1481,8 +1482,8 @@ export class AppShell {
 
     // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
     // state's coherent action and a convenience when projects already exist. The
-    // reversible delete-project control (#1735) rides alongside it, but only for
-    // the CURRENT project (single-project IA).
+    // delete-project control (#1735) rides alongside it, but only for the CURRENT
+    // project (single-project IA).
     const footChildren: HTMLElement[] = [];
 
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
@@ -1498,7 +1499,7 @@ export class AppShell {
     if (currentSummary) {
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
       const isRegistered = state.registeredProjects.includes(currentSummary.root);
-      // Delete-project ARCHIVES the project's live sessions (#1735, reversible) AND, for
+      // Delete-project ARCHIVES the project's regular live sessions (#1735) AND, for
       // a registered project, removes its durable registry record (#2456) so it leaves
       // the switcher. It is a silent no-op ONLY for a project with neither: a task-only,
       // UNregistered repo (its tasks are cleared from the Tasks view, not here), so it is
