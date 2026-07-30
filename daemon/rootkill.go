@@ -146,10 +146,13 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// committed, so even when the workspace teardown remains unknown and the
 	// record is retained for another retry, no daemon-owned editor should keep
 	// serving it. Stop twice to close the same proxy-spawn race KillSession does:
-	// UserKilled blocks new spawns, and the deferred sweep catches one that passed
-	// the check just before the tombstone became visible.
-	defer m.stopVSCodeForInstance(key, instance.ID)
-	m.stopVSCodeForInstance(key, instance.ID)
+	// UserKilled blocks new spawns, and the second confirmed stop catches one that
+	// passed the check just before the tombstone became visible. Both happen before
+	// record deletion so an unknown outcome keeps the stable-id retry handle.
+	if err := m.stopVSCodeForInstance(key, instance.ID); err != nil {
+		log.WarningLog.Printf("finishing kill of %q: VS Code editor teardown remains unknown; retaining the record for the next poll: %v", instance.Title, err)
+		return
+	}
 
 	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
 	// Kill's own best-effort handling already swallows every failure tmux or git
@@ -160,6 +163,10 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// let the next poll try again: this loop IS the retry, and it is the reason a
 	// bounded teardown does not need a daemon restart to converge (#1917).
 	teardownErr := instance.Kill()
+	if err := m.stopVSCodeForInstance(key, instance.ID); err != nil {
+		log.WarningLog.Printf("finishing kill of %q: could not confirm the VS Code editor stopped; retaining the record for the next poll: %v", instance.Title, err)
+		return
+	}
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown, so this loop keeps the record and retries instead of orphaning the
 	// workspace. This loop IS the retry.

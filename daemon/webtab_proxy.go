@@ -214,9 +214,9 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	// process right now" is exactly the question being asked here.
 	//
 	// It closes the archive window completely (BeginArchive raises the fence before
-	// teardown) and most of the kill window; the deferred sweep in KillSession /
-	// ArchiveSession catches anything that still races in, so the invariant holds
-	// on timing rather than on luck.
+	// teardown) and most of the kill window; the post-spawn check below and each
+	// destructive verb's confirmed final stop catch anything that still races in,
+	// so the invariant holds on timing rather than on luck.
 	if err := instance.TabSpawnBlocked(); err != nil {
 		return vscodeEndpoint{}, err
 	}
@@ -280,9 +280,9 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 //     no close/archive/kill path for a tab that no longer exists will ever stop
 //     it.
 //
-// The deferred sweeps in KillSession/ArchiveSession are the belt to this brace;
-// this keeps the "inert session ⇒ no editor" invariant from resting on which
-// goroutine reaches v.mu first.
+// The destructive paths' confirmed stop before record deletion is the belt to
+// this brace; this keeps the "inert session ⇒ no editor" invariant from resting
+// on which goroutine reaches v.mu first.
 func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title string) error {
 	err := func() error {
 		if err := m.requireCurrentVSCodeInstance(instance, key, title); err != nil {
@@ -300,7 +300,9 @@ func (m *Manager) stopVSCodeIfUnwanted(instance *session.Instance, key, title st
 		return nil
 	}()
 	if err != nil {
-		m.stopVSCodeForInstance(key, instance.ID)
+		if stopErr := m.stopVSCodeForInstance(key, instance.ID); stopErr != nil {
+			return errors.Join(err, fmt.Errorf("stopping the unwanted VS Code editor: %w", stopErr))
+		}
 	}
 	return err
 }
@@ -319,10 +321,12 @@ func (m *Manager) requireCurrentVSCodeInstance(instance *session.Instance, key, 
 	return nil
 }
 
-func (m *Manager) stopVSCodeForInstance(key, instanceID string) {
-	if err := m.vscode.stopForInstance(key, instanceID); err != nil {
+func (m *Manager) stopVSCodeForInstance(key, instanceID string) error {
+	err := m.vscode.stopForInstance(key, instanceID)
+	if err != nil {
 		log.WarningLog.Printf("vscode: could not determine or complete teardown for session id %q: %v", instanceID, err)
 	}
+	return err
 }
 
 // webTabProxyHandler reverse-proxies /v1/webtab/{sessionId}/{tabId}/{rest...}

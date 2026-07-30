@@ -24,6 +24,7 @@ type vscodeOwnerRecord struct {
 	InstanceID string `json:"instance_id"`
 	PID        int    `json:"pid"`
 	StartID    uint64 `json:"start_id"`
+	BootID     string `json:"boot_id"`
 }
 
 const vscodeOwnerExt = ".owner.json"
@@ -43,6 +44,10 @@ func writeVSCodeOwner(path string, owner vscodeOwnerRecord) error {
 }
 
 func captureVSCodeOwner(key, instanceID string, pid int) (vscodeOwnerRecord, error) {
+	bootID, err := proctree.BootID()
+	if err != nil {
+		return vscodeOwnerRecord{}, fmt.Errorf("could not determine kernel boot identity: %w", err)
+	}
 	process, err := proctree.Lookup(pid)
 	if err != nil {
 		if errors.Is(err, proctree.ErrProcessExited) {
@@ -57,7 +62,7 @@ func captureVSCodeOwner(key, instanceID string, pid int) (vscodeOwnerRecord, err
 		return vscodeOwnerRecord{}, fmt.Errorf("could not determine editor process identity for pid %d", pid)
 	}
 	return vscodeOwnerRecord{
-		Key: key, InstanceID: instanceID, PID: pid, StartID: process.StartID,
+		Key: key, InstanceID: instanceID, PID: pid, StartID: process.StartID, BootID: bootID,
 	}, nil
 }
 
@@ -103,7 +108,7 @@ func readVSCodeOwner(path string) (vscodeOwnerRecord, error) {
 	if err := json.Unmarshal(raw, &owner); err != nil {
 		return vscodeOwnerRecord{}, err
 	}
-	if owner.Key == "" || owner.InstanceID == "" || owner.PID <= 1 || owner.StartID == 0 {
+	if owner.Key == "" || owner.InstanceID == "" || owner.PID <= 1 || owner.StartID == 0 || owner.BootID == "" {
 		return vscodeOwnerRecord{}, fmt.Errorf("invalid editor owner record")
 	}
 	return owner, nil
@@ -141,6 +146,16 @@ func waitForProcessGroupExit(pgid int, timeout time.Duration) (bool, error) {
 // that PID from being reused, so an absent PID plus a live -PGID is also safe.
 // Any unreadable live PID remains UNKNOWN and is never signalled.
 func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
+	bootID, err := proctree.BootID()
+	if err != nil {
+		return fmt.Errorf("could not determine kernel boot identity for editor pid %d: %w", owner.PID, err)
+	}
+	if owner.BootID != bootID {
+		// Linux start stamps are ticks since boot. A record from another boot
+		// carries no authority over a PID in this one, even when both numeric
+		// fields match; discarding it without signaling is the only safe result.
+		return nil
+	}
 	snapshot, err := proctree.Snapshot()
 	if err != nil {
 		return fmt.Errorf("could not determine editor ownership for pid %d: %w", owner.PID, err)
@@ -190,10 +205,10 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 	return nil
 }
 
-// stopPersistedForInstanceLocked reaps owner records for exactly one stable
-// session id. Caller holds v.mu, serializing this restart reconciliation against
-// any new spawn for the same supervisor.
-func (v *vscodeSupervisor) stopPersistedForInstanceLocked(key, instanceID string) error {
+// stopPersistedForInstance reaps owner records for exactly one stable session
+// id. The caller reserves key under v.mu before entering; process waits happen
+// without the supervisor-wide mutex so unrelated editor operations stay live.
+func (v *vscodeSupervisor) stopPersistedForInstance(key, instanceID string) error {
 	paths, err := persistedVSCodeOwners(key)
 	if err != nil {
 		return err

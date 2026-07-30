@@ -460,11 +460,13 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, err
 
 	// A reaped root's tabs are not carried into the replacement instance, so its
 	// per-session editor becomes unreachable even though both roots use the same
-	// repo checkout and daemon key. Stop before teardown and sweep again on return,
-	// mirroring KillSession/finishUserKill and closing a proxy spawn that resolved
-	// the dead root immediately before this pass took ownership.
-	defer m.stopVSCodeForInstance(key, inst.ID)
-	m.stopVSCodeForInstance(key, inst.ID)
+	// repo checkout and daemon key. Stop before runtime teardown and confirm again
+	// before record deletion, mirroring KillSession/finishUserKill and closing a
+	// proxy spawn that resolved the dead root immediately before this pass took
+	// ownership. Either unknown result retains the record for the next ensure pass.
+	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
+		return false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed, retaining its record for a retry: %w", repoID, err)
+	}
 
 	// Best-effort by design (#478): tmux is already gone and an in-place
 	// worktree's Cleanup is a no-op, so failures Kill can ANSWER for only log
@@ -477,6 +479,9 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (bool, err
 	// tick, so it IS the retry (#1917: found by auditing every record delete against
 	// the invariant, not reported).
 	teardownErr := inst.Kill()
+	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
+		return false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed after runtime teardown, retaining its record for a retry: %w", repoID, err)
+	}
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
 	// is unknown. This site was still log-and-delete after two audits I called
 	// exhaustive — which is the argument for there being exactly one place to call.

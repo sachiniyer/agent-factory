@@ -76,6 +76,20 @@ func snapshot() (map[int]Process, error) {
 // does not serve it (subset=pid) without mounting one.
 var uptimePath = "/proc/uptime"
 
+var bootIDPath = "/proc/sys/kernel/random/boot_id"
+
+func bootID() (string, error) {
+	data, err := os.ReadFile(bootIDPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", bootIDPath, err)
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return "", fmt.Errorf("reading %s: empty boot id", bootIDPath)
+	}
+	return id, nil
+}
+
 // bootTime returns the wall-clock instant the machine booted, from
 // /proc/uptime.
 func bootTime() (time.Time, error) {

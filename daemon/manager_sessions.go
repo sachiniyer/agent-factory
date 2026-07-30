@@ -124,16 +124,18 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// and a killed session's editor would otherwise linger rooted at a directory
 	// that is being removed. No-ops when the session never had a vscode tab.
 	//
-	// Stopped TWICE, deliberately. The webtab proxy resolves (and may spawn) an
+	// Checked TWICE, deliberately. The webtab proxy resolves (and may spawn) an
 	// editor without this op-lock — it must, since a spawn blocks for seconds — so
 	// a request racing this teardown could start one after the stop below.
 	// ensureVSCodeServer refuses once the session is inert, which closes most of
-	// that window; the deferred sweep closes the rest, so "a killed session has no
-	// editor" holds on ordering rather than on timing.
+	// that window; the second confirmed stop runs before the durable record is
+	// deleted, so "a killed session has no editor" holds on ordering rather than
+	// timing, and uncertainty retains the stable-id retry handle.
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
-	defer m.stopVSCodeForInstance(vscodeKey, instance.ID)
 	stage.set("stopping vscode editor")
-	m.stopVSCodeForInstance(vscodeKey, instance.ID)
+	if err := m.stopVSCodeForInstance(vscodeKey, targetID); err != nil {
+		return session.InstanceData{}, fmt.Errorf("kill of session %q could not safely stop its VS Code editor, so its tombstoned record was kept for a retry: %w", req.Title, err)
+	}
 
 	// Carried to the record delete below, which refuses on a non-nil teardown.
 	var teardownErr error
@@ -185,6 +187,15 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill to try again: %v", req.Title, teardownErr)
 			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
 		}
+	}
+
+	// Re-check before deleting the durable retry handle. A proxy request that
+	// passed its pre-spawn fence before the tombstone was committed can finish
+	// later; if its exact editor cannot be confirmed stopped, the record must stay
+	// so the poll finisher can retry by stable id.
+	stage.set("confirming vscode editor teardown")
+	if err := m.stopVSCodeForInstance(vscodeKey, targetID); err != nil {
+		return session.InstanceData{}, fmt.Errorf("kill of session %q could not confirm its VS Code editor stopped, so its tombstoned record was kept for a retry: %w", req.Title, err)
 	}
 
 	stage.set("deleting record from storage")

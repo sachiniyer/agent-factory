@@ -1,10 +1,17 @@
 package daemon
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session"
 
 	"github.com/stretchr/testify/require"
@@ -36,6 +43,122 @@ func vscodeServerRegistered(m *Manager, key string) bool {
 	defer m.vscode.mu.Unlock()
 	_, ok := m.vscode.servers[key]
 	return ok
+}
+
+func writeVSCodeOwnerFixture(t *testing.T, key, instanceID, bootID string, process proctree.Process) string {
+	t.Helper()
+	socketPath, err := vscodeSocketPath(key)
+	require.NoError(t, err)
+	raw, err := json.Marshal(map[string]any{
+		"key": key, "instance_id": instanceID, "pid": process.PID,
+		"start_id": process.StartID, "boot_id": bootID,
+	})
+	require.NoError(t, err)
+	path := vscodeOwnerPath(socketPath)
+	require.NoError(t, os.WriteFile(path, append(raw, '\n'), 0o600))
+	return path
+}
+
+func writeUnreadableVSCodeOwnerFixture(t *testing.T, key string) {
+	t.Helper()
+	socketPath, err := vscodeSocketPath(key)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(vscodeOwnerPath(socketPath), []byte("{"), 0o600))
+}
+
+func startOwnedSleep(t *testing.T) (*exec.Cmd, proctree.Process) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, cmd.Start())
+	waited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waited)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-waited:
+		case <-time.After(2 * time.Second):
+			t.Errorf("owned sleep pid %d did not exit", cmd.Process.Pid)
+		}
+	})
+	process, err := proctree.Lookup(cmd.Process.Pid)
+	require.NoError(t, err)
+	return cmd, process
+}
+
+func requireSessionRecordRetained(t *testing.T, manager *Manager, repoID, key string, inst *session.Instance) {
+	t.Helper()
+	manager.mu.Lock()
+	current := manager.instances[key]
+	manager.mu.Unlock()
+	require.Same(t, inst, current, "editor cleanup uncertainty removed the in-memory retry handle")
+	raw, err := config.LoadRepoInstances(repoID)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"title":"`+inst.Title+`"`, "editor cleanup uncertainty deleted the durable retry handle")
+}
+
+func TestPersistedVSCodeOwner_FromPreviousBootIsNeverSignaled(t *testing.T) {
+	shortAFHome(t)
+	_, process := startOwnedSleep(t)
+	path := writeVSCodeOwnerFixture(t, "prior-boot", "instance-1", "definitely-not-this-boot", process)
+	owner, err := readVSCodeOwner(path)
+	require.NoError(t, err)
+
+	v := newVSCodeSupervisor()
+	var signaled bool
+	v.killGroup = func(pgid int, sig syscall.Signal) error {
+		signaled = true
+		return syscall.Kill(-pgid, sig)
+	}
+	require.NoError(t, v.stopPersistedOwner(owner))
+	require.False(t, signaled, "an owner record from a previous boot authorized signaling a reused PID")
+}
+
+func TestPersistedVSCodeStop_DoesNotHoldSupervisorLockWhileWaiting(t *testing.T) {
+	shortAFHome(t)
+	_, process := startOwnedSleep(t)
+	bootID, err := proctree.BootID()
+	require.NoError(t, err)
+	writeVSCodeOwnerFixture(t, "blocked", "instance-1", bootID, process)
+
+	v := newVSCodeSupervisor()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	v.killGroup = func(pgid int, sig syscall.Signal) error {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+		return syscall.Kill(-pgid, sig)
+	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- v.stopForInstance("blocked", "instance-1") }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("persisted owner teardown never reached its blocking signal seam")
+	}
+
+	unrelatedDone := make(chan struct{})
+	go func() {
+		v.stopFor("unrelated")
+		close(unrelatedDone)
+	}()
+	blocked := false
+	select {
+	case <-unrelatedDone:
+	case <-time.After(250 * time.Millisecond):
+		blocked = true
+	}
+	close(release)
+	require.NoError(t, <-stopDone)
+	if blocked {
+		t.Fatal("persisted owner teardown held the supervisor-wide mutex while waiting for a process group")
+	}
 }
 
 // TestArchiveSession_StopsVSCodeEditor: archiving MOVES the worktree, and the
@@ -125,6 +248,28 @@ func TestFinishUserKill_StopsEditorOwnedByPreviousSupervisor(t *testing.T) {
 	}
 }
 
+func TestKillSession_RetainsRecordWhenEditorOwnershipIsUnknown(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "worker", session.NewFakeBackend(), true, session.Ready)
+	key := daemonInstanceKey(repoID, "worker")
+	writeUnreadableVSCodeOwnerFixture(t, key)
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "worker", RepoID: repoID})
+	require.ErrorContains(t, err, "VS Code editor")
+	requireSessionRecordRetained(t, manager, repoID, key, inst)
+}
+
+func TestFinishUserKill_RetainsRecordWhenEditorOwnershipIsUnknown(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "worker", session.NewFakeBackend(), true, session.Ready)
+	key := daemonInstanceKey(repoID, "worker")
+	writeUnreadableVSCodeOwnerFixture(t, key)
+	require.NoError(t, manager.persistKillTombstone(repoID, inst, nil))
+
+	manager.finishUserKill(repoID, inst)
+	requireSessionRecordRetained(t, manager, repoID, key, inst)
+}
+
 // TestReapDeadRoot_StopsVSCodeEditor is the adjacent automatic teardown path.
 // A dead root is removed and recreated under the same session key, but its old
 // vscode tabs are not carried forward, so retaining their editor leaks an
@@ -140,6 +285,18 @@ func TestReapDeadRoot_StopsVSCodeEditor(t *testing.T) {
 	require.True(t, reaped)
 	require.False(t, vscodeServerRegistered(manager, key),
 		"reaping a dead root left its unreachable VS Code editor running")
+}
+
+func TestReapDeadRoot_RetainsRecordWhenEditorOwnershipIsUnknown(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, session.RootSessionTitle, session.NewFakeBackend(), true, session.Dead)
+	key := daemonInstanceKey(repoID, session.RootSessionTitle)
+	writeUnreadableVSCodeOwnerFixture(t, key)
+
+	reaped, err := manager.reapDeadRoot(repoID, inst)
+	require.ErrorContains(t, err, "VS Code editor")
+	require.False(t, reaped)
+	requireSessionRecordRetained(t, manager, repoID, key, inst)
 }
 
 // TestEnsureVSCodeServer_RefusesInertSessions is the codex P1 gate: the webtab

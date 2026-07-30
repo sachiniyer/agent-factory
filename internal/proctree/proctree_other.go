@@ -27,6 +27,10 @@ func readProc(int) (Process, error) {
 	return Process{}, ErrUnsupportedPlatform
 }
 
+func bootID() (string, error) {
+	return "", ErrUnsupportedPlatform
+}
+
 func readEnviron(int) ([]string, error) {
 	return nil, ErrUnsupportedPlatform
 }

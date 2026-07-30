@@ -481,6 +481,10 @@ func (s *vscodeServer) stop() {
 type vscodeSupervisor struct {
 	mu      sync.Mutex
 	servers map[string]*vscodeServer
+	// reconciling reserves one session key while a prior daemon's persisted
+	// owner is inspected and stopped outside mu. Same-key operations retry;
+	// unrelated sessions never wait through process-group teardown.
+	reconciling map[string]struct{}
 	// failures records the last spawn failure per key, enforcing
 	// vscodeRespawnCooldown so a broken editor can't be respawned on every
 	// auto-refresh.
@@ -516,8 +520,9 @@ type vscodeFailure struct {
 
 func newVSCodeSupervisor() *vscodeSupervisor {
 	return &vscodeSupervisor{
-		servers:  make(map[string]*vscodeServer),
-		failures: make(map[string]vscodeFailure),
+		servers:     make(map[string]*vscodeServer),
+		reconciling: make(map[string]struct{}),
+		failures:    make(map[string]vscodeFailure),
 		configuredBinary: func() string {
 			cfg, err := config.LoadConfig()
 			if err != nil || cfg == nil {
@@ -540,6 +545,50 @@ func (v *vscodeSupervisor) ensureServer(key, worktree string) (vscodeEndpoint, e
 	return v.ensureServerForInstance(key, key, worktree)
 }
 
+func (v *vscodeSupervisor) reserveReconcileLocked(key string) bool {
+	if v.reconciling == nil {
+		v.reconciling = make(map[string]struct{})
+	}
+	if _, busy := v.reconciling[key]; busy {
+		return false
+	}
+	v.reconciling[key] = struct{}{}
+	return true
+}
+
+func (v *vscodeSupervisor) releaseReconcile(key string) {
+	v.mu.Lock()
+	delete(v.reconciling, key)
+	v.mu.Unlock()
+}
+
+// reconcilePersistedBeforeSpawn establishes the cross-daemon invariant before
+// a new editor is started. The key reservation serializes same-session callers,
+// while the slow process-table and signal waits deliberately run outside mu.
+func (v *vscodeSupervisor) reconcilePersistedBeforeSpawn(key, instanceID string) error {
+	v.mu.Lock()
+	if v.stopped {
+		v.mu.Unlock()
+		return fmt.Errorf("daemon is shutting down")
+	}
+	if v.servers[key] != nil {
+		v.mu.Unlock()
+		return nil
+	}
+	if !v.reserveReconcileLocked(key) {
+		v.mu.Unlock()
+		return errVSCodeStarting
+	}
+	v.mu.Unlock()
+
+	err := v.stopPersistedForInstance(key, instanceID)
+	v.releaseReconcile(key)
+	if err != nil {
+		return fmt.Errorf("reconciling a previous VS Code editor: %w", err)
+	}
+	return nil
+}
+
 // ensureServerForInstance is the production form: the stable instance id keeps
 // a same-title recreation from adopting or stopping its predecessor's editor.
 func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree string) (vscodeEndpoint, error) {
@@ -548,6 +597,9 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 	}
 	if strings.TrimSpace(instanceID) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session has no stable identity for VS Code")
+	}
+	if err := v.reconcilePersistedBeforeSpawn(key, instanceID); err != nil {
+		return vscodeEndpoint{}, err
 	}
 
 	// Hold the supervisor lock for the whole call. It serializes concurrent
@@ -563,7 +615,6 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 	// Reuse a live editor, but only while it still serves THIS worktree: a session
 	// restored to a different path (or a key reused after a kill) must never be
 	// handed an editor rooted at the old directory.
-	replacedRegistered := false
 	if s := v.servers[key]; s != nil {
 		switch {
 		case s.alive() && s.instanceID == instanceID && s.worktree == worktree:
@@ -584,7 +635,6 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 			neverReady := !s.ready && !s.alive()
 			delete(v.servers, key)
 			go s.stop()
-			replacedRegistered = true
 			// An editor that died having NEVER become ready is a broken start, not a
 			// crash to heal from — record it so the cooldown applies. Without this
 			// only spawnLocked's own errors were recorded, so an editor that outlived
@@ -600,15 +650,6 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 			}
 		}
 	}
-	// An empty in-memory slot does not prove no editor exists: a previous daemon
-	// may have died after persisting this process identity. Reconcile that exact
-	// stable session before spawning a second editor under the reused title.
-	if !replacedRegistered {
-		if err := v.stopPersistedForInstanceLocked(key, instanceID); err != nil {
-			return vscodeEndpoint{}, fmt.Errorf("reconciling a previous VS Code editor: %w", err)
-		}
-	}
-
 	// Replay a recent failure instead of respawning, so the notice page's refresh
 	// can't drive a spawn loop against a broken editor.
 	if f, ok := v.failures[key]; ok && v.now().Sub(f.at) < v.cooldown {
@@ -855,17 +896,24 @@ func (v *vscodeSupervisor) stopForInstance(key, instanceID string) error {
 	} else {
 		server = nil
 	}
-	var persistedErr error
-	if server == nil && instanceID != "" {
-		persistedErr = v.stopPersistedForInstanceLocked(key, instanceID)
+	reconcile := server == nil && instanceID != ""
+	if reconcile && !v.reserveReconcileLocked(key) {
+		v.mu.Unlock()
+		return fmt.Errorf("VS Code editor teardown for session id %q is already in progress", instanceID)
 	}
 	v.mu.Unlock()
 	// Stop OUTSIDE the lock: it blocks for up to the stop grace, and holding the
 	// supervisor lock across it would stall every unrelated session's editor.
 	if server != nil {
 		server.stop()
+		return nil
 	}
-	return persistedErr
+	if reconcile {
+		err := v.stopPersistedForInstance(key, instanceID)
+		v.releaseReconcile(key)
+		return err
+	}
+	return nil
 }
 
 // Stop tears down every editor and refuses further spawns, so daemon shutdown

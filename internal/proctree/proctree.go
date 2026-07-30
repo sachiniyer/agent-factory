@@ -117,6 +117,13 @@ func Lookup(pid int) (Process, error) {
 	return readProc(pid)
 }
 
+// BootID identifies the current kernel boot. Persisted process identities must
+// include it: Linux StartID values are ticks since boot, so the same PID and
+// StartID can name an unrelated process after a reboot.
+func BootID() (string, error) {
+	return bootID()
+}
+
 // TreeOf returns root plus every descendant of root present in snap, in BFS
 // order (root first). Returns nil when root is not in the snapshot.
 func TreeOf(snap map[int]Process, root int) []Process {
