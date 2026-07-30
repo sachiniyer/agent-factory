@@ -85,12 +85,17 @@ func TestCreateSessionRejectsRemoteSlugCollisionWithInMemoryInstance(t *testing.
 func TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 
-	for _, title := range []string{"日本語", "مرحبا", "!!!"} {
+	for _, title := range []string{
+		"日本語",
+		"مرحبا",
+		"!!!",
+		strings.Repeat("-", 200) + "a", // the only alphanumeric is truncated before fallback
+	} {
 		manager.mu.Lock()
 		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil)
 		manager.mu.Unlock()
 		if err == nil {
-			t.Errorf("remote hook title %q contains no ASCII letter or digit but was accepted", title)
+			t.Errorf("remote hook title %q retains no ASCII letter or digit in its bounded slug but was accepted", title)
 			continue
 		}
 		if !strings.Contains(err.Error(), "ASCII letter or digit") {
@@ -98,7 +103,7 @@ func TestValidateTitleRejectsRemoteHookWithoutASCIIAlphanumeric(t *testing.T) {
 		}
 	}
 
-	for _, title := range []string{"SESSION!", "日本語-2"} {
+	for _, title := range []string{"SESSION!", "日本語-2", strings.Repeat("-", 199) + "a"} {
 		manager.mu.Lock()
 		err := manager.validateTitleAvailableLocked(repoID, repoPath, title, "claude", runtimeNamespaceRemoteHook, false, nil)
 		manager.mu.Unlock()

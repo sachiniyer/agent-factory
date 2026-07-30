@@ -181,12 +181,13 @@ func (m *Manager) validateTitleShapeLocked(title string, namespace runtimeNameNa
 		return fmt.Errorf("session title must be a single line and contain no control characters")
 	}
 	// Hook scripts receive one globally shared --name derived by Slugify. A title
-	// with no ASCII alphanumeric content collapses to the generic "session"
-	// fallback, so reject it before collision checks or provisioning. Docker and
-	// SSH may use the same slug helper for repo-scoped paths or labels, but do not
-	// claim this global hook namespace and therefore keep accepting Unicode titles.
-	if namespace == runtimeNamespaceRemoteHook && !session.RemoteHookTitleHasASCIIAlnum(title) {
-		return fmt.Errorf("remote hook session title %q must contain at least one ASCII letter or digit (A-Z, a-z, or 0-9); add an ASCII component so it derives a specific hook name", title)
+	// whose bounded sanitized form retains no ASCII alphanumeric content collapses
+	// to the generic "session" fallback, so reject it before collision checks or
+	// provisioning. Docker and SSH may use the same slug helper for repo-scoped
+	// paths or labels, but do not claim this global hook namespace and therefore
+	// keep accepting Unicode titles.
+	if namespace == runtimeNamespaceRemoteHook && !session.RemoteHookTitleHasSpecificSlug(title) {
+		return fmt.Errorf("remote hook session title %q must retain at least one ASCII letter or digit after hook-name sanitization and truncation; add an ASCII component so it derives a specific hook name", title)
 	}
 	// The "root" title belongs to the daemon-managed root agent (#1106).
 	// Every creation path lands here — TUI, `af sessions create`, task

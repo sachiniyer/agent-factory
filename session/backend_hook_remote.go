@@ -17,21 +17,15 @@ var slugRegexp = regexp.MustCompile(`[^a-z0-9-]`)
 // (#2528). The slug is ASCII ([a-z0-9-]), so a byte truncation is rune-safe.
 const maxSlugLen = 200
 
-// RemoteHookTitleHasASCIIAlnum reports whether a title can derive a hook name
-// from its own content. Hook names accept ASCII only; without a letter or digit,
-// Slugify has to use its compatibility fallback "session", which is not unique
-// enough for the hook backend's global namespace.
+// RemoteHookTitleHasSpecificSlug reports whether the exact sanitization and
+// truncation Slugify applies retains a title-derived name. A raw title may have
+// ASCII content only after the bounded slug prefix (for example, 200 hyphens
+// followed by "a"), so scanning the unbounded input is not equivalent.
 //
 // Do not infer this from Slugify(title) == "session": valid titles such as
 // "SESSION!" deliberately derive that same slug.
-func RemoteHookTitleHasASCIIAlnum(title string) bool {
-	for i := 0; i < len(title); i++ {
-		c := title[i]
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
-			return true
-		}
-	}
-	return false
+func RemoteHookTitleHasSpecificSlug(title string) bool {
+	return slugWithoutFallback(title) != ""
 }
 
 // Slugify converts a title to a slug-safe string for the remote hook scripts.
@@ -41,6 +35,14 @@ func RemoteHookTitleHasASCIIAlnum(title string) bool {
 // must not coexist (FindSlugCollision guards that at create time — including two
 // long titles that truncate to the same slug).
 func Slugify(title string) string {
+	s := slugWithoutFallback(title)
+	if s == "" {
+		s = "session"
+	}
+	return s
+}
+
+func slugWithoutFallback(title string) string {
 	s := strings.ToLower(title)
 	s = strings.ReplaceAll(s, " ", "-")
 	s = slugRegexp.ReplaceAllString(s, "")
@@ -48,9 +50,6 @@ func Slugify(title string) string {
 		s = s[:maxSlugLen]
 	}
 	s = strings.Trim(s, "-")
-	if s == "" {
-		s = "session"
-	}
 	return s
 }
 

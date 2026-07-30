@@ -107,9 +107,9 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			ForceRemote: m.pendingForceRemote,
 		}, instance.Path)
 		if backendKindErr == nil && backendKind == session.BackendHook {
-			if !session.RemoteHookTitleHasASCIIAlnum(title) {
+			if !session.RemoteHookTitleHasSpecificSlug(title) {
 				return m, m.handleError(fmt.Errorf(
-					"remote hook session title %q must contain at least one ASCII letter or digit (A-Z, a-z, or 0-9)",
+					"remote hook session title %q must retain at least one ASCII letter or digit after hook-name sanitization",
 					title,
 				))
 			}
