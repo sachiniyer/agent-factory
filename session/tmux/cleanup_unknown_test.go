@@ -16,6 +16,7 @@ import (
 // continuing on to worktree deletion.
 func TestCleanupSessionsOwnershipCheckTimeoutIsUnknown(t *testing.T) {
 	dir := t.TempDir()
+	probeMarker := filepath.Join(dir, "has-session-called")
 	script := `#!/bin/sh
 case "$1" in
 ls)
@@ -24,6 +25,10 @@ ls)
 show-environment)
   sleep 300 &
   wait
+  ;;
+has-session)
+  : > "$PROBE_MARKER"
+  exit 1
   ;;
 *)
   exit 97
@@ -35,11 +40,15 @@ esac
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("PROBE_MARKER", probeMarker)
 	shortTmuxTimeout(t, 200*time.Millisecond)
 
 	err := CleanupSessions(cmd.MakeExecutor())
 	if !errors.Is(err, ErrTmuxTimeout) {
 		t.Fatalf("CleanupSessions error = %v, want ErrTmuxTimeout when AF_HOME ownership probe does not answer", err)
+	}
+	if _, err := os.Stat(probeMarker); !os.IsNotExist(err) {
+		t.Fatalf("marker timeout launched a second tmux probe, stat error = %v", err)
 	}
 }
 
@@ -170,6 +179,7 @@ show-environment)
   ;;
 has-session)
   [ "${2-}" = "-t=af_gone" ] || exit 98
+  printf "can't find session: af_gone\n" >&2
   exit 1
   ;;
 *)
@@ -220,6 +230,40 @@ esac
 	err := CleanupSessions(cmd.MakeExecutor())
 	if !errors.Is(err, ErrTmuxTimeout) {
 		t.Fatalf("CleanupSessions error = %v, want ErrTmuxTimeout when the exact session re-probe does not answer", err)
+	}
+}
+
+// TestCleanupSessionsMarkerErrorReprobeExit1FailureIsUnknown guards the exact
+// absence diagnostic. Exit 1 alone is ambiguous: a wrapper or policy failure
+// can use it too, so only tmux's named missing-session response may let reset
+// continue to destructive worktree cleanup.
+func TestCleanupSessionsMarkerErrorReprobeExit1FailureIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+ls)
+  echo 'af_unknown: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+show-environment)
+  exit 97
+  ;;
+has-session)
+  printf 'policy denied\n' >&2
+  exit 1
+  ;;
+*)
+  exit 98
+  ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	if err := CleanupSessions(cmd.MakeExecutor()); err == nil {
+		t.Fatal("CleanupSessions error = nil, want exit 1 without tmux's absence diagnostic to remain unknown")
 	}
 }
 
