@@ -301,57 +301,26 @@ func CodexTrustPromptPresent(content string) bool {
 		noOption < affordance && affordance == last
 }
 
-// DocTrustPromptPresent reports whether content shows the documentation-link
-// trust dialog shared by aider/gemini:
+// DocTrustPromptPresent reports whether content ends at the documentation-link
+// confirmation prompt shared by aider/gemini:
 //
-//	Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:
+//	https://aider.chat/docs/...
+//	<question text> (Y)es/(N)o/(D)on't ask again [Yes]:
 //
-// BOTH the full prose question and the "(D)on't ask again" affordance are
-// required, and NEITHER is redundant:
+// aider's InputOutput.confirm_ask accepts caller-controlled question text, then
+// appends the confirmation prefix above. InputOutput.offer_url separately renders
+// the URL subject before asking. Match those renderer invariants: the final
+// non-empty line must end at the full confirmation prefix, and a URL must be in
+// its immediate prompt context. Do not key daemon input on the overridable prose.
+// In particular, this source file contains the old prose and affordance together;
+// a strings.Contains matcher lets repo-controlled text inject D+Enter (#2638).
 //
-//   - The affordance is not a discriminator. aider renders "(D)on't ask again"
-//     on EVERY confirmation it asks ("Add src/main.go to the chat?", …). It only
-//     tells us some prompt is up — not which one. It is the weaker anchor.
-//   - The prose is the discriminator, and only at FULL length. Do not shorten it
-//     to a prefix like "Open documentation url": the prefix plus an affordance
-//     that is nearly always present means an unrelated confirmation gets answered
-//     'D' whenever that string is anywhere on screen — including in a source file
-//     the agent has open. This repo is self-hosted, so that is not hypothetical.
-//
-// The full prose is also the ORIGINAL observed string (2b23c52); the shorter form
-// was a later paraphrase introduced for readiness detection (7d78ee6), not an
-// observation of the dialog. Match what the dialog actually renders.
-//
-// ACTION HERE REQUIRES POSITIVE EVIDENCE, because the two ways to be wrong do not
-// cost the same:
-//
-//   - A MISS costs one keypress. The dialog stays up, the user presses D — or the
-//     next tick of the daemon's 1-second poll catches it, since this re-runs
-//     continuously and the real dialog does not go away on its own.
-//   - A FALSE POSITIVE types 'D'+Enter into a RUNNING agent that never asked
-//     anything (TapDAndEnter, via CheckAndHandleTrustPrompt above). That is
-//     unbidden input into someone's live session: it can answer a different
-//     question than the one we think is on screen, or land in an agent's prompt
-//     box and modify their files. The poll's caller discards the bool, so nothing
-//     breaks the loop — it re-fires every tick the phrase stays on screen (#1952).
-//
-// So this is deliberately conservative BY CONSTRUCTION, and the asymmetry above is
-// the reason. When the match is ambiguous the answer is DO NOTHING. If you are here
-// to "loosen this so it catches more cases": that trade buys back a keypress the
-// user can supply themselves, and pays for it in keystrokes injected into live
-// agents. Prefer adding a NEW anchored predicate for a specific dialog you can
-// identify over widening this one.
-//
-// Before changing this predicate, answer: what does the new one ADMIT that the old
-// one did not? Not what it rejects — what it lets through. Adding a conjunct while
-// quietly weakening another term reads as tightening and is not; that is how the
-// #1952 fix itself first shipped a NEW false-positive path. The tests only exercise
-// the real dialogs, so they will not catch it for you.
-//
-// The match runs against a visible-only capture (CapturePaneContent), so content
-// is whatever is on screen right now — including the agent's own output, a log
-// line, or a file it printed. Requiring a marker only the real dialog renders is
-// what keeps ordinary output from being mistaken for a question.
+// The immediate-context and final-line requirements both matter. The affordance
+// appears on unrelated aider confirmations, while a URL or a copied fixture can
+// appear in ordinary output. Together they describe the rendered URL prompt, not
+// merely strings that appeared somewhere in the visible pane. Ambiguity is a
+// negative here: a miss costs one manual keypress, while a false positive types
+// into a running agent on every daemon poll (#1952).
 //
 // This is the single copy, shared with task's readiness check (task/runner.go
 // isReadyContent) so the dismissal and the readiness signal can never drift apart
@@ -359,8 +328,26 @@ func CodexTrustPromptPresent(content string) bool {
 // #1952 happened. It lives here because task already imports session/tmux; the
 // reverse edge would be an import cycle.
 func DocTrustPromptPresent(content string) bool {
-	return strings.Contains(content, "Open documentation url for more info") &&
-		strings.Contains(content, "(D)on't ask again")
+	const confirmPrefix = "(Y)es/(N)o/(D)on't ask again [Yes]:"
+	content = ansiCSISequence.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
+	lines := strings.Split(content, "\n")
+	last := len(lines) - 1
+	for last >= 0 && strings.TrimSpace(lines[last]) == "" {
+		last--
+	}
+	if last < 0 || !strings.HasSuffix(strings.TrimSpace(lines[last]), confirmPrefix) {
+		return false
+	}
+	first := last - 2
+	if first < 0 {
+		first = 0
+	}
+	for _, line := range lines[first : last+1] {
+		if strings.Contains(line, "https://") || strings.Contains(line, "http://") {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeTrustPromptPresent reports whether the captured pane content is showing

@@ -114,7 +114,7 @@ func TestIsReadyContent(t *testing.T) {
 		{
 			name:    "gemini doc trust prompt",
 			agent:   "gemini",
-			content: "Gemini CLI\nOpen documentation url for more info.\n(D)on't ask again",
+			content: "Gemini CLI\nhttps://docs.example.test/\nReview docs? (Y)es/(N)o/(D)on't ask again [Yes]:",
 			want:    true,
 		},
 		{"gemini not ready", "gemini", "starting gemini-cli…", false},
@@ -125,7 +125,7 @@ func TestIsReadyContent(t *testing.T) {
 		{"amp high-mode input box", "amp", "╭──────── high ────────╮\n│ > \n╰──────── /tmp/repo ─────╯", true},
 		{"amp box without prompt anchor", "amp", "╭ downloading tools ╮\n╰ please wait ─────╯", false},
 		{"amp prompt top without input line", "amp", "╭──────── medium ────────╮\nloading plugins", false},
-		{"amp doc trust prompt", "amp", "Open documentation url for more info.\n(D)on't ask again", true},
+		{"amp doc trust prompt", "amp", "https://docs.example.test/\nReview docs? (Y)es/(N)o/(D)on't ask again [Yes]:", true},
 		{"amp not ready on arbitrary output", "amp", "loading settings", false},
 
 		// opencode — the composer frame is the ready signal. The real-capture

@@ -564,6 +564,18 @@ func TestCheckAndHandleTrustPrompt_RealDocDialogIsDismissed(t *testing.T) {
 	}
 }
 
+func TestCheckAndHandleTrustPrompt_OverriddenDocMessageIsDismissed(t *testing.T) {
+	content := `https://aider.chat/docs/faq.html
+Review these docs before continuing? (Y)es/(N)o/(D)on't ask again [Yes]:`
+	for _, program := range []string{ProgramAider, ProgramGemini} {
+		t.Run(program, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, program, content)
+			require.True(t, handled, "the renderer invariant must identify the active URL prompt")
+			require.Contains(t, sentKeystrokes(cmds), "tmux send-keys -t =af_trust: D Enter")
+		})
+	}
+}
+
 // The dialog marker alone is not the doc-trust dialog: aider renders
 // "(D)on't ask again" on every confirmation prompt it asks. Dismissing an
 // arbitrary confirmation with 'D' ("don't ask again") is exactly the unbidden
@@ -605,6 +617,29 @@ Add src/main.go to the chat?
 					"renders is not evidence the doc dialog is up — tapping 'D' here answers an "+
 					"unrelated question; got %v", cmds)
 			require.False(t, handled)
+		})
+	}
+}
+
+func TestCheckAndHandleTrustPrompt_DocMatcherSourceCommentInjectsNothing(t *testing.T) {
+	content := `// DocTrustPromptPresent reports whether content shows the documentation-link
+// trust dialog shared by aider/gemini:
+//
+//	Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:
+//
+// ACTION HERE REQUIRES POSITIVE EVIDENCE.
+func DocTrustPromptPresent(content string) bool {
+	return strings.Contains(content, "Open documentation url for more info") &&
+		strings.Contains(content, "(D)on't ask again")
+}`
+
+	for _, program := range []string{ProgramAider, ProgramGemini} {
+		t.Run(program, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, program, content)
+			require.False(t, handled,
+				"source text describing the prompt is not evidence that the prompt is active")
+			require.Empty(t, sentKeystrokes(cmds),
+				"repo-controlled source visible in the pane must not trigger daemon input; got %v", cmds)
 		})
 	}
 }
