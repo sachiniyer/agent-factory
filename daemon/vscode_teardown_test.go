@@ -68,9 +68,13 @@ func writeUnreadableVSCodeOwnerFixture(t *testing.T, key string) {
 }
 
 func startOwnedSleep(t *testing.T) (*exec.Cmd, proctree.Process) {
+	return startOwnedSleepWithNonce(t, "test-vscode-owner-nonce")
+}
+
+func startOwnedSleepWithNonce(t *testing.T, processNonce string) (*exec.Cmd, proctree.Process) {
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
-	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"=test-vscode-owner-nonce")
+	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"="+processNonce)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, cmd.Start())
 	waited := make(chan struct{})
@@ -86,8 +90,22 @@ func startOwnedSleep(t *testing.T) (*exec.Cmd, proctree.Process) {
 			t.Errorf("owned sleep pid %d did not exit", cmd.Process.Pid)
 		}
 	})
-	process, err := proctree.Lookup(cmd.Process.Pid)
-	require.NoError(t, err)
+	deadline := time.Now().Add(2 * time.Second)
+	var process proctree.Process
+	for {
+		candidate, lookupErr := proctree.Lookup(cmd.Process.Pid)
+		value, status := proctree.LookupEnv(cmd.Process.Pid, vscodeOwnerNonceEnv)
+		if lookupErr == nil && candidate.Comm == "sleep" && status == proctree.EnvFound {
+			require.Equal(t, processNonce, value)
+			process = candidate
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("owned sleep pid %d never stabilized (comm=%q, lookup=%v, environment=%s)",
+				cmd.Process.Pid, candidate.Comm, lookupErr, status)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	return cmd, process
 }
 
@@ -121,25 +139,7 @@ func TestPersistedVSCodeOwner_FromPreviousBootIsNeverSignaled(t *testing.T) {
 
 func TestPersistedVSCodeOwner_ProcessNonceRejectsReusedIdentity(t *testing.T) {
 	shortAFHome(t)
-	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
-	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"=live-process-token")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	require.NoError(t, cmd.Start())
-	waited := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(waited)
-	}()
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		select {
-		case <-waited:
-		case <-time.After(2 * time.Second):
-			t.Errorf("foreign sleep pid %d did not exit", cmd.Process.Pid)
-		}
-	})
-	process, err := proctree.Lookup(cmd.Process.Pid)
-	require.NoError(t, err)
+	_, process := startOwnedSleepWithNonce(t, "live-process-token")
 	bootID, err := proctree.BootID()
 	require.NoError(t, err)
 
@@ -189,6 +189,8 @@ func TestPersistedVSCodeStop_DoesNotHoldSupervisorLockWhileWaiting(t *testing.T)
 	go func() { stopDone <- v.stopForInstance("blocked", "instance-1") }()
 	select {
 	case <-entered:
+	case stopErr := <-stopDone:
+		t.Fatalf("persisted owner teardown returned before reaching its blocking signal seam: %v", stopErr)
 	case <-time.After(2 * time.Second):
 		t.Fatal("persisted owner teardown never reached its blocking signal seam")
 	}
