@@ -195,6 +195,7 @@ func TestControlServer_DeleteProject_RemovesRegistryRecordAndPublishes(t *testin
 	require.True(t, del.OK)
 	assert.Equal(t, 0, del.ArchivedCount, "a sessionless project archives nothing")
 	assert.Equal(t, 0, del.KilledCount)
+	assert.True(t, del.Deregistered, "the control response must report that the durable registration was removed")
 
 	waitForEvent(t, ch, agentproto.EventProjectsChanged)
 

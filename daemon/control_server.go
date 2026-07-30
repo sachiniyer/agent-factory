@@ -708,6 +708,7 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	resp.OK = true
 	resp.ArchivedCount = len(result.Archived)
 	resp.KilledCount = len(result.Killed)
+	resp.Deregistered = result.Deregistered
 	return nil
 }
 

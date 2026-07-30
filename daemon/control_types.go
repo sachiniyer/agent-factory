@@ -171,6 +171,8 @@ type DeleteProjectResponse struct {
 	// down instead — only in-place/external worktrees (the root agent, `--here`
 	// sessions), whose kill never touches the user's tree or branch.
 	KilledCount int `json:"killed_count"`
+	// Deregistered reports whether the durable project record was removed.
+	Deregistered bool `json:"deregistered"`
 }
 
 // RegisterProjectRequest asks the daemon to register a git checkout as a durable,

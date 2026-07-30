@@ -167,6 +167,7 @@ were archived.`,
 			"repo_path":      req.RepoPath,
 			"archived_count": resp.ArchivedCount,
 			"killed_count":   resp.KilledCount,
+			"deregistered":   resp.Deregistered,
 		})
 	},
 }

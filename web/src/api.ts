@@ -472,11 +472,13 @@ export async function handoffSession(id: string, title: string, to: string, toke
 }
 
 /** The daemon's DeleteProject response: how many sessions it archived vs tore
- *  down (in-place ones that can't be archived). */
+ *  down (in-place ones that can't be archived), and whether it removed the
+ *  durable project registration. */
 export interface DeleteProjectResult {
   ok: boolean;
   archived_count: number;
   killed_count: number;
+  deregistered: boolean;
 }
 
 /** Deletes a project (mirrors `af projects delete`): regular live sessions are
