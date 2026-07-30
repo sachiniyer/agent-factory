@@ -42,16 +42,16 @@ var (
 	// indicator strings are NOT contiguous in a raw capture either and must be
 	// matched on the stripped skeleton for the same reason.
 	paneAnsiEscape = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
-	// ampPromptFrameTop matches the top rule of amp's input-prompt frame: a
-	// box-drawing top run carrying the mode label near its right end, e.g.
-	// "╭──── medium ────╮" (matched after ANSI stripping). The left side is
-	// tolerant of decorations amp interleaves into the rule (e.g. a "$0.06" cost
-	// indicator once a turn has spent tokens: "╭──── $0.06 ─ medium ─╮"), so the
-	// match keeps working across those format variants; the mode label followed
-	// by the closing "─╮" is the stable anchor.
-	ampPromptFrameTop = regexp.MustCompile(`╭[─ ].*[─ ](low|medium|high|deep)[─ ]+╮`)
+	// ampPromptFrameTop matches the invariant rendered prefix of amp's
+	// input-prompt frame (after ANSI stripping): a top-left corner immediately
+	// followed by its horizontal rule. Text embedded later in that rule is owned
+	// by amp — mode names and decorations have both changed — so it is deliberately
+	// NOT part of the protocol. The contiguous interior + bottom-rule walk below
+	// supplies the strictness that excludes banners, loading panes, and stale
+	// fragments.
+	ampPromptFrameTop = regexp.MustCompile(`^\s*╭─`)
 	// ampPromptFrameBottom matches the bottom rule of the same frame, which carries
-	// the repo/branch, e.g. "╰──── repo (branch) ────╯". Requiring BOTH the labeled
+	// the repo/branch, e.g. "╰──── repo (branch) ────╯". Requiring BOTH the anchored
 	// top and the closing bottom confirms the input box fully rendered and is
 	// accepting input — it excludes amp's blank loading pane and its "Welcome to
 	// Amp" banner, neither of which draws the box (the reason the match is strict).
@@ -241,7 +241,7 @@ func isReadyContent(content, agent string) bool {
 // accepting-input state. amp colorizes the frame, so the ANSI escapes are stripped
 // first (see ampAnsiEscape).
 //
-// Readiness requires a CONTIGUOUS frame: a labeled top rule, immediately followed
+// Readiness requires a CONTIGUOUS frame: the anchored top rule, immediately followed
 // by the box-interior rows (each a "│ … │" line) and then the closing bottom rule,
 // with no other line in between. Matching the top and bottom rules independently
 // anywhere in the pane would let an old top border in scrollback pair with a newer
@@ -272,7 +272,7 @@ func isAmpPromptFrame(content string) bool {
 // questions: "is opencode accepting input?" is whether the frame exists at all,
 // and "is opencode mid-turn?" is what the status bar BELOW that frame says.
 //
-// opencode's composer has no labeled top rule (unlike amp's "╭──── medium ────╮"),
+// opencode's composer has no top rule (unlike amp's "╭──── medium ────╮"),
 // so the walk anchors on the distinctive bottom rule and steps UP one line: a real
 // composer always has a "┃" box-interior row directly above its rule. Requiring
 // that pairing rather than matching a lone "╹" anywhere excludes stray glyphs.
@@ -321,13 +321,13 @@ func ampFrameBottomRule(content string) (string, bool) {
 		if !ampPromptFrameTop.MatchString(line) {
 			continue
 		}
-		// Walk downward from the labeled top rule: box-interior rows begin with
+		// Walk downward from the anchored top rule: box-interior rows begin with
 		// the "│" border, and a bottom rule closes a contiguous box. Any other line
 		// before the bottom rule means these borders are not one box, so this top
 		// rule is stale scrollback — keep scanning.
 		//
 		// Keep the LAST such frame, not the first: agent output can quote a
-		// complete frame (labeled top rule, "│" interior, bottom rule) above the
+		// complete frame (top rule, "│" interior, bottom rule) above the
 		// live one, so the CURRENT frame is the bottom-most complete pairing, never
 		// the first — returning the first pinned an idle session at Running when the
 		// quoted rule read as working (#2439). opencodeFrameLines tracks its last

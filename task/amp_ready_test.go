@@ -19,8 +19,8 @@ import (
 // escape wraps the repo/branch on the bottom rule. Those escapes sit between the
 // box-drawing glyphs, so the old box regex never matched in the wild — amp creates
 // spun the full readiness timeout. The fix strips escapes first, then requires the
-// labeled top rule AND the closing bottom rule, so the real ready frame matches and
-// the blank loading pane / "Welcome to Amp" banner do not.
+// frame's invariant top prefix AND closing bottom rule, so the real ready frame
+// matches and the blank loading pane / "Welcome to Amp" banner do not.
 func TestIsAmpPromptFrameRealCapture(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -55,7 +55,7 @@ func TestIsAmpPromptFrameRealCapture(t *testing.T) {
 }
 
 // TestIsAmpPromptFrameRequiresBothRules guards the strictness the old comment
-// asked for: a labeled top rule alone (a partial redraw, or the box top scrolled
+// asked for: a top rule alone (a partial redraw, or the box top scrolled
 // into stale scrollback) is not "accepting input" until the closing bottom rule is
 // also present. Built from the real capture so the ANSI handling is exercised too.
 func TestIsAmpPromptFrameRequiresBothRules(t *testing.T) {
@@ -76,14 +76,14 @@ func TestIsAmpPromptFrameRequiresBothRules(t *testing.T) {
 	}
 
 	if isAmpPromptFrame(joinLines(topOnly)) {
-		t.Error("labeled top rule without the bottom rule must not count as ready")
+		t.Error("top rule without the bottom rule must not count as ready")
 	}
 	if isAmpPromptFrame(joinLines(bottomOnly)) {
-		t.Error("bottom rule without the labeled top rule must not count as ready")
+		t.Error("bottom rule without the top rule must not count as ready")
 	}
 }
 
-// TestIsAmpPromptFrameRequiresContiguousBox pins Greptile P2: the labeled top rule
+// TestIsAmpPromptFrameRequiresContiguousBox pins Greptile P2: the top rule
 // and the closing bottom rule must belong to ONE adjacent box. Separated fragments
 // — an old frame's top border left in scrollback, unrelated output, then a bottom
 // border — must not read as ready; one contiguous current box must.
@@ -102,6 +102,27 @@ func TestIsAmpPromptFrameRequiresContiguousBox(t *testing.T) {
 		"╰──────── /tmp/repo (main) ────────╯\n"
 	if !isAmpPromptFrame(live) {
 		t.Error("a contiguous current amp prompt box must count as ready")
+	}
+}
+
+// TestIsAmpPromptFrameIgnoresModeLabel pins the rendered protocol boundary:
+// Amp owns the text embedded in the prompt frame's top rule and can add, rename,
+// or override modes independently of af. Readiness therefore anchors on the
+// invariant frame prefix and contiguous box shape, never a mode vocabulary.
+func TestIsAmpPromptFrameIgnoresModeLabel(t *testing.T) {
+	for _, label := range []string{"ultra", "backend-defined-mode"} {
+		t.Run(label, func(t *testing.T) {
+			content := "╭──────── " + label + " ────────╮\n" +
+				"│ >                                        │\n" +
+				"│                                          │\n" +
+				"╰──────── /tmp/repo (main) ────────╯\n"
+			if !isAmpPromptFrame(content) {
+				t.Fatalf("a contiguous Amp prompt frame with label %q must count as ready", label)
+			}
+			if !isReadyContent(content, "amp") {
+				t.Fatalf("WaitForReady seam rejected Amp prompt frame label %q", label)
+			}
+		})
 	}
 }
 
