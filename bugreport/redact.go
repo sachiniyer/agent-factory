@@ -185,12 +185,7 @@ func (r *redactor) scrub(s string) string {
 	// part of the privacy invariant, not a nicety. Sort a copy so scrub stays a pure
 	// read of r.users.
 	names := append([]string(nil), r.users...)
-	sort.Slice(names, func(i, j int) bool {
-		if len(names[i]) != len(names[j]) {
-			return len(names[i]) > len(names[j])
-		}
-		return names[i] < names[j]
-	})
+	sortLongestFirst(names)
 	for _, name := range names {
 		s = replaceBareToken(s, name, userMarker)
 	}
@@ -258,17 +253,23 @@ func (r *redactor) scrubSessionTitles(s string) string {
 	// first destroys the only exact match for the longer secret and leaves its
 	// suffix behind, so the order is part of the privacy invariant. The lexical
 	// tie-break makes output deterministic even though titles are stored in a map.
-	sort.Slice(titles, func(i, j int) bool {
-		if len(titles[i]) != len(titles[j]) {
-			return len(titles[i]) > len(titles[j])
-		}
-		return titles[i] < titles[j]
-	})
+	sortLongestFirst(titles)
 	for _, title := range titles {
 		s = strings.ReplaceAll(s, strconv.Quote(title), strconv.Quote(redactedMarker))
 		s = replaceBareTitle(s, title)
 	}
 	return s
+}
+
+// sortLongestFirst keeps redaction order in one place: replace longer secrets
+// before their prefixes, with a lexical tie-break for deterministic output.
+func sortLongestFirst(values []string) {
+	sort.Slice(values, func(i, j int) bool {
+		if len(values[i]) != len(values[j]) {
+			return len(values[i]) > len(values[j])
+		}
+		return values[i] < values[j]
+	})
 }
 
 // tmuxPrefixMarker is the redaction of an af tmux session name whose title
