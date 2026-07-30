@@ -87,11 +87,12 @@ var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
 // Filesystem operation seams let tests force cross-device and cleanup-failure
 // paths deterministically. Production never reassigns them.
 var (
-	renamePath                = renamePathNoReplace
-	removeAllPath             = os.RemoveAll
-	copyTreeBeforeSourceOpen  = func(string) error { return nil }
-	moveDirBeforeDestCommit   = func(string) error { return nil }
-	moveDirBeforeSourceCommit = func(string) error { return nil }
+	renamePath                  = renamePathNoReplace
+	removeAllPath               = os.RemoveAll
+	copyTreeBeforeSourceOpen    = func(string) error { return nil }
+	moveDirBeforeDestParentOpen = func(string) error { return nil }
+	moveDirBeforeDestCommit     = func(string) error { return nil }
+	moveDirBeforeSourceCommit   = func(string) error { return nil }
 )
 
 // MoveWorktree relocates this worktree's directory to dest and keeps git's
@@ -267,6 +268,10 @@ func moveDirCrossDevice(src, dest string) error {
 	}
 	copied, err := copyTreeWithIdentities(src, stagingPath)
 	if err != nil {
+		cleanupErr := removeAllPath(stagingPath)
+		if cleanupErr != nil {
+			return fmt.Errorf("failed to copy worktree into private staging directory %s (%v) and failed to clean that staging tree: %w", stagingPath, err, cleanupErr)
+		}
 		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
 	}
 
@@ -302,8 +307,17 @@ func moveDirCrossDevice(src, dest string) error {
 	}
 
 	destinationParentPath := filepath.Dir(dest)
+	if err := moveDirBeforeDestParentOpen(destinationParentPath); err != nil {
+		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
+			return fmt.Errorf("destination parent hook failed (%v) and secured source could not be restored: %w", err, restoreErr)
+		}
+		return err
+	}
 	destinationParent, _, err := openDirectoryPathFollowingLinks(destinationParentPath, "destination parent")
 	if err != nil {
+		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
+			return fmt.Errorf("failed to reopen destination parent %s (%v) and secured source could not be restored: %w", destinationParentPath, err, restoreErr)
+		}
 		return err
 	}
 	defer destinationParent.Close()
@@ -596,7 +610,7 @@ func privateMovePath(path, purpose string) (string, error) {
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", fmt.Errorf("generate private %s path beside %s: %w", purpose, path, err)
 	}
-	name := fmt.Sprintf(".%s.af-%s-%s", filepath.Base(path), purpose, hex.EncodeToString(random[:]))
+	name := fmt.Sprintf(".af-%s-%s", purpose, hex.EncodeToString(random[:]))
 	return filepath.Join(filepath.Dir(path), name), nil
 }
 

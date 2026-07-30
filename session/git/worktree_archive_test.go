@@ -729,6 +729,73 @@ func TestMoveDirCrossDevice_SourceReplacementAtCleanupIsNotDeleted(t *testing.T)
 	assert.FileExists(t, filepath.Join(movedOriginal, "original.txt"), "the renamed original must remain recoverable")
 }
 
+// TestMoveDirCrossDevice_DestinationParentReopenFailureRestoresSource covers the
+// destination parent changing after the source was atomically quarantined. A
+// failed second parent open must restore src rather than strand the worktree at
+// an unrecorded private name.
+func TestMoveDirCrossDevice_DestinationParentReopenFailureRestoresSource(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	destinationParent := filepath.Join(t.TempDir(), "destination-parent")
+	require.NoError(t, os.Mkdir(destinationParent, 0755))
+	dest := filepath.Join(destinationParent, "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeDestParentOpen
+	moveDirBeforeDestParentOpen = func(path string) error {
+		return os.Rename(path, path+".moved")
+	}
+	t.Cleanup(func() { moveDirBeforeDestParentOpen = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err, "the removed destination parent must abort the move")
+	assert.FileExists(t, filepath.Join(src, "original.txt"), "source must be restored after destination-parent reopen fails")
+}
+
+// TestMoveDirCrossDevice_CopyFailureCleansPrivateStaging ensures an unsupported
+// node cannot leak a nearly complete random staging tree on every archive retry.
+func TestMoveDirCrossDevice_CopyFailureCleansPrivateStaging(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "regular.txt"), []byte("regular"), 0644))
+	require.NoError(t, syscall.Mkfifo(filepath.Join(src, "unsupported.fifo"), 0600))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err)
+	entries, readErr := os.ReadDir(destinationParent)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "failed copy must remove its private staging tree")
+	assert.FileExists(t, filepath.Join(src, "regular.txt"), "copy failure must leave source untouched")
+}
+
+// TestMoveDirCrossDevice_LongLeafFitsPrivateNames covers a valid 239-byte leaf,
+// the placement limit that reserves 16 bytes below NAME_MAX. Private staging
+// and source names must not append enough text to make that valid path fail.
+func TestMoveDirCrossDevice_LongLeafFitsPrivateNames(t *testing.T) {
+	leaf := strings.Repeat("w", 239)
+	src := filepath.Join(t.TempDir(), leaf)
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))
+	dest := filepath.Join(t.TempDir(), leaf)
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	require.NoError(t, moveDirCrossDevice(src, dest))
+	assert.FileExists(t, filepath.Join(dest, "tracked.txt"))
+	assert.NoDirExists(t, src)
+}
+
 // TestCopyTree_RejectsNamedPipeWithoutBlocking is the #2654 regression. The
 // cross-device move fallback copies a worktree node by node; opening a FIFO as
 // though it were a regular file waits for a writer forever. Special files must
