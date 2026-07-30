@@ -121,6 +121,11 @@ func TestExtractJSON(t *testing.T) {
 			in:   "progress { reading \"config\n" + `{"name": "remote-one"}`,
 			want: `{"name": "remote-one"}`,
 		},
+		{
+			name: "resynchronizes before same-line JSON after unterminated string",
+			in:   "progress { reading \"config " + `{"name": "remote-one"}` + "\n",
+			want: `{"name": "remote-one"}`,
+		},
 	}
 
 	for _, tc := range cases {

@@ -592,6 +592,7 @@ echo '{"level":"info","url":"http://wrong.invalid","token":"logged-secret"}' >&2
 echo '{"URL":"http://case-variant.invalid","TOKEN":"case-variant-secret"}' >&2
 echo '{"url":"http://first-duplicate.invalid","url":"http://last-duplicate.invalid","token":"duplicate-secret"}' >&2
 echo '{"level":"info","endpoint":{"url":"http://nested.invalid","token":"nested-secret"},INVALID}' >&2
+echo '{"level":INVALID,"endpoint":{"url":"http://post-error.invalid","token":"post-error-secret"}}' >&2
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 echo '{"level":"info","msg":"tunnel ready"}' >&2
 exit 0
@@ -707,6 +708,19 @@ func TestHookOutputSuffixRedactsTruncatedJSONEscapedToken(t *testing.T) {
 
 	suffix := hookOutputSuffix([]byte(output))
 	assert.NotContains(t, suffix, secret, "a truncated serialized endpoint must not expose its bearer token")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
+// TestHookOutputSuffixRedactsTopLevelSerializedEndpoint covers log pipelines
+// that JSON-encode the endpoint document itself as a complete string record.
+// It has no enclosing object for the recursive map walk to discover.
+func TestHookOutputSuffixRedactsTopLevelSerializedEndpoint(t *testing.T) {
+	const secret = "top-level-json-string-token-must-not-leak"
+	output := "{\"level\":\"info\"}\n" +
+		`"{\"url\":\"\",\"token\":\"top-level-json-string-token-must-not-leak\"}"`
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "a serialized top-level endpoint must not expose its bearer token")
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 

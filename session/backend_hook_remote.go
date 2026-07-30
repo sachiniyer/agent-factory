@@ -93,6 +93,7 @@ type jsonCandidateRange struct {
 	firstChild  int
 	lastChild   int
 	nextSibling int
+	embedded    bool
 }
 
 func extractJSONAt(output string, start int) (string, int) {
@@ -100,6 +101,8 @@ func extractJSONAt(output string, start int) (string, int) {
 	var stack []int
 	inString := false
 	escape := false
+	stringCandidateStart := -1
+	lineRescanned := false
 	for cursor := start; cursor < len(output); cursor++ {
 		c := output[cursor]
 		if len(stack) == 0 {
@@ -118,14 +121,29 @@ func extractJSONAt(output string, start int) (string, int) {
 			continue
 		}
 
+		if inString && (c == '{' || c == '[') && stringCandidateStart < 0 {
+			stringCandidateStart = cursor
+		}
 		// A raw newline cannot occur inside a JSON string. Treat it as a hard
 		// resynchronization boundary so an unterminated stderr diagnostic cannot
 		// hide a complete endpoint record written on the next line to stdout.
 		if inString && (c == '\n' || c == '\r') {
+			if stringCandidateStart >= 0 && !lineRescanned {
+				cursor = stringCandidateStart - 1
+				candidates = candidates[:0]
+				stack = stack[:0]
+				inString = false
+				escape = false
+				stringCandidateStart = -1
+				lineRescanned = true
+				continue
+			}
 			candidates = candidates[:0]
 			stack = stack[:0]
 			inString = false
 			escape = false
+			stringCandidateStart = -1
+			lineRescanned = false
 			continue
 		}
 		if escape {
@@ -143,6 +161,11 @@ func extractJSONAt(output string, start int) (string, int) {
 		if inString {
 			continue
 		}
+		if c == '\n' || c == '\r' {
+			stringCandidateStart = -1
+			lineRescanned = false
+			continue
+		}
 
 		if c == '{' || c == '[' {
 			parent := stack[len(stack)-1]
@@ -152,6 +175,8 @@ func extractJSONAt(output string, start int) (string, int) {
 				firstChild:  -1,
 				lastChild:   -1,
 				nextSibling: -1,
+				embedded: candidates[parent].embedded ||
+					jsonCandidateFollowsColon(output, cursor, candidates[parent].start),
 			})
 			if candidates[parent].firstChild < 0 {
 				candidates[parent].firstChild = index
@@ -185,6 +210,7 @@ func extractJSONAt(output string, start int) (string, int) {
 			return output[candidate.start:candidate.end], candidate.end
 		}
 		candidates = candidates[:0]
+		stringCandidateStart = -1
 	}
 	if len(candidates) > 0 {
 		unfinished := candidates[0]
@@ -211,7 +237,7 @@ func firstJSONCandidateAfterError(
 ) (jsonCandidateRange, bool) {
 	for index := candidates[parent].firstChild; index >= 0; index = candidates[index].nextSibling {
 		candidate := candidates[index]
-		if candidate.end <= candidate.start || candidate.start < errorAt {
+		if candidate.embedded || candidate.end <= candidate.start || candidate.start < errorAt {
 			continue
 		}
 		valid, childErrorAt, recoverable := inspectJSONCandidate(output, candidate)
@@ -226,6 +252,18 @@ func firstJSONCandidateAfterError(
 		}
 	}
 	return jsonCandidateRange{}, false
+}
+
+func jsonCandidateFollowsColon(output string, start, lowerBound int) bool {
+	for cursor := start - 1; cursor > lowerBound; cursor-- {
+		switch output[cursor] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		default:
+			return output[cursor] == ':'
+		}
+	}
+	return false
 }
 
 // inspectJSONCandidate parses directly from the output string so an early

@@ -389,6 +389,7 @@ func hookOutputSuffix(out []byte) string {
 // to persistent session errors, so that tail must be safe too.
 func redactHookOutputTokens(output string) string {
 	output = redactCompleteHookJSON(output)
+	output = redactTopLevelHookJSONStrings(output)
 	ranges := hookTokenRedactionRanges(output)
 	if len(ranges) == 0 {
 		return output
@@ -403,6 +404,62 @@ func redactHookOutputTokens(output string) string {
 	}
 	redacted.WriteString(output[written:])
 	return redacted.String()
+}
+
+// redactTopLevelHookJSONStrings handles JSON log streams where the record is a
+// string containing serialized endpoint JSON rather than an object with a
+// string field. Hook JSON records are newline-delimited; requiring the whole
+// trimmed line to decode as a string avoids treating arbitrary quoted prose as
+// a structured value.
+func redactTopLevelHookJSONStrings(output string) string {
+	var redacted strings.Builder
+	written := 0
+	for lineStart := 0; lineStart < len(output); {
+		lineEnd := lineStart + strings.IndexByte(output[lineStart:], '\n')
+		if lineEnd < lineStart {
+			lineEnd = len(output)
+		}
+		nextLine := lineEnd
+		if nextLine < len(output) {
+			nextLine++
+		}
+
+		valueStart := lineStart
+		for valueStart < lineEnd && isJSONWhitespace(output[valueStart]) {
+			valueStart++
+		}
+		valueEnd := lineEnd
+		for valueEnd > valueStart && isJSONWhitespace(output[valueEnd-1]) {
+			valueEnd--
+		}
+		if valueStart < valueEnd && output[valueStart] == '"' {
+			var decoded string
+			if json.Unmarshal([]byte(output[valueStart:valueEnd]), &decoded) == nil {
+				sanitized := redactHookOutputTokens(decoded)
+				if sanitized != decoded {
+					encoded, _ := json.Marshal(sanitized)
+					redacted.WriteString(output[written:valueStart])
+					redacted.Write(encoded)
+					written = valueEnd
+				}
+			}
+		}
+		lineStart = nextLine
+	}
+	if written == 0 {
+		return output
+	}
+	redacted.WriteString(output[written:])
+	return redacted.String()
+}
+
+func isJSONWhitespace(value byte) bool {
+	switch value {
+	case ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
 }
 
 // redactCompleteHookJSON handles structured log records that serialize another
