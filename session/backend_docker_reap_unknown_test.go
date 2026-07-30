@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +32,57 @@ func withShortDockerReapTimeout(t *testing.T, d time.Duration) {
 	prev := dockerReapTimeout
 	dockerReapTimeout = d
 	t.Cleanup(func() { dockerReapTimeout = prev })
+}
+
+// TestDockerProvisionFailureSurfacesUnknownReap covers the no-record failure
+// path: if provisioning fails after creating a container and its immediate reap
+// times out, both causes and the orphan risk must reach the session creator.
+func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "docker",
+		"docker":  map[string]any{"image": "img:latest"},
+	})
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	withShortDockerReapTimeout(t, 50*time.Millisecond)
+
+	provisionErr := errors.New("permission denied")
+	var reapCalls atomic.Int32
+	defer SetDockerExecForTest(func(ctx context.Context, _ []string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "info":
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		case "run":
+			return []byte(dockerCreatedID + "\n"), nil
+		case "exec":
+			return nil, provisionErr
+		case "rm":
+			reapCalls.Add(1)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		default:
+			return nil, fmt.Errorf("unexpected docker command: %v", args)
+		}
+	})()
+
+	_, err := dockerRuntime{}.Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "partial-container",
+		CloneURL: "file:///repo",
+	})
+	if !errors.Is(err, provisionErr) || !errors.Is(err, ErrWorkspaceStateUnknown) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("provision and unknown cleanup causes must all survive, got %v", err)
+	}
+	if reapCalls.Load() != 1 {
+		t.Fatalf("failed provision attempted container cleanup %d times, want 1", reapCalls.Load())
+	}
+	for _, detail := range []string{shortContainerID(dockerCreatedID), "partial-container", "may still be running", "inspect it before retrying"} {
+		if !strings.Contains(err.Error(), detail) {
+			t.Fatalf("provision cleanup error omitted %q: %v", detail, err)
+		}
+	}
 }
 
 // TestDockerReapTimeoutIsWorkspaceStateUnknown is the #2049 regression: a reap

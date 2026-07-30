@@ -241,14 +241,24 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	}
 	res, err := p.provision()
 	if err != nil {
-		// Reap anything the failed provision left running so a container never
-		// leaks on a partial failure.
-		if p.containerID != "" {
-			p.reap()
-		}
-		return ProvisionResult{}, err
+		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
+}
+
+// reapProvisionFailure cleans up a container created by a failed provision. No
+// Instance record exists to carry a future retry, so a reap that does not succeed
+// must remain visible to the caller with both causes and the orphan risk (#2590).
+func (p *dockerProvisioner) reapProvisionFailure(provisionErr error) error {
+	if p.containerID == "" {
+		return provisionErr
+	}
+	reapErr := p.reap()
+	if reapErr == nil {
+		return provisionErr
+	}
+	return fmt.Errorf("backend=docker: provisioning failed and cleanup of container %s for session %q did not complete; a container may still be running; inspect it before retrying: %w",
+		p.shortID(), p.spec.Title, errors.Join(provisionErr, reapErr))
 }
 
 // dockerProvisioner holds the state of one container provisioning so its steps
