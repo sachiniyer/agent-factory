@@ -39,6 +39,12 @@ func TestRedactAccessTokenURL(t *testing.T) {
 			wantPresent: []string{"box:8080", "access_token=REDACTED"},
 		},
 		{
+			name:        "semicolon query separator",
+			raw:         "http://box:8080/stream?view=2;access_token=sekrit;mode=full",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"box:8080", "view=2", "access_token=REDACTED", "mode=full"},
+		},
+		{
 			name:        "no token untouched",
 			raw:         "http://box:8080/v1/sessions/s/stream?tab=2",
 			wantAbsent:  []string{"REDACTED"},

@@ -88,14 +88,14 @@ func RedactAccessTokenText(text string) string {
 			return redacted.String()
 		}
 		valueStart := i + len(needle)
-		if i > 0 && rest[i-1] != '?' && rest[i-1] != '&' {
+		if i > 0 && rest[i-1] != '?' && rest[i-1] != '&' && rest[i-1] != ';' {
 			redacted.WriteString(rest[:valueStart])
 			rest = rest[valueStart:]
 			continue
 		}
 
 		valueEnd := valueStart
-		for valueEnd < len(rest) && !strings.ContainsRune("& \t\r\n#\"'", rune(rest[valueEnd])) {
+		for valueEnd < len(rest) && !strings.ContainsRune("&; \t\r\n#\"'", rune(rest[valueEnd])) {
 			valueEnd++
 		}
 		redacted.WriteString(rest[:valueStart])
