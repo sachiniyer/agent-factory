@@ -229,10 +229,17 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			}
 			// The session may have disappeared after `tmux ls`. Re-probe the
 			// exact name after every non-timeout marker error: only an authoritative
-			// has-session absence turns this race into a successful no-op.
+			// has-session absence turns this race into a successful cleanup. Session
+			// absence is not process absence: a detached AF_SESSION-marked helper may
+			// have survived after tmux lost the pane ancestry used by the normal
+			// reaper, so the absent branch performs an ownership-scoped process sweep.
 			exists, known, probeErr := probeSessionStrict(cmdExec, match)
 			if known && !exists {
-				log.InfoLog.Printf("tmux session %s vanished during ownership lookup; nothing remains to clean", match)
+				if reapErr := reapVanishedSessionProcesses(match, ownHome); reapErr != nil {
+					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
+						match, reapErr)
+				}
+				log.InfoLog.Printf("tmux session %s vanished during ownership lookup; marked orphan process sweep completed", match)
 				continue
 			}
 			if !known {
@@ -319,4 +326,30 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	}
 	wg.Wait()
 	return killErr
+}
+
+func reapVanishedSessionProcesses(match, ownHome string) error {
+	marked, inspectErr := markedOrphanProcesses(match, ownHome)
+	remaining := reapLeakedProcesses(match, marked, reapGraceWait, reapTermWait)
+	if len(remaining) > 0 {
+		pids := make([]string, 0, len(remaining))
+		for _, process := range remaining {
+			pids = append(pids, fmt.Sprintf("%d", process.PID))
+		}
+		inspectErr = errors.Join(inspectErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
+			strings.Join(pids, ", ")))
+	}
+	// Re-snapshot after signalling. A helper can fork between the first snapshot
+	// and SIGTERM; only a second affirmative empty result proves the sweep did
+	// not leave a newly detached marked child behind.
+	left, verifyErr := markedOrphanProcesses(match, ownHome)
+	if len(left) > 0 {
+		pids := make([]string, 0, len(left))
+		for _, process := range left {
+			pids = append(pids, fmt.Sprintf("%d", process.PID))
+		}
+		verifyErr = errors.Join(verifyErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",
+			strings.Join(pids, ", ")))
+	}
+	return errors.Join(inspectErr, verifyErr)
 }

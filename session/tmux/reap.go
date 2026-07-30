@@ -3,6 +3,8 @@ package tmux
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +127,102 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		}
 	}
 	return procs, errors.Join(captureErrs...)
+}
+
+// markedOrphanProcesses finds same-user processes whose immutable launch
+// environment proves they belong to this exact tmux session and AF home. It is
+// the fallback after tmux authoritatively reports that a session vanished
+// before its pane tree could be captured: AF_SESSION recovers the lost session
+// identity, while AF_HOME keeps a same-named process from another install out
+// of the reap set.
+//
+// An unreadable environment on a live same-user process is UNKNOWN, not an
+// absent marker. Returning both the processes we did prove and an error lets
+// cleanup reap known-owned orphans while still refusing worktree deletion when
+// it could not rule out another one. Processes owned by another uid cannot have
+// been launched by this user's reset target and are skipped before reading
+// their environment.
+func markedOrphanProcesses(sanitizedName, ownHome string) ([]proctree.Process, error) {
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		return nil, fmt.Errorf("cannot inspect processes after tmux session vanished: %w", err)
+	}
+	selfUID, selfUIDKnown := proctree.UID(os.Getpid())
+	if !selfUIDKnown {
+		return nil, fmt.Errorf("cannot determine reset process ownership while checking vanished tmux session %s", sanitizedName)
+	}
+	selfChain := selfAndAncestorProcesses(snap)
+	cleanHome := filepath.Clean(ownHome)
+	var owned []proctree.Process
+	var inspectErrs []error
+	for _, process := range snap {
+		uid, uidKnown := proctree.UID(process.PID)
+		if !uidKnown {
+			if proctree.AliveSame(process) {
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine owner of live pid %d", process.PID))
+			}
+			continue
+		}
+		if uid != selfUID {
+			continue
+		}
+
+		environ, envErr := proctree.Environ(process.PID)
+		if envErr != nil {
+			if proctree.AliveSame(process) {
+				inspectErrs = append(inspectErrs, fmt.Errorf("cannot determine whether live pid %d belongs to session %s: %w",
+					process.PID, sanitizedName, envErr))
+			}
+			continue
+		}
+		processSession, hasSession := processEnvValue(environ, EnvMarkerSession)
+		if !hasSession || processSession != sanitizedName {
+			continue
+		}
+		processHome, hasHome := processEnvValue(environ, EnvMarkerHome)
+		if !hasHome {
+			inspectErrs = append(inspectErrs, fmt.Errorf("live pid %d marks session %s but has no %s ownership marker",
+				process.PID, sanitizedName, EnvMarkerHome))
+			continue
+		}
+		if filepath.Clean(processHome) != cleanHome {
+			continue
+		}
+		if selfChain[process.PID] {
+			inspectErrs = append(inspectErrs, fmt.Errorf("refusing to reap reset process or ancestor pid %d for vanished session %s",
+				process.PID, sanitizedName))
+			continue
+		}
+		owned = append(owned, process)
+	}
+	return owned, errors.Join(inspectErrs...)
+}
+
+func processEnvValue(environ []string, name string) (string, bool) {
+	prefix := name + "="
+	for _, value := range environ {
+		if strings.HasPrefix(value, prefix) {
+			return value[len(prefix):], true
+		}
+	}
+	return "", false
+}
+
+func selfAndAncestorProcesses(snap map[int]proctree.Process) map[int]bool {
+	ancestors := make(map[int]bool)
+	pid := os.Getpid()
+	for range 128 {
+		if pid <= 0 || ancestors[pid] {
+			break
+		}
+		ancestors[pid] = true
+		process, ok := snap[pid]
+		if !ok {
+			break
+		}
+		pid = process.PPID
+	}
+	return ancestors
 }
 
 // reapLeakedProcesses waits for the captured processes to exit after

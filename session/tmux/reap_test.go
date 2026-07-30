@@ -153,6 +153,112 @@ func TestCleanupSessionsReapsEscapedProcesses(t *testing.T) {
 		"SIGHUP-immune pane child survived CleanupSessions")
 }
 
+// TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringOwnership
+// covers the ls-to-marker race's process half. A detached helper can outlive
+// the tmux session that stamped its AF_SESSION/AF_HOME ancestry markers; reset
+// must not read "session absent" as "no process remains" and delete the
+// helper's worktree underneath it.
+func TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringOwnership(t *testing.T) {
+	shrinkReapWaits(t)
+
+	const name = "af_vanished_with_helper"
+	home := t.TempDir()
+	marked := spawnAncestryMarkedHelper(t, name, home)
+	installVanishedSessionTmux(t, name)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	require.NoError(t, CleanupSessions(cmd.MakeExecutor()))
+	require.False(t, proctree.AliveSame(marked),
+		"AF_SESSION/AF_HOME-marked helper survived after its tmux session vanished")
+}
+
+// The process sweep's AF_HOME check is an authorization boundary, not just a
+// filter: a same-named helper from another install must never be signalled.
+func TestCleanupSessionsDoesNotReapForeignHomeProcessForVanishedSession(t *testing.T) {
+	shrinkReapWaits(t)
+
+	const name = "af_vanished_foreign_helper"
+	marked := spawnAncestryMarkedHelper(t, name, t.TempDir())
+	installVanishedSessionTmux(t, name)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, CleanupSessions(cmd.MakeExecutor()))
+	require.True(t, proctree.AliveSame(marked),
+		"a foreign-home helper with the same session name must not be reaped")
+}
+
+// A matching AF_SESSION without readable home ownership is not foreign and is
+// not ours: it is unknown. Leave the process alive and stop reset before it can
+// delete a worktree the process may still be using.
+func TestCleanupSessionsFailsClosedOnUnownedProcessForVanishedSession(t *testing.T) {
+	shrinkReapWaits(t)
+
+	const name = "af_vanished_unowned_helper"
+	marked := spawnAncestryMarkedHelper(t, name, "")
+	installVanishedSessionTmux(t, name)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	err := CleanupSessions(cmd.MakeExecutor())
+	require.ErrorContains(t, err, "has no AF_HOME ownership marker")
+	require.True(t, proctree.AliveSame(marked),
+		"a process with unknown home ownership must be left alone")
+}
+
+func spawnAncestryMarkedHelper(t *testing.T, name, home string) proctree.Process {
+	t.Helper()
+	helper := exec.Command("sleep", "300")
+	helper.Env = append(os.Environ(), EnvMarkerSession+"="+name)
+	if home != "" {
+		helper.Env = append(helper.Env, EnvMarkerHome+"="+home)
+	}
+	require.NoError(t, helper.Start())
+	t.Cleanup(func() {
+		_ = helper.Process.Kill()
+		_, _ = helper.Process.Wait()
+	})
+
+	var marked proctree.Process
+	require.Eventually(t, func() bool {
+		snap, err := proctree.Snapshot()
+		if err != nil {
+			return false
+		}
+		var ok bool
+		marked, ok = snap[helper.Process.Pid]
+		if !ok {
+			return false
+		}
+		gotName, nameStatus := proctree.LookupEnv(marked.PID, EnvMarkerSession)
+		return nameStatus == proctree.EnvFound && gotName == name
+	}, 5*time.Second, 20*time.Millisecond, "helper ancestry marker never became readable")
+	return marked
+}
+
+func installVanishedSessionTmux(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+ls)
+  echo '%s: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+show-environment)
+  exit 97
+  ;;
+has-session)
+  [ "${2-}" = "-t=%s" ] || exit 98
+  printf "can't find session: %s\n" >&2
+  exit 1
+  ;;
+*)
+  exit 96
+  ;;
+esac
+`, name, name, name)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // TestCaptureRejectsNonTmuxPaneRoots is the safety property that keeps
 // mock-backed tests (and any confused tmux output) from ever capturing a
 // process tree that is not rooted in a real tmux pane: a claimed pane PID
