@@ -50,6 +50,13 @@ const (
 // mid-create session as idle — releasing a concurrency slot it should hold, and
 // telling `sessions watch` a session is ready before it ever started.
 func ClassifyActivity(data InstanceData) (Activity, string) {
+	// A committed kill is terminal even while its teardown or an older operation
+	// marker remains visible. UserKilled means finish-this-kill, never resume work;
+	// treating a stale pending mission/op as active would keep watch and task slots
+	// alive for a run that can no longer continue.
+	if data.UserKilled {
+		return ActivityTerminal, "session was killed and its teardown is pending"
+	}
 	// A failed create whose runtime identity could not be confirmed is a settled
 	// blocked outcome, not an idle LiveReady session. It wins even over a stale
 	// OpCreating persisted by the failure path: no automatic operation may settle
@@ -184,6 +191,7 @@ func (v LifecycleView) Activity() Activity {
 	activity, _ := ClassifyActivity(InstanceData{
 		Liveness:            v.Liveness,
 		InFlightOp:          v.InFlightOp,
+		UserKilled:          v.UserKilled,
 		StartupStateUnknown: v.StartupStateUnknown,
 	})
 	return activity

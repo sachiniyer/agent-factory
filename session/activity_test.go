@@ -142,6 +142,30 @@ func TestLifecycleViewActivity(t *testing.T) {
 	require.Equal(t, ActivityIdle, i.LifecycleView().Activity(), "an idle agent releases its slot")
 }
 
+// TestActivity_UserKilledOutranksPendingHandoff keeps raw stored records and
+// live lifecycle views aligned: a committed kill is terminal even if the handoff
+// mission and its transient replacement op have not been cleared yet.
+func TestActivity_UserKilledOutranksPendingHandoff(t *testing.T) {
+	t.Run("record", func(t *testing.T) {
+		activity, _ := ClassifyActivity(InstanceData{
+			Liveness:              LiveRunning,
+			InFlightOp:            OpReplacing,
+			PendingHandoffMission: "continue inherited work",
+			UserKilled:            true,
+		})
+		require.Equal(t, ActivityTerminal, activity)
+	})
+
+	t.Run("lifecycle view", func(t *testing.T) {
+		activity := (LifecycleView{
+			Liveness:   LiveRunning,
+			InFlightOp: OpReplacing,
+			UserKilled: true,
+		}).Activity()
+		require.Equal(t, ActivityTerminal, activity)
+	})
+}
+
 // TestLifecycleViewIsInternallyConsistent: the whole point of the view is that
 // every field describes the SAME instant. A caller reaching a verdict from two
 // accessor calls can have a concurrent restore land between them and see a state

@@ -114,12 +114,13 @@ func opIsTeardown(op InFlightOp) bool {
 // already tearing down (OpKilling/OpArchiving) is inside the teardown fence, so
 // it offers no verb either — the action it would show (Archive on a live row,
 // Restore on the archived result) is precisely the mutation the fence exists to
-// refuse. Resting rows restore; every other settled row archives. Kill
-// addressability is intentionally independent (CanKill): a retained
-// startup-unknown row must remain removable without becoming attachable,
-// archivable, or restorable.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown bool) LifecycleAction {
-	if id == "" || op == OpCreating || op == OpReplacing || opIsTeardown(op) || startupStateUnknown {
+// refuse. A kill tombstone likewise admits no competing archive/restore action:
+// its only valid transition is finishing teardown. Resting rows restore; every
+// other settled row archives. Kill addressability is intentionally independent
+// (CanKill): a retained tombstone or startup-unknown row must remain removable
+// without becoming attachable, archivable, or restorable.
+func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled bool) LifecycleAction {
+	if id == "" || op == OpCreating || op == OpReplacing || opIsTeardown(op) || startupStateUnknown || userKilled {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -147,7 +148,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown)
+	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled)
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for

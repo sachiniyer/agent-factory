@@ -621,6 +621,29 @@ func TestResumePendingHandoffs_DeliversPostReadyFailure(t *testing.T) {
 	}
 }
 
+// TestResumePendingHandoffs_SkipsUserKilled makes the durable kill tombstone
+// terminal for the handoff recovery loop too. A retained teardown must never
+// receive the mission whose delivery lost the race with that kill.
+func TestResumePendingHandoffs_SkipsUserKilled(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "killed-pending-handoff", backend)
+	inst.SetStatusForTest(session.Ready)
+	inst.SetPendingHandoffMission("continue inherited work")
+	inst.MarkUserKilled()
+
+	manager.ResumePendingHandoffs()
+
+	if got := inst.PendingHandoffMission(); got == "" {
+		t.Fatal("handoff recovery cleared a killed session's pending mission instead of leaving teardown authoritative")
+	}
+	events, previews, _ := backend.eventSnapshot()
+	_, prompts := backend.snapshot()
+	if previews != 0 || len(prompts) != 0 || len(events) != 0 {
+		t.Fatalf("handoff recovery touched a tombstoned runtime: previews=%d prompts=%q events=%q", previews, prompts, events)
+	}
+}
+
 func TestResumePendingHandoffs_PostReadyFailureClearsOutgoingLimit(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	sendErr := errors.New("paste transport failed")

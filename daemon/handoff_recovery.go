@@ -40,7 +40,7 @@ func (m *Manager) ResumePendingHandoffs() {
 
 	for _, entry := range entries {
 		mission := entry.instance.PendingHandoffMission()
-		if mission == "" || entry.instance.StartupStateUnknown() {
+		if mission == "" || entry.instance.UserKilled() || entry.instance.StartupStateUnknown() {
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 			continue
 		}
@@ -67,7 +67,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	op := entry.instance.GetInFlightOp()
 	if killing || current != entry.instance || entry.instance.IsTearingDown() ||
 		(op != session.OpNone && op != session.OpReplacing) ||
-		entry.instance.PendingHandoffMission() != mission || entry.instance.StartupStateUnknown() {
+		entry.instance.PendingHandoffMission() != mission || entry.instance.UserKilled() || entry.instance.StartupStateUnknown() {
 		return nil
 	}
 

@@ -42,7 +42,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:                i.statusLocked(),
 		Liveness:              i.liveness,
 		InFlightOp:            i.inFlightOp,
-		LifecycleAction:       lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown),
+		LifecycleAction:       lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled),
 		CanKill:               canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:            i.canHandoffLocked(),
 		CurrentAgent:          i.currentAgentNameLocked(),
@@ -166,8 +166,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// an irreversible runtime swap completed but its takeover brief did not. Disk
 	// still scrubs the generic op enum, then this specific proof reconstructs the
 	// replacement fence so status polling cannot call the idle incoming composer a
-	// completed task before recovery delivers its mission.
-	if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone {
+	// completed task before recovery delivers its mission. A kill tombstone
+	// outranks every process-local op, including one carried by a live snapshot;
+	// startup-unknown likewise prevents synthesizing a replacement fence. Both
+	// terminal markers must retain an explicit teardown handle rather than load as
+	// an in-flight replacement.
+	if data.UserKilled {
+		inFlightOp = OpNone
+	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone {
 		inFlightOp = OpReplacing
 	}
 	instance := &Instance{
