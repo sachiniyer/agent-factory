@@ -382,9 +382,9 @@ func hookOutputSuffix(out []byte) string {
 }
 
 // launch runs the user's launch_cmd with the provision spec as flags, then
-// recovers the {url,token} JSON it echoes (stderr may interleave progress, so
-// extractJSON pulls the object out of the combined output, mirroring how
-// docker/ssh poll their agent-server banner file).
+// recovers the {url,token} JSON it echoes. stderr may interleave progress or JSON
+// logs, so launch scans each complete value in the combined output and selects by
+// endpoint shape, mirroring how docker/ssh validate their agent-server banner.
 func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	args := []string{
 		"--name", p.slug,
@@ -440,24 +440,36 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 			hookOutputSuffix(out))
 	}
 
-	jsonStr := extractJSON(string(out))
-	if jsonStr == "" {
+	output := string(out)
+	sawJSON := false
+	for cursor := 0; cursor < len(output); {
+		jsonStr, next := extractJSONAt(output, cursor)
+		if jsonStr == "" {
+			break
+		}
+		cursor = next
+		sawJSON = true
+
+		var ej hookEndpointJSON
+		if err := json.Unmarshal([]byte(jsonStr), &ej); err != nil {
+			continue
+		}
+		if strings.TrimSpace(ej.URL) == "" || strings.TrimSpace(ej.Token) == "" {
+			continue
+		}
+		// ej.TLSFingerprint is intentionally not read — TLS was removed; an old
+		// script that still echoes it parses fine and the value is dropped.
+		return &AgentServerEndpoint{
+			URL:   ej.URL,
+			Token: ej.Token,
+		}, nil
+	}
+	if !sawJSON {
 		return nil, fmt.Errorf("launch_cmd (%s) exited 0 but printed no {\"url\",\"token\"} JSON "+
 			"(see docs/remote-hooks.md for the recipe)%s", p.hooks.LaunchCmd, hookOutputSuffix(out))
 	}
-	var ej hookEndpointJSON
-	if err := json.Unmarshal([]byte(jsonStr), &ej); err != nil {
-		return nil, fmt.Errorf("launch_cmd returned invalid endpoint JSON: %s: %w", jsonStr, err)
-	}
-	if strings.TrimSpace(ej.URL) == "" || strings.TrimSpace(ej.Token) == "" {
-		return nil, fmt.Errorf("launch_cmd endpoint JSON is missing url or token (got %s); it must echo the af agent-server's {\"url\",\"token\"}", jsonStr)
-	}
-	// ej.TLSFingerprint is intentionally not read — TLS was removed; an old
-	// script that still echoes it parses fine and the value is dropped.
-	return &AgentServerEndpoint{
-		URL:   ej.URL,
-		Token: ej.Token,
-	}, nil
+	return nil, fmt.Errorf("launch_cmd (%s) exited 0 and printed JSON, but none contained a non-empty url and token; "+
+		"it must echo the af agent-server's {\"url\",\"token\"}%s", p.hooks.LaunchCmd, hookOutputSuffix(out))
 }
 
 // reap runs delete_cmd to tear down whatever launch_cmd provisioned, idempotently

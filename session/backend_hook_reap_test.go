@@ -582,6 +582,27 @@ func TestHookProvisionSucceedsWhenLaunchLeavesOutputPipeOpen(t *testing.T) {
 	assert.DirExists(t, h.sandbox(p.slug), "the working sandbox must still exist")
 }
 
+// TestHookProvisionSelectsEndpointAmongJSONLogs covers launch_cmd programs that
+// emit structured logs to stderr. stdout and stderr intentionally share one file,
+// so endpoint selection must inspect JSON shape rather than take the first value.
+func TestHookProvisionSelectsEndpointAmongJSONLogs(t *testing.T) {
+	h := newHookState(t, `
+echo '{"level":"info","msg":"connecting"}' >&2
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+echo '{"level":"info","msg":"tunnel ready"}' >&2
+exit 0
+`, "")
+	p := newHookProvisioner(h, "json logger")
+
+	res, err := p.provisionOrReap()
+	require.NoError(t, err, "a JSON log record must not hide the later endpoint JSON")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
+	assert.False(t, h.deleteRan(t), "valid endpoint output must not reap the working sandbox")
+	assert.DirExists(t, h.sandbox(p.slug))
+}
+
 // TestHookProvisionKeepsASuccessfulLaunchsTunnelAlive is the #1966-review P2: a
 // launch_cmd that SUCCEEDS and leaves a tunnel running must end with a REACHABLE
 // endpoint. The tunnel is not a leak — it is the product, the thing making the

@@ -77,10 +77,18 @@ func FindSlugCollision(candidate string, existing []*Instance) string {
 // in output, ignoring text outside JSON delimiters. It handles pretty-printed /
 // multi-line JSON and stderr interleaving around (but not inside) the JSON
 // payload — launch_cmd may write provisioning progress to stderr and echo its
-// endpoint JSON to stdout, and CombinedOutput mixes the two. Returns empty
-// string if no valid JSON value is found.
+// endpoint JSON to stdout, and the shared capture file contains both. Returns
+// empty string if no valid JSON value is found.
 func extractJSON(output string) string {
-	for i := 0; i < len(output); i++ {
+	value, _ := extractJSONAt(output, 0)
+	return value
+}
+
+// extractJSONAt returns the first complete JSON value at or after start and the
+// byte offset immediately after it. The cursor lets shape-aware callers inspect
+// every value in a combined stdout/stderr stream without rescanning prior output.
+func extractJSONAt(output string, start int) (string, int) {
+	for i := start; i < len(output); i++ {
 		if output[i] != '{' && output[i] != '[' {
 			continue
 		}
@@ -115,7 +123,7 @@ func extractJSON(output string) string {
 						candidate := output[i : j+1]
 						var test interface{}
 						if json.Unmarshal([]byte(candidate), &test) == nil {
-							return candidate
+							return candidate, j + 1
 						}
 						break
 					}
@@ -123,5 +131,5 @@ func extractJSON(output string) string {
 			}
 		}
 	}
-	return ""
+	return "", len(output)
 }
