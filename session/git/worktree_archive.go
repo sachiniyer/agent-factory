@@ -1,6 +1,8 @@
 package git
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -85,9 +87,11 @@ var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
 // Filesystem operation seams let tests force cross-device and cleanup-failure
 // paths deterministically. Production never reassigns them.
 var (
-	renamePath               = os.Rename
-	removeAllPath            = os.RemoveAll
-	copyTreeBeforeSourceOpen = func(string) error { return nil }
+	renamePath                = renamePathNoReplace
+	removeAllPath             = os.RemoveAll
+	copyTreeBeforeSourceOpen  = func(string) error { return nil }
+	moveDirBeforeDestCommit   = func(string) error { return nil }
+	moveDirBeforeSourceCommit = func(string) error { return nil }
 )
 
 // MoveWorktree relocates this worktree's directory to dest and keeps git's
@@ -253,20 +257,84 @@ func moveDirCrossDevice(src, dest string) error {
 	} else if !errors.Is(err, syscall.EXDEV) {
 		return err
 	}
-	// Cross-device: copy the tree, verify that the source pathname still names
-	// the directory descriptor we copied, then remove the original.
-	copiedSourceInfo, err := copyTreeWithSourceInfo(src, dest)
+	// Cross-device: copy into an unguessable sibling, atomically claim the
+	// verified source endpoint, then atomically publish the copied directory at
+	// dest without replacing anything. These two renames are the commit boundary:
+	// until both identities match, the source is restored and never deleted.
+	stagingPath, err := privateMovePath(dest, "copy")
 	if err != nil {
-		// Best-effort cleanup of a partial copy so a retry sees a clean dest.
-		_ = removeAllPath(dest)
 		return err
 	}
-	if err := verifySourcePathIdentity(src, copiedSourceInfo); err != nil {
-		_ = removeAllPath(dest)
+	copied, err := copyTreeWithIdentities(src, stagingPath)
+	if err != nil {
+		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
+	}
+
+	sourceParentPath := filepath.Dir(src)
+	sourceParent, _, err := openDirectoryPathFollowingLinks(sourceParentPath, "source parent")
+	if err != nil {
 		return err
 	}
-	if err := removeAllPath(src); err != nil {
-		return &copiedWorktreeSourceCleanupError{src: src, dest: dest, err: err}
+	defer sourceParent.Close()
+	sourceName := filepath.Base(src)
+	quarantinePath, err := privateMovePath(src, "source")
+	if err != nil {
+		return err
+	}
+	if err := moveDirBeforeSourceCommit(src); err != nil {
+		return err
+	}
+	quarantineName := filepath.Base(quarantinePath)
+	if err := renameAtNoReplace(int(sourceParent.Fd()), sourceName, int(sourceParent.Fd()), quarantineName); err != nil {
+		return fmt.Errorf("failed to atomically secure source directory %s before cleanup: %w", src, err)
+	}
+	quarantinedSource, quarantinedInfo, err := openDirectoryAt(sourceParent, quarantineName, quarantinePath, "secured source")
+	if err != nil {
+		return fmt.Errorf("source directory changed while it was being secured; refusing cleanup: %w", err)
+	}
+	defer quarantinedSource.Close()
+	if !os.SameFile(copied.source, quarantinedInfo) {
+		restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName)
+		if restoreErr != nil {
+			return fmt.Errorf("source directory changed while it was copied; replacement was preserved at %s but could not be restored to %s: %w", quarantinePath, src, restoreErr)
+		}
+		return fmt.Errorf("source directory changed while it was copied; restored the replacement at %s and refused cleanup", src)
+	}
+
+	destinationParentPath := filepath.Dir(dest)
+	destinationParent, _, err := openDirectoryPathFollowingLinks(destinationParentPath, "destination parent")
+	if err != nil {
+		return err
+	}
+	defer destinationParent.Close()
+	if err := moveDirBeforeDestCommit(stagingPath); err != nil {
+		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
+			return fmt.Errorf("destination commit hook failed (%v) and secured source could not be restored: %w", err, restoreErr)
+		}
+		return err
+	}
+	if err := renameAtNoReplace(
+		int(destinationParent.Fd()), filepath.Base(stagingPath),
+		int(destinationParent.Fd()), filepath.Base(dest),
+	); err != nil {
+		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
+			return fmt.Errorf("failed to commit destination %s (%v) and secured source could not be restored: %w", dest, err, restoreErr)
+		}
+		return fmt.Errorf("failed to atomically commit copied worktree at %s without replacement: %w", dest, err)
+	}
+	currentDestination, err := os.Lstat(dest)
+	if err != nil || !os.SameFile(copied.destination, currentDestination) {
+		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
+			return fmt.Errorf("destination directory changed during commit and secured source could not be restored: %w", restoreErr)
+		}
+		if err != nil {
+			return fmt.Errorf("destination directory changed during commit at %s: %w", dest, err)
+		}
+		return fmt.Errorf("destination directory changed during commit at %s; source was restored", dest)
+	}
+
+	if err := removeAllPath(quarantinePath); err != nil {
+		return &copiedWorktreeSourceCleanupError{src: quarantinePath, dest: dest, err: err}
 	}
 	return nil
 }
@@ -293,40 +361,45 @@ func (e *copiedWorktreeSourceCleanupError) Unwrap() error {
 // destination node is created exclusively. This is only reached on the
 // cross-device fallback.
 func copyTree(src, dest string) error {
-	_, err := copyTreeWithSourceInfo(src, dest)
+	_, err := copyTreeWithIdentities(src, dest)
 	return err
 }
 
-func copyTreeWithSourceInfo(src, dest string) (os.FileInfo, error) {
+type copiedTreeIdentities struct {
+	source      os.FileInfo
+	destination os.FileInfo
+}
+
+func copyTreeWithIdentities(src, dest string) (copiedTreeIdentities, error) {
 	source, sourceInfo, err := openDirectoryPath(src, "source")
 	if err != nil {
-		return nil, err
+		return copiedTreeIdentities{}, err
 	}
 	defer source.Close()
 	if err := copyTreeBeforeSourceOpen(src); err != nil {
-		return nil, err
+		return copiedTreeIdentities{}, err
 	}
 
 	destParentPath := filepath.Dir(dest)
 	destParent, _, err := openDirectoryPathFollowingLinks(destParentPath, "destination parent")
 	if err != nil {
-		return nil, err
+		return copiedTreeIdentities{}, err
 	}
 	defer destParent.Close()
 	destName := filepath.Base(dest)
 	if err := unix.Mkdirat(int(destParent.Fd()), destName, uint32(sourceInfo.Mode().Perm())); err != nil {
-		return nil, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
+		return copiedTreeIdentities{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
 	}
-	destination, _, err := openDirectoryAt(destParent, destName, dest, "destination")
+	destination, destinationInfo, err := openDirectoryAt(destParent, destName, dest, "destination")
 	if err != nil {
-		return nil, err
+		return copiedTreeIdentities{}, err
 	}
 	defer destination.Close()
 
 	if err := copyDirectoryContents(source, destination, src, dest); err != nil {
-		return nil, err
+		return copiedTreeIdentities{}, err
 	}
-	return sourceInfo, nil
+	return copiedTreeIdentities{source: sourceInfo, destination: destinationInfo}, nil
 }
 
 func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) error {
@@ -501,15 +574,34 @@ func unsupportedSourceTypeError(path string, mode uint32) error {
 	return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (mode %#o)", path, mode&unix.S_IFMT)
 }
 
-func verifySourcePathIdentity(path string, copied os.FileInfo) error {
-	current, err := os.Lstat(path)
+func renamePathNoReplace(src, dest string) error {
+	sourceParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(src), "source parent")
 	if err != nil {
-		return fmt.Errorf("cannot move worktree across filesystems: source directory changed while it was copied; refusing to remove %s: %w", path, err)
+		return err
 	}
-	if !os.SameFile(copied, current) {
-		return fmt.Errorf("cannot move worktree across filesystems: source directory changed while it was copied; refusing to remove replacement at %s", path)
+	defer sourceParent.Close()
+	destinationParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(dest), "destination parent")
+	if err != nil {
+		return err
 	}
-	return nil
+	defer destinationParent.Close()
+	return renameAtNoReplace(
+		int(sourceParent.Fd()), filepath.Base(src),
+		int(destinationParent.Fd()), filepath.Base(dest),
+	)
+}
+
+func privateMovePath(path, purpose string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate private %s path beside %s: %w", purpose, path, err)
+	}
+	name := fmt.Sprintf(".%s.af-%s-%s", filepath.Base(path), purpose, hex.EncodeToString(random[:]))
+	return filepath.Join(filepath.Dir(path), name), nil
+}
+
+func restoreSecuredSource(parent *os.File, securedName, sourceName string) error {
+	return renameAtNoReplace(int(parent.Fd()), securedName, int(parent.Fd()), sourceName)
 }
 
 // pathExists reports whether p exists (best-effort: a stat error other than

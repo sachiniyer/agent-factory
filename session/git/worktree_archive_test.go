@@ -190,8 +190,10 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 
 	cleanupErr := errors.New("forced source cleanup failure")
 	prevRemoveAll := removeAllPath
+	var leftoverPath string
 	removeAllPath = func(path string) error {
-		if path == srcPath {
+		if filepath.Dir(path) == filepath.Dir(srcPath) && strings.Contains(filepath.Base(path), ".af-source-") {
+			leftoverPath = path
 			return cleanupErr
 		}
 		return os.RemoveAll(path)
@@ -200,10 +202,12 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 
 	require.NoError(t, gw.MoveWorktree(dest),
 		"a copy+register success with only source cleanup failing must not error (#2011)")
-	assert.True(t, pathExists(srcPath), "the source cleanup failure leaves the original for manual cleanup")
+	assert.NotEmpty(t, leftoverPath, "the test must intercept cleanup of the atomically secured source")
+	assert.True(t, pathExists(leftoverPath), "the source cleanup failure leaves the secured original for manual cleanup")
+	assert.False(t, pathExists(srcPath), "the original pathname must not remain live after the source is secured")
 	assertLiveWorktreeAt(t, gw, dest) // worktreePath committed to dest (#1475), still valid + registered
 	assert.Contains(t, warnings.String(), "failed to remove the leftover source directory")
-	assert.Contains(t, warnings.String(), srcPath)
+	assert.Contains(t, warnings.String(), leftoverPath)
 }
 
 // countBranchWorktrees returns how many registered worktrees in repoRoot are
@@ -257,12 +261,13 @@ func TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan(t *testing.T) {
 
 	// Fail removal of whatever the CURRENT source directory is on every attempt: a
 	// copy+register success paired with a persistent source-cleanup failure. Keying
-	// on the live worktree path (not a fixed one) means a retry's move is caught
-	// too, so on the buggy code the modeled loop errors on BOTH attempts and
-	// physically creates the orphaned second worktree at dest2.
+	// on the atomically secured source sibling preserves the same failure shape
+	// without reopening the original pathname.
 	prevRemoveAll := removeAllPath
+	var leftoverPath string
 	removeAllPath = func(path string) error {
-		if path == gw.GetWorktreePath() {
+		if filepath.Dir(path) == filepath.Dir(srcPath) && strings.Contains(filepath.Base(path), ".af-source-") {
+			leftoverPath = path
 			return errors.New("forced source cleanup failure")
 		}
 		return os.RemoveAll(path)
@@ -299,14 +304,17 @@ func TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan(t *testing.T) {
 
 	// The un-removed source is a leftover directory for manual reclamation — NOT a
 	// registered worktree. Git tracks exactly one worktree on the branch.
-	assert.True(t, pathExists(srcPath),
-		"the source cleanup failure leaves the original directory for manual reclamation")
+	assert.NotEmpty(t, leftoverPath, "the test must intercept cleanup of the atomically secured source")
+	assert.True(t, pathExists(leftoverPath),
+		"the source cleanup failure leaves the secured original directory for manual reclamation")
+	assert.False(t, pathExists(srcPath),
+		"the original pathname must not remain live after the source is secured")
 	assert.Equal(t, 1, countBranchWorktrees(t, repoRoot, "arch/branch"),
 		"git must track exactly one worktree for the branch — no orphan")
 
 	// The cleanup failure is surfaced (visible, not swallowed) so the leftover disk is reclaimable.
 	assert.Contains(t, warnings.String(), "failed to remove")
-	assert.Contains(t, warnings.String(), srcPath)
+	assert.Contains(t, warnings.String(), leftoverPath)
 }
 
 // TestRestoreWorktreeTo_FallbackRepairsSubmoduleGitdirs archives and restores an
@@ -650,6 +658,75 @@ func TestMoveDirCrossDevice_SourceRootReplacementIsNotDeleted(t *testing.T) {
 	require.NoError(t, readErr, "the renamed original must remain recoverable")
 	assert.Equal(t, "original", string(original))
 	assert.NoDirExists(t, dest, "a failed identity check must clean the partial destination")
+}
+
+// TestMoveDirCrossDevice_DestinationReplacementDoesNotCommit covers the copied
+// destination being renamed after its descriptor is opened and replaced at the
+// pathname that relocateWorktreeTo would commit. The source must remain until
+// the final destination is atomically proven to be the tree that was copied.
+func TestMoveDirCrossDevice_DestinationReplacementDoesNotCommit(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeDestCommit
+	var movedCopy string
+	moveDirBeforeDestCommit = func(openedDest string) error {
+		movedCopy = openedDest + ".moved"
+		if err := os.Rename(openedDest, movedCopy); err != nil {
+			return err
+		}
+		if err := os.Mkdir(openedDest, 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(openedDest, "replacement.txt"), []byte("replacement"), 0644)
+	}
+	t.Cleanup(func() { moveDirBeforeDestCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err, "a replacement destination must not be committed")
+	assert.Contains(t, err.Error(), "destination directory changed")
+	assert.FileExists(t, filepath.Join(src, "original.txt"), "source must remain when destination identity is lost")
+	assert.FileExists(t, filepath.Join(dest, "replacement.txt"), "the raced-in destination must not be deleted")
+	assert.FileExists(t, filepath.Join(movedCopy, "original.txt"), "the copied tree must remain recoverable")
+}
+
+// TestMoveDirCrossDevice_SourceReplacementAtCleanupIsNotDeleted forces the
+// replacement after the last identity check but before the old pathname-based
+// RemoveAll. Cleanup must first claim the verified source endpoint atomically;
+// it must never recursively reopen and delete whatever now occupies src.
+func TestMoveDirCrossDevice_SourceReplacementAtCleanupIsNotDeleted(t *testing.T) {
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	movedOriginal := filepath.Join(parent, "moved-original")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeSourceCommit
+	moveDirBeforeSourceCommit = func(path string) error {
+		if err := os.Rename(path, movedOriginal); err != nil {
+			return err
+		}
+		if err := os.Mkdir(path, 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(path, "replacement.txt"), []byte("replacement"), 0644)
+	}
+	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err, "cleanup must fail closed when the source endpoint changes")
+	assert.Contains(t, err.Error(), "source directory changed")
+	assert.FileExists(t, filepath.Join(src, "replacement.txt"), "the uncopied replacement must not be deleted")
+	assert.FileExists(t, filepath.Join(movedOriginal, "original.txt"), "the renamed original must remain recoverable")
 }
 
 // TestCopyTree_RejectsNamedPipeWithoutBlocking is the #2654 regression. The
