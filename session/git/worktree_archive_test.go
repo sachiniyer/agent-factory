@@ -589,6 +589,69 @@ func TestCopyTree_PreservesModesAndSymlinks(t *testing.T) {
 	assert.Equal(t, "a.txt", linkTarget)
 }
 
+// TestCopyTree_AllowsSymlinkedDestinationParent preserves configured layouts
+// where (for example) $AGENT_FACTORY_HOME/worktrees is intentionally a symlink
+// to another filesystem. The copy must anchor itself to the resolved directory
+// descriptor without rejecting that parent symlink.
+func TestCopyTree_AllowsSymlinkedDestinationParent(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))
+
+	realParent := filepath.Join(t.TempDir(), "real-parent")
+	require.NoError(t, os.Mkdir(realParent, 0755))
+	linkedParent := filepath.Join(t.TempDir(), "linked-parent")
+	require.NoError(t, os.Symlink(realParent, linkedParent))
+	dest := filepath.Join(linkedParent, "dest")
+
+	require.NoError(t, copyTree(src, dest))
+	contents, err := os.ReadFile(filepath.Join(realParent, "dest", "tracked.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "tracked", string(contents))
+}
+
+// TestMoveDirCrossDevice_SourceRootReplacementIsNotDeleted covers a worktree
+// root renamed after copyTree opens it and replaced at the original pathname.
+// The opened tree may be copied consistently, but cleanup must not recursively
+// delete the different, uncopied directory now occupying src.
+func TestMoveDirCrossDevice_SourceRootReplacementIsNotDeleted(t *testing.T) {
+	parent := t.TempDir()
+	src := filepath.Join(parent, "src")
+	movedOriginal := filepath.Join(parent, "moved-original")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := copyTreeBeforeSourceOpen
+	copyTreeBeforeSourceOpen = func(path string) error {
+		if path != src {
+			return nil
+		}
+		if err := os.Rename(src, movedOriginal); err != nil {
+			return err
+		}
+		if err := os.Mkdir(src, 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(src, "replacement.txt"), []byte("replacement"), 0644)
+	}
+	t.Cleanup(func() { copyTreeBeforeSourceOpen = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err, "cleanup must fail closed when src no longer identifies the copied root")
+	assert.Contains(t, err.Error(), "source directory changed")
+	replacement, readErr := os.ReadFile(filepath.Join(src, "replacement.txt"))
+	require.NoError(t, readErr, "the uncopied replacement at src must not be deleted")
+	assert.Equal(t, "replacement", string(replacement))
+	original, readErr := os.ReadFile(filepath.Join(movedOriginal, "original.txt"))
+	require.NoError(t, readErr, "the renamed original must remain recoverable")
+	assert.Equal(t, "original", string(original))
+	assert.NoDirExists(t, dest, "a failed identity check must clean the partial destination")
+}
+
 // TestCopyTree_RejectsNamedPipeWithoutBlocking is the #2654 regression. The
 // cross-device move fallback copies a worktree node by node; opening a FIFO as
 // though it were a regular file waits for a writer forever. Special files must

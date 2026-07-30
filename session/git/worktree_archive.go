@@ -253,9 +253,15 @@ func moveDirCrossDevice(src, dest string) error {
 	} else if !errors.Is(err, syscall.EXDEV) {
 		return err
 	}
-	// Cross-device: copy the tree, then remove the original.
-	if err := copyTree(src, dest); err != nil {
+	// Cross-device: copy the tree, verify that the source pathname still names
+	// the directory descriptor we copied, then remove the original.
+	copiedSourceInfo, err := copyTreeWithSourceInfo(src, dest)
+	if err != nil {
 		// Best-effort cleanup of a partial copy so a retry sees a clean dest.
+		_ = removeAllPath(dest)
+		return err
+	}
+	if err := verifySourcePathIdentity(src, copiedSourceInfo); err != nil {
 		_ = removeAllPath(dest)
 		return err
 	}
@@ -287,32 +293,40 @@ func (e *copiedWorktreeSourceCleanupError) Unwrap() error {
 // destination node is created exclusively. This is only reached on the
 // cross-device fallback.
 func copyTree(src, dest string) error {
+	_, err := copyTreeWithSourceInfo(src, dest)
+	return err
+}
+
+func copyTreeWithSourceInfo(src, dest string) (os.FileInfo, error) {
 	source, sourceInfo, err := openDirectoryPath(src, "source")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer source.Close()
 	if err := copyTreeBeforeSourceOpen(src); err != nil {
-		return err
+		return nil, err
 	}
 
 	destParentPath := filepath.Dir(dest)
-	destParent, _, err := openDirectoryPath(destParentPath, "destination parent")
+	destParent, _, err := openDirectoryPathFollowingLinks(destParentPath, "destination parent")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer destParent.Close()
 	destName := filepath.Base(dest)
 	if err := unix.Mkdirat(int(destParent.Fd()), destName, uint32(sourceInfo.Mode().Perm())); err != nil {
-		return fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
+		return nil, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
 	}
 	destination, _, err := openDirectoryAt(destParent, destName, dest, "destination")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer destination.Close()
 
-	return copyDirectoryContents(source, destination, src, dest)
+	if err := copyDirectoryContents(source, destination, src, dest); err != nil {
+		return nil, err
+	}
+	return sourceInfo, nil
 }
 
 func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) error {
@@ -381,7 +395,7 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer sourceParent.Close()
-	destinationParent, _, err := openDirectoryPath(filepath.Dir(dst), "destination parent")
+	destinationParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(dst), "destination parent")
 	if err != nil {
 		return err
 	}
@@ -431,6 +445,18 @@ func openDirectoryPath(path, role string) (*os.File, os.FileInfo, error) {
 	return openedDirectory(fd, path, role)
 }
 
+// openDirectoryPathFollowingLinks is used only for an already-configured
+// destination parent. Users may intentionally make worktree_root a symlink to
+// another filesystem; O_DIRECTORY and O_NONBLOCK still reject a raced-in FIFO,
+// while all writes remain anchored to the returned directory descriptor.
+func openDirectoryPathFollowingLinks(path, role string) (*os.File, os.FileInfo, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot move worktree across filesystems: failed to open %s directory %s safely: %w", role, path, err)
+	}
+	return openedDirectory(fd, path, role)
+}
+
 func openDirectoryAt(parent *os.File, name, path, role string) (*os.File, os.FileInfo, error) {
 	fd, err := unix.Openat(
 		int(parent.Fd()), name,
@@ -473,6 +499,17 @@ func readLinkAt(parent *os.File, name, path string) (string, error) {
 
 func unsupportedSourceTypeError(path string, mode uint32) error {
 	return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (mode %#o)", path, mode&unix.S_IFMT)
+}
+
+func verifySourcePathIdentity(path string, copied os.FileInfo) error {
+	current, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("cannot move worktree across filesystems: source directory changed while it was copied; refusing to remove %s: %w", path, err)
+	}
+	if !os.SameFile(copied, current) {
+		return fmt.Errorf("cannot move worktree across filesystems: source directory changed while it was copied; refusing to remove replacement at %s", path)
+	}
+	return nil
 }
 
 // pathExists reports whether p exists (best-effort: a stat error other than
