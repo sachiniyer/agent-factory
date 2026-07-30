@@ -133,13 +133,20 @@ func probeSessionStrict(cmdExec cmd.Executor, name string) (exists bool, known b
 }
 
 // missingTmuxSession recognizes tmux's explicit exact-target absence answer.
-// Exit status 1 alone is ambiguous: a wrapper, policy failure, or unreachable
-// server can return the same status while the named session remains unknown.
+// Exit status 1 alone is ambiguous: wrapper, policy, and unclassified connection
+// failures can return the same status while the named session remains unknown.
+// An explicit no-server diagnostic is also definitive: no session can remain.
 func missingTmuxSession(err error, name string) bool {
 	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) &&
-		exitErr.ExitCode() == 1 &&
-		strings.TrimSpace(string(exitErr.Stderr)) == "can't find session: "+name
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		return false
+	}
+	diagnostic := strings.TrimSpace(string(exitErr.Stderr))
+	if diagnostic == "can't find session: "+name {
+		return true
+	}
+	serverSocket, noServer := strings.CutPrefix(diagnostic, "no server running on ")
+	return noServer && strings.TrimSpace(serverSocket) != ""
 }
 
 // exactTarget builds an exact-match `-t` target spec for the named session.

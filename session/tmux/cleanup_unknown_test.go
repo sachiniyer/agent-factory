@@ -198,6 +198,42 @@ esac
 	}
 }
 
+// TestCleanupSessionsToleratesLastSessionGoneDuringMarkerLookup covers the
+// same race when the disappearing session was the server's last one. tmux's
+// explicit no-server diagnostic authoritatively means no session can remain;
+// broader connection failures must still stay unknown.
+func TestCleanupSessionsToleratesLastSessionGoneDuringMarkerLookup(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+ls)
+  echo 'af_gone: 1 windows (created Thu Jan 1 00:00:00 1970)'
+  ;;
+show-environment)
+  printf 'no server running on /tmp/tmux-1001/test\n' >&2
+  exit 1
+  ;;
+has-session)
+  [ "${2-}" = "-t=af_gone" ] || exit 98
+  printf 'no server running on /tmp/tmux-1001/test\n' >&2
+  exit 1
+  ;;
+*)
+  exit 97
+  ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	if err := CleanupSessions(cmd.MakeExecutor()); err != nil {
+		t.Fatalf("CleanupSessions error = %v, want an explicitly absent tmux server to prove the last session vanished", err)
+	}
+}
+
 // TestCleanupSessionsMarkerErrorReprobeTimeoutIsUnknown guards the second
 // half of #2706's tri-state: failure to answer the exact existence re-probe is
 // not evidence that the session vanished and must stop destructive reset work.
