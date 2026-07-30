@@ -2,6 +2,7 @@ package apiclient
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -66,6 +68,11 @@ func (c *Client) AttachStream(ctx context.Context, title, repoID, tabID string, 
 	if err != nil {
 		return nil, err
 	}
+	in, err := newAttachInputReader(attachStdin)
+	if err != nil {
+		_ = sc.Conn.Close(websocket.StatusInternalError, "stdin cancellation")
+		return nil, fmt.Errorf("prepare cancellable stdin: %w", err)
+	}
 	// The tmux/ssh client used to own local terminal setup; the clientless proxy
 	// must do it itself so arrow keys, Ctrl sequences and the detach key arrive
 	// byte-for-byte and nothing echoes locally. For the CLI (no bubbletea) this is
@@ -73,15 +80,26 @@ func (c *Client) AttachStream(ctx context.Context, title, repoID, tabID string, 
 	// bubbletea's termios so Restore hands it back exactly.
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
+		_ = in.Close()
 		_ = sc.Conn.Close(websocket.StatusInternalError, "raw mode")
 		return nil, err
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		driveAttachStream(sc.Conn, oldState)
+		driveAttachStream(sc.Conn, oldState, in)
 	}()
 	return done, nil
+}
+
+// newAttachInputReader gives the attach exclusive, cancellable ownership of
+// stdin. Tests may provide their own CancelReader to model terminal FIFO order;
+// production wraps os.Stdin with the same cancelreader Bubble Tea uses.
+func newAttachInputReader(in io.Reader) (cancelreader.CancelReader, error) {
+	if cancellable, ok := in.(cancelreader.CancelReader); ok {
+		return cancellable, nil
+	}
+	return cancelreader.NewReader(in)
 }
 
 // attachWriteTimeout bounds a single WS write so a wedged server can't pin the
@@ -90,7 +108,9 @@ var attachWriteTimeout = 10 * time.Second
 
 // driveAttachStream runs the loops of a full-screen attach — WS→stdout, stdin→WS
 // (with detach-key detection), and SIGWINCH→RESIZE — until the stream ends, then
-// restores the terminal. It owns the terminal for its lifetime.
+// restores the terminal. It owns the terminal for its lifetime. The caller
+// supplies a cancellable stdin reader so a server-side exit can unblock the
+// input pump before Bubble Tea starts its replacement reader (#2671).
 //
 // Concurrency: THREE goroutines can write the WS conn (INPUT from stdin, RESIZE
 // from SIGWINCH, the detach control frame), but coder/websocket permits only ONE
@@ -98,16 +118,16 @@ var attachWriteTimeout = 10 * time.Second
 // writer, not one-lock-per-anything. The reader runs independently (one reader +
 // one writer is allowed). conn.Close is idempotent via closeOnce (both the drain
 // timer and the drain-complete path close it). The io seams are captured as
-// locals up front so the (deliberately leaked-until-next-keystroke) stdin
-// goroutine never reads the package-level seam vars a test swaps back in Cleanup.
-func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
+// locals up front so no goroutine re-reads package-level vars a test swaps back
+// in Cleanup.
+func driveAttachStream(conn *websocket.Conn, oldState *term.State, in cancelreader.CancelReader) {
+	defer in.Close()
 	// Snapshot EVERY package-level seam/tunable once, here, before any goroutine
 	// spawns. The goroutines then read only these locals — never the package vars
-	// a test swaps and restores in Cleanup — so a driver goroutine (notably the
-	// stdin reader, which stays blocked on in.Read until the next keystroke) can
-	// never race that restore. This single entry read is sequenced before the
-	// workers and before `done`, so it is ordered against the test's restore.
-	in, out, termSize := attachStdin, attachStdout, attachTermSize
+	// a test swaps and restores in Cleanup. This single entry read is sequenced
+	// before the workers and before `done`, so it is ordered against the test's
+	// restore.
+	out, termSize := attachStdout, attachTermSize
 	drainTimeout, writeTimeout := attachDrainTimeout, attachWriteTimeout
 
 	// The read context is deliberately NOT cancelled on detach: after MsgDetach we
@@ -183,7 +203,9 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 	// CLI that turns on the kitty keyboard protocol or modifyOtherKeys makes the
 	// terminal report ctrl+<key> as an escape sequence, and matching 0x17 alone
 	// left the user unable to detach at all (#1832). See detachkey.go.
+	stdinDone := make(chan struct{})
 	go func() {
+		defer close(stdinDone)
 		buf := make([]byte, 32)
 		for {
 			n, err := in.Read(buf)
@@ -231,7 +253,12 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State) {
 	}()
 
 	<-copyDone
+	// A server close/MsgExit can end copyDone while stdin is still blocked. Cancel
+	// that read and wait for the pump to prove it has exited before restoring the
+	// terminal; requesting cancellation alone is not proof the reader is gone.
+	_ = in.Cancel()
 	closeConn()
+	<-stdinDone
 	// The stream is fully drained (copyDone), so this lands strictly after any
 	// modes the pane program set — neutralize the terminal (#845, local edition),
 	// then hand the termios back to whatever owned it before attach (bubbletea for

@@ -6,12 +6,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -36,6 +38,89 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.buf.String()
 }
+
+// sharedAttachInput models the FIFO ownership of a terminal input queue. A byte
+// is delivered to exactly one blocked reader, oldest first; cancelling a reader
+// wakes it without consuming input. This is the property that makes a stale
+// attach reader steal the first post-attach keystroke from Bubble Tea (#2671).
+type sharedAttachInput struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	buf       []byte
+	queue     []int
+	cancelled map[int]bool
+}
+
+type sharedAttachReader struct {
+	input *sharedAttachInput
+	id    int
+}
+
+func newSharedAttachInput() *sharedAttachInput {
+	in := &sharedAttachInput{cancelled: make(map[int]bool)}
+	in.cond = sync.NewCond(&in.mu)
+	return in
+}
+
+func (in *sharedAttachInput) reader(id int) *sharedAttachReader {
+	return &sharedAttachReader{input: in, id: id}
+}
+
+func (in *sharedAttachInput) typed(p []byte) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.buf = append(in.buf, p...)
+	in.cond.Broadcast()
+}
+
+func (in *sharedAttachInput) blocked(id int) bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	for _, queued := range in.queue {
+		if queued == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (in *sharedAttachInput) cancel(id int) bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.cancelled[id] = true
+	in.cond.Broadcast()
+	return true
+}
+
+func (r *sharedAttachReader) Read(p []byte) (int, error) {
+	in := r.input
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.queue = append(in.queue, r.id)
+	defer func() {
+		for i, queued := range in.queue {
+			if queued == r.id {
+				in.queue = append(in.queue[:i], in.queue[i+1:]...)
+				break
+			}
+		}
+		in.cond.Broadcast()
+	}()
+	for {
+		if in.cancelled[r.id] {
+			return 0, context.Canceled
+		}
+		if len(in.buf) > 0 && in.queue[0] == r.id {
+			n := copy(p, in.buf)
+			in.buf = in.buf[n:]
+			return n, nil
+		}
+		in.cond.Wait()
+	}
+}
+
+func (r *sharedAttachReader) Cancel() bool { return r.input.cancel(r.id) }
+func (r *sharedAttachReader) Close() error { r.input.cancel(r.id); return nil }
 
 // attachWSServer stands up a Unix-socket WS server that hands the accepted
 // server-side conn to the test over connCh so the test can play the daemon's
@@ -75,7 +160,19 @@ func attachWSServer(t *testing.T) (*Client, <-chan *websocket.Conn) {
 // exercise the RESIZE writer. Read only on the main (sequential) test goroutine.
 var driverTermSize = func() (uint16, uint16, bool) { return 0, 0, false }
 
-func startDriver(t *testing.T) (srvConn *websocket.Conn, stdinW *io.PipeWriter, stdout *syncBuffer, done <-chan struct{}) {
+func startDriver(t *testing.T) (srvConn *websocket.Conn, stdinW *os.File, stdout *syncBuffer, done <-chan struct{}) {
+	t.Helper()
+	inR, inW, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = inR.Close()
+		_ = inW.Close()
+	})
+	server, out, driverDone := startDriverWithInput(t, inR)
+	return server, inW, out, driverDone
+}
+
+func startDriverWithInput(t *testing.T, in io.Reader) (srvConn *websocket.Conn, stdout *syncBuffer, done <-chan struct{}) {
 	t.Helper()
 	// Fast drain so a detach that the server doesn't promptly close still ends the
 	// test quickly.
@@ -92,19 +189,20 @@ func startDriver(t *testing.T) (srvConn *websocket.Conn, stdinW *io.PipeWriter, 
 	}
 	server := <-connCh
 
-	inR, inW := io.Pipe()
 	out := &syncBuffer{}
 	prevIn, prevOut := attachStdin, attachStdout
-	attachStdin, attachStdout = inR, out
+	attachStdin, attachStdout = in, out
 	// driverTermSize defaults to a non-TTY (no resize frames); a test can set it
 	// before startDriver to make the driver's initial sendResize actually fire.
 	prevSize := attachTermSize
 	attachTermSize = driverTermSize
 	t.Cleanup(func() { attachStdin, attachStdout, attachTermSize = prevIn, prevOut, prevSize })
 
+	input, err := newAttachInputReader(in)
+	require.NoError(t, err)
 	d := make(chan struct{})
-	go func() { defer close(d); driveAttachStream(sc.Conn, nil) }()
-	return server, inW, out, d
+	go func() { defer close(d); driveAttachStream(sc.Conn, nil, input) }()
+	return server, out, d
 }
 
 func readServerMsg(t *testing.T, conn *websocket.Conn) agentproto.Message {
@@ -356,6 +454,53 @@ func TestAttachStream_ServerExitClosesAttach(t *testing.T) {
 		t.Fatalf("write exit: %v", err)
 	}
 	waitClosed(t, done)
+}
+
+// TestAttachStream_ServerExitCancelsStdinBeforeReturning is the terminal
+// hand-back invariant for #2671. A server-side exit must remove the attach's
+// already-blocked stdin reader before Bubble Tea starts its replacement reader;
+// otherwise the old reader is first in the terminal's FIFO and consumes the
+// user's first post-attach keystroke.
+func TestAttachStream_ServerExitCancelsStdinBeforeReturning(t *testing.T) {
+	const attachReaderID, tuiReaderID = 1, 2
+	in := newSharedAttachInput()
+	t.Cleanup(func() {
+		in.cancel(attachReaderID)
+		in.cancel(tuiReaderID)
+	})
+	server, _, done := startDriverWithInput(t, in.reader(attachReaderID))
+	require.Eventually(t, func() bool { return in.blocked(attachReaderID) },
+		time.Second, time.Millisecond, "attach reader must be blocked on terminal input")
+
+	// Let the client's close handshake complete after it receives MsgExit.
+	go func() {
+		for {
+			if _, _, err := server.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	require.NoError(t, agentproto.WriteControl(context.Background(), server, agentproto.NewExitMessage(0)))
+	waitClosed(t, done)
+
+	firstKey := make(chan byte, 1)
+	go func() {
+		buf := make([]byte, 1)
+		n, err := in.reader(tuiReaderID).Read(buf)
+		if err == nil && n == 1 {
+			firstKey <- buf[0]
+		}
+	}()
+	require.Eventually(t, func() bool { return in.blocked(tuiReaderID) },
+		time.Second, time.Millisecond, "replacement TUI reader must be blocked")
+	in.typed([]byte{'?'})
+
+	select {
+	case got := <-firstKey:
+		require.Equal(t, byte('?'), got)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first post-attach keystroke was consumed by the stale attach stdin reader")
+	}
 }
 
 func waitFor(t *testing.T, cond func() bool, msg string) {
