@@ -52,7 +52,7 @@ func writeVSCodeOwnerFixture(t *testing.T, key, instanceID, bootID string, proce
 	require.NoError(t, err)
 	raw, err := json.Marshal(map[string]any{
 		"key": key, "instance_id": instanceID, "pid": process.PID,
-		"start_id": process.StartID, "boot_id": bootID,
+		"start_id": process.StartID, "boot_id": bootID, "process_nonce": "test-vscode-owner-nonce",
 	})
 	require.NoError(t, err)
 	path := vscodeOwnerPath(socketPath)
@@ -70,6 +70,7 @@ func writeUnreadableVSCodeOwnerFixture(t *testing.T, key string) {
 func startOwnedSleep(t *testing.T) (*exec.Cmd, proctree.Process) {
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
+	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"=test-vscode-owner-nonce")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, cmd.Start())
 	waited := make(chan struct{})
@@ -116,6 +117,54 @@ func TestPersistedVSCodeOwner_FromPreviousBootIsNeverSignaled(t *testing.T) {
 	}
 	require.NoError(t, v.stopPersistedOwner(owner))
 	require.False(t, signaled, "an owner record from a previous boot authorized signaling a reused PID")
+}
+
+func TestPersistedVSCodeOwner_ProcessNonceRejectsReusedIdentity(t *testing.T) {
+	shortAFHome(t)
+	cmd := exec.Command("/bin/sh", "-c", "exec sleep 60")
+	cmd.Env = append(os.Environ(), vscodeOwnerNonceEnv+"=live-process-token")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, cmd.Start())
+	waited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waited)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-waited:
+		case <-time.After(2 * time.Second):
+			t.Errorf("foreign sleep pid %d did not exit", cmd.Process.Pid)
+		}
+	})
+	process, err := proctree.Lookup(cmd.Process.Pid)
+	require.NoError(t, err)
+	bootID, err := proctree.BootID()
+	require.NoError(t, err)
+
+	socketPath, err := vscodeSocketPath("reused-process")
+	require.NoError(t, err)
+	raw, err := json.Marshal(map[string]any{
+		"key": "reused-process", "instance_id": "instance-1", "pid": process.PID,
+		"start_id": process.StartID, "boot_id": bootID, "process_nonce": "recorded-owner-token",
+	})
+	require.NoError(t, err)
+	path := vscodeOwnerPath(socketPath)
+	require.NoError(t, os.WriteFile(path, append(raw, '\n'), 0o600))
+	owner, err := readVSCodeOwner(path)
+	require.NoError(t, err)
+
+	v := newVSCodeSupervisor()
+	v.groupAlive = func(int) (bool, error) { return false, nil }
+	var signals []syscall.Signal
+	v.killGroup = func(_ int, sig syscall.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	}
+	require.NoError(t, v.stopPersistedOwner(owner))
+	require.Empty(t, signals,
+		"matching PID/start identity authorized signaling a process without the persisted ownership nonce")
 }
 
 func TestPersistedVSCodeStop_DoesNotHoldSupervisorLockWhileWaiting(t *testing.T) {

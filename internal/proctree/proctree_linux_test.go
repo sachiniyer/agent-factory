@@ -4,6 +4,7 @@ package proctree
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +50,30 @@ func TestSnapshotSurvivesUnreadableBootTime(t *testing.T) {
 	if _, _, err := CPUFraction(p); !errors.Is(err, ErrCPUUnknown) {
 		t.Errorf("CPUFraction without a boot time = %v, want ErrCPUUnknown: an unmeasurable process "+
 			"must never report as 0%% CPU, which is indistinguishable from idle", err)
+	}
+}
+
+// TestBootIDSurvivesPIDOnlyProcfs covers the other subset=pid consequence:
+// /proc/<pid> remains readable while /proc/sys/kernel/random/boot_id is hidden.
+// Persisted process ownership still needs a stable namespace-scoped identity in
+// that environment; refusing to start every editor is not a safe degradation.
+func TestBootIDSurvivesPIDOnlyProcfs(t *testing.T) {
+	orig := bootIDPath
+	t.Cleanup(func() { bootIDPath = orig })
+	bootIDPath = "/proc/definitely-not-a-boot-id"
+
+	first, err := BootID()
+	if err != nil {
+		t.Fatalf("BootID with /proc/sys hidden = %v; want a PID-namespace fallback from /proc/<pid>", err)
+	}
+	second, err := BootID()
+	if err != nil {
+		t.Fatalf("second BootID with /proc/sys hidden = %v", err)
+	}
+	if first != second {
+		t.Fatalf("PID-namespace boot fallback changed between reads: %q then %q", first, second)
+	}
+	if !strings.HasPrefix(first, "pidns:") {
+		t.Fatalf("BootID fallback = %q, want explicit pidns: identity", first)
 	}
 }

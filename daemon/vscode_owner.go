@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,17 +19,22 @@ import (
 
 // A supervisor's in-memory map dies with the daemon. The owner record is the
 // cross-restart handle for the editor process group: stable session identity,
-// PID, and the process start stamp that makes that PID safe to act on after a
-// restart. It lives beside the private editor socket and shares its nonce.
+// PID/start stamp, boot scope, and a random nonce inherited by the live editor.
+// The nonce keeps a reused process identity from authorizing a signal when a
+// subset=pid procfs cannot expose the kernel boot UUID.
 type vscodeOwnerRecord struct {
-	Key        string `json:"key"`
-	InstanceID string `json:"instance_id"`
-	PID        int    `json:"pid"`
-	StartID    uint64 `json:"start_id"`
-	BootID     string `json:"boot_id"`
+	Key          string `json:"key"`
+	InstanceID   string `json:"instance_id"`
+	PID          int    `json:"pid"`
+	StartID      uint64 `json:"start_id"`
+	BootID       string `json:"boot_id"`
+	ProcessNonce string `json:"process_nonce"`
 }
 
-const vscodeOwnerExt = ".owner.json"
+const (
+	vscodeOwnerExt      = ".owner.json"
+	vscodeOwnerNonceEnv = "AF_VSCODE_OWNER_NONCE"
+)
 
 var vscodeOwnerNamePattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{8}\.owner\.json$`)
 
@@ -43,7 +50,18 @@ func writeVSCodeOwner(path string, owner vscodeOwnerRecord) error {
 	return config.AtomicWriteFile(path, append(raw, '\n'), 0o600)
 }
 
-func captureVSCodeOwner(key, instanceID string, pid int) (vscodeOwnerRecord, error) {
+func newVSCodeOwnerNonce() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generating editor ownership nonce: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func captureVSCodeOwner(key, instanceID string, pid int, processNonce string) (vscodeOwnerRecord, error) {
+	if processNonce == "" {
+		return vscodeOwnerRecord{}, fmt.Errorf("could not determine editor process ownership nonce")
+	}
 	bootID, err := proctree.BootID()
 	if err != nil {
 		return vscodeOwnerRecord{}, fmt.Errorf("could not determine kernel boot identity: %w", err)
@@ -62,7 +80,8 @@ func captureVSCodeOwner(key, instanceID string, pid int) (vscodeOwnerRecord, err
 		return vscodeOwnerRecord{}, fmt.Errorf("could not determine editor process identity for pid %d", pid)
 	}
 	return vscodeOwnerRecord{
-		Key: key, InstanceID: instanceID, PID: pid, StartID: process.StartID, BootID: bootID,
+		Key: key, InstanceID: instanceID, PID: pid, StartID: process.StartID,
+		BootID: bootID, ProcessNonce: processNonce,
 	}, nil
 }
 
@@ -125,10 +144,23 @@ func readVSCodeOwner(path string) (vscodeOwnerRecord, error) {
 	if err := json.Unmarshal(raw, &owner); err != nil {
 		return vscodeOwnerRecord{}, err
 	}
-	if owner.Key == "" || owner.InstanceID == "" || owner.PID <= 1 || owner.StartID == 0 || owner.BootID == "" {
+	if owner.Key == "" || owner.InstanceID == "" || owner.PID <= 1 || owner.StartID == 0 ||
+		owner.BootID == "" || owner.ProcessNonce == "" {
 		return vscodeOwnerRecord{}, fmt.Errorf("invalid editor owner record")
 	}
 	return owner, nil
+}
+
+func verifyVSCodeOwnerNonce(owner vscodeOwnerRecord) (bool, error) {
+	value, status := proctree.LookupEnv(owner.PID, vscodeOwnerNonceEnv)
+	switch status {
+	case proctree.EnvFound:
+		return value == owner.ProcessNonce, nil
+	case proctree.EnvAbsent:
+		return false, nil
+	default:
+		return false, fmt.Errorf("could not determine editor ownership nonce for pid %d", owner.PID)
+	}
 }
 
 func processGroupAlive(pgid int) (bool, error) {
@@ -165,10 +197,11 @@ func (v *vscodeSupervisor) waitForProcessGroupExit(pgid int, timeout time.Durati
 }
 
 // stopPersistedOwner reaps a previous daemon's editor without trusting a bare
-// PID. A matching (PID, StartID) proves a live leader is ours. If the leader is
-// gone but its process group survives, POSIX pins the numeric PGID and prevents
-// that PID from being reused, so an absent PID plus a live -PGID is also safe.
-// Any unreadable live PID remains UNKNOWN and is never signalled.
+// PID. A live leader must match its boot scope, PID/start stamp, and inherited
+// random nonce. If the leader is gone under a strong boot identity, POSIX pins
+// the numeric PGID and prevents that PID from being reused while the group
+// survives. A fallback boot identity cannot prove that absent-leader case, and
+// any unreadable identity remains UNKNOWN, so neither is ever signalled.
 func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 	bootID, err := proctree.BootID()
 	if err != nil {
@@ -190,6 +223,13 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 			// reuse a PID while a group with that numeric PGID still exists.
 			return nil
 		}
+		matches, nonceErr := verifyVSCodeOwnerNonce(owner)
+		if nonceErr != nil {
+			return nonceErr
+		}
+		if !matches {
+			return nil
+		}
 	} else {
 		// Snapshot may omit a process it could not inspect. Distinguish a truly
 		// absent leader from that unknown before treating the surviving group as
@@ -203,6 +243,9 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 		}
 		if !alive {
 			return nil
+		}
+		if proctree.BootIDIsFallback(owner.BootID) {
+			return fmt.Errorf("could not safely verify editor process group %d without its recorded leader", owner.PID)
 		}
 	}
 
@@ -241,6 +284,13 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 		return fmt.Errorf("could not safely escalate editor process group %d after losing its recorded leader identity: %w", owner.PID, identityErr)
 	}
 	if current.StartID != owner.StartID {
+		return nil
+	}
+	matches, nonceErr := verifyVSCodeOwnerNonce(owner)
+	if nonceErr != nil {
+		return nonceErr
+	}
+	if !matches {
 		return nil
 	}
 	if err := signal(syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {

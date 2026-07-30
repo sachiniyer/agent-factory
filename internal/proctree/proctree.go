@@ -117,11 +117,21 @@ func Lookup(pid int) (Process, error) {
 	return readProc(pid)
 }
 
-// BootID identifies the current kernel boot. Persisted process identities must
-// include it: Linux StartID values are ticks since boot, so the same PID and
-// StartID can name an unrelated process after a reboot.
+// BootID scopes persisted process identities across daemon restarts. It is the
+// kernel boot UUID on ordinary Linux procfs, the boot time on darwin, and a PID
+// namespace identity when Linux subset=pid hides the UUID. Callers using that
+// fallback for destructive work must pair it with proof from the live process;
+// see BootIDIsFallback.
 func BootID() (string, error) {
 	return bootID()
+}
+
+// BootIDIsFallback reports whether id is the Linux PID-namespace identity used
+// when a subset=pid procfs hides the kernel boot UUID. The fallback scopes a
+// process identity to the namespace but can be reused after a host reboot, so a
+// persisted destructive action must pair it with proof from the live process.
+func BootIDIsFallback(id string) bool {
+	return strings.HasPrefix(id, "pidns:")
 }
 
 // TreeOf returns root plus every descendant of root present in snap, in BFS

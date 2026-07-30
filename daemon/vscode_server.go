@@ -764,9 +764,13 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("clearing the stale VS Code socket %s failed: %w", socketPath, err)
 	}
+	processNonce, err := newVSCodeOwnerNonce()
+	if err != nil {
+		return nil, err
+	}
 	cmd := newDaemonChildCommand(binary, vscodeArgs(flavor, socketPath, worktree)...)
 	cmd.Dir = worktree
-	cmd.Env = vscodeChildEnv()
+	cmd.Env = append(vscodeChildEnv(), vscodeOwnerNonceEnv+"="+processNonce)
 	// Own process group so the editor's whole tree (extension host, terminal
 	// workers) can be signalled together on teardown, mirroring the watcher
 	// supervisor (#610/#769).
@@ -780,7 +784,7 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("exec %s: %w", binary, err)
 	}
-	owner, err := captureVSCodeOwner(key, instanceID, cmd.Process.Pid)
+	owner, err := captureVSCodeOwner(key, instanceID, cmd.Process.Pid, processNonce)
 	if err == nil {
 		err = writeVSCodeOwner(vscodeOwnerPath(socketPath), owner)
 	}
@@ -880,6 +884,7 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 var vscodeScrubbedEnv = []string{
 	tmux.EnvMarkerSession,
 	tmux.EnvMarkerHome,
+	vscodeOwnerNonceEnv,
 	"VSCODE_IPC_HOOK_CLI",
 }
 

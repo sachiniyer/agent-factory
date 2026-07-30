@@ -77,17 +77,36 @@ func snapshot() (map[int]Process, error) {
 var uptimePath = "/proc/uptime"
 
 var bootIDPath = "/proc/sys/kernel/random/boot_id"
+var pidNamespacePath = "/proc/self/ns/pid"
 
 func bootID() (string, error) {
 	data, err := os.ReadFile(bootIDPath)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", bootIDPath, err)
+	if err == nil {
+		id := strings.TrimSpace(string(data))
+		if id == "" {
+			return "", fmt.Errorf("reading %s: empty boot id", bootIDPath)
+		}
+		return id, nil
 	}
-	id := strings.TrimSpace(string(data))
-	if id == "" {
-		return "", fmt.Errorf("reading %s: empty boot id", bootIDPath)
+
+	// A procfs mounted with subset=pid deliberately hides /proc/sys while
+	// keeping /proc/<pid>, including namespace handles, available. The PID
+	// namespace inode is stable across daemon restarts in that environment and
+	// prevents records from a different container namespace from authorizing a
+	// signal. It is not globally unique across host reboots, so destructive
+	// users must pair this fallback with identity read from the live process.
+	info, namespaceErr := os.Stat(pidNamespacePath)
+	if namespaceErr != nil {
+		return "", errors.Join(
+			fmt.Errorf("reading %s: %w", bootIDPath, err),
+			fmt.Errorf("reading PID namespace %s: %w", pidNamespacePath, namespaceErr),
+		)
 	}
-	return id, nil
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Ino == 0 {
+		return "", fmt.Errorf("reading PID namespace %s: missing inode identity", pidNamespacePath)
+	}
+	return fmt.Sprintf("pidns:%x:%x", uint64(stat.Dev), stat.Ino), nil
 }
 
 // bootTime returns the wall-clock instant the machine booted, from

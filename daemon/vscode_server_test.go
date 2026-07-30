@@ -609,6 +609,7 @@ func TestVSCodeSupervisor_StillStartingIsNotAFailure(t *testing.T) {
 func TestVSCodeSupervisor_ScrubsSessionMarkers(t *testing.T) {
 	t.Setenv(tmux.EnvMarkerSession, "af_somesession")
 	t.Setenv(tmux.EnvMarkerHome, "/some/af/home")
+	t.Setenv(vscodeOwnerNonceEnv, "previous-editor-owner")
 
 	env := vscodeChildEnv()
 	for _, kv := range env {
@@ -617,6 +618,9 @@ func TestVSCodeSupervisor_ScrubsSessionMarkers(t *testing.T) {
 		}
 		if strings.HasPrefix(kv, tmux.EnvMarkerHome+"=") {
 			t.Errorf("the editor's env carries %s; doctor --fix would attribute it to this af home and kill it", kv)
+		}
+		if strings.HasPrefix(kv, vscodeOwnerNonceEnv+"=") {
+			t.Errorf("the base editor env carries %s; it would shadow the new process ownership nonce", kv)
 		}
 	}
 	// It is a scrub, not a wipe: everything else the editor needs still reaches it.
