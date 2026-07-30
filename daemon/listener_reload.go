@@ -82,13 +82,18 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
 	var errs []error
-	if newCfg.ListenAddr != wl.webConfigAddr {
+	// A closer retained after unexpected listener death outlives the empty
+	// binding sentinel. Disabling that listener must still enter bindWebLocked's
+	// teardown path so accepted connections do not survive reconciliation.
+	if newCfg.ListenAddr != wl.webConfigAddr ||
+		(newCfg.ListenAddr == "" && wl.webClose != nil) {
 		if e := wl.bindWebLocked(newCfg.ListenAddr); e != nil {
 			errs = append(errs, e)
 			failed = append(failed, "listen_addr")
 		}
 	}
-	if newCfg.PreviewListenAddr != wl.previewConfigAddr {
+	if newCfg.PreviewListenAddr != wl.previewConfigAddr ||
+		(newCfg.PreviewListenAddr == "" && wl.previewClose != nil) {
 		if e := wl.bindPreviewLocked(newCfg.PreviewListenAddr); e != nil {
 			errs = append(errs, e)
 			failed = append(failed, "preview_listen_addr")

@@ -309,6 +309,88 @@ func TestWebListenersRetainCloserAfterUnexpectedListenerDeath(t *testing.T) {
 	}
 }
 
+func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *testing.T) {
+	for _, kind := range []string{"control", "preview"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			cfg := config.DefaultConfig()
+			cfg.ListenAddr = ""
+			cfg.PreviewListenAddr = ""
+			if kind == "control" {
+				cfg.ListenAddr = "127.0.0.1:0"
+			} else {
+				cfg.PreviewListenAddr = "127.0.0.1:0"
+			}
+
+			m, err := NewManager(cfg)
+			require.NoError(t, err)
+			wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}))
+			m.webListeners = wl
+
+			var listener *readObservedListener
+			wl.listenTCP = func(network, address string) (net.Listener, error) {
+				bound, listenErr := net.Listen(network, address)
+				if listenErr != nil {
+					return nil, listenErr
+				}
+				listener = &readObservedListener{Listener: bound, readStarted: make(chan struct{})}
+				return listener, nil
+			}
+			failed, err := wl.reconcile(m.Config())
+			require.NoError(t, err)
+			require.Empty(t, failed)
+			t.Cleanup(func() { _ = wl.close() })
+
+			state := m.lifecycle.snapshot().listeners
+			addr := state.TCPBoundAddr
+			if kind == "preview" {
+				addr = state.PreviewBoundAddr
+			}
+			conn, err := net.Dial("tcp", addr)
+			require.NoError(t, err)
+			defer conn.Close()
+			_, err = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n")
+			require.NoError(t, err)
+			require.Eventually(t, func() bool {
+				select {
+				case <-listener.readStarted:
+					return true
+				default:
+					return false
+				}
+			}, time.Second, 10*time.Millisecond, "the server must accept and begin reading the connection")
+
+			require.NoError(t, listener.Close(), "fail the listener without calling the server closer")
+			require.Eventually(t, func() bool {
+				wl.mu.Lock()
+				defer wl.mu.Unlock()
+				if kind == "control" {
+					return wl.webConfigAddr == "" && wl.webClose != nil
+				}
+				return wl.previewConfigAddr == "" && wl.previewClose != nil
+			}, time.Second, 10*time.Millisecond, "listener death must leave only the accepted-connection closer")
+
+			disabled := *m.Config()
+			if kind == "control" {
+				disabled.ListenAddr = ""
+			} else {
+				disabled.PreviewListenAddr = ""
+			}
+			m.live.Store(&disabled)
+			failed, err = wl.reconcile(&disabled)
+			require.NoError(t, err)
+			require.Empty(t, failed)
+
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+			_, err = conn.Read(make([]byte, 1))
+			var netErr net.Error
+			require.Error(t, err)
+			require.False(t, errors.As(err, &netErr) && netErr.Timeout(),
+				"disabling a dead listener must close its retained accepted connections")
+		})
+	}
+}
+
 // TestApplyConfigTokenlessNetworkWarnsAndBinds: a tokenless non-loopback address is
 // WARNED about at save time and BINDS — never refused (#2168 Phase 0; the #2556
 // correction the plan called out). ApplyConfig surfaces the exposure notice as a
