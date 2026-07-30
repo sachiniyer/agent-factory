@@ -198,12 +198,18 @@ type Manager struct {
 	// effect on the next daemon start" contract — a re-added project's root
 	// materializes on restart, not mid-run). Guarded by m.mu.
 	deletedRootRepos map[string]struct{}
-	// killsInFlight marks sessions (by daemon instance key) whose KillSession
-	// teardown is currently running, so the status poll's finish-kill pass for
-	// tombstoned records (#1108) never runs a second concurrent teardown of
-	// the same session, and a duplicate KillSession RPC is rejected instead of
-	// double-killing.
+	// killsInFlight marks sessions (by daemon instance key) with an exclusive
+	// lifecycle operation in progress (kill/archive/restore). The status poll's
+	// finish-kill pass for tombstoned records (#1108) therefore never runs a
+	// second concurrent teardown, duplicate operations are rejected, and project
+	// deletion can see a restore claim before the row changes lifecycle state.
 	killsInFlight map[string]struct{}
+	// restoresInFlight identifies the subset of killsInFlight entries admitted
+	// by a manual restore. DeleteProject treats these as early blockers because
+	// an archived row has not necessarily changed lifecycle state yet. Keeping
+	// the subset explicit preserves the existing partial-failure behavior for
+	// ordinary kill/archive operations already in progress.
+	restoresInFlight map[string]struct{}
 	// lostRestoreStates tracks per-session retry state for the Lost-session
 	// restore loop (#1108 PR 2), keyed by daemon instance key — the general
 	// sibling of rootEnsureStates.
@@ -362,6 +368,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		rootKilledAt:           make(map[string]time.Time),
 		deletedRootRepos:       make(map[string]struct{}),
 		killsInFlight:          make(map[string]struct{}),
+		restoresInFlight:       make(map[string]struct{}),
 		lostRestoreStates:      make(map[string]*lostRestoreState),
 		limitResumeStates:      make(map[string]*limitResumeState),
 		handoffRetryDue:        make(map[string]time.Time),

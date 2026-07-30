@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,8 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // promptRecorder collects every prompt that reaches a session's backend, across
@@ -25,6 +29,64 @@ import (
 type promptRecorder struct {
 	mu      sync.Mutex
 	prompts []string
+}
+
+func TestDeliverPrompt_RefusesTaskProjectBindingMismatch(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerStarted(t, manager, repoID, repoPath, "worker", session.NewFakeBackend(), true, session.Ready)
+	originalRepoID := config.RepoIDFromRoot(filepath.Join(t.TempDir(), "original"))
+	require.NotEqual(t, repoID, originalRepoID)
+
+	_, err := manager.DeliverPrompt(DeliverPromptRequest{
+		Title: "worker", RepoPath: repoPath, Prompt: "run it", TaskRepoID: originalRepoID,
+	})
+	require.Error(t, err, "task delivery must not follow a path rebound into another project")
+	assert.Contains(t, err.Error(), "bound")
+	assert.Contains(t, err.Error(), "not delivered")
+}
+
+func TestReserveCreate_RefusesTaskProjectBindingMismatch(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	originalRepoID := config.RepoIDFromRoot(filepath.Join(t.TempDir(), "original"))
+	_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		Title: "worker", RepoPath: repoPath, Program: "claude", TaskRepoID: originalRepoID,
+	})
+	if err == nil {
+		release()
+	}
+	require.Error(t, err, "task session create must honor the retained project binding")
+	assert.Contains(t, err.Error(), "bound")
+	assert.Contains(t, err.Error(), "prompt not delivered")
+}
+
+func TestDeliverPrompt_TaskBindingSurvivesPathRebindBeforeAutoCreate(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	rec := installRecordingBackend(t)
+	alpha := setupControlRepo(t)
+	beta := setupTaskRepo(t)
+	bound := filepath.Join(t.TempDir(), "bound")
+	require.NoError(t, os.Symlink(alpha, bound))
+	alphaRepo, err := config.RepoFromPath(bound)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	origHook := testHookDeliverAfterTargetLock
+	var once sync.Once
+	testHookDeliverAfterTargetLock = func() {
+		once.Do(func() {
+			require.NoError(t, os.Remove(bound))
+			require.NoError(t, os.Symlink(beta, bound))
+		})
+	}
+	t.Cleanup(func() { testHookDeliverAfterTargetLock = origHook })
+
+	_, err = manager.DeliverPrompt(DeliverPromptRequest{
+		Title: "worker", RepoPath: bound, Program: "claude", Prompt: "run it", TaskRepoID: alphaRepo.ID,
+	})
+	require.Error(t, err, "final create admission must recheck the task binding")
+	assert.Contains(t, err.Error(), "bound")
+	assert.Empty(t, rec.snapshot(), "binding refusal must precede agent startup and prompt delivery")
 }
 
 func (r *promptRecorder) add(prompt string) {

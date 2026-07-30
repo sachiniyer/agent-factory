@@ -473,18 +473,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
-	m.mu.Lock()
-	if _, busy := m.killsInFlight[key]; busy {
-		m.mu.Unlock()
-		return "", fmt.Errorf("an operation is already in progress for session %q", req.Title)
+	if err := m.claimRestoreOperation(repoID, key, req.Title); err != nil {
+		return "", err
 	}
-	m.killsInFlight[key] = struct{}{}
-	m.mu.Unlock()
-	defer func() {
-		m.mu.Lock()
-		delete(m.killsInFlight, key)
-		m.mu.Unlock()
-	}()
+	defer m.releaseRestoreOperation(key)
 
 	opLock, err := m.lockSessionOperationWithin(key, "restore", req.Title)
 	if err != nil {

@@ -71,10 +71,11 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 	target := task.CanonicalTargetSession(t.TargetSession)
 	if target == "" {
 		data, err := createSessionForTask(CreateSessionRequest{
-			TitleBase: task.TaskRunBaseTitle(*t),
-			RepoPath:  t.ProjectPath,
-			Program:   t.Program,
-			Prompt:    prompt,
+			TitleBase:  task.TaskRunBaseTitle(*t),
+			RepoPath:   t.ProjectPath,
+			Program:    t.Program,
+			Prompt:     prompt,
+			TaskRepoID: t.RepoID,
 			// Provenance + the cap the manager admits against (#1892). TaskID is
 			// persisted on the session so the count is by association, never by a
 			// title prefix; MaxConcurrentRuns is zero for every task that has not
@@ -92,7 +93,11 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			if isAtConcurrencyLimitErr(err) {
 				return "", errAtConcurrencyLimit
 			}
-			return "", fmt.Errorf("failed to start task session: %w", err)
+			wrapped := fmt.Errorf("failed to start task session: %w", err)
+			if isNotAttemptedErr(err) {
+				return "", notAttempted(wrapped)
+			}
+			return "", wrapped
 		}
 		// The freshly created session hit a usage-limit wall during startup and
 		// was parked, not failed (#1146 PR4). Record the parked status so the run
@@ -115,10 +120,11 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		// byte-for-byte. Titles are not canonicalized globally and the daemon keys
 		// instances on exact bytes, so this lookup must never be trimmed: a task
 		// aimed at the legal title " build " has to keep looking for " build ".
-		Title:    target,
-		RepoPath: t.ProjectPath,
-		Program:  t.Program,
-		Prompt:   prompt,
+		Title:      target,
+		RepoPath:   t.ProjectPath,
+		Program:    t.Program,
+		Prompt:     prompt,
+		TaskRepoID: t.RepoID,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.

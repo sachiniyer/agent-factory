@@ -7,6 +7,35 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// claimRestoreOperation makes restore admission atomic with DeleteProject's
+// per-repo lifecycle fence. If restore wins, killsInFlight makes deletion see
+// the session even while an archived row has not yet entered OpRestoring. If
+// deletion wins, projectDeletes refuses the restore before any state/worktree
+// mutation. The legacy killsInFlight name covers all exclusive lifecycle ops.
+func (m *Manager) claimRestoreOperation(repoID, key, title string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, deleting := m.projectDeletes[repoID]; deleting {
+		return fmt.Errorf("cannot restore session %q: project %s is being deleted; retry after deletion finishes", title, repoID)
+	}
+	if _, busy := m.killsInFlight[key]; busy {
+		return fmt.Errorf("an operation is already in progress for session %q", title)
+	}
+	if m.restoresInFlight == nil {
+		m.restoresInFlight = make(map[string]struct{})
+	}
+	m.killsInFlight[key] = struct{}{}
+	m.restoresInFlight[key] = struct{}{}
+	return nil
+}
+
+func (m *Manager) releaseRestoreOperation(key string) {
+	m.mu.Lock()
+	delete(m.killsInFlight, key)
+	delete(m.restoresInFlight, key)
+	m.mu.Unlock()
+}
+
 // RestoreSession restores a user-restorable session regardless of how it became
 // unavailable: archived rows use the archive restore path, while Lost/Dead rows
 // run the same Recover path the daemon's automatic Lost loop uses. It returns the
@@ -49,18 +78,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	}
 
 	key := daemonInstanceKey(repoID, title)
-	m.mu.Lock()
-	if _, busy := m.killsInFlight[key]; busy {
-		m.mu.Unlock()
-		return "", fmt.Errorf("an operation is already in progress for session %q", title)
+	if err := m.claimRestoreOperation(repoID, key, title); err != nil {
+		return "", err
 	}
-	m.killsInFlight[key] = struct{}{}
-	m.mu.Unlock()
-	defer func() {
-		m.mu.Lock()
-		delete(m.killsInFlight, key)
-		m.mu.Unlock()
-	}()
+	defer m.releaseRestoreOperation(key)
 
 	opLock, err := m.lockSessionOperationWithin(key, "restore", title)
 	if err != nil {

@@ -13,12 +13,13 @@ import (
 )
 
 // repoSessionTitlesLocked returns the titles of the repo's sessions the daemon still
-// tracks, across every create phase: m.reservedTitles (admitted but not yet projected),
-// m.pendingCreates (provisioning, so not yet in m.instances, #2549), and m.instances
+// tracks, across every create/restore phase: m.reservedTitles (admitted but not yet
+// projected), m.pendingCreates (provisioning, so not yet in m.instances, #2549),
+// m.restoresInFlight (the restore-only subset of m.killsInFlight), and m.instances
 // (live, non-archived rows). m.instances is not the universe (the same class the #1892
 // ghostTaskRuns comment in manager.go warns about, reached through a different door): a
-// delete that walked only it would miss a still-provisioning create, deregister the
-// project, and let the create finish into a live orphan.
+// delete that walked only it would miss a still-provisioning create or a restoring
+// archive, deregister the project, and let that session finish into a live orphan.
 //
 // inFlightOnly selects the ones a delete cannot archive YET — every pending create,
 // plus any m.instances row with an op in flight — which is what the up-front fail-closed
@@ -36,6 +37,15 @@ func (m *Manager) repoSessionTitlesLocked(repoID string, inFlightOnly bool) []st
 	}
 	// A pending create is always in flight (still provisioning), so it counts either way.
 	for key := range m.pendingCreates {
+		if rid, title := splitDaemonInstanceKey(key); rid == repoID {
+			titleSet[title] = struct{}{}
+		}
+	}
+	// Restore claims are admitted under m.mu. Count them even while an archived
+	// row has not yet transitioned to Lost+OpRestoring; the matching restore
+	// admission checks projectDeletes under this same lock. Other lifecycle ops
+	// retain DeleteProject's established per-session partial-failure behavior.
+	for key := range m.restoresInFlight {
 		if rid, title := splitDaemonInstanceKey(key); rid == repoID {
 			titleSet[title] = struct{}{}
 		}
@@ -205,7 +215,7 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	m.mu.Unlock()
 	if len(starting) > 0 {
 		sort.Strings(starting)
-		return result, fmt.Errorf("delete project %s: session(s) %v are still starting; nothing was changed — delete again once they are ready", repoID, starting)
+		return result, fmt.Errorf("delete project %s: session(s) %v are still starting or changing; nothing was changed — delete again once their operations finish", repoID, starting)
 	}
 	defer func() {
 		m.mu.Lock()
@@ -391,7 +401,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) error {
 	var titles []string
 	for key, instance := range m.instances {
 		rid, title := splitDaemonInstanceKey(key)
-		if rid != repoID || instance == nil || instance.GetLiveness() == session.LiveArchived || instance.IsExternalWorktree() {
+		if rid != repoID || instance == nil || instance.GetLiveness() == session.LiveArchived {
 			continue
 		}
 		titles = append(titles, title)
@@ -410,7 +420,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) error {
 		}
 	}
 	if len(blockers) > 0 {
-		return fmt.Errorf("delete project %s: enabled task(s) target session(s) it must archive: %s; disable or retarget them, then delete the project again; nothing was changed", repoID, strings.Join(blockers, "; "))
+		return fmt.Errorf("delete project %s: enabled task(s) target session(s) it must remove: %s; disable or retarget them, then delete the project again; nothing was changed", repoID, strings.Join(blockers, "; "))
 	}
 	return nil
 }

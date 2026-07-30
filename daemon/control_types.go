@@ -26,12 +26,17 @@ type CreateSessionRequest struct {
 	// counts a task's in-flight sessions by provenance rather than by a title
 	// prefix, and so the count survives a daemon restart.
 	//
-	// Both are `json:"-"`: they ride the net/rpc GOB control socket (which encodes
+	// These provenance fields are `json:"-"`: they ride the net/rpc GOB control
+	// socket (which encodes
 	// exported fields and ignores json tags), so the daemon's own task-delivery
 	// loopback still carries them, while the HTTP/JSON plane — the user-facing
 	// surface, reachable over TCP with a token since #1592 — cannot set them at
 	// all. encoding/json drops a "-" field on decode, and jsonFields skips it, so
 	// it is neither accepted nor advertised in the route catalog.
+	//
+	// TaskRepoID carries the same retained project binding used by targeted task
+	// delivery, so reserveCreate can reject a path that was rebound between the
+	// task runner and final create admission.
 	//
 	// That boundary is the point: provenance is an assertion the daemon makes
 	// about its own delivery, never a claim a client gets to make. Were it
@@ -40,6 +45,7 @@ type CreateSessionRequest struct {
 	// consuming its slots and parking its events, from a session that task never
 	// spawned.
 	TaskID            string `json:"-"`
+	TaskRepoID        string `json:"-"`
 	MaxConcurrentRuns int    `json:"-"`
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
@@ -255,6 +261,11 @@ type DeliverPromptRequest struct {
 	RepoPath string `json:"repo_path"`
 	Program  string `json:"program"`
 	Prompt   string `json:"prompt"`
+	// TaskRepoID is the task's retained project binding. Like CreateSession's
+	// TaskID, it is daemon-internal provenance carried over GOB and excluded from
+	// HTTP/JSON so a client cannot forge task authority. DeliverPrompt compares it
+	// with RepoPath's current resolution at the final daemon boundary.
+	TaskRepoID string `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a

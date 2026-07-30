@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,6 +160,64 @@ func stubTaskDelivery(t *testing.T) (*[]CreateSessionRequest, *[]DeliverPromptRe
 		deliverPromptForTask = origDeliver
 	})
 	return &creates, &delivers
+}
+
+func TestDeliverTaskPromptCarriesRetainedRepoBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	_, delivers := stubTaskDelivery(t)
+	boundRepoID := config.RepoIDFromRoot("/original/project")
+	tk := task.Task{
+		ID: "bound001", ProjectPath: repoPath, RepoID: boundRepoID,
+		TargetSession: "worker", Program: "claude",
+	}
+
+	_, err := deliverTaskPrompt(&tk, "run it", false)
+	if err != nil {
+		t.Fatalf("deliverTaskPrompt: %v", err)
+	}
+	if len(*delivers) != 1 {
+		t.Fatalf("deliver calls = %d, want 1", len(*delivers))
+	}
+	if got := (*delivers)[0].TaskRepoID; got != boundRepoID {
+		t.Fatalf("TaskRepoID = %q, want retained binding %q", got, boundRepoID)
+	}
+}
+
+func TestCreateTaskSessionCarriesRetainedRepoBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	boundRepoID := config.RepoIDFromRoot("/original/project")
+	tk := task.Task{
+		ID: "bound002", ProjectPath: repoPath, RepoID: boundRepoID, Program: "claude",
+	}
+
+	_, err := deliverTaskPrompt(&tk, "run it", false)
+	if err != nil {
+		t.Fatalf("deliverTaskPrompt: %v", err)
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("create calls = %d, want 1", len(*creates))
+	}
+	if got := (*creates)[0].TaskRepoID; got != boundRepoID {
+		t.Fatalf("TaskRepoID = %q, want retained binding %q", got, boundRepoID)
+	}
+}
+
+func TestCreateTaskBindingRefusalIsNotAttempted(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	origCreate := createSessionForTask
+	createSessionForTask = func(CreateSessionRequest) (*session.InstanceData, error) {
+		return nil, errors.New("task binding changed; prompt not delivered")
+	}
+	t.Cleanup(func() { createSessionForTask = origCreate })
+	tk := task.Task{ID: "bound003", ProjectPath: setupTaskRepo(t), RepoID: "repo-a"}
+
+	_, err := deliverTaskPrompt(&tk, "run it", false)
+	if !errors.Is(err, errNotAttempted) {
+		t.Fatalf("binding refusal = %v, want not-attempted classification", err)
+	}
 }
 
 // seedTargetSession persists a bare instance record so the delivery path sees

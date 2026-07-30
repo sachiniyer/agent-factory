@@ -160,6 +160,14 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 		// a momentarily unresolvable project during an outage must not burn budget.
 		return "", notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 	}
+	// A task's retained RepoID is its authoritative project binding. ProjectPath
+	// still supplies the filesystem root a delivery needs, but a symlink or
+	// worktree path can later resolve to a different repo. Refuse that implicit
+	// rebind at the final daemon boundary so a task bound to A never delivers into
+	// B; the operator can explicitly rebind the task through the supported update.
+	if req.TaskRepoID != "" && req.TaskRepoID != repo.ID {
+		return "", notAttempted(fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID))
+	}
 
 	unlock := m.lockTarget(repo.ID, req.Title)
 	defer unlock()
@@ -208,10 +216,11 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 	// the per-target lock, no other in-daemon delivery is creating it. Create it
 	// now and deliver the prompt as its initial prompt.
 	created, err := m.CreateSession(context.Background(), CreateSessionRequest{
-		Title:    req.Title,
-		RepoPath: req.RepoPath,
-		Program:  req.Program,
-		Prompt:   req.Prompt,
+		Title:      req.Title,
+		RepoPath:   req.RepoPath,
+		Program:    req.Program,
+		Prompt:     req.Prompt,
+		TaskRepoID: req.TaskRepoID,
 	})
 	if err != nil {
 		// A creator outside this daemon (a plain `af sessions create`, the API)

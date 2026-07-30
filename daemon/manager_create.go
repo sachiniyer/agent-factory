@@ -243,6 +243,9 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	if err != nil {
 		return nil, "", nil, nil, err
 	}
+	if req.TaskRepoID != "" && req.TaskRepoID != repo.ID {
+		return nil, "", nil, nil, fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; session was not created and prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/assert"
@@ -359,4 +360,129 @@ func TestDeleteProject_RefusesCreateAlreadyReservedBeforeFence(t *testing.T) {
 	assert.Empty(t, result.Archived)
 	assert.Contains(t, err.Error(), "still starting")
 	assert.Contains(t, err.Error(), "worker")
+}
+
+func TestProjectDeleteAndRestoreAdmissionAreMutuallyExclusive(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, *Manager, string, string) *session.Instance
+		restore func(*Manager, string) error
+	}{
+		{
+			name: "archived restore",
+			prepare: func(t *testing.T, manager *Manager, repoID, repoPath string) *session.Instance {
+				inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+				inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+				_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+				require.NoError(t, err)
+				return inst
+			},
+			restore: func(manager *Manager, repoID string) error {
+				_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+				return err
+			},
+		},
+		{
+			name: "lost restore",
+			prepare: func(t *testing.T, manager *Manager, repoID, repoPath string) *session.Instance {
+				backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+				return registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Lost)
+			},
+			restore: func(manager *Manager, repoID string) error {
+				_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "worker", RepoID: repoID})
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			inst := tc.prepare(t, manager, repoID, repoPath)
+			before := inst.LifecycleView()
+
+			mutationReached := make(chan struct{})
+			resumeDelete := make(chan struct{})
+			orig := deregisterRootAgents
+			deregisterRootAgents = func(string) ([]string, error) {
+				close(mutationReached)
+				<-resumeDelete
+				return nil, errors.New("forced stop before mutation")
+			}
+			t.Cleanup(func() { deregisterRootAgents = orig })
+
+			deleteDone := make(chan error, 1)
+			go func() {
+				_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+				deleteDone <- err
+			}()
+			select {
+			case <-mutationReached:
+			case <-time.After(5 * time.Second):
+				close(resumeDelete)
+				t.Fatal("DeleteProject did not reach its first mutation")
+			}
+
+			restoreErr := tc.restore(manager, repoID)
+			close(resumeDelete)
+			require.Error(t, <-deleteDone)
+			require.Error(t, restoreErr, "restore must not cross an active project-deletion fence")
+			assert.Contains(t, restoreErr.Error(), "delet")
+			assert.Equal(t, before, inst.LifecycleView(), "refused restore must not mutate the session")
+		})
+	}
+}
+
+func TestDeleteProject_RefusesClaimedArchivedRestore(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+
+	key := daemonInstanceKey(repoID, "worker")
+	require.NoError(t, manager.claimRestoreOperation(repoID, key, "worker"))
+	t.Cleanup(func() { manager.releaseRestoreOperation(key) })
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.Error(t, err, "a restore claim made before deletion must block deletion before mutation")
+	assert.Empty(t, result.Archived)
+	assert.Contains(t, err.Error(), "worker")
+	assert.Equal(t, session.LiveArchived, inst.GetLiveness())
+}
+
+func TestDeleteProject_TargetedExternalSessionsArePreflightBlockers(t *testing.T) {
+	for _, title := range []string{session.RootSessionTitle, "inplace"} {
+		t.Run(title, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, repoPath, title, "master", "", true, false)
+			require.NoError(t, err)
+			inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoPath, Program: "claude"})
+			require.NoError(t, err)
+			inst.SetBackend(session.NewFakeBackend())
+			inst.SetGitWorktreeForTest(gw)
+			inst.SetStartedForTest(true)
+			inst.SetStatusForTest(session.Ready)
+			manager.mu.Lock()
+			manager.instances[daemonInstanceKey(repoID, title)] = inst
+			manager.mu.Unlock()
+			require.NoError(t, manager.SaveInstances())
+			require.NoError(t, task.AddTask(archiveTargetTask("external1", "External Target", repoPath, title, true)))
+
+			seed := config.DefaultConfig()
+			seed.RootAgents = map[string]config.RootAgentConfig{repoPath: {}}
+			require.NoError(t, config.SaveConfig(seed))
+
+			result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+			require.Error(t, err, "deletion must not silently remove an enabled task target")
+			assert.Empty(t, result.Killed)
+			assert.Contains(t, err.Error(), "External Target")
+			cfg, loadErr := config.LoadConfig()
+			require.NoError(t, loadErr)
+			assert.Contains(t, cfg.RootAgents, repoPath, "blocker must precede root-agent mutation")
+			manager.mu.Lock()
+			_, stillTracked := manager.instances[daemonInstanceKey(repoID, title)]
+			manager.mu.Unlock()
+			assert.True(t, stillTracked)
+		})
+	}
 }
