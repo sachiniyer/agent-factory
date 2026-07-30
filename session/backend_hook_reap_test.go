@@ -591,6 +591,7 @@ echo '{"level":"info","msg":"connecting"}' >&2
 echo '{"level":"info","url":"http://wrong.invalid","token":"logged-secret"}' >&2
 echo '{"URL":"http://case-variant.invalid","TOKEN":"case-variant-secret"}' >&2
 echo '{"url":"http://first-duplicate.invalid","url":"http://last-duplicate.invalid","token":"duplicate-secret"}' >&2
+echo '{"level":"info","endpoint":{"url":"http://nested.invalid","token":"nested-secret"},INVALID}' >&2
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 echo '{"level":"info","msg":"tunnel ready"}' >&2
 exit 0
@@ -697,6 +698,18 @@ func TestHookOutputSuffixRedactsJSONEscapedToken(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+// TestHookOutputSuffixRedactsTruncatedJSONEscapedToken covers a structured log
+// whose string field contains only the prefix of an endpoint document. The
+// complete outer log must not make the incomplete inner token safe to report.
+func TestHookOutputSuffixRedactsTruncatedJSONEscapedToken(t *testing.T) {
+	const secret = "truncated-json-escaped-token-must-not-leak"
+	output := `{"endpoint":"{\"url\":\"\",\"token\":\"truncated-json-escaped-token-must-not-leak\""}`
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "a truncated serialized endpoint must not expose its bearer token")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
 // TestExtractJSONAtHandlesMalformedDelimiterFlood keeps endpoint selection
 // linear after a valid JSON log. No unmatched opener can produce a complete
 // value, so retrying a suffix scan from each one is pure quadratic work.
@@ -718,6 +731,12 @@ func TestExtractJSONAtHandlesMalformedDelimiterFlood(t *testing.T) {
 	assert.Less(t, time.Since(started), time.Second, "balanced malformed nesting must be scanned in linear time")
 	assert.Empty(t, value)
 	assert.Equal(t, len(balanced), end)
+
+	recoverable := strings.Repeat("[bad", 20_000) + logRecord + strings.Repeat("]", 20_000)
+	started = time.Now()
+	value, _ = extractJSONAt(recoverable, 0)
+	assert.Less(t, time.Since(started), time.Second, "nested recovery must walk each candidate once")
+	assert.Equal(t, logRecord, value)
 }
 
 // TestHookProvisionRedactsTokenFromIncompleteEndpointOutput covers a launch

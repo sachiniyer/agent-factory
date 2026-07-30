@@ -88,9 +88,11 @@ func extractJSON(output string) string {
 // byte offset immediately after it. The cursor lets shape-aware callers inspect
 // every value in a combined stdout/stderr stream without rescanning prior output.
 type jsonCandidateRange struct {
-	start  int
-	end    int
-	parent int
+	start       int
+	end         int
+	firstChild  int
+	lastChild   int
+	nextSibling int
 }
 
 func extractJSONAt(output string, start int) (string, int) {
@@ -104,13 +106,28 @@ func extractJSONAt(output string, start int) (string, int) {
 			if c != '{' && c != '[' {
 				continue
 			}
-			candidates = append(candidates[:0], jsonCandidateRange{start: cursor, parent: -1})
+			candidates = append(candidates[:0], jsonCandidateRange{
+				start:       cursor,
+				firstChild:  -1,
+				lastChild:   -1,
+				nextSibling: -1,
+			})
 			stack = append(stack[:0], 0)
 			inString = false
 			escape = false
 			continue
 		}
 
+		// A raw newline cannot occur inside a JSON string. Treat it as a hard
+		// resynchronization boundary so an unterminated stderr diagnostic cannot
+		// hide a complete endpoint record written on the next line to stdout.
+		if inString && (c == '\n' || c == '\r') {
+			candidates = candidates[:0]
+			stack = stack[:0]
+			inString = false
+			escape = false
+			continue
+		}
 		if escape {
 			escape = false
 			continue
@@ -128,11 +145,21 @@ func extractJSONAt(output string, start int) (string, int) {
 		}
 
 		if c == '{' || c == '[' {
+			parent := stack[len(stack)-1]
+			index := len(candidates)
 			candidates = append(candidates, jsonCandidateRange{
-				start:  cursor,
-				parent: stack[len(stack)-1],
+				start:       cursor,
+				firstChild:  -1,
+				lastChild:   -1,
+				nextSibling: -1,
 			})
-			stack = append(stack, len(candidates)-1)
+			if candidates[parent].firstChild < 0 {
+				candidates[parent].firstChild = index
+			} else {
+				candidates[candidates[parent].lastChild].nextSibling = index
+			}
+			candidates[parent].lastChild = index
+			stack = append(stack, index)
 			continue
 		}
 		if c != '}' && c != ']' {
@@ -147,50 +174,81 @@ func extractJSONAt(output string, start int) (string, int) {
 		}
 
 		candidate := candidates[0]
-		if json.Valid([]byte(output[candidate.start:candidate.end])) {
+		valid, errorAt, recoverable := inspectJSONCandidate(output, candidate)
+		if valid {
 			return output[candidate.start:candidate.end], candidate.end
 		}
-		if candidate, ok := firstValidJSONChild(output, candidates, 0); ok {
+		if recoverable {
+			candidate, recoverable = firstJSONCandidateAfterError(output, candidates, 0, errorAt)
+		}
+		if recoverable {
 			return output[candidate.start:candidate.end], candidate.end
 		}
 		candidates = candidates[:0]
 	}
-	if candidate, ok := firstRecoverableJSONCandidate(output, candidates); ok {
-		return output[candidate.start:candidate.end], candidate.end
+	if len(candidates) > 0 {
+		unfinished := candidates[0]
+		unfinished.end = len(output)
+		if _, errorAt, ok := inspectJSONCandidate(output, unfinished); ok {
+			if candidate, ok := firstJSONCandidateAfterError(output, candidates, 0, errorAt); ok {
+				return output[candidate.start:candidate.end], candidate.end
+			}
+		}
 	}
 	return "", len(output)
 }
 
-// Direct children are disjoint. If a balanced outer candidate is malformed,
-// validating only that level recovers JSON embedded in surrounding prose while
-// keeping the total number of inspected bytes linear.
-func firstValidJSONChild(output string, candidates []jsonCandidateRange, parent int) (jsonCandidateRange, bool) {
-	for _, candidate := range candidates {
-		if candidate.parent != parent || candidate.end <= candidate.start {
+// firstJSONCandidateAfterError descends only through children that begin after
+// their parent's first syntax error. Children before that point are structured
+// values embedded in the malformed parent, not independent launch records. At
+// each level direct children are disjoint; recursion happens only after an early
+// syntax error, avoiding overlapping full-document validation.
+func firstJSONCandidateAfterError(
+	output string,
+	candidates []jsonCandidateRange,
+	parent int,
+	errorAt int,
+) (jsonCandidateRange, bool) {
+	for index := candidates[parent].firstChild; index >= 0; index = candidates[index].nextSibling {
+		candidate := candidates[index]
+		if candidate.end <= candidate.start || candidate.start < errorAt {
 			continue
 		}
-		if json.Valid([]byte(output[candidate.start:candidate.end])) {
+		valid, childErrorAt, recoverable := inspectJSONCandidate(output, candidate)
+		if valid {
 			return candidate, true
+		}
+		if !recoverable {
+			continue
+		}
+		if nested, ok := firstJSONCandidateAfterError(output, candidates, index, childErrorAt); ok {
+			return nested, true
 		}
 	}
 	return jsonCandidateRange{}, false
 }
 
-// If an outer delimiter never closed, a later complete JSON value would
-// otherwise be hidden inside it. Only validate completed direct children of an
-// unresolved candidate. Those ranges are disjoint, which preserves recovery
-// without repeatedly validating every nested suffix of malformed output.
-func firstRecoverableJSONCandidate(output string, candidates []jsonCandidateRange) (jsonCandidateRange, bool) {
-	for _, candidate := range candidates {
-		if candidate.end <= candidate.start {
-			continue
-		}
-		if candidate.parent >= 0 && candidates[candidate.parent].end != 0 {
-			continue
-		}
-		if json.Valid([]byte(output[candidate.start:candidate.end])) {
-			return candidate, true
-		}
+// inspectJSONCandidate parses directly from the output string so an early
+// syntax error does not copy the candidate's entire remaining suffix. The error
+// position tells recovery which descendants occurred only after the parent had
+// already ceased to be valid JSON.
+func inspectJSONCandidate(output string, candidate jsonCandidateRange) (bool, int, bool) {
+	decoder := json.NewDecoder(strings.NewReader(output[candidate.start:candidate.end]))
+	var raw json.RawMessage
+	err := decoder.Decode(&raw)
+	if err == nil {
+		return true, 0, false
 	}
-	return jsonCandidateRange{}, false
+	syntaxErr, ok := err.(*json.SyntaxError)
+	if !ok {
+		return false, 0, false
+	}
+	position := candidate.start + int(syntaxErr.Offset) - 1
+	if position < candidate.start {
+		position = candidate.start
+	}
+	if position > candidate.end {
+		position = candidate.end
+	}
+	return false, position, true
 }

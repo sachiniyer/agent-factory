@@ -111,6 +111,16 @@ func TestExtractJSON(t *testing.T) {
 			in:   `noise { not json {"name": "remote-one"} still bad }`,
 			want: `{"name": "remote-one"}`,
 		},
+		{
+			name: "descends through nested malformed wrappers",
+			in:   `noise { bad [ bad {"name": "remote-one"} bad ] bad }`,
+			want: `{"name": "remote-one"}`,
+		},
+		{
+			name: "resynchronizes after raw newline in unterminated string",
+			in:   "progress { reading \"config\n" + `{"name": "remote-one"}`,
+			want: `{"name": "remote-one"}`,
+		},
 	}
 
 	for _, tc := range cases {

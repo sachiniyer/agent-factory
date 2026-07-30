@@ -481,7 +481,10 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		return value, changed
 	case string:
-		redacted := redactCompleteHookJSON(value)
+		// A complete outer log can contain an incomplete serialized endpoint.
+		// Once decoded, run both complete-document and truncated-field redaction
+		// over the inner diagnostic before re-encoding the outer record.
+		redacted := redactHookOutputTokens(value)
 		return redacted, redacted != value
 	default:
 		return value, false
