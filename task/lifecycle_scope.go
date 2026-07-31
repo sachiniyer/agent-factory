@@ -58,20 +58,14 @@ func LoadTasksForRepoIDWithBindingUpdates(repoID string) ([]Task, []Task, error)
 	return filtered, updated, nil
 }
 
-// LoadTasksWithStableRepoBindings returns the authoritative task list after
-// committing every legacy ProjectPath that currently resolves to a real
+// LoadTasksWithStableRepoBindingUpdates is the all-project counterpart to
+// LoadTasksForRepoIDWithBindingUpdates. It returns the authoritative task list
+// after committing every legacy ProjectPath that currently resolves to a real
 // repository. Resolution runs before the tasks-file lock because it shells out
 // to git; the lock then re-reads the store and applies only path-keyed answers
 // from that snapshot. Rows added with a new path in the interval remain
 // unresolved, never guessed. Callers that depend on identity must treat their
 // empty RepoID as unknown.
-func LoadTasksWithStableRepoBindings() ([]Task, error) {
-	tasks, _, err := LoadTasksWithStableRepoBindingUpdates()
-	return tasks, err
-}
-
-// LoadTasksWithStableRepoBindingUpdates is the all-project counterpart to
-// LoadTasksForRepoIDWithBindingUpdates.
 func LoadTasksWithStableRepoBindingUpdates() ([]Task, []Task, error) {
 	tasks, _, updated, err := loadTasksWithStableRepoBindings()
 	return tasks, updated, err
