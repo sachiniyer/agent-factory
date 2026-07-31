@@ -735,6 +735,36 @@ func TestHookOutputSuffixRedactsPrefixedSerializedEndpoint(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+// TestHookOutputSuffixRedactsSerializedEndpointVariants covers JSON-equivalent
+// encodings where the decoded document begins with whitespace or an escaped
+// opening brace rather than a literal raw delimiter.
+func TestHookOutputSuffixRedactsSerializedEndpointVariants(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		output string
+	}{
+		{
+			name:   "leading whitespace",
+			secret: "whitespace-json-string-token-must-not-leak",
+			output: `"  {\"token\":\"whitespace-json-string-token-must-not-leak\"}"`,
+		},
+		{
+			name:   "unicode escaped opener",
+			secret: "escaped-opener-token-must-not-leak",
+			output: `"\u007b\"token\":\"escaped-opener-token-must-not-leak\"}"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			suffix := hookOutputSuffix([]byte(test.output))
+			assert.NotContains(t, suffix, test.secret, "a JSON-equivalent serialized endpoint must redact its token")
+			assert.Contains(t, suffix, "[REDACTED]")
+		})
+	}
+}
+
 // TestExtractJSONAtHandlesMalformedDelimiterFlood keeps endpoint selection
 // linear after a valid JSON log. No unmatched opener can produce a complete
 // value, so retrying a suffix scan from each one is pure quadratic work.

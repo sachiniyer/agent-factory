@@ -408,9 +408,10 @@ func redactHookOutputTokens(output string) string {
 
 // redactSerializedHookJSONStrings handles a JSON string containing serialized
 // endpoint JSON whether it is a top-level record, an object field, or surrounded
-// by logger metadata. Only quotes whose decoded value begins with an object or
-// array are candidates. The scanner examines every byte once and reconsiders a
-// malformed candidate's closing quote as a possible overlapping opener.
+// by logger metadata. Every quote boundary is considered so JSON-equivalent
+// encodings such as leading whitespace and \u007b are covered. The scanner
+// examines every byte once and reconsiders each closing quote as the next
+// possible opener, so malformed prefixes cannot phase-shift later values.
 func redactSerializedHookJSONStrings(output string) string {
 	var redacted strings.Builder
 	written := 0
@@ -418,7 +419,7 @@ func redactSerializedHookJSONStrings(output string) string {
 	escaped := false
 	for cursor := 0; cursor < len(output); cursor++ {
 		if candidateStart < 0 {
-			if serializedJSONQuoteAt(output, cursor) {
+			if output[cursor] == '"' {
 				candidateStart = cursor
 				escaped = false
 			}
@@ -448,21 +449,14 @@ func redactSerializedHookJSONStrings(output string) string {
 			}
 		}
 		candidateStart = -1
-		if serializedJSONQuoteAt(output, cursor) {
-			candidateStart = cursor
-			escaped = false
-		}
+		candidateStart = cursor
+		escaped = false
 	}
 	if written == 0 {
 		return output
 	}
 	redacted.WriteString(output[written:])
 	return redacted.String()
-}
-
-func serializedJSONQuoteAt(output string, quote int) bool {
-	return quote >= 0 && quote+1 < len(output) && output[quote] == '"' &&
-		(output[quote+1] == '{' || output[quote+1] == '[')
 }
 
 // redactCompleteHookJSON handles structured log records that serialize another
