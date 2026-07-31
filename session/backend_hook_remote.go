@@ -88,23 +88,37 @@ func extractJSON(output string) string {
 // byte offset immediately after it. The cursor lets shape-aware callers inspect
 // every value in a combined stdout/stderr stream without rescanning prior output.
 type jsonCandidateRange struct {
-	start       int
-	end         int
-	firstChild  int
-	lastChild   int
-	nextSibling int
-	embedded    bool
+	start            int
+	end              int
+	firstChild       int
+	lastChild        int
+	nextSibling      int
+	keyStart         int
+	keyEnd           int
+	propertyValue    bool
+	embedded         bool
+	endpointEmbedded bool
 }
 
 func extractJSONAt(output string, start int) (string, int) {
-	return extractJSONAtWithEOFResync(output, start, true)
+	value, next, _ := extractJSONCandidateAt(output, start, true)
+	return value, next
 }
 
-func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (string, int) {
+// extractEndpointJSONAt also reports whether a recovered value was independent
+// of a surrounding array. Generic malformed-prose parsing may recover such a
+// value, but launch must not promote an endpoint-shaped log array element into
+// the provisioner's top-level endpoint record.
+func extractEndpointJSONAt(output string, start int) (string, int, bool) {
+	return extractJSONCandidateAt(output, start, true)
+}
+
+func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (string, int, bool) {
 	var candidates []jsonCandidateRange
 	var stack []int
 	inString := false
 	escape := false
+	jsonStringStart := -1
 	stringCandidateStart := -1
 	lineRescanned := false
 	for cursor := start; cursor < len(output); cursor++ {
@@ -118,10 +132,13 @@ func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (
 				firstChild:  -1,
 				lastChild:   -1,
 				nextSibling: -1,
+				keyStart:    -1,
+				keyEnd:      -1,
 			})
 			stack = append(stack[:0], 0)
 			inString = false
 			escape = false
+			jsonStringStart = -1
 			continue
 		}
 
@@ -138,6 +155,7 @@ func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (
 				stack = stack[:0]
 				inString = false
 				escape = false
+				jsonStringStart = -1
 				stringCandidateStart = -1
 				lineRescanned = true
 				continue
@@ -146,6 +164,7 @@ func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (
 			stack = stack[:0]
 			inString = false
 			escape = false
+			jsonStringStart = -1
 			stringCandidateStart = -1
 			lineRescanned = false
 			continue
@@ -159,7 +178,17 @@ func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (
 			continue
 		}
 		if c == '"' {
-			inString = !inString
+			if inString {
+				inString = false
+				parent := stack[len(stack)-1]
+				candidates[parent].keyStart = jsonStringStart
+				candidates[parent].keyEnd = cursor + 1
+				candidates[parent].propertyValue = false
+				jsonStringStart = -1
+			} else {
+				inString = true
+				jsonStringStart = cursor
+			}
 			continue
 		}
 		if inString {
@@ -171,16 +200,35 @@ func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (
 			continue
 		}
 
+		parent := stack[len(stack)-1]
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			continue
+		}
+		if c == ':' {
+			keyStart := candidates[parent].keyStart
+			keyEnd := candidates[parent].keyEnd
+			candidates[parent].propertyValue = output[candidates[parent].start] == '{' &&
+				keyStart >= 0 && keyEnd > keyStart && json.Valid([]byte(output[keyStart:keyEnd]))
+			candidates[parent].keyStart = -1
+			candidates[parent].keyEnd = -1
+			continue
+		}
 		if c == '{' || c == '[' {
+			propertyValue := candidates[parent].propertyValue
+			candidates[parent].keyStart = -1
+			candidates[parent].keyEnd = -1
+			candidates[parent].propertyValue = false
 			parent := stack[len(stack)-1]
 			index := len(candidates)
 			candidates = append(candidates, jsonCandidateRange{
-				start:       cursor,
-				firstChild:  -1,
-				lastChild:   -1,
-				nextSibling: -1,
-				embedded: candidates[parent].embedded ||
-					jsonCandidateFollowsColon(output, cursor, candidates[parent].start),
+				start:            cursor,
+				firstChild:       -1,
+				lastChild:        -1,
+				nextSibling:      -1,
+				keyStart:         -1,
+				keyEnd:           -1,
+				embedded:         candidates[parent].embedded || propertyValue,
+				endpointEmbedded: candidates[parent].endpointEmbedded || propertyValue || output[candidates[parent].start] == '[',
 			})
 			if candidates[parent].firstChild < 0 {
 				candidates[parent].firstChild = index
@@ -191,6 +239,9 @@ func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (
 			stack = append(stack, index)
 			continue
 		}
+		candidates[parent].keyStart = -1
+		candidates[parent].keyEnd = -1
+		candidates[parent].propertyValue = false
 		if c != '}' && c != ']' {
 			continue
 		}
@@ -205,30 +256,30 @@ func extractJSONAtWithEOFResync(output string, start int, allowEOFResync bool) (
 		candidate := candidates[0]
 		valid, errorAt, recoverable := inspectJSONCandidate(output, candidate)
 		if valid {
-			return output[candidate.start:candidate.end], candidate.end
+			return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded
 		}
 		if recoverable {
 			candidate, recoverable = firstJSONCandidateAfterError(output, candidates, 0, errorAt)
 		}
 		if recoverable {
-			return output[candidate.start:candidate.end], candidate.end
+			return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded
 		}
 		candidates = candidates[:0]
 		stringCandidateStart = -1
 	}
 	if allowEOFResync && stringCandidateStart >= 0 && !lineRescanned {
-		return extractJSONAtWithEOFResync(output, stringCandidateStart, false)
+		return extractJSONCandidateAt(output, stringCandidateStart, false)
 	}
 	if len(candidates) > 0 {
 		unfinished := candidates[0]
 		unfinished.end = len(output)
 		if _, errorAt, ok := inspectJSONCandidate(output, unfinished); ok {
 			if candidate, ok := firstJSONCandidateAfterError(output, candidates, 0, errorAt); ok {
-				return output[candidate.start:candidate.end], candidate.end
+				return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded
 			}
 		}
 	}
-	return "", len(output)
+	return "", len(output), false
 }
 
 // firstJSONCandidateAfterError descends only through children that begin after
@@ -259,18 +310,6 @@ func firstJSONCandidateAfterError(
 		}
 	}
 	return jsonCandidateRange{}, false
-}
-
-func jsonCandidateFollowsColon(output string, start, lowerBound int) bool {
-	for cursor := start - 1; cursor > lowerBound; cursor-- {
-		switch output[cursor] {
-		case ' ', '\t', '\r', '\n':
-			continue
-		default:
-			return output[cursor] == ':'
-		}
-	}
-	return false
 }
 
 // inspectJSONCandidate parses directly from the output string so an early

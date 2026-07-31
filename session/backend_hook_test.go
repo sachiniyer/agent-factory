@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestExtractJSON exercises the bracket-counting parser added for #572,
@@ -131,6 +132,11 @@ func TestExtractJSON(t *testing.T) {
 			in:   "progress { reading \"config " + `{"name": "remote-one"}`,
 			want: `{"name": "remote-one"}`,
 		},
+		{
+			name: "recovers value after diagnostic colon",
+			in:   "progress { pending:" + `{"name": "remote-one"}`,
+			want: `{"name": "remote-one"}`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -140,4 +146,43 @@ func TestExtractJSON(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestHookProvisionRejectsEndpointInMalformedLogArray(t *testing.T) {
+	h := newHookState(t, `
+echo '[INVALID,{"url":"http://array.invalid","token":"array-secret"}]' >&2
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	p := newHookProvisioner(h, "malformed array logger")
+
+	res, err := p.provisionOrReap()
+	require.NoError(t, err, "an endpoint-shaped log array element must not hide the launch record")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
+	assert.False(t, h.deleteRan(t), "valid endpoint output must not reap the working sandbox")
+}
+
+func TestHookOutputSuffixRedactsOverlappingSerializedEndpoints(t *testing.T) {
+	const firstSecret = "first-overlap-must-not-leak"
+	const secondSecret = "second-overlap-must-not-leak"
+	output := `"{\"token\":\"first-overlap-must-not-leak\"}"{\"token\":\"second-overlap-must-not-leak\"}"`
+
+	var suffix string
+	require.NotPanics(t, func() {
+		suffix = hookOutputSuffix([]byte(output))
+	}, "overlapping serialized values must not abort hook error reporting")
+	assert.NotContains(t, suffix, firstSecret)
+	assert.NotContains(t, suffix, secondSecret)
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
+func TestHookOutputSuffixRedactsUnterminatedSerializedEndpoint(t *testing.T) {
+	const secret = "unterminated-serialized-token-must-not-leak"
+	output := `INFO endpoint="{\"url\":\"\",\"token\":\"unterminated-serialized-token-must-not-leak\"`
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "an incomplete outer string must not expose its serialized token")
+	assert.Contains(t, suffix, "[REDACTED]")
 }

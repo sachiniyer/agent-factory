@@ -443,13 +443,28 @@ func redactSerializedHookJSONStrings(output string) string {
 			sanitized := redactHookOutputTokens(decoded)
 			if sanitized != decoded {
 				encoded, _ := json.Marshal(sanitized)
-				redacted.WriteString(output[written:candidateStart])
-				redacted.Write(encoded)
-				written = candidateEnd
+				appendSerializedHookJSONReplacement(&redacted, output, &written,
+					candidateStart, candidateEnd, encoded)
 			}
 		}
 		candidateStart = cursor
 		escaped = false
+	}
+	if candidateStart >= 0 {
+		// A killed hook may leave the outer JSON string unfinished even though
+		// its escaped inner token value is complete. Close only for decoding,
+		// sanitize the decoded prefix, then drop the synthetic closing quote so
+		// the diagnostic remains faithful to the interrupted output.
+		var decoded string
+		if json.Unmarshal([]byte(output[candidateStart:]+`"`), &decoded) == nil {
+			sanitized := redactHookOutputTokens(decoded)
+			if sanitized != decoded {
+				encoded, _ := json.Marshal(sanitized)
+				encoded = encoded[:len(encoded)-1]
+				appendSerializedHookJSONReplacement(&redacted, output, &written,
+					candidateStart, len(output), encoded)
+			}
+		}
 	}
 	if written == 0 {
 		return output
@@ -763,12 +778,15 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	output := string(out)
 	sawJSON := false
 	for cursor := 0; cursor < len(output); {
-		jsonStr, next := extractJSONAt(output, cursor)
+		jsonStr, next, endpointCandidate := extractEndpointJSONAt(output, cursor)
 		if jsonStr == "" {
 			break
 		}
 		cursor = next
 		sawJSON = true
+		if !endpointCandidate {
+			continue
+		}
 
 		// The documented endpoint schema itself is the discriminator. Reject
 		// unknown fields so a structured log that merely includes url and token
