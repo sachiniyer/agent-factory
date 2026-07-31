@@ -87,6 +87,7 @@ var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
 var (
 	renamePath                  = renamePathNoReplace
 	removeDirectoryTree         = removeOpenedDirectory
+	moveDirInspectClaimedSource = identityAt
 	copyTreeBeforeSourceOpen    = func(string) error { return nil }
 	copyTreeAfterSymlinkCreate  = func(string) error { return nil }
 	copyTreeAfterDestCreate     = func(string) error { return nil }
@@ -323,12 +324,19 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 	if err := renameAtNoReplace(int(sourceParent.Fd()), sourceName, int(sourceParent.Fd()), quarantineName); err != nil {
 		return fmt.Errorf("failed to atomically secure source directory %s before cleanup: %w", src, err)
 	}
-	quarantinedIdentity, err := identityAt(sourceParent, quarantineName)
+	quarantinedIdentity, err := moveDirInspectClaimedSource(sourceParent, quarantineName)
 	if err != nil {
-		if restoreErr := restoreClaimedSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
+		// Restore only what still identifies the source this process opened. A
+		// racer can strand the claimed entry and drop a replacement at the
+		// quarantine name inside this window; an unchecked rename would publish
+		// that replacement at src and report it as the restored source, while
+		// the real tree stayed stranded under the racer's name.
+		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName, copied.source); restoreErr != nil {
 			return fmt.Errorf("failed to inspect secured source %s (%v) and could not restore it to %s: %w", quarantinePath, err, src, restoreErr)
 		}
-		if pathErr := validateDirectoryPathIdentity(sourceParentPath, "source", sourceParentIdentity); pathErr != nil {
+		if pathErr := validateNamedPathIdentity(
+			sourceParentPath, sourceName, "source", sourceParentIdentity, copied.sourceIdentity,
+		); pathErr != nil {
 			return errors.Join(fmt.Errorf("failed to inspect secured source %s: %w", quarantinePath, err), pathErr)
 		}
 		return fmt.Errorf("failed to inspect secured source %s; restored it to %s: %w", quarantinePath, src, err)

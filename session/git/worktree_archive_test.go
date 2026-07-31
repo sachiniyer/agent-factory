@@ -1211,6 +1211,9 @@ func TestMoveDirCrossDevice_CopyFailureCleansPrivateStaging(t *testing.T) {
 // narrow window after mkdirat succeeds but before a descriptor owns staging.
 // A restrictive umask makes the new directory unopenable deterministically.
 func TestMoveDirCrossDevice_InitialStagingOpenFailureCleansCreatedName(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a mode-000 directory regardless; this scenario needs a non-root uid")
+	}
 	src := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.Mkdir(src, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))

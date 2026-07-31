@@ -171,6 +171,49 @@ func TestMoveDirCrossDevice_PostCreateFailureCleansPrivateStaging(t *testing.T) 
 	assert.FileExists(t, filepath.Join(src, "a-file"), "a failed move must leave the source intact")
 }
 
+// TestMoveDirCrossDevice_InspectFailureNeverRestoresAReplacement pins the
+// inspection-error branch to what it can verify. A racer that strands the
+// just-claimed source and drops a replacement at the quarantine name before the
+// restore runs must not have that replacement renamed onto src and reported as
+// the restored source — the real tree has to stay recoverable.
+func TestMoveDirCrossDevice_InspectFailureNeverRestoresAReplacement(t *testing.T) {
+	sourceParent := t.TempDir()
+	src := filepath.Join(sourceParent, "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	destinationParent := t.TempDir()
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	stranded := filepath.Join(sourceParent, "stranded")
+	originalInspect := moveDirInspectClaimedSource
+	moveDirInspectClaimedSource = func(_ *os.File, name string) (pathIdentity, error) {
+		claimed := filepath.Join(sourceParent, name)
+		if err := os.Rename(claimed, stranded); err != nil {
+			return pathIdentity{}, err
+		}
+		if err := os.Mkdir(claimed, 0755); err != nil {
+			return pathIdentity{}, err
+		}
+		if err := os.WriteFile(filepath.Join(claimed, "replacement.txt"), []byte("replacement"), 0644); err != nil {
+			return pathIdentity{}, err
+		}
+		return pathIdentity{}, syscall.ENOENT
+	}
+	t.Cleanup(func() { moveDirInspectClaimedSource = originalInspect })
+
+	err := moveDirCrossDevice(src, filepath.Join(destinationParent, "dest"))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "restored it to",
+		"a replacement must never be reported as the restored source")
+	assert.FileExists(t, filepath.Join(stranded, "original.txt"),
+		"the source this process opened must stay recoverable")
+	assert.NoFileExists(t, filepath.Join(src, "replacement.txt"),
+		"a replacement must not be published at the source path")
+}
+
 func TestCopyTree_RejectsExcessiveDepth(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.Mkdir(src, 0755))
