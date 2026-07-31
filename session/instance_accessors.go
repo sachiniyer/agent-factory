@@ -368,6 +368,8 @@ func (i *Instance) ResolvedPaneAgent() string {
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,
 // materializing the single Agent tab if needed.
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.setTmuxLocked(session)
 }
 
