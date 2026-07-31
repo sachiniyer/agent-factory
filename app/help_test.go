@@ -78,6 +78,27 @@ func TestGeneralHelpReboundLineKeyWinsOverPagingAlias(t *testing.T) {
 		"a configured line key must win over a hardcoded paging alias")
 }
 
+func TestGeneralHelpHidesPagingAliasShadowedByRebind(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"up": {"pgdown"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	var pageLine string
+	for _, line := range strings.Split(xansi.Strip(helpTypeGeneral{}.toContent()), "\n") {
+		if strings.HasPrefix(line, "Page:") {
+			pageLine = line
+			break
+		}
+	}
+
+	require.NotEmpty(t, pageLine)
+	require.NotContains(t, pageLine, "pgdn",
+		"the page controls must not advertise an alias shadowed by a rebind")
+	require.Contains(t, xansi.Strip(helpTypeGeneral{}.toContent()), "pgdown, ↓/j",
+		"the effective line binding remains advertised on its actual action")
+}
+
 // TestGeneralHelpNavigationMatchesBindings guards against regressing #764, where
 // the help screen documented "↑/j, ↓/k" while the canonical bindings in
 // keys/keys.go map k=up and j=down (standard vim convention).

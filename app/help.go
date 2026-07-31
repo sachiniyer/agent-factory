@@ -152,6 +152,38 @@ func firstRunActionLine(actions string) string {
 	return descStyle.Render(actions)
 }
 
+func helpPagingAliases() string {
+	aliases := []struct {
+		label string
+		msg   tea.KeyMsg
+	}{
+		{label: "pgup", msg: tea.KeyMsg{Type: tea.KeyPgUp}},
+		{label: "pgdn", msg: tea.KeyMsg{Type: tea.KeyPgDown}},
+	}
+	bindings := []keys.KeyName{
+		keys.KeyHelp,
+		keys.KeyUp,
+		keys.KeyDown,
+		keys.KeyShiftUp,
+		keys.KeyShiftDown,
+	}
+
+	var visible []string
+	for _, alias := range aliases {
+		shadowed := false
+		for _, name := range bindings {
+			if key.Matches(alias.msg, keys.GlobalKeyBindings[name]) {
+				shadowed = true
+				break
+			}
+		}
+		if !shadowed {
+			visible = append(visible, alias.label)
+		}
+	}
+	return strings.Join(visible, "/")
+}
+
 func (h helpTypeGeneral) toContent() string {
 	return h.toContentWidth(0)
 }
@@ -163,12 +195,17 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 	// and stays literal; the task-manager run shortcut is folded into the
 	// tasks row (its `r` is overlay-local, not the global restore key #1605).
 	navKeys := helpKey(keys.KeyUp) + ", " + helpKey(keys.KeyDown)
+	pageLine := descStyle.Render("Page: ")
+	if aliases := helpPagingAliases(); aliases != "" {
+		pageLine += descStyle.Render(aliases + " · ")
+	}
+	pageLine += keyStyle.Render(helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown))
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
 		"",
 		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
 		"",
-		descStyle.Render("Page: pgup/pgdn · ")+keyStyle.Render(helpKey(keys.KeyShiftUp)+"/"+helpKey(keys.KeyShiftDown)),
+		pageLine,
 		descStyle.Render("Line: ")+keyStyle.Render(navKeys)+descStyle.Render(" · home/end jump"),
 		descStyle.Render("Close: esc · ")+keyStyle.Render(helpKey(keys.KeyHelp))+descStyle.Render(" toggles help"),
 	)
