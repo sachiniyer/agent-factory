@@ -2,10 +2,14 @@ package agentproto
 
 import (
 	"errors"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/quick"
 )
 
 func TestURLRedactedLeavesAccessTokenQueryUntouched(t *testing.T) {
@@ -125,6 +129,86 @@ func TestRedactAccessTokenText(t *testing.T) {
 			t.Errorf("text redactor lost %q: %s", want, got)
 		}
 	}
+}
+
+type accessTokenRedactionCase struct {
+	Input string
+	Token string
+}
+
+func TestRedactAccessTokenTextNeverRetainsTokenValue(t *testing.T) {
+	const generatedCases = 3 * 3 * 6 * 3 * 8
+	caseNumber := 0
+	config := &quick.Config{
+		MaxCount: generatedCases,
+		Rand:     rand.New(rand.NewSource(2695)),
+		Values: func(values []reflect.Value, source *rand.Rand) {
+			generated := generateAccessTokenRedactionCase(caseNumber, source)
+			caseNumber++
+			values[0] = reflect.ValueOf(generated)
+		},
+	}
+
+	property := func(generated accessTokenRedactionCase) bool {
+		got := RedactAccessTokenText(generated.Input)
+		if strings.Contains(got, generated.Token) {
+			t.Logf("RedactAccessTokenText(%q) = %q; token value %q survived",
+				generated.Input, got, generated.Token)
+			return false
+		}
+		return true
+	}
+	if err := quick.Check(property, config); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func generateAccessTokenRedactionCase(n int, source *rand.Rand) accessTokenRedactionCase {
+	caseID := n
+	position := n % 8
+	n /= 8
+	separators := []string{";", "&", "?"}
+	shapes := []func(string, string, string) string{
+		func(separator, marker, decoration string) string {
+			return separator + marker + decoration
+		},
+		func(separator, marker, decoration string) string {
+			return marker + separator + decoration
+		},
+		func(separator, marker, decoration string) string {
+			return marker + decoration + separator
+		},
+	}
+	decorations := []string{"", "=", "%3F", "%26", "%3B", "%3D"}
+	parameterNames := []string{"access_token", "Access_Token", "ACCESS_TOKEN"}
+
+	separator := separators[n%len(separators)]
+	n /= len(separators)
+	shape := shapes[n%len(shapes)]
+	n /= len(shapes)
+	decoration := decorations[n%len(decorations)]
+	n /= len(decorations)
+	parameterName := parameterNames[n%len(parameterNames)]
+
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	randomPart := make([]byte, 12)
+	for i := range randomPart {
+		randomPart[i] = letters[source.Intn(len(letters))]
+	}
+	marker := "af-token-" + strconv.Itoa(caseID) + "-" + string(randomPart)
+	token := shape(separator, marker, decoration)
+	field := parameterName + "=" + token
+	inputs := []string{
+		"https://box.test/stream?before=1;" + field + ";after=2",
+		"https://box.test/stream?" + field,
+		"https://box.test/stream?" + field + "&after=trailing",
+		"https://box.test/stream?before=1&" + field + "&after=2",
+		"https://box.test/stream?before=1&" + field,
+		"Get \"ws://box.test/stream?" + field + "\": dial failed",
+		"failure " + field + " # fragment",
+		"https://box.test/stream?" + field + "&before=1&" + field,
+	}
+	return accessTokenRedactionCase{Input: inputs[position], Token: token}
 }
 
 func TestBearerToken(t *testing.T) {

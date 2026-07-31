@@ -75,36 +75,76 @@ func RedactAccessTokenError(err error, token string) error {
 // handling a URL or request error must still use the structured helpers above.
 func RedactAccessTokenText(text string) string {
 	needle := AccessTokenQueryParam + "="
-	if !strings.Contains(text, needle) {
+	if indexFoldASCII(text, needle) < 0 {
 		return text
 	}
 
 	var redacted strings.Builder
 	rest := text
 	for {
-		i := strings.Index(rest, needle)
+		i := indexFoldASCII(rest, needle)
 		if i < 0 {
 			redacted.WriteString(rest)
 			return redacted.String()
 		}
 		valueStart := i + len(needle)
-		if i > 0 && rest[i-1] != '?' && rest[i-1] != '&' && rest[i-1] != ';' {
+		if i > 0 && !accessTokenFieldBoundary(rest[i-1]) {
 			redacted.WriteString(rest[:valueStart])
 			rest = rest[valueStart:]
 			continue
 		}
+		if alreadyRedactedValueEnd := accessTokenRedactionEnd(rest, valueStart); alreadyRedactedValueEnd >= 0 {
+			redacted.WriteString(rest[:alreadyRedactedValueEnd])
+			rest = rest[alreadyRedactedValueEnd:]
+			continue
+		}
 
-		// A preceding semicolon can introduce a legacy query field, but a semicolon
-		// inside the value is ambiguous. Redact through the next unambiguous boundary
-		// rather than risk preserving credential material after it.
+		// Query separators inside the value are ambiguous. Redact through the next
+		// unambiguous text boundary rather than risk preserving credential material
+		// after one. Losing neighbouring fields is safe; retaining a token is not.
 		valueEnd := valueStart
-		for valueEnd < len(rest) && !strings.ContainsRune("& \t\r\n#\"'", rune(rest[valueEnd])) {
+		for valueEnd < len(rest) && !strings.ContainsRune(" \t\r\n#\"'", rune(rest[valueEnd])) {
 			valueEnd++
 		}
 		redacted.WriteString(rest[:valueStart])
 		redacted.WriteString(accessTokenRedaction)
 		rest = rest[valueEnd:]
 	}
+}
+
+func indexFoldASCII(text, lowerASCII string) int {
+	for i := 0; i+len(lowerASCII) <= len(text); i++ {
+		matches := true
+		for j := range lowerASCII {
+			got := text[i+j]
+			if got >= 'A' && got <= 'Z' {
+				got += 'a' - 'A'
+			}
+			if got != lowerASCII[j] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return i
+		}
+	}
+	return -1
+}
+
+func accessTokenRedactionEnd(text string, valueStart int) int {
+	valueEnd := valueStart + len(accessTokenRedaction)
+	if valueEnd > len(text) || text[valueStart:valueEnd] != accessTokenRedaction {
+		return -1
+	}
+	if valueEnd == len(text) || strings.ContainsRune("&; \t\r\n#\"'", rune(text[valueEnd])) {
+		return valueEnd
+	}
+	return -1
+}
+
+func accessTokenFieldBoundary(char byte) bool {
+	return strings.ContainsRune("?&; \t\r\n", rune(char))
 }
 
 // BearerToken extracts the token from an Authorization header value, matching the
