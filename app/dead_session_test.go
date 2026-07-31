@@ -333,6 +333,7 @@ func TestInteractiveGuardSeverity(t *testing.T) {
 
 	t.Run("liveness contradiction is an error", func(t *testing.T) {
 		h := newTestHome(t)
+		h.errBox.SetSize(200, 1)
 		info, errorLogs := captureHomeMessageLogs(t)
 
 		// Ready is the deceptive projection: the sidebar still paints it green.
@@ -346,5 +347,16 @@ func TestInteractiveGuardSeverity(t *testing.T) {
 			"a session that vanished while projecting as running is a discovered failure")
 		require.NotContains(t, info.String(), "is no longer running",
 			"the discovery must not be downgraded to a notice")
+
+		// Classifying it must stay invisible: the marker exists for errors.Is,
+		// not for the reader. A %w-prepended sentinel would push an internal
+		// phrase to the front of both the status line and the log, displacing
+		// the specific sentence the guard composed.
+		require.NotContains(t, errorLogs.String(), "contradicted the projection",
+			"the internal classification must not leak into the operator's log line")
+		require.NotContains(t, h.errBox.FullError(), "contradicted the projection",
+			"nor into the status surface the user reads")
+		require.Contains(t, h.errBox.FullError(), "'vanished' is no longer running",
+			"the user still gets the specific message")
 	})
 }

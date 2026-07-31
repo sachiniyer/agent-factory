@@ -808,16 +808,26 @@ func interactiveGuard(inst *session.Instance) error {
 		// IsAlive's tri-state) tmux could not be asked at all. This guard is the
 		// component that DISCOVERS that, so it must reach ERROR monitoring rather
 		// than be filed as ordinary user feedback.
-		return fmt.Errorf("%w: session '%s' is no longer running", errSessionLivenessUnexpected, inst.Title)
+		return livenessDiscovery{cause: fmt.Errorf("session '%s' is no longer running", inst.Title)}
 	}
 	return nil
 }
 
 // errSessionLivenessUnexpected marks the one interactiveGuard result that is a
 // discovered failure rather than a designed fence, so callers can route it by
-// KIND instead of re-deriving the distinction at each site. Wrapped, not
-// returned bare, because the message the user sees is still the specific one.
+// KIND instead of re-deriving the distinction at each site.
 var errSessionLivenessUnexpected = errors.New("session liveness contradicted the projection")
+
+// livenessDiscovery carries that mark WITHOUT putting it in front of the user.
+// A plain `fmt.Errorf("%w: …", sentinel, …)` would prepend the sentinel's text
+// to the transient status line and the log, so the operator would read an
+// internal classification phrase instead of the specific, actionable sentence
+// the guard composed. Error() delegates to the cause; only errors.Is sees the
+// marker, via the multi-error Unwrap.
+type livenessDiscovery struct{ cause error }
+
+func (e livenessDiscovery) Error() string   { return e.cause.Error() }
+func (e livenessDiscovery) Unwrap() []error { return []error{e.cause, errSessionLivenessUnexpected} }
 
 // handleGuardResult routes an interactiveGuard/webTabAttachGuard error to the
 // severity its KIND deserves: a fence the user ran into is a notice, a liveness
