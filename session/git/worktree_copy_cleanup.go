@@ -201,14 +201,14 @@ func removeOpenedDirectory(
 	if manifest == nil {
 		snapshot, snapshotErr := snapshotCopiedTree(directory, path)
 		if snapshotErr != nil {
-			return snapshotErr
+			return recheckCleanupRoot(parent, name, path, directoryIdentity, snapshotErr)
 		}
 		manifest = &snapshot
 	} else if err := validateCopiedTree(directory, *manifest, true, path); err != nil {
 		return unverifiedCleanupError("refusing to remove changed source tree %s: %v", path, err)
 	}
 	if err := removeCopiedTree(directory, path, *manifest, protectUnexpected); err != nil {
-		return err
+		return recheckCleanupRoot(parent, name, path, directoryIdentity, err)
 	}
 	current, err = identityAt(parent, name)
 	if err != nil || !directoryIdentity.same(current) {
@@ -218,9 +218,31 @@ func removeOpenedDirectory(
 		)
 	}
 	if err := unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR); err != nil {
-		return fmt.Errorf("failed to remove secured directory %s: %w", path, err)
+		return recheckCleanupRoot(
+			parent,
+			name,
+			path,
+			directoryIdentity,
+			fmt.Errorf("failed to remove secured directory %s: %w", path, err),
+		)
 	}
 	return nil
+}
+
+func recheckCleanupRoot(
+	parent *os.File,
+	name, path string,
+	expected pathIdentity,
+	cause error,
+) error {
+	current, err := identityAt(parent, name)
+	if err == nil && expected.same(current) {
+		return cause
+	}
+	return &unverifiedCleanupPathError{err: errors.Join(
+		cause,
+		fmt.Errorf("secured cleanup name %s no longer identifies the retained source", path),
+	)}
 }
 
 func snapshotCopiedTree(root *os.File, path string) (copiedDirectory, error) {
@@ -325,6 +347,9 @@ func removeCopiedTree(root *os.File, path string, manifest copiedDirectory, prot
 }
 
 func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
+	if err := removeTreeBeforeEntryClaim(directory, path); err != nil {
+		return err
+	}
 	current, err := identityAt(directory, entry.name)
 	if err != nil || !entry.source.same(current) {
 		return changedCleanupError(

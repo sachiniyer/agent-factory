@@ -377,6 +377,60 @@ func TestMoveWorktree_UnverifiedCleanupPathOmitsDeleteAdvice(t *testing.T) {
 	assert.Contains(t, warnings.String(), "could not determine")
 }
 
+// TestMoveWorktree_CleanupErrorRechecksQuarantineIdentity moves the secured
+// root after cleanup's initial identity check, then makes the retained tree
+// non-writable so the child claim returns an ordinary permission error. Every
+// error exit must recheck the root name before deciding manual advice is safe.
+func TestMoveWorktree_CleanupErrorRechecksQuarantineIdentity(t *testing.T) {
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure")
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+	previousRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = previousRename })
+
+	var warnings bytes.Buffer
+	originalWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = originalWarning })
+
+	worktree, _, sourcePath := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	previousHook := removeTreeBeforeEntryClaim
+	var stalePath, movedOriginal string
+	removeTreeBeforeEntryClaim = func(directory *os.File, path string) error {
+		if stalePath != "" || filepath.Dir(path) != filepath.Dir(sourcePath) || !strings.Contains(filepath.Base(path), ".af-source-") {
+			return nil
+		}
+		stalePath = path
+		movedOriginal = path + ".moved"
+		if err := os.Rename(path, movedOriginal); err != nil {
+			return err
+		}
+		if err := os.Mkdir(path, 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(path, "replacement.txt"), []byte("replacement"), 0644); err != nil {
+			return err
+		}
+		return unix.Fchmod(int(directory.Fd()), 0500)
+	}
+	t.Cleanup(func() { removeTreeBeforeEntryClaim = previousHook })
+	t.Cleanup(func() {
+		if movedOriginal != "" {
+			_ = os.Chmod(movedOriginal, 0700)
+		}
+	})
+
+	require.NoError(t, worktree.MoveWorktree(dest))
+	assert.NotEmpty(t, stalePath)
+	assert.FileExists(t, filepath.Join(stalePath, "replacement.txt"))
+	assert.NotContains(t, warnings.String(), shellsuggest.Command("rm", "-rf", stalePath))
+	assert.Contains(t, warnings.String(), "could not determine")
+}
+
 // TestRestoreWorktreeTo_FallbackRepairsSubmoduleGitdirs archives and restores an
 // initialized submodule worktree through the manual-move fallback. Before #1459,
 // `git worktree repair` fixed the superproject but left deps/sub/.git pointing
@@ -1033,6 +1087,39 @@ func TestMoveDirCrossDevice_BoundsDescriptorsAcrossDeepTree(t *testing.T) {
 
 	require.NoError(t, err, "valid deep moves must not exhaust descriptors")
 	assert.FileExists(t, filepath.Join(dest, strings.Repeat("d/", 24), "tracked.txt"))
+}
+
+// TestMoveDirCrossDevice_UnsupportedNoReplaceUsesCompatibility preserves
+// archive support when the kernel/filesystem cannot provide renameat2 with
+// RENAME_NOREPLACE. The fallback must remain no-clobber and complete a normal
+// directory move rather than returning ENOSYS to the caller.
+func TestMoveDirCrossDevice_UnsupportedNoReplaceUsesCompatibility(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return unix.ENOSYS }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	require.NoError(t, moveDirCrossDevice(src, dest))
+	assert.FileExists(t, filepath.Join(dest, "tracked.txt"))
+	assert.NoDirExists(t, src)
+
+	sourceWithOccupiedDest := filepath.Join(t.TempDir(), "source-with-occupied-dest")
+	require.NoError(t, os.Mkdir(sourceWithOccupiedDest, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceWithOccupiedDest, "source.txt"), []byte("source"), 0644))
+	occupiedDest := filepath.Join(t.TempDir(), "occupied-dest")
+	require.NoError(t, os.Mkdir(occupiedDest, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(occupiedDest, "keep.txt"), []byte("keep"), 0644))
+
+	err := moveDirCrossDevice(sourceWithOccupiedDest, occupiedDest)
+	require.Error(t, err, "compatibility fallback must preserve no-clobber semantics")
+	assert.FileExists(t, filepath.Join(sourceWithOccupiedDest, "source.txt"))
+	kept, readErr := os.ReadFile(filepath.Join(occupiedDest, "keep.txt"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "keep", string(kept))
 }
 
 // TestMoveDirCrossDevice_LongLeafFitsPrivateNames covers a valid 239-byte leaf,

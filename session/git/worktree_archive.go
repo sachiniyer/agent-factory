@@ -93,6 +93,7 @@ var (
 	moveDirBeforeDestParentOpen = func(string) error { return nil }
 	moveDirBeforeDestCommit     = func(string) error { return nil }
 	moveDirBeforeSourceCommit   = func(string) error { return nil }
+	removeTreeBeforeEntryClaim  = func(*os.File, string) error { return nil }
 )
 
 // MoveWorktree relocates this worktree's directory to dest and keeps git's
@@ -265,10 +266,14 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // The copy preserves file contents, modes, and symlinks, so uncommitted changes
 // survive verbatim.
 func moveDirCrossDevice(src, dest string) (returnErr error) {
-	if err := renamePath(src, dest); err == nil {
+	renameErr := renamePath(src, dest)
+	if isAtomicNoReplaceUnsupported(renameErr) {
+		renameErr = renamePathNoReplaceCompat(src, dest)
+	}
+	if renameErr == nil {
 		return nil
-	} else if !errors.Is(err, syscall.EXDEV) {
-		return err
+	} else if !errors.Is(renameErr, syscall.EXDEV) {
+		return renameErr
 	}
 	// Cross-device: copy into an unguessable sibling, atomically claim the
 	// verified source endpoint, then atomically publish the copied directory at
