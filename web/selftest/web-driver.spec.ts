@@ -1387,8 +1387,8 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
     await expect(mouseHint).not.toHaveClass(/af-visible/, { timeout: 5_000 });
     const beforeLatchedScroll = await viewport.evaluate((el) => el.scrollTop);
     await p.locator(".xterm-helper-textarea").dispatchEvent("keydown", { key: "Shift", shiftKey: true });
-    await p.mouse.wheel(0, -120);
-    await expect.poll(() => viewport.evaluate((el) => el.scrollTop), { message: "latched modifier scrolls history" }).toBeLessThan(beforeLatchedScroll);
+    await p.mouse.wheel(0, 120);
+    await expect.poll(() => viewport.evaluate((el) => el.scrollTop), { message: "latched modifier scrolls history" }).toBeGreaterThan(beforeLatchedScroll);
     await expect(mouseHint, "a successful latched override must not advertise its own modifier").not.toHaveClass(/af-visible/);
     await p.locator(".xterm-helper-textarea").dispatchEvent("keyup", { key: "Shift" });
 
