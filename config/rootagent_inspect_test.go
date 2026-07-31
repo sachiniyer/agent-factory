@@ -120,7 +120,7 @@ func TestRootAgentInspectionInputsPopulateEveryLayer(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName), []byte(globalTOML), 0o644))
 	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\n")
 
-	inputs, _, err := assembleRootAgentInspectionInputs(repoRoot)
+	inputs, _, _, _, err := assembleRootAgentInspectionInputs(repoRoot, true)
 	require.NoError(t, err)
 
 	v := reflect.ValueOf(inputs)
@@ -133,4 +133,15 @@ func TestRootAgentInspectionInputsPopulateEveryLayer(t *testing.T) {
 		require.Falsef(t, field.IsNil(),
 			"RootAgentInputs.%s was left nil by assembleRootAgentInspectionInputs even though the fixture configures every layer — a new root-agent layer must be assembled for --explain too, or it silently drops out of the trace (the drift this guard prevents)", name)
 	}
+}
+
+func TestRootAgentInspectionErrorUsesCanonicalProjectWording(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName), []byte("schema_version = 1\n"), 0o644))
+
+	_, err := ResolveRootAgentForInspection(t.TempDir(), true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve project path")
+	assert.NotContains(t, err.Error(), "--project")
 }

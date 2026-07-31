@@ -141,6 +141,53 @@ func TestConfigGetRootAgentGlobalTraceDoesNotInventAProject(t *testing.T) {
 	assert.NotContains(t, out, "not configured for this project")
 }
 
+// TestConfigGetRootAgentGlobalSingletonRequiresRegisteredProject keeps the
+// inspection surface aligned with the daemon's candidate set. A global
+// singleton applies to registered projects; merely running the read command
+// inside an unrelated git checkout must not claim that a root will materialize.
+func TestConfigGetRootAgentGlobalSingletonRequiresRegisteredProject(t *testing.T) {
+	_, repoRoot := setupRootAgentProject(t,
+		"schema_version = 1\n\n[root_agent]\nenabled = true\nprogram = \"codex\"\n",
+		false, "")
+	removed, err := config.DeregisterProject(repoRoot)
+	require.NoError(t, err)
+	require.True(t, removed)
+	t.Chdir(repoRoot)
+
+	setConfigGetReadFlags(t, "", false, false)
+	out, err := runConfigGetForTest(t, "root_agent")
+	require.NoError(t, err)
+	assert.Equal(t, "{\"enabled\":false}\n", out)
+
+	configGetExplainFlag = true
+	out, err = runConfigGetForTest(t, "root_agent")
+	require.NoError(t, err)
+	assert.Contains(t, out, "project is not registered and has no legacy root_agents entry")
+	assert.Contains(t, out, `root_agent = {"enabled":false}`)
+}
+
+// TestConfigGetRootAgentImplicitScopeToleratesCorruptRegistry preserves the
+// daemon resolver's additive fallback for a cwd-derived project. An unreadable
+// registry must not hide a legacy root_agents opt-in; an explicit selector
+// remains strict because the user asked to inspect that project.
+func TestConfigGetRootAgentImplicitScopeToleratesCorruptRegistry(t *testing.T) {
+	home, repoRoot := setupRootAgentProject(t, "schema_version = 1\n", true, "")
+	badRecordDir := filepath.Join(home, config.ProjectRegistryDirName, "corrupt")
+	require.NoError(t, os.MkdirAll(badRecordDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(badRecordDir, "project.json"), []byte("{"), 0o644))
+	t.Chdir(repoRoot)
+
+	setConfigGetReadFlags(t, "", false, false)
+	out, err := runConfigGetForTest(t, "root_agent")
+	require.NoError(t, err)
+	assert.Equal(t, "{\"enabled\":true}\n", out)
+
+	configGetProjectFlag = repoRoot
+	_, err = runConfigGetForTest(t, "root_agent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "project registry")
+}
+
 func TestConfigReadFlagsUseRepoAndKeepProjectAlias(t *testing.T) {
 	for _, cmd := range []*cobra.Command{configGetCmd, configListCmd} {
 		require.NotNil(t, cmd.Flags().Lookup("repo"), "%s must follow the shared --repo contract", cmd.Name())

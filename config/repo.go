@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,12 @@ import (
 // hex characters; tests and any future ID schemes are constrained to the
 // same character class so the value can never escape its parent directory.
 var repoIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// ErrNotGitRepository identifies the one CurrentRepo failure for which callers
+// may deliberately fall back to global scope. Other git failures (missing git,
+// an invalid .git file, safe-directory rejection, permissions) must remain
+// visible rather than being mistaken for "outside git."
+var ErrNotGitRepository = errors.New("not inside a git repository")
 
 // maxRepoIDLength caps the size of an accepted repoID. Legitimate IDs are
 // 12 chars; the cap is loose enough to accommodate future schemes while
@@ -48,6 +55,10 @@ func resolveMainRepoRoot(pathArgs ...string) (string, error) {
 	topCmd := exec.Command("git", append(pathArgs, "rev-parse", "--show-toplevel")...)
 	topOut, err := topCmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "not a git repository") {
+			return "", fmt.Errorf("%w: %s", ErrNotGitRepository, strings.TrimSpace(string(exitErr.Stderr)))
+		}
 		return "", fmt.Errorf("failed to get git repo root: %w", err)
 	}
 	toplevel := strings.TrimSpace(string(topOut))

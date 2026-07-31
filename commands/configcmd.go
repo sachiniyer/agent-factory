@@ -204,7 +204,7 @@ resolved value with the complete source trace.`,
 		defer log.Close()
 		warnDeprecatedConfigProjectAlias(cmd)
 
-		projectSelector, err := configReadProjectSelector(configGetRepoFlag, configGetProjectFlag)
+		projectSelector, explicitProject, err := configReadProjectSelector(configGetRepoFlag, configGetProjectFlag)
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
@@ -223,7 +223,7 @@ resolved value with the complete source trace.`,
 			// resolution for both the concise value and --explain, or the two
 			// read modes can contradict each other (#2607).
 			if isRootAgentExplainKey(args[0]) {
-				specialized, err := rootAgentReadValue(projectSelector, args[0])
+				specialized, err := rootAgentReadValue(projectSelector, args[0], explicitProject)
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
@@ -279,7 +279,7 @@ disallowed for that key.`,
 		defer log.Close()
 		warnDeprecatedConfigProjectAlias(cmd)
 
-		projectSelector, err := configReadProjectSelector(configListRepoFlag, configListProjectFlag)
+		projectSelector, explicitProject, err := configReadProjectSelector(configListRepoFlag, configListProjectFlag)
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
@@ -288,7 +288,7 @@ disallowed for that key.`,
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
-			values, err := rootAgentAwareResolution(resolved, projectSelector)
+			values, err := rootAgentAwareResolution(resolved, projectSelector, explicitProject)
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}

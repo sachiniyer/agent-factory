@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -29,21 +30,24 @@ type configListExplanation struct {
 	Values  []config.ResolvedValue `json:"values"`
 }
 
-func configReadProjectSelector(repoSelector, projectAlias string) (string, error) {
+func configReadProjectSelector(repoSelector, projectAlias string) (selector string, explicit bool, err error) {
 	if repoSelector != "" && projectAlias != "" {
-		return "", fmt.Errorf("--repo and --project are aliases; pass only one")
+		return "", false, fmt.Errorf("--repo and --project are aliases; pass only one")
 	}
 	if repoSelector != "" {
-		return repoSelector, nil
+		return repoSelector, true, nil
 	}
 	if projectAlias != "" {
-		return projectAlias, nil
+		return projectAlias, true, nil
 	}
 	repo, err := config.CurrentRepo()
 	if err != nil {
-		return "", nil
+		if errors.Is(err, config.ErrNotGitRepository) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("resolve current repository: %w", err)
 	}
-	return repo.Root, nil
+	return repo.Root, false, nil
 }
 
 func loadResolvedConfig(projectSelector string) (*config.ResolvedConfig, error) {
@@ -101,8 +105,8 @@ func isRootAgentExplainKey(key string) bool {
 // ResolvedValuePath machinery every other key uses, by wrapping the specialized
 // table in a throwaway ResolvedConfig — so concise and --explain reads cannot
 // disagree about the effective value.
-func rootAgentReadValue(projectSelector, keyPath string) (config.ResolvedValue, error) {
-	parent, err := config.ResolveRootAgentForInspection(projectSelector)
+func rootAgentReadValue(projectSelector, keyPath string, strictProjectLookup bool) (config.ResolvedValue, error) {
+	parent, err := config.ResolveRootAgentForInspection(projectSelector, strictProjectLookup)
 	if err != nil {
 		return config.ResolvedValue{}, err
 	}
@@ -117,9 +121,9 @@ func rootAgentReadValue(projectSelector, keyPath string) (config.ResolvedValue, 
 	return projected, nil
 }
 
-func rootAgentAwareResolution(resolved *config.ResolvedConfig, projectSelector string) ([]config.ResolvedValue, error) {
+func rootAgentAwareResolution(resolved *config.ResolvedConfig, projectSelector string, strictProjectLookup bool) ([]config.ResolvedValue, error) {
 	values := append([]config.ResolvedValue(nil), resolved.Resolution...)
-	rootAgent, err := config.ResolveRootAgentForInspection(projectSelector)
+	rootAgent, err := config.ResolveRootAgentForInspection(projectSelector, strictProjectLookup)
 	if err != nil {
 		return nil, err
 	}

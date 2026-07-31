@@ -141,17 +141,8 @@ func (m *Manager) rootAgentInputsFor(repoID string, legacy *config.RootAgentConf
 // snapshot dedup set) to preserve the legacy contract that a path pointing at a
 // not-yet-cloned repo starts applying the moment the repo appears.
 func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig {
-	for path, rc := range m.cfg.RootAgents {
-		repo, err := config.RepoFromPath(config.ExpandTilde(path))
-		if err != nil {
-			continue
-		}
-		if repo.ID == repoID {
-			entry := rc
-			return &entry
-		}
-	}
-	return nil
+	entry, _ := config.LegacyRootAgentForRepo(m.cfg, repoID)
+	return entry
 }
 
 // rootAgentResolutionForRepo resolves the effective root-agent profile for one

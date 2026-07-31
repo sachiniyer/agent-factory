@@ -12,6 +12,8 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // All tests here are hermetic (#1106 hard rule): temp AGENT_FACTORY_HOME,
@@ -35,6 +37,29 @@ func findRootInstance(t *testing.T, manager *Manager, repoPath string) *session.
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	return manager.instances[daemonInstanceKey(repo.ID, session.RootSessionTitle)]
+}
+
+func TestLegacyRootAgentSelectionIsDeterministicAcrossEquivalentPaths(t *testing.T) {
+	repoPath := setupControlRepo(t)
+	container := t.TempDir()
+	firstPath := filepath.Join(container, "a-repo")
+	secondPath := filepath.Join(container, "z-repo")
+	require.NoError(t, os.Symlink(repoPath, firstPath))
+	require.NoError(t, os.Symlink(repoPath, secondPath))
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	cfg := config.DefaultConfig()
+	cfg.RootAgents = map[string]config.RootAgentConfig{
+		secondPath: {Program: "second"},
+		firstPath:  {Program: "first"},
+	}
+	manager := &Manager{cfg: cfg}
+	for range 100 {
+		got := manager.legacyRootAgentForRepo(repo.ID)
+		require.NotNil(t, got)
+		assert.Equal(t, "first", got.Program)
+	}
 }
 
 // TestEnsureRootAgentsCreatesInPlaceRoot: a configured repo with no root gets

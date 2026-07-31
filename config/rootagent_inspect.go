@@ -58,12 +58,16 @@ func (locs rootAgentLocations) forSource(source RootAgentSource) (path, keyPath 
 // Global scope (an empty selector) has no project to key the legacy and personal
 // layers by, so those layers resolve as absent. The command normally supplies
 // the cwd's repository and reaches global scope only outside git.
-func ResolveRootAgentForInspection(projectSelector string) (ResolvedValue, error) {
-	inputs, locs, err := assembleRootAgentInspectionInputs(projectSelector)
+func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
+	inputs, locs, ignoredGlobal, ignoredReason, err := assembleRootAgentInspectionInputs(projectSelector, strictProjectLookup)
 	if err != nil {
 		return ResolvedValue{}, err
 	}
-	return rootAgentResolvedValue(ResolveRootAgent(inputs), locs, projectSelector != ""), nil
+	resolved := rootAgentResolvedValue(ResolveRootAgent(inputs), locs, projectSelector != "")
+	if ignoredGlobal != nil {
+		markRootAgentGlobalIneligible(&resolved, *ignoredGlobal, ignoredReason, locs)
+	}
+	return resolved, nil
 }
 
 // assembleRootAgentInspectionInputs builds the RootAgentInputs the --explain
@@ -82,10 +86,16 @@ func ResolveRootAgentForInspection(projectSelector string) (ResolvedValue, error
 // why TestRootAgentInspectionInputsPopulateEveryLayer reflects over the assembled
 // inputs and fails when any layer is left unset: keep this in step with
 // RootAgentInputs and the guard, not with a comment.
-func assembleRootAgentInspectionInputs(projectSelector string) (RootAgentInputs, rootAgentLocations, error) {
+func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLookup bool) (
+	RootAgentInputs,
+	rootAgentLocations,
+	*RootAgentCandidate,
+	string,
+	error,
+) {
 	global, err := LoadConfig()
 	if err != nil {
-		return RootAgentInputs{}, rootAgentLocations{}, err
+		return RootAgentInputs{}, rootAgentLocations{}, nil, "", err
 	}
 	locs := rootAgentLocations{globalPath: global.source.path}
 	if locs.globalPath == "" {
@@ -98,24 +108,34 @@ func assembleRootAgentInspectionInputs(projectSelector string) (RootAgentInputs,
 	if projectSelector != "" {
 		abs, err := ResolveUserPath(projectSelector)
 		if err != nil {
-			return RootAgentInputs{}, rootAgentLocations{}, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
+			return RootAgentInputs{}, rootAgentLocations{}, nil, "", fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
 		repo, err := RepoFromPath(abs)
 		if err != nil {
-			return RootAgentInputs{}, rootAgentLocations{}, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
+			return RootAgentInputs{}, rootAgentLocations{}, nil, "", fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
-		if legacy, key := legacyRootAgentForRepoID(global, repo.ID); legacy != nil {
+		legacy, key := LegacyRootAgentForRepo(global, repo.ID)
+		if legacy != nil {
 			inputs.Legacy = legacy
 			locs.legacyKey = key
 		}
 		project, found, err := projectForRoot(repo.Root)
 		if err != nil {
-			return RootAgentInputs{}, rootAgentLocations{}, err
+			if strictProjectLookup {
+				return RootAgentInputs{}, rootAgentLocations{}, nil, "", err
+			}
+			if legacy == nil {
+				ignored := rootAgentCandidateForLayer(inputs, RootAgentSourceGlobal)
+				inputs.Global = nil
+				return inputs, locs, ignored,
+					"project registry is unreadable, so singleton activation cannot be confirmed", nil
+			}
+			return inputs, locs, nil, "", nil
 		}
 		if found {
 			pc, err := LoadProjectConfig(project.ID)
 			if err != nil {
-				return RootAgentInputs{}, rootAgentLocations{}, err
+				return RootAgentInputs{}, rootAgentLocations{}, nil, "", err
 			}
 			if layer := pc.RootAgentLayer(); layer != nil {
 				inputs.Personal = layer
@@ -123,17 +143,22 @@ func assembleRootAgentInspectionInputs(projectSelector string) (RootAgentInputs,
 					locs.personalPath = path
 				}
 			}
+		} else if legacy == nil {
+			ignored := rootAgentCandidateForLayer(inputs, RootAgentSourceGlobal)
+			inputs.Global = nil
+			return inputs, locs, ignored,
+				"project is not registered and has no legacy root_agents entry", nil
 		}
 	}
 
-	return inputs, locs, nil
+	return inputs, locs, nil, "", nil
 }
 
-// legacyRootAgentForRepoID returns the root_agents entry whose path resolves to
+// LegacyRootAgentForRepo returns the root_agents entry whose path resolves to
 // repoID (and the matched key), or nil. Keys are checked in sorted order so the
-// match is deterministic when two spellings resolve to the same repo — the same
-// stability the daemon's snapshot relies on.
-func legacyRootAgentForRepoID(global *Config, repoID string) (*RootAgentConfig, string) {
+// inspection surface, daemon lookup, and sorted ensure pass share one stable
+// winner when two spellings resolve to the same repo.
+func LegacyRootAgentForRepo(global *Config, repoID string) (*RootAgentConfig, string) {
 	keys := make([]string, 0, len(global.RootAgents))
 	for key := range global.RootAgents {
 		keys = append(keys, key)
@@ -150,6 +175,41 @@ func legacyRootAgentForRepoID(global *Config, repoID string) (*RootAgentConfig, 
 		}
 	}
 	return nil, ""
+}
+
+func rootAgentCandidateForLayer(inputs RootAgentInputs, source RootAgentSource) *RootAgentCandidate {
+	for _, candidate := range ResolveRootAgent(inputs).Candidates {
+		if candidate.Source == source && candidate.Present {
+			candidateCopy := candidate
+			return &candidateCopy
+		}
+	}
+	return nil
+}
+
+func markRootAgentGlobalIneligible(
+	resolved *ResolvedValue,
+	candidate RootAgentCandidate,
+	reason string,
+	locs rootAgentLocations,
+) {
+	for i := range resolved.Candidates {
+		if resolved.Candidates[i].Layer != string(RootAgentSourceGlobal) {
+			continue
+		}
+		path, keyPath := locs.forSource(RootAgentSourceGlobal)
+		resolved.Candidates[i] = CandidateTrace{
+			Layer:   string(RootAgentSourceGlobal),
+			Path:    path,
+			KeyPath: keyPath,
+			Allowed: false,
+			Present: true,
+			Value:   rootAgentCandidateLeaves(candidate),
+			Result:  "ignored",
+			Reason:  reason,
+		}
+		return
+	}
 }
 
 // rootAgentResolvedValue maps a RootAgentResolution into the generic
