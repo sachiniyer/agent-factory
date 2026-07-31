@@ -102,13 +102,23 @@ test("applyEvent: an id-less killed event falls back to the title", () => {
   assert.deepEqual(r.sessions.map((s) => s.title), ["y"]);
 });
 
-test("applyEvent: archived/restored ask for a resync and leave the list untouched", () => {
+test("applyEvent: legacy partial archived/restored events still ask for a resync", () => {
   const list = [sess("x", { id: "id-x" })];
   for (const type of ["session.archived", "session.restored"] as const) {
     const r = applyEvent(list, { type, data: { id: "id-x", title: "x", branch: "" } });
     assert.equal(r.needsResync, true, `${type} → resync`);
     assert.equal(r.sessions, list, "list reference unchanged pending the refetch");
   }
+});
+
+test("#2680: a full archived projection updates the row without a fallible resync", () => {
+  const list = [sess("x", { id: "id-x", liveness: Liveness.Ready })];
+  const archived = sess("x", { id: "id-x", liveness: Liveness.Archived });
+  const r = applyEvent(list, { type: "session.archived", data: archived });
+
+  assert.equal(r.needsResync, false, "the daemon projection is already authoritative");
+  assert.notEqual(r.sessions, list, "the archived event updates the store immediately");
+  assert.equal(r.sessions[0]?.liveness, Liveness.Archived, "the rail consumes the daemon-projected liveness");
 });
 
 test("applyEvent: task.* and dataless events are no-ops", () => {

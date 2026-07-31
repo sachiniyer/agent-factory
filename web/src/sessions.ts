@@ -19,10 +19,9 @@
 import type { SessionData, WireEvent } from "./types.js";
 
 /** The result of applying one event: the next list plus whether the caller must
- *  re-Snapshot. Partial events (archived/restored carry only {id,title}, with no
- *  liveness to reconstruct) set needsResync so index.ts refetches authoritative
- *  state; the common created/updated/killed deltas apply in place (needsResync
- *  false) for an instant, poll-free update. */
+ *  re-Snapshot. Full session projections apply in place. Older partial archive or
+ *  restore events set needsResync because their liveness cannot be reconstructed;
+ *  the browser never derives daemon-owned lifecycle state itself. */
 export interface ApplyResult {
   sessions: SessionData[];
   needsResync: boolean;
@@ -63,8 +62,8 @@ export function removeSession(list: SessionData[], target: { id?: string; title:
  * contract (agentproto/message.go, daemon/control_server.go):
  *  - created/updated carry the full projection → upsert by id in place;
  *  - killed carries {id,title} → remove the row keyed by id;
- *  - archived/restored carry {id,title} and flip a liveness the event can't
- *    convey → signal a resync so the caller refetches Snapshot;
+ *  - archived/restored carry the daemon's full projection → upsert immediately;
+ *    tolerate an older {id,title}-only event by asking for a Snapshot instead;
  *  - task.* are not a sidebar concern → no-op.
  * The list is returned unchanged (same reference) for events that don't touch it.
  */
@@ -83,6 +82,9 @@ export function applyEvent(list: SessionData[], ev: WireEvent): ApplyResult {
       return { sessions: list, needsResync: false };
     case "session.archived":
     case "session.restored":
+      if (ev.data && ev.data.title && ev.data.liveness !== undefined) {
+        return { sessions: upsertSession(list, ev.data), needsResync: false };
+      }
       return { sessions: list, needsResync: true };
     case "projects.changed":
       // A project was deleted as a whole (#1735): the per-session archived events

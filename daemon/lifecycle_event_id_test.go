@@ -81,6 +81,9 @@ func TestArchiveAndRestoreEventsCarryStableID(t *testing.T) {
 	if archived.ID != data.ID {
 		t.Fatalf("archived event ID = %q, want %q", archived.ID, data.ID)
 	}
+	if archived.Liveness != session.LiveArchived {
+		t.Fatalf("archived event liveness = %v, want %v; a partial event leaves web clients stale when their follow-up Snapshot fails", archived.Liveness, session.LiveArchived)
+	}
 
 	var rResp RestoreArchivedResponse
 	if err := cs.RestoreArchived(RestoreArchivedRequest{ID: data.ID, Title: "stale-display-title", RepoID: repo.ID}, &rResp); err != nil {

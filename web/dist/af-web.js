@@ -8981,6 +8981,9 @@ function applyEvent(list, ev) {
       return { sessions: list, needsResync: false };
     case "session.archived":
     case "session.restored":
+      if (ev.data && ev.data.title && ev.data.liveness !== void 0) {
+        return { sessions: upsertSession(list, ev.data), needsResync: false };
+      }
       return { sessions: list, needsResync: true };
     case "projects.changed":
       return { sessions: list, needsResync: true };

@@ -56,10 +56,10 @@ var deregisterRootAgents = config.DeregisterRootAgentsForRepo
 // projects-changed signal), and the CLI/TUI can report the counts.
 type DeleteProjectResult struct {
 	RepoID string
-	// Archived carries the {ID, Title} of every session archived (restorable via
-	// RestoreArchived). Killed carries the {ID, Title} of every in-place/external
-	// session torn down instead (archive can't relocate an external worktree; its
-	// kill never touches the user's tree/branch).
+	// Archived carries the full committed projection of every archived session so
+	// lifecycle events are directly applicable by clients (#2680). Killed needs only
+	// {ID, Title} for every in-place/external session torn down instead (archive can't
+	// relocate an external worktree; its kill never touches the user's tree/branch).
 	Archived []session.InstanceData
 	Killed   []session.InstanceData
 	// Deregistered is true when this delete removed the repo's durable #2355 registry
@@ -290,7 +290,7 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			errs = append(errs, fmt.Errorf("session %q: %w", t.title, err))
 			continue
 		}
-		result.Archived = append(result.Archived, session.InstanceData{ID: archived.ID, Title: archived.Title})
+		result.Archived = append(result.Archived, archived)
 	}
 
 	if len(errs) > 0 {

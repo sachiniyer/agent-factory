@@ -69,6 +69,10 @@ func TestDeleteProject_ArchivesAllSessionsRestorableRepoUntouched(t *testing.T) 
 	require.NoError(t, err)
 	assert.Len(t, result.Archived, 2, "both live sessions must be archived")
 	assert.Empty(t, result.Killed, "neither session is in-place, so none is torn down")
+	for _, archived := range result.Archived {
+		assert.Equal(t, session.LiveArchived, archived.Liveness, "bulk archive returns the daemon's committed liveness")
+		assert.Equal(t, session.LifecycleActionRestore, archived.LifecycleAction, "bulk archive returns the daemon's projected next action")
+	}
 
 	// Both sessions are now inert Archived rows, worktrees relocated out.
 	for _, title := range []string{"alpha", "beta"} {

@@ -37,12 +37,12 @@ var ErrAlreadyArchived = errors.New("already archived")
 // kill, and Lost-recovery never interleave). Returns the relocated worktree's
 // new path.
 // ArchiveSession archives the resolved session and returns the relocated worktree
-// path AND the stable identity (id + title) of the session it ACTUALLY resolved and
-// acted on, so the control server publishes the archived event for exactly that
-// session — never the request's own (possibly stale) id under a cross-repo title
-// collision (#1592 Phase 5 follow-up).
+// path AND the full committed projection of the session it ACTUALLY resolved and
+// acted on. The control server publishes that projection so clients learn Archived
+// directly from the event instead of depending on a second Snapshot request (#2680),
+// while its stable id still prevents cross-repo title misrouting (#1592 Phase 5).
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
-	instance, repoID, title, resolvedID, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
+	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", session.InstanceData{}, err
 	}
@@ -50,7 +50,6 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// killsInFlight key, and the relocation key off the id-resolved identity,
 	// not the request's title. req is a value copy, so this is local.
 	req.Title = title
-	resolved := session.InstanceData{ID: resolvedID, Title: title}
 	if session.IsReservedTitle(req.Title) {
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive the reserved %q session", req.Title)
 	}
@@ -81,7 +80,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		// idempotent success and still report the right {id, title}, while a caller
 		// archiving one named session — the CLI/TUI verbs — keeps the same message
 		// and the same failure it has always shown.
-		return "", resolved, fmt.Errorf("session %q is %w", req.Title, ErrAlreadyArchived)
+		return "", instance.ToInstanceData(), fmt.Errorf("session %q is %w", req.Title, ErrAlreadyArchived)
 	}
 	if instance.GetInFlightOp() != session.OpNone {
 		return "", session.InstanceData{}, fmt.Errorf("session %q is busy (%v); try again in a moment", req.Title, instance.GetStatus())
@@ -125,7 +124,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		if rerr != nil {
 			return "", session.InstanceData{}, rerr
 		}
-		return archivedPath, resolved, nil
+		return archivedPath, instance.ToInstanceData(), nil
 	}
 
 	dest, err := archivedWorktreePath(repoID, req.Title)
@@ -216,7 +215,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
 	}
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
-	return archivedPath, resolved, nil
+	return archivedPath, instance.ToInstanceData(), nil
 }
 
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a

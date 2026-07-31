@@ -37,7 +37,7 @@
 // playwright.config.ts): AF_WEB_BASE_URL and the two seeded session titles
 // AF_WEB_SESSION_A / AF_WEB_SESSION_B. No token is needed.
 
-import { expect, type Browser, type BrowserContext, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Browser, type BrowserContext, type Locator, type Page, type Route, test } from "@playwright/test";
 import { decode, Op } from "../src/frame.js";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
@@ -3427,7 +3427,7 @@ test.describe("create → kill (one session, two flows)", () => {
   });
 });
 
-test("archive: an unselected row's hover action retires that session, not the selection", REAL_FIXTURE, async () => {
+test("#2680: archive retires an unselected row even when the follow-up Snapshot fails", REAL_FIXTURE, async () => {
   // Keep A selected, then invoke B's hover-revealed action. The modal target must be
   // the row that owns the button; deriving it from the current selection would archive
   // A instead (#2223).
@@ -3443,13 +3443,40 @@ test("archive: an unselected row's hover action retires that session, not the se
   await expect(modal).toContainText(SESSION_B);
   await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
   await expect(row(page, SESSION_B)).not.toHaveClass(/af-row-selected/);
+
+  // The archived event itself must carry the daemon's projected Archived row. If
+  // the browser needs a second Snapshot to learn the liveness, one transient fetch
+  // failure leaves the old live row in place forever even though the archive
+  // committed; only a reload repairs it (#2680). Make that dependency unavailable
+  // so this test watches the actual live-update contract rather than a lucky refetch.
+  let failedSnapshots = 0;
+  const failSnapshot = async (route: Route): Promise<void> => {
+    failedSnapshots += 1;
+    await route.abort("connectionfailed");
+  };
+  await page.route("**/v1/Snapshot", failSnapshot);
   await modal.locator("button.af-primary").click();
 
   // B LEAVES the default rail (feat: hide archived by default) — archived sessions are
   // history, and the rail shows the work you can still act on. This is the real
-  // archive flow, not a filter toggle: the row goes as the daemon's archived event
-  // lands, which is the end-to-end proof the filter reads live projection state.
-  await expect(row(page, SESSION_B)).toHaveCount(0, { timeout: 30_000 });
+  // archive flow, not a filter toggle: the full daemon projection on the archived
+  // event moves the row without depending on a fallible second request.
+  try {
+    await expect(row(page, SESSION_B)).toHaveCount(0, { timeout: 5_000 });
+  } catch (liveError) {
+    // Preserve the issue's cheapest diagnostic in the fail-first output: on the
+    // broken client the live row stays, but a fresh Snapshot on reload clears it.
+    await page.unroute("**/v1/Snapshot", failSnapshot);
+    await page.reload();
+    await expect(row(page, SESSION_B), "reload must clear the stale archived row").toHaveCount(0, {
+      timeout: 15_000,
+    });
+    throw new Error(
+      `archived row stayed live after ${failedSnapshots} failed Snapshot request(s); reload cleared it: ${String(liveError)}`,
+    );
+  } finally {
+    await page.unroute("**/v1/Snapshot", failSnapshot);
+  }
 
   // B is NOT killed, though — revealing the archive brings the very same row back,
   // muted, carrying the static archive shape (no spinner): the error/terminal states
