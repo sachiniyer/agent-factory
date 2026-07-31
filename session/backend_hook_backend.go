@@ -448,7 +448,6 @@ func redactSerializedHookJSONStrings(output string) string {
 				written = candidateEnd
 			}
 		}
-		candidateStart = -1
 		candidateStart = cursor
 		escaped = false
 	}
