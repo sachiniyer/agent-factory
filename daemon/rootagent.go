@@ -24,8 +24,9 @@ import (
 // The loop is adopt-first: an existing root instance in any state other than
 // Dead — whatever program it runs and however it was created — is left
 // completely alone. Only a Dead root (tmux vanished) or a missing one
-// triggers a (re-)create, and an explicit KillSession of the root suppresses
-// re-creation only for rootKillHealDelay before configured state wins (#1223).
+// triggers a (re-)create. An explicit KillSession suppresses re-creation in
+// this daemon until rootKillHealDelay; restart re-asserts configuration
+// immediately, and an elapsed delay takes effect on the next ensure pass (#1223).
 
 // rootDangerouslySkipPermissionsFlag is ensured on the default root-agent
 // program: the root agent exists to act autonomously (issue #1106's
