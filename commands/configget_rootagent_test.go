@@ -23,6 +23,7 @@ import (
 // its source, even though global-only has no project to key legacy/personal by.
 func TestConfigGetRootAgentExplainGlobalNamesFourLayers(t *testing.T) {
 	_, _ = setupConfigExplainCommandTest(t, "schema_version = 1\n\n[root_agent]\nenabled = true\nprogram = \"codex\"\n")
+	t.Chdir(t.TempDir())
 	setConfigGetReadFlags(t, "", true, false)
 
 	out, err := runConfigGetForTest(t, "root_agent")
