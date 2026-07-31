@@ -3,7 +3,9 @@ package daemon
 import (
 	"os"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -139,6 +141,28 @@ func TestCloseTab_StopsEditorOnlyWithTheLastVSCodeTab(t *testing.T) {
 	}
 	if instanceHasVSCodeTab(inst) {
 		t.Fatal("the instance still reports a vscode tab after both were closed")
+	}
+}
+
+func TestCloseTab_LastVSCodeTabPropagatesUnconfirmedEditorStop(t *testing.T) {
+	manager, repoID, title := newVSCodeCreateFixture(t)
+	key := daemonInstanceKey(repoID, title)
+	inst := manager.instances[key]
+	if _, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repoID, Kind: "vscode"}); err != nil {
+		t.Fatalf("CreateTab(vscode): %v", err)
+	}
+	cmd, _ := startOwnedSleep(t)
+	manager.vscode.servers[key] = &vscodeServer{
+		worktree: t.TempDir(), instanceID: inst.ID, cmd: cmd, exited: make(chan struct{}),
+		stopGrace: 10 * time.Millisecond,
+		killGroup: func(int, syscall.Signal) error { return nil },
+	}
+
+	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}); err == nil {
+		t.Fatal("CloseTab reported success after the last VS Code tab editor could not confirm exit")
+	}
+	if !instanceHasVSCodeTab(inst) {
+		t.Fatal("CloseTab removed the last VS Code retry handle after editor teardown stayed unknown")
 	}
 }
 

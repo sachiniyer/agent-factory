@@ -101,8 +101,9 @@ type vscodeEndpoint struct {
 	Transport  *http.Transport
 }
 
-// releaseSocket unlinks the editor's socket and drops any pooled connections to
-// it. Called by reap, and ONLY by reap.
+// releaseSocket unlinks the editor's socket and confirmed-clean owner record,
+// then drops pooled connections. Called by reap, and ONLY by reap. When the group
+// kill is unknown, reap uses releaseSocketKeepingOwner instead.
 //
 // It belongs here for the same reason the group kill does: this is the one place
 // that observes the process actually dying, it runs exactly once per spawn, and
@@ -128,12 +129,22 @@ type vscodeEndpoint struct {
 // inert, since nothing listens on it and a dial gets ECONNREFUSED — and the
 // daemon's next start sweeps the directory anyway.
 func (s *vscodeServer) releaseSocket() {
+	s.releaseSocketState(true)
+}
+
+// releaseSocketKeepingOwner drops the dead endpoint but retains the durable
+// process-group handle after reaping could not confirm its final group kill.
+func (s *vscodeServer) releaseSocketKeepingOwner() {
+	s.releaseSocketState(false)
+}
+
+func (s *vscodeServer) releaseSocketState(removeOwner bool) {
 	if s.socketPath != "" {
 		if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 			log.WarningLog.Printf("vscode: removing the editor socket %s failed: %v", s.socketPath, err)
 		}
 	}
-	if s.ownerPath != "" {
+	if removeOwner && s.ownerPath != "" {
 		if err := os.Remove(s.ownerPath); err != nil && !os.IsNotExist(err) {
 			log.WarningLog.Printf("vscode: removing the editor owner %s failed: %v", s.ownerPath, err)
 		}

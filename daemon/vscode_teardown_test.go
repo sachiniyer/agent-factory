@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/require"
 )
@@ -273,6 +274,30 @@ func TestVSCodeSupervisor_StopReapsEditorOwnedByPreviousSupervisor(t *testing.T)
 	}
 }
 
+func TestStopForInstance_ReconcilesPersistedOwnerAfterInMemoryStop(t *testing.T) {
+	shortAFHome(t)
+	_, process := startOwnedSleep(t)
+	bootID, err := proctree.BootID()
+	if err != nil {
+		t.Fatalf("BootID: %v", err)
+	}
+	const (
+		key        = "mixed-owners"
+		instanceID = "instance-1"
+	)
+	ownerPath := writeVSCodeOwnerFixture(t, key, instanceID, bootID, process)
+
+	v := newVSCodeSupervisor()
+	v.servers[key] = &vscodeServer{instanceID: instanceID, exited: make(chan struct{})}
+	v.killGroup = func(pgid int, sig syscall.Signal) error { return syscall.Kill(-pgid, sig) }
+	if err := v.stopForInstance(key, instanceID); err != nil {
+		t.Fatalf("stopForInstance: %v", err)
+	}
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("persisted owner survived successful in-memory teardown, stat error = %v", err)
+	}
+}
+
 func TestVSCodeSupervisor_StopDoesNotCreateMissingHome(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "missing-af-home")
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -317,6 +342,50 @@ func TestArchiveSession_StopsVSCodeEditor(t *testing.T) {
 
 	require.False(t, vscodeServerRegistered(manager, key),
 		"archiving a session left its VS Code editor running against the moved worktree")
+}
+
+func TestArchiveSession_FinalVSCodeStopFailureRollsBack(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, origPath := registerArchivable(t, manager, repoID, repoPath, "late-editor")
+	inst.SetTmuxSession(sessiontmux.NewTmuxSession("af_late_editor_agent", sessiontmux.ProgramClaude))
+	if _, err := inst.AddVSCodeTab("editor"); err != nil {
+		t.Fatalf("AddVSCodeTab: %v", err)
+	}
+	cmd, _ := startOwnedSleep(t)
+	key := daemonInstanceKey(repoID, "late-editor")
+
+	origTeardown := archiveTeardown
+	archiveTeardown = func(target *session.Instance, dest string) error {
+		if err := origTeardown(target, dest); err != nil {
+			return err
+		}
+		manager.vscode.mu.Lock()
+		manager.vscode.servers[key] = &vscodeServer{
+			worktree: origPath, instanceID: inst.ID, cmd: cmd, exited: make(chan struct{}),
+			stopGrace: 10 * time.Millisecond,
+			killGroup: func(int, syscall.Signal) error { return nil },
+		}
+		manager.vscode.mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { archiveTeardown = origTeardown })
+
+	dest, err := archivedWorktreePath(repoID, "late-editor")
+	if err != nil {
+		t.Fatalf("archivedWorktreePath: %v", err)
+	}
+	if _, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "late-editor", RepoID: repoID}); err == nil {
+		t.Fatal("archive reported success after its final editor sweep could not confirm exit")
+	}
+	if inst.GetLiveness() != session.LiveLost {
+		t.Fatalf("archive with an unconfirmed late editor left liveness %v, want Lost", inst.GetLiveness())
+	}
+	if got := inst.GetWorktreePath(); got != origPath {
+		t.Fatalf("archive with an unconfirmed late editor left worktree at %q, want rollback to %q", got, origPath)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("archive destination survived rollback, stat error = %v", err)
+	}
 }
 
 // TestKillSession_StopsVSCodeEditor: killing removes the worktree, so its editor

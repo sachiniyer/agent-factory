@@ -329,16 +329,19 @@ type vscodeServer struct {
 	// stopGrace defaults to vscodeStopGrace when unset. Tests shorten it when
 	// modelling an editor that accepts signals but never confirms its exit.
 	stopGrace time.Duration
+	// reapErr is published by closing exited. Non-nil means group cleanup was not
+	// confirmed, so the durable owner remains and teardown fails.
+	reapErr error
 
 	// ready latches once the editor has accepted a connection. Until then the
 	// process is up but must not be proxied to, so callers see errVSCodeStarting
 	// instead of a 502 from a socket that is not listening yet.
 	ready bool
 
-	// exited is closed by the reaping goroutine once the child has been reaped AND
-	// its process group SIGKILLed, so alive can distinguish "running" from "died"
-	// without a syscall — and so a closed exited means the whole group is gone,
-	// not merely the leader.
+	// exited is closed by the reaping goroutine once the child has been reaped and
+	// its process-group cleanup has been attempted, so alive can distinguish a live
+	// leader without a syscall. A closed channel plus nil reapErr confirms the
+	// group cleanup; a non-nil reapErr keeps the outcome explicitly unknown.
 	exited chan struct{}
 
 	// killGroup overrides the process-group signal syscall. Teardown's correctness
@@ -404,8 +407,12 @@ func (s *vscodeServer) reap() {
 	// pinned long enough for the kill below to mean what it says.
 	pgid := s.cmd.Process.Pid
 	_ = s.cmd.Wait()
-	_ = s.signalGroup(pgid, syscall.SIGKILL)
-	s.releaseSocket()
+	if err := s.signalGroup(pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		s.reapErr = fmt.Errorf("reaping VS Code editor process group %d for %s: %w", pgid, s.worktree, err)
+		s.releaseSocketKeepingOwner()
+	} else {
+		s.releaseSocket()
+	}
 	close(s.exited)
 }
 
@@ -441,12 +448,11 @@ func (s *vscodeServer) stop() error {
 		grace = vscodeStopGrace
 	}
 	pgid := s.cmd.Process.Pid
-	// A reaped leader means the reaper has ALREADY SIGKILLed the group — and that
-	// -pgid is no longer provably ours, since an empty group's id is free for the
-	// kernel to hand to an unrelated new group leader. Nothing left to signal, and
-	// no safe way to signal it.
+	// A reaped leader means the reaper has already made the last safely pinned group
+	// kill attempt. The numeric pgid is no longer authority for another signal;
+	// return that attempt's explicit result.
 	if !s.alive() {
-		return nil
+		return s.reapErr
 	}
 	// Alive ⇒ unreaped ⇒ the leader still holds the group id ⇒ -pgid is still ours.
 	// (The alive()→signal gap is a microsecond TOCTOU inherent to POSIX group
@@ -455,8 +461,9 @@ func (s *vscodeServer) stop() error {
 	select {
 	case <-s.exited:
 		// exited closes AFTER the reaper's group SIGKILL, so the group is clean and
-		// there is nothing further to escalate to.
-		return nil
+		// there is nothing further to escalate to — unless that kill failed, in
+		// which case reapErr preserves the unknown outcome.
+		return s.reapErr
 	case <-time.After(grace):
 	}
 	var killErr error
@@ -468,7 +475,7 @@ func (s *vscodeServer) stop() error {
 	// a returning stop() leaves neither a live process nor a socket behind.
 	select {
 	case <-s.exited:
-		return nil
+		return s.reapErr
 	case <-time.After(grace):
 	}
 	if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
@@ -588,21 +595,24 @@ func (v *vscodeSupervisor) reconcilePersistedBeforeSpawn(key, instanceID string)
 		v.mu.Unlock()
 		return fmt.Errorf("daemon is shutting down")
 	}
-	if v.servers[key] != nil {
-		v.mu.Unlock()
-		return nil
-	}
 	if !v.reserveReconcileLocked(key) {
 		v.mu.Unlock()
 		return errVSCodeStarting
 	}
+	hasServer := v.servers[key] != nil
 	v.mu.Unlock()
 
+	// Keep the reservation until admission: otherwise teardown can remove an
+	// existing server in this unlock/relock gap and a replacement can escape it.
+	if hasServer {
+		return nil
+	}
 	err := v.stopPersistedForInstance(key, instanceID)
-	v.releaseReconcile(key)
 	if err != nil {
+		v.releaseReconcile(key)
 		return fmt.Errorf("reconciling a previous VS Code editor: %w", err)
 	}
+	// ensureServer removes the reservation under mu and keeps mu through registration.
 	return nil
 }
 
@@ -624,6 +634,7 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 	// session), and it is the supervisor's own lock — never Manager.mu — so even
 	// the blocking start grace stalls only other editor spawns, not unrelated RPCs.
 	v.mu.Lock()
+	delete(v.reconciling, key)
 	defer v.mu.Unlock()
 	if v.stopped {
 		return vscodeEndpoint{}, fmt.Errorf("daemon is shutting down")
@@ -921,25 +932,27 @@ func (v *vscodeSupervisor) stopFor(key string) {
 // including a previous daemon's process when this supervisor's map is empty.
 func (v *vscodeSupervisor) stopForInstance(key, instanceID string) error {
 	v.mu.Lock()
+	if !v.reserveReconcileLocked(key) {
+		v.mu.Unlock()
+		return fmt.Errorf("VS Code editor admission or teardown for session id %q is already in progress", instanceID)
+	}
 	server := v.servers[key]
 	if server != nil && (instanceID == "" || server.instanceID == instanceID) {
 		delete(v.servers, key)
 	} else {
 		server = nil
 	}
-	reconcile := server == nil && instanceID != ""
-	if reconcile && !v.reserveReconcileLocked(key) {
-		v.mu.Unlock()
-		return fmt.Errorf("VS Code editor teardown for session id %q is already in progress", instanceID)
-	}
 	v.mu.Unlock()
+	defer v.releaseReconcile(key)
+
 	// Stop OUTSIDE the lock: it blocks for up to the stop grace, and holding the
-	// supervisor lock across it would stall every unrelated session's editor.
+	// supervisor lock across it would stall every unrelated session's editor. The
+	// same-key reservation stays held through both in-memory and durable cleanup,
+	// so no replacement can enter between them.
 	if server != nil {
 		if err := server.stop(); err != nil {
-			// Keep the in-memory identity as a retry handle when no replacement raced
-			// into the key. A real server also retains its durable owner sidecar, but
-			// the pointer avoids making the next attempt rediscover it unnecessarily.
+			// Keep the in-memory identity as a retry handle. Admission cannot race into
+			// the key while the reservation is held, so a nil slot is still ours.
 			v.mu.Lock()
 			if v.servers[key] == nil {
 				v.servers[key] = server
@@ -947,12 +960,12 @@ func (v *vscodeSupervisor) stopForInstance(key, instanceID string) error {
 			v.mu.Unlock()
 			return err
 		}
-		return nil
 	}
-	if reconcile {
-		err := v.stopPersistedForInstance(key, instanceID)
-		v.releaseReconcile(key)
-		return err
+	if instanceID != "" {
+		// A prior failed reaper or an older daemon can leave additional sidecars
+		// even when an in-memory editor existed. Teardown succeeds only after every
+		// owner for this stable instance has been reconciled.
+		return v.stopPersistedForInstance(key, instanceID)
 	}
 	return nil
 }

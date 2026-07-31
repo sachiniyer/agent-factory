@@ -250,33 +250,43 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	}
 
 	closedVSCode := tabs[idx].Kind == session.TabKindVSCode
+	lastVSCode := closedVSCode
+	if closedVSCode {
+		for otherIdx, tab := range tabs {
+			if otherIdx != idx && tab.Kind == session.TabKindVSCode {
+				lastVSCode = false
+				break
+			}
+		}
+	}
 	targetID, err := stableTabTargetID(tabs[idx], title)
 	if err != nil {
 		return "", err
+	}
+
+	var vscodeKey string
+	if lastVSCode {
+		// Stop before removing the last durable UI retry handle. An unknown result
+		// leaves the tab intact so the user can retry instead of orphaning an editor.
+		vscodeKey = daemonInstanceKey(repoID, title)
+		if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
+			return "", fmt.Errorf("cannot close the last VS Code tab because editor teardown could not be confirmed: %w", err)
+		}
 	}
 
 	if err := instance.CloseTabByID(targetID); err != nil {
 		return "", err
 	}
 
-	// The editor is per SESSION, not per tab, so closing one vscode tab only ends
-	// it when it was the LAST one — a second vscode tab (or another pane on the
-	// same tab) is still using it. Evaluated after the close so the just-removed
-	// tab can't count itself, and DEFERRED so it also runs on the persist-failure
-	// path below: CloseTab has already removed the tab from the live instance by
-	// then, so the editor is unreachable either way and would otherwise linger to
-	// daemon shutdown. (If the unpersisted close is undone by a restart, the tab
-	// comes back and lazily starts a fresh editor — nothing is lost by stopping.)
-	if closedVSCode {
-		// The same key tabMutationTarget took its op-lock on: a pure function of the
-		// RESOLVED repoID/title it returned, never the request's, so there is exactly
-		// one correct value to recompute here.
-		key := daemonInstanceKey(repoID, title)
-		defer func() {
-			if !instanceHasVSCodeTab(instance) {
-				m.stopVSCodeForInstance(key, instance.ID)
-			}
-		}()
+	// A proxy that resolved the tab before the first stop can still reach editor
+	// admission without the session op-lock. Sweep again after the roster change,
+	// and propagate uncertainty before persisting the close. A persist failure is
+	// still safe: the live roster has no tab and this final sweep stopped its
+	// editor; a restart restores the old tab and lazily starts a new one.
+	if lastVSCode {
+		if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
+			return "", fmt.Errorf("closed the VS Code tab in memory but could not confirm final editor teardown; the durable tab record was retained for retry: %w", err)
+		}
 	}
 
 	data := instance.ToInstanceData()

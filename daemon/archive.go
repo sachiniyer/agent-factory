@@ -162,14 +162,13 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// respawns an editor on a fresh port. That is what makes stopping here safe —
 	// it is a stop, not a delete.
 	//
-	// The deferred sweep is the belt to that brace: the webtab proxy may spawn an
+	// The final sweep is the belt to that brace: the webtab proxy may spawn an
 	// editor without this op-lock (a spawn is too slow to hold it), so a request
 	// racing this teardown could start one after the stop below. BeginArchive above
 	// already makes ensureVSCodeServer refuse, so this should never fire — it is
 	// here so the "archived ⇒ no editor" invariant does not depend on that being
-	// true forever.
+	// true forever. Its result is checked below before the durable archive commit.
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
-	defer m.stopVSCodeForInstance(vscodeKey, instance.ID)
 	if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 		_ = instance.Transition(session.AbortArchiveToLost())
 		m.persistInstance(repoID, instance)
@@ -180,7 +179,7 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a
 	// separate MoveArchivedWorktree step relying on duplicated ordering prose).
-	if err := instance.ArchiveTeardown(dest); err != nil {
+	if err := archiveTeardown(instance, dest); err != nil {
 		// The worktree is still at a valid location (the git layer guarantees
 		// worktreePath points at the actual bytes even on a repair failure).
 		// Roll the fence back to Lost — started is still true and the agent tmux
@@ -208,6 +207,17 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// persist-error cause this issue reports is fully closed.)
 	_ = instance.Transition(session.CommitArchive())
 	archivedPath := instance.GetWorktreePath()
+	if stopErr := m.stopVSCodeForInstance(vscodeKey, instance.ID); stopErr != nil {
+		log.ErrorLog.Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
+		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
+			// The worktree cannot be returned home. Keep and best-effort persist the
+			// committed archive rather than claiming a live Lost session at a path
+			// that no longer exists, while surfacing both unknown outcomes.
+			m.persistInstance(repoID, instance)
+			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but could not confirm its final VS Code editor teardown (%v) and could not roll the worktree back (%v); it may need manual recovery", req.Title, archivedPath, stopErr, rbErr)
+		}
+		return "", session.InstanceData{}, fmt.Errorf("could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w", req.Title, stopErr)
+	}
 	if perr := archivePersist(m, repoID, instance); perr != nil {
 		log.ErrorLog.Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
@@ -520,6 +530,11 @@ func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
 // rollback in #1538) without disturbing any other persist. Production points it
 // at persistInstanceErr.
 var archivePersist = (*Manager).persistInstanceErr
+
+// archiveTeardown is the physical teardown+move ArchiveSession runs before its
+// durable commit. Indirected so race tests can install an editor in the exact
+// post-move window without weakening the production ordering.
+var archiveTeardown = (*session.Instance).ArchiveTeardown
 
 // archivedWorktreePath returns the global archive location for a session's
 // relocated worktree: <AGENT_FACTORY_HOME>/archived/<repoID>/<safeTitle>/. The
