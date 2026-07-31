@@ -50,6 +50,36 @@ func TestTaskMutations_UnresolvedProjectIdentityFailsClosed(t *testing.T) {
 	require.Error(t, getErr, "an indeterminate target relationship must not commit")
 }
 
+func TestTaskMutations_LegacyEnablePersistsResolvedRepoBinding(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	otherRepoPath := setupTaskRepo(t)
+	bound := filepath.Join(t.TempDir(), "bound")
+	require.NoError(t, os.Symlink(repoPath, bound))
+	legacy := archiveTargetTask("legacy02", "Legacy Binding", bound, "worker", false)
+	raw, err := json.Marshal([]task.Task{legacy})
+	require.NoError(t, err)
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, raw, 0o600))
+
+	enabled := true
+	err = archiveTaskControlServer(manager).UpdateTask(UpdateTaskRequest{
+		ID: legacy.ID, Update: task.TaskUpdate{Enabled: &enabled},
+	}, &UpdateTaskResponse{})
+	require.NoError(t, err, "a resolvable legacy target may be enabled")
+	stored, err := task.GetTask(legacy.ID)
+	require.NoError(t, err)
+	assert.Equal(t, repoID, stored.RepoID, "the identity lent to validation must be committed with the update")
+
+	require.NoError(t, os.Remove(bound))
+	require.NoError(t, os.Symlink(otherRepoPath, bound))
+	otherRepo, err := config.RepoFromPath(otherRepoPath)
+	require.NoError(t, err)
+	otherTasks, err := task.LoadTasksForRepoID(otherRepo.ID)
+	require.NoError(t, err)
+	assert.Empty(t, otherTasks, "a later path rebind must not move the updated task to another project")
+}
+
 func TestTaskMutations_MissingReservedTargetRequiresMaterialization(t *testing.T) {
 	t.Run("configured root", func(t *testing.T) {
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -99,6 +129,20 @@ func TestTaskMutations_MissingReservedTargetRequiresMaterialization(t *testing.T
 		assert.Contains(t, err.Error(), "materialize")
 		_, getErr := task.GetTask("rootnone")
 		require.Error(t, getErr, "an unreachable reserved target must not commit")
+	})
+
+	t.Run("live unconfigured root", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		registerArchivable(t, manager, repoID, repoPath, session.RootSessionTitle)
+		require.False(t, manager.repoRootAgentWillMaterialize(repoID))
+
+		err := archiveTaskControlServer(manager).AddTask(AddTaskRequest{Task: archiveTargetTask(
+			"rootlive", "Unmanaged Live Root", repoPath, session.RootSessionTitle, true,
+		)}, &AddTaskResponse{})
+		require.Error(t, err, "a live reserved target without self-healing would become a permanent retry after it disappears")
+		assert.Contains(t, err.Error(), "materialize")
+		_, getErr := task.GetTask("rootlive")
+		require.Error(t, getErr, "an unmanaged reserved target must not commit")
 	})
 
 	t.Run("deleted root", func(t *testing.T) {

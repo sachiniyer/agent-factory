@@ -828,9 +828,11 @@ func UpdateTask(id string, update TaskUpdate, expect ProjectExpectation) (Task, 
 }
 
 // UpdateTaskChecked is UpdateTask with a validator applied to the authoritative
-// merged record immediately before commit. A validator error leaves the stored
-// task unchanged. See AddTaskChecked for the callback constraints.
-func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, validate func(Task) error) (Task, error) {
+// merged record immediately before commit. Alongside an error, the validator
+// may return a nonempty resolved RepoID to persist on a legacy row; no other
+// field can be changed after ordinary task validation. A validator error leaves
+// the stored task unchanged. See AddTaskChecked for the callback constraints.
+func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, validate func(Task) (string, error)) (Task, error) {
 	if err := ValidateTaskID(id); err != nil {
 		return Task{}, err
 	}
@@ -881,8 +883,12 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 					}
 				}
 				if validate != nil {
-					if err := validate(merged); err != nil {
+					validatedRepoID, err := validate(merged)
+					if err != nil {
 						return err
+					}
+					if validatedRepoID != "" {
+						merged.RepoID = validatedRepoID
 					}
 				}
 				tasks[i] = merged

@@ -371,6 +371,22 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	if t.RepoID == "" {
 		return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", t.ID, target)
 	}
+	// Reserved root delivery is safe only while the daemon owns its future, not
+	// merely because a process happens to exist now. A disabled root-agent policy
+	// deliberately leaves a surviving live root alone, but will not recreate it
+	// after the next kill/outage; accepting a task there would defer the permanent
+	// failure until that disappearance.
+	if session.IsReservedTitle(target) {
+		if target != session.RootSessionTitle {
+			return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
+		}
+		if ctx.rootRepoID != t.RepoID {
+			return fmt.Errorf("cannot enable task %q: could not determine whether reserved target session %q will materialize because its project identity changed during validation; retry; nothing was changed", t.ID, target)
+		}
+		if !ctx.rootWillMaterialize {
+			return fmt.Errorf("cannot enable task %q: target session %q is reserved, but af could not establish that its root agent will materialize (it may be unconfigured, unresolved, or its project may be deleted); configure or re-register the root agent and restart the daemon, or choose a different target; nothing was changed", t.ID, target)
+		}
+	}
 	m.mu.Lock()
 	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
 	m.mu.Unlock()
@@ -381,17 +397,6 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	} else {
 		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
 		if errors.Is(err, errSessionNotFound) {
-			if session.IsReservedTitle(target) {
-				if target != session.RootSessionTitle {
-					return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
-				}
-				if ctx.rootRepoID != t.RepoID {
-					return fmt.Errorf("cannot enable task %q: could not determine whether reserved target session %q will materialize because its project identity changed during validation; retry; nothing was changed", t.ID, target)
-				}
-				if !ctx.rootWillMaterialize {
-					return fmt.Errorf("cannot enable task %q: target session %q is reserved, but af could not establish that its root agent will materialize (it may be unconfigured, unresolved, or its project may be deleted); configure or re-register the root agent and restart the daemon, or choose a different target; nothing was changed", t.ID, target)
-				}
-			}
 			return nil
 		}
 		if err != nil {

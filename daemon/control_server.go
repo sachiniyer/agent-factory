@@ -338,7 +338,7 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		return err
 	}
 	defer unlock()
-	var validate func(task.Task) error
+	var validate func(task.Task) (string, error)
 	if s.manager != nil {
 		s.manager.taskTargetMu.Lock()
 		defer s.manager.taskTargetMu.Unlock()
@@ -374,11 +374,14 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		validation := s.manager.prepareTaskTargetValidation(
 			validationRepoID, validationTarget, validationEnabled,
 		)
-		validate = func(candidate task.Task) error {
+		validate = func(candidate task.Task) (string, error) {
 			if candidate.RepoID == "" && candidate.ProjectPath == legacyPath {
 				candidate.RepoID = legacyRepoID
 			}
-			return s.manager.validateEnabledTaskTarget(candidate, validation)
+			if err := s.manager.validateEnabledTaskTarget(candidate, validation); err != nil {
+				return "", err
+			}
+			return candidate.RepoID, nil
 		}
 	}
 	merged, err := task.UpdateTaskChecked(req.ID, req.Update, req.Expect, validate)
