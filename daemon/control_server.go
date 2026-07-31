@@ -306,7 +306,13 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 	if s.manager != nil {
 		s.manager.taskTargetMu.Lock()
 		defer s.manager.taskTargetMu.Unlock()
-		validate = s.manager.validateEnabledTaskTarget
+		repoID := taskRepoIDForValidation(req.Task.ProjectPath)
+		validation := s.manager.prepareTaskTargetValidation(
+			repoID, req.Task.TargetSession, req.Task.Enabled,
+		)
+		validate = func(candidate task.Task) error {
+			return s.manager.validateEnabledTaskTarget(candidate, validation)
+		}
 	}
 	if err := task.AddTaskChecked(req.Task, validate); err != nil {
 		return err
@@ -349,18 +355,30 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		legacyRepoID := ""
 		if existing.RepoID == "" && req.Update.ProjectPath == nil {
 			legacyPath = existing.ProjectPath
-			if repo, repoErr := config.RepoFromPath(legacyPath); repoErr == nil {
-				legacyRepoID = repo.ID
-			}
+			legacyRepoID = taskRepoIDForValidation(legacyPath)
 		}
+		validationRepoID := existing.RepoID
+		if req.Update.ProjectPath != nil {
+			validationRepoID = taskRepoIDForValidation(*req.Update.ProjectPath)
+		} else if validationRepoID == "" {
+			validationRepoID = legacyRepoID
+		}
+		validationTarget := existing.TargetSession
+		if req.Update.TargetSession != nil {
+			validationTarget = *req.Update.TargetSession
+		}
+		validationEnabled := existing.Enabled
+		if req.Update.Enabled != nil {
+			validationEnabled = *req.Update.Enabled
+		}
+		validation := s.manager.prepareTaskTargetValidation(
+			validationRepoID, validationTarget, validationEnabled,
+		)
 		validate = func(candidate task.Task) error {
 			if candidate.RepoID == "" && candidate.ProjectPath == legacyPath {
 				candidate.RepoID = legacyRepoID
 			}
-			if candidate.Enabled && task.CanonicalTargetSession(candidate.TargetSession) != "" && candidate.RepoID == "" {
-				return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", candidate.ID, candidate.TargetSession)
-			}
-			return s.manager.validateEnabledTaskTarget(candidate)
+			return s.manager.validateEnabledTaskTarget(candidate, validation)
 		}
 	}
 	merged, err := task.UpdateTaskChecked(req.ID, req.Update, req.Expect, validate)
@@ -380,6 +398,18 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	}
 	return &mutationCommittedError{err: fmt.Errorf(
 		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)}
+}
+
+// taskRepoIDForValidation mirrors task.AddTaskChecked's bind-time identity
+// derivation outside the tasks-file lock. A second resolution inside the task
+// package remains authoritative; any mismatch matters only for reserved-root
+// reachability and is rejected as indeterminate by the final validator.
+func taskRepoIDForValidation(projectPath string) string {
+	repo, err := config.RepoFromPath(projectPath)
+	if err != nil {
+		return ""
+	}
+	return repo.ID
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {

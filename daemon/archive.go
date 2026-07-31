@@ -332,13 +332,32 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	return archivedPath, archived, nil
 }
 
+// taskTargetValidationContext carries the root-agent reachability fact that can
+// require git resolution. Control callers prepare it while holding taskTargetMu
+// but before entering the tasks-file lock; validators must not shell out there.
+type taskTargetValidationContext struct {
+	rootRepoID          string
+	rootWillMaterialize bool
+}
+
+func (m *Manager) prepareTaskTargetValidation(repoID, target string, enabled bool) taskTargetValidationContext {
+	ctx := taskTargetValidationContext{}
+	if enabled && repoID != "" && session.IsReservedTitle(target) {
+		ctx.rootRepoID = repoID
+		ctx.rootWillMaterialize = m.repoRootAgentWillMaterialize(repoID)
+	}
+	return ctx
+}
+
 // validateEnabledTaskTarget is the task-writer side of taskTargetMu's fence.
-// Missing targets remain legal (delivery auto-creates them), but a known target
+// Missing ordinary targets remain legal (delivery auto-creates them), but a
+// reserved target needs a proven daemon materialization path. A known target
 // that is archiving or already archived would retry forever and is refused
 // before the task-store commit. RepoID has already been derived by the checked
-// add path or supplied from a freshly resolved legacy update; an unresolved new
-// project retains its existing AddTask behavior.
-func (m *Manager) validateEnabledTaskTarget(t task.Task) error {
+// add path or supplied from a freshly resolved legacy update. Unknown identity
+// stays unknown for enabled targeted writes; accepting it would bypass every
+// repository-scoped lifecycle check.
+func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidationContext) error {
 	target := task.CanonicalTargetSession(t.TargetSession)
 	if !t.Enabled || target == "" {
 		return nil
@@ -350,7 +369,7 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task) error {
 		return errDaemonStarting()
 	}
 	if t.RepoID == "" {
-		return nil
+		return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", t.ID, target)
 	}
 	m.mu.Lock()
 	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
@@ -362,6 +381,17 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task) error {
 	} else {
 		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
 		if errors.Is(err, errSessionNotFound) {
+			if session.IsReservedTitle(target) {
+				if target != session.RootSessionTitle {
+					return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
+				}
+				if ctx.rootRepoID != t.RepoID {
+					return fmt.Errorf("cannot enable task %q: could not determine whether reserved target session %q will materialize because its project identity changed during validation; retry; nothing was changed", t.ID, target)
+				}
+				if !ctx.rootWillMaterialize {
+					return fmt.Errorf("cannot enable task %q: target session %q is reserved, but af could not establish that its root agent will materialize (it may be unconfigured, unresolved, or its project may be deleted); configure or re-register the root agent and restart the daemon, or choose a different target; nothing was changed", t.ID, target)
+				}
+			}
 			return nil
 		}
 		if err != nil {
