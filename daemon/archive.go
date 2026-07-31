@@ -455,6 +455,22 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", fmt.Errorf("cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w", req.Title, instance.GetWorktreePath(), err)
 		}
+		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+			// The relocate was cut off by its deadline AFTER the bytes reached
+			// dest: the git layer commits the new location to the worktree object
+			// before repairing, precisely because the registration can be stale
+			// while the location is not. That new location only exists in memory,
+			// and this failure path returns without persisting — so a daemon
+			// restart would reload the session as Archived pointing at an archive
+			// path that is no longer there, and every later restore would fail the
+			// source-exists guard while the user's work sat at dest.
+			//
+			// Persist first, then report. Same shape as the re-spawn failure
+			// below: keep the durable facts we did establish, and still surface
+			// the error so the caller does not read this as a completed restore.
+			m.persistInstance(repoID, instance)
+			return "", fmt.Errorf("restore of %q was cut off mid-relocate; its worktree is recorded at %s so it is not lost, but its git registration is unverified — check that path and retry: %w", req.Title, instance.GetWorktreePath(), err)
+		}
 		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
 	}
 

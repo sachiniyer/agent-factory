@@ -39,9 +39,16 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// ResolveUserPath expands a leading ~ before absolutizing — filepath.Abs
 	// alone would turn "~/project" into "<cwd>/~/project" (#924). validateForm
 	// already normalized the field, so this is idempotent.
+	//
+	// handleError, unlike the form-validation branches above. ResolveUserPath is
+	// ExpandTilde + filepath.Abs, and Abs's only failure is os.Getwd() — the TUI's
+	// working directory was removed or became unreadable. Nothing about the typed
+	// path caused that, and nothing the user retypes fixes it, so it is an
+	// operation failure. ("invalid path" is the user-facing half; the severity is
+	// the monitoring half, and they answer different questions.)
 	absPath, err := config.ResolveUserPath(projectPath)
 	if err != nil {
-		return m.handleNotice(fmt.Errorf("invalid path: %v", err))
+		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
 	if program == "" {
 		program = m.program
