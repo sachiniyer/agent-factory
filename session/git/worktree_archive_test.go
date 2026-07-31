@@ -902,6 +902,111 @@ func TestMoveDirCrossDevice_DestinationParentReopenFailureRestoresSource(t *test
 	assert.FileExists(t, filepath.Join(src, "original.txt"), "source must be restored after destination-parent reopen fails")
 }
 
+// TestMoveDirCrossDevice_SourceParentReplacementInvalidatesRollback moves the
+// source parent after its descriptor is retained, then forces a destination
+// failure. Restoring through the fd is not enough: the textual source parent
+// must still identify that descriptor before rollback can be reported intact.
+func TestMoveDirCrossDevice_SourceParentReplacementInvalidatesRollback(t *testing.T) {
+	root := t.TempDir()
+	sourceParent := filepath.Join(root, "source-parent")
+	require.NoError(t, os.Mkdir(sourceParent, 0755))
+	src := filepath.Join(sourceParent, "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeDestParentOpen
+	movedParent := sourceParent + ".moved"
+	moveDirBeforeDestParentOpen = func(string) error {
+		if err := os.Rename(sourceParent, movedParent); err != nil {
+			return err
+		}
+		if err := os.Mkdir(sourceParent, 0755); err != nil {
+			return err
+		}
+		return errors.New("forced destination failure after source parent replacement")
+	}
+	t.Cleanup(func() { moveDirBeforeDestParentOpen = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "source parent path changed")
+	assert.FileExists(t, filepath.Join(movedParent, "src", "original.txt"),
+		"the original remains recoverable in the retained parent")
+	assert.NoFileExists(t, filepath.Join(src, "original.txt"),
+		"the replacement textual parent must not be reported as a successful rollback")
+}
+
+// TestMoveDirCrossDevice_ChangedPublishedDescendantIsNotDeleted replaces a
+// copied child after publication but before post-commit validation. Rollback
+// cleanup must use the copied destination identities, not snapshot and delete
+// the replacement tree it has just discovered.
+func TestMoveDirCrossDevice_ChangedPublishedDescendantIsNotDeleted(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirAfterDestCommit
+	var strandedCopy string
+	moveDirAfterDestCommit = func(path string) error {
+		strandedCopy = filepath.Join(path, "stranded-copy")
+		if err := os.Rename(filepath.Join(path, "sub"), strandedCopy); err != nil {
+			return err
+		}
+		if err := os.Mkdir(filepath.Join(path, "sub"), 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(path, "sub", "replacement.txt"), []byte("replacement"), 0644)
+	}
+	t.Cleanup(func() { moveDirAfterDestCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err)
+	assert.FileExists(t, filepath.Join(src, "sub", "original.txt"), "source must be restored")
+	assert.FileExists(t, filepath.Join(dest, "sub", "replacement.txt"),
+		"uncopied replacement data must survive failed destination cleanup")
+	assert.FileExists(t, filepath.Join(strandedCopy, "original.txt"),
+		"the moved copied subtree must remain recoverable")
+}
+
+// TestMoveDirCrossDevice_FastRenameParentReplacementRollsBack changes the
+// destination parent path after the fd-relative same-filesystem rename. The
+// helper must reject the stale textual destination and restore source through
+// the retained descriptors.
+func TestMoveDirCrossDevice_FastRenameParentReplacementRollsBack(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	destinationRoot := t.TempDir()
+	destinationParent := filepath.Join(destinationRoot, "parent")
+	require.NoError(t, os.Mkdir(destinationParent, 0755))
+	dest := filepath.Join(destinationParent, "dest")
+	movedParent := destinationParent + ".moved"
+
+	originalHook := renamePathAfterCommit
+	renamePathAfterCommit = func(string) error {
+		if err := os.Rename(destinationParent, movedParent); err != nil {
+			return err
+		}
+		return os.Mkdir(destinationParent, 0755)
+	}
+	t.Cleanup(func() { renamePathAfterCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "destination parent path changed")
+	assert.FileExists(t, filepath.Join(src, "original.txt"), "failed fast rename must restore source")
+	assert.NoDirExists(t, dest)
+	assert.NoDirExists(t, filepath.Join(movedParent, "dest"), "rolled-back worktree must not remain stranded")
+}
+
 // TestMoveDirCrossDevice_SecuredSourceOpenFailureDoesNotStrandSource changes
 // source permissions after the copy but before quarantine. The move may finish
 // through a descriptor retained from the copy; if it cannot, it must restore
@@ -964,6 +1069,37 @@ func TestMoveDirCrossDevice_PrePublicationFailureCleansPrivateStaging(t *testing
 	require.NoError(t, readErr)
 	assert.Empty(t, entries, "every pre-publication exit must remove private staging")
 	assert.FileExists(t, filepath.Join(src, "original.txt"), "failed move must leave source intact")
+}
+
+func TestMoveDirCrossDevice_SourceCleanupParentReplacementIsUnverified(t *testing.T) {
+	root := t.TempDir()
+	sourceParent := filepath.Join(root, "source-parent")
+	require.NoError(t, os.Mkdir(sourceParent, 0755))
+	src := filepath.Join(sourceParent, "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalRemoveTree := removeDirectoryTree
+	movedParent := sourceParent + ".moved"
+	removeDirectoryTree = func(parent *os.File, name, path string, directory *os.File, expected *copiedDirectory) error {
+		if filepath.Dir(path) != sourceParent || !strings.Contains(filepath.Base(path), ".af-source-") {
+			return originalRemoveTree(parent, name, path, directory, expected)
+		}
+		require.NoError(t, os.Rename(sourceParent, movedParent))
+		require.NoError(t, os.Mkdir(sourceParent, 0755))
+		return errors.New("forced cleanup failure after source parent replacement")
+	}
+	t.Cleanup(func() { removeDirectoryTree = originalRemoveTree })
+
+	err := moveDirCrossDevice(src, dest)
+	var cleanupErr *copiedWorktreeSourceCleanupError
+	require.ErrorAs(t, err, &cleanupErr)
+	assert.False(t, cleanupErr.cleanupPathVerified,
+		"a retained descriptor does not verify a pathname through a replaced parent")
 }
 
 // TestMoveDirCrossDevice_SourceCleanupReplacementIsNotDeleted injects a

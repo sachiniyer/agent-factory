@@ -93,6 +93,8 @@ var (
 	moveDirBeforeDestParentOpen = func(string) error { return nil }
 	moveDirBeforeDestCommit     = func(string) error { return nil }
 	moveDirBeforeSourceCommit   = func(string) error { return nil }
+	moveDirAfterDestCommit      = func(string) error { return nil }
+	renamePathAfterCommit       = func(string) error { return nil }
 	removeTreeBeforeEntryClaim  = func(*os.File, string) error { return nil }
 )
 
@@ -307,6 +309,10 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 		return err
 	}
 	defer sourceParent.Close()
+	sourceParentIdentity, err := identityFromFile(sourceParent)
+	if err != nil {
+		return err
+	}
 	sourceName := filepath.Base(src)
 	quarantinePath, err := privateMovePath(src, "source")
 	if err != nil {
@@ -324,6 +330,9 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 		if restoreErr := restoreClaimedSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
 			return fmt.Errorf("failed to inspect secured source %s (%v) and could not restore it to %s: %w", quarantinePath, err, src, restoreErr)
 		}
+		if pathErr := validateDirectoryPathIdentity(sourceParentPath, "source", sourceParentIdentity); pathErr != nil {
+			return errors.Join(fmt.Errorf("failed to inspect secured source %s: %w", quarantinePath, err), pathErr)
+		}
 		return fmt.Errorf("failed to inspect secured source %s; restored it to %s: %w", quarantinePath, src, err)
 	}
 	if !copied.sourceIdentity.same(quarantinedIdentity) {
@@ -331,12 +340,22 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 		if restoreErr != nil {
 			return fmt.Errorf("source directory changed while it was copied; replacement was preserved at %s but could not be restored to %s: %w", quarantinePath, src, restoreErr)
 		}
+		if pathErr := validateNamedPathIdentity(
+			sourceParentPath, sourceName, "source", sourceParentIdentity, quarantinedIdentity,
+		); pathErr != nil {
+			return errors.Join(errors.New("source directory changed while it was copied"), pathErr)
+		}
 		return fmt.Errorf("source directory changed while it was copied; restored the replacement at %s and refused cleanup", src)
 	}
 	restoreSource := func(cause error) error {
 		restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName, copied.source)
 		if restoreErr != nil {
 			return fmt.Errorf("%v; secured source at %s could not be restored to %s: %w", cause, quarantinePath, src, restoreErr)
+		}
+		if pathErr := validateNamedPathIdentity(
+			sourceParentPath, sourceName, "source", sourceParentIdentity, copied.sourceIdentity,
+		); pathErr != nil {
+			return errors.Join(cause, pathErr)
 		}
 		return cause
 	}
@@ -373,23 +392,30 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 		return restoreSource(fmt.Errorf("failed to atomically commit copied worktree at %s without replacement: %w", dest, err))
 	}
 	published = true
-	if err := validatePublishedDestination(dest, copied); err != nil {
+	commitErr := errors.Join(moveDirAfterDestCommit(dest), validatePublishedDestination(dest, copied))
+	if commitErr != nil {
+		destinationManifest := destinationCleanupManifest(copied.root)
 		cleanupErr := removeDirectoryTree(
-			copied.destinationParent, filepath.Base(dest), dest, copied.destination, nil,
+			copied.destinationParent, filepath.Base(dest), dest, copied.destination, &destinationManifest,
 		)
 		if cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("failed to remove unverified destination %s: %w", dest, cleanupErr))
+			commitErr = errors.Join(commitErr, fmt.Errorf("failed to remove unverified destination %s: %w", dest, cleanupErr))
 		}
-		return restoreSource(err)
+		return restoreSource(commitErr)
 	}
 
 	if err := removeDirectoryTree(sourceParent, quarantineName, quarantinePath, copied.source, &copied.root); err != nil {
 		var unverified *unverifiedCleanupPathError
+		cleanupPathVerified := !errors.As(err, &unverified)
+		if pathErr := validateDirectoryPathIdentity(sourceParentPath, "source", sourceParentIdentity); pathErr != nil {
+			err = errors.Join(err, pathErr)
+			cleanupPathVerified = false
+		}
 		return &copiedWorktreeSourceCleanupError{
 			src:                 quarantinePath,
 			dest:                dest,
 			err:                 err,
-			cleanupPathVerified: !errors.As(err, &unverified),
+			cleanupPathVerified: cleanupPathVerified,
 		}
 	}
 	return nil
@@ -886,23 +912,6 @@ func readLinkAt(parent *os.File, name, path string) (string, error) {
 
 func unsupportedSourceTypeError(path string, mode uint32) error {
 	return fmt.Errorf("cannot move worktree across filesystems: unsupported file type at %s (mode %#o)", path, mode&unix.S_IFMT)
-}
-
-func renamePathNoReplace(src, dest string) error {
-	sourceParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(src), "source parent")
-	if err != nil {
-		return err
-	}
-	defer sourceParent.Close()
-	destinationParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(dest), "destination parent")
-	if err != nil {
-		return err
-	}
-	defer destinationParent.Close()
-	return renameAtNoReplace(
-		int(sourceParent.Fd()), filepath.Base(src),
-		int(destinationParent.Fd()), filepath.Base(dest),
-	)
 }
 
 func privateMovePath(path, purpose string) (string, error) {

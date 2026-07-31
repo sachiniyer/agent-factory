@@ -42,6 +42,74 @@ func identityFromStat(stat *unix.Stat_t) pathIdentity {
 	}
 }
 
+func validateDirectoryPathIdentity(path, role string, expected pathIdentity) error {
+	current, _, err := openDirectoryPathFollowingLinks(path, role+" parent")
+	if err != nil {
+		return fmt.Errorf("%s parent path changed at %s: %w", role, path, err)
+	}
+	defer current.Close()
+	identity, err := identityFromFile(current)
+	if err != nil {
+		return fmt.Errorf("could not verify %s parent path at %s: %w", role, path, err)
+	}
+	if !expected.same(identity) {
+		return fmt.Errorf("%s parent path changed at %s", role, path)
+	}
+	return nil
+}
+
+func validateNamedPathIdentity(
+	parentPath, name, role string,
+	expectedParent, expectedEntry pathIdentity,
+) error {
+	currentParent, _, err := openDirectoryPathFollowingLinks(parentPath, role+" parent")
+	if err != nil {
+		return fmt.Errorf("%s parent path changed at %s: %w", role, parentPath, err)
+	}
+	defer currentParent.Close()
+	parentIdentity, err := identityFromFile(currentParent)
+	if err != nil {
+		return fmt.Errorf("could not verify %s parent path at %s: %w", role, parentPath, err)
+	}
+	if !expectedParent.same(parentIdentity) {
+		return fmt.Errorf("%s parent path changed at %s", role, parentPath)
+	}
+	entryIdentity, err := identityAt(currentParent, name)
+	if err != nil {
+		return fmt.Errorf("%s path changed at %s: %w", role, filepath.Join(parentPath, name), err)
+	}
+	if !expectedEntry.same(entryIdentity) {
+		return fmt.Errorf("%s path changed at %s", role, filepath.Join(parentPath, name))
+	}
+	return nil
+}
+
+func destinationCleanupManifest(root copiedDirectory) copiedDirectory {
+	manifest := copiedDirectory{}
+	type cloneJob struct {
+		source      *copiedDirectory
+		destination *copiedDirectory
+	}
+	queue := []cloneJob{{source: &root, destination: &manifest}}
+	for len(queue) > 0 {
+		job := queue[0]
+		queue = queue[1:]
+		job.destination.entries = make([]copiedEntry, 0, len(job.source.entries))
+		for _, entry := range job.source.entries {
+			clone := copiedEntry{name: entry.name, source: entry.destination}
+			if entry.directory != nil {
+				clone.directory = &copiedDirectory{}
+			}
+			job.destination.entries = append(job.destination.entries, clone)
+			if entry.directory != nil {
+				clonedEntry := &job.destination.entries[len(job.destination.entries)-1]
+				queue = append(queue, cloneJob{source: entry.directory, destination: clonedEntry.directory})
+			}
+		}
+	}
+	return manifest
+}
+
 func directoryNames(directory *os.File, path string) ([]string, error) {
 	reader, _, err := openDirectoryAt(directory, ".", path, "tree")
 	if err != nil {
