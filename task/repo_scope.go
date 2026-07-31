@@ -36,7 +36,15 @@ type repoScope struct {
 	fresh bool
 	// seen memoizes resolution within this load. The process-level cache below
 	// carries positives ACROSS loads, which is what keeps the poll cheap.
-	seen map[string]string
+	seen map[string]repoResolution
+}
+
+// repoResolution preserves the third value lifecycle callers need: a derived
+// fallback ID keeps display scoping usable, but is not proof that a legacy path
+// belongs to a different repository.
+type repoResolution struct {
+	id    string
+	known bool
 }
 
 // newRepoScope canonicalizes the target side.
@@ -50,7 +58,7 @@ func newRepoScope(repoRoot string) *repoScope {
 	return &repoScope{
 		root: repoRoot,
 		id:   config.RepoIDFromRoot(repoRoot),
-		seen: map[string]string{},
+		seen: map[string]repoResolution{},
 	}
 }
 
@@ -58,16 +66,18 @@ func newRepoScope(repoRoot string) *repoScope {
 // holds the daemon's canonical repo identity but may not have a local worktree
 // path (for example, an archived remote session).
 func newRepoScopeForID(repoID string) *repoScope {
-	return &repoScope{id: repoID, fresh: true, seen: map[string]string{}}
+	return &repoScope{id: repoID, fresh: true, seen: map[string]repoResolution{}}
 }
 
-// matches reports whether t belongs to this scope.
-func (s *repoScope) matches(t Task) bool {
+// matches reports both whether t belongs to this scope and whether that answer
+// is known. Display scopes retain their fallback matching; fresh lifecycle
+// scopes expose unresolved legacy bindings instead of collapsing them to false.
+func (s *repoScope) matches(t Task) (matched, known bool) {
 	// The RETAINED id wins when present: it was resolved at bind time, while the
 	// recorded path was known to resolve, so it survives that path being deleted
 	// or moved. Re-deriving would be strictly worse information — and it is free.
 	if t.RepoID != "" {
-		return t.RepoID == s.id
+		return t.RepoID == s.id, true
 	}
 	// An unbound task belongs to no project, so no project's pane claims it.
 	// This deliberately diverges from api/scope.go, which matches an unbound task
@@ -75,26 +85,33 @@ func (s *repoScope) matches(t Task) bool {
 	// duplicating one orphan into every project's pane is noise, not a fix. No
 	// supported writer creates one (see Task.ProjectPath).
 	if strings.TrimSpace(t.ProjectPath) == "" {
-		return false
+		return false, true
 	}
 	// Exact match short-circuits the git resolution for every task created from
 	// the repo root — the majority, and the case that already worked.
 	if t.ProjectPath == s.root {
-		return true
+		return true, true
 	}
-	return s.resolve(t.ProjectPath) == s.id
+	resolved := s.resolve(t.ProjectPath)
+	return resolved.id == s.id, resolved.known
 }
 
-func (s *repoScope) resolve(projectPath string) string {
+func (s *repoScope) resolve(projectPath string) repoResolution {
 	if got, ok := s.seen[projectPath]; ok {
 		return got
 	}
-	id := resolveProjectID(projectPath)
+	resolved := repoResolution{id: resolveProjectID(projectPath), known: true}
 	if s.fresh {
-		id = resolveProjectIDFresh(projectPath)
+		fresh := config.ResolveProjectPath(projectPath)
+		resolved.id = fresh.ID
+		// Root empty means config derived an ID from an unresolved spelling.
+		// Equality with the target ID still proves membership: both IDs are the
+		// hash of that exact cleaned root spelling. A mismatch is unknown, not
+		// evidence that the legacy task belongs to another project.
+		resolved.known = fresh.Root != "" || fresh.ID == s.id
 	}
-	s.seen[projectPath] = id
-	return id
+	s.seen[projectPath] = resolved
+	return resolved
 }
 
 // projectIDMemo caches path→repo-ID resolutions that RESOLVED to a real
@@ -124,11 +141,4 @@ func resolveProjectID(projectPath string) string {
 		projectIDMemo.Store(projectPath, resolved.ID)
 	}
 	return resolved.ID
-}
-
-// resolveProjectIDFresh deliberately bypasses projectIDMemo. Retained Task.RepoID
-// remains authoritative and never reaches this path; this is only for legacy
-// rows whose current ProjectPath binding must be known at a lifecycle boundary.
-func resolveProjectIDFresh(projectPath string) string {
-	return config.ResolveProjectPath(projectPath).ID
 }

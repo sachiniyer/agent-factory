@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -11,6 +13,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestArchiveSession_UnresolvedLegacyTaskScopeFailsClosed(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, source := registerArchivable(t, manager, repoID, repoPath, "worker")
+	bound := filepath.Join(t.TempDir(), "bound")
+	require.NoError(t, os.Symlink(repoPath, bound))
+	legacy := archiveTargetTask("unknown2", "Unknown Binding", bound, "worker", true)
+	raw, err := json.Marshal([]task.Task{legacy})
+	require.NoError(t, err)
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, raw, 0o600))
+	require.NoError(t, os.Remove(bound))
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err, "archive must not infer that an unresolved legacy task belongs elsewhere")
+	assert.Contains(t, err.Error(), "could not determine")
+	assert.Contains(t, err.Error(), "unknown2")
+	assert.Equal(t, session.LiveReady, inst.GetLiveness(), "unknown scope must fail before the archive fence")
+	_, statErr := os.Stat(source)
+	assert.NoError(t, statErr, "unknown scope must not move the worktree")
+}
 
 func TestTaskMutations_UnresolvedProjectIdentityFailsClosed(t *testing.T) {
 	manager, _, repoPath := newStatusTestManager(t)

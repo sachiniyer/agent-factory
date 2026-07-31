@@ -505,7 +505,11 @@ func LoadTasksForRepo(repoRoot string) ([]Task, error) {
 // It is the path-independent counterpart to LoadTasksForRepo for daemon
 // lifecycle checks, including remote sessions with no local git worktree. Legacy
 // rows without a retained RepoID are resolved freshly: lifecycle mutations may
-// not reuse the display scope's intentionally stale positive path cache.
+// not reuse the display scope's intentionally stale positive path cache. An
+// enabled targeted legacy row whose nonempty path cannot currently resolve is
+// an unknown relationship and returns an error rather than silently excluding
+// a possible blocker; disabled and untargeted rows cannot create that retry
+// state and remain non-blocking.
 func LoadTasksForRepoID(repoID string) ([]Task, error) {
 	return loadTasksForScope(newRepoScopeForID(repoID))
 }
@@ -517,7 +521,11 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 	}
 	var filtered []Task
 	for _, t := range all {
-		if scope.matches(t) {
+		matched, known := scope.matches(t)
+		if scope.fresh && !known && t.Enabled && CanonicalTargetSession(t.TargetSession) != "" {
+			return nil, fmt.Errorf("could not determine whether enabled legacy task %q targeting %q belongs to repo %s: project_path %q does not resolve to a repository; refusing lifecycle decision", t.ID, t.TargetSession, scope.id, t.ProjectPath)
+		}
+		if matched {
 			filtered = append(filtered, t)
 		}
 	}

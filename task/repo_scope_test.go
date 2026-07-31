@@ -205,3 +205,33 @@ func TestLoadTasksForRepoID_LegacyPathRebindUsesFreshResolution(t *testing.T) {
 	require.Len(t, betaTasks, 1, "lifecycle lookup must resolve the rebound legacy path freshly")
 	assert.Equal(t, "rebind01", betaTasks[0].ID)
 }
+
+func TestLoadTasksForRepoID_UnresolvedLegacyBindingFailsClosed(t *testing.T) {
+	repo := mkScopeRepo(t, "project")
+	bound := filepath.Join(t.TempDir(), "bound")
+	require.NoError(t, os.Symlink(repo, bound))
+	setupTestTasks(t, []Task{{
+		ID: "unknown1", Name: "unknown binding", Prompt: "p", CronExpr: "0 * * * *",
+		ProjectPath: bound, TargetSession: "worker", Enabled: true, CreatedAt: time.Now(),
+	}})
+	require.NoError(t, os.Remove(bound))
+
+	_, err := LoadTasksForRepoID(repoIDForPath(repo))
+	require.Error(t, err, "an unresolved legacy binding is unknown, not evidence that the task belongs elsewhere")
+	assert.Contains(t, err.Error(), "could not determine")
+	assert.Contains(t, err.Error(), "unknown1")
+	assert.Contains(t, err.Error(), bound)
+}
+
+func TestLoadTasksForRepoID_UnresolvedIrrelevantLegacyRowsDoNotBlock(t *testing.T) {
+	repo := mkScopeRepo(t, "project")
+	missing := filepath.Join(t.TempDir(), "missing")
+	setupTestTasks(t, []Task{
+		{ID: "disabled", Name: "disabled", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: missing, TargetSession: "worker", Enabled: false, CreatedAt: time.Now()},
+		{ID: "freshrun", Name: "fresh run", Prompt: "p", CronExpr: "0 * * * *", ProjectPath: missing, Enabled: true, CreatedAt: time.Now()},
+	})
+
+	got, err := LoadTasksForRepoID(repoIDForPath(repo))
+	require.NoError(t, err, "disabled and untargeted tasks cannot create an archived-target retry")
+	assert.Empty(t, got)
+}
