@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	stdlog "log"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,48 @@ func TestWebTabProxyFailureDoesNotLogTargetAccessToken(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), token) {
 		t.Fatalf("web-tab proxy error response exposed the target access_token: %s", rec.Body.String())
+	}
+}
+
+func TestWebTabProxy_ClientCancellationIsNotAnUpstreamFailure(t *testing.T) {
+	upstreamStarted := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(upstreamStarted)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	var warnings bytes.Buffer
+	previous := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "", 0)
+	t.Cleanup(func() { aflog.WarningLog = previous })
+
+	mux, sessionID, tabID := newWebTabProxyFixture(t, upstream.URL)
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/webtab/"+sessionID+"/"+tabID+"/",
+		nil,
+	).WithContext(requestCtx)
+	rec := httptest.NewRecorder()
+	proxyDone := make(chan struct{})
+	go func() {
+		defer close(proxyDone)
+		mux.ServeHTTP(rec, req)
+	}()
+
+	<-upstreamStarted
+	cancelRequest()
+	<-proxyDone
+
+	if got := warnings.String(); got != "" {
+		t.Fatalf("a canceled client request logged an upstream failure: %s", got)
+	}
+	if got := rec.Header().Get(webtabErrorHeader); got != "" {
+		t.Fatalf("a canceled client request was marked as an unreachable upstream: %s=%q", webtabErrorHeader, got)
+	}
+	if rec.Code == http.StatusBadGateway {
+		t.Fatalf("a canceled client request manufactured an upstream 502")
 	}
 }
 

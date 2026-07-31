@@ -659,7 +659,15 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			rewriteRefreshURL(resp.Header, tabPathPrefix, targetURL)
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, proxyReq *http.Request, err error) {
+			// ReverseProxy reports the request context ending as a transport
+			// error. That means the browser navigated away, disconnected, or the
+			// tab was torn down; there is no live client to warn or manufacture a
+			// dead-server response for. Keep genuine live-request transport
+			// failures on the warning + marked-502 path below.
+			if proxyReq != nil && errors.Is(err, proxyReq.Context().Err()) {
+				return
+			}
 			safeErr := agentproto.RedactAccessTokenError(err,
 				agentproto.AccessTokenFromQuery(targetURL.Query()))
 			log.WarningLog.Printf("web tab proxy to %s failed: %v",
@@ -674,7 +682,7 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 			// Set before writeHTTPError: that writes the status, after which headers
 			// no longer reach the client.
 			w.Header().Set(webtabErrorHeader, webtabErrorUpstreamUnreachable)
-			writeHTTPError(w, r, http.StatusBadGateway,
+			writeHTTPError(w, proxyReq, http.StatusBadGateway,
 				fmt.Errorf("web tab dev server at %s is unreachable: %w", targetURL.Host, safeErr))
 		},
 	}
