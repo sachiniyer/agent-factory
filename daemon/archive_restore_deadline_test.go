@@ -22,13 +22,15 @@ import (
 // `git worktree repair` makes no progress, so the bounded runner SIGKILLs it.
 //
 // Everything else execs the real git, so the repo, the worktree registration and
-// the archive that precede this are genuine.
-func partialRelocateGitOnPath(t *testing.T) {
+// the archive that precede this are genuine. The returned heal() drops the
+// misbehavior so the same test can then drive a healthy retry.
+func partialRelocateGitOnPath(t *testing.T) (heal func()) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	require.NoError(t, err)
 
 	dir := t.TempDir()
+	shim := filepath.Join(dir, "git")
 	// Args always arrive as: git -C <path> <verb> <subverb> …
 	script := "#!/bin/sh\n" +
 		"if [ \"$3\" = \"worktree\" ] && [ \"$4\" = \"repair\" ]; then sleep 300 & wait; fi\n" +
@@ -36,8 +38,16 @@ func partialRelocateGitOnPath(t *testing.T) {
 		"  echo 'simulated: git worktree move refused (cross-device)' >&2; exit 1\n" +
 		"fi\n" +
 		"exec " + realGit + " \"$@\"\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// heal rewrites the shim as a pass-through, so a test can exercise a healthy
+	// retry through the same PATH. Rewriting the file rather than reading an env
+	// var is deliberate: runGitCommandContext filters the environment it hands
+	// git, so a test-only variable would not survive the call.
+	return func() {
+		require.NoError(t, os.WriteFile(shim, []byte("#!/bin/sh\nexec "+realGit+" \"$@\"\n"), 0o755))
+	}
 }
 
 // TestRestoreArchived_RelocateCutOffPersistsTheNewLocation is the restore half of
@@ -69,7 +79,7 @@ func TestRestoreArchived_RelocateCutOffPersistsTheNewLocation(t *testing.T) {
 	require.NoError(t, perr)
 
 	// Only now: the archive above ran on real git.
-	partialRelocateGitOnPath(t)
+	heal := partialRelocateGitOnPath(t)
 	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
 
 	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
@@ -88,6 +98,21 @@ func TestRestoreArchived_RelocateCutOffPersistsTheNewLocation(t *testing.T) {
 	assert.Equal(t, expected, rec.Worktree.WorktreePath,
 		"the new location must be persisted before returning: a restart that reloads the old, "+
 			"now-missing archive path can never restore this session again")
+
+	// ...and the retry the error advertises has to actually work. The session is
+	// still Archived (RestoreFromArchive never ran), and the standard restore path
+	// is now occupied by the half-relocated worktree — RestoreWorktreePath's
+	// collision suffix is what keeps that from being a dead end, so assert the
+	// whole round trip rather than trusting it.
+	heal()
+	retryPath, _, retryErr := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, retryErr, "the advertised retry must be able to finish the restore")
+	assert.NotEqual(t, expected, retryPath,
+		"the retry relocates off the occupied path rather than colliding with itself")
+	assert.True(t, exists(retryPath), "the worktree must exist at the retried location")
+	assert.Equal(t, session.Running, inst.GetStatus(), "the retried restore re-spawns the agent")
+	assert.Equal(t, retryPath, recordFor(t, repoID, "worker").Worktree.WorktreePath,
+		"and the durable record follows it")
 }
 
 // TestRestoreArchived_RelocateCutOffReportsAFailedPersist is the other half of the
@@ -111,7 +136,7 @@ func TestRestoreArchived_RelocateCutOffReportsAFailedPersist(t *testing.T) {
 	// The durable write can no longer land: see driftPersistedStableID.
 	driftPersistedStableID(t, repoID, "worker")
 
-	partialRelocateGitOnPath(t)
+	_ = partialRelocateGitOnPath(t)
 	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
 
 	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
@@ -138,7 +163,7 @@ func TestArchiveSession_TeardownFailureReportsAFailedPersist(t *testing.T) {
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 
 	driftPersistedStableID(t, repoID, "worker")
-	partialRelocateGitOnPath(t)
+	_ = partialRelocateGitOnPath(t)
 	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
 
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
@@ -170,4 +195,54 @@ func driftPersistedStableID(t *testing.T, repoID, title string) {
 		}
 		return json.Marshal(records)
 	}))
+}
+
+// TestReserveCreate_ReuseArchivedNameCutOffRecordsTheLocation is the THIRD
+// caller of the bounded relocate, and the one with no rollback to fall back on.
+//
+// renameArchivedForReuseLocked frees an archived session's title so a new
+// session can take it (#2127). When the relocate is cut off after the bytes have
+// reached the new archive path, RenameArchived returns before it changes the
+// title — so the re-key and the durable rewrite below it are both skipped, and
+// the persisted row keeps pointing at an archive directory that is no longer
+// there. A restart strands the worktree, exactly as archive and restore would
+// have before their own handling.
+func TestReserveCreate_ReuseArchivedNameCutOffRecordsTheLocation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	// Branch freed: #2127's guard refuses before the rename whenever the archived
+	// session still holds the branch the create derives, and this must REACH the
+	// relocate.
+	archived, _ := seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo", "foo")
+	origDest, err := archivedWorktreePath(repoID, "foo")
+	require.NoError(t, err)
+	newDest, err := archivedWorktreePath(repoID, "foo (archived)")
+	require.NoError(t, err)
+	require.True(t, exists(origDest), "precondition: the archive starts at the pre-rename path")
+
+	_ = partialRelocateGitOnPath(t)
+	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
+
+	_, _, release, _, rerr := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "foo",
+		Program:  "claude",
+	})
+	if release != nil {
+		release()
+	}
+
+	require.Error(t, rerr, "the create must abort when the archived name could not be freed")
+	require.ErrorIs(t, rerr, sessiongit.ErrRelocateStateUnknown)
+
+	// The bytes moved even though the rename did not complete — which is the whole
+	// hazard: the location changed and only memory knew it.
+	require.True(t, exists(newDest), "premise: the manual move placed the worktree at the new path")
+	require.False(t, exists(origDest), "premise: it is no longer at the pre-rename path")
+	assert.Equal(t, "foo", archived.Title, "the rename did not happen: the title is unchanged")
+
+	rec := recordFor(t, repoID, "foo")
+	require.NotNil(t, rec, "the row is still keyed by its original title")
+	assert.Equal(t, newDest, rec.Worktree.WorktreePath,
+		"the durable record must follow the bytes: a restart that reloads the pre-rename path "+
+			"can never reach this archive again")
 }

@@ -628,6 +628,28 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// prefix would mislabel a branch-rename failure as a worktree one (the P3 on
 	// #2465).
 	if err := archived.RenameArchived(newTitle, newDest, newBranch); err != nil {
+		if errors.Is(err, git.ErrRelocateStateUnknown) {
+			// Third caller of the bounded relocate, and the one with no rollback to
+			// fall back on. A deadline tripped after the bytes reached newDest, so
+			// the worktree object points there while the TITLE was never changed —
+			// RenameArchived returns before that step — and everything below
+			// (re-key, persist) is skipped. Without this, the durable row keeps
+			// pointing at the old, now-missing archive directory and a restart
+			// strands the worktree, exactly as archive and restore would have.
+			//
+			// Persist under the UNCHANGED title, which is what the on-disk row still
+			// keys on: the rename did not happen, only the location moved.
+			//
+			// persistInstanceData DIRECTLY, never m.persistInstance (#2106): we are
+			// on reserveCreate's stack, which holds m.mu across this whole call, and
+			// the wrapper re-enters m.mu via startLockForRepo. See the longer note
+			// on the same call below for why this is safe and why the repo start
+			// lock must not be taken here either.
+			if perr := persistInstanceData(repoID, archived.ToInstanceData()); perr != nil {
+				return nil, fmt.Errorf("cannot free the archived name %q for reuse, and its worktree's new location %s could not be recorded (%v); check that path before restarting the daemon: %w", oldTitle, archived.GetWorktreePath(), perr, err)
+			}
+			return nil, fmt.Errorf("cannot free the archived name %q for reuse; its worktree was left at %s and recorded there, so it is not lost: %w", oldTitle, archived.GetWorktreePath(), err)
+		}
 		return nil, fmt.Errorf("cannot free the archived name %q for reuse: %w", oldTitle, err)
 	}
 	// Re-key the manager map so the archived row is addressable under its new title.
