@@ -137,7 +137,7 @@ type accessTokenRedactionCase struct {
 }
 
 func TestRedactAccessTokenTextNeverRetainsTokenValue(t *testing.T) {
-	const generatedCases = 3 * 3 * 6 * 3 * 8
+	const generatedCases = 3 * 4 * 6 * 3 * 8
 	caseNumber := 0
 	config := &quick.Config{
 		MaxCount: generatedCases,
@@ -177,6 +177,9 @@ func generateAccessTokenRedactionCase(n int, source *rand.Rand) accessTokenRedac
 		},
 		func(separator, marker, decoration string) string {
 			return marker + decoration + separator
+		},
+		func(separator, marker, decoration string) string {
+			return accessTokenRedaction + separator + marker + decoration
 		},
 	}
 	decorations := []string{"", "=", "%3F", "%26", "%3B", "%3D"}

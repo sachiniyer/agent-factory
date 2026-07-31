@@ -53,12 +53,14 @@ func RedactAccessTokenError(err error, token string) error {
 	if err == nil {
 		return nil
 	}
+	safeStructuredURL := ""
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		urlErr.URL = RedactAccessTokenURL(urlErr.URL)
+		safeStructuredURL = urlErr.URL
 	}
 
-	message := RedactAccessTokenText(err.Error())
+	message := redactAccessTokenTextOutside(err.Error(), safeStructuredURL)
 	if token != "" {
 		message = strings.ReplaceAll(message, token, accessTokenRedaction)
 	}
@@ -93,11 +95,6 @@ func RedactAccessTokenText(text string) string {
 			rest = rest[valueStart:]
 			continue
 		}
-		if alreadyRedactedValueEnd := accessTokenRedactionEnd(rest, valueStart); alreadyRedactedValueEnd >= 0 {
-			redacted.WriteString(rest[:alreadyRedactedValueEnd])
-			rest = rest[alreadyRedactedValueEnd:]
-			continue
-		}
 
 		// Query separators inside the value are ambiguous. Redact through the next
 		// unambiguous text boundary rather than risk preserving credential material
@@ -110,6 +107,17 @@ func RedactAccessTokenText(text string) string {
 		redacted.WriteString(accessTokenRedaction)
 		rest = rest[valueEnd:]
 	}
+}
+
+func redactAccessTokenTextOutside(text, safe string) string {
+	if safe == "" {
+		return RedactAccessTokenText(text)
+	}
+	parts := strings.Split(text, safe)
+	for i := range parts {
+		parts[i] = RedactAccessTokenText(parts[i])
+	}
+	return strings.Join(parts, safe)
 }
 
 func indexFoldASCII(text, lowerASCII string) int {
@@ -128,17 +136,6 @@ func indexFoldASCII(text, lowerASCII string) int {
 		if matches {
 			return i
 		}
-	}
-	return -1
-}
-
-func accessTokenRedactionEnd(text string, valueStart int) int {
-	valueEnd := valueStart + len(accessTokenRedaction)
-	if valueEnd > len(text) || text[valueStart:valueEnd] != accessTokenRedaction {
-		return -1
-	}
-	if valueEnd == len(text) || strings.ContainsRune("&; \t\r\n#\"'", rune(text[valueEnd])) {
-		return valueEnd
 	}
 	return -1
 }
