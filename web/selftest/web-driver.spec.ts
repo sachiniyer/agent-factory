@@ -1292,6 +1292,15 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
     await p.keyboard.press("Enter");
     await expect(host).toContainText("mouse-mode-80", { timeout: 15_000 });
 
+    // Outside application mouse mode, leave modifier-wheel semantics entirely to
+    // xterm. On Linux xterm intentionally treats Shift+wheel as a no-op; the af
+    // escape must not introduce a new scroll path in an ordinary shell.
+    const normalBottom = await viewport.evaluate((el) => el.scrollTop);
+    await p.keyboard.down("Shift");
+    await p.mouse.wheel(0, -900);
+    await p.keyboard.up("Shift");
+    expect(await viewport.evaluate((el) => el.scrollTop), "normal-mode modifier wheel stays xterm-owned").toBe(normalBottom);
+
     // A full-screen TUI enables DEC mouse tracking. Drive the real terminal mode,
     // rather than mocking pointer handlers, so xterm itself decides who owns each
     // event. This is the state-dependent boundary behind both reported symptoms.
@@ -1353,6 +1362,21 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
       })
       .toBeLessThan(beforeHistoryScroll);
     expect(inputPayloads, "the history override must not leak a wheel report to the application").toHaveLength(0);
+
+    // A key released while the page is unfocused never produces keyup here. Window
+    // blur must clear the fallback latch or the next plain wheel would be stolen
+    // from the mouse-aware application indefinitely.
+    await p.locator(".xterm-helper-textarea").dispatchEvent("keydown", { key: "Shift", shiftKey: true });
+    await p.evaluate(() => window.dispatchEvent(new Event("blur")));
+    inputPayloads.length = 0;
+    await p.mouse.wheel(0, -120);
+    await expect.poll(() => inputPayloads.length, { message: "plain wheel after window blur returns to the application" }).toBeGreaterThan(0);
+
+    // The scrollbar is browser-owned even while the application owns the screen.
+    // Once the prior hint expires, using that working control must not re-show it.
+    await expect(mouseHint).not.toHaveClass(/af-visible/, { timeout: 5_000 });
+    await viewport.dispatchEvent("pointerdown", { bubbles: true });
+    await expect(mouseHint, "a working scrollbar must not advertise an unnecessary modifier").not.toHaveClass(/af-visible/);
   } finally {
     try {
       await resetToAgentTab(p);

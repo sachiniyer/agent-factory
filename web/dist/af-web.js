@@ -7282,7 +7282,7 @@ function terminalUserScrollPlan(source, hasScheduledVisibleFit) {
 
 // src/terminal-mouse.ts
 function terminalMouseOverride(platform) {
-  return /Mac|iPhone|iPad|iPod/i.test(platform) ? "Option" : "Shift";
+  return ["Macintosh", "MacIntel", "MacPPC", "Mac68K"].includes(platform) ? "Option" : "Shift";
 }
 function terminalMouseOverrideHeld(event, override) {
   return override === "Option" ? event.altKey : event.shiftKey;
@@ -7500,6 +7500,7 @@ var AttachTerminal = class {
     });
     this.io.observe(container);
     window.addEventListener("focus", this.onWindowFocus);
+    window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
@@ -7550,9 +7551,14 @@ var AttachTerminal = class {
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
   onWindowFocus = () => this.scheduleVisibleFit();
+  onWindowBlur = () => {
+    this.mouseOverrideKeyHeld = false;
+  };
   onVisibilityChange = () => {
     if (document.visibilityState === "visible") {
       this.scheduleVisibleFit();
+    } else {
+      this.mouseOverrideKeyHeld = false;
     }
   };
   // Entering a pane is the earliest reliable activation signal for side-by-side
@@ -7571,11 +7577,13 @@ var AttachTerminal = class {
   };
   onTouchMove = () => this.handleUserScroll("touch");
   onPointerDown = (event) => {
+    const viewport = this.container.querySelector(".xterm-viewport");
+    if (event.target === viewport) {
+      this.handleUserScroll("scrollbar");
+      return;
+    }
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
       this.showMouseCaptureHint();
-    }
-    if (event.target === this.container.querySelector(".xterm-viewport")) {
-      this.handleUserScroll("scrollbar");
     }
   };
   handleUserScroll(source) {
@@ -7610,6 +7618,7 @@ var AttachTerminal = class {
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
+    window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
@@ -7634,7 +7643,7 @@ var AttachTerminal = class {
     }, 4e3);
   }
   handleHistoryWheel(event) {
-    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
+    if (!this.applicationOwnsMouse() || !terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
       return true;
     }
     const renderedRow = this.container.querySelector(".xterm-rows > div");

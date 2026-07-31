@@ -144,9 +144,15 @@ export class AttachTerminal {
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
   private readonly onWindowFocus = (): void => this.scheduleVisibleFit();
+  private readonly onWindowBlur = (): void => {
+    // A modifier released in another tab/window never sends this terminal keyup.
+    this.mouseOverrideKeyHeld = false;
+  };
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
       this.scheduleVisibleFit();
+    } else {
+      this.mouseOverrideKeyHeld = false;
     }
   };
   // Entering a pane is the earliest reliable activation signal for side-by-side
@@ -165,14 +171,16 @@ export class AttachTerminal {
   };
   private readonly onTouchMove = (): void => this.handleUserScroll("touch");
   private readonly onPointerDown = (event: PointerEvent): void => {
-    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
-      this.showMouseCaptureHint();
-    }
     // The xterm screen is a sibling of its scrollable viewport. A pointer whose
     // target is the viewport itself is therefore a scrollbar/track gesture, while
     // an ordinary terminal click targets the screen and keeps the saved anchor.
-    if (event.target === this.container.querySelector(".xterm-viewport")) {
+    const viewport = this.container.querySelector(".xterm-viewport");
+    if (event.target === viewport) {
       this.handleUserScroll("scrollbar");
+      return;
+    }
+    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
+      this.showMouseCaptureHint();
     }
   };
 
@@ -296,6 +304,7 @@ export class AttachTerminal {
     });
     this.io.observe(container);
     window.addEventListener("focus", this.onWindowFocus);
+    window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
@@ -325,6 +334,7 @@ export class AttachTerminal {
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
+    window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
@@ -355,7 +365,10 @@ export class AttachTerminal {
     // Chromium's wheel event can omit modifier flags even while the keyboard key
     // remains down (notably through automation and trackpad momentum). xterm sees
     // the matching keydown/up, so retain that state as the authoritative fallback.
-    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
+    if (
+      !this.applicationOwnsMouse() ||
+      (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld)
+    ) {
       return true;
     }
 

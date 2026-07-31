@@ -7,7 +7,9 @@ test("application-mouse escape matches xterm's platform selection modifier", () 
   assert.equal(terminalMouseOverride("Linux x86_64"), "Shift");
   assert.equal(terminalMouseOverride("Win32"), "Shift");
   assert.equal(terminalMouseOverride("MacIntel"), "Option");
-  assert.equal(terminalMouseOverride("iPad"), "Option");
+  // Match xterm's own Platform.isMac predicate exactly. It classifies iPad
+  // separately, so selection remains Shift there even though it is Apple-made.
+  assert.equal(terminalMouseOverride("iPad"), "Shift");
 
   assert.equal(terminalMouseOverrideHeld({ shiftKey: true, altKey: false }, "Shift"), true);
   assert.equal(terminalMouseOverrideHeld({ shiftKey: false, altKey: true }, "Option"), true);

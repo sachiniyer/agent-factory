@@ -21,7 +21,9 @@ export interface HistoryWheelPlan {
 
 /** xterm itself uses Option to force selection on macOS and Shift elsewhere. */
 export function terminalMouseOverride(platform: string): TerminalMouseOverride {
-  return /Mac|iPhone|iPad|iPod/i.test(platform) ? "Option" : "Shift";
+  // Keep this in lockstep with xterm 5.5 Platform.isMac. In particular, xterm
+  // classifies iPad separately and SelectionService therefore uses Shift there.
+  return ["Macintosh", "MacIntel", "MacPPC", "Mac68K"].includes(platform) ? "Option" : "Shift";
 }
 
 export function terminalMouseOverrideHeld(event: MouseModifierEvent, override: TerminalMouseOverride): boolean {
