@@ -157,7 +157,7 @@ func TestExtractJSON(t *testing.T) {
 
 func TestHookProvisionRejectsEndpointInMalformedLogArray(t *testing.T) {
 	h := newHookState(t, `
-echo '[INVALID,{"url":"http://array.invalid","token":"array-secret"}]' >&2
+echo '[INVALID,{"level":"info"},{"url":"http://array.invalid","token":"array-secret"}]' >&2
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, "")
@@ -259,12 +259,54 @@ func TestHookOutputSuffixResynchronizesAtEscapedSerializedOpener(t *testing.T) {
 			secret: "invalid-unicode-prefix-token-must-not-leak",
 			output: `warning "\uZZZZ\"{\"token\":\"invalid-unicode-prefix-token-must-not-leak\"}\"`,
 		},
+		{
+			name:   "invalid synthetic continuation",
+			secret: "synthetic-continuation-token-must-not-leak",
+			output: "warning \"\n\t\\\"{\\\"token\\\":\\\"synthetic-continuation-token-must-not-leak\\\"}\\\"",
+		},
+		{
+			name:   "unicode escaped serialized opener",
+			secret: "unicode-reanchor-token-must-not-leak",
+			output: `warning "\q\"\u007b\"token\":\"unicode-reanchor-token-must-not-leak\"}\"`,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			suffix := hookOutputSuffix([]byte(test.output))
 			assert.NotContains(t, suffix, test.secret, "an invalid quoted prefix must not hide an escaped serialized token")
+			assert.Contains(t, suffix, "[REDACTED]")
+		})
+	}
+}
+
+func TestHookOutputSuffixRedactsSerializedTokenSplitAcrossNewline(t *testing.T) {
+	tests := []struct {
+		name        string
+		output      string
+		mustNotLeak string
+	}{
+		{
+			name:        "between colon and value",
+			output:      "INFO endpoint=\"{\\\"token\\\":\n\\\"split-line-serialized-token-must-not-leak\\\"}\"",
+			mustNotLeak: "split-line-serialized-token-must-not-leak",
+		},
+		{
+			name:        "between key and colon",
+			output:      "INFO endpoint=\"{\\\"token\\\"\n:\\\"split-before-colon-token-must-not-leak\\\"}\"",
+			mustNotLeak: "split-before-colon-token-must-not-leak",
+		},
+		{
+			name:        "inside value",
+			output:      "INFO endpoint=\"{\\\"token\\\":\\\"redacted-prefix-\nvisible-token-tail\\\"}\"",
+			mustNotLeak: "visible-token-tail",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			suffix := hookOutputSuffix([]byte(test.output))
+			assert.NotContains(t, suffix, test.mustNotLeak, "a raw newline must not split serialized token context")
 			assert.Contains(t, suffix, "[REDACTED]")
 		})
 	}

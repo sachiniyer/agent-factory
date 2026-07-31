@@ -5,6 +5,15 @@ import (
 	"strings"
 )
 
+type serializedTokenContinuation uint8
+
+const (
+	serializedTokenNone serializedTokenContinuation = iota
+	serializedTokenColon
+	serializedTokenValue
+	serializedTokenValueTail
+)
+
 // redactSerializedHookJSONStrings handles a JSON string containing serialized
 // endpoint JSON whether it is a top-level record, an object field, or surrounded
 // by logger metadata. Every quote boundary is considered so JSON-equivalent
@@ -19,7 +28,18 @@ func redactSerializedHookJSONStrings(output string) string {
 	candidateInvalid := false
 	escapedOpenerStart := -1
 	unicodeEscapeDigits := 0
+	tokenContinuation := serializedTokenNone
 	escaped := false
+	sanitizeCandidate := func(start, end int, syntheticStart, syntheticEnd bool) {
+		replacement, changed, nextContinuation := sanitizeSerializedHookJSONString(
+			output[start:end], syntheticStart, syntheticEnd, tokenContinuation,
+		)
+		if changed {
+			appendSerializedHookJSONReplacement(&redacted, output, &written,
+				start, end, replacement)
+		}
+		tokenContinuation = nextContinuation
+	}
 	for cursor := 0; cursor < len(output); cursor++ {
 		if candidateStart < 0 {
 			if output[cursor] == '"' {
@@ -33,12 +53,7 @@ func redactSerializedHookJSONStrings(output string) string {
 			continue
 		}
 		if output[cursor] == '\n' || output[cursor] == '\r' {
-			if replacement, changed := sanitizeSerializedHookJSONString(
-				output[candidateStart:cursor], syntheticStart, true,
-			); changed {
-				appendSerializedHookJSONReplacement(&redacted, output, &written,
-					candidateStart, cursor, replacement)
-			}
+			sanitizeCandidate(candidateStart, cursor, syntheticStart, true)
 			// The next line can continue the impossible outer string with escaped
 			// endpoint JSON. Treat its first byte as following a synthetic opening
 			// quote until a real unescaped quote supplies the closing boundary.
@@ -66,7 +81,7 @@ func redactSerializedHookJSONStrings(output string) string {
 			default:
 				candidateInvalid = true
 			}
-			if output[cursor] == '"' && candidateInvalid && !syntheticStart {
+			if output[cursor] == '"' && candidateInvalid {
 				escapedOpenerStart = cursor + 1
 			}
 			escaped = false
@@ -81,6 +96,17 @@ func redactSerializedHookJSONStrings(output string) string {
 				syntheticStart = true
 				candidateInvalid = false
 				escapedOpenerStart = -1
+				unicodeEscapeDigits = 0
+			case '\\':
+				if isEscapedJSONContainerOpener(output, cursor) {
+					candidateStart = escapedOpenerStart
+					syntheticStart = true
+					candidateInvalid = false
+					escapedOpenerStart = -1
+					unicodeEscapeDigits = 0
+				} else {
+					escapedOpenerStart = -1
+				}
 			default:
 				escapedOpenerStart = -1
 			}
@@ -97,12 +123,7 @@ func redactSerializedHookJSONStrings(output string) string {
 		}
 
 		candidateEnd := cursor + 1
-		if replacement, changed := sanitizeSerializedHookJSONString(
-			output[candidateStart:candidateEnd], syntheticStart, false,
-		); changed {
-			appendSerializedHookJSONReplacement(&redacted, output, &written,
-				candidateStart, candidateEnd, replacement)
-		}
+		sanitizeCandidate(candidateStart, candidateEnd, syntheticStart, false)
 		candidateStart = cursor
 		syntheticStart = false
 		candidateInvalid = false
@@ -115,12 +136,7 @@ func redactSerializedHookJSONStrings(output string) string {
 		// its escaped inner token value is complete. Close only for decoding,
 		// sanitize the decoded prefix, then drop the synthetic closing quote so
 		// the diagnostic remains faithful to the interrupted output.
-		if replacement, changed := sanitizeSerializedHookJSONString(
-			output[candidateStart:], syntheticStart, true,
-		); changed {
-			appendSerializedHookJSONReplacement(&redacted, output, &written,
-				candidateStart, len(output), replacement)
-		}
+		sanitizeCandidate(candidateStart, len(output), syntheticStart, true)
 	}
 	if written == 0 {
 		return output
@@ -133,7 +149,20 @@ func isJSONHexDigit(value byte) bool {
 	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
-func sanitizeSerializedHookJSONString(candidate string, syntheticStart, syntheticEnd bool) ([]byte, bool) {
+func isEscapedJSONContainerOpener(output string, start int) bool {
+	if start+6 > len(output) || output[start] != '\\' || output[start+1] != 'u' ||
+		output[start+2] != '0' || output[start+3] != '0' {
+		return false
+	}
+	return output[start+4] == '7' && (output[start+5] == 'b' || output[start+5] == 'B') ||
+		output[start+4] == '5' && (output[start+5] == 'b' || output[start+5] == 'B')
+}
+
+func sanitizeSerializedHookJSONString(
+	candidate string,
+	syntheticStart, syntheticEnd bool,
+	continuation serializedTokenContinuation,
+) ([]byte, bool, serializedTokenContinuation) {
 	document := candidate
 	if syntheticStart {
 		document = `"` + document
@@ -143,11 +172,15 @@ func sanitizeSerializedHookJSONString(candidate string, syntheticStart, syntheti
 	}
 	var decoded string
 	if json.Unmarshal([]byte(document), &decoded) != nil {
-		return nil, false
+		return nil, false, continuation
 	}
-	sanitized := redactHookOutputTokens(decoded)
+	sanitized, nextContinuation := redactHookTokenContinuation(decoded, continuation)
+	if nextContinuation == serializedTokenNone {
+		nextContinuation = hookOutputTokenContinuation(sanitized)
+	}
+	sanitized = redactHookOutputTokens(sanitized)
 	if sanitized == decoded {
-		return nil, false
+		return nil, false, nextContinuation
 	}
 	encoded, _ := json.Marshal(sanitized)
 	start, end := 0, len(encoded)
@@ -157,7 +190,95 @@ func sanitizeSerializedHookJSONString(candidate string, syntheticStart, syntheti
 	if syntheticEnd {
 		end--
 	}
-	return encoded[start:end], true
+	return encoded[start:end], true, nextContinuation
+}
+
+func hookOutputTokenContinuation(output string) serializedTokenContinuation {
+	for cursor := 0; cursor < len(output); cursor++ {
+		if output[cursor] != '"' {
+			continue
+		}
+		keyEnd, ok := hookTokenKeyEnd(output, cursor)
+		if !ok {
+			continue
+		}
+		separator := skipJSONWhitespace(output, keyEnd)
+		if separator == len(output) {
+			return serializedTokenColon
+		}
+		if output[separator] != ':' {
+			continue
+		}
+		valueStart := skipJSONWhitespace(output, separator+1)
+		if valueStart == len(output) {
+			return serializedTokenValue
+		}
+		if output[valueStart] != '"' {
+			continue
+		}
+		valueEnd, complete := jsonStringEnd(output, valueStart)
+		if !complete {
+			return serializedTokenValueTail
+		}
+		cursor = valueEnd - 2
+	}
+	return serializedTokenNone
+}
+
+func redactHookTokenContinuation(
+	output string,
+	continuation serializedTokenContinuation,
+) (string, serializedTokenContinuation) {
+	start := 0
+	if continuation == serializedTokenColon {
+		start = skipJSONWhitespace(output, start)
+		if start == len(output) {
+			return output, continuation
+		}
+		if output[start] != ':' {
+			return output, serializedTokenNone
+		}
+		start++
+		continuation = serializedTokenValue
+	}
+	if continuation == serializedTokenValue {
+		start = skipJSONWhitespace(output, start)
+		if start == len(output) {
+			return output, continuation
+		}
+		if output[start] != '"' {
+			return output, serializedTokenNone
+		}
+		end, complete := jsonStringEnd(output, start)
+		redacted := output[:start] + `"[REDACTED]"` + output[end:]
+		if !complete {
+			return redacted, serializedTokenValueTail
+		}
+		return redacted, serializedTokenNone
+	}
+	if continuation == serializedTokenValueTail {
+		end, complete := jsonStringContinuationEnd(output)
+		if !complete {
+			return "", continuation
+		}
+		return output[end:], serializedTokenNone
+	}
+	return output, serializedTokenNone
+}
+
+func jsonStringContinuationEnd(input string) (int, bool) {
+	escaped := false
+	for cursor := 0; cursor < len(input); cursor++ {
+		switch {
+		case escaped:
+			escaped = false
+		case input[cursor] == '\\':
+			escaped = true
+		case input[cursor] == '"':
+			return cursor + 1, true
+		}
+	}
+	return len(input), false
 }
 
 // appendSerializedHookJSONReplacement preserves a shared quote boundary between

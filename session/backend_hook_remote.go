@@ -131,7 +131,7 @@ func consumeJSONContainerString(candidate *jsonCandidateRange, valid bool) {
 }
 
 func extractJSONAt(output string, start int) (string, int) {
-	value, next, _ := extractJSONCandidateAt(output, start, true)
+	value, next, _, _ := extractJSONCandidateAt(output, start, true)
 	return value, next
 }
 
@@ -140,10 +140,14 @@ func extractJSONAt(output string, start int) (string, int) {
 // value, but launch must not promote an endpoint-shaped log array element into
 // the provisioner's top-level endpoint record.
 func extractEndpointJSONAt(output string, start int) (string, int, bool) {
-	return extractJSONCandidateAt(output, start, true)
+	value, next, eligible, enclosingEnd := extractJSONCandidateAt(output, start, true)
+	if !eligible && enclosingEnd > next {
+		next = enclosingEnd
+	}
+	return value, next, eligible
 }
 
-func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (string, int, bool) {
+func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (string, int, bool, int) {
 	var candidates []jsonCandidateRange
 	var stack []int
 	inString := false
@@ -295,13 +299,14 @@ func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (stri
 		candidate := candidates[0]
 		valid, errorAt, recoverable := inspectJSONCandidate(output, candidate)
 		if valid {
-			return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded
+			return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded, candidate.end
 		}
 		if recoverable {
 			candidate, recoverable = firstJSONCandidateAfterError(output, candidates, 0, errorAt)
 		}
 		if recoverable {
-			return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded
+			return output[candidate.start:candidate.end], candidate.end,
+				!candidate.endpointEmbedded, candidates[0].end
 		}
 		candidates = candidates[:0]
 		stringCandidateStart = -1
@@ -314,11 +319,12 @@ func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (stri
 		unfinished.end = len(output)
 		if _, errorAt, ok := inspectJSONCandidate(output, unfinished); ok {
 			if candidate, ok := firstJSONCandidateAfterError(output, candidates, 0, errorAt); ok {
-				return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded
+				return output[candidate.start:candidate.end], candidate.end,
+					!candidate.endpointEmbedded, len(output)
 			}
 		}
 	}
-	return "", len(output), false
+	return "", len(output), false, len(output)
 }
 
 // firstJSONCandidateAfterError descends only through children that begin after
