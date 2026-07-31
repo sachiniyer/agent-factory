@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -88,6 +90,31 @@ func TestArchiveSession_MovesWorktreeAndMarksArchived(t *testing.T) {
 	list, lerr := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").CombinedOutput()
 	require.NoError(t, lerr, string(list))
 	assert.Contains(t, string(list), archivedPath, "git must still register the worktree at its new path")
+}
+
+// TestArchiveSessionPublishesCommittedProjectionBeforeReturn pins the lifecycle
+// ordering domain: ArchiveSession holds the per-session operation lock until it
+// returns, so its committed event must already be queued before that return. If
+// the control layer publishes afterward, a restore can acquire the lock, finish,
+// and publish first; the delayed stale Archived projection then wins in clients.
+func TestArchiveSessionPublishesCommittedProjectionBeforeReturn(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "ordered-event")
+	_, events := manager.events.subscribe()
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{ID: inst.ID, Title: inst.Title, RepoID: repoID})
+	require.NoError(t, err)
+
+	select {
+	case event := <-events:
+		require.Equal(t, agentproto.EventSessionArchived, event.Type)
+		var archived session.InstanceData
+		require.NoError(t, json.Unmarshal(event.Data, &archived))
+		assert.Equal(t, inst.ID, archived.ID)
+		assert.Equal(t, session.LiveArchived, archived.Liveness)
+	default:
+		t.Fatal("ArchiveSession returned before publishing its committed projection; a concurrent restore can overtake the stale event")
+	}
 }
 
 // TestArchiveSessionRejectsStartupUnknown prevents archive from turning an

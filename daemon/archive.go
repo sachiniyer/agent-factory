@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -38,9 +39,10 @@ var ErrAlreadyArchived = errors.New("already archived")
 // new path.
 // ArchiveSession archives the resolved session and returns the relocated worktree
 // path AND the full committed projection of the session it ACTUALLY resolved and
-// acted on. The control server publishes that projection so clients learn Archived
-// directly from the event instead of depending on a second Snapshot request (#2680),
-// while its stable id still prevents cross-repo title misrouting (#1592 Phase 5).
+// acted on. It publishes that projection before releasing the per-session operation
+// lock so a later restore cannot overtake it, and clients learn Archived directly
+// instead of depending on a second Snapshot request (#2680). Its stable id still
+// prevents cross-repo title misrouting (#1592 Phase 5).
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
@@ -124,7 +126,9 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		if rerr != nil {
 			return "", session.InstanceData{}, rerr
 		}
-		return archivedPath, instance.ToInstanceData(), nil
+		archived := instance.ToInstanceData()
+		m.publishEvent(agentproto.EventSessionArchived, archived)
+		return archivedPath, archived, nil
 	}
 
 	dest, err := archivedWorktreePath(repoID, req.Title)
@@ -215,7 +219,12 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
 	}
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
-	return archivedPath, instance.ToInstanceData(), nil
+	archived := instance.ToInstanceData()
+	// Still inside opLock: lifecycle event order must match committed operation
+	// order. Publishing after this method returns lets an immediate restore finish
+	// and publish before this older Archived projection (#2680 Codex review).
+	m.publishEvent(agentproto.EventSessionArchived, archived)
+	return archivedPath, archived, nil
 }
 
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a

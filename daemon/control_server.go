@@ -628,17 +628,15 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id)
-	// and returns the full projection it ACTUALLY archived. Publishing that exact
-	// session both preserves stable identity and lets clients consume the daemon's
-	// Archived liveness without a fallible follow-up Snapshot (#2680).
-	archivedPath, archived, err := s.manager.ArchiveSession(req)
+	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
+	// commits it, and publishes the full projection inside its operation lock. That
+	// keeps lifecycle event order identical to operation order (#2680).
+	archivedPath, _, err := s.manager.ArchiveSession(req)
 	if err != nil {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
-	s.manager.publishEvent(agentproto.EventSessionArchived, archived)
 	return nil
 }
 
@@ -709,9 +707,6 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 		return err
 	}
 	result, err := s.manager.DeleteProject(req)
-	for _, a := range result.Archived {
-		s.manager.publishEvent(agentproto.EventSessionArchived, a)
-	}
 	for _, k := range result.Killed {
 		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
 	}
