@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/rpc"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -632,11 +634,14 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
 	archivedPath, _, err := s.manager.ArchiveSession(req)
-	if err != nil {
+	if err != nil && !isMutationCommitted(err) {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
+	if err != nil {
+		resp.Warning = err.Error()
+	}
 	return nil
 }
 
@@ -720,7 +725,16 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	resp.ArchivedCount = len(result.Archived)
 	resp.KilledCount = len(result.Killed)
 	resp.Deregistered = result.Deregistered
+	resp.Warning = strings.Join(result.Warnings, "\n")
 	return nil
+}
+
+func isMutationCommitted(err error) bool {
+	type committed interface {
+		MutationCommitted() bool
+	}
+	var outcome committed
+	return errors.As(err, &outcome) && outcome.MutationCommitted()
 }
 
 // RegisterProject records a git checkout as a durable, sessionless project in

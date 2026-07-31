@@ -8,6 +8,7 @@ import (
 	"runtime"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -518,7 +519,8 @@ func (m *home) restoreInstanceCmd(target sessionActionTarget) tea.Cmd {
 // On failure the error lands in the error box.
 func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.Cmd) {
 	inst := m.resolveSessionActionTarget(msg.target)
-	if msg.err != nil {
+	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
+	if msg.err != nil && !committedWarning {
 		// Archive failed: clear the optimistic op so the row reverts to its
 		// underlying daemon liveness rather than stranding as archiving.
 		if inst != nil && inst.GetInFlightOp() == session.OpArchiving {
@@ -536,7 +538,11 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 		// direct unconditional mirror rather than a fenced edge (#1195 Phase 2d).
 		inst.SetArchived()
 	}
-	return m, m.selectionChanged()
+	refresh := m.selectionChanged()
+	if committedWarning {
+		return m, tea.Batch(refresh, m.handleError(msg.err))
+	}
+	return m, refresh
 }
 
 // limitRetriedMsg reports completion of an async usage-limit manual retry

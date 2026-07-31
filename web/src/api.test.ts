@@ -429,6 +429,31 @@ test("an envelope error preserves its machine-readable outcome code", async () =
   assert.equal(isMutationCommittedError(err), true);
 });
 
+test("archiveSession surfaces a successful response's committed hook warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        archived_path: "/archive/worker",
+        warning: 'archive committed, but on-archive hook "prune" failed',
+      },
+      error: null,
+    }),
+  });
+  const err = await archiveSession("id", "worker", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /on-archive hook/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
 test("a 200 carrying an envelope error still surfaces the real message", async () => {
   stubFetchResponse({
     ok: true,

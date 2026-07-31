@@ -182,7 +182,16 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a
 	// separate MoveArchivedWorktree step relying on duplicated ordering prose).
-	if err := archiveTeardown(instance, dest); err != nil {
+	hookErr, err := archiveTeardown(instance, dest, func() error {
+		return runOnArchiveHook(onArchiveHookContext{
+			sessionID:   instance.ID,
+			title:       req.Title,
+			repoRoot:    instance.GetRepoPath(),
+			worktree:    origPath,
+			archivePath: dest,
+		})
+	})
+	if err != nil {
 		// The worktree is still at a valid location (the git layer guarantees
 		// worktreePath points at the actual bytes even on a repair failure).
 		// Roll the fence back to Lost — started is still true and the agent tmux
@@ -238,6 +247,12 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// order. Publishing after this method returns lets an immediate restore finish
 	// and publish before this older Archived projection (#2680 Codex review).
 	m.publishEvent(agentproto.EventSessionArchived, archived)
+	if hookErr != nil {
+		committedErr := &mutationCommittedError{err: fmt.Errorf(
+			"archive committed, but on-archive hook failed: %w", hookErr)}
+		log.WarningLog.Printf("%v", committedErr)
+		return archivedPath, archived, committedErr
+	}
 	return archivedPath, archived, nil
 }
 
@@ -539,10 +554,10 @@ func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
 // at persistInstanceErr.
 var archivePersist = (*Manager).persistInstanceErr
 
-// archiveTeardown is the physical teardown+move ArchiveSession runs before its
-// durable commit. Indirected so race tests can install an editor in the exact
-// post-move window without weakening the production ordering.
-var archiveTeardown = (*session.Instance).ArchiveTeardown
+// archiveTeardown is the physical teardown+hook+move ArchiveSession runs before
+// its durable commit. Indirected so race tests can install an editor in the
+// exact post-move window without weakening the production ordering.
+var archiveTeardown = (*session.Instance).ArchiveTeardownWithHook
 
 // archivedWorktreePath returns the global archive location for a session's
 // relocated worktree: <AGENT_FACTORY_HOME>/archived/<repoID>/<safeTitle>/. The

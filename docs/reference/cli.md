@@ -563,6 +563,7 @@ Settable keys:
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string
+  on_archive_command         shell command run before a local worktree moves into the archive, or "" to disable
   worktree_root              subdirectory | sibling
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
@@ -586,7 +587,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides.<agent>, branch_prefix); a global-only key
+(default_program, program_overrides.<agent>, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 

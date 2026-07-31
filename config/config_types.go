@@ -222,6 +222,14 @@ type Config struct {
 	LogMaxBackups int `json:"log_max_backups" toml:"log_max_backups"`
 	// BranchPrefix is the prefix used for git branches created by the application.
 	BranchPrefix string `json:"branch_prefix" toml:"branch_prefix"`
+	// OnArchiveCommand is an operator-authored shell command run in a local
+	// session's worktree after its panes have exited and immediately before the
+	// worktree is relocated into the archive. It is admitted from the global and
+	// machine-local personal-project layers only: a checked-in repository config
+	// must never make archiving execute repository-controlled code on the daemon
+	// host. Empty disables the hook. Failure is reported after the archive itself
+	// commits, so cleanup policy can never make the session disappear.
+	OnArchiveCommand string `json:"on_archive_command,omitempty" toml:"on_archive_command,omitempty"`
 	// WorktreeRoot controls where new worktrees are created.
 	WorktreeRoot string `json:"worktree_root" toml:"worktree_root"`
 	// DetachKeys is the key combination used to detach from an attached session (e.g. "ctrl-w", "ctrl-q").

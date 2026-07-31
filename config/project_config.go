@@ -38,6 +38,9 @@ type ProjectConfig struct {
 	ProgramOverrides map[string]string `toml:"program_overrides,omitempty"`
 	// BranchPrefix overrides the git branch prefix for this project's sessions.
 	BranchPrefix string `toml:"branch_prefix,omitempty"`
+	// OnArchiveCommand overrides the operator-authored archive hook for this
+	// project. This file is machine-local under the AF home, never checked in.
+	OnArchiveCommand string `toml:"on_archive_command,omitempty"`
 	// RootAgent is the personal per-project root-agent profile (#2216 Phase 6):
 	// whether THIS project keeps an always-ensured root session on this machine,
 	// and the command it runs. It is the highest-precedence root-agent layer, so

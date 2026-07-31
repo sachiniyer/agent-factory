@@ -12,6 +12,13 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+type committedArchiveWarningTestError struct{}
+
+func (committedArchiveWarningTestError) Error() string {
+	return "archive committed, but on-archive hook \"prune\" failed"
+}
+func (committedArchiveWarningTestError) MutationCommitted() bool { return true }
+
 // archiveActionInstance builds a started, mock-backed instance at the given
 // status for the archive/restore action tests.
 func archiveActionInstance(t *testing.T, title string, status session.Status) *session.Instance {
@@ -221,6 +228,29 @@ func TestArchiveInstanceCmd_SurfacesError(t *testing.T) {
 	msg := h.archiveInstanceCmd(sessionActionTarget{title: "worker", repoID: h.repoID})()
 	done := msg.(instanceArchivedMsg)
 	require.Error(t, done.err)
+}
+
+func TestArchiveInstanceCmdCommitsRowAndSurfacesHookWarning(t *testing.T) {
+	h := newTestHome(t)
+	inst := archiveActionInstance(t, "worker", session.Ready)
+	inst.SetInFlightOpForTest(session.OpArchiving)
+	h.store.AddInstance(inst)
+	target := captureSessionActionTarget(inst, h.repoID)
+
+	prev := archiveSessionThroughDaemon
+	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
+		return "/archive/worker", committedArchiveWarningTestError{}
+	}
+	defer func() { archiveSessionThroughDaemon = prev }()
+
+	msg := h.archiveInstanceCmd(target)()
+	model, _ := h.handleInstanceArchived(msg.(instanceArchivedMsg))
+	h = model.(*home)
+
+	require.Equal(t, session.Archived, inst.GetStatus(),
+		"a committed archive warning must still settle the optimistic row as archived")
+	require.Contains(t, h.errBox.FullError(), "on-archive hook",
+		"the nonfatal hook failure must remain visible in the TUI")
 }
 
 // TestRestoreInstanceCmd_CallsDaemon: the restore command invokes the daemon

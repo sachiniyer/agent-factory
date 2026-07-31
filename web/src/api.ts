@@ -402,7 +402,10 @@ export async function killSession(id: string, title: string, token: string): Pro
 /** Archives a session (mirrors `af sessions archive`) — non-destructive, keeps it
  *  restorable. The session.archived event triggers a rail resync. */
 export async function archiveSession(id: string, title: string, token: string): Promise<void> {
-  await af("ArchiveSession", { id, title, repo_id: "" }, token);
+  const result = await af<{ warning?: string }>("ArchiveSession", { id, title, repo_id: "" }, token);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Restores an archived, Lost, or Dead session (mirrors `af sessions restore`) —
@@ -479,6 +482,7 @@ export interface DeleteProjectResult {
   archived_count: number;
   killed_count: number;
   deregistered: boolean;
+  warning?: string;
 }
 
 /** Deletes a project (mirrors `af projects delete`): regular live sessions are
@@ -487,7 +491,11 @@ export interface DeleteProjectResult {
  *  the repo path (worktree.repo_path, the stable project id). The per-session
  *  events + the projects.changed event trigger a rail/projects resync. */
 export async function deleteProject(root: string, token: string): Promise<DeleteProjectResult> {
-  return af("DeleteProject", { repo_path: root, repo_id: "" }, token);
+  const result = await af<DeleteProjectResult>("DeleteProject", { repo_path: root, repo_id: "" }, token);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
+  return result;
 }
 
 /** A durable project identity the daemon registered (the #2355 registry record). */

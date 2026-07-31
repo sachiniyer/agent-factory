@@ -721,6 +721,12 @@ function openConfirm(action: "kill" | "archive" | "restore", session: Actionable
               ? archiveSession(target.id, target.title, tok)
               : restoreSession(target.id, target.title, tok);
         void run.then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            closeModal();
+            requestResync();
+            surfaceTabError(e);
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -750,6 +756,13 @@ function openDeleteProject(root: string, label: string, sessionCount: number): v
         void deleteProject(root, tok)
           .then(closeModal)
           .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              closeModal();
+              requestResync();
+              refreshRegisteredProjects();
+              surfaceTabError(e);
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });

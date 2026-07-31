@@ -104,6 +104,10 @@ type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
+	// Warning reports a failed operator hook after the archive itself committed.
+	// The response remains successful so every transport retains ArchivedPath and
+	// clients can reconcile the completed lifecycle transition without retrying.
+	Warning string `json:"warning,omitempty"`
 }
 
 // RestoreArchivedRequest asks the daemon to restore an archived session (#1028):
@@ -173,6 +177,9 @@ type DeleteProjectResponse struct {
 	KilledCount int `json:"killed_count"`
 	// Deregistered reports whether the durable project record was removed.
 	Deregistered bool `json:"deregistered"`
+	// Warning joins nonfatal on-archive hook failures from sessions whose archive
+	// and project deletion both committed.
+	Warning string `json:"warning,omitempty"`
 }
 
 // RegisterProjectRequest asks the daemon to register a git checkout as a durable,

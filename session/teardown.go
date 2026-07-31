@@ -381,7 +381,11 @@ func (teardownReleasePTY) finalize(i *Instance, closed []closedTab, _ *git.GitWo
 // drops the shell/process tabs; started is left true (the OpArchiving fence, not the #990 started guard,
 // owns the teardown window) so a failed move self-heals via the Lost-restore
 // loop.
-type teardownArchive struct{ dest string }
+type teardownArchive struct {
+	dest       string
+	beforeMove func() error
+	hookErr    *error
+}
 
 // closeTab waits for the pane to exit before handleWorktree relocates the
 // worktree: a process still flushing state races the move otherwise (#802).
@@ -399,6 +403,16 @@ func (teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (te
 func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
 	if gw == nil {
 		return stateKnown, fmt.Errorf("cannot archive %q: instance has no worktree to relocate", title)
+	}
+	if m.beforeMove != nil {
+		// Cleanup policy is deliberately best-effort. Record its failure for the
+		// daemon to surface after the archive commits, then always relocate the
+		// worktree so a broken operator hook cannot strand or lose the session.
+		if m.hookErr != nil {
+			*m.hookErr = m.beforeMove()
+		} else {
+			_ = m.beforeMove()
+		}
 	}
 	// stateKnown either way: MoveWorktree runs on the UNBOUNDED local-git runner,
 	// so it cannot report an unknown — it either moves or answers with an error the

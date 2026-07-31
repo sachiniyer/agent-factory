@@ -99,6 +99,24 @@ func TestDeleteProject_ArchivesAllSessionsRestorableRepoUntouched(t *testing.T) 
 	assert.True(t, liveProjectRoots(manager.Snapshot(repoID))[repoPath], "restoring an archived session reconstitutes the project")
 }
 
+func TestDeleteProjectTreatsHookFailureAsCommittedArchiveWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	require.NoError(t, manager.SaveInstances())
+	writeOnArchiveCommand(t, "printf 'project prune failed'; exit 17")
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.NoError(t, err,
+		"a project delete must not retry or fail after its nested archive committed")
+	require.Len(t, result.Archived, 1)
+	assert.Equal(t, inst.ID, result.Archived[0].ID)
+	require.Len(t, result.Warnings, 1)
+	assert.Contains(t, result.Warnings[0], "on-archive hook")
+	assert.Contains(t, result.Warnings[0], "exit status 17")
+	assert.False(t, exists(srcPath))
+	assert.Equal(t, session.Archived, inst.GetStatus())
+}
+
 // TestDeleteProject_UnknownProjectIsNoOp: deleting a project the daemon knows
 // nothing about archives nothing, drops no opt-in, and returns a zero-count
 // success (idempotent).

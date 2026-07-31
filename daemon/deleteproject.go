@@ -62,6 +62,10 @@ type DeleteProjectResult struct {
 	// relocate an external worktree; its kill never touches the user's tree/branch).
 	Archived []session.InstanceData
 	Killed   []session.InstanceData
+	// Warnings carries failed on-archive hooks for sessions whose archive still
+	// committed. They do not block the remaining sessions or project
+	// deregistration, but every caller must surface them as a committed outcome.
+	Warnings []string
 	// Deregistered is true when this delete removed the repo's durable #2355 registry
 	// record (#2456). It is what lets the projects-changed signal fire for a
 	// registered project with NO live sessions — otherwise a delete that archived
@@ -284,6 +288,10 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		// op in flight, or a teardown that broke is genuinely not archived, and the
 		// caller must be told to retry.
 		if errors.Is(err, ErrAlreadyArchived) {
+			err = nil
+		}
+		if isMutationCommitted(err) {
+			result.Warnings = append(result.Warnings, err.Error())
 			err = nil
 		}
 		if err != nil {

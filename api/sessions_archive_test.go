@@ -9,7 +9,16 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type committedArchiveWarningTestError struct{}
+
+func (committedArchiveWarningTestError) Error() string {
+	return "archive committed, but on-archive hook \"prune\" failed"
+}
+func (committedArchiveWarningTestError) MutationCommitted() bool { return true }
 
 // TestSessionsArchive_SurfacesDaemonError: a daemon-side rejection (e.g. remote
 // or in-place session) is surfaced as a JSON error, not a silent success.
@@ -29,6 +38,25 @@ func TestSessionsArchive_SurfacesDaemonError(t *testing.T) {
 	if !strings.Contains(err.Error(), "cannot archive remote session") {
 		t.Fatalf("error = %v, want the daemon's rejection message", err)
 	}
+}
+
+func TestSessionsArchiveReportsCommittedHookWarningAsSuccess(t *testing.T) {
+	setupRepoForCmd(t)
+
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
+		return "/archive/worker", committedArchiveWarningTestError{}
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	require.NoError(t, err, "a committed archive must not be presented as retryable")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, true, parsed["ok"])
+	assert.Equal(t, "/archive/worker", parsed["archived_path"])
+	assert.Contains(t, parsed["warning"], "on-archive hook")
 }
 
 // stubCurrentTmuxName swaps the tmux-name seam so `--self`/`whoami` tests can

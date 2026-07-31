@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -50,6 +52,18 @@ func registerArchivable(t *testing.T, m *Manager, repoID, repoPath, title string
 	m.instances[daemonInstanceKey(repoID, title)] = inst
 	m.mu.Unlock()
 	return inst, wtPath
+}
+
+func writeOnArchiveCommand(t *testing.T, command string) {
+	t.Helper()
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(configDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configDir, config.TomlConfigFileName),
+		[]byte(fmt.Sprintf("on_archive_command = %q\n", command)),
+		0600,
+	))
 }
 
 // TestArchiveSession_MovesWorktreeAndMarksArchived: the happy path — tmux torn
@@ -114,6 +128,109 @@ func TestArchiveSessionPublishesCommittedProjectionBeforeReturn(t *testing.T) {
 		assert.Equal(t, session.LiveArchived, archived.Liveness)
 	default:
 		t.Fatal("ArchiveSession returned before publishing its committed projection; a concurrent restore can overtake the stale event")
+	}
+}
+
+func TestArchiveSessionRunsOperatorHookAfterPaneTeardownBeforeMove(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	require.NoError(t, os.MkdirAll(filepath.Join(srcPath, "node_modules", "pkg"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcPath, "node_modules", "pkg", "bulk.js"), []byte("bulk"), 0644))
+
+	dest, err := archivedWorktreePath(repoID, "worker")
+	require.NoError(t, err)
+	marker := filepath.Join(t.TempDir(), "archive-hook-ran")
+	command := fmt.Sprintf(
+		`test "$PWD" = "$AF_WORKTREE_PATH" && `+
+			`test "$AF_SESSION_TITLE" = "worker" && `+
+			`test "$AF_SESSION_ID" = %q && `+
+			`test "$AF_REPO_ROOT" = %q && `+
+			`test "$AF_WORKTREE_PATH" = %q && `+
+			`test "$AF_ARCHIVE_PATH" = %q && `+
+			`test ! -e "$AF_ARCHIVE_PATH" && `+
+			`find node_modules -depth -delete && printf ran > %q`,
+		inst.ID, repoPath, srcPath, dest, marker,
+	)
+	writeOnArchiveCommand(t, command)
+
+	archivedPath, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+	assert.Equal(t, dest, archivedPath)
+	assert.FileExists(t, marker, "the configured operator hook must execute")
+	assert.NoDirExists(t, filepath.Join(archivedPath, "node_modules"),
+		"the hook must prune before the worktree bytes are moved")
+}
+
+func TestArchiveSessionHookFailureCommitsArchiveAndSurfacesWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	writeOnArchiveCommand(t, "printf 'prune failed loudly\\n'; exit 23")
+
+	archivedPath, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err, "a failed hook must be surfaced to the caller")
+	var committed interface{ MutationCommitted() bool }
+	require.ErrorAs(t, err, &committed)
+	assert.True(t, committed.MutationCommitted(), "the caller must be told not to retry an archive that committed")
+	assert.Contains(t, err.Error(), "on-archive hook")
+	assert.Contains(t, err.Error(), "exit status 23")
+	assert.Contains(t, err.Error(), "prune failed loudly")
+
+	assert.Equal(t, inst.ID, archived.ID)
+	assert.NotEmpty(t, archivedPath)
+	assert.False(t, exists(srcPath), "hook failure must not keep the live worktree in place")
+	assert.True(t, exists(archivedPath), "hook failure must not lose the archived worktree")
+	assert.Equal(t, session.Archived, inst.GetStatus())
+	assert.Equal(t, session.Archived, persistedStatus(t, repoID, "worker"))
+}
+
+func TestArchiveSessionRejectsCheckedInHookWithoutExecutingRepoCode(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	marker := filepath.Join(t.TempDir(), "repo-code-ran")
+	inRepoPath := config.InRepoTomlConfigPath(repoPath)
+	require.NoError(t, os.MkdirAll(filepath.Dir(inRepoPath), 0755))
+	require.NoError(t, os.WriteFile(inRepoPath,
+		[]byte(fmt.Sprintf("on_archive_command = %q\n", fmt.Sprintf("printf unsafe > %q", marker))), 0644))
+
+	archivedPath, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err, "the rejected checked-in setting must remain visible")
+	var committed interface{ MutationCommitted() bool }
+	require.ErrorAs(t, err, &committed)
+	assert.Contains(t, err.Error(), `"on_archive_command"`)
+	assert.Contains(t, err.Error(), "cannot be set per-repo")
+	assert.NoFileExists(t, marker,
+		"archiving a cloned repository must never execute its checked-in command on the daemon host")
+	assert.Equal(t, inst.ID, archived.ID)
+	assert.False(t, exists(srcPath))
+	assert.True(t, exists(archivedPath),
+		"rejecting untrusted config must not prevent the session itself from archiving")
+	assert.Equal(t, session.Archived, inst.GetStatus())
+}
+
+func TestControlArchiveHookFailurePublishesCommittedArchiveAndReturnsWarning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	writeOnArchiveCommand(t, "exit 19")
+	_, events := manager.events.subscribe()
+	server := &controlServer{manager: manager}
+
+	var resp ArchiveSessionResponse
+	err := server.ArchiveSession(ArchiveSessionRequest{ID: inst.ID, Title: "worker", RepoID: repoID}, &resp)
+	require.NoError(t, err, "a nonfatal hook warning must remain a successful control response")
+	assert.True(t, resp.OK)
+	assert.NotEmpty(t, resp.ArchivedPath)
+
+	raw, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"warning":"archive committed, but on-archive hook`,
+		"the success response must carry the hook failure to every client")
+
+	select {
+	case event := <-events:
+		assert.Equal(t, agentproto.EventSessionArchived, event.Type,
+			"a hook warning must not suppress the archive lifecycle event")
+	default:
+		t.Fatal("committed archive did not publish its lifecycle event")
 	}
 }
 

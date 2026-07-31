@@ -221,7 +221,7 @@ func expectedPrecedence(entry ManifestEntry) []ConfigSource {
 		return precedenceLegacyRepo
 	case "default_program", "program_overrides":
 		return precedenceGlobalRepoPersonal
-	case "branch_prefix", "root_agent":
+	case "branch_prefix", "on_archive_command", "root_agent":
 		return precedenceGlobalPersonal
 	default:
 		if entry.Sources == sourceGlobalOnly {

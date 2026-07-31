@@ -157,18 +157,25 @@ were archived.`,
 		}
 
 		resp, err := deleteProjectViaDaemon(req)
-		if err != nil {
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]any{
+		result := map[string]any{
 			"ok":             true,
 			"project":        name,
 			"repo_path":      req.RepoPath,
 			"archived_count": resp.ArchivedCount,
 			"killed_count":   resp.KilledCount,
 			"deregistered":   resp.Deregistered,
-		})
+		}
+		if warning != "" {
+			result["warning"] = warning
+		}
+		return jsonOut(result)
 	},
 }
 

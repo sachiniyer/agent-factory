@@ -74,6 +74,19 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
+	t.Run("ArchiveSession preserves committed hook warning with path", func(t *testing.T) {
+		c := routeServer(t, "ArchiveSession", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.ArchiveSessionResponse{
+				OK: true, ArchivedPath: "/arch/alpha",
+				Warning: "archive committed, but on-archive hook failed",
+			})
+		})
+		path, err := c.ArchiveSession(daemon.ArchiveSessionRequest{Title: "alpha"})
+		if path != "/arch/alpha" || !IsMutationCommitted(err) {
+			t.Fatalf("ArchiveSession = %q, %T %v; want path plus committed warning", path, err, err)
+		}
+	})
+
 	// Both names come back, and they DIFFER: the resolved tab name and the tmux
 	// session it was spawned under are independent namespaces post-#1957, so a
 	// client that dropped the second and re-derived it from the first would bind

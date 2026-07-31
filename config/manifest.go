@@ -286,6 +286,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "on_archive_command",
+		Type:       "string",
+		Default:    `""`,
+		Purpose:    "Operator command run in a session worktree after its panes exit and before it moves into the archive · empty disables it; failures warn but do not cancel the archive.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "worktree_root",
 		Type:       "string",
 		Default:    WorktreeRootSibling,

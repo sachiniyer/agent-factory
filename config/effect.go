@@ -52,6 +52,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"default_program":                EffectAppliedLive,
 	"program_overrides":              EffectAppliedLive,
 	"session_env_passthrough":        EffectAppliedLive,
+	"on_archive_command":             EffectAppliedLive,
 	"worktree_root":                  EffectAppliedLive,
 	"vscode_server_binary":           EffectAppliedLive,
 	"daemon_poll_interval":           EffectAppliedLive,

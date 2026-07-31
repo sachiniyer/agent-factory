@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
@@ -382,7 +383,8 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 // RegisterRootAgent's persistence is picked up) and refreshes the Projects
 // section so the now-empty project leaves the list immediately.
 func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
+	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
+	if msg.err != nil && !committedWarning {
 		return m, m.handleError(fmt.Errorf("failed to delete project '%s': %w", msg.name, msg.err))
 	}
 	if m.appConfig != nil {
@@ -393,7 +395,11 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		}
 	}
 	m.refreshSidebarProjects()
-	return m, m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
+	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
+	if committedWarning {
+		return m, tea.Batch(success, m.handleError(msg.err))
+	}
+	return m, success
 }
 
 func (m *home) closeProjectPicker() {

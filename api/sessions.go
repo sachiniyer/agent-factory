@@ -605,11 +605,18 @@ success.`,
 		}
 
 		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
-		if err != nil {
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]any{"ok": true, "title": title, "archived_path": archivedPath})
+		result := map[string]any{"ok": true, "title": title, "archived_path": archivedPath}
+		if warning != "" {
+			result["warning"] = warning
+		}
+		return jsonOut(result)
 	},
 }
 

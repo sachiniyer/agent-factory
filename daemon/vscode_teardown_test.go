@@ -440,9 +440,10 @@ func TestArchiveSession_FinalVSCodeStopFailureRollsBack(t *testing.T) {
 	key := daemonInstanceKey(repoID, "late-editor")
 
 	origTeardown := archiveTeardown
-	archiveTeardown = func(target *session.Instance, dest string) error {
-		if err := origTeardown(target, dest); err != nil {
-			return err
+	archiveTeardown = func(target *session.Instance, dest string, beforeMove func() error) (error, error) {
+		hookErr, err := origTeardown(target, dest, beforeMove)
+		if err != nil {
+			return hookErr, err
 		}
 		manager.vscode.mu.Lock()
 		manager.vscode.servers[key] = &vscodeServer{
@@ -451,7 +452,7 @@ func TestArchiveSession_FinalVSCodeStopFailureRollsBack(t *testing.T) {
 			killGroup: func(int, syscall.Signal) error { return nil },
 		}
 		manager.vscode.mu.Unlock()
-		return nil
+		return hookErr, nil
 	}
 	t.Cleanup(func() { archiveTeardown = origTeardown })
 

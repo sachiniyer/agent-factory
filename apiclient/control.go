@@ -47,6 +47,9 @@ func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, error
 	if err := c.call("ArchiveSession", req, &resp); err != nil {
 		return "", err
 	}
+	if resp.Warning != "" {
+		return resp.ArchivedPath, &mutationCommittedError{detail: resp.Warning}
+	}
 	return resp.ArchivedPath, nil
 }
 
@@ -66,6 +69,9 @@ func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeletePr
 	var resp daemon.DeleteProjectResponse
 	if err := c.call("DeleteProject", req, &resp); err != nil {
 		return daemon.DeleteProjectResponse{}, err
+	}
+	if resp.Warning != "" {
+		return resp, &mutationCommittedError{detail: resp.Warning}
 	}
 	return resp, nil
 }

@@ -135,7 +135,18 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 // remote sessions have no local tmux/worktree and the daemon rejects archiving
 // them before reaching here.
 func (i *Instance) ArchiveTeardown(dest string) error {
-	return i.teardownTabs(teardownArchive{dest: dest})
+	_, err := i.ArchiveTeardownWithHook(dest, nil)
+	return err
+}
+
+// ArchiveTeardownWithHook is ArchiveTeardown with one additional operator
+// callback at the only safe cleanup point: every pane has been confirmed dead,
+// but the worktree still occupies its live path. A callback failure is returned
+// separately from the relocation result and never prevents the move.
+func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error) (hookErr, archiveErr error) {
+	mode := teardownArchive{dest: dest, beforeMove: beforeMove, hookErr: &hookErr}
+	archiveErr = i.teardownTabs(mode)
+	return hookErr, archiveErr
 }
 
 // SetArchived flips the instance into the inert Archived state atomically:

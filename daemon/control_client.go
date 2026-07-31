@@ -478,6 +478,9 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	if err := callDaemon("ArchiveSession", req, &resp); err != nil {
 		return "", err
 	}
+	if resp.Warning != "" {
+		return resp.ArchivedPath, &rpcMutationCommittedError{err: errors.New(resp.Warning)}
+	}
 	return resp.ArchivedPath, nil
 }
 
@@ -523,6 +526,9 @@ func DeleteProject(req DeleteProjectRequest) (DeleteProjectResponse, error) {
 	var resp DeleteProjectResponse
 	if err := callDaemon("DeleteProject", req, &resp); err != nil {
 		return DeleteProjectResponse{}, err
+	}
+	if resp.Warning != "" {
+		return resp, &rpcMutationCommittedError{err: errors.New(resp.Warning)}
 	}
 	return resp, nil
 }

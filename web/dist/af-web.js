@@ -6285,7 +6285,10 @@ async function killSession(id, title, token2) {
   await af("KillSession", { id, title, repo_id: "" }, token2);
 }
 async function archiveSession(id, title, token2) {
-  await af("ArchiveSession", { id, title, repo_id: "" }, token2);
+  const result = await af("ArchiveSession", { id, title, repo_id: "" }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function restoreSession(id, title, token2) {
   await af("RestoreSession", { id, title, repo_id: "" }, token2);
@@ -6300,7 +6303,11 @@ async function handoffSession(id, title, to, token2) {
   return af("HandoffSession", { id, title, repo_id: "", to }, token2);
 }
 async function deleteProject(root2, token2) {
-  return af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
+  const result = await af("DeleteProject", { repo_path: root2, repo_id: "" }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
+  return result;
 }
 async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
@@ -12937,6 +12944,12 @@ function openConfirm(action, session) {
         m.setBusy(true);
         const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : restoreSession(target.id, target.title, tok);
         void run.then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            closeModal();
+            requestResync();
+            surfaceTabError(e);
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -12958,6 +12971,13 @@ function openDeleteProject(root2, label, sessionCount) {
         const m = modal;
         m.setBusy(true);
         void deleteProject(root2, tok).then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            closeModal();
+            requestResync();
+            refreshRegisteredProjects();
+            surfaceTabError(e);
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
         });
