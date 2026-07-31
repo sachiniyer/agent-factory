@@ -431,3 +431,40 @@ func TestConfigGetProjectRejectsNonRepositoryWithJSONEnvelope(t *testing.T) {
 	require.NotNil(t, envelope.Error)
 	assert.Contains(t, envelope.Error.Message, "failed to resolve project path")
 }
+
+// TestConfigGetDeprecatedProjectAliasKeepsJSONParseable drives the real pflag
+// parser before RunE. An automatic deprecation warning must not prefix the JSON
+// error envelope when a script uses the retained --project alias with --json.
+func TestConfigGetDeprecatedProjectAliasKeepsJSONParseable(t *testing.T) {
+	_, _ = setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
+	notRepo := t.TempDir()
+
+	oldOut, oldErr := configGetCmd.OutOrStdout(), configGetCmd.ErrOrStderr()
+	oldRepo, oldProject := configGetRepoFlag, configGetProjectFlag
+	oldExplain, oldJSON := configGetExplainFlag, configJSONFlag
+	flags := configGetCmd.Flags()
+	oldFlagOut := flags.Output()
+	projectFlag := flags.Lookup("project")
+	jsonFlag := flags.Lookup("json")
+	require.NotNil(t, projectFlag)
+	require.NotNil(t, jsonFlag)
+	oldProjectChanged, oldJSONChanged := projectFlag.Changed, jsonFlag.Changed
+	t.Cleanup(func() {
+		configGetCmd.SetOut(oldOut)
+		configGetCmd.SetErr(oldErr)
+		configGetRepoFlag, configGetProjectFlag = oldRepo, oldProject
+		configGetExplainFlag, configJSONFlag = oldExplain, oldJSON
+		projectFlag.Changed, jsonFlag.Changed = oldProjectChanged, oldJSONChanged
+		flags.SetOutput(oldFlagOut)
+	})
+
+	var output bytes.Buffer
+	configGetCmd.SetOut(&output)
+	configGetCmd.SetErr(&output)
+	flags.SetOutput(&output)
+	require.NoError(t, flags.Parse([]string{"--project", notRepo, "--json"}))
+
+	err := configGetCmd.RunE(configGetCmd, []string{"default_program"})
+	require.Error(t, err)
+	assert.Truef(t, json.Valid(output.Bytes()), "stderr must be one parseable JSON envelope, got:\n%s", output.String())
+}

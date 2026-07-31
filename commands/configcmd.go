@@ -202,6 +202,7 @@ resolved value with the complete source trace.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		warnDeprecatedConfigProjectAlias(cmd)
 
 		projectSelector, err := configReadProjectSelector(configGetRepoFlag, configGetProjectFlag)
 		if err != nil {
@@ -276,6 +277,7 @@ disallowed for that key.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		warnDeprecatedConfigProjectAlias(cmd)
 
 		projectSelector, err := configReadProjectSelector(configListRepoFlag, configListProjectFlag)
 		if err != nil {
@@ -557,6 +559,18 @@ func prettyPath(p string) string {
 	return p
 }
 
+// warnDeprecatedConfigProjectAlias keeps the compatibility notice on the human
+// path without letting pflag prefix a --json error envelope with plain text.
+// pflag emits MarkDeprecated warnings while parsing, before it knows that a
+// later --json flag selected a machine-readable contract.
+func warnDeprecatedConfigProjectAlias(cmd *cobra.Command) {
+	projectFlag := cmd.Flags().Lookup("project")
+	if configJSONFlag || projectFlag == nil || !projectFlag.Changed {
+		return
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(), "Flag --project has been deprecated, use --repo instead")
+}
+
 func init() {
 	const jsonUsage = "Emit the value(s) as JSON wrapped in the {data,error} envelope"
 	configGetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
@@ -573,10 +587,10 @@ func init() {
 		"Resolve config for this project instead of the current repository")
 	configListCmd.Flags().StringVar(&configListProjectFlag, "project", "",
 		"Deprecated alias for --repo")
-	if err := configGetCmd.Flags().MarkDeprecated("project", "use --repo instead"); err != nil {
+	if err := configGetCmd.Flags().MarkHidden("project"); err != nil {
 		panic(err)
 	}
-	if err := configListCmd.Flags().MarkDeprecated("project", "use --repo instead"); err != nil {
+	if err := configListCmd.Flags().MarkHidden("project"); err != nil {
 		panic(err)
 	}
 	configSetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
