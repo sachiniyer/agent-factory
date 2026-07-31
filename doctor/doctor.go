@@ -44,13 +44,18 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// Finding is one detected problem. FixAction is empty for report-only
-// findings; when set, applying opts.Fix runs the attached fix.
+// Finding is one visible diagnostic observation.
 type Finding struct {
 	// Check is the detector that produced this finding (stable slug).
 	Check string
 	// Detail is the human-readable description.
 	Detail string
+	// Actionable means doctor established a specific unhealthy condition that
+	// must be corrected before the run is healthy. It is deliberately
+	// independent of FixAction: some proven conditions require an exact manual
+	// command, while UNKNOWN observations remain advisory even though they carry
+	// inspection guidance.
+	Actionable bool
 	// FixAction describes what --fix will do; empty means report-only.
 	FixAction string
 	fix       func() error
@@ -103,12 +108,30 @@ type Report struct {
 	Findings []Finding
 }
 
+// addActionableFinding records a condition doctor established is unhealthy.
+// Keeping the classification in the call name makes detector authors choose it
+// separately from automated fix support.
+func (r *Report) addActionableFinding(f Finding) {
+	f.Actionable = true
+	r.Findings = append(r.Findings, f)
+}
+
+// addAdvisoryFinding records a visible observation that does not establish an
+// unhealthy run. Typical examples are UNKNOWN ownership/liveness and behavior
+// that may be intentional. Advisories never drive a health probe or exit code.
+func (r *Report) addAdvisoryFinding(f Finding) {
+	f.Actionable = false
+	r.Findings = append(r.Findings, f)
+}
+
 // UnresolvedCount returns how many underlying issues remain un-remediated
-// (either report-only, fix not requested, or fix failed). It is the number the
-// summary leads with and the exit code keys on, so it counts TRUE underlying
+// (whether automated or manual). Advisory observations are intentionally
+// excluded: the count is the health-probe boundary and may only include
+// conditions doctor established are unhealthy. It is the number the summary
+// leads with and the exit code keys on, so it counts TRUE underlying actionable
 // issues — a collapsed "… and N more" summary finding stands for N issues, not
-// one — and therefore equals the sum of the per-check counts a reader sees, not
-// the smaller number of collapsed rows (#1979).
+// one — and therefore equals the sum of the actionable per-check counts, not the
+// smaller number of collapsed rows (#1979).
 func (r *Report) UnresolvedCount() int {
 	n := 0
 	for _, c := range r.Checks {

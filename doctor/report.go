@@ -221,6 +221,7 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 	fixable := 0
 	fixed := 0
 	failed := 0
+	actionable := false
 	for _, f := range findings {
 		if f.Fixed {
 			fixed++
@@ -228,8 +229,11 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 		if f.FixErr != nil {
 			failed++
 		}
-		if f.FixAction != "" && !f.Fixed {
+		if f.Actionable && f.FixAction != "" && !f.Fixed {
 			fixable++
+		}
+		if f.Actionable && !f.Fixed {
+			actionable = true
 		}
 	}
 
@@ -247,9 +251,9 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 		status:      status,
 		detail:      collapsedProcessDetail(check, total, fixable, fixed, failed, fixMode),
 		remediation: collapsedProcessRemediation(check, fixable, fixMode),
-		// One row standing in for several findings is actionable while any of
-		// them is still unresolved.
-		actionable: fixed < len(findings),
+		// One row can mix proven and UNKNOWN findings. It is actionable only
+		// while at least one proven condition remains unresolved.
+		actionable: actionable,
 	}
 }
 
@@ -323,16 +327,15 @@ func collapsedCount(findings []Finding) int {
 	return total
 }
 
-// countUnresolvedFindings counts the TRUE number of underlying issues the
-// un-remediated findings represent. It mirrors collapsedCount's expansion of a
-// "… and N more" summary into N, so the total the summary reports and the
-// per-check counts a reader sees are the same arithmetic — 1 + 15 + 62, not
-// 1 + 15 + 16 (#1979). Without this the summary's total counts collapsed ROWS
-// while the per-check details count PROCESSES, and the two never add up.
+// countUnresolvedFindings counts the TRUE number of underlying actionable
+// issues the un-remediated findings represent. Advisory observations remain
+// visible but do not enter the health-probe total. It mirrors collapsedCount's
+// expansion of a "… and N more" summary into N, so the actionable total and the
+// actionable per-check counts use the same arithmetic (#1979).
 func countUnresolvedFindings(findings []Finding) int {
 	n := 0
 	for _, f := range findings {
-		if f.Fixed {
+		if !f.Actionable || f.Fixed {
 			continue
 		}
 		if c, ok := summarizedMoreCount(f.Detail); ok {
@@ -384,9 +387,9 @@ func findingRow(f Finding, fixMode bool) renderRow {
 		status:      status,
 		detail:      detail,
 		remediation: findingRemediation(f, fixMode),
-		// Mirrors UnresolvedCount's rule for findings: every un-remediated
-		// finding is a real problem — findings are only ever raised for those.
-		actionable: !f.Fixed,
+		// Mirrors UnresolvedCount's rule for findings. Visibility, automated
+		// fixability, and actionability are separate axes.
+		actionable: f.Actionable && !f.Fixed,
 	}
 }
 
@@ -528,7 +531,7 @@ func issuePhrase(n int) string {
 func fixableCount(r *Report) int {
 	n := 0
 	for _, f := range r.Findings {
-		if f.FixAction != "" && !f.Fixed {
+		if f.Actionable && f.FixAction != "" && !f.Fixed {
 			n++
 		}
 	}

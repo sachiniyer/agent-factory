@@ -339,7 +339,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 				if inSession[p.PID] {
 					continue
 				}
-				report.Findings = append(report.Findings, Finding{
+				report.addAdvisoryFinding(Finding{
 					Check: "escaped-process",
 					Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
 						"(left alone while the session is alive)", describeProc(p), name),
@@ -362,7 +362,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			hasHome := homeStatus == proctree.EnvFound
 			switch {
 			case hasHome && filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir):
-				report.Findings = append(report.Findings, Finding{
+				report.addActionableFinding(Finding{
 					Check: "orphaned-process",
 					Detail: fmt.Sprintf("%s was spawned by dead session %s (home %s)",
 						describeProc(p), name, home),
@@ -370,7 +370,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					fix:       killFix(ctx, p),
 				})
 			case hasHome:
-				report.Findings = append(report.Findings, Finding{
+				report.addAdvisoryFinding(Finding{
 					Check: "orphaned-process",
 					Detail: fmt.Sprintf("%s marks dead session %s but belongs to another "+
 						"agent-factory home (%s) — its session may be live on that install's "+
@@ -378,7 +378,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 						"with that home active", describeProc(p), name, home),
 				})
 			default:
-				report.Findings = append(report.Findings, Finding{
+				report.addAdvisoryFinding(Finding{
 					Check: "orphaned-process",
 					Detail: fmt.Sprintf("%s marks dead session %s but carries no readable "+
 						"home marker — cannot prove which install owns it, so it is "+
@@ -409,14 +409,14 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	const maxPossibleOrphans = 15
 	for i, r := range rankedPossibles {
 		if i == maxPossibleOrphans {
-			report.Findings = append(report.Findings, Finding{
+			report.addAdvisoryFinding(Finding{
 				Check: "possible-orphan",
 				Detail: fmt.Sprintf("… and %d more processes of dead tmux servers (all idle or near-idle; "+
 					"none carry an agent-factory marker, so none are killed)", len(rankedPossibles)-maxPossibleOrphans),
 			})
 			break
 		}
-		report.Findings = append(report.Findings, Finding{
+		report.addAdvisoryFinding(Finding{
 			Check: "possible-orphan",
 			Detail: fmt.Sprintf("%s belongs to a dead tmux server (no agent-factory marker — "+
 				"cannot verify ownership, so it is reported, not killed)", describeProc(r.p)),
@@ -480,7 +480,7 @@ func checkRunawayChildren(ctx *scanContext, report *Report) {
 			if err != nil || frac < runawayCPUFraction || age < runawayMinAge.Seconds() {
 				continue
 			}
-			report.Findings = append(report.Findings, Finding{
+			report.addAdvisoryFinding(Finding{
 				Check: "runaway-cpu",
 				Detail: fmt.Sprintf("%s in live session %s has averaged a pegged core — "+
 					"check the session; doctor never kills children of live sessions", describeProc(p), name),
@@ -510,23 +510,35 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 	sort.Strings(leaked)
 	for _, name := range leaked {
 		origin := "no ancestry marker"
+		ownedByActiveHome := false
 		if procs := tmux.SessionProcessTrees(ctx.opts.Exec, name); len(procs) > 0 {
 			if home, st := proctree.LookupEnv(procs[0].PID, tmux.EnvMarkerHome); st == proctree.EnvFound {
 				if filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir) {
 					origin = "created by this install"
+					ownedByActiveHome = true
 				} else {
 					origin = "created by another agent-factory home: " + home
 				}
 			}
 		}
-		report.Findings = append(report.Findings, Finding{
+		finding := Finding{
 			Check: "leaked-tmux-session",
 			Detail: fmt.Sprintf("tmux session %s has no backing record in %s (%s); "+
 				"kill it with: %s", name, ctx.opts.ConfigDir, origin,
 				// "=name:" is tmux's exact-match target syntax — one argument, so
 				// it is one piece the seam quotes as a whole.
 				shellsuggest.Command("tmux", "kill-session", "-t", "="+name+":")),
-		})
+		}
+		if ownedByActiveHome {
+			// This install's marker plus no record is a proven leak with an
+			// exact manual remedy. --fix support is not required for a row to
+			// be actionable.
+			report.addActionableFinding(finding)
+		} else {
+			// A shared tmux server can expose another install's healthy session,
+			// and a pre-marker session has unknown ownership.
+			report.addAdvisoryFinding(finding)
+		}
 	}
 }
 
@@ -640,7 +652,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 			// and no live tmux session names it, so the home is provably unused.
 			// The fix re-verifies every precondition at fix time (TOCTOU): a
 			// daemon may have started, or a tmux session appeared, since detection.
-			report.Findings = append(report.Findings, Finding{
+			report.addActionableFinding(Finding{
 				Check: "stale-temp-home",
 				Detail: fmt.Sprintf("agent-factory home %s is abandoned (untouched for %s) and no live daemon "+
 					"holds its lock, so it is safe to remove", dir, formatAge(age.Seconds())),
@@ -656,7 +668,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		// non-use), a filesystem whose flock cannot be trusted (NFS), or an I/O
 		// error. Report it — reporting is safe — but never authorise the delete
 		// on a proof we do not have. The operator decides.
-		report.Findings = append(report.Findings, Finding{
+		report.addAdvisoryFinding(Finding{
 			Check: "stale-temp-home",
 			Detail: fmt.Sprintf("agent-factory home %s looks abandoned (untouched for %s), but nothing here can "+
 				"PROVE it is unused (%s) — inspect it and remove it yourself if it is dead",
@@ -888,7 +900,7 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 			continue // this install's daemon; covered by checkDaemonHealth
 		}
 		if _, err := os.Stat(home); os.IsNotExist(err) {
-			report.Findings = append(report.Findings, Finding{
+			report.addActionableFinding(Finding{
 				Check: "foreign-daemon",
 				Detail: fmt.Sprintf("%s serves agent-factory home %s which no longer exists "+
 					"(abandoned daemon will run its cron tasks forever)", describeProc(p), home),
@@ -896,13 +908,13 @@ func checkForeignDaemons(ctx *scanContext, report *Report) {
 				fix:       killFix(ctx, p),
 			})
 		} else if err != nil {
-			report.Findings = append(report.Findings, Finding{
+			report.addAdvisoryFinding(Finding{
 				Check: "foreign-daemon",
 				Detail: fmt.Sprintf("%s serves agent-factory home %s whose status cannot be verified: %v",
 					describeProc(p), home, err),
 			})
 		} else {
-			report.Findings = append(report.Findings, Finding{
+			report.addAdvisoryFinding(Finding{
 				Check: "foreign-daemon",
 				Detail: fmt.Sprintf("%s serves a different agent-factory home (%s) — "+
 					"left alone in case it is intentional", describeProc(p), home),

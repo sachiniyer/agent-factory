@@ -8,12 +8,13 @@ import (
 
 // JSONCheck is one check in `af doctor --json`.
 //
-// Actionable — not Status, and not "Remedy is non-empty" — is the field a
-// script should branch on. Doctor deliberately emits advisory WARNs (no
-// autostart unit installed, a legacy config that still loads) that carry a
-// useful remedy while leaving the run healthy and the exit code 0. Only
-// Actionable separates those from the WARNs that mean something is broken, and
-// it is derived from the same rule as the exit code, so the two cannot disagree.
+// Actionable — not Status, "Remedy is non-empty", or automated fix support — is
+// the field a script should branch on. It means doctor established a specific
+// unhealthy condition that must be corrected before the run is healthy. Doctor
+// deliberately emits advisory WARNs and UNKNOWN observations with useful
+// inspection guidance while leaving the exit code 0. Conversely, a proven
+// condition can be actionable even when its exact remedy is manual. Actionable
+// is derived from the same rule as the exit code, so the two cannot disagree.
 type JSONCheck struct {
 	Name    string `json:"name"`
 	Section string `json:"section"`
@@ -22,18 +23,20 @@ type JSONCheck struct {
 	// Remedy is what to do about it. Present on advisory rows too — the hint is
 	// worth having either way — and empty only when there is nothing to do.
 	Remedy string `json:"remedy"`
-	// Actionable reports whether this row requires action. Rows with
-	// actionable=true are what make the run exit nonzero.
+	// Actionable reports whether doctor established that this row requires
+	// correction before the run is healthy. Rows with actionable=true are what
+	// make the run exit nonzero.
 	Actionable bool `json:"actionable"`
 }
 
 // JSONSummary counts the run by status. Unresolved is the count that drives the
 // exit code, so a script can branch on it without re-deriving the rules.
 //
-// Unresolved counts underlying ISSUES, which is not always the number of
-// actionable rows: without --verbose, many process findings collapse into one
-// row. Use Unresolved for "is anything wrong", and per-row Actionable for
-// "which rows".
+// Unresolved counts underlying ACTIONABLE ISSUES, which is not always the
+// number of actionable rows: without --verbose, many process findings collapse
+// into one row. Advisory observations are excluded. Use Unresolved for "did
+// doctor establish anything unhealthy", and per-row Actionable for "which
+// rows".
 type JSONSummary struct {
 	Pass       int `json:"pass"`
 	Warn       int `json:"warn"`

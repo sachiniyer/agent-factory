@@ -59,9 +59,16 @@ answering while rejecting fields a newer client sends, which surfaces as
 
 Use --json to emit each check as {name, section, status, detail, remedy,
 actionable} in the shared {data,error} envelope for scripting. Branch on
-"actionable", not on the status: doctor emits advisory warnings (no autostart
-unit, a legacy config that still loads) that carry a remedy while leaving the
-run healthy. Only the actionable rows make it exit nonzero.
+"actionable", not on the status or whether --fix supports the row. Actionable
+means doctor established a specific unhealthy condition and named a correction
+that must happen before the run is healthy. Some exact corrections are manual
+and remain actionable even though --fix does not perform them.
+
+UNKNOWN observations stay visible as advisory warnings with inspection
+guidance, but they are not actionable: "inspect it and decide" is not a finding
+that the run is unhealthy. A CI step or health probe should fail on the command
+exit code (equivalently, JSON summary.unresolved > 0), which includes only
+actionable rows.
 
 High-volume process findings are summarized by default so the actionable
 problem is visible first. Use --verbose to show each process behind those
@@ -70,9 +77,11 @@ summaries.
 Read-only by default. With --fix, applies the safe remediations — killing
 orphans whose ancestry markers prove they came from a dead af session, and
 removing stale temp homes — logging each action. Ambiguous cases are always
-reported rather than acted on.
+reported rather than acted on, and remain advisory unless another check
+establishes a specific unhealthy condition.
 
-Exits 1 when unresolved issues remain, 0 when healthy.`,
+Exits 1 when unresolved actionable issues remain, 0 when doctor established no
+unhealthy condition (advisory warnings may still be present).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()

@@ -30,14 +30,14 @@ func checkSetup(ctx *scanContext, report *Report) {
 
 func checkAFHome(ctx *scanContext, report *Report) {
 	if ctx.opts.ConfigDir == "" {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "af-home",
 			Detail: "agent-factory home could not be resolved",
 		})
 		return
 	}
 	if err := writableDir(ctx.opts.ConfigDir); err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check: "af-home",
 			Detail: fmt.Sprintf("agent-factory home %s is not writable — "+
 				"fix directory permissions or set AGENT_FACTORY_HOME to a writable directory",
@@ -58,7 +58,7 @@ func checkStateDirs(ctx *scanContext, report *Report) {
 		{"repo-state-dir", "repo state storage", filepath.Join(ctx.opts.ConfigDir, "repos")},
 	} {
 		if err := writableDir(d.dir); err != nil {
-			report.Findings = append(report.Findings, Finding{
+			report.addActionableFinding(Finding{
 				Check:  d.check,
 				Detail: fmt.Sprintf("%s directory %s is not writable — fix directory permissions: %v", d.label, d.dir, err),
 			})
@@ -71,7 +71,7 @@ func checkStateDirs(ctx *scanContext, report *Report) {
 func checkLogStorage(report *Report) {
 	path := aflog.LogFilePath()
 	if path == "" {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "log-storage",
 			Detail: "could not resolve application log path — set AGENT_FACTORY_HOME to a writable directory and retry",
 		})
@@ -79,7 +79,7 @@ func checkLogStorage(report *Report) {
 	}
 	dir := filepath.Dir(path)
 	if err := writableDir(dir); err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "log-storage",
 			Detail: fmt.Sprintf("log directory %s is not writable — fix directory permissions or set AGENT_FACTORY_HOME to a writable directory: %v", dir, err),
 		})
@@ -91,7 +91,7 @@ func checkLogStorage(report *Report) {
 func checkConfig(_ *scanContext, report *Report) *config.Config {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "config",
 			Detail: fmt.Sprintf("config is not valid — fix the reported file or delete it to regenerate defaults: %v", err),
 		})
@@ -99,14 +99,14 @@ func checkConfig(_ *scanContext, report *Report) *config.Config {
 	}
 	path, err := config.GlobalConfigPath()
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "config",
 			Detail: fmt.Sprintf("could not resolve config path: %v", err),
 		})
 		return cfg
 	}
 	if _, statErr := os.Stat(path); statErr != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "config",
 			Detail: fmt.Sprintf("config loaded in memory but %s is not materialized on disk — run `%s` or fix AF home permissions: %v", path, shellsuggest.Command("af", "config", "set", "default_program", cfg.DefaultProgram), statErr),
 		})
@@ -120,7 +120,7 @@ func checkConfig(_ *scanContext, report *Report) *config.Config {
 func checkGit(report *Report) {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "git",
 			Detail: "git is not installed or not on PATH — install git and retry",
 		})
@@ -130,7 +130,7 @@ func checkGit(report *Report) {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "git-repo",
 			Detail: fmt.Sprintf("could not determine current directory: %v", err),
 		})
@@ -138,7 +138,7 @@ func checkGit(report *Report) {
 	}
 	out, err := exec.Command(gitPath, "-C", cwd, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "git-repo",
 			Detail: fmt.Sprintf("%s is not inside a git repository — run `af` from a repo root or pass --repo where supported", cwd),
 		})
@@ -157,7 +157,7 @@ func checkGitIdentity(gitPath, cwd string, report *Report) {
 		}
 	}
 	if len(missing) > 0 {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check: "git-identity",
 			Detail: fmt.Sprintf("git identity is incomplete (missing %s) — run: "+
 				"git config --global user.name \"Your Name\" && git config --global user.email you@example.com",
@@ -171,7 +171,7 @@ func checkGitIdentity(gitPath, cwd string, report *Report) {
 func checkTmux(report *Report) {
 	version, err := preflight.CheckTmux()
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{Check: "tmux", Detail: err.Error()})
+		report.addActionableFinding(Finding{Check: "tmux", Detail: err.Error()})
 		return
 	}
 	report.Pass(sectionEnvironment, "tmux", version)
@@ -179,7 +179,7 @@ func checkTmux(report *Report) {
 
 func checkAgentPrograms(cfg *config.Config, report *Report) {
 	if cfg.DefaultProgram == "" {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "agent-program",
 			Detail: fmt.Sprintf("default_program is empty — set it to one of %s in ~/.agent-factory/config.toml", tmux.SupportedProgramsString()),
 		})
@@ -198,7 +198,7 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 func checkOneProgram(field, agent, command string, report *Report) {
 	check, err := preflight.CheckCommand(command)
 	if err != nil {
-		report.Findings = append(report.Findings, Finding{
+		report.addActionableFinding(Finding{
 			Check:  "agent-program",
 			Detail: fmt.Sprintf("%s resolves to %q but is not runnable — %v", field, command, preflight.ProgramError(agent, command, err)),
 		})

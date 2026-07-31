@@ -20,6 +20,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Every test here is hermetic by construction (#1104 hard rules): the AF
@@ -288,6 +289,16 @@ func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
 	require.True(t, foreignDetail, "foreign-home orphan must say whose it is")
 	require.True(t, unmarkedDetail, "unmarked orphan must say why it is not killed")
 
+	payload := BuildJSONReport(report, true, true)
+	require.Zero(t, payload.Summary.Unresolved,
+		"processes whose owning install cannot be established must stay visible without failing a health probe")
+	for _, row := range payload.Checks {
+		if row.Name == "orphaned-process" {
+			require.False(t, row.Actionable,
+				"an UNKNOWN ownership row cannot claim the run is unhealthy until the user changes something")
+		}
+	}
+
 	require.True(t, alive(foreign), "a foreign home's process must survive --fix")
 	require.True(t, alive(unmarked), "an unproven orphan must survive --fix")
 }
@@ -312,27 +323,95 @@ func TestMarkedProcessOfLiveSessionIsNeverKilled(t *testing.T) {
 	require.Len(t, escaped, 1)
 	require.Empty(t, escaped[0].FixAction, "escaped processes of live sessions are report-only")
 	require.True(t, alive(escapee), "process of a live session must never be killed")
+
+	payload := BuildJSONReport(report, true, false)
+	require.Zero(t, payload.Summary.Unresolved,
+		"a process merely observed outside a live pane tree is not an established health failure")
+	for _, row := range payload.Checks {
+		if row.Name == "escaped-processes" {
+			require.False(t, row.Actionable,
+				"inspection advice must remain visible without making the run fail")
+		}
+	}
 }
 
-// TestLeakedTmuxSessionReportedNotKilled: an af_ session with no backing
-// record is reported with a suggested command, and --fix must NOT kill it
-// (it may belong to another agent-factory home).
+// TestLeakedTmuxSessionReportedNotKilled distinguishes the two facts hidden
+// behind "no backing record": a session marked as this install's is a definite
+// leak with an exact manual remedy, while a session with no ownership marker is
+// UNKNOWN. Neither is auto-fixed, proving that --fix support does not define
+// actionability.
 func TestLeakedTmuxSessionReportedNotKilled(t *testing.T) {
 	testguard.IsolateTmux(t)
 
-	const name = "af_doctor-leaked"
-	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 300").CombinedOutput()
-	require.NoError(t, err, "tmux new-session: %s", out)
-	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+	home := testguard.SocketTempDir(t)
+	const unknownName = "af_doctor-leaked-unknown"
+	const ownedName = "af_doctor-leaked-owned"
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: unknownName, args: []string{"new-session", "-d", "-s", unknownName, "sleep 300"}},
+		{name: ownedName, args: []string{
+			"new-session", "-d", "-s", ownedName, "-e", tmux.EnvMarkerHome + "=" + home, "sleep 300",
+		}},
+	} {
+		out, err := exec.Command("tmux", tc.args...).CombinedOutput()
+		require.NoError(t, err, "tmux new-session %s: %s", tc.name, out)
+		name := tc.name
+		t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+	}
 
-	report, err := Run(testOptions(t, true))
+	report, err := Run(testOptionsWithHome(t, home, true))
 	require.NoError(t, err)
 	leaked := findByCheck(report, "leaked-tmux-session")
-	require.Len(t, leaked, 1)
-	require.Contains(t, leaked[0].Detail, name)
-	require.Empty(t, leaked[0].FixAction)
-	require.NoError(t, exec.Command("tmux", "has-session", "-t", "="+name+":").Run(),
-		"leaked session must survive --fix")
+	require.Len(t, leaked, 2)
+
+	var unknownRow, ownedRow *JSONCheck
+	payload := BuildJSONReport(report, true, true)
+	for i := range payload.Checks {
+		row := &payload.Checks[i]
+		switch {
+		case strings.Contains(row.Detail, unknownName):
+			unknownRow = row
+		case strings.Contains(row.Detail, ownedName):
+			ownedRow = row
+		}
+	}
+	require.NotNil(t, unknownRow)
+	require.False(t, unknownRow.Actionable,
+		"a session with no ownership marker is visible UNKNOWN, not a failed health check")
+	require.NotNil(t, ownedRow)
+	require.True(t, ownedRow.Actionable,
+		"a session proven to belong to this install has a specific manual kill remedy and remains actionable")
+	require.Equal(t, 1, payload.Summary.Unresolved,
+		"only the proven leak, not the UNKNOWN row, should fail a health probe")
+
+	for _, name := range []string{unknownName, ownedName} {
+		require.NoError(t, exec.Command("tmux", "has-session", "-t", "="+name+":").Run(),
+			"leaked session %s must survive --fix", name)
+	}
+}
+
+func TestPossibleOrphanWithoutAgentFactoryMarkerIsAdvisory(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	possible := spawnWithEnv(t, "sh", nil, map[string]string{
+		"TMUX": fmt.Sprintf("/tmp/af-doctor-dead-tmux,%d,0", 1<<30),
+	})
+	report, err := Run(testOptions(t, true, possible.PID))
+	require.NoError(t, err)
+	require.Len(t, findByCheck(report, "possible-orphan"), 1,
+		"the unowned process must stay visible for manual inspection")
+	require.True(t, alive(possible), "an unowned process must never be killed")
+
+	payload := BuildJSONReport(report, true, false)
+	require.Zero(t, payload.Summary.Unresolved,
+		"no agent-factory marker means doctor has not established an unhealthy af state")
+	for _, row := range payload.Checks {
+		if row.Name == "possible-orphans" {
+			require.False(t, row.Actionable)
+		}
+	}
 }
 
 // TestStaleTempHomeReportedButNeverRemoved: an abandoned AF home with NO
@@ -381,6 +460,16 @@ func TestStaleTempHomeReportedButNeverRemoved(t *testing.T) {
 		"stale-temp-home with no lock file must carry NO fix action: absence of a lock is not proof of "+
 			"non-use, so it must not authorise deleting one")
 	require.False(t, findings[0].Fixed, "a --fix run must not have removed anything")
+
+	payload := BuildJSONReport(report, true, true)
+	require.Zero(t, payload.Summary.Unresolved,
+		"an UNKNOWN temp home must remain visible without holding the exit code at 1")
+	for _, row := range payload.Checks {
+		if row.Name == "stale-temp-home" {
+			require.False(t, row.Actionable,
+				"`--fix` cannot establish whether this home needs removal, so neither can a health probe")
+		}
+	}
 
 	require.DirExists(t, stale, "a --fix run must NOT delete a home it cannot prove is unused")
 	require.DirExists(t, fresh, "recently-touched home must be spared")
@@ -443,6 +532,15 @@ func TestForeignDaemonHandling(t *testing.T) {
 	}
 	require.Equal(t, 1, fixed, "the daemon with a deleted home must be killed")
 	require.Equal(t, 1, reported, "the daemon with an existing home must be left alone")
+	payload := BuildJSONReport(report, true, true)
+	require.Zero(t, payload.Summary.Unresolved,
+		"the proven dead-home daemon was fixed; an intentional second home is advisory")
+	for _, row := range payload.Checks {
+		if row.Name == "foreign-daemon" && strings.Contains(row.Detail, liveHome) {
+			require.False(t, row.Actionable,
+				"a daemon serving an existing home may be intentional and cannot fail this home's health probe")
+		}
+	}
 	require.Eventually(t, func() bool { return !alive(broken) }, 5*time.Second, 25*time.Millisecond)
 	require.True(t, alive(intentional))
 }
@@ -464,6 +562,28 @@ func TestForeignDaemonStatErrorIsNotReportedAsMissing(t *testing.T) {
 	require.Empty(t, findings[0].FixAction, "non-ENOENT stat errors must be report-only")
 	require.False(t, findings[0].Fixed)
 	require.True(t, alive(uncertain), "an uncertain foreign daemon must survive --fix")
+	payload := BuildJSONReport(report, true, true)
+	require.Zero(t, payload.Summary.Unresolved,
+		"a stat error is failure to establish the home's state, not proof that the daemon is unhealthy")
+	for _, row := range payload.Checks {
+		if row.Name == "foreign-daemon" {
+			require.False(t, row.Actionable)
+		}
+	}
+}
+
+func TestRunawayCPUInspectionAdviceIsAdvisory(t *testing.T) {
+	r := &Report{Findings: []Finding{{
+		Check:  "runaway-cpu",
+		Detail: "pid 42 averaged a pegged core inside a live session; inspect it",
+	}}}
+
+	payload := BuildJSONReport(r, false, false)
+	require.Len(t, payload.Checks, 1)
+	require.Equal(t, "runaway-cpu", payload.Checks[0].Name)
+	require.False(t, payload.Checks[0].Actionable,
+		"high CPU can be legitimate work; an inspect-it row does not establish an unhealthy run")
+	require.Zero(t, payload.Summary.Unresolved)
 }
 
 // TestCleanRunHasNoFindings: an empty environment yields a clean bill of
@@ -486,9 +606,9 @@ func TestRenderShapes(t *testing.T) {
 	r := &Report{
 		OK: []string{"daemon: not running (starts on demand)"},
 		Findings: []Finding{
-			{Check: "orphaned-process", Detail: "pid 1234 (yes)", FixAction: "kill pid 1234"},
-			{Check: "leaked-tmux-session", Detail: "tmux session af_x has no backing record"},
-			{Check: "stale-temp-home", Detail: "abandoned home /tmp/x", FixAction: "remove /tmp/x", Fixed: true},
+			{Check: "orphaned-process", Detail: "pid 1234 (yes)", Actionable: true, FixAction: "kill pid 1234"},
+			{Check: "leaked-tmux-session", Detail: "tmux session af_x has no backing record", Actionable: true},
+			{Check: "stale-temp-home", Detail: "abandoned home /tmp/x", Actionable: true, FixAction: "remove /tmp/x", Fixed: true},
 		},
 	}
 	var buf bytes.Buffer
@@ -840,8 +960,8 @@ func TestDaemonPingRefusalStaysFail(t *testing.T) {
 func TestSummaryLeadsWithActionableCountMatchingUnresolved(t *testing.T) {
 	r := &Report{
 		Findings: []Finding{
-			{Check: "possible-orphan", Detail: "pid 1 (x) belongs to a dead tmux server"},
-			{Check: "possible-orphan", Detail: "… and 46 more processes of dead tmux servers"},
+			{Check: "orphaned-process", Detail: "pid 1 (x) was spawned by a dead session", Actionable: true},
+			{Check: "orphaned-process", Detail: "… and 46 more processes from dead sessions", Actionable: true},
 		},
 	}
 	// 1 shown + 46 folded into the summary row = 47 underlying issues, the same
@@ -854,7 +974,7 @@ func TestSummaryLeadsWithActionableCountMatchingUnresolved(t *testing.T) {
 	out := buf.String()
 
 	require.Contains(t, out, "47 issues require action")
-	require.Contains(t, out, "47 processes belong to dead tmux servers",
+	require.Contains(t, out, "47 orphaned processes from dead sessions",
 		"the per-check row and the summary total must be the same arithmetic (#1979)")
 
 	idxCount := strings.Index(out, "issues require action")
@@ -875,7 +995,7 @@ func TestSummaryLeadsWithActionableCountMatchingUnresolved(t *testing.T) {
 func TestSummarizedMoreCountIsAnchoredNotOpportunistic(t *testing.T) {
 	embedded := &Report{
 		Findings: []Finding{
-			{Check: "possible-orphan", Detail: "pid 42 (sh): /bin/sh -c 'sync and 5 more files' belongs to a dead tmux server"},
+			{Check: "orphaned-process", Detail: "pid 42 (sh): /bin/sh -c 'sync and 5 more files'", Actionable: true},
 		},
 	}
 	require.Equal(t, 1, embedded.UnresolvedCount(),
@@ -883,7 +1003,9 @@ func TestSummarizedMoreCountIsAnchoredNotOpportunistic(t *testing.T) {
 
 	// The genuine roll-up still expands to what it folded.
 	rollup := &Report{
-		Findings: []Finding{{Check: "possible-orphan", Detail: "… and 46 more processes of dead tmux servers"}},
+		Findings: []Finding{{
+			Check: "orphaned-process", Detail: "… and 46 more processes from dead sessions", Actionable: true,
+		}},
 	}
 	require.Equal(t, 46, rollup.UnresolvedCount(),
 		"the real roll-up must still stand for every process it folded")
