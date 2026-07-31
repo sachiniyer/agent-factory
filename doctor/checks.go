@@ -42,11 +42,16 @@ var (
 	daemonProcessCwd       = proctree.WorkingDir
 )
 
-// runawayCPUFraction and runawayMinAge define "pegging a core for an
-// extended period": lifetime-average CPU ≥ 80% of a core for a process at
-// least 30 minutes old. A legitimate build rarely sustains that average; the
-// leaked `yes` processes from the outage sat at ~100% for 15 days.
+// processLeakMinAge separates durable escaped/orphaned processes from ordinary
+// session teardown. A minute is far longer than one doctor scan but negligible
+// beside the 8-hour-to-10-day leaks this check found in production (#2627).
+//
+// runawayCPUFraction and runawayMinAge define "pegging a core for an extended
+// period": lifetime-average CPU ≥ 80% of a core for a process at least 30
+// minutes old. A legitimate build rarely sustains that average; the leaked
+// `yes` processes from the outage sat at ~100% for 15 days.
 const (
+	processLeakMinAge  = time.Minute
 	runawayCPUFraction = 0.8
 	runawayMinAge      = 30 * time.Minute
 )
@@ -308,6 +313,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 
 	marked := map[string][]proctree.Process{}
 	var possibles []proctree.Process
+	var observations processLeakObservations
 	for pid, p := range ctx.snap {
 		if ctx.selfAncestors[pid] {
 			continue
@@ -319,11 +325,15 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 		// rather than act on one we never identified.
 		name, nameStatus := proctree.LookupEnv(pid, tmux.EnvMarkerSession)
 		if nameStatus == proctree.EnvFound && name != "" {
-			marked[name] = append(marked[name], p)
+			if observations.oldEnough(ctx, p) {
+				marked[name] = append(marked[name], p)
+			}
 			continue
 		}
 		if tmuxEnv, st := proctree.LookupEnv(pid, "TMUX"); st == proctree.EnvFound && tmuxServerDead(ctx, tmuxEnv) {
-			possibles = append(possibles, p)
+			if observations.oldEnough(ctx, p) {
+				possibles = append(possibles, p)
+			}
 		}
 	}
 
@@ -336,7 +346,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 				inSession[p.PID] = true
 			}
 			for _, p := range procs {
-				if inSession[p.PID] {
+				if inSession[p.PID] || !observations.stillPresent(p) {
 					continue
 				}
 				report.addAdvisoryFinding(Finding{
@@ -348,6 +358,9 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			continue
 		}
 		for _, p := range procs {
+			if !observations.stillPresent(p) {
+				continue
+			}
 			// A kill requires a PROVEN home match, not just a dead-looking
 			// session: another agent-factory home (e.g. a play-test sandbox
 			// on a private `tmux -L` server) has sessions that are invisible
@@ -397,6 +410,9 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	}
 	rankedPossibles := make([]ranked, 0, len(possibles))
 	for _, p := range possibles {
+		if !observations.stillPresent(p) {
+			continue
+		}
 		frac, _, _ := proctree.CPUFraction(p)
 		rankedPossibles = append(rankedPossibles, ranked{p, frac})
 	}
@@ -422,6 +438,50 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 				"cannot verify ownership, so it is reported, not killed)", describeProc(r.p)),
 		})
 	}
+	observations.report(report)
+}
+
+// processLeakObservations keeps every unprovable state visible without mixing
+// it into the leak counts. A vanished process is normal churn and needs no row;
+// missing age or an identity-read failure means the check was blind.
+type processLeakObservations struct {
+	unknownAge      int
+	unknownIdentity int
+}
+
+func (o *processLeakObservations) oldEnough(ctx *scanContext, p proctree.Process) bool {
+	if p.StartedAt.IsZero() {
+		o.unknownAge++
+		return false
+	}
+	return ctx.snapAt.Sub(p.StartedAt) >= ctx.opts.minProcessLeakAge
+}
+
+func (o *processLeakObservations) stillPresent(p proctree.Process) bool {
+	same, err := proctree.SameIdentity(p)
+	if err != nil {
+		o.unknownIdentity++
+		return false
+	}
+	return same
+}
+
+func (o processLeakObservations) report(report *Report) {
+	var blind []string
+	if o.unknownAge > 0 {
+		blind = append(blind, fmt.Sprintf("could not determine the age of %s",
+			plural(o.unknownAge, "candidate process", "candidate processes")))
+	}
+	if o.unknownIdentity > 0 {
+		blind = append(blind, fmt.Sprintf("could not revalidate the identity of %s",
+			plural(o.unknownIdentity, "candidate process", "candidate processes")))
+	}
+	if len(blind) == 0 {
+		return
+	}
+	report.Warn(sectionProcesses, "process-leak-inspection",
+		strings.Join(blind, " and ")+"; they are omitted from the escaped, orphaned, and possible-orphan counts",
+		"those candidates are UNKNOWN, not proven leaks; rerun doctor or inspect them manually", false)
 }
 
 // tmuxServerDead parses a TMUX env value ("socketPath,serverPID,sessionIdx")

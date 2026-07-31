@@ -204,6 +204,11 @@ type Options struct {
 	killGrace    time.Duration
 	killTermWait time.Duration
 
+	// minProcessLeakAge is the persistence window for orphan/escape findings.
+	// Production uses processLeakMinAge; tests shorten it when their freshly
+	// spawned fixtures represent already-durable leaks.
+	minProcessLeakAge time.Duration
+
 	// snapshot overrides the process-table scan; tests inject a snapshot
 	// containing only their own spawned processes so a --fix run can never act
 	// on anything outside the test.
@@ -221,6 +226,10 @@ type scanContext struct {
 	// genuinely has none, and the operator cannot tell which one they got.
 	// checkProcessInspection turns that state into a FAIL row; see snapErr.
 	snap map[int]proctree.Process
+	// snapAt is the instant immediately before snap was collected. Process age
+	// is measured against this fixed point so later shell-outs cannot age a
+	// candidate across the leak threshold during one doctor run.
+	snapAt time.Time
 	// snapErr is why snap is nil. Held so the report can name the cause
 	// instead of asserting health from an empty table (#1939).
 	snapErr error
@@ -265,6 +274,9 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.killTermWait == 0 {
 		o.killTermWait = 2 * time.Second
+	}
+	if o.minProcessLeakAge == 0 {
+		o.minProcessLeakAge = processLeakMinAge
 	}
 	if o.snapshot == nil {
 		o.snapshot = proctree.Snapshot
@@ -326,8 +338,10 @@ func Run(opts Options) (*Report, error) {
 	// A failed snapshot is recorded, never discarded: checkProcessInspection
 	// reports it as a failure to OBSERVE, and the process checks below stay
 	// silent only because that row already spoke for them (#1939).
+	snapAt := time.Now()
 	if snap, err := ctx.opts.snapshot(); err == nil {
 		ctx.snap = snap
+		ctx.snapAt = snapAt
 		for pid := range selfAndAncestors(snap) {
 			ctx.selfAncestors[pid] = true
 		}

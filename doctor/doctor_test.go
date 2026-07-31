@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -80,7 +81,10 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		MinTempHomeAge: time.Hour,
 		killGrace:      100 * time.Millisecond,
 		killTermWait:   200 * time.Millisecond,
-		snapshot:       snapshotOf(t, pids...),
+		// Most process fixtures below model durable leaks; age-specific tests
+		// opt back into the production grace period explicitly.
+		minProcessLeakAge: time.Nanosecond,
+		snapshot:          snapshotOf(t, pids...),
 		// Default to "no remote configured" so the non-remote suite stays
 		// hermetic (no git shell-out, no reading the real repo's in-repo
 		// config). The remote tests below inject their own resolver.
@@ -333,6 +337,155 @@ func TestMarkedProcessOfLiveSessionIsNeverKilled(t *testing.T) {
 				"inspection advice must remain visible without making the run fail")
 		}
 	}
+}
+
+// TestLiveSessionTransientChildIsNotReportedAsEscaped stages the production
+// self-observation race deterministically on a real private tmux server. The
+// child exists in the process snapshot and still carries the live session's
+// marker when doctor maps candidates, then exits immediately before the later
+// real list-panes/tree observation. That is ordinary pane work completing, not
+// evidence that the process escaped.
+func TestLiveSessionTransientChildIsNotReportedAsEscaped(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af_doctor-transient-child"
+	dir := t.TempDir()
+	script := filepath.Join(dir, "spawn-child")
+	pidFile := filepath.Join(dir, "child.pid")
+	require.NoError(t, os.WriteFile(script, []byte(
+		"#!/bin/sh\nsleep 300 &\nchild=$!\nprintf '%s\\n' \"$child\" > \"$1\"\nwait \"$child\"\nexec sleep 300\n",
+	), 0o700))
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name,
+		"-e", tmux.EnvMarkerSession+"="+name, script, pidFile).CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+
+	var transientPID int
+	require.Eventually(t, func() bool {
+		raw, readErr := os.ReadFile(pidFile)
+		if readErr != nil {
+			return false
+		}
+		_, scanErr := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &transientPID)
+		return scanErr == nil && transientPID > 1
+	}, 5*time.Second, 10*time.Millisecond, "tmux pane never published its transient child pid")
+
+	full, err := proctree.Snapshot()
+	require.NoError(t, err)
+	transient, ok := full[transientPID]
+	require.True(t, ok, "transient pane child %d missing from snapshot", transientPID)
+	marker, markerStatus := proctree.LookupEnv(transientPID, tmux.EnvMarkerSession)
+	require.Equal(t, proctree.EnvFound, markerStatus)
+	require.Equal(t, name, marker)
+
+	realExec := cmd.MakeExecutor()
+	stopped := false
+	opts := testOptions(t, false)
+	opts.snapshot = func() (map[int]proctree.Process, error) {
+		return map[int]proctree.Process{transient.PID: transient}, nil
+	}
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if len(c.Args) > 1 && c.Args[1] == "list-panes" && !stopped {
+				stopped = true
+				require.NoError(t, proctree.Signal(transient, syscall.SIGTERM))
+				require.Eventually(t, func() bool { return !proctree.AliveSame(transient) },
+					5*time.Second, 10*time.Millisecond,
+					"transient pane child did not exit before the later pane-tree observation")
+			}
+			return realExec.Output(c)
+		},
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.True(t, stopped, "test did not reach the later real pane-tree observation")
+	require.Empty(t, findByCheck(report, "escaped-process"),
+		"a pane child completing between the two observations must not be reported as escaped")
+}
+
+func TestYoungProcessesExcludedFromEveryLeakPopulation(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := testguard.SocketTempDir(t)
+	const liveName = "af_doctor-young-live"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", liveName, "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+liveName+":").Run() })
+
+	escaped := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+	})
+	orphaned := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-young-dead",
+		tmux.EnvMarkerHome:    home,
+	})
+	possible := spawnWithEnv(t, "sh", nil, map[string]string{
+		"TMUX": fmt.Sprintf("/tmp/af-doctor-young-dead-tmux,%d,0", 1<<30),
+	})
+
+	opts := testOptionsWithHome(t, home, false, escaped.PID, orphaned.PID, possible.PID)
+	opts.minProcessLeakAge = processLeakMinAge
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Empty(t, findByCheck(report, "escaped-process"),
+		"a newly-started live-session child is ordinary process churn, not an escapee")
+	require.Empty(t, findByCheck(report, "orphaned-process"),
+		"a newly-started marked process has not persisted long enough to be a leak")
+	require.Empty(t, findByCheck(report, "possible-orphan"),
+		"a newly-started unmarked process has not persisted long enough to be a possible orphan")
+
+	opts.snapshot = func() (map[int]proctree.Process, error) {
+		snap, snapErr := snapshotOf(t, escaped.PID, orphaned.PID, possible.PID)()
+		if snapErr != nil {
+			return nil, snapErr
+		}
+		for pid, p := range snap {
+			p.StartedAt = time.Now().Add(-2 * processLeakMinAge)
+			snap[pid] = p
+		}
+		return snap, nil
+	}
+	report, err = Run(opts)
+	require.NoError(t, err)
+	require.Len(t, findByCheck(report, "escaped-process"), 1,
+		"a durable process outside its live pane tree remains visible")
+	require.Len(t, findByCheck(report, "orphaned-process"), 1,
+		"a durable marked process from a dead session remains visible")
+	require.Len(t, findByCheck(report, "possible-orphan"), 1,
+		"a durable process from a dead tmux server remains visible")
+}
+
+func TestUnknownProcessAgeIsReportedWithoutClaimingALeak(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	home := testguard.SocketTempDir(t)
+	candidate := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-age-unknown",
+		tmux.EnvMarkerHome:    home,
+	})
+	opts := testOptionsWithHome(t, home, false, candidate.PID)
+	opts.snapshot = func() (map[int]proctree.Process, error) {
+		snap, err := snapshotOf(t, candidate.PID)()
+		if err != nil {
+			return nil, err
+		}
+		p := snap[candidate.PID]
+		p.StartedAt = time.Time{}
+		snap[candidate.PID] = p
+		return snap, nil
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	require.Empty(t, findByCheck(report, "orphaned-process"),
+		"unknown age cannot establish that a candidate persisted long enough to be a leak")
+	rows := findCheckRows(report, "process-leak-inspection")
+	require.Len(t, rows, 1, "age blindness must stay visible rather than reading as a clean leak scan")
+	require.Equal(t, StatusWarn, rows[0].Status)
+	require.False(t, rows[0].Problem,
+		"rerunning or inspecting an unmeasurable candidate is advice, not an established unhealthy state")
 }
 
 // TestLeakedTmuxSessionReportedNotKilled distinguishes the two facts hidden
