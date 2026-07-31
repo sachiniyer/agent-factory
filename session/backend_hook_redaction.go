@@ -5,14 +5,22 @@ import (
 	"strings"
 )
 
-type serializedTokenContinuation uint8
+const maxHookTokenKeyEncodedLen = 32
+
+type serializedTokenPhase uint8
 
 const (
-	serializedTokenNone serializedTokenContinuation = iota
+	serializedTokenNone serializedTokenPhase = iota
+	serializedTokenPartialKey
 	serializedTokenColon
 	serializedTokenValue
 	serializedTokenValueTail
 )
+
+type serializedTokenContinuation struct {
+	phase     serializedTokenPhase
+	keyPrefix string
+}
 
 // redactSerializedHookJSONStrings handles a JSON string containing serialized
 // endpoint JSON whether it is a top-level record, an object field, or surrounded
@@ -28,7 +36,7 @@ func redactSerializedHookJSONStrings(output string) string {
 	candidateInvalid := false
 	escapedOpenerStart := -1
 	unicodeEscapeDigits := 0
-	tokenContinuation := serializedTokenNone
+	tokenContinuation := serializedTokenContinuation{}
 	escaped := false
 	sanitizeCandidate := func(start, end int, syntheticStart, syntheticEnd bool) {
 		replacement, changed, nextContinuation := sanitizeSerializedHookJSONString(
@@ -175,7 +183,7 @@ func sanitizeSerializedHookJSONString(
 		return nil, false, continuation
 	}
 	sanitized, nextContinuation := redactHookTokenContinuation(decoded, continuation)
-	if nextContinuation == serializedTokenNone {
+	if nextContinuation.phase == serializedTokenNone {
 		nextContinuation = hookOutputTokenContinuation(sanitized)
 	}
 	sanitized = redactHookOutputTokens(sanitized)
@@ -200,29 +208,35 @@ func hookOutputTokenContinuation(output string) serializedTokenContinuation {
 		}
 		keyEnd, ok := hookTokenKeyEnd(output, cursor)
 		if !ok {
+			if _, complete := jsonStringEnd(output, cursor); !complete && len(output)-cursor < maxHookTokenKeyEncodedLen {
+				return serializedTokenContinuation{
+					phase:     serializedTokenPartialKey,
+					keyPrefix: output[cursor:],
+				}
+			}
 			continue
 		}
 		separator := skipJSONWhitespace(output, keyEnd)
 		if separator == len(output) {
-			return serializedTokenColon
+			return serializedTokenContinuation{phase: serializedTokenColon}
 		}
 		if output[separator] != ':' {
 			continue
 		}
 		valueStart := skipJSONWhitespace(output, separator+1)
 		if valueStart == len(output) {
-			return serializedTokenValue
+			return serializedTokenContinuation{phase: serializedTokenValue}
 		}
 		if output[valueStart] != '"' {
 			continue
 		}
 		valueEnd, complete := jsonStringEnd(output, valueStart)
 		if !complete {
-			return serializedTokenValueTail
+			return serializedTokenContinuation{phase: serializedTokenValueTail}
 		}
 		cursor = valueEnd - 2
 	}
-	return serializedTokenNone
+	return serializedTokenContinuation{}
 }
 
 func redactHookTokenContinuation(
@@ -230,40 +244,58 @@ func redactHookTokenContinuation(
 	continuation serializedTokenContinuation,
 ) (string, serializedTokenContinuation) {
 	start := 0
-	if continuation == serializedTokenColon {
+	if continuation.phase == serializedTokenPartialKey {
+		combined := continuation.keyPrefix + output
+		keyEnd, complete := jsonStringEnd(combined, 0)
+		if !complete {
+			if len(combined) < maxHookTokenKeyEncodedLen {
+				continuation.keyPrefix = combined
+				return output, continuation
+			}
+			return output, serializedTokenContinuation{}
+		}
+		var key string
+		if keyEnd > maxHookTokenKeyEncodedLen || json.Unmarshal([]byte(combined[:keyEnd]), &key) != nil ||
+			!strings.EqualFold(key, "token") {
+			return output, serializedTokenContinuation{}
+		}
+		start = keyEnd - len(continuation.keyPrefix)
+		continuation = serializedTokenContinuation{phase: serializedTokenColon}
+	}
+	if continuation.phase == serializedTokenColon {
 		start = skipJSONWhitespace(output, start)
 		if start == len(output) {
 			return output, continuation
 		}
 		if output[start] != ':' {
-			return output, serializedTokenNone
+			return output, serializedTokenContinuation{}
 		}
 		start++
-		continuation = serializedTokenValue
+		continuation = serializedTokenContinuation{phase: serializedTokenValue}
 	}
-	if continuation == serializedTokenValue {
+	if continuation.phase == serializedTokenValue {
 		start = skipJSONWhitespace(output, start)
 		if start == len(output) {
 			return output, continuation
 		}
 		if output[start] != '"' {
-			return output, serializedTokenNone
+			return output, serializedTokenContinuation{}
 		}
 		end, complete := jsonStringEnd(output, start)
 		redacted := output[:start] + `"[REDACTED]"` + output[end:]
 		if !complete {
-			return redacted, serializedTokenValueTail
+			return redacted, serializedTokenContinuation{phase: serializedTokenValueTail}
 		}
-		return redacted, serializedTokenNone
+		return redacted, serializedTokenContinuation{}
 	}
-	if continuation == serializedTokenValueTail {
+	if continuation.phase == serializedTokenValueTail {
 		end, complete := jsonStringContinuationEnd(output)
 		if !complete {
 			return "", continuation
 		}
-		return output[end:], serializedTokenNone
+		return output[end:], serializedTokenContinuation{}
 	}
-	return output, serializedTokenNone
+	return output, serializedTokenContinuation{}
 }
 
 func jsonStringContinuationEnd(input string) (int, bool) {

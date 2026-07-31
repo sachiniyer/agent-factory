@@ -546,7 +546,7 @@ func hookTokenRedactionRanges(output string) []hookOutputRange {
 // what keeps malformed output linear while still accepting JSON-equivalent key
 // spellings and case variants for redaction.
 func hookTokenKeyEnd(input string, start int) (int, bool) {
-	limit := start + 32
+	limit := start + maxHookTokenKeyEncodedLen
 	if limit > len(input) {
 		limit = len(input)
 	}

@@ -171,6 +171,22 @@ exit 0
 	assert.False(t, h.deleteRan(t), "valid endpoint output must not reap the working sandbox")
 }
 
+func TestHookProvisionRejectsEndpointPropertyInMalformedLogObject(t *testing.T) {
+	h := newHookState(t, `
+echo '{"level":INVALID "endpoint":{"url":"http://property.invalid","token":"property-secret"}}' >&2
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	p := newHookProvisioner(h, "malformed object logger")
+
+	res, err := p.provisionOrReap()
+	require.NoError(t, err, "an endpoint-shaped log property must not hide the launch record")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
+	assert.False(t, h.deleteRan(t), "valid endpoint output must not reap the working sandbox")
+}
+
 func TestHookProvisionRecoversEndpointAfterMalformedDiagnosticPrefix(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -300,6 +316,16 @@ func TestHookOutputSuffixRedactsSerializedTokenSplitAcrossNewline(t *testing.T) 
 			name:        "inside value",
 			output:      "INFO endpoint=\"{\\\"token\\\":\\\"redacted-prefix-\nvisible-token-tail\\\"}\"",
 			mustNotLeak: "visible-token-tail",
+		},
+		{
+			name:        "inside key",
+			output:      "INFO endpoint=\"{\\\"to\nken\\\":\\\"split-key-token-must-not-leak\\\"}\"",
+			mustNotLeak: "split-key-token-must-not-leak",
+		},
+		{
+			name:        "inside escaped key",
+			output:      "INFO endpoint=\"{\\\"\\\\u00\n74oken\\\":\\\"split-escape-token-must-not-leak\\\"}\"",
+			mustNotLeak: "split-escape-token-must-not-leak",
 		},
 	}
 

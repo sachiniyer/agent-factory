@@ -94,6 +94,7 @@ type jsonCandidateRange struct {
 	lastChild        int
 	nextSibling      int
 	state            jsonContainerState
+	objectKeySeen    bool
 	embedded         bool
 	endpointEmbedded bool
 }
@@ -122,7 +123,12 @@ func consumeJSONContainerString(candidate *jsonCandidateRange, valid bool) {
 	}
 	switch candidate.state {
 	case jsonObjectExpectKey:
+		candidate.objectKeySeen = true
 		candidate.state = jsonObjectExpectColon
+	case jsonContainerInvalid:
+		if candidate.objectKeySeen {
+			candidate.state = jsonObjectExpectColon
+		}
 	case jsonContainerExpectValue:
 		candidate.state = jsonContainerExpectComma
 	default:
