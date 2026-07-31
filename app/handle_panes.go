@@ -1,8 +1,6 @@
 package app
 
 import (
-	"fmt"
-
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
@@ -615,21 +613,8 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	if instance == nil || instance.IsCreating() {
 		return m, nil
 	}
-	if instance.IsTearingDown() {
-		return m, m.handleError(fmt.Errorf("session '%s' is being deleted", instance.Title))
-	}
-	if instance.GetInFlightOp() == session.OpRestoring {
-		return m, m.handleError(fmt.Errorf("session '%s' is being restored", instance.Title))
-	}
-	if instance.GetLiveness() == session.LiveLost {
-		// Restore is a key IN this interface (#2479): name it, not a shell command.
-		return m, m.handleError(fmt.Errorf("session '%s' was lost — press %s to restore", instance.Title, restoreKeyHint()))
-	}
-	if instance.GetLiveness() == session.LiveDead {
-		return m, m.handleError(fmt.Errorf("session '%s' is no longer running — press %s to restore", instance.Title, restoreKeyHint()))
-	}
-	if !instance.TmuxAlive() {
-		return m, m.handleError(fmt.Errorf("session '%s' is no longer running", instance.Title))
+	if err := interactiveGuard(instance); err != nil {
+		return m, m.handleError(err)
 	}
 	// Fence attach off a browser-only tab HERE too. The tree-selection paths guard
 	// on the SELECTED tab, but a web/vscode tab already open as a focused pane

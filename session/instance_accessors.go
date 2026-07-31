@@ -98,18 +98,28 @@ func (i *Instance) GetWorktreeBranch() string {
 
 // MarkUserKilled records kill intent on the instance (#1108). Callers persist
 // the instance afterwards so the tombstone survives a daemon crash mid-kill.
+// Daemon callers reach this commit at serialized points: an explicit kill owns
+// the per-session operation lock, while failed-create retention still owns the
+// repo start lock and has not exposed the instance to another operation. Any
+// carried process-local operation therefore has no live owner and must not
+// outrank the durable tombstone or hide its retry action. A TUI retry owns its
+// OpKilling on a separate projection instance and is preserved by snapshot
+// reconciliation.
 func (i *Instance) MarkUserKilled() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	lv, op, resetAt := i.lifecycleStateLocked()
 	i.userKilled = true
+	i.inFlightOp = OpNone
+	i.noteStateChangeLocked(lv, op, resetAt)
 }
 
 // ReconcileUserKilledSnapshot applies the durable tombstone carried by a
 // daemon snapshot to an already-materialized projection row. Tombstones are
-// monotonic: an older snapshot cannot make a killed row live again. Once the
-// tombstone is present, any reconstructed operation marker belongs to the old
-// process and must be cleared; only the daemon that owns an active teardown may
-// temporarily keep its live operation fence alongside MarkUserKilled.
+// monotonic: an older snapshot cannot make a killed row live again. When the
+// tombstone is first adopted, any existing operation marker belongs to the old
+// process and must be cleared with it. A later reconcile preserves an OpKilling
+// raised locally for the user's current teardown retry.
 func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -118,9 +128,6 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	changed := false
 	if userKilled && !i.userKilled {
 		i.userKilled = true
-		changed = true
-	}
-	if i.userKilled && i.inFlightOp != OpNone {
 		i.inFlightOp = OpNone
 		changed = true
 	}

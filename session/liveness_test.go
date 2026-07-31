@@ -215,6 +215,22 @@ func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 	}
 }
 
+// TestMarkUserKilledClearsStaleOperationAndKeepsTeardownAddressable pins the
+// daemon commit point: the per-session operation lock proves a carried handoff
+// marker has no live owner by the time kill intent becomes durable. Leaving the
+// marker would hide the only retry action on a retained unknown-state teardown.
+func TestMarkUserKilledClearsStaleOperationAndKeepsTeardownAddressable(t *testing.T) {
+	inst := &Instance{ID: "killed-handoff-id", liveness: LiveRunning, inFlightOp: OpReplacing}
+
+	inst.MarkUserKilled()
+
+	require.Equal(t, OpNone, inst.GetInFlightOp(), "durable kill intent must discard the stale handoff fence")
+	require.True(t, inst.CanKill(), "a retained tombstone must keep its explicit teardown handle")
+	data := inst.ToInstanceData()
+	require.True(t, data.UserKilled)
+	require.True(t, data.CanKill, "daemon and web projections must expose the same teardown handle")
+}
+
 func TestInFlightOpStrippedFromStorageRecords(t *testing.T) {
 	data := InstanceData{Status: Deleting, Liveness: LiveRunning, InFlightOp: OpArchiving}
 	stored := data.ForStorage()

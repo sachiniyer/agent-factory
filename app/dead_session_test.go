@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -260,6 +261,44 @@ func TestInteractiveGuard_RestingRowsNameTheRestoreKey(t *testing.T) {
 				"the guard names the restore key, not a shell command")
 			require.NotContains(t, err.Error(), "af sessions restore",
 				"the guard must not send the user out to a CLI command (#2479)")
+		})
+	}
+}
+
+// TestInteractiveActionsBlockLiveUserKilledSession covers a retained kill whose
+// tmux binding survived teardown. Its live liveness and reachable pane must not
+// make tree Enter, tree attach, or focused-pane attach reopen a runtime already
+// committed for deletion.
+func TestInteractiveActionsBlockLiveUserKilledSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		act  func(*home, *session.Instance) (tea.Model, tea.Cmd)
+	}{
+		{name: "tree_enter", act: func(h *home, _ *session.Instance) (tea.Model, tea.Cmd) {
+			return h.handleEnter()
+		}},
+		{name: "tree_attach", act: func(h *home, _ *session.Instance) (tea.Model, tea.Cmd) {
+			return h.handleAttach()
+		}},
+		{name: "focused_pane_attach", act: func(h *home, inst *session.Instance) (tea.Model, tea.Cmd) {
+			return h.handleEnterPane(h.openPaneWindow(inst, 0))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := instanceWithFakeBackend(t, "killed-but-reachable")
+			inst.MarkUserKilled()
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+
+			model, cmd := tc.act(h, inst)
+			h = model.(*home)
+
+			require.NotNil(t, cmd, "the rejected interaction must surface a transient error")
+			h.errBox.SetSize(200, 1)
+			require.Contains(t, h.errBox.String(), "was killed")
+			require.NotContains(t, h.errBox.String(), "restore",
+				"a kill tombstone has only a teardown off-ramp, never restore")
 		})
 	}
 }

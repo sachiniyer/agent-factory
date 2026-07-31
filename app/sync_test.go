@@ -62,6 +62,28 @@ func TestSnapshotReconcilesUserKilledTombstone(t *testing.T) {
 	}
 }
 
+// TestSnapshotPreservesOptimisticKillForAdoptedTombstone distinguishes an old
+// daemon operation from the TUI's current retry. Once the row has adopted the
+// tombstone, its local OpKilling is still the only fence preventing a second
+// delete request while the first RPC is in flight.
+func TestSnapshotPreservesOptimisticKillForAdoptedTombstone(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "killed-retry")
+	inst.MarkUserKilled()
+	inst.SetInFlightOpForTest(session.OpKilling)
+
+	data := inst.ToInstanceData()
+	data.UserKilled = true
+	data.InFlightOp = session.OpReplacing
+	data.Liveness = session.LiveRunning
+
+	h.updateInstanceFromSnapshot(inst, data)
+
+	require.Equal(t, session.OpKilling, inst.GetInFlightOp(),
+		"a non-terminal snapshot must preserve the retry's optimistic kill fence")
+	require.False(t, inst.CanKill(), "the active retry must not expose a duplicate kill action")
+}
+
 // instanceWithFakeBackend builds an instance backed by FakeBackend, marked
 // Started and Running. Used by metadata-tick tests to exercise the loop body
 // without spinning up real tmux sessions.

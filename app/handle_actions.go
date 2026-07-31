@@ -764,6 +764,9 @@ func interactiveGuard(inst *session.Instance) error {
 	if inst.IsTearingDown() {
 		return fmt.Errorf("session '%s' is being deleted", inst.Title)
 	}
+	if inst.UserKilled() {
+		return fmt.Errorf("session '%s' was killed and is pending deletion", inst.Title)
+	}
 	if inst.GetInFlightOp() == session.OpRestoring {
 		// Restore in flight (#1210/#1300): archived rows are re-homed into
 		// Instances while the daemon moves/spawns, and Lost/Dead rows keep their
