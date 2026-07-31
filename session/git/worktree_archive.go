@@ -481,7 +481,7 @@ type copiedDirectoryRoute struct {
 	depth     int
 }
 
-const maxArchiveTreeDepth = 256
+const maxArchiveTreeDepth = 64
 
 type pathIdentity struct {
 	device   uint64

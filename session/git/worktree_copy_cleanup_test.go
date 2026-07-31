@@ -28,8 +28,8 @@ func TestCopiedDirectoryRoutesRetainLinearAncestry(t *testing.T) {
 
 func TestCopyTree_PartialFailurePreservesChangedDestination(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
-	require.NoError(t, os.MkdirAll(filepath.Join(src, "a-dir"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(src, "a-dir", "original.txt"), []byte("original"), 0644))
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "a-file"), []byte("original"), 0644))
 	require.NoError(t, syscall.Mkfifo(filepath.Join(src, "z-fifo"), 0600))
 	dest := filepath.Join(t.TempDir(), "dest")
 
@@ -38,19 +38,18 @@ func TestCopyTree_PartialFailurePreservesChangedDestination(t *testing.T) {
 		if !strings.HasSuffix(path, "z-fifo") {
 			return nil
 		}
-		if err := os.Rename(filepath.Join(dest, "a-dir"), filepath.Join(dest, "stranded-copy")); err != nil {
+		if err := os.Rename(filepath.Join(dest, "a-file"), filepath.Join(dest, "stranded-copy")); err != nil {
 			return err
 		}
-		if err := os.Mkdir(filepath.Join(dest, "a-dir"), 0755); err != nil {
-			return err
-		}
-		return os.WriteFile(filepath.Join(dest, "a-dir", "replacement.txt"), []byte("replacement"), 0644)
+		return os.WriteFile(filepath.Join(dest, "a-file"), []byte("replacement"), 0644)
 	}
 	t.Cleanup(func() { copyTreeBeforeSourceOpen = originalHook })
 
 	require.Error(t, copyTree(src, dest))
-	assert.FileExists(t, filepath.Join(dest, "a-dir", "replacement.txt"))
-	assert.FileExists(t, filepath.Join(dest, "stranded-copy", "original.txt"))
+	assert.FileExists(t, filepath.Join(dest, "a-file"))
+	contents, readErr := os.ReadFile(filepath.Join(dest, "stranded-copy"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "original", string(contents))
 }
 
 func TestCopyTree_RejectsDestinationSymlinkReplacement(t *testing.T) {
@@ -75,7 +74,7 @@ func TestCopyTree_RejectsExcessiveDepth(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.Mkdir(src, 0755))
 	current := src
-	for range 257 {
+	for range maxArchiveTreeDepth + 1 {
 		current = filepath.Join(current, "d")
 		require.NoError(t, os.Mkdir(current, 0755))
 	}
