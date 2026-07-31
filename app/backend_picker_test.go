@@ -269,6 +269,42 @@ func TestBackendPickerReasonlessRefusalIsAnError(t *testing.T) {
 		"a broken response contract must not be filed as ordinary user feedback")
 }
 
+// TestBackendPickerUnrecognizedStatusIsAnError is the version-skew half. The
+// picker deliberately renders whatever the daemon lists, which means a status
+// this build does not know is reachable — a newer daemon, a status added
+// server-side. Defaulting an unnameable status to a notice would silently mute
+// whatever it turns out to mean, so the downgrade is gated POSITIVELY on
+// BackendUnavailable: only a precondition we can name as checked-and-failed is
+// user feedback.
+func TestBackendPickerUnrecognizedStatusIsAnError(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(200, 1)
+	info, errorLogs := captureHomeMessageLogs(t)
+	stubBackends(t, daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendLocal, Label: "local", Status: daemon.BackendAvailable},
+			// A wire value from a daemon newer than this build.
+			{Name: config.BackendDocker, Label: "docker",
+				Status: daemon.BackendAvailability("quarantined"),
+				Reason: "docker is quarantined by a policy this client has never heard of"},
+		},
+		Default:       config.BackendLocal,
+		DefaultStatus: daemon.BackendAvailable,
+	}, nil)
+	startNaming(t, h, "skewed-daemon")
+
+	openBackendField(t, h)
+	pickBackend(t, h, "docker")
+
+	assert.Empty(t, h.pendingBackend, "an unrecognized status must not be treated as usable")
+	assert.Contains(t, h.errBox.FullError(), "quarantined",
+		"the daemon's reason is still shown verbatim")
+	assert.Contains(t, errorLogs.String(), "quarantined",
+		"a status this build cannot name must stay visible to ERROR monitoring")
+	assert.Empty(t, info.String(),
+		"only a checked-and-failed precondition may be downgraded to a notice")
+}
+
 // TestBackendPickerOffersWhateverTheDaemonListed is the anti-drift property, and
 // the reason this picker reads the catalog instead of config.SupportedBackends: a
 // backend added server-side must be offered here with no change to app/. The

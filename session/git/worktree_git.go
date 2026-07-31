@@ -42,6 +42,18 @@ const gitWaitDelay = 2 * time.Second
 // A var (not a const) only so tests can shorten it; production never reassigns.
 var localGitTimeout = 60 * time.Second
 
+// SetLocalGitTimeoutForTest shortens localGitTimeout and returns a restore func,
+// so a test OUTSIDE this package can drive a tripped teardown deadline in
+// milliseconds instead of the production 60s. Package-internal tests assign the
+// var directly (see shortenLocalTimeout); this exists for session/, whose
+// archive teardown has to classify a cut-off relocate (git.ErrRelocateStateUnknown)
+// and can only produce one by actually tripping this bound. Test-only.
+func SetLocalGitTimeoutForTest(d time.Duration) func() {
+	prev := localGitTimeout
+	localGitTimeout = d
+	return func() { localGitTimeout = prev }
+}
+
 // runGitCommand executes a local git command and returns any error.
 // Only stdout is returned on success so callers parsing the output (e.g. SHAs
 // or porcelain status) are not corrupted by warnings git emits on stderr.

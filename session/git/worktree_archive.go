@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -48,6 +49,25 @@ func RestoreWorktreePath(repoPath, title, branchName string) (string, error) {
 // worktree intact for the user to salvage manually (#1028).
 var ErrRepoGone = errors.New("origin repository is gone")
 
+// ErrRelocateStateUnknown is joined into a MoveWorktree/RestoreWorktreeTo error
+// when a git step on the relocate path was cut off by its own deadline, so the
+// operation's effect was never established: SIGKILLed mid-move or mid-repair,
+// git may have moved the bytes, updated part of its registration, or neither.
+//
+// It exists because bounding those calls (#1917) created an outcome they could
+// not previously report. session/teardown.go's archive mode says so explicitly:
+// an UNBOUNDED move either moves or answers with an error the daemon rolls the
+// session back to Lost on, so it always returned stateKnown — "if the move is
+// ever bounded, a tripped deadline must return stateUnknown here". Callers that
+// finalize a teardown (clearing tmux refs and the worktree pointer, which is
+// exactly what a retry needs to find intact) must check for this and skip
+// finalization rather than treat the timeout as an ordinary failed move.
+//
+// Only ERRORS carry it. A deadline that trips on the fast path and is then
+// recovered by the manual move + a repair that SUCCEEDS establishes the end
+// state, and that returns nil.
+var ErrRelocateStateUnknown = errors.New("the worktree relocation was cut off by a deadline: its on-disk and registration state is unestablished")
+
 // Every git call on the relocate path below uses runGitLocalCommand, not
 // runGitCommand. Archive and restore are session-TEARDOWN/lifecycle paths held
 // under the daemon's per-session guards, and the runner contract in
@@ -66,9 +86,18 @@ var worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
 }
 
 // worktreeContainsSubmodules identifies the worktree shape that `git worktree
-// move` explicitly does not support. Checking before the move keeps the manual
-// move + repair path a deliberate implementation choice instead of first
-// manufacturing a Git failure for every archive of such a repository.
+// move` explicitly does not support: a worktree with an INITIALIZED submodule.
+// Checking before the move keeps the manual move + repair path a deliberate
+// implementation choice instead of first manufacturing a Git failure for every
+// archive of such a repository.
+//
+// "Declared" is not "initialized", and only the latter blocks the fast path. A
+// worktree that merely records a submodule gitlink it never checked out (any
+// clone without --recursive) still prints a line — `git submodule status` marks
+// an UNINITIALIZED entry with a leading '-'. Treating every line as initialized
+// sent those worktrees down the manual path even though `git worktree move`
+// handles them natively (verified on git 2.43), trading an atomic rename for a
+// byte-move plus a repair that can time out or leave a stale registration.
 //
 // The probe reads an initialized submodule's gitdir, so it inherits exactly the
 // stall it is meant to precede: bounded, a hung mount surfaces a timeout the
@@ -79,7 +108,13 @@ var worktreeContainsSubmodules = func(g *GitWorktree, src string) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(out) != "", nil
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" || strings.HasPrefix(line, "-") {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // worktreeRepair re-links a manually moved worktree's two-way registration
@@ -163,6 +198,14 @@ func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
 // touching its config, so on failure the source is normally left intact and the
 // fallback is safe; the dest-already-moved check covers the rare partial-move
 // case.
+//
+// Because every git step here is bounded, a step can now be SIGKILLed partway
+// through instead of failing or finishing. Any error returned after a tripped
+// deadline is joined with ErrRelocateStateUnknown so a teardown caller can tell
+// "the move failed, roll back" from "we do not know what the move did" — the
+// second must not finalize. A deadline that trips and is then RECOVERED (the
+// fallback moves the bytes and the repair succeeds) establishes the end state
+// and returns nil, so the marker never rides on a success.
 func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 	src := g.worktreePath
 	if g.externalWorktree {
@@ -184,15 +227,39 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		return fmt.Errorf("failed to create destination parent directory for %s: %w", dest, err)
 	}
 
+	// deadlineTripped latches when any bounded step was cut off rather than
+	// answering. It only changes how an ERROR is classified below.
+	deadlineTripped := false
+	noteDeadline := func(err error) error {
+		if errors.Is(err, context.DeadlineExceeded) {
+			deadlineTripped = true
+		}
+		return err
+	}
+	// unknownIfCutOff joins the state marker onto a failure that followed a
+	// tripped deadline. Not applied to the guard failures above: those return
+	// before any git ran, so nothing was left half-done.
+	unknownIfCutOff := func(err error) error {
+		if !deadlineTripped {
+			return err
+		}
+		return errors.Join(err, ErrRelocateStateUnknown)
+	}
+
 	useFallback, inspectErr := worktreeContainsSubmodules(g, src)
 	if inspectErr != nil {
+		// The probe mutates nothing, so a timeout here leaves no partial state of
+		// its own — but it still latches, because a probe that could not read the
+		// worktree means the steps below are running against the same stalled
+		// filesystem and their own outcome is that much less certain.
+		noteDeadline(inspectErr)
 		log.InfoLog.Printf(
 			"could not inspect worktree %s for submodules (%v); trying git worktree move",
 			src, inspectErr,
 		)
 	}
 	if !useFallback {
-		if err := worktreeMoveFast(g, src, dest); err != nil {
+		if err := noteDeadline(worktreeMoveFast(g, src, dest)); err != nil {
 			// The fallback is the designed recovery for cross-device moves and
 			// other fast-path limitations. Record why it was selected without
 			// reporting a failed archive; actual fallback/repair failures return
@@ -215,7 +282,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 			if mErr := moveDirCrossDevice(src, dest); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
-					return fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr)
+					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))
 				}
 				sourceCleanupErr = mErr
 				sourceCleanupPath = copiedErr.src
@@ -231,13 +298,13 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		// archive move-failure path (#1028 PR 3) marks the instance Lost and
 		// relies on a consistent worktree location.
 		g.setWorktreeLocation(dest)
-		if rErr := worktreeRepair(g, dest); rErr != nil {
+		if rErr := noteDeadline(worktreeRepair(g, dest)); rErr != nil {
 			if sourceCleanupErr != nil {
-				return fmt.Errorf("copied worktree to %s but failed to remove original %s and failed to repair its git registration: %v: %w", dest, sourceCleanupPath, rErr, sourceCleanupErr)
+				return unknownIfCutOff(fmt.Errorf("copied worktree to %s but failed to remove original %s and failed to repair its git registration: %v: %w", dest, sourceCleanupPath, rErr, sourceCleanupErr))
 			}
-			return fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr)
+			return unknownIfCutOff(fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr))
 		}
-		if sErr := worktreeRepairSubmodules(g, dest); sErr != nil {
+		if sErr := noteDeadline(worktreeRepairSubmodules(g, dest)); sErr != nil {
 			log.WarningLog.Printf(
 				"submodule gitdir repair failed after moving worktree to %s; "+
 					"run `%s` "+

@@ -464,12 +464,23 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 			_ = m.beforeMove()
 		}
 	}
-	// stateKnown either way: MoveWorktree runs on the UNBOUNDED local-git runner,
-	// so it cannot report an unknown — it either moves or answers with an error the
-	// daemon rolls the session back to Lost on, and that rollback (which needs
-	// finalize to have run) is the pre-#1917 contract. If the move is ever bounded,
-	// a tripped deadline must return stateUnknown here.
-	return stateKnown, gw.MoveWorktree(m.dest)
+	// The move is now BOUNDED, which is the case this comment used to reserve:
+	// "if the move is ever bounded, a tripped deadline must return stateUnknown
+	// here". A git SIGKILLed mid-move or mid-repair may have moved the bytes,
+	// written part of its registration, or neither — so finalize must not run,
+	// because it clears the tmux refs and worktree pointer a recovery needs to
+	// find intact, and the daemon would drop the record on a half-done relocate.
+	//
+	// Every other outcome keeps the pre-#1917 contract: an ordinary move failure
+	// still reports stateKnown so the daemon's rollback to Lost (which requires
+	// finalize to have run) fires as before.
+	if err := gw.MoveWorktree(m.dest); err != nil {
+		if errors.Is(err, git.ErrRelocateStateUnknown) {
+			return stateUnknown, fmt.Errorf("archive %q: %w", title, err)
+		}
+		return stateKnown, err
+	}
+	return stateKnown, nil
 }
 
 func (teardownArchive) clearsStarted() bool { return false }

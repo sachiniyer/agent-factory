@@ -264,10 +264,16 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		//     reading or parsing the in-repo config failed. daemon/backends.go keeps
 		//     that distinct from "unavailable" precisely so a client does not report
 		//     an I/O failure as a settled no.
+		//
+		// So the notice is gated on BackendUnavailable POSITIVELY, not on "anything
+		// that isn't unknown". A wire value this build does not recognize — a
+		// version-skewed daemon, a status added server-side — is another broken
+		// response, and defaulting it to a notice would silently mute whatever a
+		// future status means. Downgrade only what we can name.
 		if choice.reason == "" {
 			return m, m.handleError(fmt.Errorf("backend %q is not usable for this repo, and the daemon gave no reason", choice.label))
 		}
-		if choice.status == daemon.BackendUnknown {
+		if choice.status != daemon.BackendUnavailable {
 			return m, m.handleError(errors.New(choice.reason))
 		}
 		return m, m.handleNotice(errors.New(choice.reason))
