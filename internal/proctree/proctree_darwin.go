@@ -73,10 +73,23 @@ const szomb = 5
 // readProc reads one process's kinfo_proc. Returns an error when the pid names
 // no live process, which is what makes it usable as an identity check.
 func readProc(pid int) (Process, error) {
-	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	// The singular x/sys wrapper maps every response whose length differs from
+	// one kinfo_proc to EIO. For an exact PID that has exited, Darwin returns a
+	// successful zero-length response, so that wrapper erases authoritative
+	// absence into an undifferentiated error. The slice wrapper preserves the
+	// empty result while still surfacing actual sysctl failures and malformed
+	// response sizes.
+	kps, err := unix.SysctlKinfoProcSlice("kern.proc.pid", pid)
 	if err != nil {
 		return Process{}, err
 	}
+	if len(kps) == 0 {
+		return Process{}, ErrProcessExited
+	}
+	if len(kps) != 1 {
+		return Process{}, fmt.Errorf("kern.proc.pid returned %d entries for pid %d", len(kps), pid)
+	}
+	kp := &kps[0]
 	// kern.proc.pid answers for zombies too, with ppid, session and start time
 	// all intact — so without this the identity check matches a process that
 	// has already exited. Same defect as the Linux state field, same fix

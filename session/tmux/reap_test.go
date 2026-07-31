@@ -244,6 +244,18 @@ func TestCleanupSessionsFailsClosedOnUnownedProcessForVanishedSession(t *testing
 		"a process with unknown home ownership must be left alone")
 }
 
+func TestAddOrReplaceOrphanCandidateReplacesRecycledPID(t *testing.T) {
+	stale := proctree.Process{PID: 42, StartID: 100}
+	current := proctree.Process{PID: 42, StartID: 200}
+	candidates := []proctree.Process{stale}
+	byPID := map[int]int{stale.PID: 0}
+
+	candidates = addOrReplaceOrphanCandidate(candidates, byPID, current)
+
+	require.Equal(t, []proctree.Process{current}, candidates,
+		"a current marked process must replace a stale identity that reused its PID")
+}
+
 func spawnMarkedSessionWithEscapee(t *testing.T, name, home string) proctree.Process {
 	t.Helper()
 	dir := t.TempDir()

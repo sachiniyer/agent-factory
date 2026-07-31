@@ -246,13 +246,10 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string) 
 	if err != nil {
 		return captured, fmt.Errorf("cannot refresh processes after tmux session %s vanished: %w", sanitizedName, err)
 	}
-	seen := make(map[int]bool, len(captured))
+	byPID := make(map[int]int, len(captured))
 	refreshed := make([]proctree.Process, 0, len(captured))
 	add := func(process proctree.Process) {
-		if !seen[process.PID] {
-			seen[process.PID] = true
-			refreshed = append(refreshed, process)
-		}
+		refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process)
 	}
 	for _, process := range captured {
 		add(process)
@@ -276,6 +273,21 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string) 
 		}
 	}
 	return refreshed, nil
+}
+
+// addOrReplaceOrphanCandidate deduplicates by PID without confusing a PID
+// slot with a process identity. A current snapshot or marker scan must replace
+// an older entry when the same PID now carries another StartID; otherwise the
+// stale identity would be rejected later while the replacement escaped review.
+func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]int, process proctree.Process) []proctree.Process {
+	if index, exists := byPID[process.PID]; exists {
+		if candidates[index].StartID != process.StartID {
+			candidates[index] = process
+		}
+		return candidates
+	}
+	byPID[process.PID] = len(candidates)
+	return append(candidates, process)
 }
 
 func processEnvValue(environ []string, name string) (string, bool) {
