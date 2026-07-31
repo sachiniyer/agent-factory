@@ -269,9 +269,6 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // survive verbatim.
 func moveDirCrossDevice(src, dest string) (returnErr error) {
 	renameErr := renamePath(src, dest)
-	if isAtomicNoReplaceUnsupported(renameErr) {
-		renameErr = renamePathNoReplaceCompat(src, dest)
-	}
 	if renameErr == nil {
 		return nil
 	} else if !errors.Is(renameErr, syscall.EXDEV) {
@@ -296,8 +293,9 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 		if published {
 			return
 		}
+		stagingManifest := destinationCleanupManifest(copied.root)
 		if cleanupErr := removeDirectoryTree(
-			copied.destinationParent, stagingName, stagingPath, copied.destination, nil,
+			copied.destinationParent, stagingName, stagingPath, copied.destination, &stagingManifest,
 		); cleanupErr != nil {
 			returnErr = errors.Join(returnErr, fmt.Errorf("failed to clean private staging tree %s: %w", stagingPath, cleanupErr))
 		}

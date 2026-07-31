@@ -3,6 +3,7 @@ package git
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -1071,6 +1072,44 @@ func TestMoveDirCrossDevice_PrePublicationFailureCleansPrivateStaging(t *testing
 	assert.FileExists(t, filepath.Join(src, "original.txt"), "failed move must leave source intact")
 }
 
+func TestMoveDirCrossDevice_ChangedStagingDescendantIsNotDeleted(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "original.txt"), []byte("original"), 0644))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeSourceCommit
+	var stagingPath, strandedCopy string
+	moveDirBeforeSourceCommit = func(string) error {
+		entries, err := os.ReadDir(destinationParent)
+		if err != nil || len(entries) != 1 {
+			return fmt.Errorf("locate staging directory: entries=%d: %w", len(entries), err)
+		}
+		stagingPath = filepath.Join(destinationParent, entries[0].Name())
+		strandedCopy = filepath.Join(stagingPath, "stranded-copy")
+		if err := os.Rename(filepath.Join(stagingPath, "sub"), strandedCopy); err != nil {
+			return err
+		}
+		if err := os.Mkdir(filepath.Join(stagingPath, "sub"), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(stagingPath, "sub", "replacement.txt"), []byte("replacement"), 0644); err != nil {
+			return err
+		}
+		return errors.New("forced failure after staging replacement")
+	}
+	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
+
+	require.Error(t, moveDirCrossDevice(src, dest))
+	assert.FileExists(t, filepath.Join(stagingPath, "sub", "replacement.txt"))
+	assert.FileExists(t, filepath.Join(strandedCopy, "original.txt"))
+	assert.FileExists(t, filepath.Join(src, "sub", "original.txt"))
+}
+
 func TestMoveDirCrossDevice_SourceCleanupParentReplacementIsUnverified(t *testing.T) {
 	root := t.TempDir()
 	sourceParent := filepath.Join(root, "source-parent")
@@ -1225,11 +1264,10 @@ func TestMoveDirCrossDevice_BoundsDescriptorsAcrossDeepTree(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dest, strings.Repeat("d/", 24), "tracked.txt"))
 }
 
-// TestMoveDirCrossDevice_UnsupportedNoReplaceUsesCompatibility preserves
-// archive support when the kernel/filesystem cannot provide renameat2 with
-// RENAME_NOREPLACE. The fallback must remain no-clobber and complete a normal
-// directory move rather than returning ENOSYS to the caller.
-func TestMoveDirCrossDevice_UnsupportedNoReplaceUsesCompatibility(t *testing.T) {
+// TestMoveDirCrossDevice_UnsupportedNoReplaceFailsClosed requires an explicit,
+// prompt error when the platform cannot provide an atomic no-replace rename.
+// Reservation and link/unlink emulations have unavoidable replacement races.
+func TestMoveDirCrossDevice_UnsupportedNoReplaceFailsClosed(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.Mkdir(src, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))
@@ -1239,23 +1277,10 @@ func TestMoveDirCrossDevice_UnsupportedNoReplaceUsesCompatibility(t *testing.T) 
 	renamePath = func(_, _ string) error { return unix.ENOSYS }
 	t.Cleanup(func() { renamePath = originalRename })
 
-	require.NoError(t, moveDirCrossDevice(src, dest))
-	assert.FileExists(t, filepath.Join(dest, "tracked.txt"))
-	assert.NoDirExists(t, src)
-
-	sourceWithOccupiedDest := filepath.Join(t.TempDir(), "source-with-occupied-dest")
-	require.NoError(t, os.Mkdir(sourceWithOccupiedDest, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(sourceWithOccupiedDest, "source.txt"), []byte("source"), 0644))
-	occupiedDest := filepath.Join(t.TempDir(), "occupied-dest")
-	require.NoError(t, os.Mkdir(occupiedDest, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(occupiedDest, "keep.txt"), []byte("keep"), 0644))
-
-	err := moveDirCrossDevice(sourceWithOccupiedDest, occupiedDest)
-	require.Error(t, err, "compatibility fallback must preserve no-clobber semantics")
-	assert.FileExists(t, filepath.Join(sourceWithOccupiedDest, "source.txt"))
-	kept, readErr := os.ReadFile(filepath.Join(occupiedDest, "keep.txt"))
-	require.NoError(t, readErr)
-	assert.Equal(t, "keep", string(kept))
+	err := moveDirCrossDevice(src, dest)
+	require.ErrorIs(t, err, unix.ENOSYS)
+	assert.FileExists(t, filepath.Join(src, "tracked.txt"), "unsupported atomic rename must preserve source")
+	assert.NoDirExists(t, dest, "unsupported atomic rename must not create destination")
 }
 
 // TestMoveDirCrossDevice_LongLeafFitsPrivateNames covers a valid 239-byte leaf,
