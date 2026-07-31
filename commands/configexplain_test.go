@@ -75,6 +75,7 @@ func runConfigListForTest(t *testing.T) (string, error) {
 
 func TestConfigGetExplainKeepsBareGlobalContract(t *testing.T) {
 	_, _ = setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
+	t.Chdir(t.TempDir())
 
 	setConfigGetReadFlags(t, "", false, false)
 	bare, err := runConfigGetForTest(t, "default_program")
@@ -274,6 +275,7 @@ codex = "/global/codex"
 func TestConfigListProjectIncludesRepoOnlyKeysButBareListDoesNot(t *testing.T) {
 	_, repoRoot := setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
 	writeCommandTestInRepoConfig(t, repoRoot, "backend = \"docker\"\n[docker]\nimage = \"af-test\"\n")
+	t.Chdir(t.TempDir())
 
 	setConfigListReadFlags(t, "", false, false)
 	globalOutput, err := runConfigListForTest(t)
