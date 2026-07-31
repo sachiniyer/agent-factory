@@ -332,10 +332,20 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 // id. The caller reserves key under v.mu before entering; process waits happen
 // without the supervisor-wide mutex so unrelated editor operations stay live.
 func (v *vscodeSupervisor) stopPersistedForInstance(key, instanceID string) error {
+	_, err := v.reconcilePersistedForInstance(key, instanceID)
+	return err
+}
+
+// reconcilePersistedForInstance additionally reports whether an owner for the
+// exact stable instance was found. Callers recovering from an in-memory UNKNOWN
+// may treat a matching, conclusively cleaned durable owner as the stronger
+// result; a clean scan that found nothing is not evidence of cleanup.
+func (v *vscodeSupervisor) reconcilePersistedForInstance(key, instanceID string) (bool, error) {
 	paths, err := persistedVSCodeOwners(key)
 	if err != nil {
-		return err
+		return false, err
 	}
+	matched := false
 	var errs []error
 	for _, path := range paths {
 		owner, err := readVSCodeOwner(path)
@@ -346,6 +356,7 @@ func (v *vscodeSupervisor) stopPersistedForInstance(key, instanceID string) erro
 		if owner.Key != key || owner.InstanceID != instanceID {
 			continue
 		}
+		matched = true
 		if err := v.stopPersistedOwner(owner); err != nil {
 			errs = append(errs, err)
 			continue
@@ -354,7 +365,7 @@ func (v *vscodeSupervisor) stopPersistedForInstance(key, instanceID string) erro
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	return matched, errors.Join(errs...)
 }
 
 func removePersistedVSCodeOwner(path string) error {

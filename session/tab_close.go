@@ -47,6 +47,32 @@ func (i *Instance) CloseTabByID(tabID string) error {
 	return i.closeRemovedTab(tab)
 }
 
+// RestoreClosedVSCodeTab reinserts the exact metadata-only tab removed by a
+// CloseTabByID whose final editor sweep stayed unknown. VS Code tabs own no tmux
+// process or PTY, so restoring the roster entry restores the durable retry
+// handle without reviving anything already torn down. The daemon holds its
+// per-instance operation lock across close and rollback; this lock still guards
+// the slice for readers and rejects any inconsistent insertion.
+func (i *Instance) RestoreClosedVSCodeTab(tab *Tab, idx int) error {
+	if tab == nil || tab.Kind != TabKindVSCode || tab.tmux != nil {
+		return fmt.Errorf("only a metadata-only VS Code tab can be restored after close")
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if idx <= 0 || idx > len(i.Tabs) {
+		return fmt.Errorf("cannot restore VS Code tab %q at index %d", tab.Name, idx)
+	}
+	for _, current := range i.Tabs {
+		if current.ID == tab.ID || current.Name == tab.Name {
+			return fmt.Errorf("cannot restore VS Code tab %q: its identity or name is already present", tab.Name)
+		}
+	}
+	i.Tabs = append(i.Tabs, nil)
+	copy(i.Tabs[idx+1:], i.Tabs[idx:])
+	i.Tabs[idx] = tab
+	return nil
+}
+
 // removeTabLocked detaches idx from the roster and returns the exact tab object
 // whose stream/process teardown must continue after i.mu is released.
 func (i *Instance) removeTabLocked(idx int) *Tab {

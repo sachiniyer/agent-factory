@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -263,6 +264,7 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	closedTab := tabs[idx]
 
 	var vscodeKey string
 	if lastVSCode {
@@ -285,7 +287,11 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	// editor; a restart restores the old tab and lazily starts a new one.
 	if lastVSCode {
 		if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
-			return "", fmt.Errorf("closed the VS Code tab in memory but could not confirm final editor teardown; the durable tab record was retained for retry: %w", err)
+			stopErr := fmt.Errorf("could not confirm final editor teardown after closing the VS Code tab: %w", err)
+			if restoreErr := instance.RestoreClosedVSCodeTab(closedTab, idx); restoreErr != nil {
+				return "", errors.Join(stopErr, fmt.Errorf("restoring the VS Code retry tab: %w", restoreErr))
+			}
+			return "", fmt.Errorf("restored the VS Code tab because final editor teardown stayed unknown: %w", stopErr)
 		}
 	}
 

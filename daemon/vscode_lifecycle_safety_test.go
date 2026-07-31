@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
 func TestVSCodeServer_ReaperRetainsOwnerUntilGroupExitConfirmed(t *testing.T) {
@@ -145,5 +147,56 @@ func TestVSCodeSupervisor_StopWaitsForReservedReconciliation(t *testing.T) {
 	}
 	if returnedEarly {
 		t.Fatal("Stop scanned persisted owners before an active per-key reconciliation drained")
+	}
+}
+
+func TestStopForInstance_RetriesDurableOwnerAfterCachedReapError(t *testing.T) {
+	shortAFHome(t)
+	const (
+		key        = "cached-reap-error"
+		instanceID = "instance-1"
+	)
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting reaped leader fixture: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("waiting for reaped leader fixture: %v", err)
+	}
+	bootID, err := proctree.BootID()
+	if err != nil {
+		t.Fatalf("BootID: %v", err)
+	}
+	pidNamespace, err := proctree.PIDNamespaceID()
+	if err != nil {
+		t.Fatalf("PIDNamespaceID: %v", err)
+	}
+	socketPath, err := vscodeSocketPath(key)
+	if err != nil {
+		t.Fatalf("vscodeSocketPath: %v", err)
+	}
+	ownerPath := vscodeOwnerPath(socketPath)
+	if err := writeVSCodeOwner(ownerPath, vscodeOwnerRecord{
+		Key: key, InstanceID: instanceID, PID: cmd.Process.Pid, StartID: 1,
+		BootID: bootID, PIDNamespace: pidNamespace, ProcessNonce: "nonce",
+	}); err != nil {
+		t.Fatalf("writing retained owner fixture: %v", err)
+	}
+
+	exited := make(chan struct{})
+	close(exited)
+	v := newVSCodeSupervisor()
+	v.groupAlive = func(int) (bool, error) { return false, nil }
+	v.servers[key] = &vscodeServer{
+		instanceID: instanceID, cmd: cmd, exited: exited,
+		reapErr: errors.New("cached group cleanup unknown"),
+	}
+
+	if err := v.stopForInstance(key, instanceID); err != nil {
+		t.Fatalf("stopForInstance kept replaying a cached reap error after its matching durable owner became conclusively clean: %v", err)
+	}
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("matching durable owner survived successful retry: %v", err)
 	}
 }
