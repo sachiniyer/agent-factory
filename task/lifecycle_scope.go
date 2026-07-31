@@ -26,6 +26,11 @@ func LoadTasksForRepoID(repoID string) ([]Task, error) {
 // projections whose legacy ProjectPath bindings this load durably backfilled.
 // Daemon callers publish those commits so push-only clients cannot retain a
 // different dynamic scope after the server has made RepoID authoritative.
+//
+// The backfill commits before scope exclusion, so a scope error is a PARTIAL
+// success: updates are returned WITH that error and are already durable on
+// disk. Callers must publish them before propagating — the error branch is the
+// one path where nothing else will ever republish them.
 func LoadTasksForRepoIDWithBindingUpdates(repoID string) ([]Task, []Task, error) {
 	all, unresolved, updated, err := loadTasksWithStableRepoBindings()
 	if err != nil {

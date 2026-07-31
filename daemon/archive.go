@@ -53,11 +53,16 @@ func (m *Manager) enabledTasksTargetingSession(repoID, title string) ([]task.Tas
 // with many sessions do not repeat tasks x path-resolution work.
 func (m *Manager) loadEnabledTaskTargets(repoID string) (map[string][]task.Task, error) {
 	tasks, bindingUpdates, err := loadTasksForRepoID(repoID)
-	if err != nil {
-		return nil, err
-	}
+	// Publish BEFORE propagating: the load returns backfilled bindings alongside
+	// a scope error (task.LoadTasksForRepoIDWithBindingUpdates), and those rows
+	// were already committed durably. Dropping them on the error branch is not a
+	// no-op — nothing re-publishes them, so a push-only client keeps a stale
+	// repository scope for a projection the server has made authoritative.
 	for _, updated := range bindingUpdates {
 		m.publishEvent(agentproto.EventTaskUpdated, updated)
+	}
+	if err != nil {
+		return nil, err
 	}
 	targets := make(map[string][]task.Task)
 	for _, t := range tasks {

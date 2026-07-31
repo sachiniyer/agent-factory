@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,47 @@ drained:
 	require.Equal(t, legacy.ID, bound.ID)
 	require.Equal(t, repoID, bound.RepoID)
 	require.Equal(t, agentproto.EventSessionArchived, got[1].Type)
+}
+
+// TestArchiveSession_PublishesBindingBackfillBeforeScopeRefusal covers the
+// partial-success load: one legacy row's binding is durably committed, then a
+// second enabled targeted row with an unresolvable path leaves the scope decision
+// unknown. That commit already happened, so its projection must still reach
+// push-only clients before the error propagates — otherwise they keep a stale
+// repository scope for a row the server has already made authoritative, and no
+// later event corrects it.
+func TestArchiveSession_PublishesBindingBackfillBeforeScopeRefusal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+	resolvable := archiveTargetTask("legacy04", "Legacy Binding", repoPath, "captain", true)
+	unresolvable := archiveTargetTask("legacy05", "Unknown Binding", filepath.Join(t.TempDir(), "missing"), "worker", true)
+	raw, err := json.Marshal([]task.Task{resolvable, unresolvable})
+	require.NoError(t, err)
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, raw, 0o600))
+	_, events := manager.events.subscribe()
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err, "an unresolvable enabled legacy binding leaves the blocker set unknown")
+	assert.Contains(t, err.Error(), "could not determine")
+
+	var got []agentproto.Event
+	for {
+		select {
+		case event := <-events:
+			got = append(got, event)
+		default:
+			goto drained
+		}
+	}
+drained:
+	require.Len(t, got, 1, "the durably committed binding must publish even though the load then refused")
+	require.Equal(t, agentproto.EventTaskUpdated, got[0].Type)
+	var bound task.Task
+	require.NoError(t, json.Unmarshal(got[0].Data, &bound))
+	assert.Equal(t, resolvable.ID, bound.ID)
+	assert.Equal(t, repoID, bound.RepoID, "the published projection carries the committed identity")
 }
 
 // TestArchiveSession_TaskStoreReadFailureLeavesSessionIntact preserves the
