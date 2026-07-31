@@ -302,7 +302,7 @@ Behavior and guarantees:
 - **Strictly opt-in and global-only.** Nothing gets a root agent unless you add it here, in *your* `~/.agent-factory/config.toml`. The key is rejected in in-repo configs, so cloning a repository can never opt your machine into an always-on agent.
 - **Adopt, never clobber.** If a session titled `root` already exists and is alive — however it was created — the daemon leaves it completely alone. Only a `root` whose tmux has died (status `Dead`) or that is missing entirely is (re-)created.
 - **The name `root` is reserved.** Normal session creation (TUI, `af sessions create`, the API, task spawns) rejects the title `root` (case-insensitively); auto-derived titles skip it.
-- **An explicit kill is respected.** If you kill the `root` session (TUI `D`, `af sessions kill root`), the daemon does not resurrect it until the next daemon restart, at which point the configured state is re-asserted.
+- **An explicit kill gets a grace window.** If you kill the `root` session (TUI `D`, `af sessions kill root`), the daemon honors the stop for about 2 minutes, then re-creates it while configuration still enables it. To keep it down, remove the repository from `root_agents` or set its personal per-project `[root_agent]` to `enabled = false`, then restart the daemon to apply that configuration change.
 - **Failures back off but never give up.** If ensuring a root repeatedly fails (e.g. the configured path is not a git repository, or the tmux server is temporarily unusable), the daemon retries with exponential backoff that settles at one attempt every 5 minutes, logging each outcome to the application log (with an escalation to ERROR after 6 consecutive failures). The first attempt after the cause clears heals the root — no daemon restart needed.
 - Changes to `root_agents` are picked up on the next **daemon restart**.
 
@@ -332,7 +332,7 @@ Semantics:
 - **Precedence (low → high): built-in `enabled=false` < global `[root_agent]` < legacy `root_agents[path]` < personal per-project `[root_agent]`.** Layers merge **by field**: a higher layer overrides `enabled` only if it set it (an explicit `false` counts) and `program` only if non-empty. So a personal `enabled = false` can disable a root that the global default — or a legacy `root_agents` entry — turned on.
 - **The global default reaches registered projects only.** It never scans disk for repositories; a project must be registered (`af projects add`) to receive it. Legacy `root_agents` entries keep working unchanged and forever.
 - **Hand-edited for now.** Like `[theme]`, `[root_agent]` is not writable with `af config set` yet (`af config get root_agent` reads it); editing through the CLI/TUI lands in a later phase. Edit the file (or use the config assistant) directly.
-- **Restart-to-apply**, exactly like `root_agents`: changes take effect on the next daemon start. All the always-ensure guarantees above (adopt-never-clobber, reserved name, kill respected, back-off-but-never-give-up) apply identically to a root the singleton enables.
+- **Restart-to-apply**, exactly like `root_agents`: changes take effect on the next daemon start. All the always-ensure guarantees above (adopt-never-clobber, reserved name, temporary kill grace window, back-off-but-never-give-up) apply identically to a root the singleton enables.
 
 ### Usage-limit auto-resume
 

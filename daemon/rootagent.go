@@ -25,7 +25,7 @@ import (
 // Dead — whatever program it runs and however it was created — is left
 // completely alone. Only a Dead root (tmux vanished) or a missing one
 // triggers a (re-)create, and an explicit KillSession of the root suppresses
-// re-creation until the daemon restarts (see Manager.KillSession).
+// re-creation only for rootKillHealDelay before configured state wins (#1223).
 
 // rootDangerouslySkipPermissionsFlag is ensured on the default root-agent
 // program: the root agent exists to act autonomously (issue #1106's
