@@ -435,18 +435,6 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)}
 }
 
-// taskRepoIDForValidation mirrors task.AddTaskChecked's bind-time identity
-// derivation outside the tasks-file lock. A second resolution inside the task
-// package remains authoritative; any mismatch matters only for reserved-root
-// reachability and is rejected as indeterminate by the final validator.
-func taskRepoIDForValidation(projectPath string) string {
-	repo, err := config.RepoFromPath(projectPath)
-	if err != nil {
-		return ""
-	}
-	return repo.ID
-}
-
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
