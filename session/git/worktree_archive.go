@@ -474,8 +474,10 @@ type copiedEntry struct {
 }
 
 type copiedDirectoryRoute struct {
-	components []copiedEntry
-	directory  *copiedDirectory
+	parent    int
+	entry     copiedEntry
+	directory *copiedDirectory
+	depth     int
 }
 
 type pathIdentity struct {
@@ -635,32 +637,32 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 
 func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) (copiedDirectory, error) {
 	root := copiedDirectory{}
-	queue := []copiedDirectoryRoute{{directory: &root}}
-	for len(queue) > 0 {
-		job := queue[0]
-		queue = queue[1:]
-		sourceDirectory, err := openDirectoryRoute(source, sourcePath, job.components, true)
+	routes := []copiedDirectoryRoute{{parent: -1, directory: &root}}
+	for index := 0; index < len(routes); index++ {
+		job := routes[index]
+		components := copiedDirectoryRouteComponents(routes, index)
+		sourceDirectory, err := openDirectoryRoute(source, sourcePath, components, true)
 		if err != nil {
 			return copiedDirectory{}, err
 		}
-		destinationDirectory, err := openDirectoryRoute(destination, destinationPath, job.components, false)
+		destinationDirectory, err := openDirectoryRoute(destination, destinationPath, components, false)
 		if err != nil {
 			_ = sourceDirectory.Close()
 			return copiedDirectory{}, err
 		}
-		children, err := copyDirectoryLevel(
+		err = copyDirectoryLevel(
 			sourceDirectory,
 			destinationDirectory,
-			directoryRoutePath(sourcePath, job.components),
-			directoryRoutePath(destinationPath, job.components),
-			job,
+			directoryRoutePath(sourcePath, components),
+			directoryRoutePath(destinationPath, components),
+			job.directory,
 		)
 		_ = destinationDirectory.Close()
 		_ = sourceDirectory.Close()
 		if err != nil {
 			return copiedDirectory{}, err
 		}
-		queue = append(queue, children...)
+		routes = appendCopiedDirectoryChildren(routes, index)
 	}
 	return root, nil
 }
@@ -668,24 +670,23 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 func copyDirectoryLevel(
 	source, destination *os.File,
 	sourcePath, destinationPath string,
-	job copiedDirectoryRoute,
-) ([]copiedDirectoryRoute, error) {
+	directory *copiedDirectory,
+) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
-		return nil, fmt.Errorf("cannot move worktree across filesystems: failed to enumerate source directory %s: %w", sourcePath, err)
+		return fmt.Errorf("cannot move worktree across filesystems: failed to enumerate source directory %s: %w", sourcePath, err)
 	}
 	sort.Strings(names)
-	job.directory.entries = make([]copiedEntry, 0, len(names))
-	children := make([]copiedDirectoryRoute, 0)
+	directory.entries = make([]copiedEntry, 0, len(names))
 	for _, name := range names {
 		childSourcePath := filepath.Join(sourcePath, name)
 		childDestinationPath := filepath.Join(destinationPath, name)
 		if err := copyTreeBeforeSourceOpen(childSourcePath); err != nil {
-			return nil, err
+			return err
 		}
 		stat, err := statAt(source, name)
 		if err != nil {
-			return nil, fmt.Errorf("cannot move worktree across filesystems: failed to inspect source entry %s: %w", childSourcePath, err)
+			return fmt.Errorf("cannot move worktree across filesystems: failed to inspect source entry %s: %w", childSourcePath, err)
 		}
 		inspected := identityFromStat(stat)
 
@@ -701,16 +702,11 @@ func copyDirectoryLevel(
 			err = unsupportedSourceTypeError(childSourcePath, uint32(stat.Mode))
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
-		job.directory.entries = append(job.directory.entries, entry)
-		if entry.directory != nil {
-			components := append([]copiedEntry(nil), job.components...)
-			components = append(components, entry)
-			children = append(children, copiedDirectoryRoute{components: components, directory: entry.directory})
-		}
+		directory.entries = append(directory.entries, entry)
 	}
-	return children, nil
+	return nil
 }
 
 func copyDirectoryEntry(

@@ -133,11 +133,10 @@ func removeEmptyDirectoryAt(parent *os.File, name, path string) error {
 
 func validateCopiedTree(root *os.File, expected copiedDirectory, source bool, path string) error {
 	rootDirectory := expected
-	queue := []copiedDirectoryRoute{{directory: &rootDirectory}}
-	for len(queue) > 0 {
-		job := queue[0]
-		queue = queue[1:]
-		directory, err := openDirectoryRoute(root, path, job.components, source)
+	routes := copiedDirectoryRoutes(&rootDirectory)
+	for index, job := range routes {
+		components := copiedDirectoryRouteComponents(routes, index)
+		directory, err := openDirectoryRoute(root, path, components, source)
 		if err != nil {
 			return err
 		}
@@ -145,19 +144,11 @@ func validateCopiedTree(root *os.File, expected copiedDirectory, source bool, pa
 			directory,
 			*job.directory,
 			source,
-			directoryRoutePath(path, job.components),
+			directoryRoutePath(path, components),
 		)
 		_ = directory.Close()
 		if err != nil {
 			return err
-		}
-		for _, entry := range job.directory.entries {
-			if entry.directory == nil {
-				continue
-			}
-			components := append([]copiedEntry(nil), job.components...)
-			components = append(components, entry)
-			queue = append(queue, copiedDirectoryRoute{components: components, directory: entry.directory})
 		}
 	}
 	return nil
@@ -315,15 +306,15 @@ func recheckCleanupRoot(
 
 func snapshotCopiedTree(root *os.File, path string) (copiedDirectory, error) {
 	manifest := copiedDirectory{}
-	queue := []copiedDirectoryRoute{{directory: &manifest}}
-	for len(queue) > 0 {
-		job := queue[0]
-		queue = queue[1:]
-		directory, err := openDirectoryRoute(root, path, job.components, true)
+	routes := []copiedDirectoryRoute{{parent: -1, directory: &manifest}}
+	for index := 0; index < len(routes); index++ {
+		job := routes[index]
+		components := copiedDirectoryRouteComponents(routes, index)
+		directory, err := openDirectoryRoute(root, path, components, true)
 		if err != nil {
 			return copiedDirectory{}, err
 		}
-		names, err := directoryNames(directory, directoryRoutePath(path, job.components))
+		names, err := directoryNames(directory, directoryRoutePath(path, components))
 		if err != nil {
 			_ = directory.Close()
 			return copiedDirectory{}, err
@@ -341,40 +332,24 @@ func snapshotCopiedTree(root *os.File, path string) (copiedDirectory, error) {
 				entry.directory = &child
 			}
 			job.directory.entries = append(job.directory.entries, entry)
-			if entry.directory != nil {
-				components := append([]copiedEntry(nil), job.components...)
-				components = append(components, entry)
-				queue = append(queue, copiedDirectoryRoute{components: components, directory: entry.directory})
-			}
 		}
 		_ = directory.Close()
+		routes = appendCopiedDirectoryChildren(routes, index)
 	}
 	return manifest, nil
 }
 
 func removeCopiedTree(root *os.File, path string, manifest copiedDirectory, protectUnexpected bool) error {
 	rootManifest := manifest
-	routes := []copiedDirectoryRoute{{directory: &rootManifest}}
-	for index := 0; index < len(routes); index++ {
-		job := routes[index]
-		for _, entry := range job.directory.entries {
-			if entry.directory == nil {
-				continue
-			}
-			components := append([]copiedEntry(nil), job.components...)
-			components = append(components, entry)
-			routes = append(routes, copiedDirectoryRoute{components: components, directory: entry.directory})
-		}
-	}
-	sort.SliceStable(routes, func(left, right int) bool {
-		return len(routes[left].components) > len(routes[right].components)
-	})
-	for _, route := range routes {
-		directory, err := openDirectoryRoute(root, path, route.components, true)
+	routes := copiedDirectoryRoutes(&rootManifest)
+	for index := len(routes) - 1; index >= 0; index-- {
+		route := routes[index]
+		components := copiedDirectoryRouteComponents(routes, index)
+		directory, err := openDirectoryRoute(root, path, components, true)
 		if err != nil {
 			return changedCleanupError(protectUnexpected, "failed to reopen copied source tree: %v", err)
 		}
-		directoryPath := directoryRoutePath(path, route.components)
+		directoryPath := directoryRoutePath(path, components)
 		for _, entry := range route.directory.entries {
 			if entry.directory != nil {
 				continue
@@ -396,22 +371,61 @@ func removeCopiedTree(root *os.File, path string, manifest copiedDirectory, prot
 				directoryPath,
 			)
 		}
-		if len(route.components) == 0 {
+		if route.parent < 0 {
 			continue
 		}
-		parentComponents := route.components[:len(route.components)-1]
-		entry := route.components[len(route.components)-1]
+		parentComponents := copiedDirectoryRouteComponents(routes, route.parent)
 		parent, err := openDirectoryRoute(root, path, parentComponents, true)
 		if err != nil {
 			return changedCleanupError(protectUnexpected, "failed to reopen copied source parent: %v", err)
 		}
-		err = removeCopiedEntry(parent, directoryRoutePath(path, parentComponents), entry, protectUnexpected)
+		err = removeCopiedEntry(parent, directoryRoutePath(path, parentComponents), route.entry, protectUnexpected)
 		_ = parent.Close()
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func copiedDirectoryRoutes(root *copiedDirectory) []copiedDirectoryRoute {
+	routes := []copiedDirectoryRoute{{parent: -1, directory: root}}
+	for index := 0; index < len(routes); index++ {
+		routes = appendCopiedDirectoryChildren(routes, index)
+	}
+	return routes
+}
+
+func appendCopiedDirectoryChildren(routes []copiedDirectoryRoute, parent int) []copiedDirectoryRoute {
+	parentRoute := routes[parent]
+	for _, entry := range parentRoute.directory.entries {
+		if entry.directory == nil {
+			continue
+		}
+		routes = append(routes, copiedDirectoryRoute{
+			parent: parent, entry: entry, directory: entry.directory, depth: parentRoute.depth + 1,
+		})
+	}
+	return routes
+}
+
+func copiedDirectoryRouteComponents(routes []copiedDirectoryRoute, index int) []copiedEntry {
+	components := make([]copiedEntry, routes[index].depth)
+	for position := len(components) - 1; position >= 0; position-- {
+		components[position] = routes[index].entry
+		index = routes[index].parent
+	}
+	return components
+}
+
+func retainedRouteEntries(routes []copiedDirectoryRoute) int {
+	total := 0
+	for _, route := range routes {
+		if route.parent >= 0 {
+			total++
+		}
+	}
+	return total
 }
 
 func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
