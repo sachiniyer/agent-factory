@@ -124,11 +124,17 @@ func directoryNames(directory *os.File, path string) ([]string, error) {
 	return names, nil
 }
 
-func removeEmptyDirectoryAt(parent *os.File, name, path string) error {
-	if err := unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR); err != nil {
-		return fmt.Errorf("failed to clean empty private directory %s: %w", path, err)
-	}
-	return nil
+// removeCreatedDirectory removes a directory this process just created, using
+// the identity captured at creation. unlinkat() resolves a name rather than an
+// inode, so a bare rmdir here would delete whatever a same-UID racer left at
+// that name — an empty directory it created is still not ours to remove. The
+// shared claim-verify-unlink path fails closed instead.
+func removeCreatedDirectory(parent *os.File, parentPath, name string, created pathIdentity) error {
+	return removeCopiedEntry(parent, parentPath, copiedEntry{
+		name:      name,
+		source:    created,
+		directory: &copiedDirectory{},
+	}, true)
 }
 
 func validateCopiedTree(root *os.File, expected copiedDirectory, source bool, path string) error {

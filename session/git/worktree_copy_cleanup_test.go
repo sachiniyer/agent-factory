@@ -214,6 +214,42 @@ func TestMoveDirCrossDevice_InspectFailureNeverRestoresAReplacement(t *testing.T
 		"a replacement must not be published at the source path")
 }
 
+// TestRemoveCreatedDirectory_RefusesAReplacement proves the staging-root
+// cleanup is tied to an identity rather than to a name. unlinkat() resolves a
+// name, so a same-UID racer that swaps its own empty directory in at the moment
+// the staging open fails would otherwise have that directory rmdir'd.
+func TestRemoveCreatedDirectory_RefusesAReplacement(t *testing.T) {
+	parentPath := t.TempDir()
+	parent, _, err := openDirectoryPathFollowingLinks(parentPath, "parent")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parent.Close() })
+
+	// The happy path: the name still identifies what this process created.
+	require.NoError(t, os.Mkdir(filepath.Join(parentPath, "removable"), 0755))
+	removable, err := identityAt(parent, "removable")
+	require.NoError(t, err)
+	require.NoError(t, removeCreatedDirectory(parent, parentPath, "removable", removable))
+	assert.NoDirExists(t, filepath.Join(parentPath, "removable"))
+
+	// The raced path: the racer renames the staging root away and drops its own
+	// directory at that name. Keeping the original alive under another name is
+	// also what stops the filesystem from recycling its inode.
+	require.NoError(t, os.Mkdir(filepath.Join(parentPath, "staging"), 0755))
+	created, err := identityAt(parent, "staging")
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(filepath.Join(parentPath, "staging"), filepath.Join(parentPath, "stranded")))
+	require.NoError(t, os.Mkdir(filepath.Join(parentPath, "staging"), 0755))
+	replacementID, err := identityAt(parent, "staging")
+	require.NoError(t, err)
+	require.NotEqual(t, created, replacementID, "the replacement must be a distinct inode")
+
+	err = removeCreatedDirectory(parent, parentPath, "staging", created)
+	require.Error(t, err, "cleanup must not remove a directory it did not create")
+	var unverified *unverifiedCleanupPathError
+	assert.ErrorAs(t, err, &unverified, "an unverified removal must fail closed")
+	assert.DirExists(t, filepath.Join(parentPath, "staging"), "the replacement must survive")
+}
+
 func TestCopyTree_RejectsExcessiveDepth(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.Mkdir(src, 0755))

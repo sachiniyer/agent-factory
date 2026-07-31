@@ -179,16 +179,27 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		_ = source.Close()
 		return nil, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
 	}
+	// Identify the staging root before anything else can fail: cleanup below
+	// unlinks it, and unlinkat() takes a name rather than an inode.
+	createdIdentity, err := identityAt(destParent, destName)
+	if err != nil {
+		_ = destParent.Close()
+		_ = source.Close()
+		return nil, fmt.Errorf(
+			"cannot move worktree across filesystems: failed to identify destination directory %s after creating it (leaving it in place): %w",
+			dest, err,
+		)
+	}
 	destination, _, err := openDirectoryAt(destParent, destName, dest, "destination")
 	if err != nil {
-		cleanupErr := removeEmptyDirectoryAt(destParent, destName, dest)
+		cleanupErr := removeCreatedDirectory(destParent, destParentPath, destName, createdIdentity)
 		_ = destParent.Close()
 		_ = source.Close()
 		return nil, errors.Join(err, cleanupErr)
 	}
 	destinationIdentity, err := identityFromFile(destination)
 	if err != nil {
-		cleanupErr := removeEmptyDirectoryAt(destParent, destName, dest)
+		cleanupErr := removeCreatedDirectory(destParent, destParentPath, destName, createdIdentity)
 		_ = destination.Close()
 		_ = destParent.Close()
 		_ = source.Close()
