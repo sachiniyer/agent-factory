@@ -68,17 +68,23 @@ func TestSnapshotReconcilesUserKilledTombstone(t *testing.T) {
 // delete request while the first RPC is in flight.
 func TestSnapshotPreservesOptimisticKillForAdoptedTombstone(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		liveness session.Liveness
+		name        string
+		localKilled bool
+		liveness    session.Liveness
 	}{
-		{name: "running", liveness: session.LiveRunning},
-		{name: "lost", liveness: session.LiveLost},
-		{name: "archived", liveness: session.LiveArchived},
+		{name: "first adoption running", liveness: session.LiveRunning},
+		{name: "first adoption lost", liveness: session.LiveLost},
+		{name: "first adoption archived", liveness: session.LiveArchived},
+		{name: "already adopted running", localKilled: true, liveness: session.LiveRunning},
+		{name: "already adopted lost", localKilled: true, liveness: session.LiveLost},
+		{name: "already adopted archived", localKilled: true, liveness: session.LiveArchived},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)
 			inst := instanceWithFakeBackend(t, "killed-retry")
-			inst.MarkUserKilled()
+			if tc.localKilled {
+				inst.MarkUserKilled()
+			}
 			inst.SetInFlightOpForTest(session.OpKilling)
 
 			data := inst.ToInstanceData()

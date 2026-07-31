@@ -117,9 +117,10 @@ func (i *Instance) MarkUserKilled() {
 // ReconcileUserKilledSnapshot applies the durable tombstone carried by a
 // daemon snapshot to an already-materialized projection row. Tombstones are
 // monotonic: an older snapshot cannot make a killed row live again. When the
-// tombstone is first adopted, any existing operation marker belongs to the old
-// process and must be cleared with it. A later reconcile preserves an OpKilling
-// raised locally for the user's current teardown retry.
+// tombstone is first adopted, stale daemon operation markers must be cleared
+// with it. OpKilling is different: snapshot reconciliation runs on the TUI's
+// projection instance, so that marker belongs to the user's current teardown
+// request and must survive even the first tombstone snapshot.
 func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -128,7 +129,9 @@ func (i *Instance) ReconcileUserKilledSnapshot(userKilled bool) bool {
 	changed := false
 	if userKilled && !i.userKilled {
 		i.userKilled = true
-		i.inFlightOp = OpNone
+		if i.inFlightOp != OpKilling {
+			i.inFlightOp = OpNone
+		}
 		changed = true
 	}
 	i.noteStateChangeLocked(lv, op, resetAt)
