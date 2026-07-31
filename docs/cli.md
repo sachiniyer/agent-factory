@@ -247,8 +247,9 @@ sessions with no backing record, abandoned temp agent-factory homes, and daemon
 problems (stale socket, stale pid file, a daemon still running a replaced
 binary). With `--fix` it kills orphans whose ancestry markers prove they came
 from a dead Agent Factory session and removes stale temp homes, logging each
-action; anything it cannot verify is reported, never touched. Exits 1 when
-unresolved issues remain.
+action; anything it cannot verify is reported, never touched, and stays
+advisory rather than failing the run. Exits 1 only when an actionable
+condition remains — advisory warnings do not.
 
 When the repository you run it in configures a [remote-hook backend](remote-hooks.md),
 `af doctor` also validates that setup, so a misconfigured remote surfaces as a
