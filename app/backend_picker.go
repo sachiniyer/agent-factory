@@ -250,10 +250,25 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// The reason is the daemon's, verbatim: it names the key and the file to fix,
 		// and it is the SAME sentence a create would have failed with, so the picker
 		// cannot describe a precondition differently from the thing that enforces it.
-		// The fallback covers a reasonless non-available answer, which would otherwise
-		// flash an empty notice — the keypress must always say something (#2020).
+		//
+		// Only BackendUnavailable is a designed refusal — a precondition that was
+		// CHECKED and failed, which the user fixes by editing the repo's config. The
+		// other two non-available shapes are failures wearing a refusal's clothes and
+		// keep ERROR severity:
+		//
+		//   - no reason at all violates BackendOption's contract (every non-available
+		//     status carries one), so the daemon's answer is malformed. It would also
+		//     otherwise flash an empty notice — the keypress must always say
+		//     something (#2020).
+		//   - BackendUnknown means the preconditions could not be EVALUATED, i.e.
+		//     reading or parsing the in-repo config failed. daemon/backends.go keeps
+		//     that distinct from "unavailable" precisely so a client does not report
+		//     an I/O failure as a settled no.
 		if choice.reason == "" {
-			return m, m.handleNotice(fmt.Errorf("backend %q is not usable for this repo, and the daemon gave no reason", choice.label))
+			return m, m.handleError(fmt.Errorf("backend %q is not usable for this repo, and the daemon gave no reason", choice.label))
+		}
+		if choice.status == daemon.BackendUnknown {
+			return m, m.handleError(errors.New(choice.reason))
 		}
 		return m, m.handleNotice(errors.New(choice.reason))
 	}

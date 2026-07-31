@@ -177,6 +177,7 @@ func TestBackendFieldRepoDefaultRowSendsNoBackend(t *testing.T) {
 func TestBackendPickerRefusesAnUnusableChoice(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
+	info, errorLogs := captureHomeMessageLogs(t)
 	got := recordStartRequest(t)
 	stubBackends(t, twoUsableBackends(), nil)
 	startNaming(t, h, "no-ssh-here")
@@ -189,6 +190,12 @@ func TestBackendPickerRefusesAnUnusableChoice(t *testing.T) {
 	assert.Empty(t, h.pendingBackend, "a refused choice must not be attached")
 	assert.Contains(t, h.errBox.FullError(), "ssh.host",
 		"the refusal must name what to fix, in the daemon's own words")
+	// BackendUnavailable is the ONE designed refusal here: a precondition that was
+	// checked and failed, which the user fixes by editing the repo config.
+	assert.Contains(t, info.String(), "ssh.host",
+		"a checked-and-failed precondition is user feedback, so it belongs at INFO")
+	assert.Empty(t, errorLogs.String(),
+		"a designed precondition refusal must not read as an operation failure")
 
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Backend, "a refused choice must not reach the daemon")
@@ -201,6 +208,7 @@ func TestBackendPickerRefusesAnUnusableChoice(t *testing.T) {
 func TestBackendPickerRefusesAnUncheckableChoice(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
+	info, errorLogs := captureHomeMessageLogs(t)
 	stubBackends(t, daemon.ListBackendsResponse{
 		Backends: []daemon.BackendOption{
 			{Name: config.BackendLocal, Label: "local", Status: daemon.BackendAvailable},
@@ -220,6 +228,45 @@ func TestBackendPickerRefusesAnUncheckableChoice(t *testing.T) {
 	assert.Empty(t, h.pendingBackend, "an uncheckable backend must not be attached")
 	assert.Contains(t, h.errBox.FullError(), "could not be read",
 		"the notice must say what stopped the check, not that docker is unavailable")
+	// ...and unlike an unavailable precondition, an uncheckable one is a real
+	// failure: the in-repo config could not be read or parsed. Filing it as
+	// ordinary user feedback would hide config I/O breakage from ERROR monitoring.
+	assert.Contains(t, errorLogs.String(), "could not be read",
+		"an evaluation that FAILED is an operation failure, not a designed refusal")
+	assert.NotContains(t, info.String(), "could not be read",
+		"an uncheckable backend must not be downgraded to a notice")
+}
+
+// TestBackendPickerReasonlessRefusalIsAnError covers the defensive fallback.
+// BackendOption promises an actionable reason with every non-available status, so
+// a reasonless one is a MALFORMED daemon response — the message even says the
+// daemon failed to explain itself. That is a contract violation to investigate,
+// not something the user can act on, so it must reach ERROR.
+func TestBackendPickerReasonlessRefusalIsAnError(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(200, 1)
+	info, errorLogs := captureHomeMessageLogs(t)
+	stubBackends(t, daemon.ListBackendsResponse{
+		Backends: []daemon.BackendOption{
+			{Name: config.BackendLocal, Label: "local", Status: daemon.BackendAvailable},
+			// Non-available with no reason: the shape the contract forbids.
+			{Name: config.BackendDocker, Label: "docker", Status: daemon.BackendUnavailable},
+		},
+		Default:       config.BackendLocal,
+		DefaultStatus: daemon.BackendAvailable,
+	}, nil)
+	startNaming(t, h, "reasonless-refusal")
+
+	openBackendField(t, h)
+	pickBackend(t, h, "docker")
+
+	assert.Empty(t, h.pendingBackend, "a reasonless refusal must not attach the backend")
+	assert.Contains(t, h.errBox.FullError(), "gave no reason",
+		"the keypress must still say something (#2020)")
+	assert.Contains(t, errorLogs.String(), "gave no reason",
+		"a malformed daemon response must stay visible to ERROR monitoring")
+	assert.Empty(t, info.String(),
+		"a broken response contract must not be filed as ordinary user feedback")
 }
 
 // TestBackendPickerOffersWhateverTheDaemonListed is the anti-drift property, and
