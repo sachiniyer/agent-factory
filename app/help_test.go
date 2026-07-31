@@ -99,6 +99,28 @@ func TestGeneralHelpHidesPagingAliasShadowedByRebind(t *testing.T) {
 		"the effective line binding remains advertised on its actual action")
 }
 
+func TestGeneralHelpHidesJumpAliasShadowedByRebind(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"help": {"home"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	var lineControls string
+	content := xansi.Strip(helpTypeGeneral{}.toContent())
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "Line:") {
+			lineControls = line
+			break
+		}
+	}
+
+	require.NotEmpty(t, lineControls)
+	require.NotContains(t, lineControls, "home",
+		"the line controls must not advertise a jump alias shadowed by a rebind")
+	require.Contains(t, content, "Close: esc · home toggles help",
+		"the effective help binding remains advertised on its actual action")
+}
+
 // TestGeneralHelpNavigationMatchesBindings guards against regressing #764, where
 // the help screen documented "↑/j, ↓/k" while the canonical bindings in
 // keys/keys.go map k=up and j=down (standard vim convention).

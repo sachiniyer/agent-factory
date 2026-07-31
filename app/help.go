@@ -152,14 +152,12 @@ func firstRunActionLine(actions string) string {
 	return descStyle.Render(actions)
 }
 
-func helpPagingAliases() string {
-	aliases := []struct {
-		label string
-		msg   tea.KeyMsg
-	}{
-		{label: "pgup", msg: tea.KeyMsg{Type: tea.KeyPgUp}},
-		{label: "pgdn", msg: tea.KeyMsg{Type: tea.KeyPgDown}},
-	}
+type helpAlias struct {
+	label string
+	msg   tea.KeyMsg
+}
+
+func visibleHelpAliases(aliases []helpAlias) string {
 	bindings := []keys.KeyName{
 		keys.KeyHelp,
 		keys.KeyUp,
@@ -184,6 +182,20 @@ func helpPagingAliases() string {
 	return strings.Join(visible, "/")
 }
 
+func helpPagingAliases() string {
+	return visibleHelpAliases([]helpAlias{
+		{label: "pgup", msg: tea.KeyMsg{Type: tea.KeyPgUp}},
+		{label: "pgdn", msg: tea.KeyMsg{Type: tea.KeyPgDown}},
+	})
+}
+
+func helpJumpAliases() string {
+	return visibleHelpAliases([]helpAlias{
+		{label: "home", msg: tea.KeyMsg{Type: tea.KeyHome}},
+		{label: "end", msg: tea.KeyMsg{Type: tea.KeyEnd}},
+	})
+}
+
 func (h helpTypeGeneral) toContent() string {
 	return h.toContentWidth(0)
 }
@@ -200,13 +212,17 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 		pageLine += descStyle.Render(aliases + " · ")
 	}
 	pageLine += keyStyle.Render(helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown))
+	lineControls := descStyle.Render("Line: ") + keyStyle.Render(navKeys)
+	if aliases := helpJumpAliases(); aliases != "" {
+		lineControls += descStyle.Render(" · " + aliases + " jump")
+	}
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
 		"",
 		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
 		"",
 		pageLine,
-		descStyle.Render("Line: ")+keyStyle.Render(navKeys)+descStyle.Render(" · home/end jump"),
+		lineControls,
 		descStyle.Render("Close: esc · ")+keyStyle.Render(helpKey(keys.KeyHelp))+descStyle.Render(" toggles help"),
 	)
 	return renderHelpSections(header, []helpSection{
