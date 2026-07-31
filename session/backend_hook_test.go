@@ -1,7 +1,9 @@
 package session
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,6 +139,11 @@ func TestExtractJSON(t *testing.T) {
 			in:   "progress { pending:" + `{"name": "remote-one"}`,
 			want: `{"name": "remote-one"}`,
 		},
+		{
+			name: "resynchronizes past multiple openers in malformed string",
+			in:   "progress { reading \"config {{ " + `{"name": "remote-one"}` + "\n",
+			want: `{"name": "remote-one"}`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -194,4 +201,22 @@ func TestHookOutputSuffixRedactsUnterminatedSerializedEndpointBeforeNewline(t *t
 	suffix := hookOutputSuffix([]byte(output))
 	assert.NotContains(t, suffix, secret, "a line terminator must not make an incomplete outer string safe")
 	assert.Contains(t, suffix, "[REDACTED]")
+}
+
+func TestHookOutputSuffixRedactsSerializedEndpointAfterNewline(t *testing.T) {
+	const secret = "post-newline-serialized-token-must-not-leak"
+	output := "INFO endpoint=\"\n{\\\"token\\\":\\\"post-newline-serialized-token-must-not-leak\\\"}\""
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "a raw newline must not hide a following escaped token")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
+func TestExtractJSONHandlesMalformedStringOpenerFlood(t *testing.T) {
+	const value = `{"name":"remote-one"}`
+	output := `progress { reading "config ` + strings.Repeat("{", 50_000) + value + "\n"
+
+	started := time.Now()
+	assert.Equal(t, value, extractJSON(output))
+	assert.Less(t, time.Since(started), time.Second, "string resynchronization must not retry every opener suffix")
 }

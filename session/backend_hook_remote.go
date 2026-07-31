@@ -142,7 +142,10 @@ func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (stri
 			continue
 		}
 
-		if inString && (c == '{' || c == '[') && stringCandidateStart < 0 {
+		// Retain the most recent opener in an impossible JSON string. Retrying
+		// only that suffix recovers a later endpoint past any number of malformed
+		// wrapper openers without making suffix retries grow with input size.
+		if inString && (c == '{' || c == '[') {
 			stringCandidateStart = cursor
 		}
 		// A raw newline cannot occur inside a JSON string. Treat it as a hard
