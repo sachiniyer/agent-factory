@@ -35,7 +35,16 @@ func (m *home) showTransientMessage(message string) tea.Cmd {
 func (m *home) setTransientNotice(err error) uint64 {
 	m.transientNoticeID++
 	m.errBox.SetError(err)
+	m.lastNotice = m.errBox.FullError()
 	return m.transientNoticeID
+}
+
+// clearTransientNotice retracts both the visible line and its details history.
+// Timed hideErrMsg deliberately clears only errBox; explicit retractions use
+// this helper when the message is no longer true or no longer useful.
+func (m *home) clearTransientNotice() {
+	m.errBox.Clear()
+	m.lastNotice = ""
 }
 
 func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
@@ -49,11 +58,16 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 }
 
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
-	full := m.errBox.FullError()
+	full := m.lastNotice
+	if full == "" {
+		// Preserve the component-level fallback for callers/tests that populate
+		// ErrBox directly instead of going through setTransientNotice.
+		full = m.errBox.FullError()
+	}
 	if full == "" {
 		return m, nil
 	}
-	m.textOverlay = overlay.NewTextOverlay("Last error\n\n" + full)
+	m.textOverlay = overlay.NewTextOverlay("Message details\n\n" + full)
 	m.textOverlayDismissAnyKey = false
 	m.textOverlayDismissPolicy = nil
 	m.replayHelpDismissKey = false

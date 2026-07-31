@@ -358,6 +358,10 @@ type home struct {
 	menu *ui.Menu
 	// errBox displays error messages inside the status bar (shared handle)
 	errBox *ui.ErrBox
+	// lastNotice preserves the sanitized full text after the status bar's
+	// three-second visual timeout, so E details can recover a clipped tail
+	// instead of becoming a silent no-op (#2618).
+	lastNotice string
 	// transientNoticeID is a generation token for the status-bar notice timer.
 	// Each new error/success notice increments it; a stale hideErrMsg from an
 	// older timer must not clear a newer notice.
@@ -774,7 +778,7 @@ func (m *home) clearStaleAutoHideStatus() {
 		return
 	}
 	if m.transientNoticeID == m.paneAutoHideNoticeID {
-		m.errBox.Clear()
+		m.clearTransientNotice()
 	}
 	m.paneAutoHideNoticeID = 0
 	m.pendingPaneAutoHideStatus = ""

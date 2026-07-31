@@ -151,7 +151,7 @@ func (m *home) handleConfigAgentSpawned(msg configAgentSpawnedMsg) (tea.Model, t
 	// had not read. The generation token is the same mechanism hideErrMsg uses
 	// (home_update.go).
 	if msg.noticeID == m.transientNoticeID {
-		m.errBox.Clear()
+		m.clearTransientNotice()
 	}
 	if msg.sessionName == "" {
 		// The daemon reported success but named no session. Nothing to attach to,
