@@ -579,7 +579,7 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 		commitCmd, p = cmd, committed
 	}
 	if instErr := interactiveGuard(p.Instance()); instErr != nil {
-		return m, tea.Batch(commitCmd, m.handleError(instErr))
+		return m, tea.Batch(commitCmd, m.handleNotice(instErr))
 	}
 	if p.Instance() == nil || p.Instance().IsCreating() {
 		return m, commitCmd
@@ -591,7 +591,7 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 	// unstreamable tab would fall through to a full-screen attach instead of the
 	// "view it in the web UI" message.
 	if webErr := webTabAttachGuard(p.Instance(), p.Tab()); webErr != nil {
-		return m, tea.Batch(commitCmd, m.handleError(webErr))
+		return m, tea.Batch(commitCmd, m.handleNotice(webErr))
 	}
 	if liveSessionName(p.Instance(), p.Tab()) == "" {
 		// Not embeddable (remote): the full-screen attach of this pane's tab.
@@ -614,7 +614,7 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if err := interactiveGuard(instance); err != nil {
-		return m, m.handleError(err)
+		return m, m.handleNotice(err)
 	}
 	// Fence attach off a browser-only tab HERE too. The tree-selection paths guard
 	// on the SELECTED tab, but a web/vscode tab already open as a focused pane
@@ -623,7 +623,7 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	// stream for a tab that has none and surfaces the low-level attach failure
 	// rather than the message telling the user where to actually view it.
 	if err := webTabAttachGuard(instance, p.Tab()); err != nil {
-		return m, m.handleError(err)
+		return m, m.handleNotice(err)
 	}
 	return m.attachInstanceTab(instance, p.Tab(), "handleEnter-pane", "handleEnter-pane-terminal")
 }

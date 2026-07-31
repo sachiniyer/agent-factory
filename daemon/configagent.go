@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -62,6 +63,16 @@ var configAgentSeq atomic.Uint64
 // A var keeps the receipt regressions fast.
 var configAgentPromptReceiptTimeout = 5 * time.Second
 
+// After the TUI is allowed to attach, keep observing for a bounded interval so
+// a merely late receipt and a persistently unconfirmed delivery do not collapse
+// into the same log line. A var keeps the receipt regressions fast.
+var configAgentPromptReceiptEscalationTimeout = 30 * time.Second
+
+type configAgentReceiptWatcher struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
+}
+
 // configAgentSupervisor owns every bare tmux session this daemon spawned for a
 // config agent, so none can outlive its use.
 //
@@ -72,15 +83,19 @@ var configAgentPromptReceiptTimeout = 5 * time.Second
 // the control socket binds — so a SIGTERM during warm-up cannot skip it, exactly
 // as vscodeSupervisor.Stop() is.
 type configAgentSupervisor struct {
-	mu       sync.Mutex
-	sessions map[string]*tmux.TmuxSession
+	mu              sync.Mutex
+	sessions        map[string]*tmux.TmuxSession
+	receiptWatchers map[string]configAgentReceiptWatcher
 	// stopped latches on daemon teardown so a spawn racing shutdown cannot
 	// register a session nothing will ever reap.
 	stopped bool
 }
 
 func newConfigAgentSupervisor() *configAgentSupervisor {
-	return &configAgentSupervisor{sessions: make(map[string]*tmux.TmuxSession)}
+	return &configAgentSupervisor{
+		sessions:        make(map[string]*tmux.TmuxSession),
+		receiptWatchers: make(map[string]configAgentReceiptWatcher),
+	}
 }
 
 // track registers a live config-agent session. It returns false when the daemon
@@ -107,6 +122,34 @@ func (c *configAgentSupervisor) session(name string) *tmux.TmuxSession {
 	return c.sessions[name]
 }
 
+// watchReceipt keeps a bounded post-attach receipt check under the same
+// ownership as the bare tmux session. Reap and daemon shutdown cancel and join
+// it, so a closed config agent cannot emit a later degradation warning.
+func (c *configAgentSupervisor) watchReceipt(name string, watch func(context.Context)) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	c.mu.Lock()
+	if c.stopped || c.sessions[name] == nil {
+		c.mu.Unlock()
+		cancel()
+		close(done)
+		return
+	}
+	c.receiptWatchers[name] = configAgentReceiptWatcher{cancel: cancel, done: done}
+	c.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		watch(ctx)
+		c.mu.Lock()
+		if current, ok := c.receiptWatchers[name]; ok && current.done == done {
+			delete(c.receiptWatchers, name)
+		}
+		c.mu.Unlock()
+	}()
+}
+
 // reap kills one config-agent session and forgets it. Unknown names are a no-op
 // success: reap is called on a best-effort path (the TUI returning from the
 // takeover), and a session already gone is the desired end state either way.
@@ -114,7 +157,13 @@ func (c *configAgentSupervisor) reap(name string) error {
 	c.mu.Lock()
 	ts, ok := c.sessions[name]
 	delete(c.sessions, name)
+	watcher, watching := c.receiptWatchers[name]
+	delete(c.receiptWatchers, name)
 	c.mu.Unlock()
+	if watching {
+		watcher.cancel()
+		<-watcher.done
+	}
 	if !ok {
 		return nil
 	}
@@ -137,7 +186,19 @@ func (c *configAgentSupervisor) Stop() {
 		sessions = append(sessions, ts)
 	}
 	c.sessions = make(map[string]*tmux.TmuxSession)
+	watchers := make([]configAgentReceiptWatcher, 0, len(c.receiptWatchers))
+	for _, watcher := range c.receiptWatchers {
+		watchers = append(watchers, watcher)
+	}
+	c.receiptWatchers = make(map[string]configAgentReceiptWatcher)
 	c.mu.Unlock()
+
+	for _, watcher := range watchers {
+		watcher.cancel()
+	}
+	for _, watcher := range watchers {
+		<-watcher.done
+	}
 
 	var wg sync.WaitGroup
 	for _, ts := range sessions {
@@ -323,7 +384,49 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 				if ctx.Err() != nil {
 					return fail(fmt.Errorf("config agent: spawn cancelled while awaiting the briefing receipt: %w", err))
 				}
-				log.WarningLog.Printf("config agent: %s started but the briefing receipt was not confirmed within %s (%v); attaching anyway — the briefing was delivered to Codex's composer and it may record the turn shortly", sessionName, configAgentPromptReceiptTimeout, err)
+				if errors.Is(err, session.ErrPromptReceiptNotObserved) {
+					log.InfoLog.Printf(
+						"config agent: %s briefing receipt was not observed within %s (%v)",
+						sessionName, configAgentPromptReceiptTimeout, err,
+					)
+					m.configAgents.watchReceipt(sessionName, func(receiptCtx context.Context) {
+						lateErr := session.WaitForPromptReceipt(
+							receiptCtx,
+							agent,
+							promptReceipt,
+							req.Prompt,
+							configAgentPromptReceiptEscalationTimeout,
+						)
+						if lateErr == nil {
+							log.InfoLog.Printf(
+								"config agent: %s briefing receipt confirmed after the initial %s window",
+								sessionName, configAgentPromptReceiptTimeout,
+							)
+							return
+						}
+						if receiptCtx.Err() != nil {
+							return
+						}
+						if errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
+							log.WarningLog.Printf(
+								"config agent: %s briefing receipt was still not observed after %s (%v); delivery remains unconfirmed",
+								sessionName,
+								configAgentPromptReceiptTimeout+configAgentPromptReceiptEscalationTimeout,
+								lateErr,
+							)
+							return
+						}
+						log.WarningLog.Printf(
+							"config agent: %s could not continue checking the briefing receipt after the initial %s window: %v",
+							sessionName, configAgentPromptReceiptTimeout, lateErr,
+						)
+					})
+				} else {
+					log.WarningLog.Printf(
+						"config agent: %s could not confirm the briefing receipt: %v",
+						sessionName, err,
+					)
+				}
 			}
 		}
 	}

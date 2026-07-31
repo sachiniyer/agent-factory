@@ -63,16 +63,16 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if err := selected.ValidateRuntimeAction(session.RuntimeActionHandoff); err != nil {
-		return m, m.handleError(err)
+		return m, m.handleNotice(err)
 	}
 	if !selected.Capabilities().Handoff {
-		return m, m.handleError(fmt.Errorf("session '%s' cannot be handed off: only local-worktree sessions can swap their agent", selected.Title))
+		return m, m.handleNotice(fmt.Errorf("session '%s' cannot be handed off: only local-worktree sessions can swap their agent", selected.Title))
 	}
 
 	current := selected.CurrentAgentName()
 	choices := handoffAgentChoices(current)
 	if len(choices) == 0 {
-		return m, m.handleError(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
+		return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
 	}
 
 	m.handoffChoices = choices

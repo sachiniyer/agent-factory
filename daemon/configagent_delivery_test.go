@@ -2,20 +2,25 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/term"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
 const (
@@ -23,6 +28,37 @@ const (
 	configAgentCodexFixtureModeEnv  = "AF_CONFIG_AGENT_CODEX_FIXTURE_MODE"
 	configAgentCodexFixtureSentinel = "AF_CONFIG_AGENT_2220_RECEIVER_SENTINEL"
 )
+
+type synchronizedLogBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(p)
+}
+
+func (b *synchronizedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.String()
+}
+
+func captureConfigAgentReceiptLogs(t *testing.T) (info, warnings *synchronizedLogBuffer) {
+	t.Helper()
+	info, warnings = &synchronizedLogBuffer{}, &synchronizedLogBuffer{}
+	previousInfo := aflog.InfoLog
+	previousWarnings := aflog.WarningLog
+	aflog.InfoLog = stdlog.New(info, "", 0)
+	aflog.WarningLog = stdlog.New(warnings, "", 0)
+	t.Cleanup(func() {
+		aflog.InfoLog = previousInfo
+		aflog.WarningLog = previousWarnings
+	})
+	return info, warnings
+}
 
 // TestConfigAgentCodexFixtureProcess is re-exec'd through a symlink named
 // "codex" by the two tests below. It models the real Codex 0.144.6 terminal
@@ -93,10 +129,14 @@ func TestConfigAgentCodexTrustModalSubmitsBriefing(t *testing.T) {
 func TestConfigAgentUnconfirmedReceiptStillAttaches(t *testing.T) {
 	testguard.IsolateTmux(t)
 	manager, program, rollout := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
 
 	oldTimeout := configAgentPromptReceiptTimeout
 	configAgentPromptReceiptTimeout = 250 * time.Millisecond
 	t.Cleanup(func() { configAgentPromptReceiptTimeout = oldTimeout })
+	oldEscalationTimeout := configAgentPromptReceiptEscalationTimeout
+	configAgentPromptReceiptEscalationTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { configAgentPromptReceiptEscalationTimeout = oldEscalationTimeout })
 
 	const prompt = "briefing the receiver never records as a turn"
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -116,6 +156,18 @@ func TestConfigAgentUnconfirmedReceiptStillAttaches(t *testing.T) {
 			t.Errorf("reap unconfirmed-receipt config agent: %v", rerr)
 		}
 	})
+	if !strings.Contains(info.String(), "briefing receipt was not observed within 250ms") {
+		t.Fatalf("the initial missing-receipt fact was not recorded at INFO:\n%s", info.String())
+	}
+	if got := warnings.String(); got != "" {
+		t.Fatalf("attaching the live session after the initial receipt window emitted a warning:\n%s", got)
+	}
+	require.Eventually(t, func() bool {
+		return strings.Contains(warnings.String(), "briefing receipt was still not observed after 500ms")
+	}, 2*time.Second, 25*time.Millisecond,
+		"a receipt that remains absent beyond the post-attach window must escalate")
+	require.NotContains(t, warnings.String(), "attaching anyway",
+		"designed attach behavior is not the degraded fact")
 
 	// Prove we attached WITHOUT a confirmed receipt: the receiver recorded only
 	// its session_meta, never the briefing turn. If this ever contains the prompt
@@ -127,6 +179,44 @@ func TestConfigAgentUnconfirmedReceiptStillAttaches(t *testing.T) {
 	if strings.Contains(string(data), prompt) {
 		t.Fatalf("the drop fixture unexpectedly recorded the briefing turn, so this no longer exercises an unconfirmed receipt:\n%s", data)
 	}
+}
+
+func TestConfigAgentLateReceiptIsConfirmedWithoutWarning(t *testing.T) {
+	testguard.IsolateTmux(t)
+	manager, program, rollout := newConfigAgentCodexFixture(t, "drop")
+	info, warnings := captureConfigAgentReceiptLogs(t)
+
+	oldTimeout := configAgentPromptReceiptTimeout
+	configAgentPromptReceiptTimeout = 250 * time.Millisecond
+	t.Cleanup(func() { configAgentPromptReceiptTimeout = oldTimeout })
+	oldEscalationTimeout := configAgentPromptReceiptEscalationTimeout
+	configAgentPromptReceiptEscalationTimeout = time.Second
+	t.Cleanup(func() { configAgentPromptReceiptEscalationTimeout = oldEscalationTimeout })
+
+	const prompt = "briefing recorded shortly after the initial receipt window"
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	sessionName, _, err := manager.SpawnConfigAgent(ctx, SpawnConfigAgentRequest{
+		Program: program,
+		Prompt:  prompt,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, manager.ReapConfigAgent(ReapConfigAgentRequest{SessionName: sessionName}))
+	})
+
+	require.Contains(t, info.String(), "briefing receipt was not observed within 250ms",
+		"the slow-start fact remains visible")
+	require.Empty(t, warnings.String(),
+		"crossing the initial receipt window is not yet a degraded delivery")
+	require.NoError(t, appendConfigAgentCodexUserTurn(rollout, prompt),
+		"model the receiver writing the same Codex user_message receipt, only after Spawn returned")
+	require.Eventually(t, func() bool {
+		return strings.Contains(info.String(), "briefing receipt confirmed after the initial 250ms window")
+	}, 2*time.Second, 25*time.Millisecond,
+		"a receipt that arrives during the post-attach observation window should resolve at INFO")
+	require.Empty(t, warnings.String(),
+		"a late-but-confirmed receipt must stay distinguishable from a persistently missing one")
 }
 
 func TestConfigAgentCodexInlineHomeSubmitsAndVerifiesBriefing(t *testing.T) {

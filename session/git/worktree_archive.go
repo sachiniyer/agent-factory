@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -55,6 +56,18 @@ var ErrRepoGone = errors.New("origin repository is gone")
 var worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
 	_, err := g.runGitCommand(g.repoPath, "worktree", "move", src, dest)
 	return err
+}
+
+// worktreeContainsSubmodules identifies the worktree shape that `git worktree
+// move` explicitly does not support. Checking before the move keeps the manual
+// move + repair path a deliberate implementation choice instead of first
+// manufacturing a Git failure for every archive of such a repository.
+var worktreeContainsSubmodules = func(g *GitWorktree, src string) (bool, error) {
+	out, err := g.runGitCommand(src, "submodule", "status")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 // worktreeRepair re-links a manually moved worktree's two-way registration
@@ -126,14 +139,18 @@ func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
 }
 
 // relocateWorktreeTo is the shared move engine behind MoveWorktree and
-// RestoreWorktreeTo. Fast path: `git worktree move`. Because the archive root
-// ($AF_HOME) is frequently on a different filesystem than the repo, that rename
-// can fail with EXDEV; on ANY fast-path failure we fall back to moving the
-// directory bytes ourselves (rename, or copy+remove across devices) and running
-// `git worktree repair`, which is purpose-built to fix a manually moved
-// worktree. `git worktree move` validates and renames before touching its
-// config, so on failure the source is normally left intact and the fallback is
-// safe; the dest-already-moved check covers the rare partial-move case.
+// RestoreWorktreeTo. Fast path: `git worktree move`. Git explicitly refuses
+// linked worktrees containing submodules, so that known shape goes directly to
+// the manual move + repair path. Because the archive root ($AF_HOME) is
+// frequently on a different filesystem than the repo, the fast path can also
+// fail with EXDEV; any attempted fast-path failure uses the same fallback.
+//
+// The fallback moves the directory bytes (rename, or copy+remove across
+// devices) and runs `git worktree repair`, which is purpose-built to fix a
+// manually moved worktree. `git worktree move` validates and renames before
+// touching its config, so on failure the source is normally left intact and the
+// fallback is safe; the dest-already-moved check covers the rare partial-move
+// case.
 func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 	src := g.worktreePath
 	if g.externalWorktree {
@@ -155,8 +172,27 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		return fmt.Errorf("failed to create destination parent directory for %s: %w", dest, err)
 	}
 
-	if err := worktreeMoveFast(g, src, dest); err != nil {
-		log.WarningLog.Printf("git worktree move %s -> %s failed (%v); falling back to manual move + repair", src, dest, err)
+	useFallback, inspectErr := worktreeContainsSubmodules(g, src)
+	if inspectErr != nil {
+		log.InfoLog.Printf(
+			"could not inspect worktree %s for submodules (%v); trying git worktree move",
+			src, inspectErr,
+		)
+	}
+	if !useFallback {
+		if err := worktreeMoveFast(g, src, dest); err != nil {
+			// The fallback is the designed recovery for cross-device moves and
+			// other fast-path limitations. Record why it was selected without
+			// reporting a failed archive; actual fallback/repair failures return
+			// below and are surfaced by the caller.
+			log.InfoLog.Printf(
+				"git worktree move unavailable for %s -> %s (%v); using manual move + repair",
+				src, dest, err,
+			)
+			useFallback = true
+		}
+	}
+	if useFallback {
 		// The fast path may have moved the directory before failing to update
 		// its config (rare). Only move bytes ourselves if the dir is still at
 		// src; either way, repair fixes the two-way registration.

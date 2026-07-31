@@ -12,10 +12,13 @@ import (
 func TestErrorDetailsOverlayShowsFullTruncatedError(t *testing.T) {
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)
+	_, errorLogs := captureHomeMessageLogs(t)
 
 	msg := "no clipboard tool found (install xclip/wl-clipboard, or pbcopy on macOS); PR URL: https://example.invalid/pr/987"
 	cmd := h.handleError(errors.New(msg))
 	require.NotNil(t, cmd, "handleError still returns the normal clear-message command")
+	require.Contains(t, errorLogs.String(), msg,
+		"a real operation failure remains an ERROR while notices move to INFO")
 	require.Contains(t, h.errBox.String(), "E details",
 		"truncated status error should advertise the details key")
 

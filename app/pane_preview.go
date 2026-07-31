@@ -372,7 +372,7 @@ func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {
 		return nil, nil
 	}
 	if err := previewCommitError(txn.target.instance); err != nil {
-		return nil, m.handleError(err)
+		return nil, m.handleNotice(err)
 	}
 	owner := m.openPaneByID(txn.ownerPaneID)
 	if owner == nil {
@@ -417,7 +417,7 @@ func (m *home) commitPanePreviewAlongside() tea.Cmd {
 		return nil
 	}
 	if err := previewCommitError(txn.target.instance); err != nil {
-		return m.handleError(err)
+		return m.handleNotice(err)
 	}
 	if m.openPaneByID(txn.ownerPaneID) == nil {
 		m.cancelPanePreview(false)

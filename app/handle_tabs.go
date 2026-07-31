@@ -36,7 +36,7 @@ func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !selected.Capabilities().TabManagement {
-		return m, m.handleError(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
+		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
 	items := make([]string, len(newTabChoices))
@@ -106,7 +106,7 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 		return m, nil
 	}
 	if !selected.Capabilities().TabManagement {
-		return m, m.handleError(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
+		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
 	target := captureSessionActionTarget(selected, m.repoID)
@@ -196,14 +196,14 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if idx <= 0 {
-		return m, m.handleError(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
+		return m, m.handleNotice(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
 	}
 	if !inst.Capabilities().TabManagement {
-		return m, m.handleError(fmt.Errorf("this session's tab list is fixed by its runtime and can't be edited"))
+		return m, m.handleNotice(fmt.Errorf("this session's tab list is fixed by its runtime and can't be edited"))
 	}
 	tabs := inst.GetTabs()
 	if idx >= len(tabs) {
-		return m, m.handleError(fmt.Errorf("tab cannot be closed"))
+		return m, m.handleNotice(fmt.Errorf("tab cannot be closed"))
 	}
 	tab := tabs[idx]
 	tabName := tab.Name

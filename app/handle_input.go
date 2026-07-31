@@ -69,14 +69,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			title = m.namingPlaceholder
 		}
 		if strings.TrimSpace(title) == "" {
-			return m, m.handleError(fmt.Errorf("title cannot be empty"))
+			return m, m.handleNotice(fmt.Errorf("title cannot be empty"))
 		}
 		// "root" is reserved for the daemon-managed root agent (#1106). The
 		// daemon's reserveCreate is the authoritative gate; rejecting here
 		// keeps the user in the naming overlay instead of surfacing the
 		// error after submit, mirroring the #936 collision pre-check below.
 		if session.IsReservedTitle(title) {
-			return m, m.handleError(fmt.Errorf("title %q is reserved for the daemon-managed root agent; pick another name", title))
+			return m, m.handleNotice(fmt.Errorf("title %q is reserved for the daemon-managed root agent; pick another name", title))
 		}
 		for _, other := range m.store.GetInstances() {
 			if other == instance {
@@ -88,7 +88,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// only catching exact duplicates and deferring case/branch variants
 			// to a post-Start error (#936).
 			if git.TitlesCollide(other.Title, title, m.appConfig.BranchPrefix) {
-				return m, m.handleError(fmt.Errorf("a session titled %q conflicts with existing session %q", title, other.Title))
+				return m, m.handleNotice(fmt.Errorf("a session titled %q conflicts with existing session %q", title, other.Title))
 			}
 		}
 		// Which runtime this create lands on, resolved from the PENDING selection
@@ -108,7 +108,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}, instance.Path)
 		if backendKindErr == nil && backendKind == session.BackendHook {
 			if !session.RemoteHookTitleHasSpecificSlug(title) {
-				return m, m.handleError(fmt.Errorf(
+				return m, m.handleNotice(fmt.Errorf(
 					"remote hook session title %q must retain at least one ASCII letter or digit after hook-name sanitization",
 					title,
 				))
@@ -124,7 +124,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				existing = append(existing, other)
 			}
 			if dup := session.FindSlugCollision(title, existing); dup != "" {
-				return m, m.handleError(fmt.Errorf(
+				return m, m.handleNotice(fmt.Errorf(
 					"a remote session titled %q already maps to hook name %q",
 					dup, session.Slugify(title),
 				))
@@ -137,7 +137,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Every gate passed — commit the resolved title exactly once.
 		if err := instance.SetTitle(title); err != nil {
-			return m, m.handleError(err)
+			return m, m.handleNotice(err)
 		}
 
 		// Apply the program selected during naming. The optimistic create op
@@ -240,10 +240,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		newTitle := instance.Title + string(cleanRunes)
 		if runewidth.StringWidth(newTitle) > 32 {
-			return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
+			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
 		}
 		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleError(err)
+			return m, m.handleNotice(err)
 		}
 	case tea.KeyBackspace:
 		runes := []rune(instance.Title)
@@ -251,15 +251,15 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if err := instance.SetTitle(string(runes[:len(runes)-1])); err != nil {
-			return m, m.handleError(err)
+			return m, m.handleNotice(err)
 		}
 	case tea.KeySpace:
 		newTitle := instance.Title + " "
 		if runewidth.StringWidth(newTitle) > 32 {
-			return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
+			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
 		}
 		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleError(err)
+			return m, m.handleNotice(err)
 		}
 	case tea.KeyEsc:
 		// Kill by the captured namingInstance pointer, not the live selection
@@ -325,7 +325,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 			// clips to the terminal width and the tail is what disappears
 			// (#1973), so the guide URL — recoverable under `E details` — goes
 			// last.
-			return m, m.handleError(fmt.Errorf(
+			return m, m.handleNotice(fmt.Errorf(
 				"remote sessions need a remote_hooks backend configured for this repo — press n for a local session, or configure remote_hooks and try again. Guide: https://sachiniyer.github.io/agent-factory/remote-hooks/"))
 		}
 	}

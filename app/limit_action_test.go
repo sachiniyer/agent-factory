@@ -27,6 +27,7 @@ func limitActionInstance(t *testing.T, title string, resetAt time.Time) *session
 // not usage-limit-blocked surfaces a message and never fires the resume RPC.
 func TestHandleLimitRetry_NonLimitRow_NoDispatch(t *testing.T) {
 	h := newTestHome(t)
+	info, errorLogs := captureHomeMessageLogs(t)
 	inst, err := session.NewInstance(session.InstanceOptions{Title: "worker", Path: t.TempDir(), Program: "test"})
 	require.NoError(t, err)
 	inst.SetBackend(session.NewFakeBackend())
@@ -41,6 +42,10 @@ func TestHandleLimitRetry_NonLimitRow_NoDispatch(t *testing.T) {
 
 	_, _ = h.handleLimitRetry()
 	require.False(t, called, "a non-limit row must not dispatch the resume RPC")
+	require.Contains(t, info.String(), "session 'worker' is not blocked on a usage limit",
+		"the truthful reason for declining the action remains visible at INFO")
+	require.Empty(t, errorLogs.String(),
+		"a designed action refusal must not be indistinguishable from an operation failure")
 }
 
 // TestHandleLimitRetry_LimitRow_Dispatches: pressing c on a limit-blocked row

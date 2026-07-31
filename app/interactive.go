@@ -92,7 +92,7 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	// (e.g. gone Lost, #1108): re-run the Enter guard so the user gets the
 	// same truthful error Enter would give now, not a generic bind failure.
 	if err := interactiveGuard(p.Instance()); err != nil {
-		return m.handleError(err)
+		return m.handleNotice(err)
 	}
 
 	// Focus (and, via the recency touch, un-auto-hide) the pane, then bind its live
@@ -108,7 +108,7 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	// the pane can stream, instead of inheriting the reconcile's context gates and
 	// failing to the `o` fallback when one of them happens to be closed (#1819).
 	if !m.ensureLiveTermPaneFor(p) {
-		return m.handleError(fmt.Errorf("couldn't open an embedded terminal for %s — press o to attach full-screen", paneErrorLabel(p)))
+		return m.handleNotice(fmt.Errorf("couldn't open an embedded terminal for %s — press o to attach full-screen", paneErrorLabel(p)))
 	}
 	m.setInteractive(true)
 	return nil

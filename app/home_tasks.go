@@ -18,7 +18,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	name, prompt, cronExpr, watchCmd, targetSession, projectPath, program := sp.ConsumePendingCreate()
 
 	if name == "" {
-		return m.handleError(fmt.Errorf("task name is required"))
+		return m.handleNotice(fmt.Errorf("task name is required"))
 	}
 	// Re-validate the trigger contract behind the form (#782): exactly one of
 	// cron / watch cmd, and cron tasks need a prompt — there is no event line
@@ -26,14 +26,14 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	hasCron := cronExpr != ""
 	hasWatch := watchCmd != ""
 	if hasCron == hasWatch {
-		return m.handleError(fmt.Errorf("exactly one of cron or watch cmd is required"))
+		return m.handleNotice(fmt.Errorf("exactly one of cron or watch cmd is required"))
 	}
 	if hasCron {
 		if strings.TrimSpace(prompt) == "" {
-			return m.handleError(fmt.Errorf("prompt must be non-empty"))
+			return m.handleNotice(fmt.Errorf("prompt must be non-empty"))
 		}
 		if err := task.ValidateCronExpr(cronExpr); err != nil {
-			return m.handleError(fmt.Errorf("invalid cron: %v", err))
+			return m.handleNotice(fmt.Errorf("invalid cron: %v", err))
 		}
 	}
 	// ResolveUserPath expands a leading ~ before absolutizing — filepath.Abs
@@ -41,7 +41,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	// already normalized the field, so this is idempotent.
 	absPath, err := config.ResolveUserPath(projectPath)
 	if err != nil {
-		return m.handleError(fmt.Errorf("invalid path: %v", err))
+		return m.handleNotice(fmt.Errorf("invalid path: %v", err))
 	}
 	if program == "" {
 		program = m.program
@@ -108,7 +108,7 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 	sp := m.automations.TaskPane()
 	tsk := sp.ConsumePendingTrigger()
 	if tsk == nil {
-		return m.handleError(fmt.Errorf("no task selected"))
+		return m.handleNotice(fmt.Errorf("no task selected"))
 	}
 
 	// The trigger fires from inside the tasks overlay: close it and move focus to

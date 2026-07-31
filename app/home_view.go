@@ -18,6 +18,14 @@ func (m *home) handleError(err error) tea.Cmd {
 	return m.showTransientError(err)
 }
 
+// handleNotice reports why af deliberately declined or redirected a user
+// action. The same transient UI surface carries both notices and failures, but
+// their logs must not: ERROR is reserved for an operation that actually failed.
+func (m *home) handleNotice(notice error) tea.Cmd {
+	log.InfoLog.Printf("%v", notice)
+	return m.showTransientError(notice)
+}
+
 func (m *home) showTransientError(err error) tea.Cmd {
 	if err == nil {
 		return nil

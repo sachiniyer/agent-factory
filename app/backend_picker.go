@@ -253,9 +253,9 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// The fallback covers a reasonless non-available answer, which would otherwise
 		// flash an empty notice — the keypress must always say something (#2020).
 		if choice.reason == "" {
-			return m, m.handleError(fmt.Errorf("backend %q is not usable for this repo, and the daemon gave no reason", choice.label))
+			return m, m.handleNotice(fmt.Errorf("backend %q is not usable for this repo, and the daemon gave no reason", choice.label))
 		}
-		return m, m.handleError(errors.New(choice.reason))
+		return m, m.handleNotice(errors.New(choice.reason))
 	}
 	m.pendingBackend = choice.value
 	m.menu.SetNamingBackend(m.pendingBackend != repoDefaultBackend)

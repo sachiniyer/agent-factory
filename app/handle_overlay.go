@@ -102,7 +102,7 @@ func (m *home) showSearchOverlay() (tea.Model, tea.Cmd) {
 	// duplicate/ghost entries (#1008).
 	instances := m.store.GetInstancesSnapshot()
 	if len(instances) == 0 {
-		return m, m.handleError(fmt.Errorf("no sessions to search"))
+		return m, m.handleNotice(fmt.Errorf("no sessions to search"))
 	}
 	m.searchOverlay = overlay.NewSearchOverlay(instances)
 	m.searchOverlay.SetWidth(60)
