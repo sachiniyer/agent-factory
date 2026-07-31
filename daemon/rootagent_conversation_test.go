@@ -74,6 +74,45 @@ func TestEnsureRootAgentsCarriesConversationAcrossTmuxVanish(t *testing.T) {
 	require.NotNil(t, findRootInstance(t, manager, repoPath), "always-ensure: the root must exist again")
 }
 
+// TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation pins the
+// ordering between a late async conversation capture and a root reap. A busy
+// operation lock means capture/kill/archive may still change the record, so the
+// reap must return no snapshot. Once it owns the lock and re-confirms identity,
+// the conversation it returns is the exact record it is about to delete.
+func TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+
+	inst := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, inst)
+	prior := seedRootConversation(t, inst)
+	inst.SetStatusForTest(session.Lost)
+
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
+	opLock := manager.opLockFor(key)
+	opLock.Lock()
+
+	carried, reaped, err := manager.reapDeadRoot(repo.ID, inst)
+	require.NoError(t, err)
+	require.False(t, reaped)
+	require.False(t, carried.HasID(),
+		"a skipped reap must not snapshot state that another operation still owns")
+
+	opLock.Unlock()
+	carried, reaped, err = manager.reapDeadRoot(repo.ID, inst)
+	require.NoError(t, err)
+	require.True(t, reaped)
+	require.Equal(t, prior, carried,
+		"the reap must snapshot the conversation under the same lock that fences deletion")
+}
+
 // unresumableCarryBackend fails exactly the create that carries a conversation
 // forward, standing in for `claude --resume <id>` exiting at startup because
 // the provider no longer has that conversation.
@@ -154,6 +193,12 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 			carried:  prior,
 			created:  &session.AgentConversationData{Agent: tmux.ProgramClaude, ID: priorRootConversationID},
 			wantInfo: "resumed its prior claude conversation " + priorRootConversationID,
+		},
+		{
+			name:        "resolved command pins its own conversation",
+			carried:     prior,
+			created:     nil,
+			wantWarning: "context continuity is unknown",
 		},
 		{
 			name:        "recorded but not resumed",
