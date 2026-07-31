@@ -820,12 +820,11 @@ step "af_select handles a target with an open pane (#1996)"  _expect_af_select_o
 # _expect_config_editor_writes — the config editor's end-to-end flow against the
 # sandbox's throwaway AF home: open it, assert it rendered a tier-1 key FROM THE
 # MANIFEST, edit a value through the real write path, and assert the editor
-# echoed the write AND told the user the change is not live until a restart.
+# echoed the write AND surfaced the per-key effect returned by that write.
 #
-# The restart notice is the assertion that matters most here. config.toml is read
-# at startup, so an editor that changed a value the running daemon then ignored —
-# without saying so — would be lying by omission. This pins that it says so at the
-# moment of the edit, and names the command.
+# default_program is applied to the running daemon in place (#2480), so this
+# acceptance path must confirm that the new value is live now and must not
+# resurrect the obsolete instruction to restart the daemon (#2479).
 _expect_config_editor_writes() {
     af_open_config || return 1
     # The manifest's tier-1 keys lead; the editor holds no key list of its own.
@@ -840,12 +839,8 @@ _expect_config_editor_writes() {
     af_send Enter
 
     af_wait_for 'set default_program = codex' "$AF_DRIVER_TIMEOUT" 'config write echo' || return 1
-    # Match a fragment that survives the overlay's line wrap. The notice reads
-    # "… run `af daemon restart` and restart af to apply", and at the driver's
-    # fixed 100x30 the wrap falls between "af" and "daemon restart" — so the full
-    # phrase is NOT greppable on one line. Verified against a real capture rather
-    # than guessed; the fixed terminal size is what makes it deterministic.
-    af_wait_for 'daemon restart' "$AF_DRIVER_TIMEOUT" 'config restart notice' || return 1
+    af_wait_for 'using the new value now' "$AF_DRIVER_TIMEOUT" 'config live-apply notice' || return 1
+    af_refute_screen 'daemon restart' 'config notice prescribes no obsolete restart' || return 1
     af_close_config || return 1
 
     # It reached the real file, through the real writer.
