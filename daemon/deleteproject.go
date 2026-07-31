@@ -424,7 +424,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 		return make(map[string][]task.Task), nil
 	}
 
-	taskTargets, err := loadEnabledTaskTargets(repoID)
+	taskTargets, err := m.loadEnabledTaskTargets(repoID)
 	if err != nil {
 		return nil, fmt.Errorf("delete project %s: could not determine whether enabled tasks target its sessions; nothing was changed: %w", repoID, err)
 	}

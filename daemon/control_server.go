@@ -458,37 +458,6 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	return nil
 }
 
-// RestartTask synchronously replaces one enabled watch command. The task-control
-// lock makes the scope re-check, stop/join, and replacement one operation with
-// respect to Add/Update/Remove/ReloadTasks, so a concurrent rebind cannot turn a
-// project-scoped restart into a different project's process.
-func (s *controlServer) RestartTask(req RestartTaskRequest, resp *RestartTaskResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if s.watchers == nil {
-		return fmt.Errorf("this daemon does not host a watch task supervisor")
-	}
-	unlock, err := s.lockTaskControl()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	tsk, err := task.GetTask(req.ID)
-	if err != nil {
-		return err
-	}
-	if err := req.Expect.Verify(*tsk); err != nil {
-		return err
-	}
-	if err := s.watchers.restart(*tsk); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
 // TriggerTask fires a task NOW through the shared RunTask firing path — the same
 // entrypoint the in-daemon scheduler uses (#1029 PR 3). This unifies the CLI
 // `af tasks trigger`, the TUI run-now, and the cron scheduler on one

@@ -18,9 +18,18 @@ import (
 // a possible blocker; disabled and untargeted rows cannot create that retry
 // state and remain non-blocking.
 func LoadTasksForRepoID(repoID string) ([]Task, error) {
-	all, unresolved, err := loadTasksWithStableRepoBindings()
+	filtered, _, err := LoadTasksForRepoIDWithBindingUpdates(repoID)
+	return filtered, err
+}
+
+// LoadTasksForRepoIDWithBindingUpdates also returns the authoritative task
+// projections whose legacy ProjectPath bindings this load durably backfilled.
+// Daemon callers publish those commits so push-only clients cannot retain a
+// different dynamic scope after the server has made RepoID authoritative.
+func LoadTasksForRepoIDWithBindingUpdates(repoID string) ([]Task, []Task, error) {
+	all, unresolved, updated, err := loadTasksWithStableRepoBindings()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var filtered []Task
 	for _, t := range all {
@@ -40,13 +49,13 @@ func LoadTasksForRepoID(repoID string) ([]Task, error) {
 		// introduced after the pre-lock resolution snapshot, stays unknown.
 		known := ok && (resolved.known || matched)
 		if !known && t.Enabled && CanonicalTargetSession(t.TargetSession) != "" {
-			return nil, fmt.Errorf("could not determine whether enabled legacy task %q targeting %q belongs to repo %s: project_path %q does not resolve to a repository; refusing lifecycle decision", t.ID, t.TargetSession, repoID, t.ProjectPath)
+			return nil, updated, fmt.Errorf("could not determine whether enabled legacy task %q targeting %q belongs to repo %s: project_path %q does not resolve to a repository; refusing lifecycle decision", t.ID, t.TargetSession, repoID, t.ProjectPath)
 		}
 		if matched {
 			filtered = append(filtered, t)
 		}
 	}
-	return filtered, nil
+	return filtered, updated, nil
 }
 
 // LoadTasksWithStableRepoBindings returns the authoritative task list after
@@ -57,21 +66,28 @@ func LoadTasksForRepoID(repoID string) ([]Task, error) {
 // unresolved, never guessed. Callers that depend on identity must treat their
 // empty RepoID as unknown.
 func LoadTasksWithStableRepoBindings() ([]Task, error) {
-	tasks, _, err := loadTasksWithStableRepoBindings()
+	tasks, _, err := LoadTasksWithStableRepoBindingUpdates()
 	return tasks, err
 }
 
-func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, error) {
+// LoadTasksWithStableRepoBindingUpdates is the all-project counterpart to
+// LoadTasksForRepoIDWithBindingUpdates.
+func LoadTasksWithStableRepoBindingUpdates() ([]Task, []Task, error) {
+	tasks, _, updated, err := loadTasksWithStableRepoBindings()
+	return tasks, updated, err
+}
+
+func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Task, error) {
 	path, err := getTasksPathFn()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	snapshot, err := LoadTasks()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	resolvedPaths := make(map[string]repoResolution)
 	for _, t := range snapshot {
@@ -88,6 +104,7 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, error
 	}
 
 	var authoritative []Task
+	var updated []Task
 	unresolved := make(map[string]repoResolution)
 	lockErr := config.WithFileLock(path, func() error {
 		current, err := loadTasksLocked(path)
@@ -102,6 +119,7 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, error
 			resolved, ok := resolvedPaths[current[i].ProjectPath]
 			if ok && resolved.known {
 				current[i].RepoID = resolved.id
+				updated = append(updated, current[i])
 				changed = true
 				continue
 			}
@@ -120,7 +138,7 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, error
 		return nil
 	})
 	if lockErr != nil {
-		return nil, nil, lockErr
+		return nil, nil, nil, lockErr
 	}
-	return authoritative, unresolved, nil
+	return authoritative, unresolved, updated, nil
 }

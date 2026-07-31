@@ -169,9 +169,15 @@ func (s *watcherSupervisor) Reload() error {
 	if err != nil {
 		return err
 	}
+	return s.reloadSnapshot(tasks, tasks)
+}
 
+// reloadSnapshot reconciles runnable watchers from armed while using allTasks
+// only as the authoritative inventory for orphan-queue cleanup. A lifecycle-
+// unsafe task can therefore remain unarmed without being mistaken for deleted.
+func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
 	desired := make(map[string]task.Task)
-	for _, t := range tasks {
+	for _, t := range armed {
 		if !t.Enabled || !t.IsWatch() {
 			continue
 		}
@@ -217,7 +223,7 @@ func (s *watcherSupervisor) Reload() error {
 	// deleted task's backlog must not replay into a recreated namesake. A
 	// merely-disabled task keeps its backlog for re-enable (#1129). Runs after
 	// stopWatchers so no stale drainer is mid-replay on a file being removed.
-	s.cleanOrphanQueues(tasks)
+	s.cleanOrphanQueues(allTasks)
 	return nil
 }
 

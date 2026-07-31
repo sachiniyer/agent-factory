@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,21 @@ func TestControlRestartTaskStartsEnabledWatchTask(t *testing.T) {
 	require.NoError(t, server.RestartTask(RestartTaskRequest{ID: tsk.ID}, &resp))
 	require.True(t, resp.OK)
 	require.Equal(t, []string{tsk.ID}, watchers.watchingTaskIDs())
+}
+
+func TestControlRestartTaskRefusesPersistedUnsafeTarget(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	tsk := watchTask("feed0006", "sleep 60", repoPath)
+	tsk.TargetSession = session.RootSessionTitle
+	require.NoError(t, task.AddTask(tsk),
+		"seed a watch task accepted while root-agent policy was enabled by the previous daemon")
+
+	watchers, _ := newTestSupervisor(t, task.LoadTasks)
+	server := &controlServer{manager: manager, scheduler: newTaskScheduler(), watchers: watchers}
+	err := server.RestartTask(RestartTaskRequest{ID: tsk.ID}, &RestartTaskResponse{})
+	require.ErrorContains(t, err, "materialize",
+		"explicit restart must not bypass the same target-lifecycle refusal as startup and reload")
+	require.Empty(t, watchers.watchingTaskIDs(), "an unsafe target must remain unarmed")
 }
 
 func TestControlRestartTaskRefusesWrongScopeDisabledAndCronTasks(t *testing.T) {

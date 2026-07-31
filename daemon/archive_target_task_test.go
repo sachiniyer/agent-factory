@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -55,6 +56,40 @@ func TestArchiveSession_RefusesEnabledTargetTasksBeforeMutation(t *testing.T) {
 	assert.Equal(t, session.LiveReady, inst.GetLiveness(), "rejection must precede the archive fence")
 	_, statErr := os.Stat(source)
 	assert.NoError(t, statErr, "rejection must not move the worktree")
+}
+
+func TestArchiveSession_PublishesLegacyBindingBackfill(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+	legacy := archiveTargetTask("legacy03", "Legacy Binding", repoPath, "captain", true)
+	raw, err := json.Marshal([]task.Task{legacy})
+	require.NoError(t, err)
+	tasksPath, err := task.MigrateOnLoadPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tasksPath, raw, 0o600))
+	_, events := manager.events.subscribe()
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+
+	var got []agentproto.Event
+	for {
+		select {
+		case event := <-events:
+			got = append(got, event)
+		default:
+			goto drained
+		}
+	}
+drained:
+	require.Len(t, got, 2, "the binding commit and archive commit must both reach push-only clients")
+	require.Equal(t, agentproto.EventTaskUpdated, got[0].Type,
+		"the durable binding projection must publish before the lifecycle event")
+	var bound task.Task
+	require.NoError(t, json.Unmarshal(got[0].Data, &bound))
+	require.Equal(t, legacy.ID, bound.ID)
+	require.Equal(t, repoID, bound.RepoID)
+	require.Equal(t, agentproto.EventSessionArchived, got[1].Type)
 }
 
 // TestArchiveSession_TaskStoreReadFailureLeavesSessionIntact preserves the
@@ -630,7 +665,7 @@ func TestDeleteProject_LoadsTaskTargetsOnce(t *testing.T) {
 
 	orig := loadTasksForRepoID
 	loads := 0
-	loadTasksForRepoID = func(gotRepoID string) ([]task.Task, error) {
+	loadTasksForRepoID = func(gotRepoID string) ([]task.Task, []task.Task, error) {
 		loads++
 		return orig(gotRepoID)
 	}

@@ -4,36 +4,45 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/task"
 )
+
+type taskArmingSnapshot struct {
+	all            []task.Task
+	safe           []task.Task
+	bindingUpdates []task.Task
+	refused        []error
+}
 
 // persistedTasksForArming checks every enabled targeted relationship before a
 // reload arms cron tasks or watch processes. The caller holds taskTargetMu so
 // validation, the returned snapshot, and the eventual scheduler/watch reload
 // are one lifecycle decision. Unsafe tasks are excluded and returned as loud
 // refusals; one stale relationship must not suppress unrelated automation.
-func (m *Manager) persistedTasksForArming() ([]task.Task, []error, error) {
-	tasks, err := task.LoadTasksWithStableRepoBindings()
+func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
+	tasks, bindingUpdates, err := task.LoadTasksWithStableRepoBindingUpdates()
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not load and stabilize task bindings: %w", err)
+		return taskArmingSnapshot{}, fmt.Errorf("could not load and stabilize task bindings: %w", err)
 	}
-	safe := make([]task.Task, 0, len(tasks))
-	var refused []error
+	snapshot := taskArmingSnapshot{
+		all: tasks, safe: make([]task.Task, 0, len(tasks)), bindingUpdates: bindingUpdates,
+	}
 	for _, candidate := range tasks {
 		target := task.CanonicalTargetSession(candidate.TargetSession)
 		if !candidate.Enabled || target == "" {
-			safe = append(safe, candidate)
+			snapshot.safe = append(snapshot.safe, candidate)
 			continue
 		}
 		validation := m.prepareTaskTargetValidation(candidate.RepoID, target, true)
 		if err := m.validateEnabledTaskTarget(candidate, validation); err != nil {
-			refused = append(refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
+			snapshot.refused = append(snapshot.refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
 			continue
 		}
-		safe = append(safe, candidate)
+		snapshot.safe = append(snapshot.safe, candidate)
 	}
-	return safe, refused, nil
+	return snapshot, nil
 }
 
 // armTaskAutomation serializes startup arming with every task control writer,
@@ -58,27 +67,22 @@ func armTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *wat
 func reloadTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor) ([]error, error) {
 	manager.taskTargetMu.Lock()
 	defer manager.taskTargetMu.Unlock()
-	tasks, refused, err := manager.persistedTasksForArming()
+	snapshot, err := manager.persistedTasksForArming()
 	if err != nil {
 		return nil, err
 	}
-	loadSnapshot := func() ([]task.Task, error) {
-		return append([]task.Task(nil), tasks...), nil
+	for _, updated := range snapshot.bindingUpdates {
+		manager.publishEvent(agentproto.EventTaskUpdated, updated)
 	}
-	if watchers != nil {
-		originalWatcherLoad := watchers.loadTasks
-		watchers.loadTasks = loadSnapshot
-		defer func() { watchers.loadTasks = originalWatcherLoad }()
-	}
-	if err := scheduler.reloadTasks(tasks); err != nil {
+	if err := scheduler.reloadTasks(snapshot.safe); err != nil {
 		return nil, err
 	}
 	if watchers != nil {
-		if err := watchers.Reload(); err != nil {
+		if err := watchers.reloadSnapshot(snapshot.safe, snapshot.all); err != nil {
 			return nil, err
 		}
 	}
-	return refused, nil
+	return snapshot.refused, nil
 }
 
 // taskRepoIDForValidation mirrors task.AddTaskChecked's bind-time identity

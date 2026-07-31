@@ -33,14 +33,14 @@ var archiveTargetTasksChecked = func() {}
 
 // loadTasksForRepoID is a test seam for proving lifecycle operations do not
 // repeatedly reload and freshly resolve the same project task set.
-var loadTasksForRepoID = task.LoadTasksForRepoID
+var loadTasksForRepoID = task.LoadTasksForRepoIDWithBindingUpdates
 
 // enabledTasksTargetingSession returns enabled tasks in repoID whose canonical
 // target is exactly title. Names are sorted for a deterministic, complete
 // archive refusal. A load error stays unknown and must fail the archive before
 // any session mutation.
-func enabledTasksTargetingSession(repoID, title string) ([]task.Task, error) {
-	targets, err := loadEnabledTaskTargets(repoID)
+func (m *Manager) enabledTasksTargetingSession(repoID, title string) ([]task.Task, error) {
+	targets, err := m.loadEnabledTaskTargets(repoID)
 	if err != nil {
 		return nil, err
 	}
@@ -51,10 +51,13 @@ func enabledTasksTargetingSession(repoID, title string) ([]task.Task, error) {
 // then indexes every enabled target. DeleteProject reuses this snapshot for its
 // preflight and each subsequent archive while holding taskTargetMu, so projects
 // with many sessions do not repeat tasks x path-resolution work.
-func loadEnabledTaskTargets(repoID string) (map[string][]task.Task, error) {
-	tasks, err := loadTasksForRepoID(repoID)
+func (m *Manager) loadEnabledTaskTargets(repoID string) (map[string][]task.Task, error) {
+	tasks, bindingUpdates, err := loadTasksForRepoID(repoID)
 	if err != nil {
 		return nil, err
+	}
+	for _, updated := range bindingUpdates {
+		m.publishEvent(agentproto.EventTaskUpdated, updated)
 	}
 	targets := make(map[string][]task.Task)
 	for _, t := range tasks {
@@ -169,7 +172,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	targeted := taskTargets[req.Title]
 	if taskTargets == nil {
 		var taskErr error
-		targeted, taskErr = enabledTasksTargetingSession(repoID, req.Title)
+		targeted, taskErr = m.enabledTasksTargetingSession(repoID, req.Title)
 		if taskErr != nil {
 			return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: could not determine whether enabled tasks target it; nothing was changed: %w", req.Title, taskErr)
 		}

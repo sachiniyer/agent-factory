@@ -194,3 +194,26 @@ func TestTaskArming_RootPolicyDriftFailsBeforeScheduling(t *testing.T) {
 	assert.Contains(t, scheduler.scheduledTaskIDs(), "safearm1", "one unsafe task must not suppress unrelated automation")
 	assert.Empty(t, watchers.watchingTaskIDs(), "failed startup preflight must leave watch automation unarmed")
 }
+
+func TestTaskArming_RefusedWatchTaskKeepsDurableQueue(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	unsafe := watchTask("rootqueue", "sleep 60", repoPath)
+	unsafe.TargetSession = session.RootSessionTitle
+	require.NoError(t, task.AddTask(unsafe),
+		"seed a task accepted while root-agent policy was enabled by the previous daemon")
+
+	watchers, _ := newTestSupervisor(t, task.LoadTasks)
+	queueDir, err := watchers.queueDir()
+	require.NoError(t, err)
+	require.NoError(t, newEventQueue(queueDir, unsafe.ID).enqueue("pending"))
+
+	scheduler := newTaskScheduler()
+	scheduler.controlMu.Lock()
+	refused, reloadErr := reloadTaskAutomation(manager, scheduler, watchers)
+	scheduler.controlMu.Unlock()
+	require.NoError(t, reloadErr)
+	require.NotEmpty(t, refused, "unsafe task must be refused instead of armed")
+	_, statErr := os.Stat(filepath.Join(queueDir, unsafe.ID+".jsonl"))
+	require.NoError(t, statErr,
+		"a refused task still exists in tasks.json, so its repairable backlog must not be treated as orphaned")
+}
