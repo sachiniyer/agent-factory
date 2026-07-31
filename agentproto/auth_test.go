@@ -115,6 +115,15 @@ func TestRedactAccessTokenError(t *testing.T) {
 	if RedactAccessTokenError(nil, token) != nil {
 		t.Fatal("nil error must remain nil")
 	}
+
+	shortURL := &url.Error{
+		Op:  "Get",
+		URL: "token",
+		Err: errors.New("failure access_token=sekrit"),
+	}
+	if got := RedactAccessTokenError(shortURL, ""); strings.Contains(got.Error(), "sekrit") {
+		t.Fatalf("short structured URL split the redaction needle: %s", got)
+	}
 }
 
 func TestRedactAccessTokenText(t *testing.T) {

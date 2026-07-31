@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -53,14 +54,12 @@ func RedactAccessTokenError(err error, token string) error {
 	if err == nil {
 		return nil
 	}
-	safeStructuredURL := ""
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		urlErr.URL = RedactAccessTokenURL(urlErr.URL)
-		safeStructuredURL = urlErr.URL
 	}
 
-	message := redactAccessTokenTextOutside(err.Error(), safeStructuredURL)
+	message := redactAccessTokenTextOutsideStructuredURL(err.Error(), urlErr)
 	if token != "" {
 		message = strings.ReplaceAll(message, token, accessTokenRedaction)
 	}
@@ -109,15 +108,27 @@ func RedactAccessTokenText(text string) string {
 	}
 }
 
-func redactAccessTokenTextOutside(text, safe string) string {
-	if safe == "" {
+func redactAccessTokenTextOutsideStructuredURL(text string, urlErr *url.Error) string {
+	if urlErr == nil {
 		return RedactAccessTokenText(text)
 	}
-	parts := strings.Split(text, safe)
-	for i := range parts {
-		parts[i] = RedactAccessTokenText(parts[i])
+
+	structured := urlErr.Error()
+	quotedURL := strconv.Quote(urlErr.URL)
+	structuredPrefix := urlErr.Op + " " + quotedURL + ": "
+	if !strings.HasPrefix(structured, structuredPrefix) ||
+		strings.Count(text, structured) != 1 {
+		// A custom wrapper changed the nested error's text, so there is no
+		// unique structured occurrence whose provenance is safe to exempt.
+		return RedactAccessTokenText(text)
 	}
-	return strings.Join(parts, safe)
+	structuredStart := strings.Index(text, structured)
+	urlOffset := len(urlErr.Op) + 1
+	urlStart := structuredStart + urlOffset
+	urlEnd := urlStart + len(quotedURL)
+	return RedactAccessTokenText(text[:urlStart]) +
+		text[urlStart:urlEnd] +
+		RedactAccessTokenText(text[urlEnd:])
 }
 
 func indexFoldASCII(text, lowerASCII string) int {
