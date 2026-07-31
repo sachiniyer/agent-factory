@@ -3,7 +3,9 @@ package session
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -71,32 +73,55 @@ func TestEnsurePluginDir_ConcurrentStalePrune(t *testing.T) {
 	}
 }
 
-// TestEnsurePluginDir_PrunesStaleGuardHooks is the upgrade-safety lock for the
-// tmux-guard removal. An af that shipped the guard left a hooks/ directory
-// (hooks.json + guard-tmux.sh) in the runtime Claude plugin. This af installs no
-// PreToolUse hook, so a lingering one would invoke the removed `af hook-guard-tmux`
-// and fail CLOSED on every Bash call for an upgraded user. ensurePluginDir must
-// remove it on the next launch after upgrade.
-func TestEnsurePluginDir_PrunesStaleGuardHooks(t *testing.T) {
+// TestEnsurePluginDir_DisarmsStaleGuardWithoutBreakingLiveHook is the upgrade-
+// safety lock for #2608. Claude Code loads hooks.json once, so removing the
+// stale file disarms new sessions but an already-running session keeps invoking
+// the exact legacy wrapper below. The removed guard must remain as an executable
+// no-op until those sessions end.
+func TestEnsurePluginDir_DisarmsStaleGuardWithoutBreakingLiveHook(t *testing.T) {
 	tmpDir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmpDir)
 
-	// Seed the hooks/ directory a pre-removal af wrote.
+	// Seed the two files v1.0.209 wrote before #2563 removed the guard.
 	hooksDir := filepath.Join(tmpDir, "plugin", "hooks")
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		t.Fatalf("seed hooks dir: %v", err)
 	}
-	for _, name := range []string{"hooks.json", "guard-tmux.sh"} {
-		if err := os.WriteFile(filepath.Join(hooksDir, name), []byte("stale"), 0644); err != nil {
-			t.Fatalf("seed %s: %v", name, err)
-		}
+	if err := os.WriteFile(filepath.Join(hooksDir, "hooks.json"), []byte(`{"hooks":{"PreToolUse":[]}}`), 0644); err != nil {
+		t.Fatalf("seed hooks.json: %v", err)
+	}
+	legacyGuard := "#!/bin/sh\n" +
+		"guard_binary=/removed/v1.0.209/af\n" +
+		"if [ ! -x \"$guard_binary\" ]; then\n" +
+		"  echo 'Agent Factory tmux safety guard binary is unavailable; refusing the Bash command.' >&2\n" +
+		"  exit 2\n" +
+		"fi\n" +
+		"\"$guard_binary\" hook-guard-tmux\n" +
+		"status=$?\n" +
+		"if [ \"$status\" -ne 0 ]; then\n" +
+		"  echo 'Agent Factory tmux safety guard failed; refusing the Bash command.' >&2\n" +
+		"  exit 2\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "guard-tmux.sh"), []byte(legacyGuard), 0755); err != nil {
+		t.Fatalf("seed guard-tmux.sh: %v", err)
 	}
 
-	if _, err := ensurePluginDir(); err != nil {
+	pluginDir, err := ensurePluginDir()
+	if err != nil {
 		t.Fatalf("ensurePluginDir: %v", err)
 	}
 
-	if _, err := os.Stat(hooksDir); !os.IsNotExist(err) {
-		t.Errorf("stale hooks/ directory survived upgrade (err=%v); it would keep firing the removed guard against every Bash call", err)
+	if _, err := os.Stat(filepath.Join(hooksDir, "hooks.json")); !os.IsNotExist(err) {
+		t.Errorf("stale hooks.json survived upgrade (err=%v); a new session would register the removed guard", err)
+	}
+
+	const legacyWrapper = `if [ ! -x "${CLAUDE_PLUGIN_ROOT}/hooks/guard-tmux.sh" ]; then
+  echo 'Agent Factory tmux safety guard is unavailable; refusing the Bash command.' >&2; exit 2; fi;
+  "${CLAUDE_PLUGIN_ROOT}/hooks/guard-tmux.sh"`
+	wrapper := exec.Command("sh", "-c", legacyWrapper)
+	wrapper.Env = append(os.Environ(), "CLAUDE_PLUGIN_ROOT="+pluginDir)
+	output, err := wrapper.CombinedOutput()
+	if err != nil {
+		t.Fatalf("live v1.0.209 hook denied Bash after upgrade: %v\n%s", err, strings.TrimSpace(string(output)))
 	}
 }

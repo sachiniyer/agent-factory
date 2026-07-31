@@ -34,6 +34,12 @@ const pluginManifest = `{
 }
 `
 
+// legacyGuardNoop keeps already-running pre-#2563 Claude sessions usable after
+// an af upgrade. Those sessions retain their loaded PreToolUse wrapper, which
+// still executes this path even after hooks.json is removed. New sessions never
+// load the tombstone because ensurePluginDir removes hooks.json.
+const legacyGuardNoop = "#!/bin/sh\nexit 0\n"
+
 // pluginCommands defines the command files to write into the plugin directory.
 // ensurePluginDir writes this map to disk on every session launch and prunes any
 // .md file that isn't listed here, so adding/removing/editing a skill is as simple
@@ -61,9 +67,9 @@ var pluginCommands = map[string]string{
 //
 // This is called on every claude-based session launch (see injectSystemPrompt),
 // and rewrites the manifest, writes every file in pluginCommands, prunes any
-// stray .md in commands/ that isn't in the map, and removes the stale hooks/
-// directory an older af wrote — so inserts, edits, and removes all propagate on
-// the next session start.
+// stray .md in commands/ that isn't in the map, and disarms the stale hook an
+// older af wrote — so inserts, edits, and removes all propagate on the next
+// session start.
 func ensurePluginDir() (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
@@ -72,6 +78,7 @@ func ensurePluginDir() (string, error) {
 
 	pluginDir := filepath.Join(configDir, "plugin")
 	commandsDir := filepath.Join(pluginDir, "commands")
+	hooksDir := filepath.Join(pluginDir, "hooks")
 	manifestDir := filepath.Join(pluginDir, ".claude-plugin")
 
 	if err := os.MkdirAll(commandsDir, 0755); err != nil {
@@ -81,14 +88,15 @@ func ensurePluginDir() (string, error) {
 		return "", err
 	}
 
-	// Remove the hooks/ directory a prior af version wrote for the tmux-command
-	// guard (its hooks.json + guard-tmux.sh). This af installs no PreToolUse hook,
-	// and a lingering one would invoke the removed `af hook-guard-tmux` and fail
-	// CLOSED on every Bash call for an upgraded user — worse than the guard it
-	// replaced. Pruning here, on the next session launch after upgrade, is what
-	// keeps the removal safe for existing installs. RemoveAll is idempotent, so this
-	// is a clean no-op once the directory is gone.
-	if err := os.RemoveAll(filepath.Join(pluginDir, "hooks")); err != nil {
+	// A prior af wrote hooks.json + guard-tmux.sh. Remove only the registration
+	// so new sessions load no PreToolUse guard, then replace its executable with
+	// a no-op for already-running Claude sessions that cached the old wrapper at
+	// startup (#2608). Deleting the whole directory leaves those live wrappers
+	// failing closed on every Bash call.
+	if err := os.Remove(filepath.Join(hooksDir, "hooks.json")); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := config.AtomicWriteFile(filepath.Join(hooksDir, "guard-tmux.sh"), []byte(legacyGuardNoop), 0755); err != nil {
 		return "", err
 	}
 
