@@ -107,6 +107,8 @@ func TestConfigGetRootAgentExplainProjectPersonalDisablesLegacy(t *testing.T) {
 func TestConfigGetRootAgentDefaultsToCurrentProject(t *testing.T) {
 	_, repoRoot := setupRootAgentProject(t, "schema_version = 1\n", true, "")
 	t.Chdir(repoRoot)
+	currentRepo, err := config.CurrentRepo()
+	require.NoError(t, err)
 
 	setConfigGetReadFlags(t, "", false, false)
 	out, err := runConfigGetForTest(t, "root_agent")
@@ -116,7 +118,7 @@ func TestConfigGetRootAgentDefaultsToCurrentProject(t *testing.T) {
 	configGetExplainFlag = true
 	out, err = runConfigGetForTest(t, "root_agent")
 	require.NoError(t, err)
-	assert.Contains(t, out, "project: "+repoRoot)
+	assert.Contains(t, out, "project: "+currentRepo.Root)
 	assert.Contains(t, out, `root_agent = {"enabled":true}`)
 	assert.Contains(t, out, "winner · supplies the effective enabled")
 	assert.Contains(t, out, "this project has no entry")
