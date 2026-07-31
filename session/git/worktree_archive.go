@@ -88,7 +88,7 @@ var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
 // paths deterministically. Production never reassigns them.
 var (
 	renamePath                  = renamePathNoReplace
-	removeAllPath               = os.RemoveAll
+	removeDirectoryTree         = removeOpenedDirectory
 	copyTreeBeforeSourceOpen    = func(string) error { return nil }
 	moveDirBeforeDestParentOpen = func(string) error { return nil }
 	moveDirBeforeDestCommit     = func(string) error { return nil }
@@ -157,6 +157,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		// its config (rare). Only move bytes ourselves if the dir is still at
 		// src; either way, repair fixes the two-way registration.
 		var sourceCleanupErr error
+		var sourceCleanupPath string
 		if !pathExists(dest) {
 			if mErr := moveDirCrossDevice(src, dest); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
@@ -164,6 +165,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 					return fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr)
 				}
 				sourceCleanupErr = mErr
+				sourceCleanupPath = copiedErr.src
 			}
 		}
 		// The bytes are now at dest. Commit the new location to the worktree
@@ -177,7 +179,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		g.setWorktreeLocation(dest)
 		if rErr := worktreeRepair(g, dest); rErr != nil {
 			if sourceCleanupErr != nil {
-				return fmt.Errorf("copied worktree to %s but failed to remove original %s and failed to repair its git registration: %v: %w", dest, src, rErr, sourceCleanupErr)
+				return fmt.Errorf("copied worktree to %s but failed to remove original %s and failed to repair its git registration: %v: %w", dest, sourceCleanupPath, rErr, sourceCleanupErr)
 			}
 			return fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr)
 		}
@@ -211,8 +213,8 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 				"worktree copied and registered at %s, but failed to remove the leftover source directory %s; "+
 					"the worktree is valid and usable at %s — the leftover is only reclaimable disk, "+
 					"remove it by hand with `%s`: %v",
-				dest, src, dest,
-				shellsuggest.Command("rm", "-rf", src),
+				dest, sourceCleanupPath, dest,
+				shellsuggest.Command("rm", "-rf", sourceCleanupPath),
 				sourceCleanupErr,
 			)
 		}
@@ -252,7 +254,7 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // common case when the archive root lives on a different device than the repo.
 // The copy preserves file contents, modes, and symlinks, so uncommitted changes
 // survive verbatim.
-func moveDirCrossDevice(src, dest string) error {
+func moveDirCrossDevice(src, dest string) (returnErr error) {
 	if err := renamePath(src, dest); err == nil {
 		return nil
 	} else if !errors.Is(err, syscall.EXDEV) {
@@ -268,12 +270,21 @@ func moveDirCrossDevice(src, dest string) error {
 	}
 	copied, err := copyTreeWithIdentities(src, stagingPath)
 	if err != nil {
-		cleanupErr := removeAllPath(stagingPath)
-		if cleanupErr != nil {
-			return fmt.Errorf("failed to copy worktree into private staging directory %s (%v) and failed to clean that staging tree: %w", stagingPath, err, cleanupErr)
-		}
 		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
 	}
+	defer copied.close()
+	stagingName := filepath.Base(stagingPath)
+	published := false
+	defer func() {
+		if published {
+			return
+		}
+		if cleanupErr := removeDirectoryTree(
+			copied.destinationParent, stagingName, stagingPath, copied.destination, nil,
+		); cleanupErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("failed to clean private staging tree %s: %w", stagingPath, cleanupErr))
+		}
+	}()
 
 	sourceParentPath := filepath.Dir(src)
 	sourceParent, _, err := openDirectoryPathFollowingLinks(sourceParentPath, "source parent")
@@ -293,61 +304,71 @@ func moveDirCrossDevice(src, dest string) error {
 	if err := renameAtNoReplace(int(sourceParent.Fd()), sourceName, int(sourceParent.Fd()), quarantineName); err != nil {
 		return fmt.Errorf("failed to atomically secure source directory %s before cleanup: %w", src, err)
 	}
-	quarantinedSource, quarantinedInfo, err := openDirectoryAt(sourceParent, quarantineName, quarantinePath, "secured source")
+	quarantinedIdentity, err := identityAt(sourceParent, quarantineName)
 	if err != nil {
-		return fmt.Errorf("source directory changed while it was being secured; refusing cleanup: %w", err)
+		if restoreErr := restoreClaimedSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
+			return fmt.Errorf("failed to inspect secured source %s (%v) and could not restore it to %s: %w", quarantinePath, err, src, restoreErr)
+		}
+		return fmt.Errorf("failed to inspect secured source %s; restored it to %s: %w", quarantinePath, src, err)
 	}
-	defer quarantinedSource.Close()
-	if !os.SameFile(copied.source, quarantinedInfo) {
-		restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName)
+	if !copied.sourceIdentity.same(quarantinedIdentity) {
+		restoreErr := restoreClaimedSource(sourceParent, quarantineName, sourceName)
 		if restoreErr != nil {
 			return fmt.Errorf("source directory changed while it was copied; replacement was preserved at %s but could not be restored to %s: %w", quarantinePath, src, restoreErr)
 		}
 		return fmt.Errorf("source directory changed while it was copied; restored the replacement at %s and refused cleanup", src)
 	}
+	restoreSource := func(cause error) error {
+		restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName, copied.source)
+		if restoreErr != nil {
+			return fmt.Errorf("%v; secured source at %s could not be restored to %s: %w", cause, quarantinePath, src, restoreErr)
+		}
+		return cause
+	}
 
 	destinationParentPath := filepath.Dir(dest)
 	if err := moveDirBeforeDestParentOpen(destinationParentPath); err != nil {
-		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
-			return fmt.Errorf("destination parent hook failed (%v) and secured source could not be restored: %w", err, restoreErr)
-		}
-		return err
+		return restoreSource(err)
 	}
-	destinationParent, _, err := openDirectoryPathFollowingLinks(destinationParentPath, "destination parent")
+	currentDestinationParent, _, err := openDirectoryPathFollowingLinks(destinationParentPath, "destination parent")
 	if err != nil {
-		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
-			return fmt.Errorf("failed to reopen destination parent %s (%v) and secured source could not be restored: %w", destinationParentPath, err, restoreErr)
-		}
-		return err
+		return restoreSource(err)
 	}
-	defer destinationParent.Close()
-	if err := moveDirBeforeDestCommit(stagingPath); err != nil {
-		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
-			return fmt.Errorf("destination commit hook failed (%v) and secured source could not be restored: %w", err, restoreErr)
+	currentDestinationParentIdentity, err := identityFromFile(currentDestinationParent)
+	currentDestinationParent.Close()
+	if err != nil || !copied.destinationParentIdentity.same(currentDestinationParentIdentity) {
+		if err == nil {
+			err = fmt.Errorf("destination parent changed while the worktree was copied")
 		}
-		return err
+		return restoreSource(err)
+	}
+	if err := moveDirBeforeDestCommit(stagingPath); err != nil {
+		return restoreSource(err)
+	}
+	if err := copied.validateSource(quarantinePath); err != nil {
+		return restoreSource(fmt.Errorf("source tree changed after copy: %w", err))
+	}
+	if err := copied.validateDestination(stagingPath); err != nil {
+		return restoreSource(fmt.Errorf("destination tree changed after copy: %w", err))
 	}
 	if err := renameAtNoReplace(
-		int(destinationParent.Fd()), filepath.Base(stagingPath),
-		int(destinationParent.Fd()), filepath.Base(dest),
+		int(copied.destinationParent.Fd()), stagingName,
+		int(copied.destinationParent.Fd()), filepath.Base(dest),
 	); err != nil {
-		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
-			return fmt.Errorf("failed to commit destination %s (%v) and secured source could not be restored: %w", dest, err, restoreErr)
-		}
-		return fmt.Errorf("failed to atomically commit copied worktree at %s without replacement: %w", dest, err)
+		return restoreSource(fmt.Errorf("failed to atomically commit copied worktree at %s without replacement: %w", dest, err))
 	}
-	currentDestination, err := os.Lstat(dest)
-	if err != nil || !os.SameFile(copied.destination, currentDestination) {
-		if restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName); restoreErr != nil {
-			return fmt.Errorf("destination directory changed during commit and secured source could not be restored: %w", restoreErr)
+	published = true
+	if err := validatePublishedDestination(dest, copied); err != nil {
+		cleanupErr := removeDirectoryTree(
+			copied.destinationParent, filepath.Base(dest), dest, copied.destination, nil,
+		)
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to remove unverified destination %s: %w", dest, cleanupErr))
 		}
-		if err != nil {
-			return fmt.Errorf("destination directory changed during commit at %s: %w", dest, err)
-		}
-		return fmt.Errorf("destination directory changed during commit at %s; source was restored", dest)
+		return restoreSource(err)
 	}
 
-	if err := removeAllPath(quarantinePath); err != nil {
+	if err := removeDirectoryTree(sourceParent, quarantineName, quarantinePath, copied.source, &copied.root); err != nil {
 		return &copiedWorktreeSourceCleanupError{src: quarantinePath, dest: dest, err: err}
 	}
 	return nil
@@ -375,103 +396,281 @@ func (e *copiedWorktreeSourceCleanupError) Unwrap() error {
 // destination node is created exclusively. This is only reached on the
 // cross-device fallback.
 func copyTree(src, dest string) error {
-	_, err := copyTreeWithIdentities(src, dest)
+	copied, err := copyTreeWithIdentities(src, dest)
+	if copied != nil {
+		copied.close()
+	}
 	return err
 }
 
 type copiedTreeIdentities struct {
-	source      os.FileInfo
-	destination os.FileInfo
+	source                    *os.File
+	sourceIdentity            pathIdentity
+	destinationParent         *os.File
+	destinationParentIdentity pathIdentity
+	destination               *os.File
+	destinationIdentity       pathIdentity
+	root                      copiedDirectory
 }
 
-func copyTreeWithIdentities(src, dest string) (copiedTreeIdentities, error) {
-	source, sourceInfo, err := openDirectoryPath(src, "source")
-	if err != nil {
-		return copiedTreeIdentities{}, err
-	}
-	defer source.Close()
-	if err := copyTreeBeforeSourceOpen(src); err != nil {
-		return copiedTreeIdentities{}, err
-	}
-
-	destParentPath := filepath.Dir(dest)
-	destParent, _, err := openDirectoryPathFollowingLinks(destParentPath, "destination parent")
-	if err != nil {
-		return copiedTreeIdentities{}, err
-	}
-	defer destParent.Close()
-	destName := filepath.Base(dest)
-	if err := unix.Mkdirat(int(destParent.Fd()), destName, uint32(sourceInfo.Mode().Perm())); err != nil {
-		return copiedTreeIdentities{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
-	}
-	destination, destinationInfo, err := openDirectoryAt(destParent, destName, dest, "destination")
-	if err != nil {
-		return copiedTreeIdentities{}, err
-	}
-	defer destination.Close()
-
-	if err := copyDirectoryContents(source, destination, src, dest); err != nil {
-		return copiedTreeIdentities{}, err
-	}
-	return copiedTreeIdentities{source: sourceInfo, destination: destinationInfo}, nil
+type copiedDirectory struct {
+	entries []copiedEntry
 }
 
-func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) error {
-	names, err := source.Readdirnames(-1)
+type copiedEntry struct {
+	name        string
+	source      pathIdentity
+	destination pathIdentity
+	directory   *copiedDirectory
+}
+
+type pathIdentity struct {
+	device   uint64
+	inode    uint64
+	fileType uint32
+}
+
+func (identity pathIdentity) same(other pathIdentity) bool {
+	return identity == other
+}
+
+func (copied *copiedTreeIdentities) close() {
+	_ = copied.destination.Close()
+	_ = copied.destinationParent.Close()
+	_ = copied.source.Close()
+}
+
+func (copied *copiedTreeIdentities) validateSource(path string) error {
+	current, err := identityFromFile(copied.source)
 	if err != nil {
-		return fmt.Errorf("cannot move worktree across filesystems: failed to enumerate source directory %s: %w", sourcePath, err)
+		return err
 	}
-	sort.Strings(names)
+	if !copied.sourceIdentity.same(current) {
+		return fmt.Errorf("source root identity changed at %s", path)
+	}
+	return validateCopiedDirectory(copied.source, copied.root, true, path)
+}
+
+func (copied *copiedTreeIdentities) validateDestination(path string) error {
+	current, err := identityFromFile(copied.destination)
+	if err != nil {
+		return err
+	}
+	if !copied.destinationIdentity.same(current) {
+		return fmt.Errorf("destination root identity changed at %s", path)
+	}
+	return validateCopiedDirectory(copied.destination, copied.root, false, path)
+}
+
+func validateCopiedDirectory(directory *os.File, expected copiedDirectory, source bool, path string) error {
+	names, err := directoryNames(directory, path)
+	if err != nil {
+		return err
+	}
+	expectedByName := make(map[string]copiedEntry, len(expected.entries))
+	for _, entry := range expected.entries {
+		expectedByName[entry.name] = entry
+	}
+	if len(names) != len(expectedByName) {
+		return fmt.Errorf("tree entry set changed at %s", path)
+	}
 	for _, name := range names {
-		childSourcePath := filepath.Join(sourcePath, name)
-		childDestinationPath := filepath.Join(destinationPath, name)
-		var stat unix.Stat_t
-		if err := unix.Fstatat(int(source.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return fmt.Errorf("cannot move worktree across filesystems: failed to inspect source entry %s: %w", childSourcePath, err)
+		entry, ok := expectedByName[name]
+		if !ok {
+			return fmt.Errorf("unexpected tree entry %s", filepath.Join(path, name))
 		}
-		if err := copyTreeBeforeSourceOpen(childSourcePath); err != nil {
+		current, err := identityAt(directory, name)
+		if err != nil {
 			return err
 		}
-
-		switch uint32(stat.Mode) & unix.S_IFMT {
-		case unix.S_IFDIR:
-			if err := copyDirectoryAt(source, destination, name, childSourcePath, childDestinationPath); err != nil {
-				return err
-			}
-		case unix.S_IFLNK:
-			link, err := readLinkAt(source, name, childSourcePath)
-			if err != nil {
-				return err
-			}
-			if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
-				return fmt.Errorf("cannot move worktree across filesystems: failed to create destination symlink %s exclusively: %w", childDestinationPath, err)
-			}
-		case unix.S_IFREG:
-			if err := copyRegularFileAt(source, destination, name, childSourcePath, childDestinationPath); err != nil {
-				return err
-			}
-		default:
-			return unsupportedSourceTypeError(childSourcePath, uint32(stat.Mode))
+		expectedIdentity := entry.destination
+		role := "destination"
+		if source {
+			expectedIdentity = entry.source
+			role = "source"
+		}
+		if !expectedIdentity.same(current) {
+			return fmt.Errorf("%s tree entry identity changed at %s", role, filepath.Join(path, name))
+		}
+		if entry.directory == nil {
+			continue
+		}
+		childPath := filepath.Join(path, name)
+		child, _, err := openDirectoryAt(directory, name, childPath, role)
+		if err != nil {
+			return err
+		}
+		err = validateCopiedDirectory(child, *entry.directory, source, childPath)
+		_ = child.Close()
+		if err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func copyDirectoryAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
+func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
+	source, sourceInfo, err := openDirectoryPath(src, "source")
+	if err != nil {
+		return nil, err
+	}
+	if err := copyTreeBeforeSourceOpen(src); err != nil {
+		_ = source.Close()
+		return nil, err
+	}
+	sourceIdentity, err := identityFromFile(source)
+	if err != nil {
+		_ = source.Close()
+		return nil, err
+	}
+
+	destParentPath := filepath.Dir(dest)
+	destParent, _, err := openDirectoryPathFollowingLinks(destParentPath, "destination parent")
+	if err != nil {
+		_ = source.Close()
+		return nil, err
+	}
+	destinationParentIdentity, err := identityFromFile(destParent)
+	if err != nil {
+		_ = destParent.Close()
+		_ = source.Close()
+		return nil, err
+	}
+	destName := filepath.Base(dest)
+	if err := unix.Mkdirat(int(destParent.Fd()), destName, uint32(sourceInfo.Mode().Perm())); err != nil {
+		_ = destParent.Close()
+		_ = source.Close()
+		return nil, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
+	}
+	destination, _, err := openDirectoryAt(destParent, destName, dest, "destination")
+	if err != nil {
+		_ = destParent.Close()
+		_ = source.Close()
+		return nil, err
+	}
+	destinationIdentity, err := identityFromFile(destination)
+	if err != nil {
+		_ = destination.Close()
+		_ = destParent.Close()
+		_ = source.Close()
+		return nil, err
+	}
+	copied := &copiedTreeIdentities{
+		source:                    source,
+		sourceIdentity:            sourceIdentity,
+		destinationParent:         destParent,
+		destinationParentIdentity: destinationParentIdentity,
+		destination:               destination,
+		destinationIdentity:       destinationIdentity,
+	}
+
+	copied.root, err = copyDirectoryContents(source, destination, src, dest)
+	if err != nil {
+		cleanupErr := removeOpenedDirectory(destParent, destName, dest, destination, nil)
+		copied.close()
+		if cleanupErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("failed to clean partial destination tree %s: %w", dest, cleanupErr))
+		}
+		return nil, err
+	}
+	return copied, nil
+}
+
+func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) (copiedDirectory, error) {
+	names, err := source.Readdirnames(-1)
+	if err != nil {
+		return copiedDirectory{}, fmt.Errorf("cannot move worktree across filesystems: failed to enumerate source directory %s: %w", sourcePath, err)
+	}
+	sort.Strings(names)
+	result := copiedDirectory{entries: make([]copiedEntry, 0, len(names))}
+	for _, name := range names {
+		childSourcePath := filepath.Join(sourcePath, name)
+		childDestinationPath := filepath.Join(destinationPath, name)
+		if err := copyTreeBeforeSourceOpen(childSourcePath); err != nil {
+			return copiedDirectory{}, err
+		}
+		stat, err := statAt(source, name)
+		if err != nil {
+			return copiedDirectory{}, fmt.Errorf("cannot move worktree across filesystems: failed to inspect source entry %s: %w", childSourcePath, err)
+		}
+		inspected := identityFromStat(stat)
+
+		var entry copiedEntry
+		switch inspected.fileType {
+		case unix.S_IFDIR:
+			entry, err = copyDirectoryAt(source, destination, name, childSourcePath, childDestinationPath, inspected)
+			if err != nil {
+				return copiedDirectory{}, err
+			}
+		case unix.S_IFLNK:
+			link, err := readLinkAt(source, name, childSourcePath)
+			if err != nil {
+				return copiedDirectory{}, err
+			}
+			current, err := identityAt(source, name)
+			if err != nil || !inspected.same(current) {
+				return copiedDirectory{}, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while it was copied", childSourcePath)
+			}
+			if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
+				return copiedDirectory{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination symlink %s exclusively: %w", childDestinationPath, err)
+			}
+			destinationIdentity, err := identityAt(destination, name)
+			if err != nil {
+				return copiedDirectory{}, err
+			}
+			entry = copiedEntry{name: name, source: inspected, destination: destinationIdentity}
+		case unix.S_IFREG:
+			entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected)
+			if err != nil {
+				return copiedDirectory{}, err
+			}
+		default:
+			return copiedDirectory{}, unsupportedSourceTypeError(childSourcePath, uint32(stat.Mode))
+		}
+		result.entries = append(result.entries, entry)
+	}
+	return result, nil
+}
+
+func copyDirectoryAt(
+	source, destination *os.File,
+	name, sourcePath, destinationPath string,
+	inspected pathIdentity,
+) (copiedEntry, error) {
 	sourceChild, sourceInfo, err := openDirectoryAt(source, name, sourcePath, "source")
 	if err != nil {
-		return err
+		return copiedEntry{}, err
 	}
 	defer sourceChild.Close()
+	sourceIdentity, err := identityFromFile(sourceChild)
+	if err != nil {
+		return copiedEntry{}, err
+	}
+	if !inspected.same(sourceIdentity) {
+		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: source directory %s changed before it was opened", sourcePath)
+	}
 	if err := unix.Mkdirat(int(destination.Fd()), name, uint32(sourceInfo.Mode().Perm())); err != nil {
-		return fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", destinationPath, err)
+		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", destinationPath, err)
 	}
 	destinationChild, _, err := openDirectoryAt(destination, name, destinationPath, "destination")
 	if err != nil {
-		return err
+		return copiedEntry{}, err
 	}
 	defer destinationChild.Close()
-	return copyDirectoryContents(sourceChild, destinationChild, sourcePath, destinationPath)
+	destinationIdentity, err := identityFromFile(destinationChild)
+	if err != nil {
+		return copiedEntry{}, err
+	}
+	children, err := copyDirectoryContents(sourceChild, destinationChild, sourcePath, destinationPath)
+	if err != nil {
+		return copiedEntry{}, err
+	}
+	return copiedEntry{
+		name:        name,
+		source:      sourceIdentity,
+		destination: destinationIdentity,
+		directory:   &children,
+	}, nil
 }
 
 // copyFile is the path-based test entrypoint for the regular-file copier. The
@@ -491,22 +690,38 @@ func copyFile(src, dst string) error {
 }
 
 func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
+	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil)
+	return err
+}
+
+func copyRegularFileAtWithIdentity(
+	source, destination *os.File,
+	name, sourcePath, destinationPath string,
+	inspected *pathIdentity,
+) (copiedEntry, error) {
 	fd, err := unix.Openat(
 		int(source.Fd()), name,
 		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
 		0,
 	)
 	if err != nil {
-		return fmt.Errorf("cannot move worktree across filesystems: failed to open source file %s without following links: %w", sourcePath, err)
+		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to open source file %s without following links: %w", sourcePath, err)
 	}
 	in := os.NewFile(uintptr(fd), sourcePath)
 	defer in.Close()
 	info, err := in.Stat()
 	if err != nil {
-		return err
+		return copiedEntry{}, err
 	}
 	if !info.Mode().IsRegular() {
-		return unsupportedSourceTypeError(sourcePath, uint32(info.Mode()))
+		return copiedEntry{}, unsupportedSourceTypeError(sourcePath, uint32(info.Mode()))
+	}
+	sourceIdentity, err := identityFromFile(in)
+	if err != nil {
+		return copiedEntry{}, err
+	}
+	if inspected != nil && !inspected.same(sourceIdentity) {
+		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: source file %s changed before it was opened", sourcePath)
 	}
 	outFD, err := unix.Openat(
 		int(destination.Fd()), filepath.Base(destinationPath),
@@ -514,14 +729,22 @@ func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinati
 		uint32(info.Mode().Perm()),
 	)
 	if err != nil {
-		return fmt.Errorf("cannot move worktree across filesystems: failed to create destination file %s exclusively: %w", destinationPath, err)
+		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination file %s exclusively: %w", destinationPath, err)
 	}
 	out := os.NewFile(uintptr(outFD), destinationPath)
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
-		return err
+		return copiedEntry{}, err
 	}
-	return out.Close()
+	destinationIdentity, err := identityFromFile(out)
+	if err != nil {
+		_ = out.Close()
+		return copiedEntry{}, err
+	}
+	if err := out.Close(); err != nil {
+		return copiedEntry{}, err
+	}
+	return copiedEntry{name: name, source: sourceIdentity, destination: destinationIdentity}, nil
 }
 
 func openDirectoryPath(path, role string) (*os.File, os.FileInfo, error) {
@@ -606,16 +829,42 @@ func renamePathNoReplace(src, dest string) error {
 }
 
 func privateMovePath(path, purpose string) (string, error) {
-	var random [16]byte
-	if _, err := rand.Read(random[:]); err != nil {
+	name, err := privateMoveName(purpose)
+	if err != nil {
 		return "", fmt.Errorf("generate private %s path beside %s: %w", purpose, path, err)
 	}
-	name := fmt.Sprintf(".af-%s-%s", purpose, hex.EncodeToString(random[:]))
 	return filepath.Join(filepath.Dir(path), name), nil
 }
 
-func restoreSecuredSource(parent *os.File, securedName, sourceName string) error {
+func privateMoveName(purpose string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(".af-%s-%s", purpose, hex.EncodeToString(random[:])), nil
+}
+
+func restoreClaimedSource(parent *os.File, securedName, sourceName string) error {
 	return renameAtNoReplace(int(parent.Fd()), securedName, int(parent.Fd()), sourceName)
+}
+
+func restoreSecuredSource(parent *os.File, securedName, sourceName string, source *os.File) error {
+	expected, err := identityFromFile(source)
+	if err != nil {
+		return err
+	}
+	current, err := identityAt(parent, securedName)
+	if err != nil || !expected.same(current) {
+		return fmt.Errorf("secured source name no longer identifies the opened source")
+	}
+	if err := restoreClaimedSource(parent, securedName, sourceName); err != nil {
+		return err
+	}
+	restored, err := identityAt(parent, sourceName)
+	if err != nil || !expected.same(restored) {
+		return fmt.Errorf("restored source name does not identify the opened source")
+	}
+	return nil
 }
 
 // pathExists reports whether p exists (best-effort: a stat error other than

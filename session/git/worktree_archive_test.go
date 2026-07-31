@@ -189,16 +189,16 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 
 	cleanupErr := errors.New("forced source cleanup failure")
-	prevRemoveAll := removeAllPath
+	prevRemoveTree := removeDirectoryTree
 	var leftoverPath string
-	removeAllPath = func(path string) error {
+	removeDirectoryTree = func(parent *os.File, name, path string, directory *os.File, expected *copiedDirectory) error {
 		if filepath.Dir(path) == filepath.Dir(srcPath) && strings.Contains(filepath.Base(path), ".af-source-") {
 			leftoverPath = path
 			return cleanupErr
 		}
-		return os.RemoveAll(path)
+		return prevRemoveTree(parent, name, path, directory, expected)
 	}
-	t.Cleanup(func() { removeAllPath = prevRemoveAll })
+	t.Cleanup(func() { removeDirectoryTree = prevRemoveTree })
 
 	require.NoError(t, gw.MoveWorktree(dest),
 		"a copy+register success with only source cleanup failing must not error (#2011)")
@@ -208,6 +208,10 @@ func TestMoveWorktree_CrossDeviceCopyCleanupFailureCommitsCopiedLocation(t *test
 	assertLiveWorktreeAt(t, gw, dest) // worktreePath committed to dest (#1475), still valid + registered
 	assert.Contains(t, warnings.String(), "failed to remove the leftover source directory")
 	assert.Contains(t, warnings.String(), leftoverPath)
+	assert.Contains(t, warnings.String(), shellsuggest.Command("rm", "-rf", leftoverPath),
+		"manual cleanup advice must target the secured source that actually remains")
+	assert.NotContains(t, warnings.String(), shellsuggest.Command("rm", "-rf", srcPath),
+		"the original source pathname is absent after quarantine and must not be recommended")
 }
 
 // countBranchWorktrees returns how many registered worktrees in repoRoot are
@@ -263,16 +267,16 @@ func TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan(t *testing.T) {
 	// copy+register success paired with a persistent source-cleanup failure. Keying
 	// on the atomically secured source sibling preserves the same failure shape
 	// without reopening the original pathname.
-	prevRemoveAll := removeAllPath
+	prevRemoveTree := removeDirectoryTree
 	var leftoverPath string
-	removeAllPath = func(path string) error {
+	removeDirectoryTree = func(parent *os.File, name, path string, directory *os.File, expected *copiedDirectory) error {
 		if filepath.Dir(path) == filepath.Dir(srcPath) && strings.Contains(filepath.Base(path), ".af-source-") {
 			leftoverPath = path
 			return errors.New("forced source cleanup failure")
 		}
-		return os.RemoveAll(path)
+		return prevRemoveTree(parent, name, path, directory, expected)
 	}
-	t.Cleanup(func() { removeAllPath = prevRemoveAll })
+	t.Cleanup(func() { removeDirectoryTree = prevRemoveTree })
 
 	// Model the restore/retry loop: the daemon recomputes a collision-suffixed dest
 	// and retries whenever the move returns an error (RestoreArchived via
@@ -695,6 +699,39 @@ func TestMoveDirCrossDevice_DestinationReplacementDoesNotCommit(t *testing.T) {
 	assert.FileExists(t, filepath.Join(movedCopy, "original.txt"), "the copied tree must remain recoverable")
 }
 
+// TestMoveDirCrossDevice_CopiedDescendantReplacementDoesNotCommit covers a
+// copied child being renamed out of the staging tree and replaced after its
+// descriptor was validated. Publishing only the root identity would commit the
+// replacement, strand the bytes that were actually copied, and delete source.
+func TestMoveDirCrossDevice_CopiedDescendantReplacementDoesNotCommit(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeDestCommit
+	moveDirBeforeDestCommit = func(stagingPath string) error {
+		stagedChild := filepath.Join(stagingPath, "sub")
+		if err := os.Rename(stagedChild, filepath.Join(stagingPath, "stranded-copy")); err != nil {
+			return err
+		}
+		if err := os.Mkdir(stagedChild, 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(stagedChild, "replacement.txt"), []byte("replacement"), 0644)
+	}
+	t.Cleanup(func() { moveDirBeforeDestCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err, "a replacement descendant must prevent destination commit")
+	assert.Contains(t, err.Error(), "destination tree changed")
+	assert.FileExists(t, filepath.Join(src, "sub", "original.txt"), "source must be restored intact")
+	assert.NoDirExists(t, dest, "the replacement tree must not be published")
+}
+
 // TestMoveDirCrossDevice_SourceReplacementAtCleanupIsNotDeleted forces the
 // replacement after the last identity check but before the old pathname-based
 // RemoveAll. Cleanup must first claim the verified source endpoint atomically;
@@ -753,6 +790,114 @@ func TestMoveDirCrossDevice_DestinationParentReopenFailureRestoresSource(t *test
 	err := moveDirCrossDevice(src, dest)
 	require.Error(t, err, "the removed destination parent must abort the move")
 	assert.FileExists(t, filepath.Join(src, "original.txt"), "source must be restored after destination-parent reopen fails")
+}
+
+// TestMoveDirCrossDevice_SecuredSourceOpenFailureDoesNotStrandSource changes
+// source permissions after the copy but before quarantine. The move may finish
+// through a descriptor retained from the copy; if it cannot, it must restore
+// the source pathname instead of leaving only an unrecorded private sibling.
+func TestMoveDirCrossDevice_SecuredSourceOpenFailureDoesNotStrandSource(t *testing.T) {
+	sourceParent := t.TempDir()
+	src := filepath.Join(sourceParent, "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeSourceCommit
+	moveDirBeforeSourceCommit = func(path string) error { return os.Chmod(path, 0) }
+	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
+	t.Cleanup(func() {
+		matches, _ := filepath.Glob(filepath.Join(sourceParent, ".af-source-*"))
+		for _, match := range matches {
+			_ = os.Chmod(match, 0700)
+		}
+		_ = os.Chmod(src, 0700)
+	})
+
+	err := moveDirCrossDevice(src, dest)
+	if err != nil {
+		_, statErr := os.Lstat(src)
+		require.NoError(t, statErr, "a failed move must restore the secured source pathname")
+		require.NoError(t, os.Chmod(src, 0700))
+		assert.FileExists(t, filepath.Join(src, "original.txt"),
+			"the restored source must retain its contents")
+		return
+	}
+	assert.FileExists(t, filepath.Join(dest, "original.txt"),
+		"a retained source descriptor may allow the move to complete safely")
+	assert.NoDirExists(t, src)
+}
+
+// TestMoveDirCrossDevice_PrePublicationFailureCleansPrivateStaging proves the
+// staging lifetime covers failures after a successful copy, not only failures
+// encountered during traversal.
+func TestMoveDirCrossDevice_PrePublicationFailureCleansPrivateStaging(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeSourceCommit
+	moveDirBeforeSourceCommit = func(string) error { return errors.New("forced failure after copy") }
+	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err)
+	entries, readErr := os.ReadDir(destinationParent)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "every pre-publication exit must remove private staging")
+	assert.FileExists(t, filepath.Join(src, "original.txt"), "failed move must leave source intact")
+}
+
+// TestMoveDirCrossDevice_SourceCleanupReplacementIsNotDeleted injects a
+// replacement at the private quarantine pathname immediately before the old
+// path-based cleanup. Cleanup must stay bound to the opened source object and
+// must never recursively delete an uncopied replacement.
+func TestMoveDirCrossDevice_SourceCleanupReplacementIsNotDeleted(t *testing.T) {
+	sourceParent := t.TempDir()
+	src := filepath.Join(sourceParent, "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "original.txt"), []byte("original"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalRemoveTree := removeDirectoryTree
+	var replacementPath, movedOriginal string
+	removeDirectoryTree = func(parent *os.File, name, path string, directory *os.File, expected *copiedDirectory) error {
+		if filepath.Dir(path) != sourceParent || !strings.Contains(filepath.Base(path), ".af-source-") {
+			return originalRemoveTree(parent, name, path, directory, expected)
+		}
+		replacementPath = path
+		movedOriginal = path + ".moved"
+		if err := os.Rename(path, movedOriginal); err != nil {
+			return err
+		}
+		if err := os.Mkdir(path, 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(path, "replacement.txt"), []byte("replacement"), 0644); err != nil {
+			return err
+		}
+		return originalRemoveTree(parent, name, path, directory, expected)
+	}
+	t.Cleanup(func() { removeDirectoryTree = originalRemoveTree })
+
+	err := moveDirCrossDevice(src, dest)
+	assert.NotEmpty(t, replacementPath, "the test must reach secured-source cleanup")
+	assert.Error(t, err, "losing the secured endpoint must be reported as an indeterminate cleanup")
+	assert.FileExists(t, filepath.Join(replacementPath, "replacement.txt"),
+		"the uncopied replacement at the quarantine name must not be deleted")
+	assert.FileExists(t, filepath.Join(movedOriginal, "original.txt"),
+		"the copied source must remain recoverable when its name changes")
 }
 
 // TestMoveDirCrossDevice_CopyFailureCleansPrivateStaging ensures an unsupported
