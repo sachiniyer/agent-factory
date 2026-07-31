@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -13,6 +14,17 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
+
+func TestNewHomeRegistryModeSkipsRepoScopedTUIViewState(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	warnings := captureWarningLog(t)
+
+	h := newHome(context.Background(), "bash", nil)
+
+	require.Empty(t, h.repoID, "a nil repo must exercise registry mode")
+	require.NotContains(t, warnings.String(), "invalid repo id: empty",
+		"registry mode has no repo-scoped TUI state to restore")
+}
 
 func TestTUIViewStateRestorePanesSelectionAndFocus(t *testing.T) {
 	h := newTestHome(t)

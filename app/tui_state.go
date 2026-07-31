@@ -20,6 +20,14 @@ const tuiFocusRegionPane = "pane"
 // after the daemon snapshot has populated the projection. It never fails the
 // launch; unreadable state files fall back to the ordinary cold-start path.
 func (m *home) restoreTUIViewStateOnLaunch() int {
+	// Registry mode has no active repository and therefore no repo-scoped view
+	// state. An empty repo ID is the mode's sentinel, not a malformed persisted
+	// key, so do not send it through the config validator and manufacture a
+	// warning on every supported outside-a-repo launch.
+	if m.repoID == "" {
+		m.rememberTUIViewState()
+		return 0
+	}
 	state, ok := config.LoadTUIRepoViewState(m.repoID)
 	restored := 0
 	if ok {
