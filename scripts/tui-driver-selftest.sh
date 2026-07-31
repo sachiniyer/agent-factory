@@ -761,6 +761,22 @@ _expect_scrolled_rail_relaunch() {
     return "$rc"
 }
 
+# _seed_config_editor_start_value makes the live-apply transition non-vacuous
+# even when scripts/testbox.sh reuses a pinned AF_SELFTEST_NAME. The sandbox
+# reset intentionally preserves config.toml, so a previous run otherwise leaves
+# codex active before the editor writes codex again. This command runs after the
+# reset killed the sandbox daemon and RequestApplyConfig is non-spawning; the
+# daemon therefore boots from claude, then the editor must transition it to
+# codex for the live ListPrograms readback below to pass.
+_seed_config_editor_start_value() {
+    (cd / && af config set default_program claude >/dev/null) || return 1
+    grep -q "default_program = 'claude'" "$AGENT_FACTORY_HOME/config.toml" || {
+        printf 'could not seed default_program = claude before daemon boot:\n'
+        cat "$AGENT_FACTORY_HOME/config.toml"
+        return 1
+    }
+}
+
 printf '=== tui-driver self-test (#1161) ===\n'
 printf 'session=%s size=%sx%s home=%s\n' \
     "$AF_DRIVER_SESSION" "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" "$AGENT_FACTORY_HOME"
@@ -768,6 +784,7 @@ printf 'session=%s size=%sx%s home=%s\n' \
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
 step "reset sandbox to a clean state"                       af_reset_sandbox
+step "seed a non-codex default before daemon boot"           _seed_config_editor_start_value
 # af_boot routes launch geometry through af_resize, which verifies the window
 # actually took the requested size — so a green boot is also positive proof
 # af_resize works (#1174 item 2 / #1201).
@@ -863,6 +880,7 @@ _expect_config_editor_writes() {
         return 1
     }
     programs="$(curl --fail --silent --show-error \
+        --max-time "$AF_DRIVER_TIMEOUT" \
         --unix-socket "$socket_path" \
         http://localhost/v1/ListPrograms \
         -d '{}')" || {
