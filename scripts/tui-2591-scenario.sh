@@ -13,11 +13,42 @@ set -euo pipefail
 # Route the driver, the TUI, and the daemon through one explicitly isolated tmux
 # server. The wrapper also provides a deterministic unknown-state teardown: it
 # rejects kill-session only for af_* runtime targets, never the driver's session.
-real_tmux="$(command -v tmux)"
 # Agent Factory deliberately sanitizes PATH before it starts the daemon. Its
 # preserved prefix is $HOME/bin (where the sandbox binary also lives), so the
 # wrapper must live there or only the driver—not the daemon—would see it.
 wrapper="$HOME/bin/tmux"
+
+# A pinned AF_SELFTEST_NAME reuses its container. Resolve the underlying binary
+# past any pre-existing wrapper, preserve that path exactly, and restore it on
+# every exit so this scenario cannot poison a later driver run or recurse into
+# its own generated script.
+real_tmux=
+while IFS= read -r candidate; do
+    if [ "$candidate" != "$wrapper" ]; then
+        real_tmux="$candidate"
+        break
+    fi
+done < <(type -aP tmux)
+[ -n "$real_tmux" ] || {
+    printf '%s\n' '#2591 fixture failed: could not resolve the real tmux binary' >&2
+    exit 1
+}
+
+wrapper_backup_dir="$(mktemp -d)"
+wrapper_existed=0
+if [ -e "$wrapper" ] || [ -L "$wrapper" ]; then
+    cp -a -- "$wrapper" "$wrapper_backup_dir/tmux"
+    wrapper_existed=1
+fi
+cleanup_tmux_wrapper() {
+    rm -f -- "$wrapper"
+    if [ "$wrapper_existed" = 1 ]; then
+        cp -a -- "$wrapper_backup_dir/tmux" "$wrapper"
+    fi
+    rm -rf -- "$wrapper_backup_dir"
+}
+trap cleanup_tmux_wrapper EXIT
+
 # The single-quoted lines are the wrapper's source; their variables must expand
 # when that generated script runs, not while this scenario writes it.
 # shellcheck disable=SC2016

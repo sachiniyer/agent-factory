@@ -635,10 +635,18 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		changed = true
 	}
 	snapshotOp := d.InFlightOp
-	if d.UserKilled || inst.UserKilled() {
+	tombstoned := d.UserKilled || inst.UserKilled()
+	if tombstoned {
 		snapshotOp = session.OpNone
 	}
-	if reconcileSnapshotOp(inst, snapshotOp, lv) {
+	// A retained tombstone can already be Lost/Archived before the user retries
+	// its teardown. Those terminal liveness values therefore do not prove THIS
+	// retry completed: success removes the record, while the RPC completion
+	// clears the optimistic fence on failure. Preserve that local OpKilling until
+	// one of those determinate outcomes arrives; the snapshot op still stays
+	// scrubbed because no daemon process owns it after the tombstone commit.
+	preserveKillRetry := tombstoned && inst.GetInFlightOp() == session.OpKilling
+	if !preserveKillRetry && reconcileSnapshotOp(inst, snapshotOp, lv) {
 		changed = true
 	}
 	// Mirror the usage-limit reset time (#1146) alongside the liveness. It's

@@ -67,21 +67,32 @@ func TestSnapshotReconcilesUserKilledTombstone(t *testing.T) {
 // tombstone, its local OpKilling is still the only fence preventing a second
 // delete request while the first RPC is in flight.
 func TestSnapshotPreservesOptimisticKillForAdoptedTombstone(t *testing.T) {
-	h := newTestHome(t)
-	inst := instanceWithFakeBackend(t, "killed-retry")
-	inst.MarkUserKilled()
-	inst.SetInFlightOpForTest(session.OpKilling)
+	for _, tc := range []struct {
+		name     string
+		liveness session.Liveness
+	}{
+		{name: "running", liveness: session.LiveRunning},
+		{name: "lost", liveness: session.LiveLost},
+		{name: "archived", liveness: session.LiveArchived},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := instanceWithFakeBackend(t, "killed-retry")
+			inst.MarkUserKilled()
+			inst.SetInFlightOpForTest(session.OpKilling)
 
-	data := inst.ToInstanceData()
-	data.UserKilled = true
-	data.InFlightOp = session.OpReplacing
-	data.Liveness = session.LiveRunning
+			data := inst.ToInstanceData()
+			data.UserKilled = true
+			data.InFlightOp = session.OpReplacing
+			data.Liveness = tc.liveness
 
-	h.updateInstanceFromSnapshot(inst, data)
+			h.updateInstanceFromSnapshot(inst, data)
 
-	require.Equal(t, session.OpKilling, inst.GetInFlightOp(),
-		"a non-terminal snapshot must preserve the retry's optimistic kill fence")
-	require.False(t, inst.CanKill(), "the active retry must not expose a duplicate kill action")
+			require.Equal(t, session.OpKilling, inst.GetInFlightOp(),
+				"a tombstone poll must preserve the retry's optimistic kill fence")
+			require.False(t, inst.CanKill(), "the active retry must not expose a duplicate kill action")
+		})
+	}
 }
 
 // instanceWithFakeBackend builds an instance backed by FakeBackend, marked
