@@ -183,6 +183,20 @@ func TestArchiveSessionHookFailureCommitsArchiveAndSurfacesWarning(t *testing.T)
 	assert.Equal(t, session.Archived, persistedStatus(t, repoID, "worker"))
 }
 
+func TestArchiveSessionHookFailureBoundsCapturedOutputToATail(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, _ = registerArchivable(t, manager, repoID, repoPath, "worker")
+	writeOnArchiveCommand(t,
+		`head -c 262144 /dev/zero | tr '\0' x; printf 'tail-marker'; exit 29`)
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tail-marker",
+		"the bounded capture must retain the diagnostically useful end of output")
+	assert.Less(t, len(err.Error()), 70*1024,
+		"a noisy hook must not make daemon memory and the surfaced error grow without bound")
+}
+
 func TestArchiveSessionRejectsCheckedInHookWithoutExecutingRepoCode(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")

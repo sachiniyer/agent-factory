@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +20,39 @@ import (
 const onArchiveHookTimeout = 30 * time.Minute
 
 const onArchiveHookWaitDelay = 2 * time.Second
+
+// A hook is operator-authored and may be arbitrarily noisy. Keep only the tail:
+// the end normally contains the actionable failure while a hard ceiling prevents
+// a 30-minute hook from growing the daemon heap without bound.
+const onArchiveHookOutputLimit = 64 * 1024
+
+type archiveHookOutputTail struct {
+	data      []byte
+	truncated bool
+}
+
+func (w *archiveHookOutputTail) Write(p []byte) (int, error) {
+	written := len(p)
+	if len(p) >= onArchiveHookOutputLimit {
+		w.data = append(w.data[:0], p[len(p)-onArchiveHookOutputLimit:]...)
+		w.truncated = true
+		return written, nil
+	}
+	if overflow := len(w.data) + len(p) - onArchiveHookOutputLimit; overflow > 0 {
+		copy(w.data, w.data[overflow:])
+		w.data = w.data[:len(w.data)-overflow]
+		w.truncated = true
+	}
+	w.data = append(w.data, p...)
+	return written, nil
+}
+
+func (w *archiveHookOutputTail) String() string {
+	if !w.truncated {
+		return string(w.data)
+	}
+	return fmt.Sprintf("[output truncated to last %d bytes]\n%s", onArchiveHookOutputLimit, w.data)
+}
 
 type onArchiveHookContext struct {
 	sessionID   string
@@ -48,7 +80,7 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	ctx, cancel := context.WithTimeout(context.Background(), onArchiveHookTimeout)
 	defer cancel()
 
-	var output bytes.Buffer
+	var output archiveHookOutputTail
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = hookCtx.worktree
 	cmd.Env = append(

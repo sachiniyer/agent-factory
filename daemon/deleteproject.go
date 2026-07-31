@@ -73,6 +73,14 @@ type DeleteProjectResult struct {
 	Deregistered bool
 }
 
+func deleteProjectFailure(result DeleteProjectResult, err error) error {
+	if len(result.Warnings) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; warning(s) from archive(s) that already committed: %s",
+		err, strings.Join(result.Warnings, "\n"))
+}
+
 // normalizeDeleteProjectPath resolves an existing path to its canonical main
 // repo root and identity. A stale/missing path falls back to its cleaned spelling
 // so deleting an unknown or moved project remains an idempotent no-op.
@@ -306,8 +314,9 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		// after the phase-1 gate and so refused to archive. The delete is idempotent, so a
 		// retry finishes the rest; the registry is NOT deregistered below, so no orphan is
 		// left behind.
-		return result, fmt.Errorf("delete project %s: archived %d, tore down %d, but %d session(s) could not be removed (retry to finish): %w",
-			repoID, len(result.Archived), len(result.Killed), len(errs), errors.Join(errs...))
+		return result, deleteProjectFailure(result, fmt.Errorf(
+			"delete project %s: archived %d, tore down %d, but %d session(s) could not be removed (retry to finish): %w",
+			repoID, len(result.Archived), len(result.Killed), len(errs), errors.Join(errs...)))
 	}
 
 	// Concurrent-create guard (#2549): re-check under m.mu, immediately before the
@@ -325,8 +334,9 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	m.mu.Unlock()
 	if len(appeared) > 0 {
 		sort.Strings(appeared)
-		return result, fmt.Errorf("delete project %s: archived %d, tore down %d, but a session started for this project meanwhile (%v); the project was NOT removed — delete again to finish",
-			repoID, len(result.Archived), len(result.Killed), appeared)
+		return result, deleteProjectFailure(result, fmt.Errorf(
+			"delete project %s: archived %d, tore down %d, but a session started for this project meanwhile (%v); the project was NOT removed — delete again to finish",
+			repoID, len(result.Archived), len(result.Killed), appeared))
 	}
 
 	// Every session for the repo is archived and none is starting — NOW drop the durable
@@ -343,7 +353,9 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			// SYMMETRIC to an archive failure, and NOT "nothing changed": the sessions are
 			// already archived here, so a retry re-archives nothing and finishes the deregister
 			// — at worst an empty-but-registered project, never a live orphan.
-			return result, fmt.Errorf("delete project %s: archived %d session(s) but could not remove its durable registry record — the project still lists; retry to finish, a retry re-archives nothing: %w", repoID, len(result.Archived), regErr)
+			return result, deleteProjectFailure(result, fmt.Errorf(
+				"delete project %s: archived %d session(s) but could not remove its durable registry record — the project still lists; retry to finish, a retry re-archives nothing: %w",
+				repoID, len(result.Archived), regErr))
 		}
 		if deregistered {
 			result.Deregistered = true
