@@ -56,7 +56,8 @@ func resolveMainRepoRoot(pathArgs ...string) (string, error) {
 	topOut, err := topCmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "not a git repository") {
+		if errors.As(err, &exitErr) &&
+			strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") {
 			return "", fmt.Errorf("%w: %s", ErrNotGitRepository, strings.TrimSpace(string(exitErr.Stderr)))
 		}
 		return "", fmt.Errorf("failed to get git repo root: %w", err)
