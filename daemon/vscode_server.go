@@ -289,6 +289,9 @@ type vscodeServer struct {
 	// reaper; only a test that builds a vscodeServer directly — no reaper, no
 	// second goroutine — may set it inline.
 	killGroup func(pgid int, sig syscall.Signal) error
+	// groupAlive is the matching observation seam. It lets the reaper distinguish
+	// successful signal delivery from confirmed process-group exit.
+	groupAlive func(pgid int) (bool, error)
 }
 
 // signalGroup sends sig to the child's process GROUP, through the killGroup seam
@@ -340,11 +343,29 @@ func (s *vscodeServer) reap() {
 	// pinned long enough for the kill below to mean what it says.
 	pgid := s.cmd.Process.Pid
 	_ = s.cmd.Wait()
-	if err := s.signalGroup(pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		s.reapErr = fmt.Errorf("reaping VS Code editor process group %d for %s: %w", pgid, s.worktree, err)
+	killErr := s.signalGroup(pgid, syscall.SIGKILL)
+	switch {
+	case killErr != nil && !errors.Is(killErr, syscall.ESRCH):
+		s.reapErr = fmt.Errorf("reaping VS Code editor process group %d for %s: %w", pgid, s.worktree, killErr)
 		s.releaseSocketKeepingOwner()
-	} else {
+	case errors.Is(killErr, syscall.ESRCH):
+		// ESRCH is itself a confirmed-absent group at the safely pinned reap point.
 		s.releaseSocket()
+	default:
+		grace := s.stopGrace
+		if grace <= 0 {
+			grace = vscodeStopGrace
+		}
+		gone, err := s.waitForProcessGroupExit(pgid, grace)
+		if err != nil {
+			s.reapErr = fmt.Errorf("confirming reaped VS Code editor process group %d for %s: %w", pgid, s.worktree, err)
+			s.releaseSocketKeepingOwner()
+		} else if !gone {
+			s.reapErr = fmt.Errorf("VS Code editor process group %d for %s still exists after reaper SIGKILL", pgid, s.worktree)
+			s.releaseSocketKeepingOwner()
+		} else {
+			s.releaseSocket()
+		}
 	}
 	close(s.exited)
 }
@@ -438,7 +459,8 @@ type vscodeSupervisor struct {
 	// reconciling reserves one session key while a prior daemon's persisted
 	// owner is inspected and stopped outside mu. Same-key operations retry;
 	// unrelated sessions never wait through process-group teardown.
-	reconciling map[string]struct{}
+	reconciling   map[string]struct{}
+	reconcileCond *sync.Cond
 	// failures records the last spawn failure per key, enforcing
 	// vscodeRespawnCooldown so a broken editor can't be respawned on every
 	// auto-refresh.
@@ -475,7 +497,7 @@ type vscodeFailure struct {
 }
 
 func newVSCodeSupervisor() *vscodeSupervisor {
-	return &vscodeSupervisor{
+	v := &vscodeSupervisor{
 		servers:     make(map[string]*vscodeServer),
 		reconciling: make(map[string]struct{}),
 		failures:    make(map[string]vscodeFailure),
@@ -491,6 +513,8 @@ func newVSCodeSupervisor() *vscodeSupervisor {
 		cooldown:   vscodeRespawnCooldown,
 		now:        time.Now,
 	}
+	v.reconcileCond = sync.NewCond(&v.mu)
+	return v
 }
 
 // ensureServer returns the ENDPOINT of the editor serving worktree for key,
@@ -515,8 +539,16 @@ func (v *vscodeSupervisor) reserveReconcileLocked(key string) bool {
 
 func (v *vscodeSupervisor) releaseReconcile(key string) {
 	v.mu.Lock()
-	delete(v.reconciling, key)
+	v.clearReconcileLocked(key)
 	v.mu.Unlock()
+}
+
+func (v *vscodeSupervisor) clearReconcileLocked(key string) {
+	if _, ok := v.reconciling[key]; !ok {
+		return
+	}
+	delete(v.reconciling, key)
+	v.reconcileCond.Broadcast()
 }
 
 // reconcilePersistedBeforeSpawn establishes the cross-daemon invariant before
@@ -532,12 +564,19 @@ func (v *vscodeSupervisor) reconcilePersistedBeforeSpawn(key, instanceID string)
 		v.mu.Unlock()
 		return errVSCodeStarting
 	}
-	hasServer := v.servers[key] != nil
+	server := v.servers[key]
+	hasLiveServer := server != nil && server.alive()
+	if server != nil && !hasLiveServer {
+		delete(v.servers, key)
+		if !server.ready {
+			v.failures[key] = vscodeFailure{err: errVSCodeStartExited, at: v.now()}
+		}
+	}
 	v.mu.Unlock()
 
 	// Keep the reservation until admission: otherwise teardown can remove an
 	// existing server in this unlock/relock gap and a replacement can escape it.
-	if hasServer {
+	if hasLiveServer {
 		return nil
 	}
 	err := v.stopPersistedForInstance(key, instanceID)
@@ -567,7 +606,7 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 	// session), and it is the supervisor's own lock — never Manager.mu — so even
 	// the blocking start grace stalls only other editor spawns, not unrelated RPCs.
 	v.mu.Lock()
-	delete(v.reconciling, key)
+	v.clearReconcileLocked(key)
 	defer v.mu.Unlock()
 	if v.stopped {
 		return vscodeEndpoint{}, fmt.Errorf("daemon is shutting down")
@@ -712,7 +751,11 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	if err != nil {
 		return nil, err
 	}
-	cmd := newDaemonChildCommand(binary, vscodeArgs(flavor, socketPath, worktree)...)
+	gatePath := vscodeStartGatePath(socketPath)
+	if err := os.Remove(gatePath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("clearing the stale VS Code startup gate %s failed: %w", gatePath, err)
+	}
+	cmd := newGatedVSCodeCommand(binary, vscodeArgs(flavor, socketPath, worktree), gatePath)
 	cmd.Dir = worktree
 	cmd.Env = append(vscodeChildEnv(), vscodeOwnerNonceEnv+"="+processNonce)
 	// Own process group so the editor's whole tree (extension host, terminal
@@ -728,33 +771,37 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("exec %s: %w", binary, err)
 	}
-	owner, err := captureVSCodeOwner(key, instanceID, cmd.Process.Pid, processNonce)
-	if err == nil {
-		err = writeVSCodeOwner(vscodeOwnerPath(socketPath), owner)
-	}
-	if err != nil {
-		// Identity is the only safe cross-restart handle. Refuse to run an editor
-		// we could not durably identify; otherwise a daemon crash recreates #2668.
-		if v.killGroup != nil {
-			_ = v.killGroup(cmd.Process.Pid, syscall.SIGKILL)
-		} else {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("recording editor ownership: %w", err)
-	}
 	server := &vscodeServer{
 		worktree:   worktree,
 		instanceID: instanceID,
 		socketPath: socketPath,
 		transport:  newVSCodeTransport(socketPath),
 		cmd:        cmd,
-		ownerPath:  vscodeOwnerPath(socketPath),
 		stopGrace:  v.stopGrace,
 		exited:     make(chan struct{}),
-		// Copied in HERE, before the reaper below exists to read it — the seam has
-		// to be installed by construction rather than by a later assignment.
-		killGroup: v.killGroup,
+		// Copied in HERE, before the reaper below exists to read them — the seams
+		// have to be installed by construction rather than later assignments.
+		killGroup:  v.killGroup,
+		groupAlive: v.groupAlive,
+	}
+	owner, err := captureVSCodeOwner(key, instanceID, cmd.Process.Pid, processNonce)
+	if err == nil {
+		err = writeVSCodeOwnerForStart(vscodeOwnerPath(socketPath), owner)
+		if err == nil {
+			server.ownerPath = vscodeOwnerPath(socketPath)
+			err = releaseVSCodeStartGate(gatePath)
+		}
+	}
+	if err != nil {
+		// Identity is the only safe cross-restart handle. Refuse to run an editor
+		// we could not durably identify; otherwise a daemon crash recreates #2668.
+		// Use the ordinary reaper even though the harmless startup shell is still
+		// gated, so a failed group cleanup remains an explicit unknown outcome.
+		go server.reap()
+		if stopErr := server.stop(); stopErr != nil {
+			return nil, errors.Join(fmt.Errorf("recording editor ownership: %w", err), stopErr)
+		}
+		return nil, fmt.Errorf("recording editor ownership: %w", err)
 	}
 	// Reap the child AND clean up its process group; see reap's doc for why the
 	// group kill belongs there rather than in stop().
@@ -909,6 +956,12 @@ func (v *vscodeSupervisor) stopForInstance(key, instanceID string) error {
 func (v *vscodeSupervisor) Stop() {
 	v.mu.Lock()
 	v.stopped = true
+	// A key reservation covers work outside mu, including persisted-owner reads
+	// and signals. Wait until every such operation has completed before the
+	// global sidecar scan; otherwise shutdown can act on the same owner twice.
+	for len(v.reconciling) > 0 {
+		v.reconcileCond.Wait()
+	}
 	servers := make([]*vscodeServer, 0, len(v.servers))
 	for _, s := range v.servers {
 		servers = append(servers, s)

@@ -287,6 +287,32 @@ func TestPersistedVSCodeOwner_DoesNotEscalateAfterLeaderExit(t *testing.T) {
 		"persisted teardown escalated after losing the stable leader identity")
 }
 
+func TestPersistedVSCodeOwner_DoesNotSignalGroupWithoutRecordedLeader(t *testing.T) {
+	bootID, err := proctree.BootID()
+	require.NoError(t, err)
+	if proctree.BootIDIsFallback(bootID) {
+		t.Skip("requires a strong kernel boot identity to exercise the unsafe same-boot path")
+	}
+	pidNamespace, err := proctree.PIDNamespaceID()
+	require.NoError(t, err)
+	owner := vscodeOwnerRecord{
+		Key: "absent-leader", InstanceID: "instance-1", PID: 99_999_999,
+		StartID: 1, BootID: bootID, PIDNamespace: pidNamespace, ProcessNonce: "nonce",
+	}
+	v := newVSCodeSupervisor()
+	v.stopGrace = 10 * time.Millisecond
+	v.groupAlive = func(int) (bool, error) { return true, nil }
+	var signals []syscall.Signal
+	v.killGroup = func(_ int, sig syscall.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	}
+
+	err = v.stopPersistedOwner(owner)
+	require.Error(t, err, "a group without the recorded leader must remain unknown")
+	require.Empty(t, signals, "persisted teardown signalled a numeric group after stable leader identity was already gone")
+}
+
 func TestVSCodeSupervisor_StopReapsEditorOwnedByPreviousSupervisor(t *testing.T) {
 	binary := writeFakeVSCodeBinary(t, "code-server", nil)
 	previous := newTestVSCodeSupervisor(t, binary)

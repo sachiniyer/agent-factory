@@ -51,6 +51,11 @@ func writeVSCodeOwner(path string, owner vscodeOwnerRecord) error {
 	return config.AtomicWriteFile(path, append(raw, '\n'), 0o600)
 }
 
+// writeVSCodeOwnerForStart is the startup persistence seam. Production uses the
+// atomic writer above; tests can pause it to prove the editor does not begin
+// executing before its durable owner exists.
+var writeVSCodeOwnerForStart = writeVSCodeOwner
+
 func newVSCodeOwnerNonce() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -205,8 +210,10 @@ func (v *vscodeSupervisor) waitForProcessGroupExit(pgid int, timeout time.Durati
 // PID. A live leader must match its boot scope, PID/start stamp, and inherited
 // random nonce. If the leader is gone under a strong boot identity, POSIX pins
 // the numeric PGID and prevents that PID from being reused while the group
-// survives. A fallback boot identity cannot prove that absent-leader case, and
-// any unreadable identity remains UNKNOWN, so neither is ever signalled.
+// survives. Once the recorded leader is absent, however, a numeric group alone
+// cannot prove continuous ownership: the old group may have emptied and that id
+// may have been reused within the same boot. That case and any unreadable
+// identity remain UNKNOWN, so neither is ever signalled.
 func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 	pidNamespace, err := proctree.PIDNamespaceID()
 	if err != nil {
@@ -256,9 +263,7 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 		if !alive {
 			return nil
 		}
-		if proctree.BootIDIsFallback(owner.BootID) {
-			return fmt.Errorf("could not safely verify editor process group %d without its recorded leader", owner.PID)
-		}
+		return fmt.Errorf("could not safely verify editor process group %d without its recorded leader", owner.PID)
 	}
 
 	signal := func(sig syscall.Signal) error { return syscall.Kill(-owner.PID, sig) }
@@ -360,6 +365,9 @@ func removePersistedVSCodeOwner(path string) error {
 	socketPath := strings.TrimSuffix(path, vscodeOwnerExt) + vscodeSocketExt
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("removing stopped editor socket %s: %w", socketPath, err))
+	}
+	if err := os.Remove(vscodeStartGatePath(socketPath)); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("removing stopped editor start gate for %s: %w", socketPath, err))
 	}
 	return errors.Join(errs...)
 }

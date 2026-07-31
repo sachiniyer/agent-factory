@@ -108,5 +108,16 @@ func TestVSCodeSpawnUsesDaemonBoundSystemdScope(t *testing.T) {
 	if _, err := v.ensureServer("scope-editor", worktree); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
-	assertBoundScopeInvocation(t, logPath, binary)
+	// The bound process is the startup gate; it execs the editor only after its
+	// durable owner is recorded. Verify both layers so this still catches either
+	// bypassing the scope or dropping the intended editor command.
+	assertBoundScopeInvocation(t, logPath, "/bin/sh -c")
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading systemd-run invocation: %v", err)
+	}
+	got := string(raw)
+	if !strings.Contains(got, " af-vscode-start ") || !strings.Contains(got, " "+binary+" --socket ") {
+		t.Fatalf("scoped startup gate invocation %q does not exec editor %q", strings.TrimSpace(got), binary)
+	}
 }

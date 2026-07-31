@@ -143,6 +143,9 @@ func (s *vscodeServer) releaseSocketState(removeOwner bool) {
 		if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 			log.WarningLog.Printf("vscode: removing the editor socket %s failed: %v", s.socketPath, err)
 		}
+		if err := os.Remove(vscodeStartGatePath(s.socketPath)); err != nil && !os.IsNotExist(err) {
+			log.WarningLog.Printf("vscode: removing the editor start gate for %s failed: %v", s.socketPath, err)
+		}
 	}
 	if removeOwner && s.ownerPath != "" {
 		if err := os.Remove(s.ownerPath); err != nil && !os.IsNotExist(err) {
