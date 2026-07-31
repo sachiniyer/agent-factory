@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -154,6 +155,42 @@ func TestWaitForPromptReceipt_ConcurrentRolloutsRemainAmbiguous(t *testing.T) {
 	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
 	require.ErrorIs(t, err, ErrPromptReceiptAmbiguous,
 		"prompt coincidence cannot prove which new rollout belongs to the launched pane")
+}
+
+func TestWaitForPromptReceipt_RejectsNamedPipeWithoutBlocking(t *testing.T) {
+	codexHome := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHome(codexHome)
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "30")
+	require.NoError(t, os.MkdirAll(rolloutDir, 0755))
+	fifo := filepath.Join(rolloutDir,
+		"rollout-2026-07-30T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	require.NoError(t, syscall.Mkfifo(fifo, 0600))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForPromptReceipt(
+			context.Background(), tmux.ProgramCodex, snap, "briefing", 100*time.Millisecond)
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.ErrorContains(t, err, "not a regular file")
+	case <-time.After(time.Second):
+		fd, unblockErr := syscall.Open(
+			fifo, syscall.O_WRONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+		if unblockErr == nil {
+			require.NoError(t, syscall.Close(fd))
+		}
+		select {
+		case eventualErr := <-done:
+			t.Fatalf("HUNG: the 100ms prompt-receipt window blocked opening rollout FIFO %s; "+
+				"after bounded cleanup supplied a writer, it returned %v", fifo, eventualErr)
+		case <-time.After(time.Second):
+			t.Fatalf("HUNG: the prompt-receipt reader did not return after bounded "+
+				"nonblocking FIFO cleanup (%v)", unblockErr)
+		}
+	}
 }
 
 func TestWaitForPromptReceipt_UnsupportedAgentDoesNotInventReceipt(t *testing.T) {

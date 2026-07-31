@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -221,7 +223,7 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (bo
 }
 
 func codexRolloutHasPrompt(path, prompt string) (bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := readCodexRollout(path)
 	if err != nil {
 		return false, err
 	}
@@ -261,6 +263,32 @@ func codexRolloutHasPrompt(path, prompt string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func readCodexRollout(path string) ([]byte, error) {
+	file, err := os.OpenFile(
+		path,
+		os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open Codex rollout %s: %w", path, err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened Codex rollout %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("read Codex rollout %s: not a regular file (%s)", path, info.Mode().Type())
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
+	}
+	return data, nil
 }
 
 func jsonValueContainsPrompt(value any, prompt string) bool {
