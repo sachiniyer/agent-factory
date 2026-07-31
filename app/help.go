@@ -40,17 +40,16 @@ type helpSection struct {
 	rows  []helpRow
 }
 
-// renderHelpSections lays the sections out with a single key column whose
-// width fits the widest effective key across ALL sections, so the dashes stay
-// aligned no matter how wide a rebind makes a key. Computing the width at
-// render time (rather than the old hardcoded padding) is what keeps the
-// overlay correct under arbitrary rebinds.
-func renderHelpSections(header string, sections []helpSection) string {
-	width := 0
+// renderHelpSections lays the sections out with a single key column whose width
+// fits the widest effective key across ALL sections. When contentWidth is
+// known, the description is a separate block: lipgloss wraps it beneath its
+// first word, never beneath the key (#2577).
+func renderHelpSections(header string, sections []helpSection, contentWidth int) string {
+	keyWidth := 0
 	for _, s := range sections {
 		for _, r := range s.rows {
-			if w := lipgloss.Width(r.key); w > width {
-				width = w
+			if w := lipgloss.Width(r.key); w > keyWidth {
+				keyWidth = w
 			}
 		}
 	}
@@ -60,8 +59,27 @@ func renderHelpSections(header string, sections []helpSection) string {
 	for _, s := range sections {
 		lines = append(lines, headerStyle.Render(s.title))
 		for _, r := range s.rows {
-			pad := strings.Repeat(" ", width-lipgloss.Width(r.key)+2)
-			lines = append(lines, keyStyle.Render(r.key)+pad+descStyle.Render("- "+r.desc))
+			if contentWidth <= 0 {
+				pad := strings.Repeat(" ", keyWidth-lipgloss.Width(r.key)+2)
+				lines = append(lines, keyStyle.Render(r.key)+pad+descStyle.Render("- "+r.desc))
+				continue
+			}
+
+			keyColumnWidth := keyWidth + 2
+			if keyColumnWidth+3 > contentWidth {
+				keyColumnWidth = contentWidth / 2
+				if keyColumnWidth < 1 {
+					keyColumnWidth = 1
+				}
+			}
+			descWidth := contentWidth - keyColumnWidth - 2
+			if descWidth < 1 {
+				descWidth = 1
+			}
+			keyBlock := lipgloss.NewStyle().Width(keyColumnWidth).Render(keyStyle.Render(r.key))
+			dashBlock := descStyle.Render("- ")
+			descBlock := lipgloss.NewStyle().Width(descWidth).Render(descStyle.Render(r.desc))
+			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, keyBlock, dashBlock, descBlock))
 		}
 		lines = append(lines, "")
 	}
@@ -78,6 +96,10 @@ type helpText interface {
 	// mask returns the bit mask for this help text. These are used to track which help screens
 	// have been seen in the config and app state.
 	mask() uint32
+}
+
+type responsiveHelpText interface {
+	toContentWidth(width int) string
 }
 
 type helpTypeGeneral struct{}
@@ -131,6 +153,10 @@ func firstRunActionLine(actions string) string {
 }
 
 func (h helpTypeGeneral) toContent() string {
+	return h.toContentWidth(0)
+}
+
+func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 	// Every key glyph below is pulled from the generated binding table via
 	// helpKey, so [keys] rebinds appear here identically to the bottom menu
 	// (#1026). The tmux detach key is the one entry with no rebindable action
@@ -141,6 +167,10 @@ func (h helpTypeGeneral) toContent() string {
 		titleStyle.Render(fmt.Sprintf("Agent Factory v%s", Version)),
 		"",
 		"A terminal UI that manages multiple Claude Code (and other local agents) in separate workspaces.",
+		"",
+		descStyle.Render("Page: pgup/pgdn · ")+keyStyle.Render(helpKey(keys.KeyShiftUp)+"/"+helpKey(keys.KeyShiftDown)),
+		descStyle.Render("Line: ")+keyStyle.Render(navKeys)+descStyle.Render(" · home/end jump"),
+		descStyle.Render("Close: esc · ")+keyStyle.Render(helpKey(keys.KeyHelp))+descStyle.Render(" toggles help"),
 	)
 	return renderHelpSections(header, []helpSection{
 		{title: "Managing:", rows: []helpRow{
@@ -196,7 +226,7 @@ func (h helpTypeGeneral) toContent() string {
 		{title: "Other:", rows: []helpRow{
 			{helpKey(keys.KeyQuit), "Quit the application"},
 		}},
-	})
+	}, contentWidth)
 }
 
 func (h helpTypeInstanceStart) toContent() string {
@@ -337,9 +367,11 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 			log.WarningLog.Printf("failed to save help screen state: %v", err)
 		}
 
-		content := helpType.toContent()
-
-		m.textOverlay = overlay.NewTextOverlay(content)
+		if responsive, ok := helpType.(responsiveHelpText); ok {
+			m.textOverlay = overlay.NewResponsiveTextOverlay(responsive.toContentWidth)
+		} else {
+			m.textOverlay = overlay.NewTextOverlay(helpType.toContent())
+		}
 		m.textOverlay.OnDismiss = onDismiss
 		m.textOverlayDismissAnyKey = true
 		if _, ok := helpType.(helpTypeGeneral); ok {
@@ -366,11 +398,27 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if isHelpScrollUpKey(msg) {
+	if isHelpJumpTopKey(msg) {
+		m.textOverlay.ScrollToTop()
+		return m, nil
+	}
+	if isHelpJumpBottomKey(msg) {
+		m.textOverlay.ScrollToBottom()
+		return m, nil
+	}
+	if isHelpPageUpKey(msg) {
+		m.textOverlay.PageUp()
+		return m, nil
+	}
+	if isHelpPageDownKey(msg) {
+		m.textOverlay.PageDown()
+		return m, nil
+	}
+	if isHelpLineUpKey(msg) {
 		m.textOverlay.ScrollUp()
 		return m, nil
 	}
-	if isHelpScrollDownKey(msg) {
+	if isHelpLineDownKey(msg) {
 		m.textOverlay.ScrollDown()
 		return m, nil
 	}
@@ -437,12 +485,35 @@ func attachHelpDismissPolicy(msg tea.KeyMsg) (bool, bool) {
 	}
 }
 
-func isHelpScrollUpKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyShiftUp || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp])
+func isHelpJumpTopKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyHome
 }
 
-func isHelpScrollDownKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyShiftDown || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown])
+func isHelpJumpBottomKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyEnd
+}
+
+func isHelpPageUpKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyPgUp ||
+		msg.Type == tea.KeyCtrlB ||
+		msg.Type == tea.KeyShiftUp ||
+		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp])
+}
+
+func isHelpPageDownKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyPgDown ||
+		msg.Type == tea.KeyCtrlF ||
+		msg.Type == tea.KeySpace ||
+		msg.Type == tea.KeyShiftDown ||
+		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown])
+}
+
+func isHelpLineUpKey(msg tea.KeyMsg) bool {
+	return key.Matches(msg, keys.GlobalKeyBindings[keys.KeyUp])
+}
+
+func isHelpLineDownKey(msg tea.KeyMsg) bool {
+	return key.Matches(msg, keys.GlobalKeyBindings[keys.KeyDown])
 }
 
 func isHelpDismissKey(msg tea.KeyMsg) bool {

@@ -27,6 +27,10 @@ type TextOverlay struct {
 	OnDismiss func() tea.Cmd
 	// Content to display in the overlay
 	content string
+	// contentRenderer rebuilds width-aware content whenever the overlay is
+	// resized. Most text overlays use the static content above; general help
+	// uses this seam so key/description rows can wrap with a hanging indent.
+	contentRenderer func(width int) string
 
 	width  int
 	height int
@@ -43,6 +47,16 @@ func NewTextOverlay(content string) *TextOverlay {
 		width:  60,
 		height: 20,
 	}
+}
+
+// NewResponsiveTextOverlay creates a text overlay whose content is rendered
+// against the current inner text width. The callback must return display-ready
+// text no wider than width; the overlay still applies its ANSI-aware safety
+// wrapper for any over-long fragments.
+func NewResponsiveTextOverlay(renderer func(width int) string) *TextOverlay {
+	overlay := NewTextOverlay("")
+	overlay.contentRenderer = renderer
+	return overlay
 }
 
 // HandleKeyPress processes a key press and updates the state. Returns the
@@ -76,6 +90,7 @@ func (t *TextOverlay) Render() string {
 
 func (t *TextOverlay) SetWidth(width int) {
 	t.width = width
+	t.clampScroll(t.innerHeight())
 }
 
 func (t *TextOverlay) SetHeight(height int) {
@@ -92,6 +107,34 @@ func (t *TextOverlay) ScrollUp() {
 func (t *TextOverlay) ScrollDown() {
 	t.scroll++
 	t.clampScroll(t.innerHeight())
+}
+
+func (t *TextOverlay) PageUp() {
+	t.scroll -= t.pageStep()
+	t.clampScroll(t.innerHeight())
+}
+
+func (t *TextOverlay) PageDown() {
+	t.scroll += t.pageStep()
+	t.clampScroll(t.innerHeight())
+}
+
+func (t *TextOverlay) ScrollToTop() {
+	t.scroll = 0
+}
+
+func (t *TextOverlay) ScrollToBottom() {
+	t.scroll = len(t.wrappedContentLines())
+	t.clampScroll(t.innerHeight())
+}
+
+func (t *TextOverlay) pageStep() int {
+	// Keep the two marker rows as overlap so page-to-page context is not lost.
+	step := t.innerHeight() - 2
+	if step < 1 {
+		return 1
+	}
+	return step
 }
 
 func (t *TextOverlay) innerHeight() int {
@@ -137,7 +180,7 @@ func (t *TextOverlay) contentOverflows(inner int) bool {
 func (t *TextOverlay) visibleContent() string {
 	inner := t.innerHeight()
 	if inner <= 0 {
-		return t.content
+		return t.currentContent()
 	}
 	lines := t.wrappedContentLines()
 	t.clampScroll(inner)
@@ -167,7 +210,14 @@ func (t *TextOverlay) visibleContent() string {
 // row — under-counts, the box grows past the terminal, and PlaceOverlay dumps
 // the raw un-centered frame with its top border clipped (#1998).
 func (t *TextOverlay) wrappedContentLines() []string {
-	return strings.Split(xansi.Wrap(t.content, t.textWidth(), ""), "\n")
+	return strings.Split(xansi.Wrap(t.currentContent(), t.textWidth(), ""), "\n")
+}
+
+func (t *TextOverlay) currentContent() string {
+	if t.contentRenderer != nil {
+		return t.contentRenderer(t.textWidth())
+	}
+	return t.content
 }
 
 func textOverlayScrollMarker(width int, marker string) string {
