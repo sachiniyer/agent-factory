@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -86,4 +88,54 @@ func TestRestoreArchived_RelocateCutOffPersistsTheNewLocation(t *testing.T) {
 	assert.Equal(t, expected, rec.Worktree.WorktreePath,
 		"the new location must be persisted before returning: a restart that reloads the old, "+
 			"now-missing archive path can never restore this session again")
+}
+
+// TestRestoreArchived_RelocateCutOffReportsAFailedPersist is the other half of the
+// branch above. Persisting is not a nicety there — it IS the mitigation, so a
+// write that did not happen (full or read-only disk, drifted storage) reproduces
+// exactly the stranding the branch exists to prevent. Reporting only the
+// relocation error would tell the operator their worktree is safely recorded when
+// nothing recorded it, which is worse than the original bug: it is the same data
+// loss plus a reassurance.
+//
+// The forced failure is storage drift — the record this write targets is gone —
+// because persistInstanceData refuses to write when no record with that title
+// exists, and that is deterministic regardless of the uid the suite runs as
+// (a chmod-based denial is not, under root in the container).
+func TestRestoreArchived_RelocateCutOffReportsAFailedPersist(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+
+	// Storage drifts out from under the daemon: the persisted row still carries
+	// this title (so the restore still resolves), but a DIFFERENT stable id — the
+	// kill/recreate shape persistInstanceData refuses to overwrite. The durable
+	// write therefore cannot land, which is the condition under test.
+	require.NoError(t, config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var records []session.InstanceData
+		require.NoError(t, json.Unmarshal(raw, &records))
+		require.NotEmpty(t, records)
+		for i := range records {
+			if records[i].Title == "worker" {
+				records[i].ID = "a-different-session-entirely"
+			}
+		}
+		return json.Marshal(records)
+	}))
+
+	partialRelocateGitOnPath(t)
+	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown,
+		"the relocation error must still be reported")
+	assert.Contains(t, err.Error(), "could not be written to disk",
+		"a persist that failed must escalate: nothing durable points at the moved worktree")
+	assert.Contains(t, err.Error(), "before restarting the daemon",
+		"the operator needs to know a restart is what turns this into lost work")
 }

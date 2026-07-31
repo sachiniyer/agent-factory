@@ -465,11 +465,17 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			// path that is no longer there, and every later restore would fail the
 			// source-exists guard while the user's work sat at dest.
 			//
-			// Persist first, then report. Same shape as the re-spawn failure
-			// below: keep the durable facts we did establish, and still surface
-			// the error so the caller does not read this as a completed restore.
-			m.persistInstance(repoID, instance)
-			return "", fmt.Errorf("restore of %q was cut off mid-relocate; its worktree is recorded at %s so it is not lost, but its git registration is unverified — check that path and retry: %w", req.Title, instance.GetWorktreePath(), err)
+			// Persist first, then report — and take the error-returning persist,
+			// not the log-and-continue one. The whole point of this branch is that
+			// the location must survive a restart, so a write that did NOT happen
+			// (full or read-only disk) reproduces the exact stranding it exists to
+			// prevent. Reporting the relocate error alone would tell the operator
+			// their worktree is safely recorded when nothing recorded it.
+			restoredPath := instance.GetWorktreePath()
+			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+				return "", fmt.Errorf("restore of %q was cut off mid-relocate AND its new location %s could not be written to disk (%v); the worktree is there but nothing durable points at it — move it back or re-register it manually before restarting the daemon: %w", req.Title, restoredPath, perr, err)
+			}
+			return "", fmt.Errorf("restore of %q was cut off mid-relocate; its worktree is recorded at %s so it is not lost, but its git registration is unverified — check that path and retry: %w", req.Title, restoredPath, err)
 		}
 		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
 	}
