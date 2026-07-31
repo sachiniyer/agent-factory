@@ -24,6 +24,14 @@ import (
 
 const priorRootConversationID = "64ea06ed-7206-7fc2-803b-f7045e07a242"
 
+type codexReadyFakeBackend struct {
+	*session.FakeBackend
+}
+
+func (codexReadyFakeBackend) Preview(*session.Instance) (string, error) {
+	return "ready\n› ", nil
+}
+
 // seedRootConversation gives the manager's live root the recorded conversation
 // a real one carries, the way a claude root gets one from the --session-id
 // injected at first launch. The fake create backend spawns no program and so
@@ -111,6 +119,57 @@ func TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation(t *testing
 	require.True(t, reaped)
 	require.Equal(t, prior, carried,
 		"the reap must snapshot the conversation under the same lock that fences deletion")
+}
+
+// TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling closes the
+// earlier edge than the operation-lock snapshot above: Codex discovery polls
+// outside that lock, then takes it only to commit. Reaping while the poll is in
+// flight deletes the instance that eventual commit is bound to and loses the
+// newly discovered id forever.
+func TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	oldCaptureTimeout := conversationCaptureTimeout
+	conversationCaptureTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { conversationCaptureTimeout = oldCaptureTimeout })
+	var seen []session.InstanceOptions
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		seen = append(seen, opts)
+		backend := session.NewFakeBackend()
+		backend.CompleteStart()
+		return codexReadyFakeBackend{backend}, nil
+	})
+	t.Cleanup(restore)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{
+		Program: tmux.ProgramCodex,
+	}))
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	manager.mu.Lock()
+	pending := manager.pendingConversationCaptures[first]
+	manager.mu.Unlock()
+	require.Equal(t, 1, pending, "the create must register capture before publishing the root")
+	first.SetStatusForTest(session.Lost)
+	manager.EnsureRootAgents()
+
+	require.Len(t, seen, 1,
+		"the vanished root must stay recorded until its in-flight conversation discovery can commit")
+	require.Same(t, first, findRootInstance(t, manager, repoPath))
+
+	require.Eventually(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return manager.pendingConversationCaptures[first] == 0
+	}, 2*time.Second, 20*time.Millisecond)
+
+	manager.EnsureRootAgents()
+	require.Len(t, seen, 2, "the root may be re-created once discovery settles")
 }
 
 // unresumableCarryBackend fails exactly the create that carries a conversation

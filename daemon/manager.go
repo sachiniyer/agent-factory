@@ -219,6 +219,14 @@ type Manager struct {
 	// repoStartLocks; entries are never removed (a few bytes per session ever
 	// touched).
 	instanceOpLocks map[string]*sync.Mutex
+	// pendingConversationCaptures counts provider conversation discoveries that
+	// have started for an exact in-memory instance but have not finished polling.
+	// The commit phase takes instanceOpLocks, but polling deliberately does not;
+	// a root reap consults this map so it cannot delete the record an eventual
+	// capture result is bound to before that result reaches the commit lock.
+	// Guarded by m.mu and keyed by pointer so a same-title successor never
+	// inherits its predecessor's pending work.
+	pendingConversationCaptures map[*session.Instance]int
 
 	// pausedPolls records sessions whose daemon capture-pane liveness poll is
 	// paused while a TUI is attached full-screen to them (#1160), keyed by stable

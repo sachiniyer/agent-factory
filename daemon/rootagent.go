@@ -508,10 +508,10 @@ func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
 // the title. On success it returns the conversation snapshotted under the
 // operation lock from the exact record it deleted. The boolean reports whether
 // the root was actually reaped; false means a concurrent operation owns or
-// changed the title, so ensure should wait for a later tick instead of falling
-// through to CreateSession. Mirrors KillSession's teardown but deliberately
-// does NOT record rootKilledAt: this is the daemon healing itself, not a user
-// decision.
+// changed the title, or provider conversation discovery is still polling, so
+// ensure should wait for a later tick instead of falling through to
+// CreateSession. Mirrors KillSession's teardown but deliberately does NOT
+// record rootKilledAt: this is the daemon healing itself, not a user decision.
 func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (session.AgentConversationData, bool, error) {
 	key := daemonInstanceKey(repoID, session.RootSessionTitle)
 	opLock := m.opLockFor(key)
@@ -525,8 +525,9 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (session.A
 	m.mu.Lock()
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
+	capturePending := m.pendingConversationCaptures[inst] > 0
 	m.mu.Unlock()
-	if killing || current != inst {
+	if killing || current != inst || capturePending {
 		return session.AgentConversationData{}, false, nil
 	}
 

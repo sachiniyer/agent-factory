@@ -5,6 +5,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 var conversationCaptureTimeout = 2 * time.Second
@@ -14,7 +15,38 @@ func (m *Manager) captureAgentConversationAsync(repoID, key string, inst *sessio
 		return
 	}
 	token := inst.AgentRuntimeToken()
-	go m.captureAgentConversation(repoID, key, inst, snap, token, conversationCaptureTimeout)
+	m.mu.Lock()
+	m.startConversationCaptureLocked(repoID, key, inst, snap, token)
+	m.mu.Unlock()
+}
+
+// startConversationCaptureLocked registers discovery before launching it. The
+// create path calls this while publishing the new instance under the same
+// manager lock, closing the window where a status poll could observe and reap
+// the instance before its capture was marked pending. Callers must hold m.mu.
+func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken) {
+	if token.Agent() != tmux.ProgramCodex {
+		return
+	}
+	if m.pendingConversationCaptures == nil {
+		m.pendingConversationCaptures = make(map[*session.Instance]int)
+	}
+	m.pendingConversationCaptures[inst]++
+	timeout := conversationCaptureTimeout
+	go func() {
+		defer m.finishConversationCapture(inst)
+		m.captureAgentConversation(repoID, key, inst, snap, token, timeout)
+	}()
+}
+
+func (m *Manager) finishConversationCapture(inst *session.Instance) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pendingConversationCaptures[inst] <= 1 {
+		delete(m.pendingConversationCaptures, inst)
+		return
+	}
+	m.pendingConversationCaptures[inst]--
 }
 
 func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration) {
