@@ -200,3 +200,25 @@ func TestStopForInstance_RetriesDurableOwnerAfterCachedReapError(t *testing.T) {
 		t.Fatalf("matching durable owner survived successful retry: %v", err)
 	}
 }
+
+func TestVSCodeSupervisor_StaleInstanceDoesNotReplaceCurrentEditor(t *testing.T) {
+	binary := writeFakeVSCodeBinary(t, "code-server", nil)
+	v := newTestVSCodeSupervisor(t, binary)
+	const key = "same-title"
+	replacementWorktree := t.TempDir()
+	if _, err := v.ensureServerForInstance(key, "replacement-instance", replacementWorktree); err != nil {
+		t.Fatalf("starting replacement editor: %v", err)
+	}
+	replacement := v.servers[key]
+	if replacement == nil || !replacement.alive() {
+		t.Fatal("replacement editor fixture is not alive")
+	}
+
+	_, err := v.ensureServerForInstance(key, "stale-instance", t.TempDir())
+	if err == nil {
+		t.Fatal("stale instance request replaced the current session's live editor")
+	}
+	if got := v.servers[key]; got != replacement || !got.alive() {
+		t.Fatal("stale instance request unregistered or stopped the replacement session's editor")
+	}
+}

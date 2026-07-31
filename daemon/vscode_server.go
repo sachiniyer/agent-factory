@@ -616,8 +616,14 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 	// restored to a different path (or a key reused after a kill) must never be
 	// handed an editor rooted at the old directory.
 	if s := v.servers[key]; s != nil {
+		alive := s.alive()
 		switch {
-		case s.alive() && s.instanceID == instanceID && s.worktree == worktree:
+		case alive && s.instanceID != instanceID:
+			// The live editor is stable-ID proof that this key now belongs to a
+			// replacement session. A stale caller must not unregister that editor;
+			// its manager-side post-check will reject the old instance.
+			return vscodeEndpoint{}, fmt.Errorf("VS Code editor key %q belongs to a different stable session instance", key)
+		case alive && s.worktree == worktree:
 			if s.ready || v.probeReady(s) {
 				return s.endpoint(), nil
 			}
@@ -632,7 +638,7 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 			// A DEAD leader needs nothing from stop() — its reaper already killed
 			// the group at the only moment that was safe to — but stop() is correct
 			// and immediate on one, so the branch stays uniform.
-			neverReady := !s.ready && !s.alive()
+			neverReady := !s.ready && !alive
 			delete(v.servers, key)
 			go func() {
 				if err := s.stop(); err != nil {
