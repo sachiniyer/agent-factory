@@ -728,7 +728,7 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if err := interactiveGuard(selected); err != nil {
-		return m, m.handleNotice(err)
+		return m, m.handleGuardResult(err)
 	}
 	if err := webTabAttachGuard(selected, m.store.ActiveTab()); err != nil {
 		return m, m.handleNotice(err)
@@ -801,9 +801,33 @@ func interactiveGuard(inst *session.Instance) error {
 		return fmt.Errorf("session '%s' is archived — press %s to restore", inst.Title, restoreKeyHint())
 	}
 	if !inst.TmuxAlive() {
-		return fmt.Errorf("session '%s' is no longer running", inst.Title)
+		// Not a designed refusal, unlike every fence above. Those all describe a
+		// state the projection already knows about and offer an off-ramp; this one
+		// fires when a row still projects as RUNNING and the fresh probe disagrees
+		// — the session vanished with no kill on record, or (TmuxAlive collapses
+		// IsAlive's tri-state) tmux could not be asked at all. This guard is the
+		// component that DISCOVERS that, so it must reach ERROR monitoring rather
+		// than be filed as ordinary user feedback.
+		return fmt.Errorf("%w: session '%s' is no longer running", errSessionLivenessUnexpected, inst.Title)
 	}
 	return nil
+}
+
+// errSessionLivenessUnexpected marks the one interactiveGuard result that is a
+// discovered failure rather than a designed fence, so callers can route it by
+// KIND instead of re-deriving the distinction at each site. Wrapped, not
+// returned bare, because the message the user sees is still the specific one.
+var errSessionLivenessUnexpected = errors.New("session liveness contradicted the projection")
+
+// handleGuardResult routes an interactiveGuard/webTabAttachGuard error to the
+// severity its KIND deserves: a fence the user ran into is a notice, a liveness
+// contradiction the guard just discovered is an error. Every guard call site
+// goes through here so the two can never drift apart per site (#2575).
+func (m *home) handleGuardResult(err error) tea.Cmd {
+	if errors.Is(err, errSessionLivenessUnexpected) {
+		return m.handleError(err)
+	}
+	return m.handleNotice(err)
 }
 
 // handleAttach is the full-screen attach verb (`o`; the pre-#1089-PR-2
@@ -831,7 +855,7 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if err := interactiveGuard(selected); err != nil {
-		return m, m.handleNotice(err)
+		return m, m.handleGuardResult(err)
 	}
 	if err := webTabAttachGuard(selected, m.store.ActiveTab()); err != nil {
 		return m, m.handleNotice(err)

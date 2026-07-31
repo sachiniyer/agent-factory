@@ -197,8 +197,17 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 		// Roll the fence back to Lost — started is still true and the agent tmux
 		// binding was kept — so the Lost-restore loop re-spawns the agent in place.
 		// Persist the recovery-eligible state, then surface the failure.
+		//
+		// The error-returning persist, for the same reason as the restore path
+		// below: since the relocate became bounded, this branch is reachable with
+		// the worktree already moved to dest and only the in-memory object knowing
+		// it. A logged-and-swallowed write failure would leave the record pointing
+		// at the pre-archive path, so a restart would send the Lost-restore loop to
+		// rebuild a worktree whose bytes are sitting in the archive directory.
 		_ = instance.Transition(session.AbortArchiveToLost())
-		m.persistInstance(repoID, instance)
+		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); its worktree is at %s — check that path before restarting the daemon: %w", req.Title, perr, instance.GetWorktreePath(), err)
+		}
 		return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w", req.Title, err)
 	}
 

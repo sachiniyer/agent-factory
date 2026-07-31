@@ -579,7 +579,7 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 		commitCmd, p = cmd, committed
 	}
 	if instErr := interactiveGuard(p.Instance()); instErr != nil {
-		return m, tea.Batch(commitCmd, m.handleNotice(instErr))
+		return m, tea.Batch(commitCmd, m.handleGuardResult(instErr))
 	}
 	if p.Instance() == nil || p.Instance().IsCreating() {
 		return m, commitCmd
@@ -614,7 +614,7 @@ func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if err := interactiveGuard(instance); err != nil {
-		return m, m.handleNotice(err)
+		return m, m.handleGuardResult(err)
 	}
 	// Fence attach off a browser-only tab HERE too. The tree-selection paths guard
 	// on the SELECTED tab, but a web/vscode tab already open as a focused pane

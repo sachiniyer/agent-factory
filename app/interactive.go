@@ -92,7 +92,7 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	// (e.g. gone Lost, #1108): re-run the Enter guard so the user gets the
 	// same truthful error Enter would give now, not a generic bind failure.
 	if err := interactiveGuard(p.Instance()); err != nil {
-		return m.handleNotice(err)
+		return m.handleGuardResult(err)
 	}
 
 	// Focus (and, via the recency touch, un-auto-hide) the pane, then bind its live

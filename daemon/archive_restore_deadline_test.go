@@ -98,10 +98,8 @@ func TestRestoreArchived_RelocateCutOffPersistsTheNewLocation(t *testing.T) {
 // nothing recorded it, which is worse than the original bug: it is the same data
 // loss plus a reassurance.
 //
-// The forced failure is storage drift — the record this write targets is gone —
-// because persistInstanceData refuses to write when no record with that title
-// exists, and that is deterministic regardless of the uid the suite runs as
-// (a chmod-based denial is not, under root in the container).
+// The forced failure is storage drift; see driftPersistedStableID for why that
+// lever rather than a permissions denial.
 func TestRestoreArchived_RelocateCutOffReportsAFailedPersist(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
@@ -110,21 +108,8 @@ func TestRestoreArchived_RelocateCutOffReportsAFailedPersist(t *testing.T) {
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 
-	// Storage drifts out from under the daemon: the persisted row still carries
-	// this title (so the restore still resolves), but a DIFFERENT stable id — the
-	// kill/recreate shape persistInstanceData refuses to overwrite. The durable
-	// write therefore cannot land, which is the condition under test.
-	require.NoError(t, config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
-		var records []session.InstanceData
-		require.NoError(t, json.Unmarshal(raw, &records))
-		require.NotEmpty(t, records)
-		for i := range records {
-			if records[i].Title == "worker" {
-				records[i].ID = "a-different-session-entirely"
-			}
-		}
-		return json.Marshal(records)
-	}))
+	// The durable write can no longer land: see driftPersistedStableID.
+	driftPersistedStableID(t, repoID, "worker")
 
 	partialRelocateGitOnPath(t)
 	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
@@ -138,4 +123,51 @@ func TestRestoreArchived_RelocateCutOffReportsAFailedPersist(t *testing.T) {
 		"a persist that failed must escalate: nothing durable points at the moved worktree")
 	assert.Contains(t, err.Error(), "before restarting the daemon",
 		"the operator needs to know a restart is what turns this into lost work")
+}
+
+// TestArchiveSession_TeardownFailureReportsAFailedPersist is the archive-side
+// twin of the restore case above, and it exists because the two must not drift:
+// since the relocate became bounded, this branch is reachable with the worktree
+// already at the archive destination and only the in-memory object knowing it.
+// A logged-and-swallowed write failure would leave the record pointing at the
+// pre-archive path, so a restart would send the Lost-restore loop to rebuild a
+// worktree whose bytes are in the archive directory.
+func TestArchiveSession_TeardownFailureReportsAFailedPersist(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	driftPersistedStableID(t, repoID, "worker")
+	partialRelocateGitOnPath(t)
+	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown,
+		"the cut-off relocate must still be reported")
+	assert.Contains(t, err.Error(), "could not record its recovered state on disk",
+		"a persist that failed must escalate rather than be logged and swallowed")
+	assert.Contains(t, err.Error(), "before restarting the daemon",
+		"the operator needs to know a restart is what turns this into lost work")
+}
+
+// driftPersistedStableID makes the durable write for this title fail
+// deterministically: the row keeps its title (so the action still resolves) but
+// carries a different stable id, which persistInstanceData refuses to overwrite
+// by design. Deterministic regardless of the uid the suite runs as — a
+// permissions-based denial is not, since the container harness can run as root.
+func driftPersistedStableID(t *testing.T, repoID, title string) {
+	t.Helper()
+	require.NoError(t, config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var records []session.InstanceData
+		require.NoError(t, json.Unmarshal(raw, &records))
+		require.NotEmpty(t, records)
+		for i := range records {
+			if records[i].Title == title {
+				records[i].ID = "a-different-session-entirely"
+			}
+		}
+		return json.Marshal(records)
+	}))
 }
