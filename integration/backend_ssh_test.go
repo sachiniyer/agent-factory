@@ -36,6 +36,9 @@ import (
 // Run it on a host with docker: make backend-ssh-roundtrip. It SKIPS cleanly where
 // docker is unavailable, so the full suite stays green there.
 func TestSSHBackendRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive real-backend E2E/integration; skipped under -short — see #2052")
+	}
 	requireDocker(t)
 	requireTool(t, "git")
 	requireTool(t, "ssh-keygen")

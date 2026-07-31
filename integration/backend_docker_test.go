@@ -38,6 +38,9 @@ import (
 // where docker is unavailable (e.g. inside the test-container fence), so the full
 // suite stays green there.
 func TestDockerBackendRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive real-backend E2E/integration; skipped under -short — see #2052")
+	}
 	requireDocker(t)
 	requireTool(t, "git")
 

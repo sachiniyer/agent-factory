@@ -32,6 +32,9 @@ import (
 // Run on a host with docker: make backend-docker-roundtrip (it matches
 // TestDockerBackend*). SKIPS cleanly where docker is unavailable.
 func TestDockerBackendArchiveRestore(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive real-backend E2E/integration; skipped under -short — see #2052")
+	}
 	requireDocker(t)
 	requireTool(t, "git")
 
@@ -167,6 +170,9 @@ func TestDockerBackendArchiveRestore(t *testing.T) {
 // against the Runtime interface, so this exercises the same push-then-teardown /
 // re-provision-then-clone flow the docker test does, over the ssh transport.
 func TestSSHBackendArchiveRestore(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive real-backend E2E/integration; skipped under -short — see #2052")
+	}
 	requireDocker(t)
 	requireTool(t, "git")
 	requireTool(t, "ssh-keygen")
