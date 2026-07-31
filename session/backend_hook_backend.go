@@ -425,6 +425,17 @@ func redactSerializedHookJSONStrings(output string) string {
 			}
 			continue
 		}
+		if output[cursor] == '\n' || output[cursor] == '\r' {
+			if replacement, changed := sanitizeSerializedHookJSONString(
+				output[candidateStart:cursor], true,
+			); changed {
+				appendSerializedHookJSONReplacement(&redacted, output, &written,
+					candidateStart, cursor, replacement)
+			}
+			candidateStart = -1
+			escaped = false
+			continue
+		}
 		if escaped {
 			escaped = false
 			continue
@@ -438,14 +449,11 @@ func redactSerializedHookJSONStrings(output string) string {
 		}
 
 		candidateEnd := cursor + 1
-		var decoded string
-		if json.Unmarshal([]byte(output[candidateStart:candidateEnd]), &decoded) == nil {
-			sanitized := redactHookOutputTokens(decoded)
-			if sanitized != decoded {
-				encoded, _ := json.Marshal(sanitized)
-				appendSerializedHookJSONReplacement(&redacted, output, &written,
-					candidateStart, candidateEnd, encoded)
-			}
+		if replacement, changed := sanitizeSerializedHookJSONString(
+			output[candidateStart:candidateEnd], false,
+		); changed {
+			appendSerializedHookJSONReplacement(&redacted, output, &written,
+				candidateStart, candidateEnd, replacement)
 		}
 		candidateStart = cursor
 		escaped = false
@@ -455,15 +463,11 @@ func redactSerializedHookJSONStrings(output string) string {
 		// its escaped inner token value is complete. Close only for decoding,
 		// sanitize the decoded prefix, then drop the synthetic closing quote so
 		// the diagnostic remains faithful to the interrupted output.
-		var decoded string
-		if json.Unmarshal([]byte(output[candidateStart:]+`"`), &decoded) == nil {
-			sanitized := redactHookOutputTokens(decoded)
-			if sanitized != decoded {
-				encoded, _ := json.Marshal(sanitized)
-				encoded = encoded[:len(encoded)-1]
-				appendSerializedHookJSONReplacement(&redacted, output, &written,
-					candidateStart, len(output), encoded)
-			}
+		if replacement, changed := sanitizeSerializedHookJSONString(
+			output[candidateStart:], true,
+		); changed {
+			appendSerializedHookJSONReplacement(&redacted, output, &written,
+				candidateStart, len(output), replacement)
 		}
 	}
 	if written == 0 {

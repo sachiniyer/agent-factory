@@ -186,3 +186,12 @@ func TestHookOutputSuffixRedactsUnterminatedSerializedEndpoint(t *testing.T) {
 	assert.NotContains(t, suffix, secret, "an incomplete outer string must not expose its serialized token")
 	assert.Contains(t, suffix, "[REDACTED]")
 }
+
+func TestHookOutputSuffixRedactsUnterminatedSerializedEndpointBeforeNewline(t *testing.T) {
+	const secret = "newline-terminated-serialized-token-must-not-leak"
+	output := "INFO endpoint=\"{\\\"token\\\":\\\"newline-terminated-serialized-token-must-not-leak\\\"}\n"
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "a line terminator must not make an incomplete outer string safe")
+	assert.Contains(t, suffix, "[REDACTED]")
+}

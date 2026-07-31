@@ -1,6 +1,29 @@
 package session
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
+
+func sanitizeSerializedHookJSONString(candidate string, incomplete bool) ([]byte, bool) {
+	document := candidate
+	if incomplete {
+		document += `"`
+	}
+	var decoded string
+	if json.Unmarshal([]byte(document), &decoded) != nil {
+		return nil, false
+	}
+	sanitized := redactHookOutputTokens(decoded)
+	if sanitized == decoded {
+		return nil, false
+	}
+	encoded, _ := json.Marshal(sanitized)
+	if incomplete {
+		encoded = encoded[:len(encoded)-1]
+	}
+	return encoded, true
+}
 
 // appendSerializedHookJSONReplacement preserves a shared quote boundary between
 // malformed adjacent strings. The scanner intentionally reuses every closing
