@@ -742,3 +742,60 @@ func TestCancelNamingClearsPlaceholder(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleStateNewTitleSeverity separates the two things the naming flow can
+// refuse. The validation branches (empty, too long, reserved, colliding) are
+// user feedback and belong at INFO — a notice, not an operator alarm. But
+// Instance.SetTitle performs no validation at all: its ONE error is "cannot
+// change title of a started instance", i.e. the naming placeholder was somehow
+// already started. That is a broken invariant and must keep reaching ERROR, or
+// #2575's severity cleanup would silently mute a real state bug.
+func TestHandleStateNewTitleSeverity(t *testing.T) {
+	t.Run("validation refusal is a notice", func(t *testing.T) {
+		h := newTestHome(t)
+		h.state = stateNew
+		h.errBox.SetSize(160, 1)
+		info, errorLogs := captureHomeMessageLogs(t)
+
+		naming, err := session.NewInstance(session.InstanceOptions{
+			Title:   strings.Repeat("x", 32),
+			Path:    t.TempDir(),
+			Program: "claude",
+		})
+		require.NoError(t, err)
+		h.namingInstance = naming
+
+		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+		require.Contains(t, info.String(), "title cannot be longer than 32 characters",
+			"the reason the keystroke was refused stays visible at INFO")
+		require.Empty(t, errorLogs.String(),
+			"a designed input refusal must not be indistinguishable from an operation failure")
+	})
+
+	t.Run("started placeholder is an error", func(t *testing.T) {
+		h := newTestHome(t)
+		h.state = stateNew
+		h.errBox.SetSize(160, 1)
+		h.pendingProgram = "claude"
+		info, errorLogs := captureHomeMessageLogs(t)
+
+		naming, err := session.NewInstance(session.InstanceOptions{
+			Title:   "already-running",
+			Path:    t.TempDir(),
+			Program: "claude",
+		})
+		require.NoError(t, err)
+		// The invariant break SetTitle exists to catch: the placeholder being
+		// renamed has already been started.
+		naming.SetStartedForTest(true)
+		h.namingInstance = naming
+
+		_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyBackspace})
+
+		require.Contains(t, errorLogs.String(), "cannot change title of a started instance",
+			"an invariant failure must reach ERROR monitoring, not be filed as user feedback")
+		require.NotContains(t, info.String(), "cannot change title of a started instance",
+			"the failure must not be downgraded to a notice")
+	})
+}

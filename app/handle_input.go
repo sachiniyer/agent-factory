@@ -136,8 +136,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(err)
 		}
 		// Every gate passed — commit the resolved title exactly once.
+		//
+		// SetTitle stays on handleError. It performs no input validation: its one
+		// error is "cannot change title of a started instance", i.e. the naming
+		// placeholder was somehow already started. That is a broken invariant, not
+		// user feedback, and it must keep reaching ERROR monitoring. The branches
+		// above are the validation ones, and only those are notices.
 		if err := instance.SetTitle(title); err != nil {
-			return m, m.handleNotice(err)
+			return m, m.handleError(err)
 		}
 
 		// Apply the program selected during naming. The optimistic create op
@@ -239,11 +245,13 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		newTitle := instance.Title + string(cleanRunes)
+		// The length cap is user feedback; the SetTitle error below is not (see
+		// the commit site above) — it keeps ERROR severity here too.
 		if runewidth.StringWidth(newTitle) > 32 {
 			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
 		}
 		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleNotice(err)
+			return m, m.handleError(err)
 		}
 	case tea.KeyBackspace:
 		runes := []rune(instance.Title)
@@ -251,7 +259,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if err := instance.SetTitle(string(runes[:len(runes)-1])); err != nil {
-			return m, m.handleNotice(err)
+			return m, m.handleError(err)
 		}
 	case tea.KeySpace:
 		newTitle := instance.Title + " "
@@ -259,7 +267,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.handleNotice(fmt.Errorf("title cannot be longer than 32 characters"))
 		}
 		if err := instance.SetTitle(newTitle); err != nil {
-			return m, m.handleNotice(err)
+			return m, m.handleError(err)
 		}
 	case tea.KeyEsc:
 		// Kill by the captured namingInstance pointer, not the live selection

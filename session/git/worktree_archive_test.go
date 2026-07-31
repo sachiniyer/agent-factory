@@ -169,6 +169,42 @@ func TestMoveWorktree_SubmodulesUseDesignedFallbackWithoutWarning(t *testing.T) 
 	assertSubmoduleIntactAt(t, dest)
 }
 
+// TestRelocate_DoesNotWedgeOnStalledGit applies the #1917 runner contract to the
+// archive/restore path. relocateWorktreeTo now probes for submodules BEFORE the
+// fast path, and that probe reads an initialized submodule's gitdir — precisely
+// the I/O that stalls on a hung mount. Unbounded, the new pre-check would add a
+// fresh way to hang teardown: the daemon holds the session in its optimistic
+// Archiving/Restoring state across this call, so a wedge here is permanent.
+//
+// Every git call on the path runs under localGitTimeout, so a git making no
+// progress yields an actionable timeout within the bound. The assertion is
+// deliberately on the ERROR, not just on returning: an archive that gives up
+// must say so rather than report success it never established.
+func TestRelocate_DoesNotWedgeOnStalledGit(t *testing.T) {
+	gw, _, _ := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	// Only wedge git AFTER the fixture is built with real git.
+	stallingGitOnPath(t)
+	shortenLocalTimeout(t, 200*time.Millisecond)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- gw.MoveWorktree(dest) }()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a stalled git must surface a timeout, never a silent success")
+		require.Contains(t, err.Error(), "timed out",
+			"the error must name the bound so the operator knows the archive was abandoned, not completed")
+		require.Less(t, time.Since(start), 30*time.Second,
+			"each git step is killed at its own deadline, not left waiting for the stalled git to exit")
+	case <-time.After(60 * time.Second):
+		t.Fatal("relocateWorktreeTo hung on a stalled git (#1917): the session would stay " +
+			"wedged in Archiving/Restoring for the daemon's lifetime")
+	}
+}
+
 // TestMoveWorktree_FallbackRepairsRegistration forces the fast path to fail (as
 // a cross-device EXDEV would) and asserts the manual-move + `git worktree
 // repair` fallback still lands a valid, registered worktree with its dirty tree.

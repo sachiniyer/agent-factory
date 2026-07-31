@@ -48,13 +48,20 @@ func RestoreWorktreePath(repoPath, title, branchName string) (string, error) {
 // worktree intact for the user to salvage manually (#1028).
 var ErrRepoGone = errors.New("origin repository is gone")
 
+// Every git call on the relocate path below uses runGitLocalCommand, not
+// runGitCommand. Archive and restore are session-TEARDOWN/lifecycle paths held
+// under the daemon's per-session guards, and the runner contract in
+// worktree_git.go requires such callers to be bounded (#1917): an unbounded
+// call against a stalled filesystem leaves the session wedged forever in its
+// optimistic Archiving/Restoring state instead of surfacing a timeout.
+
 // worktreeMoveFast is the git-native fast path for relocating a worktree —
 // `git worktree move`, which is atomic on a single filesystem and updates the
 // two-way registration itself. It is a package var so tests can force the
 // manual-move + `git worktree repair` fallback deterministically without a real
 // second filesystem. Production never reassigns it.
 var worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
-	_, err := g.runGitCommand(g.repoPath, "worktree", "move", src, dest)
+	_, err := g.runGitLocalCommand(g.repoPath, "worktree", "move", src, dest)
 	return err
 }
 
@@ -62,8 +69,13 @@ var worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
 // move` explicitly does not support. Checking before the move keeps the manual
 // move + repair path a deliberate implementation choice instead of first
 // manufacturing a Git failure for every archive of such a repository.
+//
+// The probe reads an initialized submodule's gitdir, so it inherits exactly the
+// stall it is meant to precede: bounded, a hung mount surfaces a timeout the
+// caller reports; unbounded, this new pre-check would have added a fresh way to
+// wedge archive and restore.
 var worktreeContainsSubmodules = func(g *GitWorktree, src string) (bool, error) {
-	out, err := g.runGitCommand(src, "submodule", "status")
+	out, err := g.runGitLocalCommand(src, "submodule", "status")
 	if err != nil {
 		return false, err
 	}
@@ -76,7 +88,7 @@ var worktreeContainsSubmodules = func(g *GitWorktree, src string) (bool, error) 
 // byte-move to prove the location is still committed. Production never
 // reassigns it.
 var worktreeRepair = func(g *GitWorktree, dest string) error {
-	_, err := g.runGitCommand(g.repoPath, "worktree", "repair", dest)
+	_, err := g.runGitLocalCommand(g.repoPath, "worktree", "repair", dest)
 	return err
 }
 
@@ -88,10 +100,10 @@ var worktreeRepair = func(g *GitWorktree, dest string) error {
 // the repair explicit for initialized nested submodules on Git versions whose
 // top-level absorb does not recurse.
 var worktreeRepairSubmodules = func(g *GitWorktree, dest string) error {
-	if _, err := g.runGitCommand(dest, "submodule", "absorbgitdirs"); err != nil {
+	if _, err := g.runGitLocalCommand(dest, "submodule", "absorbgitdirs"); err != nil {
 		return err
 	}
-	_, err := g.runGitCommand(dest, "submodule", "foreach", "--recursive", "git submodule absorbgitdirs")
+	_, err := g.runGitLocalCommand(dest, "submodule", "foreach", "--recursive", "git submodule absorbgitdirs")
 	return err
 }
 

@@ -68,9 +68,50 @@ var configAgentPromptReceiptTimeout = 5 * time.Second
 // into the same log line. A var keeps the receipt regressions fast.
 var configAgentPromptReceiptEscalationTimeout = 30 * time.Second
 
+// configAgentReceiptJoinTimeout bounds how long a lifecycle path waits for a
+// cancelled receipt watcher to unwind. Cancellation is only observed BETWEEN
+// receipt scans: a scan sits in filepath.WalkDir / os.ReadFile under CODEX_HOME,
+// neither of which takes a context, so a stalled filesystem makes the watcher
+// uninterruptible for as long as that I/O blocks. An unbounded join would then
+// hang daemon shutdown before it ever closes the tracked tmux sessions, which is
+// a far worse outcome than letting one goroutine finish on its own — abandoning
+// the join is safe because a cancelled watcher stays silent when it returns.
+//
+// Healthy watchers return the moment they are cancelled, so this only ever trips
+// on the stall it exists for. A var so the regression can run in milliseconds.
+var configAgentReceiptJoinTimeout = 5 * time.Second
+
 type configAgentReceiptWatcher struct {
 	cancel context.CancelFunc
 	done   <-chan struct{}
+}
+
+// joinReceiptWatchers cancels every watcher and waits for their goroutines to
+// unwind under ONE shared deadline, so N stalled watchers cost the caller one
+// configAgentReceiptJoinTimeout rather than N of them. Giving up is reported,
+// never silent: an abandoned watcher is a live goroutine blocked on filesystem
+// I/O, and that is worth an operator seeing.
+func joinReceiptWatchers(watchers []configAgentReceiptWatcher) {
+	for _, watcher := range watchers {
+		watcher.cancel()
+	}
+	if len(watchers) == 0 {
+		return
+	}
+	timer := time.NewTimer(configAgentReceiptJoinTimeout)
+	defer timer.Stop()
+	for _, watcher := range watchers {
+		select {
+		case <-watcher.done:
+		case <-timer.C:
+			log.WarningLog.Printf(
+				"config agent: a briefing-receipt watcher did not unwind within %s of cancellation; "+
+					"continuing without it (its rollout scan under CODEX_HOME is blocked in filesystem I/O)",
+				configAgentReceiptJoinTimeout,
+			)
+			return
+		}
+	}
 }
 
 // configAgentSupervisor owns every bare tmux session this daemon spawned for a
@@ -161,8 +202,7 @@ func (c *configAgentSupervisor) reap(name string) error {
 	delete(c.receiptWatchers, name)
 	c.mu.Unlock()
 	if watching {
-		watcher.cancel()
-		<-watcher.done
+		joinReceiptWatchers([]configAgentReceiptWatcher{watcher})
 	}
 	if !ok {
 		return nil
@@ -193,12 +233,10 @@ func (c *configAgentSupervisor) Stop() {
 	c.receiptWatchers = make(map[string]configAgentReceiptWatcher)
 	c.mu.Unlock()
 
-	for _, watcher := range watchers {
-		watcher.cancel()
-	}
-	for _, watcher := range watchers {
-		<-watcher.done
-	}
+	// Bounded: killing the tracked tmux sessions below is the part of shutdown
+	// that must not be skipped, and a watcher wedged in receipt I/O must never
+	// stand in front of it.
+	joinReceiptWatchers(watchers)
 
 	var wg sync.WaitGroup
 	for _, ts := range sessions {
@@ -397,14 +435,20 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 							req.Prompt,
 							configAgentPromptReceiptEscalationTimeout,
 						)
+						// Cancellation is checked FIRST, and for both outcomes. The
+						// config agent is being reaped or the daemon is shutting
+						// down, so nothing this watcher learned is still worth
+						// reporting — and because the join that follows
+						// cancellation is bounded, this goroutine may well outlive
+						// the session it is describing.
+						if receiptCtx.Err() != nil {
+							return
+						}
 						if lateErr == nil {
 							log.InfoLog.Printf(
 								"config agent: %s briefing receipt confirmed after the initial %s window",
 								sessionName, configAgentPromptReceiptTimeout,
 							)
-							return
-						}
-						if receiptCtx.Err() != nil {
 							return
 						}
 						if errors.Is(lateErr, session.ErrPromptReceiptNotObserved) {
