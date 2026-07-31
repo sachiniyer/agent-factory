@@ -54,6 +54,22 @@ type teardownMode interface {
 	// it true and fences with OpArchiving instead, so a failed move self-heals
 	// via the Lost-restore loop.
 	clearsStarted() bool
+	// reapsPendingTabCleanup reports whether this mode must also tear down the
+	// session's unconfirmed tab-close handles (#2669) — the tmux sessions of tabs
+	// already off the roster whose kill was never confirmed.
+	//
+	// True for the two DESTRUCTIVE modes, and load-bearing for both. They touch the
+	// workspace, and a pending process is cwd'd in that workspace exactly like a
+	// live tab's: archive would otherwise relocate a worktree out from under it,
+	// and kill would delete the record — the handle's only home — while the process
+	// ran on, permanently untracked. Routing them through the same closeTab gives
+	// them the same pane-exit wait and the same unknown-blocks-the-worktree gate.
+	//
+	// False for release-PTY, and that is not an omission: it runs no kill-session
+	// at all. Reaping there would retire durable handles on the strength of a
+	// teardown that never killed anything — the precise "unknown read as finished"
+	// mistake #2669 is about.
+	reapsPendingTabCleanup() bool
 	// finalize reconciles the instance's tab list and worktree pointer under a
 	// held i.mu after teardown. closed pairs each torn-down tab with the tmux it
 	// closed (for identity-guarded ref clearing); gw is the worktree captured
@@ -205,6 +221,23 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 			closed = append(closed, closedTab{id: tab.ID, name: tab.Name, ts: tab.tmux})
 		}
 	}
+	// The roster is not the whole runtime. A close that committed but could not
+	// confirm its kill left a tmux session running in this same worktree with only
+	// a durable handle naming it (#2669), and a destructive teardown has to account
+	// for it or it will move/delete the workspace around a live process — or drop
+	// the record that is the handle's only home. Captured here so the retirement
+	// below removes exactly what this pass tore down.
+	var reaped []TabCleanupData
+	if mode.reapsPendingTabCleanup() && len(i.pendingTabCleanup) > 0 {
+		reaped = append([]TabCleanupData(nil), i.pendingTabCleanup...)
+		for _, handle := range reaped {
+			// Bound by its EXACT persisted name, the same binding restoreLocalTabs
+			// uses. The program is irrelevant to a kill and nothing is started here.
+			closed = append(closed, closedTab{
+				id: handle.TabID, name: handle.TmuxName, ts: restoreTmuxSession(handle.TmuxName, ""),
+			})
+		}
+	}
 	gw := i.gitWorktree
 	title := i.Title
 	if mode.clearsStarted() {
@@ -252,6 +285,14 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 
 	i.mu.Lock()
 	mode.finalize(i, closed, gw)
+	// Every pane above — live tabs and pending handles alike — is CONFIRMED dead by
+	// the gate, so the handles this pass reaped have nothing left to name. Retire
+	// exactly those rather than clearing the list: a handle appended after the
+	// snapshot above was never torn down here, and dropping it would lose the only
+	// pointer to a session nothing killed.
+	for idx := range reaped {
+		i.pendingTabCleanup = dropTabCleanup(i.pendingTabCleanup, &reaped[idx])
+	}
 	i.mu.Unlock()
 
 	return errors.Join(errs...)
@@ -332,6 +373,10 @@ func (teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownS
 
 func (teardownKill) clearsStarted() bool { return true }
 
+// reapsPendingTabCleanup: kill deletes the record, which is the cleanup handle's
+// only home. A pending session not killed here is untracked forever.
+func (teardownKill) reapsPendingTabCleanup() bool { return true }
+
 func (teardownKill) finalize(i *Instance, closed []closedTab, gw *git.GitWorktree) {
 	clearClosedTmuxRefs(i, closed)
 	if i.gitWorktree == gw {
@@ -364,6 +409,11 @@ func (teardownReleasePTY) handleWorktree(_ *git.GitWorktree, _ string) (teardown
 }
 
 func (teardownReleasePTY) clearsStarted() bool { return true }
+
+// reapsPendingTabCleanup: false. This mode runs no kill-session, so it can never
+// confirm a pending session dead — and it shares its tmux with the canonical
+// instance, which still needs those handles.
+func (teardownReleasePTY) reapsPendingTabCleanup() bool { return false }
 
 func (teardownReleasePTY) finalize(i *Instance, closed []closedTab, _ *git.GitWorktree) {
 	clearClosedTmuxRefs(i, closed)
@@ -423,6 +473,11 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 }
 
 func (teardownArchive) clearsStarted() bool { return false }
+
+// reapsPendingTabCleanup: archive MOVES the worktree a pending process is still
+// cwd'd in, so it must confirm that process dead first — the #802 ordering the
+// live tabs already get.
+func (teardownArchive) reapsPendingTabCleanup() bool { return true }
 
 func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) {
 	// Reduce to the tabs an un-archive can actually bring back: the agent tab

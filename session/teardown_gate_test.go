@@ -29,11 +29,22 @@ type gateStubMode struct {
 	worktreeCalled   bool
 	finalizeCalled   bool
 	clearStartedFlag bool
+	reapPendingFlag  bool
+	closedNames      []string
+	stateByName      map[string]teardownState
 }
 
-func (m *gateStubMode) closeTab(_ *tmux.TmuxSession, _, _ string) (teardownState, error) {
+func (m *gateStubMode) closeTab(_ *tmux.TmuxSession, _, tabName string) (teardownState, error) {
+	m.closedNames = append(m.closedNames, tabName)
+	// stateByName lets a test make ONE named session the unknown one, so a gate
+	// firing can be attributed to that session rather than to any tab in the pass.
+	if state, ok := m.stateByName[tabName]; ok {
+		return state, m.closeErr
+	}
 	return m.closeState, m.closeErr
 }
+
+func (m *gateStubMode) reapsPendingTabCleanup() bool { return m.reapPendingFlag }
 
 func (m *gateStubMode) handleWorktree(_ *git.GitWorktree, _ string) (teardownState, error) {
 	m.worktreeCalled = true
