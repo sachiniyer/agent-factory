@@ -1301,6 +1301,26 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
     await p.keyboard.up("Shift");
     expect(await viewport.evaluate((el) => el.scrollTop), "normal-mode modifier wheel stays xterm-owned").toBe(normalBottom);
 
+    // DECSET 9/X10 captures button-down only, not wheel. Its plain wheel must
+    // remain browser-owned, and its modifier wheel must retain xterm semantics.
+    await p.keyboard.type("printf '\\033[?9h'");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    inputPayloads.length = 0;
+    const x10Bottom = await viewport.evaluate((el) => el.scrollTop);
+    await p.mouse.wheel(0, -900);
+    await expect.poll(() => viewport.evaluate((el) => el.scrollTop), { message: "X10 plain wheel stays browser-owned" }).toBeLessThan(x10Bottom);
+    expect(inputPayloads, "X10 does not report wheel bytes").toHaveLength(0);
+    const x10Scrolled = await viewport.evaluate((el) => el.scrollTop);
+    await p.keyboard.down("Shift");
+    await p.mouse.wheel(0, -900);
+    await p.keyboard.up("Shift");
+    expect(await viewport.evaluate((el) => el.scrollTop), "X10 modifier wheel keeps xterm behavior").toBe(x10Scrolled);
+    const mouseHint = host.locator(".af-mouse-capture-hint");
+    await expect(mouseHint, "X10 wheel never advertises an unnecessary escape").not.toHaveClass(/af-visible/);
+    await p.keyboard.type("printf '\\033[?9l'");
+    await p.keyboard.press("Enter");
+
     // A full-screen TUI enables DEC mouse tracking. Drive the real terminal mode,
     // rather than mocking pointer handlers, so xterm itself decides who owns each
     // event. This is the state-dependent boundary behind both reported symptoms.
@@ -1333,7 +1353,6 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
     // The UI must explain the escape at the moment a user hits the application-owned
     // pointer path. Selection and scroll then share one modifier rather than becoming
     // two unrelated fixes.
-    const mouseHint = host.locator(".af-mouse-capture-hint");
     await expect.soft(mouseHint).toHaveClass(/af-visible/, { timeout: 2_000 });
     await expect.soft(mouseHint).toHaveAttribute("aria-hidden", "false");
     await expect.soft(mouseHint).toContainText("Hold Shift to select or scroll");
@@ -1362,6 +1381,16 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
       })
       .toBeLessThan(beforeHistoryScroll);
     expect(inputPayloads, "the history override must not leak a wheel report to the application").toHaveLength(0);
+
+    // Chromium can omit modifier flags on a momentum wheel while xterm still has
+    // the matching keydown. The fallback must both scroll and suppress the hint.
+    await expect(mouseHint).not.toHaveClass(/af-visible/, { timeout: 5_000 });
+    const beforeLatchedScroll = await viewport.evaluate((el) => el.scrollTop);
+    await p.locator(".xterm-helper-textarea").dispatchEvent("keydown", { key: "Shift", shiftKey: true });
+    await p.mouse.wheel(0, -120);
+    await expect.poll(() => viewport.evaluate((el) => el.scrollTop), { message: "latched modifier scrolls history" }).toBeLessThan(beforeLatchedScroll);
+    await expect(mouseHint, "a successful latched override must not advertise its own modifier").not.toHaveClass(/af-visible/);
+    await p.locator(".xterm-helper-textarea").dispatchEvent("keyup", { key: "Shift" });
 
     // A key released while the page is unfocused never produces keyup here. Window
     // blur must clear the fallback latch or the next plain wheel would be stolen

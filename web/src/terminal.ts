@@ -165,7 +165,11 @@ export class AttachTerminal {
   // gate makes every ordinary input a no-op before even measuring layout.
   private readonly onWheel = (event: WheelEvent): void => {
     this.handleUserScroll("wheel");
-    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
+    if (
+      !terminalMouseOverrideHeld(event, this.mouseOverride) &&
+      !this.mouseOverrideKeyHeld &&
+      this.applicationOwnsWheel()
+    ) {
       this.showMouseCaptureHint();
     }
   };
@@ -348,6 +352,13 @@ export class AttachTerminal {
     return this.term.modes.mouseTrackingMode !== "none";
   }
 
+  private applicationOwnsWheel(): boolean {
+    const mode = this.term.modes.mouseTrackingMode;
+    // DECSET 9/X10 reports button-down only. xterm keeps wheel events for
+    // scrollback there; VT200, drag, and any-event modes report wheel input.
+    return mode !== "none" && mode !== "x10";
+  }
+
   private showMouseCaptureHint(): void {
     this.mouseCaptureHint.classList.add("af-visible");
     this.mouseCaptureHint.setAttribute("aria-hidden", "false");
@@ -366,7 +377,7 @@ export class AttachTerminal {
     // remains down (notably through automation and trackpad momentum). xterm sees
     // the matching keydown/up, so retain that state as the authoritative fallback.
     if (
-      !this.applicationOwnsMouse() ||
+      !this.applicationOwnsWheel() ||
       (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld)
     ) {
       return true;

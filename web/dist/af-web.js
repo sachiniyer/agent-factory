@@ -7571,7 +7571,7 @@ var AttachTerminal = class {
   // gate makes every ordinary input a no-op before even measuring layout.
   onWheel = (event) => {
     this.handleUserScroll("wheel");
-    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
+    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint();
     }
   };
@@ -7630,6 +7630,10 @@ var AttachTerminal = class {
   applicationOwnsMouse() {
     return this.term.modes.mouseTrackingMode !== "none";
   }
+  applicationOwnsWheel() {
+    const mode = this.term.modes.mouseTrackingMode;
+    return mode !== "none" && mode !== "x10";
+  }
   showMouseCaptureHint() {
     this.mouseCaptureHint.classList.add("af-visible");
     this.mouseCaptureHint.setAttribute("aria-hidden", "false");
@@ -7643,7 +7647,7 @@ var AttachTerminal = class {
     }, 4e3);
   }
   handleHistoryWheel(event) {
-    if (!this.applicationOwnsMouse() || !terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
+    if (!this.applicationOwnsWheel() || !terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
       return true;
     }
     const renderedRow = this.container.querySelector(".xterm-rows > div");
