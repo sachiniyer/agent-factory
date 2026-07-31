@@ -90,6 +90,7 @@ var (
 	renamePath                  = renamePathNoReplace
 	removeDirectoryTree         = removeOpenedDirectory
 	copyTreeBeforeSourceOpen    = func(string) error { return nil }
+	copyTreeAfterSymlinkCreate  = func(string) error { return nil }
 	moveDirBeforeDestParentOpen = func(string) error { return nil }
 	moveDirBeforeDestCommit     = func(string) error { return nil }
 	moveDirBeforeSourceCommit   = func(string) error { return nil }
@@ -480,6 +481,8 @@ type copiedDirectoryRoute struct {
 	depth     int
 }
 
+const maxArchiveTreeDepth = 256
+
 type pathIdentity struct {
 	device   uint64
 	inode    uint64
@@ -625,7 +628,8 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 
 	copied.root, err = copyDirectoryContents(source, destination, src, dest)
 	if err != nil {
-		cleanupErr := removeOpenedDirectory(destParent, destName, dest, destination, nil)
+		partialManifest := destinationCleanupManifest(copied.root)
+		cleanupErr := removeOpenedDirectory(destParent, destName, dest, destination, &partialManifest)
 		copied.close()
 		if cleanupErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("failed to clean partial destination tree %s: %w", dest, cleanupErr))
@@ -643,12 +647,12 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 		components := copiedDirectoryRouteComponents(routes, index)
 		sourceDirectory, err := openDirectoryRoute(source, sourcePath, components, true)
 		if err != nil {
-			return copiedDirectory{}, err
+			return root, err
 		}
 		destinationDirectory, err := openDirectoryRoute(destination, destinationPath, components, false)
 		if err != nil {
 			_ = sourceDirectory.Close()
-			return copiedDirectory{}, err
+			return root, err
 		}
 		err = copyDirectoryLevel(
 			sourceDirectory,
@@ -660,7 +664,13 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 		_ = destinationDirectory.Close()
 		_ = sourceDirectory.Close()
 		if err != nil {
-			return copiedDirectory{}, err
+			return root, err
+		}
+		if job.depth >= maxArchiveTreeDepth && copiedDirectoryHasChildren(job.directory) {
+			return root, fmt.Errorf(
+				"cannot move worktree across filesystems: maximum supported depth of %d exceeded at %s",
+				maxArchiveTreeDepth, directoryRoutePath(sourcePath, components),
+			)
 		}
 		routes = appendCopiedDirectoryChildren(routes, index)
 	}
@@ -763,11 +773,31 @@ func copySymlinkEntry(
 	if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination symlink %s exclusively: %w", destinationPath, err)
 	}
+	if err := copyTreeAfterSymlinkCreate(destinationPath); err != nil {
+		return copiedEntry{}, err
+	}
 	destinationIdentity, err := identityAt(destination, name)
 	if err != nil {
 		return copiedEntry{}, err
 	}
+	destinationLink, err := readLinkAt(destination, name, destinationPath)
+	if err != nil {
+		return copiedEntry{}, err
+	}
+	confirmedIdentity, err := identityAt(destination, name)
+	if err != nil || !destinationIdentity.same(confirmedIdentity) || destinationLink != link {
+		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while it was copied", destinationPath)
+	}
 	return copiedEntry{name: name, source: inspected, destination: destinationIdentity}, nil
+}
+
+func copiedDirectoryHasChildren(directory *copiedDirectory) bool {
+	for _, entry := range directory.entries {
+		if entry.directory != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // copyFile is the path-based test entrypoint for the regular-file copier. The
