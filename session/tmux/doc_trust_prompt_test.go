@@ -297,6 +297,67 @@ func TestCheckAndHandleTrustPrompt_CurrentCodexSafetyWording(t *testing.T) {
 	}, sentKeystrokes(*commands))
 }
 
+func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForDelayedSelectionRender(t *testing.T) {
+	_, _, errors := captureTrustPromptLogs(t)
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingDialog, // immediate post-navigation capture is stale
+		codexCurrentSafetyBufferingWaitSelected,
+		normalPane,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"a stale post-navigation frame must leave the picker pending")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+	}, sentKeystrokes(*commands),
+		"Enter must wait until a later pane capture proves the literal target row is selected")
+	require.Empty(t, errors.String(),
+		"normal terminal rendering lag is not a failed safety-picker operation")
+
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the next daemon poll observes the delayed selected frame and accepts it")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands))
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the following poll verifies the unchanged model")
+	require.Empty(t, errors.String(),
+		"a recovered selection-render delay must not leave a false ERROR behind")
+}
+
+func TestCheckAndHandleTrustPrompt_CodexSafetyEscalatesUnverifiedSelection(t *testing.T) {
+	_, _, errors := captureTrustPromptLogs(t)
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingDialog, // immediate post-navigation capture
+		codexCurrentSafetyBufferingDialog, // first later daemon poll
+		codexCurrentSafetyBufferingDialog, // bounded retry window expires
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, errors.String(),
+		"one stale render after navigation is expected and remains pending")
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, errors.String(),
+		"the bounded verification window must not escalate early")
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Contains(t, errors.String(),
+		`could not verify "Dismiss and keep waiting" as the selected row after 3 polls`,
+		"a picker that never renders the safe selection is a real operator-visible failure")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+	}, sentKeystrokes(*commands),
+		"af must fail closed without repeating navigation or pressing Enter")
+}
+
 func TestCheckAndHandleTrustPrompt_CodexSafetyModelDowngradeIsSurfaced(t *testing.T) {
 	_, _, errors := captureTrustPromptLogs(t)
 	session, _ := runTrustPromptSequence(t, ProgramCodex,

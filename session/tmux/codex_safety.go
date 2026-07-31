@@ -7,7 +7,10 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-const codexSafetyModelVerificationPolls = 30
+const (
+	codexSafetyModelVerificationPolls     = 30
+	codexSafetySelectionVerificationPolls = 3
+)
 
 const (
 	codexSafetyRetryLabel       = "Retry with a faster model"
@@ -28,6 +31,9 @@ type codexSafetyBufferingState struct {
 	modelChangedTo     string
 	verificationPolls  int
 	awaitingModelCheck bool
+	selectionTarget    string
+	selectionPolls     int
+	selectionFailed    bool
 	notified           bool
 }
 
@@ -67,6 +73,35 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 		return safetyPromptPresent
 	}
 
+	// Navigation and terminal painting are asynchronous. Once af has sent the
+	// cursor movement, do not send it again from the next Snapshot poll: a stale
+	// frame can otherwise make repeated Down keys overshoot the safe row. Keep
+	// failing closed until a later capture proves the literal target owns the
+	// cursor, and surface an error only when that proof stays absent for a
+	// bounded number of daemon polls.
+	if state.selectionTarget != "" {
+		if dialogPresent && codexSafetySelectionVerified(dialog, state.selectionTarget) {
+			if state.selectionFailed {
+				log.InfoLog.Printf(
+					"Codex session %q additional safety-check selection became verifiable after %d polls",
+					t.sanitizedName, state.selectionPolls,
+				)
+			}
+			state.clearSelectionVerification()
+		} else if safetyPromptPresent {
+			t.recordPendingCodexSafetySelection()
+			return true
+		} else {
+			state.clearSelectionVerification()
+			if model != "" {
+				state.observeModel(model)
+			}
+			state.notified = false
+			log.InfoLog.Printf("Codex session %q additional safety checks resolved before af accepted a choice", t.sanitizedName)
+			return true
+		}
+	}
+
 	if !dialogPresent {
 		if safetyPromptPresent {
 			if !state.notified {
@@ -104,6 +139,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			log.ErrorLog.Printf("could not navigate Codex additional safety checks for session %q: %v", t.sanitizedName, err)
 			return true
 		}
+		state.beginSelectionVerification(dialog.targetLabel)
 
 		// Selection is a terminal UI state, not a numbered form value. Read
 		// the pane again and require the literal wait label to own the cursor
@@ -117,12 +153,10 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 		selectedDialog, stillPresent := parseCodexSafetyDialog(selectedContent, selectedTarget, selectedPromptActive)
 		if !stillPresent {
 			if selectedPromptPresent {
-				log.ErrorLog.Printf(
-					"refusing to accept Codex additional safety checks for session %q: could not prove the selected row while the picker remained visible",
-					t.sanitizedName,
-				)
+				t.recordPendingCodexSafetySelection()
 				return true
 			}
+			state.clearSelectionVerification()
 			if current := codexStatusLineModel(selectedContent); current != "" {
 				state.observeModel(current)
 			}
@@ -131,15 +165,11 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			return true
 		}
 		dialog = selectedDialog
-	}
-
-	if dialog.selectedIndex != dialog.targetIndex ||
-		dialog.selectedIndex < 0 || dialog.labels[dialog.selectedIndex] != dialog.targetLabel {
-		log.ErrorLog.Printf(
-			"refusing to accept Codex additional safety checks for session %q: selected row is not %q",
-			t.sanitizedName, dialog.targetLabel,
-		)
-		return true
+		if !codexSafetySelectionVerified(dialog, state.selectionTarget) {
+			t.recordPendingCodexSafetySelection()
+			return true
+		}
+		state.clearSelectionVerification()
 	}
 
 	if err := t.tapPromptKeys("Enter"); err != nil {
@@ -150,6 +180,40 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	state.verificationPolls = 0
 	state.awaitingModelCheck = true
 	return true
+}
+
+func codexSafetySelectionVerified(dialog codexSafetyDialog, target string) bool {
+	return target != "" &&
+		dialog.targetLabel == target &&
+		dialog.selectedIndex == dialog.targetIndex &&
+		dialog.selectedIndex >= 0 &&
+		dialog.selectedIndex < len(dialog.labels) &&
+		dialog.labels[dialog.selectedIndex] == target
+}
+
+func (t *TmuxSession) recordPendingCodexSafetySelection() {
+	state := &t.codexSafety
+	state.selectionPolls++
+	if state.selectionFailed || state.selectionPolls < codexSafetySelectionVerificationPolls {
+		return
+	}
+	state.selectionFailed = true
+	log.ErrorLog.Printf(
+		"refusing to accept Codex additional safety checks for session %q: could not verify %q as the selected row after %d polls",
+		t.sanitizedName, state.selectionTarget, state.selectionPolls,
+	)
+}
+
+func (s *codexSafetyBufferingState) beginSelectionVerification(target string) {
+	s.selectionTarget = target
+	s.selectionPolls = 0
+	s.selectionFailed = false
+}
+
+func (s *codexSafetyBufferingState) clearSelectionVerification() {
+	s.selectionTarget = ""
+	s.selectionPolls = 0
+	s.selectionFailed = false
 }
 
 func (t *TmuxSession) verifyCodexSafetyModel(model string, dialogPresent bool) {
