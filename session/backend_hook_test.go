@@ -171,6 +171,32 @@ exit 0
 	assert.False(t, h.deleteRan(t), "valid endpoint output must not reap the working sandbox")
 }
 
+func TestHookProvisionRecoversEndpointAfterMalformedDiagnosticPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+	}{
+		{name: "unmatched array", prefix: "progress [starting"},
+		{name: "quoted prose before colon", prefix: `progress { status "waiting":`},
+		{name: "unfinished wrappers", prefix: "progress {{"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			launch := "printf '%s' '" + test.prefix + "' >&2\n" +
+				`printf '%s' '{"url":"http://10.0.0.7:8080","token":"secret"}'` + "\nexit 0\n"
+			h := newHookState(t, launch, "")
+			p := newHookProvisioner(h, "malformed diagnostic prefix")
+
+			res, err := p.provisionOrReap()
+			require.NoError(t, err, "malformed diagnostic prose must not hide the independent launch record")
+			require.NotNil(t, res.Endpoint)
+			assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+			assert.False(t, h.deleteRan(t), "a recovered working endpoint must not be reaped")
+		})
+	}
+}
+
 func TestHookOutputSuffixRedactsOverlappingSerializedEndpoints(t *testing.T) {
 	const firstSecret = "first-overlap-must-not-leak"
 	const secondSecret = "second-overlap-must-not-leak"
@@ -212,6 +238,38 @@ func TestHookOutputSuffixRedactsSerializedEndpointAfterNewline(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+func TestHookOutputSuffixResynchronizesAtEscapedSerializedOpener(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		output string
+	}{
+		{
+			name:   "raw control prefix",
+			secret: "escaped-opener-prefix-token-must-not-leak",
+			output: "warning \"\t\\\"{\\\"token\\\":\\\"escaped-opener-prefix-token-must-not-leak\\\"}\\\"",
+		},
+		{
+			name:   "invalid escape prefix",
+			secret: "invalid-escape-prefix-token-must-not-leak",
+			output: `warning "\q\"{\"token\":\"invalid-escape-prefix-token-must-not-leak\"}\"`,
+		},
+		{
+			name:   "invalid unicode escape prefix",
+			secret: "invalid-unicode-prefix-token-must-not-leak",
+			output: `warning "\uZZZZ\"{\"token\":\"invalid-unicode-prefix-token-must-not-leak\"}\"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			suffix := hookOutputSuffix([]byte(test.output))
+			assert.NotContains(t, suffix, test.secret, "an invalid quoted prefix must not hide an escaped serialized token")
+			assert.Contains(t, suffix, "[REDACTED]")
+		})
+	}
+}
+
 func TestExtractJSONHandlesMalformedStringOpenerFlood(t *testing.T) {
 	const value = `{"name":"remote-one"}`
 	output := `progress { reading "config ` + strings.Repeat("{", 50_000) + value + "\n"
@@ -219,4 +277,9 @@ func TestExtractJSONHandlesMalformedStringOpenerFlood(t *testing.T) {
 	started := time.Now()
 	assert.Equal(t, value, extractJSON(output))
 	assert.Less(t, time.Since(started), time.Second, "string resynchronization must not retry every opener suffix")
+
+	output = "progress " + strings.Repeat("{", 20_000) + value
+	started = time.Now()
+	assert.Equal(t, value, extractJSON(output))
+	assert.Less(t, time.Since(started), time.Second, "unfinished wrapper recovery must visit each opener once")
 }

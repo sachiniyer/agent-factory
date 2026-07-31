@@ -16,12 +16,18 @@ func redactSerializedHookJSONStrings(output string) string {
 	written := 0
 	candidateStart := -1
 	syntheticStart := false
+	candidateInvalid := false
+	escapedOpenerStart := -1
+	unicodeEscapeDigits := 0
 	escaped := false
 	for cursor := 0; cursor < len(output); cursor++ {
 		if candidateStart < 0 {
 			if output[cursor] == '"' {
 				candidateStart = cursor
 				syntheticStart = false
+				candidateInvalid = false
+				escapedOpenerStart = -1
+				unicodeEscapeDigits = 0
 				escaped = false
 			}
 			continue
@@ -38,16 +44,53 @@ func redactSerializedHookJSONStrings(output string) string {
 			// quote until a real unescaped quote supplies the closing boundary.
 			candidateStart = cursor + 1
 			syntheticStart = true
+			candidateInvalid = false
+			escapedOpenerStart = -1
+			unicodeEscapeDigits = 0
 			escaped = false
 			continue
 		}
+		if unicodeEscapeDigits > 0 {
+			if isJSONHexDigit(output[cursor]) {
+				unicodeEscapeDigits--
+				continue
+			}
+			candidateInvalid = true
+			unicodeEscapeDigits = 0
+		}
 		if escaped {
+			switch output[cursor] {
+			case 'u':
+				unicodeEscapeDigits = 4
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			default:
+				candidateInvalid = true
+			}
+			if output[cursor] == '"' && candidateInvalid && !syntheticStart {
+				escapedOpenerStart = cursor + 1
+			}
 			escaped = false
 			continue
+		}
+		if escapedOpenerStart >= 0 {
+			switch output[cursor] {
+			case ' ', '\t':
+				continue
+			case '{', '[':
+				candidateStart = escapedOpenerStart
+				syntheticStart = true
+				candidateInvalid = false
+				escapedOpenerStart = -1
+			default:
+				escapedOpenerStart = -1
+			}
 		}
 		if output[cursor] == '\\' {
 			escaped = true
 			continue
+		}
+		if output[cursor] < 0x20 {
+			candidateInvalid = true
 		}
 		if output[cursor] != '"' {
 			continue
@@ -62,6 +105,9 @@ func redactSerializedHookJSONStrings(output string) string {
 		}
 		candidateStart = cursor
 		syntheticStart = false
+		candidateInvalid = false
+		escapedOpenerStart = -1
+		unicodeEscapeDigits = 0
 		escaped = false
 	}
 	if candidateStart >= 0 {
@@ -81,6 +127,10 @@ func redactSerializedHookJSONStrings(output string) string {
 	}
 	redacted.WriteString(output[written:])
 	return redacted.String()
+}
+
+func isJSONHexDigit(value byte) bool {
+	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
 }
 
 func sanitizeSerializedHookJSONString(candidate string, syntheticStart, syntheticEnd bool) ([]byte, bool) {

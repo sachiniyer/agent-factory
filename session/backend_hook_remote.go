@@ -93,11 +93,41 @@ type jsonCandidateRange struct {
 	firstChild       int
 	lastChild        int
 	nextSibling      int
-	keyStart         int
-	keyEnd           int
-	propertyValue    bool
+	state            jsonContainerState
 	embedded         bool
 	endpointEmbedded bool
+}
+
+type jsonContainerState uint8
+
+const (
+	jsonContainerInvalid jsonContainerState = iota
+	jsonObjectExpectKey
+	jsonObjectExpectColon
+	jsonContainerExpectValue
+	jsonContainerExpectComma
+)
+
+func initialJSONContainerState(opener byte) jsonContainerState {
+	if opener == '{' {
+		return jsonObjectExpectKey
+	}
+	return jsonContainerExpectValue
+}
+
+func consumeJSONContainerString(candidate *jsonCandidateRange, valid bool) {
+	if !valid {
+		candidate.state = jsonContainerInvalid
+		return
+	}
+	switch candidate.state {
+	case jsonObjectExpectKey:
+		candidate.state = jsonObjectExpectColon
+	case jsonContainerExpectValue:
+		candidate.state = jsonContainerExpectComma
+	default:
+		candidate.state = jsonContainerInvalid
+	}
 }
 
 func extractJSONAt(output string, start int) (string, int) {
@@ -132,8 +162,7 @@ func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (stri
 				firstChild:  -1,
 				lastChild:   -1,
 				nextSibling: -1,
-				keyStart:    -1,
-				keyEnd:      -1,
+				state:       initialJSONContainerState(c),
 			})
 			stack = append(stack[:0], 0)
 			inString = false
@@ -184,9 +213,8 @@ func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (stri
 			if inString {
 				inString = false
 				parent := stack[len(stack)-1]
-				candidates[parent].keyStart = jsonStringStart
-				candidates[parent].keyEnd = cursor + 1
-				candidates[parent].propertyValue = false
+				consumeJSONContainerString(&candidates[parent],
+					json.Valid([]byte(output[jsonStringStart:cursor+1])))
 				jsonStringStart = -1
 			} else {
 				inString = true
@@ -208,30 +236,40 @@ func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (stri
 			continue
 		}
 		if c == ':' {
-			keyStart := candidates[parent].keyStart
-			keyEnd := candidates[parent].keyEnd
-			candidates[parent].propertyValue = output[candidates[parent].start] == '{' &&
-				keyStart >= 0 && keyEnd > keyStart && json.Valid([]byte(output[keyStart:keyEnd]))
-			candidates[parent].keyStart = -1
-			candidates[parent].keyEnd = -1
+			if candidates[parent].state == jsonObjectExpectColon {
+				candidates[parent].state = jsonContainerExpectValue
+			} else {
+				candidates[parent].state = jsonContainerInvalid
+			}
+			continue
+		}
+		if c == ',' {
+			if candidates[parent].state == jsonContainerExpectComma ||
+				candidates[parent].state == jsonContainerInvalid {
+				candidates[parent].state = initialJSONContainerState(output[candidates[parent].start])
+			} else {
+				candidates[parent].state = jsonContainerInvalid
+			}
 			continue
 		}
 		if c == '{' || c == '[' {
-			propertyValue := candidates[parent].propertyValue
-			candidates[parent].keyStart = -1
-			candidates[parent].keyEnd = -1
-			candidates[parent].propertyValue = false
+			structuredValue := candidates[parent].state == jsonContainerExpectValue
+			if structuredValue {
+				candidates[parent].state = jsonContainerExpectComma
+			} else {
+				candidates[parent].state = jsonContainerInvalid
+			}
 			parent := stack[len(stack)-1]
 			index := len(candidates)
 			candidates = append(candidates, jsonCandidateRange{
-				start:            cursor,
-				firstChild:       -1,
-				lastChild:        -1,
-				nextSibling:      -1,
-				keyStart:         -1,
-				keyEnd:           -1,
-				embedded:         candidates[parent].embedded || propertyValue,
-				endpointEmbedded: candidates[parent].endpointEmbedded || propertyValue || output[candidates[parent].start] == '[',
+				start:       cursor,
+				firstChild:  -1,
+				lastChild:   -1,
+				nextSibling: -1,
+				state:       initialJSONContainerState(c),
+				embedded: candidates[parent].embedded ||
+					(structuredValue && output[candidates[parent].start] == '{'),
+				endpointEmbedded: candidates[parent].endpointEmbedded || structuredValue,
 			})
 			if candidates[parent].firstChild < 0 {
 				candidates[parent].firstChild = index
@@ -242,10 +280,8 @@ func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (stri
 			stack = append(stack, index)
 			continue
 		}
-		candidates[parent].keyStart = -1
-		candidates[parent].keyEnd = -1
-		candidates[parent].propertyValue = false
 		if c != '}' && c != ']' {
+			candidates[parent].state = jsonContainerInvalid
 			continue
 		}
 
@@ -298,7 +334,13 @@ func firstJSONCandidateAfterError(
 ) (jsonCandidateRange, bool) {
 	for index := candidates[parent].firstChild; index >= 0; index = candidates[index].nextSibling {
 		candidate := candidates[index]
-		if candidate.embedded || candidate.end <= candidate.start || candidate.start < errorAt {
+		if candidate.embedded || candidate.start < errorAt {
+			continue
+		}
+		if candidate.end <= candidate.start {
+			if nested, ok := firstCompletedJSONDescendant(output, candidates, index); ok {
+				return nested, true
+			}
 			continue
 		}
 		valid, childErrorAt, recoverable := inspectJSONCandidate(output, candidate)
@@ -310,6 +352,39 @@ func firstJSONCandidateAfterError(
 		}
 		if nested, ok := firstJSONCandidateAfterError(output, candidates, index, childErrorAt); ok {
 			return nested, true
+		}
+	}
+	return jsonCandidateRange{}, false
+}
+
+// firstCompletedJSONDescendant walks through unfinished malformed wrappers
+// without reparsing their overlapping suffixes. Structural object-property
+// children stay excluded by embedded; every remaining candidate is visited at
+// most once, including a deep chain left open at EOF.
+func firstCompletedJSONDescendant(
+	output string,
+	candidates []jsonCandidateRange,
+	parent int,
+) (jsonCandidateRange, bool) {
+	for index := candidates[parent].firstChild; index >= 0; index = candidates[index].nextSibling {
+		candidate := candidates[index]
+		if candidate.embedded {
+			continue
+		}
+		if candidate.end <= candidate.start {
+			if nested, ok := firstCompletedJSONDescendant(output, candidates, index); ok {
+				return nested, true
+			}
+			continue
+		}
+		valid, errorAt, recoverable := inspectJSONCandidate(output, candidate)
+		if valid {
+			return candidate, true
+		}
+		if recoverable {
+			if nested, ok := firstJSONCandidateAfterError(output, candidates, index, errorAt); ok {
+				return nested, true
+			}
 		}
 	}
 	return jsonCandidateRange{}, false
