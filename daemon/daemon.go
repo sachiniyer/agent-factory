@@ -278,6 +278,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	sweepLegacyTaskUnits()
 
 	sweepStartupOrphanContainers(manager)
+	sweepStartupTabCleanup(manager)
 	manager.finishInstanceRestore()
 
 	// Start schedule evaluation only after the control server is up and the

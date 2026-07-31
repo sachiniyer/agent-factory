@@ -134,6 +134,17 @@ type InstanceData struct {
 	StartupStateUnknown bool      `json:"startup_state_unknown,omitempty"`
 	TmuxName            string    `json:"tmux_name,omitempty"`
 	Tabs                []TabData `json:"tabs,omitempty"`
+	// PendingTabCleanup retains the tmux identity of tabs whose removal from Tabs
+	// is already durable but whose teardown could not be confirmed (#2669). It is
+	// the tab-scoped analogue of RuntimeCleanup, and it exists because CloseTab
+	// commits the shrunken roster BEFORE killing tmux: without it, a kill-session
+	// that times out (or answers while the session still exists) would drop the
+	// closed tab's only tmux identity, leaking that process untracked forever and
+	// letting a later same-named tab derive the same tmux name and collide with
+	// the survivor. Entries are cleanup handles, never tabs — nothing renders or
+	// respawns from them. Additive + omitempty on the TabData.ID rollforward
+	// precedent: records written before this field simply have none.
+	PendingTabCleanup []TabCleanupData `json:"pending_tab_cleanup,omitempty"`
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
@@ -240,6 +251,22 @@ type TabData struct {
 	// indistinguishable from a session that was never handed off — and those two
 	// deserve the same treatment, so nothing has to be backfilled.
 	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
+}
+
+// TabCleanupData is one durable cleanup handle for a closed tab whose tmux
+// teardown was never confirmed. It deliberately carries only what a retry needs
+// — no Kind, Command, or URL — so it cannot be mistaken for, or restored as, a
+// TabData: a tombstone that could round-trip into a tab would resurrect exactly
+// the closed tab #2669 exists to keep buried.
+type TabCleanupData struct {
+	// TabID is the closed tab's stable id (#1738). Ids are never reused, so it
+	// names the exact close this handle belongs to and keeps the retry's logs and
+	// deduplication honest across restarts.
+	TabID string `json:"tab_id,omitempty"`
+	// TmuxName is the cleanup handle proper: the EXACT tmux session name the retry
+	// must kill, and the token a later spawn must not re-derive. An entry with no
+	// name would be untargetable, so CloseTab never records one.
+	TmuxName string `json:"tmux_name"`
 }
 
 // PRInfoData represents the serializable data of a PRInfo

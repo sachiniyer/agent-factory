@@ -382,6 +382,17 @@ func (i *Instance) SetStartedForTest(started bool) {
 	i.started = started
 }
 
+// SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a
+// previous daemon would have left behind (#2669). Test-only: the real flow
+// writes them from CloseTab's commit and reads them back through
+// FromInstanceData, neither of which a daemon-package test can reach without
+// staging a whole crashed close.
+func (i *Instance) SetPendingTabCleanupForTest(pending []TabCleanupData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.pendingTabCleanup = append([]TabCleanupData(nil), pending...)
+}
+
 // SetGitWorktreeForTest assigns a git worktree to this instance. Test-only:
 // the real flow sets this inside LocalBackend.Start, which isn't available
 // in unit tests that use FakeBackend.

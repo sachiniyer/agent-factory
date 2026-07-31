@@ -79,15 +79,31 @@ func uniqueTabNameExcluding(tabs []*Tab, base string, exclude *Tab) string {
 // the #1957 sequence — and then it is the spawned session, not the user's
 // requested name, that takes the "-2".
 //
+// pending is the instance's unconfirmed tab-cleanup list (#2669), and it is
+// reserved against for the same reason the roster is: those sessions may still
+// be alive. A close whose kill-session timed out leaves no tab holding the
+// token, so without this a `tab-create --name fresh` would re-derive the
+// survivor's exact name and Start would reject it as already existing — a wedge
+// no retry clears, because every retry derives the same name. Reserving instead
+// walks the spawn to "fresh-2", exactly as it does around a renamed sibling.
+//
 // agentSanitized is passed in rather than read off tabs[0] because the caller
 // (tab_spawn.go) already holds the agent session it is spawning a sibling of,
 // and an instance with no agent session cannot spawn a sibling at all.
-func uniqueTabTmuxName(tabs []*Tab, agentSanitized, base string) string {
+func uniqueTabTmuxName(tabs []*Tab, pending []TabCleanupData, agentSanitized, base string) string {
 	prefix := agentSanitized + tmuxTabSeparator
-	used := make(map[string]bool, len(tabs))
+	used := make(map[string]bool, len(tabs)+len(pending))
 	for _, t := range tabs {
 		if token := tabTmuxToken(prefix, t); token != "" {
 			used[token] = true
+		}
+	}
+	for _, entry := range pending {
+		// Same HasPrefix honesty as tabTmuxToken: a handle for some other prefix
+		// (a legacy or hand-edited record) reserves nothing here rather than
+		// reserving a token derived wrongly.
+		if strings.HasPrefix(entry.TmuxName, prefix) {
+			used[strings.TrimPrefix(entry.TmuxName, prefix)] = true
 		}
 	}
 	return prefix + firstFreeName(used, base)

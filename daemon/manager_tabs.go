@@ -295,12 +295,24 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if committed.TeardownErr != nil {
+	switch {
+	case committed.TeardownErr != nil:
 		// The durable decision succeeded, but teardown did not provide evidence
 		// that the tmux process is gone. Report that third state in diagnostics
 		// without presenting the committed close as retryable: a restart reads the
-		// shrunken roster and will not resurrect this tab.
-		log.WarningLog.Printf("CloseTab %q committed, but runtime teardown could not be confirmed: %v", name, committed.TeardownErr)
+		// shrunken roster and will not resurrect this tab. The tmux session is not
+		// abandoned either — the commit persisted a cleanup handle for it, which the
+		// next daemon start sweeps and which reserves its name against a colliding
+		// spawn in the meantime (#2669).
+		log.WarningLog.Printf("CloseTab %q committed, but runtime teardown could not be confirmed; its tmux session is retained for cleanup: %v", name, committed.TeardownErr)
+	case committed.Settled != nil:
+		// Teardown confirmed the session is gone, so retire its cleanup handle on
+		// disk. Best-effort by design: a failed write only leaves a handle whose
+		// retry harmlessly re-kills an absent session, and turning that into a
+		// CloseTab error would report a fully completed close as failed.
+		if err := persistInstanceData(repoID, *committed.Settled); err != nil {
+			log.WarningLog.Printf("CloseTab %q completed, but clearing its tmux cleanup handle failed; the next daemon start will retry the (already finished) teardown: %v", name, err)
+		}
 	}
 	return name, nil
 }

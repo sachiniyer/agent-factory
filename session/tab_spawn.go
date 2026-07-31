@@ -55,7 +55,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	// session to spawn a sibling of — the precondition check below rejects it.
 	tmuxName := ""
 	if agentTmux != nil {
-		tmuxName = uniqueTabTmuxName(i.Tabs, agentTmux.SanitizedName(), displayName)
+		tmuxName = uniqueTabTmuxName(i.Tabs, i.pendingTabCleanup, agentTmux.SanitizedName(), displayName)
 	}
 	nTabs := len(i.Tabs)
 	i.mu.RUnlock()
@@ -140,7 +140,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// Both namespaces resolved under the one read lock; see AddShellTab.
 	tmuxName := ""
 	if agentTmux != nil {
-		tmuxName = uniqueTabTmuxName(i.Tabs, agentTmux.SanitizedName(), displayName)
+		tmuxName = uniqueTabTmuxName(i.Tabs, i.pendingTabCleanup, agentTmux.SanitizedName(), displayName)
 	}
 	nTabs := len(i.Tabs)
 	i.mu.RUnlock()

@@ -289,6 +289,12 @@ type Instance struct {
 	// replacement is provisioned. It is independent of userKilled: restore
 	// failures retain wanted sessions, not kill tombstones.
 	runtimeCleanupStateUnknown bool
+	// pendingTabCleanup holds the tmux cleanup handles of tabs already durably
+	// removed from Tabs whose teardown was never confirmed (#2669). Guarded by
+	// i.mu like Tabs, because a close stages both under one acquisition and a
+	// spawn must reserve against both in the same critical section. It is
+	// deliberately NOT part of the roster: nothing renders or respawns from it.
+	pendingTabCleanup []TabCleanupData
 }
 
 // tmuxLocked returns the agent tab's tmux session, or nil when the instance has

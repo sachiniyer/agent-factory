@@ -102,6 +102,15 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		data.Tabs = append(data.Tabs, td)
 	}
 
+	// Cleanup handles for tabs whose roster removal is durable but whose tmux
+	// teardown was never confirmed (#2669). Projected alongside Tabs, and from the
+	// same critical section, so a snapshot can never show a tab as both gone and
+	// untracked: whichever side of the close the read lands on, exactly one of the
+	// two lists names the tmux session.
+	if len(i.pendingTabCleanup) > 0 {
+		data.PendingTabCleanup = append([]TabCleanupData(nil), i.pendingTabCleanup...)
+	}
+
 	// Keep writing the legacy single TmuxName field (set from the agent tab) for
 	// one release: a binary rolled back to before #930 PR 2 still finds the
 	// agent session by its exact name, and old readers ignore the new Tabs list.
@@ -298,6 +307,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// load-bearing #930 requirement. LocalBackend.Start(false) then restores
 		// each tab's session.
 		restoreLocalTabs(instance, data)
+		// Carry unconfirmed tab-teardown handles across the restart (#2669). They
+		// are restored NEXT TO the roster, never into it: the daemon's startup sweep
+		// retries the kill, and a spawn reserves against them, but no tab is
+		// rebuilt from a tombstone.
+		instance.pendingTabCleanup = restoredTabCleanup(data.PendingTabCleanup)
 	}
 
 	if data.PRInfo.Number != 0 {
