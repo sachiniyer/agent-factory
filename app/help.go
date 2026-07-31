@@ -361,6 +361,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 	// in the seen bitmask.
 	m.replayHelpDismissKey = false
 	m.textOverlayDismissPolicy = nil
+	m.textOverlayScrollable = false
 	if alwaysShow || (m.appState.GetHelpScreensSeen()&flag) == 0 {
 		// Mark this help screen as seen and save state
 		if err := m.appState.SetHelpScreensSeen(m.appState.GetHelpScreensSeen() | flag); err != nil {
@@ -376,6 +377,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 		m.textOverlayDismissAnyKey = true
 		if _, ok := helpType.(helpTypeGeneral); ok {
 			m.textOverlayDismissAnyKey = false
+			m.textOverlayScrollable = true
 		}
 		if _, ok := helpType.(helpTypeInstanceAttach); ok {
 			m.textOverlayDismissAnyKey = false
@@ -398,29 +400,31 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if isHelpJumpTopKey(msg) {
-		m.textOverlay.ScrollToTop()
-		return m, nil
-	}
-	if isHelpJumpBottomKey(msg) {
-		m.textOverlay.ScrollToBottom()
-		return m, nil
-	}
-	if isHelpPageUpKey(msg) {
-		m.textOverlay.PageUp()
-		return m, nil
-	}
-	if isHelpPageDownKey(msg) {
-		m.textOverlay.PageDown()
-		return m, nil
-	}
-	if isHelpLineUpKey(msg) {
-		m.textOverlay.ScrollUp()
-		return m, nil
-	}
-	if isHelpLineDownKey(msg) {
-		m.textOverlay.ScrollDown()
-		return m, nil
+	if m.textOverlayScrollable && !isHelpDismissKey(msg) {
+		if isHelpJumpTopKey(msg) {
+			m.textOverlay.ScrollToTop()
+			return m, nil
+		}
+		if isHelpJumpBottomKey(msg) {
+			m.textOverlay.ScrollToBottom()
+			return m, nil
+		}
+		if isHelpPageUpKey(msg) {
+			m.textOverlay.PageUp()
+			return m, nil
+		}
+		if isHelpPageDownKey(msg) {
+			m.textOverlay.PageDown()
+			return m, nil
+		}
+		if isHelpLineUpKey(msg) {
+			m.textOverlay.ScrollUp()
+			return m, nil
+		}
+		if isHelpLineDownKey(msg) {
+			m.textOverlay.ScrollDown()
+			return m, nil
+		}
 	}
 
 	runOnDismiss := true
@@ -456,6 +460,7 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		replayDismissKey := m.replayHelpDismissKey
 		m.replayHelpDismissKey = false
 		m.textOverlayDismissAnyKey = false
+		m.textOverlayScrollable = false
 		m.textOverlayDismissPolicy = nil
 		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously

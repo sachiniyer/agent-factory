@@ -39,6 +39,22 @@ func TestHelpReflectsKeymapRebinds(t *testing.T) {
 	}
 }
 
+func TestGeneralHelpReboundDismissKeyWinsOverPaging(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"help": {"space"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeySpace})
+
+	require.Equal(t, stateDefault, h.state,
+		"a configured help key must dismiss help even when it is also a paging key")
+}
+
 // TestGeneralHelpNavigationMatchesBindings guards against regressing #764, where
 // the help screen documented "↑/j, ↓/k" while the canonical bindings in
 // keys/keys.go map k=up and j=down (standard vim convention).

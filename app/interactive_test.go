@@ -159,6 +159,23 @@ func TestFirstRunInteractiveHelpForwardsDismissKey(t *testing.T) {
 		"the key that dismisses the first-run interactive help must reach the pane")
 }
 
+func TestFirstRunInteractiveHelpForwardsNavigationKey(t *testing.T) {
+	h, _ := liveTestHome(t)
+	fakes, _ := stubLiveTermFactory(t)
+
+	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	require.Nil(t, cmd, "first-time interactive entry waits on the help overlay")
+	require.Equal(t, stateHelp, h.state)
+
+	_, cmd = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive, "j must dismiss first-run help rather than scroll it")
+	require.Len(t, *fakes, 1)
+	assert.Equal(t, []string{"j"}, (*fakes)[0].keys,
+		"the navigation key that dismisses first-run help must reach the pane")
+}
+
 func TestInteractiveForwardsAllKeysIncludingTab(t *testing.T) {
 	h, _, fakes := interactiveTestHome(t)
 	enterInteractive(t, h)

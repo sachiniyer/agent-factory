@@ -55,6 +55,7 @@ func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	}
 	m.textOverlay = overlay.NewTextOverlay("Last error\n\n" + full)
 	m.textOverlayDismissAnyKey = false
+	m.textOverlayScrollable = true
 	m.textOverlayDismissPolicy = nil
 	m.replayHelpDismissKey = false
 	m.layoutTextOverlay()
