@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // restoreManagerForStartup is the warm-up restore entry point RunDaemon uses.
@@ -280,11 +282,17 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	sweepStartupOrphanContainers(manager)
 	manager.finishInstanceRestore()
 
-	// Start schedule evaluation only after the control server is up and the
-	// restore has finished: a task firing immediately goes through the
-	// CreateSession RPC on our own socket, which requires a ready manager.
-	if err := scheduler.Reload(); err != nil {
-		log.WarningLog.Printf("failed to load task schedules: %v", err)
+	// Start task automation only after the control server is up and restore has
+	// finished: a task firing immediately loops back through our own socket and
+	// needs a ready manager. Revalidate every persisted target first. In
+	// particular, root-agent policy takes effect on this daemon start, so a root
+	// task accepted under the previous config must not be armed when the new
+	// policy can no longer materialize it. One preflight owns both cron and watch:
+	// on failure neither starts, and one actionable log replaces a permanent
+	// per-fire retry loop (#2646).
+	taskArmErr := armTaskAutomation(manager, scheduler, watchers)
+	if taskArmErr != nil {
+		log.WarningLog.Printf("task automation not armed: %v", taskArmErr)
 	}
 	scheduler.Start()
 	defer scheduler.Stop()
@@ -294,9 +302,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// watcher spawns only once the server is accepting. The deferred Stop
 	// runs before the deferred closeControl (LIFO), so in-flight deliveries
 	// during shutdown still find a live socket.
-	if err := watchers.Reload(); err != nil {
-		log.WarningLog.Printf("failed to start task watchers: %v", err)
-	}
 	defer watchers.Stop()
 
 	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
@@ -427,6 +432,51 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
 	return nil
+}
+
+// armTaskAutomation serializes startup arming with every task control writer,
+// validates the persisted relationships once, and reloads cron and watch as one
+// decision. A validation/load failure leaves both subsystems unarmed; the caller
+// emits the single operator-facing failure and still starts their empty hosts.
+func armTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor) error {
+	scheduler.controlMu.Lock()
+	defer scheduler.controlMu.Unlock()
+	refused, err := reloadTaskAutomation(manager, scheduler, watchers)
+	if err != nil {
+		return err
+	}
+	return errors.Join(refused...)
+}
+
+// reloadTaskAutomation reloads cron and watch from the same validated snapshot.
+// The caller holds scheduler.controlMu; this helper owns taskTargetMu so a task
+// write, archive, restore, or project deletion cannot cross the validation-to-
+// arm interval. Unsafe legacy rows stay enabled on disk for explicit repair but
+// are absent from both live subsystems, while unrelated safe tasks still arm.
+func reloadTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *watcherSupervisor) ([]error, error) {
+	manager.taskTargetMu.Lock()
+	defer manager.taskTargetMu.Unlock()
+	tasks, refused, err := manager.persistedTasksForArming()
+	if err != nil {
+		return nil, err
+	}
+	loadSnapshot := func() ([]task.Task, error) {
+		return append([]task.Task(nil), tasks...), nil
+	}
+	if watchers != nil {
+		originalWatcherLoad := watchers.loadTasks
+		watchers.loadTasks = loadSnapshot
+		defer func() { watchers.loadTasks = originalWatcherLoad }()
+	}
+	if err := scheduler.reloadTasks(tasks); err != nil {
+		return nil, err
+	}
+	if watchers != nil {
+		if err := watchers.Reload(); err != nil {
+			return nil, err
+		}
+	}
+	return refused, nil
 }
 
 // homeCheckInterval is how often watchDaemonHome verifies the daemon's own AF

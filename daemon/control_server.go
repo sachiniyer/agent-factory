@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -154,16 +155,22 @@ func (s *controlServer) reloadTaskSchedulesLocked() error {
 	if s.manager != nil && !s.manager.Ready() {
 		return nil
 	}
+	if s.manager != nil {
+		refused, err := reloadTaskAutomation(s.manager, s.scheduler, s.watchers)
+		if err != nil {
+			return err
+		}
+		for _, refusal := range refused {
+			log.WarningLog.Printf("task automation reload: %v", refusal)
+		}
+		return nil
+	}
 	if err := s.scheduler.Reload(); err != nil {
 		return err
 	}
-	// Watch tasks live in the watcher supervisor; one reload poke re-arms
-	// both trigger types (#782 phase 2). Nil only in tests that exercise the
-	// scheduler alone.
+	// Nil only in tests that exercise the scheduler alone.
 	if s.watchers != nil {
-		if err := s.watchers.Reload(); err != nil {
-			return err
-		}
+		return s.watchers.Reload()
 	}
 	return nil
 }
@@ -303,9 +310,15 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 	}
 	defer unlock()
 	var validate func(task.Task) error
+	targetLocked := false
 	if s.manager != nil {
 		s.manager.taskTargetMu.Lock()
-		defer s.manager.taskTargetMu.Unlock()
+		targetLocked = true
+		defer func() {
+			if targetLocked {
+				s.manager.taskTargetMu.Unlock()
+			}
+		}()
 		repoID := taskRepoIDForValidation(req.Task.ProjectPath)
 		validation := s.manager.prepareTaskTargetValidation(
 			repoID, req.Task.TargetSession, req.Task.Enabled,
@@ -315,6 +328,10 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 		}
 	}
 	created, err := task.AddTaskChecked(req.Task, validate)
+	if targetLocked {
+		s.manager.taskTargetMu.Unlock()
+		targetLocked = false
+	}
 	if err != nil {
 		return err
 	}
@@ -340,9 +357,15 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	}
 	defer unlock()
 	var validate func(task.Task) (string, error)
+	targetLocked := false
 	if s.manager != nil {
 		s.manager.taskTargetMu.Lock()
-		defer s.manager.taskTargetMu.Unlock()
+		targetLocked = true
+		defer func() {
+			if targetLocked {
+				s.manager.taskTargetMu.Unlock()
+			}
+		}()
 		// Legacy rows have no retained RepoID. Resolve the current authoritative
 		// ProjectPath before UpdateTaskChecked takes the tasks-file lock (git must
 		// never run under that lock), then lend that identity to validation. The
@@ -390,6 +413,10 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		}
 	}
 	merged, err := task.UpdateTaskChecked(req.ID, req.Update, req.Expect, validate)
+	if targetLocked {
+		s.manager.taskTargetMu.Unlock()
+		targetLocked = false
+	}
 	if err != nil {
 		return err
 	}

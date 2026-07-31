@@ -30,10 +30,6 @@ import (
 type repoScope struct {
 	root string
 	id   string
-	// fresh bypasses the process-wide display cache for lifecycle decisions. A
-	// positive cache entry may intentionally stay stale for UI polling, but archive
-	// blockers must follow a legacy path's current repository binding.
-	fresh bool
 	// seen memoizes resolution within this load. The process-level cache below
 	// carries positives ACROSS loads, which is what keeps the poll cheap.
 	seen map[string]repoResolution
@@ -62,16 +58,9 @@ func newRepoScope(repoRoot string) *repoScope {
 	}
 }
 
-// newRepoScopeForID builds the same membership test when the caller already
-// holds the daemon's canonical repo identity but may not have a local worktree
-// path (for example, an archived remote session).
-func newRepoScopeForID(repoID string) *repoScope {
-	return &repoScope{id: repoID, fresh: true, seen: map[string]repoResolution{}}
-}
-
-// matches reports both whether t belongs to this scope and whether that answer
-// is known. Display scopes retain their fallback matching; fresh lifecycle
-// scopes expose unresolved legacy bindings instead of collapsing them to false.
+// matches reports both whether t belongs to this display scope and whether that
+// answer is known. Lifecycle scopes use LoadTasksForRepoID's stable-binding
+// transaction instead of this intentionally cached display path.
 func (s *repoScope) matches(t Task) (matched, known bool) {
 	// The RETAINED id wins when present: it was resolved at bind time, while the
 	// recorded path was known to resolve, so it survives that path being deleted
@@ -101,15 +90,6 @@ func (s *repoScope) resolve(projectPath string) repoResolution {
 		return got
 	}
 	resolved := repoResolution{id: resolveProjectID(projectPath), known: true}
-	if s.fresh {
-		fresh := config.ResolveProjectPath(projectPath)
-		resolved.id = fresh.ID
-		// Root empty means config derived an ID from an unresolved spelling.
-		// Equality with the target ID still proves membership: both IDs are the
-		// hash of that exact cleaned root spelling. A mismatch is unknown, not
-		// evidence that the legacy task belongs to another project.
-		resolved.known = fresh.Root != "" || fresh.ID == s.id
-	}
 	s.seen[projectPath] = resolved
 	return resolved
 }

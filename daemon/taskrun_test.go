@@ -184,6 +184,26 @@ func TestDeliverTaskPromptCarriesRetainedRepoBinding(t *testing.T) {
 	}
 }
 
+func TestDeliverTaskPromptCarriesOriginForLegacyTarget(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	_, delivers := stubTaskDelivery(t)
+	tk := task.Task{
+		ID: "legacy03", ProjectPath: repoPath, TargetSession: "worker", Program: "claude",
+	}
+
+	_, err := deliverTaskPrompt(&tk, "run it", false)
+	if err != nil {
+		t.Fatalf("deliverTaskPrompt: %v", err)
+	}
+	if len(*delivers) != 1 {
+		t.Fatalf("deliver calls = %d, want 1", len(*delivers))
+	}
+	if !(*delivers)[0].TaskOrigin {
+		t.Fatal("legacy targeted delivery lost task provenance when RepoID was empty")
+	}
+}
+
 func TestCreateTaskSessionCarriesRetainedRepoBinding(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupTaskRepo(t)

@@ -221,6 +221,7 @@ func (m *Manager) DeliverPrompt(req DeliverPromptRequest) (string, error) {
 		Program:    req.Program,
 		Prompt:     req.Prompt,
 		TaskRepoID: req.TaskRepoID,
+		TaskOrigin: req.TaskOrigin,
 	})
 	if err != nil {
 		// A creator outside this daemon (a plain `af sessions create`, the API)

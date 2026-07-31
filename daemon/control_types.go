@@ -44,9 +44,15 @@ type CreateSessionRequest struct {
 	// capped task's id and have countTaskRunsLocked charge it against that task —
 	// consuming its slots and parking its events, from a session that task never
 	// spawned.
-	TaskID            string `json:"-"`
-	TaskRepoID        string `json:"-"`
-	MaxConcurrentRuns int    `json:"-"`
+	TaskID     string `json:"-"`
+	TaskRepoID string `json:"-"`
+	// TaskOrigin marks every daemon-internal automated create, including a
+	// legacy targeted task with neither retained RepoID nor per-run ownership.
+	// Unlike TaskID it is not persisted on the session and never affects
+	// concurrency accounting; it exists only to preserve the three-valued
+	// not-attempted outcome across admission and net/rpc.
+	TaskOrigin        bool `json:"-"`
+	MaxConcurrentRuns int  `json:"-"`
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch; kill/cleanup leaves the user's tree and branch
@@ -264,8 +270,11 @@ type DeliverPromptRequest struct {
 	// TaskRepoID is the task's retained project binding. Like CreateSession's
 	// TaskID, it is daemon-internal provenance carried over GOB and excluded from
 	// HTTP/JSON so a client cannot forge task authority. DeliverPrompt compares it
-	// with RepoPath's current resolution at the final daemon boundary.
+	// with RepoPath's current resolution at the final daemon boundary. TaskOrigin
+	// is the identity-independent marker that lets a legacy targeted auto-create
+	// retain a provable not-attempted outcome without claiming TaskID ownership.
 	TaskRepoID string `json:"-"`
+	TaskOrigin bool   `json:"-"`
 	// DeferWhileAttached is set by the automated task-delivery path (cron +
 	// watch) so DeliverPrompt holds the send when a TUI is attached full-screen
 	// to an existing target session, rather than pasting a prompt + Enter into a

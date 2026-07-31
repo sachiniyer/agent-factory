@@ -174,3 +174,23 @@ func TestTaskMutations_MissingReservedTargetRequiresMaterialization(t *testing.T
 		assert.False(t, stored.Enabled, "rejected enable must not commit")
 	})
 }
+
+func TestTaskArming_RootPolicyDriftFailsBeforeScheduling(t *testing.T) {
+	manager, _, repoPath := newStatusTestManager(t)
+	require.NoError(t, task.AddTask(archiveTargetTask(
+		"rootdrift", "Root Policy Drift", repoPath, session.RootSessionTitle, true,
+	)), "seed a task accepted while root policy was enabled by the previous daemon")
+	require.NoError(t, task.AddTask(archiveTargetTask(
+		"safearm1", "Safe Automation", repoPath, "", true,
+	)))
+
+	scheduler := newTaskScheduler()
+	watchers := newWatcherSupervisor()
+	err := armTaskAutomation(manager, scheduler, watchers)
+	require.Error(t, err, "startup must not arm a root-target task after root policy is disabled")
+	assert.Contains(t, err.Error(), "rootdrift")
+	assert.Contains(t, err.Error(), "materialize")
+	assert.NotContains(t, scheduler.scheduledTaskIDs(), "rootdrift", "unsafe root automation must stay unarmed")
+	assert.Contains(t, scheduler.scheduledTaskIDs(), "safearm1", "one unsafe task must not suppress unrelated automation")
+	assert.Empty(t, watchers.watchingTaskIDs(), "failed startup preflight must leave watch automation unarmed")
+}

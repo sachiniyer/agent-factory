@@ -251,13 +251,15 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	defer m.mu.Unlock()
 	if _, deleting := m.projectDeletes[repo.ID]; deleting {
 		err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repo.ID)
-		// Both task-created shapes carry daemon-only provenance: TaskID for a
-		// targetless per-run session, TaskRepoID for DeliverPrompt auto-creating a
-		// missing shared target. Admission has not reserved a name, created a
-		// runtime, or sent a prompt, so this is provably not attempted. Preserve
-		// that third outcome across net/rpc with the wire-visible marker; ordinary
-		// client creates keep their existing plain error.
-		if req.TaskID != "" || req.TaskRepoID != "" {
+		// TaskOrigin is daemon-only provenance independent of retained identity or
+		// concurrency ownership. Legacy targeted rows can have neither TaskID nor
+		// TaskRepoID, but admission still knows this create came from automation.
+		// Nothing has reserved a name, created a runtime, or sent a prompt, so the
+		// refusal is provably not attempted and carries the wire-visible marker.
+		// Keep the older identity shapes as compatibility evidence for in-process
+		// callers constructed before TaskOrigin was added; ordinary client creates
+		// carry none of these fields and retain their plain error.
+		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
 			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 		}
 		return nil, "", nil, nil, err

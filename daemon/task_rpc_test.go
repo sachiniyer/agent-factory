@@ -36,8 +36,8 @@ func enabledCronTask(id, repoPath string) task.Task {
 
 func failingReloadTaskScheduler() *taskScheduler {
 	scheduler := newTaskScheduler()
-	scheduler.loadTasks = func() ([]task.Task, error) {
-		return nil, errors.New("forced task reload failure")
+	scheduler.applyTasks = func([]task.Task) error {
+		return errors.New("forced task reload failure")
 	}
 	return scheduler
 }

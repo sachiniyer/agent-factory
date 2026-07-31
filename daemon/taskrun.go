@@ -76,6 +76,7 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 			Program:    t.Program,
 			Prompt:     prompt,
 			TaskRepoID: t.RepoID,
+			TaskOrigin: true,
 			// Provenance + the cap the manager admits against (#1892). TaskID is
 			// persisted on the session so the count is by association, never by a
 			// title prefix; MaxConcurrentRuns is zero for every task that has not
@@ -125,6 +126,7 @@ func deliverTaskPrompt(t *task.Task, prompt string, deferWhileAttached bool) (st
 		Program:    t.Program,
 		Prompt:     prompt,
 		TaskRepoID: t.RepoID,
+		TaskOrigin: true,
 		// An automated delivery (cron fire or watch event): hold it while a TUI is
 		// attached to the target so it never pastes into and submits the user's
 		// in-progress input (#1586). The caller decides how a hold is handled.

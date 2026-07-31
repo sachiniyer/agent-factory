@@ -176,12 +176,11 @@ func TestLoadTasksForRepo_NonRepoPathsFallBackToPathEquality(t *testing.T) {
 	assert.Empty(t, none)
 }
 
-// TestLoadTasksForRepoID_LegacyPathRebindUsesFreshResolution protects lifecycle
-// checks from the display scope's intentionally stale positive cache. If a
-// legacy task's symlinked ProjectPath is rebound, archive blockers must follow
-// its current repo rather than the repo that path resolved to on an earlier UI
-// load.
-func TestLoadTasksForRepoID_LegacyPathRebindUsesFreshResolution(t *testing.T) {
+// TestLoadTasksForRepoID_StabilizesLegacyBindingBeforeExclusion protects a
+// lifecycle decision from a later path rebind. Once the fresh lookup proves
+// which real repository owns a legacy row, it must persist that identity before
+// excluding the task from another repo's blockers.
+func TestLoadTasksForRepoID_StabilizesLegacyBindingBeforeExclusion(t *testing.T) {
 	alpha := mkScopeRepo(t, "alpha")
 	beta := mkScopeRepo(t, "beta")
 	bound := filepath.Join(t.TempDir(), "bound")
@@ -196,14 +195,16 @@ func TestLoadTasksForRepoID_LegacyPathRebindUsesFreshResolution(t *testing.T) {
 
 	alphaTasks, err := LoadTasksForRepoID(repoIDForPath(alpha))
 	require.NoError(t, err)
-	require.Len(t, alphaTasks, 1, "precondition: first lifecycle lookup primes the positive path cache")
+	require.Len(t, alphaTasks, 1)
+	stored, err := GetTask("rebind01")
+	require.NoError(t, err)
+	assert.Equal(t, repoIDForPath(alpha), stored.RepoID, "lifecycle scope must commit the proven binding")
 	require.NoError(t, os.Remove(bound))
 	require.NoError(t, os.Symlink(beta, bound))
 
 	betaTasks, err := LoadTasksForRepoID(repoIDForPath(beta))
 	require.NoError(t, err)
-	require.Len(t, betaTasks, 1, "lifecycle lookup must resolve the rebound legacy path freshly")
-	assert.Equal(t, "rebind01", betaTasks[0].ID)
+	assert.Empty(t, betaTasks, "a later path rebind must not move the stabilized task to another project")
 }
 
 func TestLoadTasksForRepoID_UnresolvedLegacyBindingFailsClosed(t *testing.T) {

@@ -197,13 +197,16 @@ func TestTaskMutations_UnrelatedEditToleratesExistingArchivedTarget(t *testing.T
 	require.NoError(t, task.AddTask(legacyUnsafe), "seed the state accepted before lifecycle validation existed")
 	newName := "New Name"
 	var resp UpdateTaskResponse
-	err = archiveTaskControlServer(manager).UpdateTask(UpdateTaskRequest{
+	server := archiveTaskControlServer(manager)
+	err = server.UpdateTask(UpdateTaskRequest{
 		ID: legacyUnsafe.ID, Update: task.TaskUpdate{Name: &newName},
 	}, &resp)
 	require.NoError(t, err, "an unrelated patch must not be blocked by a pre-existing invalid target")
 	assert.Equal(t, newName, resp.Task.Name)
 	assert.True(t, resp.Task.Enabled)
 	assert.Equal(t, "worker", resp.Task.TargetSession)
+	assert.NotContains(t, server.scheduler.scheduledTaskIDs(), legacyUnsafe.ID,
+		"tolerating the edit must not re-arm the pre-existing permanent failure")
 }
 
 // TestTaskMutations_TargetWriteFailsClosedDuringWarmup pins the persisted-state

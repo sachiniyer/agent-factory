@@ -416,6 +416,34 @@ func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidatio
 	}
 }
 
+// persistedTasksForArming checks every enabled targeted relationship before a
+// reload arms cron tasks or watch processes. The caller holds taskTargetMu so
+// validation, the returned snapshot, and the eventual scheduler/watch reload
+// are one lifecycle decision. Unsafe tasks are excluded and returned as loud
+// refusals; one stale relationship must not suppress unrelated automation.
+func (m *Manager) persistedTasksForArming() ([]task.Task, []error, error) {
+	tasks, err := task.LoadTasksWithStableRepoBindings()
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not load and stabilize task bindings: %w", err)
+	}
+	safe := make([]task.Task, 0, len(tasks))
+	var refused []error
+	for _, candidate := range tasks {
+		target := task.CanonicalTargetSession(candidate.TargetSession)
+		if !candidate.Enabled || target == "" {
+			safe = append(safe, candidate)
+			continue
+		}
+		validation := m.prepareTaskTargetValidation(candidate.RepoID, target, true)
+		if err := m.validateEnabledTaskTarget(candidate, validation); err != nil {
+			refused = append(refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
+			continue
+		}
+		safe = append(safe, candidate)
+	}
+	return safe, refused, nil
+}
+
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a
 // self-healing live state (#1538). It moves the worktree back to its pre-archive
 // location (origPath) and returns the instance to a plain Lost with started=true,

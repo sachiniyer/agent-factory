@@ -29,8 +29,12 @@ type taskScheduler struct {
 	// parse allows a seconds-granularity parser so firing tests don't wait a
 	// full minute, and runTask observes fires without spawning sessions.
 	loadTasks func() ([]task.Task, error)
-	parse     func(expr string) (cron.Schedule, error)
-	runTask   func(taskID string)
+	// applyTasks is a post-load test seam. Production leaves it nil and applies
+	// the supplied validated snapshot below; control tests use it to prove that
+	// a failure after durable task commit still returns the committed outcome.
+	applyTasks func([]task.Task) error
+	parse      func(expr string) (cron.Schedule, error)
+	runTask    func(taskID string)
 }
 
 func newTaskScheduler() *taskScheduler {
@@ -71,6 +75,16 @@ func (s *taskScheduler) Reload() error {
 	tasks, err := s.loadTasks()
 	if err != nil {
 		return err
+	}
+	return s.reloadTasks(tasks)
+}
+
+// reloadTasks applies an already-loaded, validated snapshot. Startup and task
+// control use this so cron and watch consume the exact same lifecycle decision
+// instead of independently re-reading a legacy binding between the two.
+func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
+	if s.applyTasks != nil {
+		return s.applyTasks(tasks)
 	}
 
 	s.mu.Lock()

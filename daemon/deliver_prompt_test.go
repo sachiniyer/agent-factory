@@ -76,6 +76,7 @@ func TestReserveCreate_ProjectDeletionTaskRefusalIsNotAttempted(t *testing.T) {
 	}{
 		{name: "targetless task", req: CreateSessionRequest{TaskID: "task0001"}},
 		{name: "missing target task", req: CreateSessionRequest{TaskRepoID: repoID}},
+		{name: "legacy missing target task", req: CreateSessionRequest{TaskOrigin: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.req.Title = "worker"
