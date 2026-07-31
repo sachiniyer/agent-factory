@@ -49,6 +49,13 @@ func archiveWorktreeForDeadlineTest(t *testing.T) *git.GitWorktree {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = repoRoot
+		// Supply the identity explicitly. A CI runner has no global gitconfig, so
+		// a fixture that commits without it fails with "Author identity unknown"
+		// — matching session/git's runGitInPlaceTest, which learned the same.
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 	}
