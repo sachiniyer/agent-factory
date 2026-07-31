@@ -273,7 +273,6 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		}
 	}
 
-	var data session.InstanceData
 	committed, err := instance.CloseTabByIDWithCommit(targetID, func(staged session.InstanceData) error {
 		// A proxy that resolved the tab before the first stop can still reach
 		// editor admission without the session op-lock. Sweep again while the
@@ -287,7 +286,10 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		if err := persistInstanceData(repoID, staged); err != nil {
 			return fmt.Errorf("failed to persist tab close: %w", err)
 		}
-		data = staged
+		// Announce the shrunk roster (#1812) as soon as it is durable. Runtime
+		// stream/tmux teardown follows the commit and may block or remain unknown;
+		// neither changes the committed roster clients should render.
+		m.publishEvent(agentproto.EventSessionUpdated, staged)
 		return nil
 	})
 	if err != nil {
@@ -300,12 +302,6 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 		// shrunken roster and will not resurrect this tab.
 		log.WarningLog.Printf("CloseTab %q committed, but runtime teardown could not be confirmed: %v", name, committed.TeardownErr)
 	}
-
-	// Announce the shrunk roster (#1812) — the close-side counterpart of
-	// CreateTab's publish; see there for why this rides on session.updated. A tab
-	// closed out-of-band must disappear from every open client, not just the one
-	// that closed it.
-	m.publishEvent(agentproto.EventSessionUpdated, data)
 	return name, nil
 }
 
