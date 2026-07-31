@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -281,16 +282,15 @@ func (h helpTypeInteractive) mask() uint32 {
 // layoutTextOverlay sizes help/intro text overlays to fit the terminal. The
 // overlay itself decides whether the content needs height-windowing, so short
 // one-shot help screens stay compact while the general help becomes scrollable
-// at 80x24 (#1290).
+// at 80x24 (#1290). PlaceOverlay centers over the entire terminal, so reserve
+// the status bar plus one row of margin on each side; otherwise a nearly
+// full-height frame lands its bottom border on the footer menu (#2578).
 func (m *home) layoutTextOverlay() {
 	if m.textOverlay == nil {
 		return
 	}
 	m.textOverlay.SetWidth(int(float32(m.termWidth) * 0.6))
-	overlayHeight := m.termHeight - 2
-	if overlayHeight < 6 {
-		overlayHeight = m.termHeight
-	}
+	overlayHeight := m.termHeight - layout.StatusBarRows - 2
 	m.textOverlay.SetHeight(overlayHeight)
 }
 

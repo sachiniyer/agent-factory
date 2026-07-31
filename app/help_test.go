@@ -5,11 +5,13 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // TestHelpReflectsKeymapRebinds is the regression guard for the #1141
@@ -281,4 +283,25 @@ func TestGeneralHelpOverlayShiftArrowsScrollAt80x24(t *testing.T) {
 
 	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
 	require.Equal(t, stateDefault, h.state, "Esc remains the explicit help dismiss key")
+}
+
+func TestGeneralHelpOverlayStopsAboveFooterMenu(t *testing.T) {
+	const termWidth, termHeight = 80, 24
+
+	h := newTestHome(t)
+	resizeHome(h, termWidth, termHeight)
+	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+
+	foreground := xansi.Strip(h.textOverlay.Render())
+	require.LessOrEqual(t, strings.Count(foreground, "\n")+1,
+		termHeight-layout.StatusBarRows-2,
+		"the centered help overlay must leave the footer rows outside its frame")
+
+	lines := strings.Split(xansi.Strip(h.View()), "\n")
+	require.Len(t, lines, termHeight)
+	menuRow := lines[h.lastLayout.StatusBar.Y]
+	require.NotContains(t, menuRow, "╰",
+		"the help overlay's bottom-left corner must not paint through the footer menu")
+	require.NotContains(t, menuRow, "╯",
+		"the help overlay's bottom-right corner must not paint through the footer menu")
 }
