@@ -450,6 +450,20 @@ func TestConfigReadDoesNotHideBrokenGitDirectory(t *testing.T) {
 	assert.Contains(t, err.Error(), "resolve current repository")
 }
 
+func TestConfigReadDoesNotHideUnreadableGitMetadata(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitDir := filepath.Join(repoRoot, ".git")
+	require.NoError(t, os.Mkdir(gitDir, 0o000))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chmod(gitDir, 0o700))
+	})
+	t.Chdir(repoRoot)
+
+	_, _, err := configReadProjectSelector("", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "resolve current repository")
+}
+
 // TestConfigGetDeprecatedProjectAliasKeepsJSONParseable drives the real pflag
 // parser before RunE. An automatic deprecation warning must not prefix the JSON
 // error envelope when a script uses the retained --project alias with --json.

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -57,7 +58,8 @@ func resolveMainRepoRoot(pathArgs ...string) (string, error) {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) &&
-			strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") {
+			strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") &&
+			!gitMetadataMayExist(pathArgs...) {
 			return "", fmt.Errorf("%w: %s", ErrNotGitRepository, strings.TrimSpace(string(exitErr.Stderr)))
 		}
 		return "", fmt.Errorf("failed to get git repo root: %w", err)
@@ -109,6 +111,36 @@ func resolveMainRepoRoot(pathArgs ...string) (string, error) {
 	}
 	// Fallback: parent of .git directory (correct for non-submodule repos)
 	return filepath.Dir(commonDir), nil
+}
+
+// gitMetadataMayExist fails closed when a failed rev-parse could be caused by
+// broken or unreadable repository metadata. Git reports the same no-ancestor
+// diagnostic for an unreadable .git directory that it reports outside Git, so
+// stderr alone cannot authorize a global-config fallback.
+func gitMetadataMayExist(pathArgs ...string) bool {
+	if os.Getenv("GIT_DIR") != "" {
+		return true
+	}
+	start := "."
+	if len(pathArgs) == 2 && pathArgs[0] == "-C" {
+		start = pathArgs[1]
+	}
+	current, err := filepath.Abs(start)
+	if err != nil {
+		return true
+	}
+	for {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 // RepoContext identifies a git repository and provides scoped path resolution.
