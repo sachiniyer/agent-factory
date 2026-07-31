@@ -50,6 +50,12 @@ import {
   viewportAnchorLine,
   viewportMarkerOffset,
 } from "./terminal-geometry.js";
+import {
+  historyWheelPlan,
+  terminalMouseOverride,
+  terminalMouseOverrideHeld,
+  type TerminalMouseOverride,
+} from "./terminal-mouse.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { currentXtermTheme } from "./theme.js";
 
@@ -107,6 +113,11 @@ export class AttachTerminal {
   private resizeTimer: number | null = null;
   private visibleFitFrame: number | null = null;
   private viewportRestoreFrame: number | null = null;
+  private readonly mouseOverride: TerminalMouseOverride;
+  private readonly mouseCaptureHint: HTMLDivElement;
+  private mouseCaptureHintTimer: number | null = null;
+  private mouseOverrideKeyHeld = false;
+  private historyWheelRemainder = 0;
   // Incremented only by an actual user scroll input while a peer-owned anchor is
   // pending. Output and resize reflows can move viewportY too, so position deltas
   // alone do not prove that a user intended to override the saved reading line.
@@ -146,9 +157,17 @@ export class AttachTerminal {
   // PTY without the pointer ever leaving this pane. Capture repairs that less-common
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary input a no-op before even measuring layout.
-  private readonly onWheel = (): void => this.handleUserScroll("wheel");
+  private readonly onWheel = (event: WheelEvent): void => {
+    this.handleUserScroll("wheel");
+    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
+      this.showMouseCaptureHint();
+    }
+  };
   private readonly onTouchMove = (): void => this.handleUserScroll("touch");
   private readonly onPointerDown = (event: PointerEvent): void => {
+    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
+      this.showMouseCaptureHint();
+    }
     // The xterm screen is a sibling of its scrollable viewport. A pointer whose
     // target is the viewport itself is therefore a scrollbar/track gesture, while
     // an ordinary terminal click targets the screen and keeps the saved anchor.
@@ -178,6 +197,7 @@ export class AttachTerminal {
     private readonly endpoint: StreamEndpoint,
     private readonly cb: TerminalCallbacks,
   ) {
+    this.mouseOverride = terminalMouseOverride(navigator.platform);
     this.term = new Terminal({
       allowProposedApi: true,
       cursorBlink: true,
@@ -189,10 +209,25 @@ export class AttachTerminal {
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5000,
+      // xterm uses Shift to force selection outside macOS. Opt macOS into its
+      // matching Option escape so every platform can leave app mouse mode.
+      macOptionClickForcesSelection: true,
     });
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
+    this.mouseCaptureHint = document.createElement("div");
+    this.mouseCaptureHint.className = "af-mouse-capture-hint";
+    this.mouseCaptureHint.setAttribute("role", "status");
+    this.mouseCaptureHint.setAttribute("aria-live", "polite");
+    this.mouseCaptureHint.setAttribute("aria-hidden", "true");
+    this.mouseCaptureHint.textContent = `App mouse active · Hold ${this.mouseOverride} to select or scroll`;
+    this.term.element?.append(this.mouseCaptureHint);
+
+    // xterm normally forwards every wheel to a mouse-aware application and
+    // cancels browser scrollback. The selection modifier instead scrolls terminal
+    // history, so copy and scroll share one discoverable escape (#2681).
+    this.term.attachCustomWheelEventHandler((event) => this.handleHistoryWheel(event));
 
     // Report focus/blur of xterm's helper textarea so index.ts can track which pane
     // owns the keyboard (#1693) even when the user clicks straight into the terminal
@@ -206,6 +241,7 @@ export class AttachTerminal {
         }
       });
       textarea.addEventListener("blur", () => {
+        this.mouseOverrideKeyHeld = false;
         if (!this.stopped) {
           this.cb.onFocusChange(false);
         }
@@ -223,8 +259,12 @@ export class AttachTerminal {
     // xterm's CR. Ctrl+C copies a present selection (else interrupts),
     // Ctrl+Shift+C is explicit copy, and Ctrl+V defers to native paste. False
     // suppresses xterm's own handling.
-    this.term.attachCustomKeyEventHandler((ev) =>
-      handleClipboardKeydown(ev, {
+    this.term.attachCustomKeyEventHandler((ev) => {
+      const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
+      if (ev.key === overrideKey) {
+        this.mouseOverrideKeyHeld = ev.type !== "keyup";
+      }
+      return handleClipboardKeydown(ev, {
         composerNewline: this.endpoint.composerNewline,
         hasSelection: () => this.term.hasSelection(),
         getSelection: () => this.term.getSelection(),
@@ -234,8 +274,8 @@ export class AttachTerminal {
         // Public Terminal.input(..., true) is xterm's genuine-user-input path:
         // it scrolls to bottom and clears selection, then fires onData above.
         sendUserInput: (text) => this.term.input(text, true),
-      }),
-    );
+      });
+    });
 
     // Re-fit + re-announce size whenever the container changes (window resize,
     // rail collapse, devtools). Debounced; the server echo reconciles multi-writer.
@@ -268,6 +308,10 @@ export class AttachTerminal {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose(): void {
     this.stopped = true;
+    if (this.mouseCaptureHintTimer !== null) {
+      window.clearTimeout(this.mouseCaptureHintTimer);
+      this.mouseCaptureHintTimer = null;
+    }
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -288,6 +332,42 @@ export class AttachTerminal {
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.closeSocket();
     this.term.dispose();
+  }
+
+  private applicationOwnsMouse(): boolean {
+    return this.term.modes.mouseTrackingMode !== "none";
+  }
+
+  private showMouseCaptureHint(): void {
+    this.mouseCaptureHint.classList.add("af-visible");
+    this.mouseCaptureHint.setAttribute("aria-hidden", "false");
+    if (this.mouseCaptureHintTimer !== null) {
+      window.clearTimeout(this.mouseCaptureHintTimer);
+    }
+    this.mouseCaptureHintTimer = window.setTimeout(() => {
+      this.mouseCaptureHint.classList.remove("af-visible");
+      this.mouseCaptureHint.setAttribute("aria-hidden", "true");
+      this.mouseCaptureHintTimer = null;
+    }, 4_000);
+  }
+
+  private handleHistoryWheel(event: WheelEvent): boolean {
+    // Chromium's wheel event can omit modifier flags even while the keyboard key
+    // remains down (notably through automation and trackpad momentum). xterm sees
+    // the matching keydown/up, so retain that state as the authoritative fallback.
+    if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
+      return true;
+    }
+
+    const renderedRow = this.container.querySelector<HTMLElement>(".xterm-rows > div");
+    const rowHeight = renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+    const plan = historyWheelPlan(event, this.term.rows, rowHeight, this.historyWheelRemainder);
+    this.historyWheelRemainder = plan.remainder;
+    if (plan.lines !== 0) {
+      this.term.scrollLines(plan.lines);
+    }
+    event.preventDefault();
+    return false;
   }
 
   /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed

@@ -1728,6 +1728,36 @@ body {
   height: 100%;
 }
 
+/* A mouse-aware TUI intentionally owns plain drag/wheel events. Surface the
+ * terminal-history escape only when the user hits that captured path; the hint is
+ * transient, pointer-inert, and lives inside xterm's positioned root (#2681). */
+.af-mouse-capture-hint {
+  position: absolute;
+  right: var(--af-sp-2);
+  bottom: var(--af-sp-2);
+  z-index: 5;
+  max-width: calc(100% - 2 * var(--af-sp-2));
+  padding: var(--af-sp-1) var(--af-sp-2);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-sm);
+  background: var(--af-bg-surface);
+  color: var(--af-text);
+  box-shadow: var(--af-shadow-sm);
+  font-size: var(--af-fs-sm);
+  line-height: 1.25;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.25rem);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.af-mouse-capture-hint.af-visible {
+  opacity: 0.96;
+  transform: translateY(0);
+}
+
 /* A web/iframe tab: fills the pane host with a thin control bar above the frame. It
  * matches the terminal pane's treatment — the pane canvas is --af-bg-term (so the
  * .af-pane-host inset gutter blends seamlessly in both themes), with a raised

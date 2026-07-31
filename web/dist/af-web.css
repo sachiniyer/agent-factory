@@ -1317,6 +1317,29 @@ body {
 .af-pane-host .xterm {
   height: 100%;
 }
+.af-mouse-capture-hint {
+  position: absolute;
+  right: var(--af-sp-2);
+  bottom: var(--af-sp-2);
+  z-index: 5;
+  max-width: calc(100% - 2 * var(--af-sp-2));
+  padding: var(--af-sp-1) var(--af-sp-2);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-sm);
+  background: var(--af-bg-surface);
+  color: var(--af-text);
+  box-shadow: var(--af-shadow-sm);
+  font-size: var(--af-fs-sm);
+  line-height: 1.25;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.25rem);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.af-mouse-capture-hint.af-visible {
+  opacity: 0.96;
+  transform: translateY(0);
+}
 .af-webpane {
   display: flex;
   flex-direction: column;
