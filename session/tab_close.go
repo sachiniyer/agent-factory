@@ -178,12 +178,14 @@ func stageTabCleanup(pending []TabCleanupData, tab *Tab) (*TabCleanupData, []Tab
 	return &handle, append(pending, handle)
 }
 
-// dropTabCleanup removes handle from pending, matching on the tmux name — the
-// field that identifies the session a retry would target. Matching on TabID
-// would miss a legacy tab that was backfilled an id only on the load AFTER its
-// tombstone was written, leaving an entry nothing can ever retire. Returns nil
-// for an emptied list so the projection omits the field entirely rather than
-// persisting an empty array.
+// dropTabCleanup removes handle from pending, matching on the tmux name rather
+// than the TabID. The name is what a retry actually targets, and it is the field
+// guaranteed unique across the list: uniqueTabTmuxName reserves pending tokens,
+// so no live tab and no other handle can hold the same session name. TabID is
+// carried for diagnostics and can be empty on a hand-edited or pre-#1738 record,
+// which would leave such an entry unretirable. Returns nil for an emptied list
+// so the projection omits the field entirely rather than persisting an empty
+// array.
 func dropTabCleanup(pending []TabCleanupData, handle *TabCleanupData) []TabCleanupData {
 	if handle == nil || len(pending) == 0 {
 		return pending
