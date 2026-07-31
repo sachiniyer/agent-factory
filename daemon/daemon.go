@@ -477,14 +477,6 @@ func applyHomeCheck(homeDir string, misses int) (int, bool) {
 	return misses, misses >= homeMissingChecksToExit
 }
 
-// fromInstanceDataForRefresh is the entry point refreshDaemonInstances uses
-// to materialize a session.Instance from a persisted on-disk entry. It is a
-// package-level variable so tests can observe (or substitute) the call —
-// see TestManagerCreateSessionAtomicWithRefresh, which uses it to detect
-// whether refresh ever raced CreateSession and tried to construct a
-// duplicate Instance from disk.
-var fromInstanceDataForRefresh = session.FromInstanceData
-
 // refreshDaemonInstances materializes the daemon's in-memory instance map from
 // disk. It ALSO returns the ghost task runs: persisted rows whose task run is
 // still in flight but which could not be turned into an Instance (#1892).
@@ -550,6 +542,27 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 		for _, item := range data {
 			key := daemonInstanceKey(repoID, item.Title)
+			if item.ID == "" {
+				item.ID = session.NewInstanceID()
+				if existing != nil {
+					if prior := existing[key]; prior != nil && prior.ID != "" {
+						item.ID = prior.ID
+					}
+				}
+				if err := persistLegacyInstanceID(repoID, item); err != nil {
+					log.WarningLog.Printf("daemon skipping legacy instance %q: could not durably assign a stable identity: %v", item.Title, err)
+					if existing != nil {
+						if prior := existing[key]; prior != nil {
+							next[key] = prior
+							continue
+						}
+					}
+					if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown && !item.UserKilled {
+						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
+					}
+					continue
+				}
+			}
 			if existing != nil {
 				if instance := existing[key]; instance != nil {
 					next[key] = instance

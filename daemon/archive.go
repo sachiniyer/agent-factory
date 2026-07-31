@@ -170,9 +170,9 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 	// true forever. Its result is checked below before the durable archive commit.
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
 	if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
-		_ = instance.Transition(session.AbortArchiveToLost())
+		_ = instance.Transition(session.CancelArchive())
 		m.persistInstance(repoID, instance)
-		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; the session was left Lost for a retry: %w", req.Title, err)
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; no session teardown was started: %w", req.Title, err)
 	}
 
 	// Tear down tmux and relocate the worktree in one call: the move is folded

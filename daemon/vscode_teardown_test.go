@@ -49,11 +49,14 @@ func vscodeServerRegistered(m *Manager, key string) bool {
 
 func writeVSCodeOwnerFixture(t *testing.T, key, instanceID, bootID string, process proctree.Process) string {
 	t.Helper()
+	pidNamespace, err := proctree.PIDNamespaceID()
+	require.NoError(t, err)
 	socketPath, err := vscodeSocketPath(key)
 	require.NoError(t, err)
 	raw, err := json.Marshal(map[string]any{
 		"key": key, "instance_id": instanceID, "pid": process.PID,
-		"start_id": process.StartID, "boot_id": bootID, "process_nonce": "test-vscode-owner-nonce",
+		"start_id": process.StartID, "boot_id": bootID, "pid_namespace_id": pidNamespace,
+		"process_nonce": "test-vscode-owner-nonce",
 	})
 	require.NoError(t, err)
 	path := vscodeOwnerPath(socketPath)
@@ -143,12 +146,15 @@ func TestPersistedVSCodeOwner_ProcessNonceRejectsReusedIdentity(t *testing.T) {
 	_, process := startOwnedSleepWithNonce(t, "live-process-token")
 	bootID, err := proctree.BootID()
 	require.NoError(t, err)
+	pidNamespace, err := proctree.PIDNamespaceID()
+	require.NoError(t, err)
 
 	socketPath, err := vscodeSocketPath("reused-process")
 	require.NoError(t, err)
 	raw, err := json.Marshal(map[string]any{
 		"key": "reused-process", "instance_id": "instance-1", "pid": process.PID,
-		"start_id": process.StartID, "boot_id": bootID, "process_nonce": "recorded-owner-token",
+		"start_id": process.StartID, "boot_id": bootID, "pid_namespace_id": pidNamespace,
+		"process_nonce": "recorded-owner-token",
 	})
 	require.NoError(t, err)
 	path := vscodeOwnerPath(socketPath)
@@ -166,6 +172,37 @@ func TestPersistedVSCodeOwner_ProcessNonceRejectsReusedIdentity(t *testing.T) {
 	require.NoError(t, v.stopPersistedOwner(owner))
 	require.Empty(t, signals,
 		"matching PID/start identity authorized signaling a process without the persisted ownership nonce")
+}
+
+func TestPersistedVSCodeOwner_PIDNamespaceRejectsReusedIdentity(t *testing.T) {
+	shortAFHome(t)
+	_, process := startOwnedSleep(t)
+	bootID, err := proctree.BootID()
+	require.NoError(t, err)
+
+	socketPath, err := vscodeSocketPath("reused-namespace")
+	require.NoError(t, err)
+	raw, err := json.Marshal(map[string]any{
+		"key": "reused-namespace", "instance_id": "instance-1", "pid": process.PID,
+		"start_id": process.StartID, "boot_id": bootID, "pid_namespace_id": "pidns:foreign",
+		"process_nonce": "test-vscode-owner-nonce",
+	})
+	require.NoError(t, err)
+	path := vscodeOwnerPath(socketPath)
+	require.NoError(t, os.WriteFile(path, append(raw, '\n'), 0o600))
+	owner, err := readVSCodeOwner(path)
+	require.NoError(t, err)
+
+	v := newVSCodeSupervisor()
+	v.groupAlive = func(int) (bool, error) { return false, nil }
+	var signals []syscall.Signal
+	v.killGroup = func(_ int, sig syscall.Signal) error {
+		signals = append(signals, sig)
+		return nil
+	}
+	require.NoError(t, v.stopPersistedOwner(owner))
+	require.Empty(t, signals,
+		"an owner record from another PID namespace authorized signaling a reused process identity")
 }
 
 func TestPersistedVSCodeStop_DoesNotHoldSupervisorLockWhileWaiting(t *testing.T) {
@@ -342,6 +379,28 @@ func TestArchiveSession_StopsVSCodeEditor(t *testing.T) {
 
 	require.False(t, vscodeServerRegistered(manager, key),
 		"archiving a session left its VS Code editor running against the moved worktree")
+}
+
+func TestArchiveSession_InitialVSCodeStopFailurePreservesLiveness(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, origPath := registerArchivable(t, manager, repoID, repoPath, "limit-blocked")
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+	cmd, _ := startOwnedSleep(t)
+	key := daemonInstanceKey(repoID, "limit-blocked")
+	manager.vscode.mu.Lock()
+	manager.vscode.servers[key] = &vscodeServer{
+		worktree: origPath, instanceID: inst.ID, cmd: cmd, exited: make(chan struct{}),
+		stopGrace: 10 * time.Millisecond,
+		killGroup: func(int, syscall.Signal) error { return nil },
+	}
+	manager.vscode.mu.Unlock()
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "limit-blocked", RepoID: repoID})
+	require.ErrorContains(t, err, "editor teardown could not be confirmed")
+	require.Equal(t, session.LiveLimitReached, inst.GetLiveness(),
+		"an archive aborted before tmux or the worktree changed must preserve the prior liveness")
+	require.Equal(t, session.OpNone, inst.GetInFlightOp(), "the aborted archive fence must be cleared")
+	require.Equal(t, origPath, inst.GetWorktreePath(), "the aborted archive moved the worktree")
 }
 
 func TestArchiveSession_FinalVSCodeStopFailureRollsBack(t *testing.T) {

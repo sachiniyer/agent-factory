@@ -84,9 +84,10 @@ type Instance struct {
 	// equality — the audit's identity-by-circumstance gotcha (a manufactured or
 	// zero-CreatedAt record silently degraded a swap into an in-place corpse
 	// mutation). Legacy records persisted before #1195 carry no ID; the reconcile
-	// falls back to title+CreatedAt for them until they are recreated. Immutable
-	// after construction, so cross-goroutine readers may read it without the mutex
-	// (like Title).
+	// receives a freshly minted in-memory ID from FromInstanceData, while daemon
+	// load durably backfills that ID before materialization. Immutable after
+	// construction, so cross-goroutine readers may read it without the mutex (like
+	// Title).
 	ID string
 	// TaskID is the id of the task whose delivery spawned this session, empty for
 	// a user-created one (#1892). It is the daemon's association between a task

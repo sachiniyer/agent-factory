@@ -556,6 +556,94 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 	}
 }
 
+func TestRefreshDaemonInstances_BackfillsLegacyIDBeforeMaterialize(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	const repoID = "legacy-id-repo"
+	const title = "legacy-editor"
+	raw, err := json.Marshal([]session.InstanceData{{
+		Title: title, Status: session.Archived, Liveness: session.LiveArchived,
+		Tabs: []session.TabData{{Name: "editor", Kind: session.TabKindVSCode}},
+	}})
+	if err != nil {
+		t.Fatalf("marshal legacy row: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatalf("save legacy row: %v", err)
+	}
+
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{ID: d.ID, Title: d.Title}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	got, _, err := refreshDaemonInstances(nil)
+	if err != nil {
+		t.Fatalf("refresh legacy row: %v", err)
+	}
+	inst := got[daemonInstanceKey(repoID, title)]
+	if inst == nil || inst.ID == "" {
+		t.Fatalf("legacy session materialized with stable ID %q; VS Code admission would reject it", func() string {
+			if inst == nil {
+				return "<missing>"
+			}
+			return inst.ID
+		}())
+	}
+	persisted, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("load backfilled row: %v", err)
+	}
+	var rows []session.InstanceData
+	if err := json.Unmarshal(persisted, &rows); err != nil {
+		t.Fatalf("decode backfilled row: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != inst.ID {
+		t.Fatalf("persisted stable ID = %q, want materialized ID %q", func() string {
+			if len(rows) == 0 {
+				return "<missing>"
+			}
+			return rows[0].ID
+		}(), inst.ID)
+	}
+}
+
+func TestRefreshDaemonInstances_DoesNotMaterializeUnpersistedLegacyID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	const repoID = "legacy-id-write-failure"
+	const title = "legacy-editor"
+	raw, err := json.Marshal([]session.InstanceData{{
+		Title: title, Status: session.Archived, Liveness: session.LiveArchived,
+	}})
+	if err != nil {
+		t.Fatalf("marshal legacy row: %v", err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatalf("save legacy row: %v", err)
+	}
+
+	prevPersist := persistLegacyInstanceID
+	persistLegacyInstanceID = func(string, session.InstanceData) error {
+		return fmt.Errorf("forced stable ID persistence failure")
+	}
+	t.Cleanup(func() { persistLegacyInstanceID = prevPersist })
+	materialized := false
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		materialized = true
+		return &session.Instance{ID: d.ID, Title: d.Title}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	got, _, err := refreshDaemonInstances(nil)
+	if err != nil {
+		t.Fatalf("refresh should isolate one legacy backfill failure: %v", err)
+	}
+	if materialized || got[daemonInstanceKey(repoID, title)] != nil {
+		t.Fatal("legacy session was materialized after its stable ID could not be persisted")
+	}
+}
+
 // TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll covers
 // the polling path (existing != nil). The pre-fix code returned the entire
 // `existing` map on any unmarshal error, preserving prior in-memory state.

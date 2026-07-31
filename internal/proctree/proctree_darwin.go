@@ -78,6 +78,14 @@ func bootID() (string, error) {
 	return fmt.Sprintf("%d.%06d", booted.Sec, booted.Usec), nil
 }
 
+func pidNamespaceID() (string, error) {
+	id, err := bootID()
+	if err != nil {
+		return "", err
+	}
+	return "host:" + id, nil
+}
+
 // readProc reads one process's kinfo_proc. Returns an error when the pid names
 // no live process, which is what makes it usable as an identity check.
 func readProc(pid int) (Process, error) {

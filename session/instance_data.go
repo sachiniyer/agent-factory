@@ -149,6 +149,13 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	id := data.ID
+	if id == "" {
+		// Legacy records predate stable session identity. Materialized instances
+		// must still have an identity so every caller can use ID-first actions;
+		// the daemon load path durably backfills this before calling us.
+		id = NewInstanceID()
+	}
 	// Resolve the liveness axis via the shared rollforward (#1108/#1195): prefer
 	// the new `liveness` field, fall back to the legacy `status` int for records
 	// written before #1195, and load a persisted Dead as Lost — recovery-
@@ -171,7 +178,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		inFlightOp = OpReplacing
 	}
 	instance := &Instance{
-		ID:         data.ID,
+		ID:         id,
 		TaskID:     data.TaskID,
 		Title:      data.Title,
 		Path:       data.Path,

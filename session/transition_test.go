@@ -64,6 +64,7 @@ func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
 		// Archive: only the OUTCOME answers. Commit ends the run for good; abort
 		// leaves it exactly as interrupted as it was.
 		tkBeginArchive:       runKeep,
+		tkCancelArchive:      runKeep,
 		tkCommitArchive:      runEnds,
 		tkAbortArchiveToLost: runKeep,
 		// Restore: un-shelving returns a workspace to a user; it never re-opens a
@@ -123,6 +124,7 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		// the daemon guards — BeginArchive gates on the op/Archived, not liveness.
 		{"BeginArchive from Lost", stateAxes{LiveLost, OpNone}, true, false, BeginArchive(), LiveLost, OpArchiving, true},
 		{"BeginArchive from LimitReached", stateAxes{LiveLimitReached, OpNone}, true, false, BeginArchive(), LiveLimitReached, OpArchiving, true},
+		{"CancelArchive preserves LimitReached", stateAxes{LiveLimitReached, OpArchiving}, true, false, CancelArchive(), LiveLimitReached, OpNone, true},
 		{"CommitArchive clears started", stateAxes{LiveRunning, OpArchiving}, true, false, CommitArchive(), LiveArchived, OpNone, false},
 		{"AbortArchiveToLost", stateAxes{LiveRunning, OpArchiving}, true, false, AbortArchiveToLost(), LiveLost, OpNone, true},
 		// BeginRestore SETS started=true on the archived (started=false) row,

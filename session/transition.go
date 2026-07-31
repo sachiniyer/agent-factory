@@ -48,6 +48,7 @@ const (
 	tkBeginKill
 	tkRevertKill
 	tkBeginArchive
+	tkCancelArchive
 	tkCommitArchive
 	tkAbortArchiveToLost
 	tkBeginRestore
@@ -75,6 +76,8 @@ func (k transitionKind) String() string {
 		return "RevertKill"
 	case tkBeginArchive:
 		return "BeginArchive"
+	case tkCancelArchive:
+		return "CancelArchive"
 	case tkCommitArchive:
 		return "CommitArchive"
 	case tkAbortArchiveToLost:
@@ -152,6 +155,10 @@ func RevertKill() TransitionEvent { return TransitionEvent{kind: tkRevertKill} }
 
 // BeginArchive raises the OpArchiving fence over an archive teardown+move (I4).
 func BeginArchive() TransitionEvent { return TransitionEvent{kind: tkBeginArchive} }
+
+// CancelArchive clears an archive fence before teardown changed the runtime or
+// worktree, preserving the liveness that was present when the fence was raised.
+func CancelArchive() TransitionEvent { return TransitionEvent{kind: tkCancelArchive} }
 
 // CommitArchive flips the session to the inert Archived state, started=false, on
 // a successful archive move (the daemon path). Reachable ONLY from the OpArchiving
@@ -366,6 +373,13 @@ var transitionTable = map[transitionKind]edgeSpec{
 		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpArchiving} },
 		// Raising the fence decides nothing: the archive may still commit (run ends)
 		// or abort back to Lost (run continues). Only the outcome answers.
+		run: runKeep,
+	},
+	tkCancelArchive: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
+		// Nothing behind the archive fence changed, so the task run remains
+		// exactly what it was before the attempted archive.
 		run: runKeep,
 	},
 	tkCommitArchive: {

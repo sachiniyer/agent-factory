@@ -126,6 +126,16 @@ func BootID() (string, error) {
 	return bootID()
 }
 
+// PIDNamespaceID scopes numeric process and process-group IDs to the kernel PID
+// allocation domain that issued them. Linux returns the PID namespace device
+// and inode; Darwin, which has no PID namespaces, returns a boot-scoped host
+// identity. Persisted destructive handles must compare this in addition to a
+// boot identity, because containers can recreate a PID namespace within one
+// host boot and reuse the same PID/start-stamp tuple.
+func PIDNamespaceID() (string, error) {
+	return pidNamespaceID()
+}
+
 // BootIDIsFallback reports whether id is the Linux PID-namespace identity used
 // when a subset=pid procfs hides the kernel boot UUID. The fallback scopes a
 // process identity to the namespace but can be reused after a host reboot, so a

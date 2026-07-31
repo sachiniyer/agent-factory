@@ -19,15 +19,16 @@ import (
 
 // A supervisor's in-memory map dies with the daemon. The owner record is the
 // cross-restart handle for the editor process group: stable session identity,
-// PID/start stamp, boot scope, and a random nonce inherited by the live editor.
-// The nonce keeps a reused process identity from authorizing a signal when a
-// subset=pid procfs cannot expose the kernel boot UUID.
+// PID/start stamp, boot scope, PID namespace, and a random nonce inherited by
+// the live editor. All four process proofs must agree before a persisted handle
+// can authorize a signal.
 type vscodeOwnerRecord struct {
 	Key          string `json:"key"`
 	InstanceID   string `json:"instance_id"`
 	PID          int    `json:"pid"`
 	StartID      uint64 `json:"start_id"`
 	BootID       string `json:"boot_id"`
+	PIDNamespace string `json:"pid_namespace_id"`
 	ProcessNonce string `json:"process_nonce"`
 }
 
@@ -66,6 +67,10 @@ func captureVSCodeOwner(key, instanceID string, pid int, processNonce string) (v
 	if err != nil {
 		return vscodeOwnerRecord{}, fmt.Errorf("could not determine kernel boot identity: %w", err)
 	}
+	pidNamespace, err := proctree.PIDNamespaceID()
+	if err != nil {
+		return vscodeOwnerRecord{}, fmt.Errorf("could not determine editor PID namespace: %w", err)
+	}
 	process, err := proctree.Lookup(pid)
 	if err != nil {
 		if errors.Is(err, proctree.ErrProcessExited) {
@@ -81,7 +86,7 @@ func captureVSCodeOwner(key, instanceID string, pid int, processNonce string) (v
 	}
 	return vscodeOwnerRecord{
 		Key: key, InstanceID: instanceID, PID: pid, StartID: process.StartID,
-		BootID: bootID, ProcessNonce: processNonce,
+		BootID: bootID, PIDNamespace: pidNamespace, ProcessNonce: processNonce,
 	}, nil
 }
 
@@ -145,7 +150,7 @@ func readVSCodeOwner(path string) (vscodeOwnerRecord, error) {
 		return vscodeOwnerRecord{}, err
 	}
 	if owner.Key == "" || owner.InstanceID == "" || owner.PID <= 1 || owner.StartID == 0 ||
-		owner.BootID == "" || owner.ProcessNonce == "" {
+		owner.BootID == "" || owner.PIDNamespace == "" || owner.ProcessNonce == "" {
 		return vscodeOwnerRecord{}, fmt.Errorf("invalid editor owner record")
 	}
 	return owner, nil
@@ -203,6 +208,13 @@ func (v *vscodeSupervisor) waitForProcessGroupExit(pgid int, timeout time.Durati
 // survives. A fallback boot identity cannot prove that absent-leader case, and
 // any unreadable identity remains UNKNOWN, so neither is ever signalled.
 func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
+	pidNamespace, err := proctree.PIDNamespaceID()
+	if err != nil {
+		return fmt.Errorf("could not determine PID namespace for editor pid %d: %w", owner.PID, err)
+	}
+	if owner.PIDNamespace != pidNamespace {
+		return nil
+	}
 	bootID, err := proctree.BootID()
 	if err != nil {
 		return fmt.Errorf("could not determine kernel boot identity for editor pid %d: %w", owner.PID, err)
@@ -265,6 +277,13 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 	// same id remains visible. Do not trust that number: the old group may have
 	// emptied and the PGID may already belong to an unrelated process. Only the
 	// exact live (boot, PID, StartID) leader pins the group for a safe escalation.
+	pidNamespace, err = proctree.PIDNamespaceID()
+	if err != nil {
+		return fmt.Errorf("could not revalidate PID namespace before escalating editor pid %d: %w", owner.PID, err)
+	}
+	if pidNamespace != owner.PIDNamespace {
+		return nil
+	}
 	bootID, err = proctree.BootID()
 	if err != nil {
 		return fmt.Errorf("could not revalidate kernel boot identity before escalating editor pid %d: %w", owner.PID, err)
