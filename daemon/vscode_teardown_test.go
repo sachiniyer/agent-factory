@@ -576,7 +576,7 @@ func TestReapDeadRoot_StopsVSCodeEditor(t *testing.T) {
 	key := daemonInstanceKey(repoID, session.RootSessionTitle)
 	registerVSCodeMarker(manager, key)
 
-	reaped, err := manager.reapDeadRoot(repoID, inst)
+	_, reaped, err := manager.reapDeadRoot(repoID, inst)
 	require.NoError(t, err)
 	require.True(t, reaped)
 	require.False(t, vscodeServerRegistered(manager, key),
@@ -589,7 +589,7 @@ func TestReapDeadRoot_RetainsRecordWhenEditorOwnershipIsUnknown(t *testing.T) {
 	key := daemonInstanceKey(repoID, session.RootSessionTitle)
 	writeUnreadableVSCodeOwnerFixture(t, key)
 
-	reaped, err := manager.reapDeadRoot(repoID, inst)
+	_, reaped, err := manager.reapDeadRoot(repoID, inst)
 	require.ErrorContains(t, err, "VS Code editor")
 	require.False(t, reaped)
 	requireSessionRecordRetained(t, manager, repoID, key, inst)
