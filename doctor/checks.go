@@ -511,14 +511,12 @@ func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
 	for _, name := range leaked {
 		origin := "no ancestry marker"
 		ownedByActiveHome := false
-		if procs := tmux.SessionProcessTrees(ctx.opts.Exec, name); len(procs) > 0 {
-			if home, st := proctree.LookupEnv(procs[0].PID, tmux.EnvMarkerHome); st == proctree.EnvFound {
-				if filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir) {
-					origin = "created by this install"
-					ownedByActiveHome = true
-				} else {
-					origin = "created by another agent-factory home: " + home
-				}
+		if home, ok := tmuxSessionHomeMarker(ctx, name); ok && home != "" {
+			if filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir) {
+				origin = "created by this install"
+				ownedByActiveHome = true
+			} else {
+				origin = "created by another agent-factory home: " + home
 			}
 		}
 		finding := Finding{

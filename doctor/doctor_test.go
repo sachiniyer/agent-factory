@@ -352,7 +352,8 @@ func TestLeakedTmuxSessionReportedNotKilled(t *testing.T) {
 	}{
 		{name: unknownName, args: []string{"new-session", "-d", "-s", unknownName, "sleep 300"}},
 		{name: ownedName, args: []string{
-			"new-session", "-d", "-s", ownedName, "-e", tmux.EnvMarkerHome + "=" + home, "sleep 300",
+			"new-session", "-d", "-s", ownedName, "-e", tmux.EnvMarkerHome + "=" + home,
+			"env", "-u", tmux.EnvMarkerHome, "sleep", "300",
 		}},
 	} {
 		out, err := exec.Command("tmux", tc.args...).CombinedOutput()
