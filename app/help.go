@@ -401,6 +401,24 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.textOverlayScrollable && !isHelpDismissKey(msg) {
+		// Effective bindings precede hardcoded aliases so an advertised rebind
+		// such as up=pgdown keeps its configured meaning inside help.
+		if isHelpLineUpKey(msg) {
+			m.textOverlay.ScrollUp()
+			return m, nil
+		}
+		if isHelpLineDownKey(msg) {
+			m.textOverlay.ScrollDown()
+			return m, nil
+		}
+		if isHelpPageUpBinding(msg) {
+			m.textOverlay.PageUp()
+			return m, nil
+		}
+		if isHelpPageDownBinding(msg) {
+			m.textOverlay.PageDown()
+			return m, nil
+		}
 		if isHelpJumpTopKey(msg) {
 			m.textOverlay.ScrollToTop()
 			return m, nil
@@ -409,20 +427,12 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.textOverlay.ScrollToBottom()
 			return m, nil
 		}
-		if isHelpPageUpKey(msg) {
+		if isHelpPageUpAlias(msg) {
 			m.textOverlay.PageUp()
 			return m, nil
 		}
-		if isHelpPageDownKey(msg) {
+		if isHelpPageDownAlias(msg) {
 			m.textOverlay.PageDown()
-			return m, nil
-		}
-		if isHelpLineUpKey(msg) {
-			m.textOverlay.ScrollUp()
-			return m, nil
-		}
-		if isHelpLineDownKey(msg) {
-			m.textOverlay.ScrollDown()
 			return m, nil
 		}
 	}
@@ -498,19 +508,25 @@ func isHelpJumpBottomKey(msg tea.KeyMsg) bool {
 	return msg.Type == tea.KeyEnd
 }
 
-func isHelpPageUpKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyPgUp ||
-		msg.Type == tea.KeyCtrlB ||
-		msg.Type == tea.KeyShiftUp ||
-		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp])
+func isHelpPageUpBinding(msg tea.KeyMsg) bool {
+	return key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftUp])
 }
 
-func isHelpPageDownKey(msg tea.KeyMsg) bool {
+func isHelpPageDownBinding(msg tea.KeyMsg) bool {
+	return key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown])
+}
+
+func isHelpPageUpAlias(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyPgUp ||
+		msg.Type == tea.KeyCtrlB ||
+		msg.Type == tea.KeyShiftUp
+}
+
+func isHelpPageDownAlias(msg tea.KeyMsg) bool {
 	return msg.Type == tea.KeyPgDown ||
 		msg.Type == tea.KeyCtrlF ||
 		msg.Type == tea.KeySpace ||
-		msg.Type == tea.KeyShiftDown ||
-		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyShiftDown])
+		msg.Type == tea.KeyShiftDown
 }
 
 func isHelpLineUpKey(msg tea.KeyMsg) bool {

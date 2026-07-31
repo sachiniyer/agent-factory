@@ -55,6 +55,29 @@ func TestGeneralHelpReboundDismissKeyWinsOverPaging(t *testing.T) {
 		"a configured help key must dismiss help even when it is also a paging key")
 }
 
+func TestGeneralHelpReboundLineKeyWinsOverPagingAlias(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{
+		"up": {"pgdown"},
+	}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	actual := newTestHome(t)
+	resizeHome(actual, 80, 24)
+	_, _ = actual.showHelpScreen(helpTypeGeneral{}, nil)
+	_, _ = actual.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlD})
+
+	want := newTestHome(t)
+	resizeHome(want, 80, 24)
+	_, _ = want.showHelpScreen(helpTypeGeneral{}, nil)
+	_, _ = want.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlD})
+	want.textOverlay.ScrollUp()
+
+	_, _ = actual.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+
+	require.Equal(t, xansi.Strip(want.View()), xansi.Strip(actual.View()),
+		"a configured line key must win over a hardcoded paging alias")
+}
+
 // TestGeneralHelpNavigationMatchesBindings guards against regressing #764, where
 // the help screen documented "↑/j, ↓/k" while the canonical bindings in
 // keys/keys.go map k=up and j=down (standard vim convention).
