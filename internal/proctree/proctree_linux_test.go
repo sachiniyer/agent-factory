@@ -3,9 +3,9 @@
 package proctree
 
 import (
-	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // This file is linux-tagged because its subject is: /proc/uptime, and the
@@ -24,10 +24,10 @@ import (
 // health where there is no data; failing here manufactured NO DATA where there
 // is data.
 //
-// Boot time is unreadable only in the sense that matters: the test points the
-// backend at a path that does not exist, which is exactly what subset=pid
-// presents. StartedAt then stays zero and CPUFraction reports unknown — a
-// nice-to-have lost, loudly — while the table itself is intact.
+// Boot time is unreadable from procfs only: the test points the backend at a
+// path that does not exist, exactly what subset=pid presents. The kernel's
+// CLOCK_BOOTTIME must still supply StartedAt, because doctor uses process age
+// to distinguish durable leaks from teardown churn.
 func TestSnapshotSurvivesUnreadableBootTime(t *testing.T) {
 	child := startSleeper(t)
 
@@ -45,11 +45,15 @@ func TestSnapshotSurvivesUnreadableBootTime(t *testing.T) {
 			child.Process.Pid)
 	}
 
-	// And the part we genuinely lost must say so rather than read as idle.
 	p := snap[child.Process.Pid]
-	if _, _, err := CPUFraction(p); !errors.Is(err, ErrCPUUnknown) {
-		t.Errorf("CPUFraction without a boot time = %v, want ErrCPUUnknown: an unmeasurable process "+
-			"must never report as 0%% CPU, which is indistinguishable from idle", err)
+	if p.StartedAt.IsZero() {
+		t.Fatal("StartedAt is zero when /proc/uptime is hidden: subset=pid must fall back to CLOCK_BOOTTIME")
+	}
+	if age := time.Since(p.StartedAt); age < 0 || age > time.Minute {
+		t.Errorf("child age with CLOCK_BOOTTIME fallback = %s, want a recent process", age)
+	}
+	if _, _, err := CPUFraction(p); err != nil {
+		t.Errorf("CPUFraction with CLOCK_BOOTTIME fallback = %v, want a measurable process", err)
 	}
 }
 

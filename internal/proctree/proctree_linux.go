@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // The Linux backend reads /proc. See proctree.go for the contract every
@@ -30,18 +32,11 @@ const clkTck = 100
 // same instant for all of them, and re-reading it per entry would let a
 // snapshot's processes disagree about when the machine booted.
 //
-// AN UNREADABLE /proc/uptime IS NOT FATAL, and that is deliberate. It used to
-// fail the whole snapshot, which meant a procfs mounted `subset=pid` — where
-// /proc/<pid>/stat reads fine but /proc/uptime is not there — reported "cannot
-// read the process table" and turned off orphan reaping and doctor's process
-// map entirely. That is this package's own disease pointing the other way:
-// manufacturing NO DATA where data exists, having been built to stop
-// manufacturing health where no data exists.
-//
-// So the table still comes back; only StartedAt is left zero. It feeds nothing
-// but CPUFraction, which already reports a zero StartedAt as unknown — so we
-// lose a nice-to-have (runaway-CPU detection says it could not measure, out
-// loud) and keep the load-bearing part (reaping, orphan and escape detection).
+// AN UNREADABLE /proc/uptime IS NOT FATAL, and that is deliberate. A procfs
+// mounted `subset=pid` still serves /proc/<pid>/stat, so bootTime falls back to
+// the kernel's CLOCK_BOOTTIME. Only if both sources fail does StartedAt remain
+// zero; the process table and identity data still come back, while consumers
+// report that age-dependent checks are UNKNOWN.
 func snapshot() (map[int]Process, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -117,22 +112,37 @@ func bootID() (string, error) {
 	return namespaceID, nil
 }
 
-// bootTime returns the wall-clock instant the machine booted, from
-// /proc/uptime.
+// bootTime returns the wall-clock instant the machine booted. /proc/uptime is
+// the ordinary source; CLOCK_BOOTTIME is the equivalent kernel clock available
+// when procfs is mounted subset=pid and hides the global uptime file.
 func bootTime() (time.Time, error) {
+	uptime, procErr := procUptime()
+	if procErr == nil {
+		return time.Now().Add(-uptime), nil
+	}
+
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
+		return time.Time{}, errors.Join(procErr, fmt.Errorf("reading CLOCK_BOOTTIME: %w", err))
+	}
+	uptime = time.Duration(ts.Sec)*time.Second + time.Duration(ts.Nsec)
+	return time.Now().Add(-uptime), nil
+}
+
+func procUptime() (time.Duration, error) {
 	data, err := os.ReadFile(uptimePath)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("reading %s: %w", uptimePath, err)
+		return 0, fmt.Errorf("reading %s: %w", uptimePath, err)
 	}
 	fields := strings.Fields(string(data))
 	if len(fields) == 0 {
-		return time.Time{}, errors.New("malformed /proc/uptime")
+		return 0, errors.New("malformed /proc/uptime")
 	}
 	uptime, err := strconv.ParseFloat(fields[0], 64)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("malformed /proc/uptime: %w", err)
+		return 0, fmt.Errorf("malformed /proc/uptime: %w", err)
 	}
-	return time.Now().Add(-time.Duration(uptime * float64(time.Second))), nil
+	return time.Duration(uptime * float64(time.Second)), nil
 }
 
 // readProc parses /proc/<pid>/stat. Format: `pid (comm) state ppid ...`.
