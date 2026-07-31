@@ -470,9 +470,10 @@ GitHub (`origin`), not the sandbox:
 
 This is the same flow for both backends (it is written once against the runtime
 seam), and it is why `docker`/`ssh` reach full capability parity with `local` —
-`Archive` and `Recover` are both supported. A **Lost** sandbox session (its
-container/remote died) recovers the same way: re-provision + clone the branch
-back.
+`Archive` and `Recover` are both supported. A **Lost** sandbox session (one whose
+sandbox answered that its agent is gone) recovers the same way: re-provision +
+clone the branch back. Unreachability alone is not death — it does not mark a
+sandbox Lost, and restore refuses to replace a sandbox it cannot reach.
 
 ### What survives, and what doesn't
 
