@@ -36,12 +36,18 @@ func RedactAccessTokenURL(raw string) string {
 		return "[url redacted]"
 	}
 	q := parsed.Query()
-	if _, ok := q[AccessTokenQueryParam]; !ok {
+	found := false
+	for key := range q {
+		if strings.EqualFold(key, AccessTokenQueryParam) {
+			q.Set(key, accessTokenRedaction)
+			found = true
+		}
+	}
+	if !found {
 		// URL.Query discards malformed query pairs. The text pass still catches
 		// an exact access_token field without trusting a partially parsed query.
 		return RedactAccessTokenText(raw)
 	}
-	q.Set(AccessTokenQueryParam, accessTokenRedaction)
 	parsed.RawQuery = q.Encode()
 	return parsed.String()
 }

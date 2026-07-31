@@ -83,6 +83,16 @@ func TestRedactAccessTokenURL(t *testing.T) {
 	}
 }
 
+func TestRedactAccessTokenURLRedactsEveryKeyCase(t *testing.T) {
+	got := RedactAccessTokenURL(
+		"https://box.test/stream?access_token=lower-secret&Access_Token=upper-secret")
+	for _, token := range []string{"lower-secret", "upper-secret"} {
+		if strings.Contains(got, token) {
+			t.Fatalf("RedactAccessTokenURL retained token value %q: %s", token, got)
+		}
+	}
+}
+
 func TestRedactAccessTokenError(t *testing.T) {
 	const token = "af-sentinel-error-redaction"
 	cause := errors.New("connection refused")
