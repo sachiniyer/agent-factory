@@ -74,8 +74,10 @@ var configJSONFlag bool
 
 var (
 	configGetExplainFlag   bool
+	configGetRepoFlag      string
 	configGetProjectFlag   string
 	configListExplainFlag  bool
+	configListRepoFlag     string
 	configListProjectFlag  string
 	configSetProjectFlag   string
 	configUnsetProjectFlag string
@@ -167,11 +169,11 @@ var configCmd = &cobra.Command{
 	Short: "Read global or project-effective config and write global config",
 	Long: `Read and write keys in the global config (~/.agent-factory/config.toml).
 
-"get"/"list" print the effective global config with defaults applied — what a
-session gets before any in-repo .agent-factory/config.toml override is layered
-on. Pass --project <repository-path> to inspect the existing global, checked-in,
-and personal per-project layers for that project. --explain shows every
-candidate and why it did or did not supply the effective value.
+"get"/"list" print the effective config for the current repository, including
+its checked-in and personal per-project layers. Pass --repo <repository-path> to
+inspect another project. Outside a git repository they fall back to global
+defaults. --explain shows every candidate and why it did or did not supply the
+effective value.
 
 "set"/"unset" write config. Without --project they edit the global config,
 changing a single settable key in place so all comments and ordering are
@@ -185,22 +187,28 @@ without a restart; a raw hand-edit of config.toml still applies on the next star
 var configGetCmd = &cobra.Command{
 	Use:   "get <key>",
 	Short: "Print one global or project-effective config value",
-	Long: `Print the effective global value of one config key (e.g. default_program,
-auto_update, update_channel). Run "af config list" to see every key. Scalar values
-print bare; composite values (program_overrides, root_agents, limit_patterns,
-keys) print as JSON.
+	Long: `Print the effective value of one config key (e.g. default_program,
+auto_update, update_channel). By default the current repository's legacy,
+checked-in, and personal layers participate; outside git, the command falls back
+to global defaults. Run "af config list" to see every key. Scalar values print
+bare; composite values (program_overrides, root_agents, limit_patterns, keys)
+print as JSON.
 
-With --project <repository-path>, print the value after the repository's current
-legacy and checked-in config layers are applied. The path is a selector only;
-this command does not register a project or write identity state. --explain
-prints the same resolved value with the complete source trace.`,
+Use --repo <repository-path> to inspect another project. The path is a selector
+only; this command does not register a project or write identity state.
+--project remains accepted as a deprecated alias. --explain prints the same
+resolved value with the complete source trace.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if configGetExplainFlag || configGetProjectFlag != "" || strings.Contains(args[0], ".") {
-			resolved, err := loadResolvedConfig(configGetProjectFlag)
+		projectSelector, err := configReadProjectSelector(configGetRepoFlag, configGetProjectFlag)
+		if err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
+		if configGetExplainFlag || projectSelector != "" || strings.Contains(args[0], ".") {
+			resolved, err := loadResolvedConfig(projectSelector)
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
@@ -210,11 +218,11 @@ prints the same resolved value with the complete source trace.`,
 			}
 			// root_agent resolves through FOUR layers in the daemon
 			// (built-in/global/legacy/personal), but the generic resolver only
-			// knows its two singleton layers. For --explain, swap in the daemon's
-			// real four-layer trace so the explanation matches what decides the
-			// root agent, not a narrower model of it (#2216).
-			if configGetExplainFlag && isRootAgentExplainKey(args[0]) {
-				specialized, err := rootAgentExplainValue(configGetProjectFlag, args[0])
+			// knows its two singleton layers. Use the daemon's real four-layer
+			// resolution for both the concise value and --explain, or the two
+			// read modes can contradict each other (#2607).
+			if isRootAgentExplainKey(args[0]) {
+				specialized, err := rootAgentReadValue(projectSelector, args[0])
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
@@ -258,17 +266,27 @@ prints the same resolved value with the complete source trace.`,
 var configListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Print global or project-effective config values",
-	Long: `Print every global config key and its effective value. Pass --project
-<repository-path> to include the repository's current legacy and checked-in
-config keys and layers. --explain prints every source candidate and the reason
-it won, was shadowed, was absent, or is disallowed for that key.`,
+	Long: `Print every effective config key. By default the current repository's
+legacy, checked-in, and personal layers participate; outside git, the command
+falls back to global defaults. Pass --repo <repository-path> to inspect another
+project. --project remains accepted as a deprecated alias. --explain prints
+every source candidate and the reason it won, was shadowed, was absent, or is
+disallowed for that key.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if configListExplainFlag || configListProjectFlag != "" {
-			resolved, err := loadResolvedConfig(configListProjectFlag)
+		projectSelector, err := configReadProjectSelector(configListRepoFlag, configListProjectFlag)
+		if err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
+		if configListExplainFlag || projectSelector != "" {
+			resolved, err := loadResolvedConfig(projectSelector)
+			if err != nil {
+				return jsonWrapError(cmd, configJSONFlag, err)
+			}
+			values, err := rootAgentAwareResolution(resolved, projectSelector)
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
@@ -276,13 +294,13 @@ it won, was shadowed, was absent, or is disallowed for that key.`,
 				if configJSONFlag {
 					output := configListExplanation{
 						Context: configExplanationContext(resolved),
-						Values:  resolved.Resolution,
+						Values:  values,
 					}
 					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(output))
 				}
-				return writeConfigExplanations(cmd.OutOrStdout(), resolved, resolved.Resolution)
+				return writeConfigExplanations(cmd.OutOrStdout(), resolved, values)
 			}
-			entries := configEntriesFromResolution(resolved)
+			entries := configEntriesFromResolution(values)
 			if configJSONFlag {
 				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entries))
 			}
@@ -544,13 +562,23 @@ func init() {
 	configGetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
 	configGetCmd.Flags().BoolVar(&configGetExplainFlag, "explain", false,
 		"Show every source candidate and why it did or did not supply the value")
+	configGetCmd.Flags().StringVar(&configGetRepoFlag, "repo", "",
+		"Resolve config for this project instead of the current repository")
 	configGetCmd.Flags().StringVar(&configGetProjectFlag, "project", "",
-		"Resolve config for the project at this repository path")
+		"Deprecated alias for --repo")
 	configListCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
 	configListCmd.Flags().BoolVar(&configListExplainFlag, "explain", false,
 		"Show every source candidate and why it did or did not supply each value")
+	configListCmd.Flags().StringVar(&configListRepoFlag, "repo", "",
+		"Resolve config for this project instead of the current repository")
 	configListCmd.Flags().StringVar(&configListProjectFlag, "project", "",
-		"Resolve config for the project at this repository path")
+		"Deprecated alias for --repo")
+	if err := configGetCmd.Flags().MarkDeprecated("project", "use --repo instead"); err != nil {
+		panic(err)
+	}
+	if err := configListCmd.Flags().MarkDeprecated("project", "use --repo instead"); err != nil {
+		panic(err)
+	}
 	configSetCmd.Flags().BoolVar(&configJSONFlag, "json", false, jsonUsage)
 	configSetCmd.Flags().StringVar(&configSetProjectFlag, "project", "",
 		"Write to this project's machine-local config instead of the global config (a prj_ id or a repository path)")

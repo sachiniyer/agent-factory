@@ -8,6 +8,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -96,4 +97,51 @@ func TestConfigGetRootAgentExplainProjectPersonalDisablesLegacy(t *testing.T) {
 	// The personal disable wins the enabled decision and the root resolves off.
 	assert.Contains(t, out, "enabled: personal project", "enabled must be attributed to the personal layer")
 	assert.Contains(t, out, `root_agent = {"enabled":false}`, "the root must resolve disabled")
+}
+
+// TestConfigGetRootAgentDefaultsToCurrentProject is the fabricated-negative
+// regression guard from #2607. A bare read from inside a repo with a legacy
+// root_agents opt-in must inspect that project, for both the concise value and
+// the provenance trace; reporting the global disabled default could make a
+// healthy running root agent look orphaned.
+func TestConfigGetRootAgentDefaultsToCurrentProject(t *testing.T) {
+	_, repoRoot := setupRootAgentProject(t, "schema_version = 1\n", true, "")
+	t.Chdir(repoRoot)
+
+	setConfigGetReadFlags(t, "", false, false)
+	out, err := runConfigGetForTest(t, "root_agent")
+	require.NoError(t, err)
+	assert.Equal(t, "{\"enabled\":true}\n", out)
+
+	configGetExplainFlag = true
+	out, err = runConfigGetForTest(t, "root_agent")
+	require.NoError(t, err)
+	assert.Contains(t, out, "project: "+repoRoot)
+	assert.Contains(t, out, `root_agent = {"enabled":true}`)
+	assert.Contains(t, out, "winner · supplies the effective enabled")
+	assert.Contains(t, out, "this project has no entry")
+	assert.NotContains(t, out, "no project in scope")
+}
+
+// TestConfigGetRootAgentGlobalTraceDoesNotInventAProject distinguishes a real
+// selected project with no entry from global fallback outside git. The latter
+// must never claim that "this project" is unconfigured because no project was
+// inspected.
+func TestConfigGetRootAgentGlobalTraceDoesNotInventAProject(t *testing.T) {
+	_, _ = setupConfigExplainCommandTest(t, "schema_version = 1\n")
+	t.Chdir(t.TempDir())
+	setConfigGetReadFlags(t, "", true, false)
+
+	out, err := runConfigGetForTest(t, "root_agent")
+	require.NoError(t, err)
+	assert.Contains(t, out, "scope: global defaults")
+	assert.Contains(t, out, "no project in scope")
+	assert.NotContains(t, out, "not configured for this project")
+}
+
+func TestConfigReadFlagsUseRepoAndKeepProjectAlias(t *testing.T) {
+	for _, cmd := range []*cobra.Command{configGetCmd, configListCmd} {
+		require.NotNil(t, cmd.Flags().Lookup("repo"), "%s must follow the shared --repo contract", cmd.Name())
+		require.NotNil(t, cmd.Flags().Lookup("project"), "%s must retain --project as a compatibility alias", cmd.Name())
+	}
 }

@@ -221,7 +221,7 @@ func rootAgentCandidate(source RootAgentSource, l rootAgentNormLayer, present bo
 		c.Reason = "root agents are opt-in by default"
 	case !present:
 		c.Result = "absent"
-		c.Reason = "not configured for this project"
+		c.Reason = "not configured"
 	default:
 		wonEnabled := res.EnabledSource == source
 		wonProgram := res.ProgramSource == source

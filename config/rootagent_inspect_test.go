@@ -31,7 +31,7 @@ func TestRootAgentExplainTraceNamesLayerPerField(t *testing.T) {
 			Global: &RootAgentLayer{Value: RootAgent{Program: "codex"}}, // program set, enabled unset
 			Legacy: &RootAgentConfig{},                                  // empty: enables, program unset
 		})
-		rv := rootAgentResolvedValue(res, rootAgentLocations{})
+		rv := rootAgentResolvedValue(res, rootAgentLocations{}, true)
 
 		// Per-field winners: enabled from legacy, program from global.
 		require.Contains(t, rv.Origins, "enabled")
@@ -61,7 +61,7 @@ func TestRootAgentExplainTraceNamesLayerPerField(t *testing.T) {
 			Legacy:   &RootAgentConfig{Program: "legacy-prog"},                            // enables, program set
 			Personal: &RootAgentLayer{Value: RootAgent{Enabled: false}, EnabledSet: true}, // explicit disable
 		})
-		rv := rootAgentResolvedValue(res, rootAgentLocations{})
+		rv := rootAgentResolvedValue(res, rootAgentLocations{}, true)
 
 		// The disable must be attributed to the personal layer.
 		require.Contains(t, rv.Origins, "enabled")
@@ -82,7 +82,7 @@ func TestRootAgentExplainTraceNamesLayerPerField(t *testing.T) {
 // absent layer reads as "not participating" rather than vanishing from the
 // explanation.
 func TestRootAgentExplainTraceCoversAllFourLayers(t *testing.T) {
-	rv := rootAgentResolvedValue(ResolveRootAgent(RootAgentInputs{}), rootAgentLocations{})
+	rv := rootAgentResolvedValue(ResolveRootAgent(RootAgentInputs{}), rootAgentLocations{}, false)
 	for _, layer := range []RootAgentSource{
 		RootAgentSourceBuiltIn, RootAgentSourceGlobal, RootAgentSourceLegacy, RootAgentSourcePersonal,
 	} {

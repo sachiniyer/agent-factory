@@ -29,17 +29,34 @@ type configListExplanation struct {
 	Values  []config.ResolvedValue `json:"values"`
 }
 
+func configReadProjectSelector(repoSelector, projectAlias string) (string, error) {
+	if repoSelector != "" && projectAlias != "" {
+		return "", fmt.Errorf("--repo and --project are aliases; pass only one")
+	}
+	if repoSelector != "" {
+		return repoSelector, nil
+	}
+	if projectAlias != "" {
+		return projectAlias, nil
+	}
+	repo, err := config.CurrentRepo()
+	if err != nil {
+		return "", nil
+	}
+	return repo.Root, nil
+}
+
 func loadResolvedConfig(projectSelector string) (*config.ResolvedConfig, error) {
 	if projectSelector == "" {
 		return config.ResolveGlobalConfig()
 	}
 	abs, err := config.ResolveUserPath(projectSelector)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
+		return nil, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 	}
 	repo, err := config.RepoFromPath(abs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve --project path %q: %w", projectSelector, err)
+		return nil, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 	}
 	resolved, err := config.ResolveConfigForInspection(repo.Root)
 	if err != nil {
@@ -47,7 +64,7 @@ func loadResolvedConfig(projectSelector string) (*config.ResolvedConfig, error) 
 	}
 	displayRoot := selectedProjectDisplayRoot(abs, repo.Root)
 	if err := resolved.RebaseProjectPathsForDisplay(displayRoot); err != nil {
-		return nil, fmt.Errorf("failed to preserve --project path %q for display: %w", projectSelector, err)
+		return nil, fmt.Errorf("failed to preserve project path %q for display: %w", projectSelector, err)
 	}
 	return resolved, nil
 }
@@ -77,14 +94,14 @@ func isRootAgentExplainKey(key string) bool {
 	return key == "root_agent" || strings.HasPrefix(key, "root_agent.")
 }
 
-// rootAgentExplainValue returns the specialized four-layer root_agent resolution
-// for --explain: the whole table, or a projected leaf for a dotted key. It
-// mirrors what the daemon resolves (built-in/global/legacy/personal), unlike the
-// generic global<personal resolver. A dotted leaf is projected through the same
+// rootAgentReadValue returns the specialized four-layer root_agent resolution:
+// the whole table, or a projected leaf for a dotted key. It mirrors what the
+// daemon resolves (built-in/global/legacy/personal), unlike the generic
+// global<personal resolver. A dotted leaf is projected through the same
 // ResolvedValuePath machinery every other key uses, by wrapping the specialized
-// table in a throwaway ResolvedConfig — so the leaf trace and its per-source
-// winner render identically to, say, theme.accent.
-func rootAgentExplainValue(projectSelector, keyPath string) (config.ResolvedValue, error) {
+// table in a throwaway ResolvedConfig — so concise and --explain reads cannot
+// disagree about the effective value.
+func rootAgentReadValue(projectSelector, keyPath string) (config.ResolvedValue, error) {
 	parent, err := config.ResolveRootAgentForInspection(projectSelector)
 	if err != nil {
 		return config.ResolvedValue{}, err
@@ -100,9 +117,24 @@ func rootAgentExplainValue(projectSelector, keyPath string) (config.ResolvedValu
 	return projected, nil
 }
 
-func configEntriesFromResolution(resolved *config.ResolvedConfig) []configEntry {
-	entries := make([]configEntry, 0, len(resolved.Resolution))
-	for _, value := range resolved.Resolution {
+func rootAgentAwareResolution(resolved *config.ResolvedConfig, projectSelector string) ([]config.ResolvedValue, error) {
+	values := append([]config.ResolvedValue(nil), resolved.Resolution...)
+	rootAgent, err := config.ResolveRootAgentForInspection(projectSelector)
+	if err != nil {
+		return nil, err
+	}
+	for i := range values {
+		if values[i].Key == "root_agent" {
+			values[i] = rootAgent
+			break
+		}
+	}
+	return values, nil
+}
+
+func configEntriesFromResolution(values []config.ResolvedValue) []configEntry {
+	entries := make([]configEntry, 0, len(values))
+	for _, value := range values {
 		entries = append(entries, configEntry{Key: value.Key, Value: value.Value})
 	}
 	return entries

@@ -440,11 +440,11 @@ Read global or project-effective config and write global config
 
 Read and write keys in the global config (~/.agent-factory/config.toml).
 
-"get"/"list" print the effective global config with defaults applied — what a
-session gets before any in-repo .agent-factory/config.toml override is layered
-on. Pass --project <repository-path> to inspect the existing global, checked-in,
-and personal per-project layers for that project. --explain shows every
-candidate and why it did or did not supply the effective value.
+"get"/"list" print the effective config for the current repository, including
+its checked-in and personal per-project layers. Pass --repo <repository-path> to
+inspect another project. Outside a git repository they fall back to global
+defaults. --explain shows every candidate and why it did or did not supply the
+effective value.
 
 "set"/"unset" write config. Without --project they edit the global config,
 changing a single settable key in place so all comments and ordering are
@@ -477,15 +477,17 @@ af config
 
 Print one global or project-effective config value
 
-Print the effective global value of one config key (e.g. default_program,
-auto_update, update_channel). Run "af config list" to see every key. Scalar values
-print bare; composite values (program_overrides, root_agents, limit_patterns,
-keys) print as JSON.
+Print the effective value of one config key (e.g. default_program,
+auto_update, update_channel). By default the current repository's legacy,
+checked-in, and personal layers participate; outside git, the command falls back
+to global defaults. Run "af config list" to see every key. Scalar values print
+bare; composite values (program_overrides, root_agents, limit_patterns, keys)
+print as JSON.
 
-With --project <repository-path>, print the value after the repository's current
-legacy and checked-in config layers are applied. The path is a selector only;
-this command does not register a project or write identity state. --explain
-prints the same resolved value with the complete source trace.
+Use --repo <repository-path> to inspect another project. The path is a selector
+only; this command does not register a project or write identity state.
+--project remains accepted as a deprecated alias. --explain prints the same
+resolved value with the complete source trace.
 
 ```
 af config get <key> [flags]
@@ -497,7 +499,7 @@ af config get <key> [flags]
 |------|------|-------------|
 | `--explain` |  | Show every source candidate and why it did or did not supply the value |
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
-| `--project` | `string` | Resolve config for the project at this repository path |
+| `--repo` | `string` | Resolve config for this project instead of the current repository |
 
 **Global flags**
 
@@ -510,10 +512,12 @@ af config get <key> [flags]
 
 Print global or project-effective config values
 
-Print every global config key and its effective value. Pass --project
-<repository-path> to include the repository's current legacy and checked-in
-config keys and layers. --explain prints every source candidate and the reason
-it won, was shadowed, was absent, or is disallowed for that key.
+Print every effective config key. By default the current repository's
+legacy, checked-in, and personal layers participate; outside git, the command
+falls back to global defaults. Pass --repo <repository-path> to inspect another
+project. --project remains accepted as a deprecated alias. --explain prints
+every source candidate and the reason it won, was shadowed, was absent, or is
+disallowed for that key.
 
 ```
 af config list [flags]
@@ -525,7 +529,7 @@ af config list [flags]
 |------|------|-------------|
 | `--explain` |  | Show every source candidate and why it did or did not supply each value |
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
-| `--project` | `string` | Resolve config for the project at this repository path |
+| `--repo` | `string` | Resolve config for this project instead of the current repository |
 
 **Global flags**
 

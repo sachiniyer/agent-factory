@@ -56,14 +56,14 @@ func (locs rootAgentLocations) forSource(source RootAgentSource) (path, keyPath 
 // NEXT start; it reads on-disk config, never the running daemon.
 //
 // Global scope (an empty selector) has no project to key the legacy and personal
-// layers by, so those layers resolve as absent; pass --project <path> to see them
-// participate.
+// layers by, so those layers resolve as absent. The command normally supplies
+// the cwd's repository and reaches global scope only outside git.
 func ResolveRootAgentForInspection(projectSelector string) (ResolvedValue, error) {
 	inputs, locs, err := assembleRootAgentInspectionInputs(projectSelector)
 	if err != nil {
 		return ResolvedValue{}, err
 	}
-	return rootAgentResolvedValue(ResolveRootAgent(inputs), locs), nil
+	return rootAgentResolvedValue(ResolveRootAgent(inputs), locs, projectSelector != ""), nil
 }
 
 // assembleRootAgentInspectionInputs builds the RootAgentInputs the --explain
@@ -158,7 +158,7 @@ func legacyRootAgentForRepoID(global *Config, repoID string) (*RootAgentConfig, 
 // Program can come from different layers), and the by-field merge policy. Pure —
 // no disk — so the per-field layer naming is unit-tested directly against the
 // decisive fixtures (empty-legacy, personal-disable).
-func rootAgentResolvedValue(res RootAgentResolution, locs rootAgentLocations) ResolvedValue {
+func rootAgentResolvedValue(res RootAgentResolution, locs rootAgentLocations, projectInScope bool) ResolvedValue {
 	rv := ResolvedValue{
 		Key:     "root_agent",
 		Value:   res.RootAgent,
@@ -174,6 +174,19 @@ func rootAgentResolvedValue(res RootAgentResolution, locs rootAgentLocations) Re
 	}
 	for _, c := range res.Candidates {
 		path, keyPath := locs.forSource(c.Source)
+		reason := c.Reason
+		if !c.Present {
+			switch c.Source {
+			case RootAgentSourceGlobal:
+				reason = "not configured globally"
+			case RootAgentSourceLegacy, RootAgentSourcePersonal:
+				if projectInScope {
+					reason = "this project has no entry"
+				} else {
+					reason = "no project in scope — pass --repo <path> to resolve this per-project layer"
+				}
+			}
+		}
 		rv.Candidates = append(rv.Candidates, CandidateTrace{
 			Layer:   string(c.Source),
 			Path:    path,
@@ -182,7 +195,7 @@ func rootAgentResolvedValue(res RootAgentResolution, locs rootAgentLocations) Re
 			Present: c.Present,
 			Value:   rootAgentCandidateLeaves(c),
 			Result:  c.Result,
-			Reason:  c.Reason,
+			Reason:  reason,
 		})
 	}
 	origins := map[string]SourceRef{
