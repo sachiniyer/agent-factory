@@ -56,6 +56,84 @@ func directoryNames(directory *os.File, path string) ([]string, error) {
 	return names, nil
 }
 
+func removeEmptyDirectoryAt(parent *os.File, name, path string) error {
+	if err := unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR); err != nil {
+		return fmt.Errorf("failed to clean empty private directory %s: %w", path, err)
+	}
+	return nil
+}
+
+func validateCopiedTree(root *os.File, expected copiedDirectory, source bool, path string) error {
+	rootDirectory := expected
+	queue := []copiedDirectoryRoute{{directory: &rootDirectory}}
+	for len(queue) > 0 {
+		job := queue[0]
+		queue = queue[1:]
+		directory, err := openDirectoryRoute(root, path, job.components, source)
+		if err != nil {
+			return err
+		}
+		err = validateCopiedDirectoryLevel(
+			directory,
+			*job.directory,
+			source,
+			directoryRoutePath(path, job.components),
+		)
+		_ = directory.Close()
+		if err != nil {
+			return err
+		}
+		for _, entry := range job.directory.entries {
+			if entry.directory == nil {
+				continue
+			}
+			components := append([]copiedEntry(nil), job.components...)
+			components = append(components, entry)
+			queue = append(queue, copiedDirectoryRoute{components: components, directory: entry.directory})
+		}
+	}
+	return nil
+}
+
+func validateCopiedDirectoryLevel(
+	directory *os.File,
+	expected copiedDirectory,
+	source bool,
+	path string,
+) error {
+	names, err := directoryNames(directory, path)
+	if err != nil {
+		return err
+	}
+	expectedByName := make(map[string]copiedEntry, len(expected.entries))
+	for _, entry := range expected.entries {
+		expectedByName[entry.name] = entry
+	}
+	if len(names) != len(expectedByName) {
+		return fmt.Errorf("tree entry set changed at %s", path)
+	}
+	for _, name := range names {
+		entry, ok := expectedByName[name]
+		if !ok {
+			return fmt.Errorf("unexpected tree entry %s", filepath.Join(path, name))
+		}
+		current, err := identityAt(directory, name)
+		if err != nil {
+			return err
+		}
+		expectedIdentity := entry.destination
+		role := "destination"
+		if source {
+			expectedIdentity = entry.source
+			role = "source"
+		}
+		if !expectedIdentity.same(current) {
+			return fmt.Errorf("%s tree entry identity changed at %s", role, filepath.Join(path, name))
+		}
+	}
+	return nil
+}
+
 func validatePublishedDestination(dest string, copied *copiedTreeIdentities) error {
 	currentParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(dest), "destination parent")
 	if err != nil {
@@ -90,6 +168,17 @@ func validatePublishedDestination(dest string, copied *copiedTreeIdentities) err
 	return nil
 }
 
+type unverifiedCleanupPathError struct {
+	err error
+}
+
+func (err *unverifiedCleanupPathError) Error() string { return err.err.Error() }
+func (err *unverifiedCleanupPathError) Unwrap() error { return err.err }
+
+func unverifiedCleanupError(format string, args ...any) error {
+	return &unverifiedCleanupPathError{err: fmt.Errorf(format, args...)}
+}
+
 func removeOpenedDirectory(
 	parent *os.File,
 	name, path string,
@@ -102,19 +191,31 @@ func removeOpenedDirectory(
 	}
 	current, err := identityAt(parent, name)
 	if err != nil || !directoryIdentity.same(current) {
-		return fmt.Errorf("refusing to remove directory %s because its secured name no longer identifies the opened tree", path)
+		return unverifiedCleanupError(
+			"refusing to remove directory %s because its secured name no longer identifies the opened tree",
+			path,
+		)
 	}
-	if expected != nil {
-		if err := validateCopiedDirectory(directory, *expected, true, path); err != nil {
-			return fmt.Errorf("refusing to remove changed source tree %s: %w", path, err)
+	manifest := expected
+	protectUnexpected := expected != nil
+	if manifest == nil {
+		snapshot, snapshotErr := snapshotCopiedTree(directory, path)
+		if snapshotErr != nil {
+			return snapshotErr
 		}
+		manifest = &snapshot
+	} else if err := validateCopiedTree(directory, *manifest, true, path); err != nil {
+		return unverifiedCleanupError("refusing to remove changed source tree %s: %v", path, err)
 	}
-	if err := removeOpenedDirectoryContents(directory, path, expected); err != nil {
+	if err := removeCopiedTree(directory, path, *manifest, protectUnexpected); err != nil {
 		return err
 	}
 	current, err = identityAt(parent, name)
 	if err != nil || !directoryIdentity.same(current) {
-		return fmt.Errorf("refusing to unlink directory %s because its secured name changed during cleanup", path)
+		return unverifiedCleanupError(
+			"refusing to unlink directory %s because its secured name changed during cleanup",
+			path,
+		)
 	}
 	if err := unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR); err != nil {
 		return fmt.Errorf("failed to remove secured directory %s: %w", path, err)
@@ -122,74 +223,144 @@ func removeOpenedDirectory(
 	return nil
 }
 
-func removeOpenedDirectoryContents(directory *os.File, path string, expected *copiedDirectory) error {
-	names, err := directoryNames(directory, path)
-	if err != nil {
-		return err
+func snapshotCopiedTree(root *os.File, path string) (copiedDirectory, error) {
+	manifest := copiedDirectory{}
+	queue := []copiedDirectoryRoute{{directory: &manifest}}
+	for len(queue) > 0 {
+		job := queue[0]
+		queue = queue[1:]
+		directory, err := openDirectoryRoute(root, path, job.components, true)
+		if err != nil {
+			return copiedDirectory{}, err
+		}
+		names, err := directoryNames(directory, directoryRoutePath(path, job.components))
+		if err != nil {
+			_ = directory.Close()
+			return copiedDirectory{}, err
+		}
+		job.directory.entries = make([]copiedEntry, 0, len(names))
+		for _, name := range names {
+			identity, err := identityAt(directory, name)
+			if err != nil {
+				_ = directory.Close()
+				return copiedDirectory{}, err
+			}
+			entry := copiedEntry{name: name, source: identity}
+			if identity.fileType == unix.S_IFDIR {
+				child := copiedDirectory{}
+				entry.directory = &child
+			}
+			job.directory.entries = append(job.directory.entries, entry)
+			if entry.directory != nil {
+				components := append([]copiedEntry(nil), job.components...)
+				components = append(components, entry)
+				queue = append(queue, copiedDirectoryRoute{components: components, directory: entry.directory})
+			}
+		}
+		_ = directory.Close()
 	}
-	expectedByName := make(map[string]copiedEntry)
-	if expected != nil {
-		for _, entry := range expected.entries {
-			expectedByName[entry.name] = entry
-		}
-		if len(names) != len(expectedByName) {
-			return fmt.Errorf("refusing to remove changed tree %s: entry set differs from copied source", path)
+	return manifest, nil
+}
+
+func removeCopiedTree(root *os.File, path string, manifest copiedDirectory, protectUnexpected bool) error {
+	rootManifest := manifest
+	routes := []copiedDirectoryRoute{{directory: &rootManifest}}
+	for index := 0; index < len(routes); index++ {
+		job := routes[index]
+		for _, entry := range job.directory.entries {
+			if entry.directory == nil {
+				continue
+			}
+			components := append([]copiedEntry(nil), job.components...)
+			components = append(components, entry)
+			routes = append(routes, copiedDirectoryRoute{components: components, directory: entry.directory})
 		}
 	}
-	for _, name := range names {
-		entry, hasExpected := expectedByName[name]
-		if expected != nil && !hasExpected {
-			return fmt.Errorf("refusing to remove unexpected entry %s", filepath.Join(path, name))
+	sort.SliceStable(routes, func(left, right int) bool {
+		return len(routes[left].components) > len(routes[right].components)
+	})
+	for _, route := range routes {
+		directory, err := openDirectoryRoute(root, path, route.components, true)
+		if err != nil {
+			return changedCleanupError(protectUnexpected, "failed to reopen copied source tree: %v", err)
 		}
-		current, err := identityAt(directory, name)
+		directoryPath := directoryRoutePath(path, route.components)
+		for _, entry := range route.directory.entries {
+			if entry.directory != nil {
+				continue
+			}
+			if err := removeCopiedEntry(directory, directoryPath, entry, protectUnexpected); err != nil {
+				_ = directory.Close()
+				return err
+			}
+		}
+		remaining, err := directoryNames(directory, directoryPath)
+		_ = directory.Close()
 		if err != nil {
 			return err
 		}
-		if hasExpected && !entry.source.same(current) {
-			return fmt.Errorf("refusing to remove changed source entry %s", filepath.Join(path, name))
-		}
-		claimedName, err := privateMoveName("delete")
-		if err != nil {
-			return err
-		}
-		if err := renameAtNoReplace(int(directory.Fd()), name, int(directory.Fd()), claimedName); err != nil {
-			return fmt.Errorf("failed to secure entry %s for removal: %w", filepath.Join(path, name), err)
-		}
-		claimed, err := identityAt(directory, claimedName)
-		if err != nil || !current.same(claimed) {
-			restoreErr := renameAtNoReplace(int(directory.Fd()), claimedName, int(directory.Fd()), name)
-			return errors.Join(
-				fmt.Errorf("entry %s changed while it was secured for removal", filepath.Join(path, name)),
-				restoreErr,
+		if len(remaining) != 0 {
+			return changedCleanupError(
+				protectUnexpected,
+				"refusing to remove directory %s because unexpected entries remain",
+				directoryPath,
 			)
 		}
-		claimedPath := filepath.Join(path, claimedName)
-		if current.fileType == unix.S_IFDIR {
-			child, _, err := openDirectoryAt(directory, claimedName, claimedPath, "secured cleanup")
-			if err != nil {
-				return err
-			}
-			var childExpected *copiedDirectory
-			if hasExpected {
-				childExpected = entry.directory
-			}
-			err = removeOpenedDirectory(directory, claimedName, claimedPath, child, childExpected)
-			_ = child.Close()
-			if err != nil {
-				return err
-			}
+		if len(route.components) == 0 {
 			continue
 		}
-		if err := unix.Unlinkat(int(directory.Fd()), claimedName, 0); err != nil {
-			return fmt.Errorf("failed to remove secured entry %s: %w", claimedPath, err)
+		parentComponents := route.components[:len(route.components)-1]
+		entry := route.components[len(route.components)-1]
+		parent, err := openDirectoryRoute(root, path, parentComponents, true)
+		if err != nil {
+			return changedCleanupError(protectUnexpected, "failed to reopen copied source parent: %v", err)
+		}
+		err = removeCopiedEntry(parent, directoryRoutePath(path, parentComponents), entry, protectUnexpected)
+		_ = parent.Close()
+		if err != nil {
+			return err
 		}
 	}
-	remaining, err := directoryNames(directory, path)
+	return nil
+}
+
+func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
+	current, err := identityAt(directory, entry.name)
+	if err != nil || !entry.source.same(current) {
+		return changedCleanupError(
+			protectUnexpected,
+			"refusing to remove changed source entry %s",
+			filepath.Join(path, entry.name),
+		)
+	}
+	claimedName, err := privateMoveName("delete")
 	if err != nil {
 		return err
 	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("refusing to remove directory %s because new entries appeared during cleanup", path)
+	if err := renameAtNoReplace(int(directory.Fd()), entry.name, int(directory.Fd()), claimedName); err != nil {
+		return fmt.Errorf("failed to secure entry %s for removal: %w", filepath.Join(path, entry.name), err)
+	}
+	claimed, err := identityAt(directory, claimedName)
+	if err != nil || !current.same(claimed) {
+		restoreErr := renameAtNoReplace(int(directory.Fd()), claimedName, int(directory.Fd()), entry.name)
+		return errors.Join(
+			changedCleanupError(protectUnexpected, "entry %s changed while it was secured for removal", filepath.Join(path, entry.name)),
+			restoreErr,
+		)
+	}
+	flags := 0
+	if entry.directory != nil {
+		flags = unix.AT_REMOVEDIR
+	}
+	if err := unix.Unlinkat(int(directory.Fd()), claimedName, flags); err != nil {
+		return fmt.Errorf("failed to remove secured entry %s: %w", filepath.Join(path, claimedName), err)
 	}
 	return nil
+}
+
+func changedCleanupError(protect bool, format string, args ...any) error {
+	if protect {
+		return unverifiedCleanupError(format, args...)
+	}
+	return fmt.Errorf(format, args...)
 }

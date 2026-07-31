@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -319,6 +320,61 @@ func TestRelocate_CopySucceedsCleanupFails_NoErrorNoRetryOrphan(t *testing.T) {
 	// The cleanup failure is surfaced (visible, not swallowed) so the leftover disk is reclaimable.
 	assert.Contains(t, warnings.String(), "failed to remove")
 	assert.Contains(t, warnings.String(), leftoverPath)
+}
+
+// TestMoveWorktree_UnverifiedCleanupPathOmitsDeleteAdvice drives a quarantine
+// endpoint replacement through the real relocate path. The destination remains
+// the operational worktree, but the retained descriptor no longer reveals the
+// original source pathname; warning text must not recommend deleting whatever
+// uncopied directory now occupies that stale private name.
+func TestMoveWorktree_UnverifiedCleanupPathOmitsDeleteAdvice(t *testing.T) {
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure")
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	previousRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = previousRename })
+
+	var warnings bytes.Buffer
+	originalWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = originalWarning })
+
+	worktree, _, sourcePath := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	originalRemoveTree := removeDirectoryTree
+	var replacementPath, movedOriginal string
+	removeDirectoryTree = func(parent *os.File, name, path string, directory *os.File, expected *copiedDirectory) error {
+		if filepath.Dir(path) != filepath.Dir(sourcePath) || !strings.Contains(filepath.Base(path), ".af-source-") {
+			return originalRemoveTree(parent, name, path, directory, expected)
+		}
+		replacementPath = path
+		movedOriginal = path + ".moved"
+		if err := os.Rename(path, movedOriginal); err != nil {
+			return err
+		}
+		if err := os.Mkdir(path, 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(path, "replacement.txt"), []byte("replacement"), 0644); err != nil {
+			return err
+		}
+		return originalRemoveTree(parent, name, path, directory, expected)
+	}
+	t.Cleanup(func() { removeDirectoryTree = originalRemoveTree })
+
+	require.NoError(t, worktree.MoveWorktree(dest),
+		"a committed and repaired destination must not trigger a duplicate retry")
+	assert.NotEmpty(t, replacementPath)
+	assert.FileExists(t, filepath.Join(replacementPath, "replacement.txt"))
+	assert.FileExists(t, filepath.Join(movedOriginal, "dirty.txt"))
+	assert.NotContains(t, warnings.String(), shellsuggest.Command("rm", "-rf", replacementPath),
+		"an unverified quarantine name must never become destructive manual advice")
+	assert.Contains(t, warnings.String(), "could not determine")
 }
 
 // TestRestoreWorktreeTo_FallbackRepairsSubmoduleGitdirs archives and restores an
@@ -920,6 +976,63 @@ func TestMoveDirCrossDevice_CopyFailureCleansPrivateStaging(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.Empty(t, entries, "failed copy must remove its private staging tree")
 	assert.FileExists(t, filepath.Join(src, "regular.txt"), "copy failure must leave source untouched")
+}
+
+// TestMoveDirCrossDevice_InitialStagingOpenFailureCleansCreatedName covers the
+// narrow window after mkdirat succeeds but before a descriptor owns staging.
+// A restrictive umask makes the new directory unopenable deterministically.
+func TestMoveDirCrossDevice_InitialStagingOpenFailureCleansCreatedName(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalUmask := syscall.Umask(0777)
+	t.Cleanup(func() { syscall.Umask(originalUmask) })
+	err := moveDirCrossDevice(src, dest)
+	syscall.Umask(originalUmask)
+
+	require.Error(t, err)
+	entries, readErr := os.ReadDir(destinationParent)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "failed initial staging open must remove the created private name")
+	assert.FileExists(t, filepath.Join(src, "tracked.txt"))
+}
+
+// TestMoveDirCrossDevice_BoundsDescriptorsAcrossDeepTree lowers RLIMIT_NOFILE
+// after constructing a valid nested tree. Copy, validation, and cleanup must
+// use a fixed descriptor budget rather than retaining fds for every ancestor.
+func TestMoveDirCrossDevice_BoundsDescriptorsAcrossDeepTree(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	deepest := src
+	for range 24 {
+		deepest = filepath.Join(deepest, "d")
+		require.NoError(t, os.Mkdir(deepest, 0755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(deepest, "tracked.txt"), []byte("tracked"), 0644))
+	dest := filepath.Join(t.TempDir(), "dest")
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	var originalLimit unix.Rlimit
+	require.NoError(t, unix.Getrlimit(unix.RLIMIT_NOFILE, &originalLimit))
+	limited := originalLimit
+	if limited.Cur > 32 {
+		limited.Cur = 32
+	}
+	require.NoError(t, unix.Setrlimit(unix.RLIMIT_NOFILE, &limited))
+	t.Cleanup(func() { _ = unix.Setrlimit(unix.RLIMIT_NOFILE, &originalLimit) })
+	err := moveDirCrossDevice(src, dest)
+	require.NoError(t, unix.Setrlimit(unix.RLIMIT_NOFILE, &originalLimit))
+
+	require.NoError(t, err, "valid deep moves must not exhaust descriptors")
+	assert.FileExists(t, filepath.Join(dest, strings.Repeat("d/", 24), "tracked.txt"))
 }
 
 // TestMoveDirCrossDevice_LongLeafFitsPrivateNames covers a valid 239-byte leaf,
