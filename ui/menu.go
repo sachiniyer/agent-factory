@@ -646,24 +646,27 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 		s.WriteString(chunk)
 		col += lipgloss.Width(chunk)
 	}
+	hintStyles := func(k keys.KeyName, action bool) (lipgloss.Style, lipgloss.Style) {
+		localKeyStyle := keyStyle
+		localDescStyle := descStyle
+		if action {
+			localKeyStyle = actionGroupStyle
+			localDescStyle = actionGroupStyle
+		}
+		if m.keyDown == k {
+			localKeyStyle = localKeyStyle.Underline(true)
+			localDescStyle = localDescStyle.Underline(true)
+		}
+		return localKeyStyle, localDescStyle
+	}
 	prevGroup := -1
 	first := true
-	for i, k := range m.options {
+	for i := 0; i < len(m.options); i++ {
+		k := m.options[i]
 		if drop[k] {
 			continue
 		}
 		binding := keys.GlobalKeyBindings[k]
-
-		var (
-			localActionStyle = actionGroupStyle
-			localKeyStyle    = keyStyle
-			localDescStyle   = descStyle
-		)
-		if m.keyDown == k {
-			localActionStyle = localActionStyle.Underline(true)
-			localKeyStyle = localKeyStyle.Underline(true)
-			localDescStyle = localDescStyle.Underline(true)
-		}
 
 		group := groupOf(i)
 		inActionGroup := group >= 0 && m.groups[group].isAction
@@ -678,16 +681,53 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 		first = false
 		prevGroup = group
 
-		start := col
-		if inActionGroup {
-			write(localActionStyle.Render(binding.Help().Key))
-			write(" ")
-			write(localActionStyle.Render(binding.Help().Desc))
-		} else {
-			write(localKeyStyle.Render(binding.Help().Key))
-			write(" ")
-			write(localDescStyle.Render(binding.Help().Desc))
+		// Preview scrolling is one action with two directions. Render its
+		// adjacent bindings as one compact hint so the description is not
+		// repeated, while retaining a click target for each key.
+		if k == keys.KeyShiftUp && i+1 < len(m.options) &&
+			m.options[i+1] == keys.KeyShiftDown && !drop[keys.KeyShiftDown] &&
+			groupOf(i+1) == group {
+			downBinding := keys.GlobalKeyBindings[keys.KeyShiftDown]
+			upHelp := binding.Help()
+			downHelp := downBinding.Help()
+			if upHelp.Desc == downHelp.Desc && upHelp.Desc != "" {
+				upKeyStyle, _ := hintStyles(k, inActionGroup)
+				downKeyStyle, _ := hintStyles(keys.KeyShiftDown, inActionGroup)
+				sharedStyle := descStyle
+				slashStyle := keyStyle
+				if inActionGroup {
+					sharedStyle = actionGroupStyle
+					slashStyle = actionGroupStyle
+				}
+				if m.keyDown == k || m.keyDown == keys.KeyShiftDown {
+					sharedStyle = sharedStyle.Underline(true)
+				}
+
+				upStart := col
+				write(upKeyStyle.Render(upHelp.Key))
+				upEnd := col
+				write(slashStyle.Render("/"))
+				downStart := col
+				write(downKeyStyle.Render(downHelp.Key))
+				write(" ")
+				write(sharedStyle.Render(upHelp.Desc))
+
+				if bkeys := binding.Keys(); len(bkeys) > 0 {
+					spans = append(spans, hintSpan{key: bkeys[0], x: upStart, w: upEnd - upStart})
+				}
+				if bkeys := downBinding.Keys(); len(bkeys) > 0 {
+					spans = append(spans, hintSpan{key: bkeys[0], x: downStart, w: col - downStart})
+				}
+				i++
+				continue
+			}
 		}
+
+		localKeyStyle, localDescStyle := hintStyles(k, inActionGroup)
+		start := col
+		write(localKeyStyle.Render(binding.Help().Key))
+		write(" ")
+		write(localDescStyle.Render(binding.Help().Desc))
 		// KeyJumpTab's "1-9" chip names nine keys, not one action — it gets
 		// no click zone. Everything else is clickable by its primary key.
 		if k != keys.KeyJumpTab {

@@ -243,6 +243,22 @@ func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
 	}
 }
 
+func TestPane_AutoHideStatusKeepsRecoveryActionAt80Columns(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, 80, 24)
+
+	alpha := h.store.GetInstanceByTitle("alpha")
+	require.NotNil(t, alpha)
+	_, _ = h.openOrFocusPane(alpha, 0)
+	_, _ = h.openOrFocusPane(alpha, 1)
+
+	rendered := h.errBox.String()
+	assert.Contains(t, rendered, "`s` open pane",
+		"the narrow status line must preserve the cheapest recovery action")
+	assert.NotContains(t, rendered, "…",
+		"the ordinary 80-column notice should fit without destroying any guidance")
+}
+
 // TestPane_AutoHideStatusDisambiguatesDuplicateTerminalTabs covers the status
 // half of #2150. The pane header and the narrow-layout notice are two views of
 // the same pane identity; neither may collapse two default Terminal tabs back

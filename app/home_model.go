@@ -742,12 +742,12 @@ func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPa
 // can own several panes, so "docs hidden" while a second `docs` pane is on
 // screen tells the user something they can see is false (#1997).
 //
-// The reason clause drops the word "terminal" to pay for the tab name: at 80
-// columns the old line already sat one cell under the limit, and the bar
-// truncates from the RIGHT, so a longer line silently eats the recovery hint
-// (#1973). Long instance titles still overflow — nothing can fit an unbounded
-// title — but the fragments are ordered worst-first, so what survives the
-// truncation is the half that matters: which pane went away.
+// The reason clause drops the word "terminal" to pay for the tab name. The
+// cheapest recovery action follows the pane identity, before the resize
+// explanation, because the bar truncates from the RIGHT; putting it last made
+// the ordinary 80-column notice destroy the very hint needed to restore the
+// pane (#2580). Long instance titles can still overflow — nothing can fit an
+// unbounded title — but E details preserves the full notice.
 func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	if p == nil || paneCount <= 1 {
 		return
@@ -756,8 +756,11 @@ func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	if label, ok := paneStatusLabel(p); ok {
 		subject = label + " hidden"
 	}
-	msg := fmt.Sprintf("%s — too narrow for %d panes; resize wider%s",
-		subject, paneCount, paneRecoveryStatusHint())
+	recovery := paneRecoveryStatusHint()
+	msg := fmt.Sprintf("%s — resize wider for %d panes", subject, paneCount)
+	if recovery != "" {
+		msg = fmt.Sprintf("%s — %s; resize wider for %d panes", subject, recovery, paneCount)
+	}
 	m.pendingPaneAutoHideStatus = msg
 	m.paneAutoHideNoticeID = m.setTransientNotice(errors.New(msg))
 }
@@ -803,12 +806,12 @@ func paneStatusLabel(p *store.OpenPane) (string, bool) {
 
 func paneRecoveryStatusHint() string {
 	if key := bindingKeyWithDesc("pane list"); key != "" {
-		return fmt.Sprintf(" or use `%s` pane list", key)
+		return fmt.Sprintf("use `%s` pane list", key)
 	}
 	if binding, ok := keys.GlobalKeyBindings[keys.KeyOpenPane]; ok {
 		help := binding.Help()
 		if help.Key != "" && help.Desc != "" {
-			return fmt.Sprintf(" or use `%s` %s", help.Key, help.Desc)
+			return fmt.Sprintf("use `%s` %s", help.Key, help.Desc)
 		}
 	}
 	return ""

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,9 +79,12 @@ func TestMenuNarrowWidthKeepsHelpAndQuit(t *testing.T) {
 	// At a roomy width nothing is dropped: the scroll hints still render, and
 	// their copy scopes the binding to AF's preview rather than attached input.
 	m.SetSize(200, 1)
-	assert.Contains(t, m.String(), "ctrl+u preview scroll", "no drops at full width")
-	assert.Contains(t, m.String(), "ctrl+d preview scroll", "no drops at full width")
-	assert.Contains(t, m.String(), "q quit")
+	full := m.String()
+	assert.Contains(t, full, "ctrl+u/ctrl+d preview scroll",
+		"the two directions share one preview-scroll description")
+	assert.Equal(t, 1, strings.Count(full, "preview scroll"),
+		"the status row must not repeat the same scroll description")
+	assert.Contains(t, full, "q quit")
 }
 
 // TestMenuLimitBlockedRowFitsNarrowWidths covers the WIDEST instance row in the

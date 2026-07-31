@@ -229,7 +229,7 @@ func projectsSwitchHint() string { return "· enter switch" }
 func (p *ProjectsPane) titleLine(name string, nameStyle lipgloss.Style) string {
 	w := p.rect.W
 	const shortName = " Projects "
-	hint := " " + projectsSwitchHint() + " "
+	hint := projectsSwitchHint() + " "
 	if runewidth.StringWidth(name+hint) <= w {
 		return nameStyle.Render(name) + projectsHintStyle.Render(hint)
 	}

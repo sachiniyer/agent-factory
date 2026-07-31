@@ -56,6 +56,28 @@ func TestMenuHintZonesMatchRenderedHints(t *testing.T) {
 	}
 }
 
+func TestMenuCombinedScrollHintKeepsBothClickZones(t *testing.T) {
+	menu := NewMenu()
+	reg := zones.NewRegistry()
+	menu.SetZoneRegistry(reg)
+	menu.SetOrigin(layout.Point{})
+	menu.SetSize(200, 1)
+	menu.SetScrollAvailable(true)
+	menu.SetInstance(readyUIInstance())
+
+	reg.Reset()
+	line := xansi.Strip(menu.String())
+
+	up, ok := reg.Find(zones.StatusHint("ctrl+u"))
+	require.True(t, ok)
+	down, ok := reg.Find(zones.StatusHint("ctrl+d"))
+	require.True(t, ok)
+	assert.Equal(t, "ctrl+u", cellSlice(line, up.X, up.X+up.W),
+		"the first key remains independently clickable")
+	assert.Equal(t, "ctrl+d preview scroll", cellSlice(line, down.X, down.X+down.W),
+		"the second key and shared description form the second click target")
+}
+
 // TestMenuDroppedHintsRegisterNoZones: hints dropped by the narrow-width
 // priority list must not leave clickable ghosts.
 func TestMenuDroppedHintsRegisterNoZones(t *testing.T) {

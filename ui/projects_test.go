@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
@@ -35,6 +36,8 @@ func TestProjectsPaneRendersHeaderAndRows(t *testing.T) {
 
 	out := p.String()
 	assert.Contains(t, out, "Projects (3)", "header names the project count")
+	assert.Contains(t, xansi.Strip(out), "Projects (3) · enter switch",
+		"the title and switch hint have exactly one separating space")
 	assert.Contains(t, out, "agent-factory (3)")
 	assert.Contains(t, out, "website (1)")
 	assert.Contains(t, out, "infra (0)")
