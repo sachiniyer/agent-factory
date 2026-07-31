@@ -182,6 +182,30 @@ func TestTaskMutations_RefuseArchivedTarget(t *testing.T) {
 	}
 }
 
+// TestTaskMutations_UnrelatedEditToleratesExistingArchivedTarget preserves
+// field-level update tolerance across upgrades. Older daemons allowed an
+// enabled task to survive after its target was archived; editing its name does
+// not create or worsen that relationship, so it must remain possible while an
+// enable, retarget, or project rebind is still rejected above.
+func TestTaskMutations_UnrelatedEditToleratesExistingArchivedTarget(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+
+	legacyUnsafe := archiveTargetTask("oldstate", "Old Name", repoPath, "worker", true)
+	require.NoError(t, task.AddTask(legacyUnsafe), "seed the state accepted before lifecycle validation existed")
+	newName := "New Name"
+	var resp UpdateTaskResponse
+	err = archiveTaskControlServer(manager).UpdateTask(UpdateTaskRequest{
+		ID: legacyUnsafe.ID, Update: task.TaskUpdate{Name: &newName},
+	}, &resp)
+	require.NoError(t, err, "an unrelated patch must not be blocked by a pre-existing invalid target")
+	assert.Equal(t, newName, resp.Task.Name)
+	assert.True(t, resp.Task.Enabled)
+	assert.Equal(t, "worker", resp.Task.TargetSession)
+}
+
 // TestTaskMutations_TargetWriteFailsClosedDuringWarmup pins the persisted-state
 // side of the archive fence. A task write that depends on target liveness may
 // not treat the manager's still-empty restore map as proof that the target is

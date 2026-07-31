@@ -314,14 +314,15 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 			return s.manager.validateEnabledTaskTarget(candidate, validation)
 		}
 	}
-	if err := task.AddTaskChecked(req.Task, validate); err != nil {
+	created, err := task.AddTaskChecked(req.Task, validate)
+	if err != nil {
 		return err
 	}
 	resp.OK = true
 	// The task-file write is the durable commit. Publish it before the
 	// non-transactional scheduler/watch reload so other clients never remain
 	// stale when that follow-up fails.
-	s.manager.publishEvent(agentproto.EventTaskCreated, req.Task)
+	s.manager.publishEvent(agentproto.EventTaskCreated, created)
 	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
 		return &mutationCommittedError{err: fmt.Errorf(
 			"%s %w", taskAddCommittedErrorPrefix, reloadErr)}
@@ -374,12 +375,16 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 		validation := s.manager.prepareTaskTargetValidation(
 			validationRepoID, validationTarget, validationEnabled,
 		)
+		validateTargetRelationship := req.Update.Enabled != nil ||
+			req.Update.TargetSession != nil || req.Update.ProjectPath != nil
 		validate = func(candidate task.Task) (string, error) {
 			if candidate.RepoID == "" && candidate.ProjectPath == legacyPath {
 				candidate.RepoID = legacyRepoID
 			}
-			if err := s.manager.validateEnabledTaskTarget(candidate, validation); err != nil {
-				return "", err
+			if validateTargetRelationship {
+				if err := s.manager.validateEnabledTaskTarget(candidate, validation); err != nil {
+					return "", err
+				}
 			}
 			return candidate.RepoID, nil
 		}

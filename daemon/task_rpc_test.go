@@ -137,6 +137,7 @@ func TestControlUpdateTask_PostCommitFailureStillPublishes(t *testing.T) {
 
 func TestControlAddTask_PostCommitFailureStillPublishes(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
 	ready := make(chan struct{})
 	close(ready)
 	manager := &Manager{events: newEventsHub(), ready: ready}
@@ -145,7 +146,7 @@ func TestControlAddTask_PostCommitFailureStillPublishes(t *testing.T) {
 		manager:   manager,
 		scheduler: failingReloadTaskScheduler(),
 	}
-	created := enabledCronTask("bbbb0099", "")
+	created := enabledCronTask("bbbb0099", repoPath)
 
 	var resp AddTaskResponse
 	err := srv.AddTask(AddTaskRequest{Task: created}, &resp)
@@ -158,7 +159,8 @@ func TestControlAddTask_PostCommitFailureStillPublishes(t *testing.T) {
 		require.Equal(t, agentproto.EventTaskCreated, event.Type)
 		var got task.Task
 		require.NoError(t, json.Unmarshal(event.Data, &got))
-		assert.Equal(t, created.ID, got.ID)
+		assert.NotEmpty(t, stored.RepoID, "precondition: the checked add derived a durable repository binding")
+		assert.Equal(t, *stored, got, "task.created must publish the canonical record that was committed")
 	default:
 		t.Fatal("committed task create was not published before the post-commit error returned")
 	}
