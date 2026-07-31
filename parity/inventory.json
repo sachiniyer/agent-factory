@@ -849,11 +849,11 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/configcmd.go:163-195,219-251 --project"
+        "pointer": "commands/configcmd.go config get/list --repo (with deprecated --project alias)"
       },
       "verdict": "real-gap",
       "issue": "#2216",
-      "notes": "Stage 2 of #2216 adds read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. TUI/web exposure is intentionally scheduled for #2216's stage 7 after the durable project model and personal layers exist."
+      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. TUI/web exposure is tracked by #2216."
     },
     {
       "id": "config.explain",
@@ -1542,10 +1542,12 @@
       "af config get --explain": "config.explain",
       "af config get --json": "cli.json-envelope",
       "af config get --project": "config.read-project",
+      "af config get --repo": "config.read-project",
       "af config list --help": "meta.discovery",
       "af config list --explain": "config.explain",
       "af config list --json": "cli.json-envelope",
       "af config list --project": "config.read-project",
+      "af config list --repo": "config.read-project",
       "af config set --help": "meta.discovery",
       "af config set --json": "cli.json-envelope",
       "af config set --project": "config.write-project",
