@@ -542,7 +542,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 		for _, item := range data {
 			key := daemonInstanceKey(repoID, item.Title)
-			if item.ID == "" {
+			if item.ID == "" && !isLegacyTransientGhost(item) {
 				item.ID = session.NewInstanceID()
 				if existing != nil {
 					if prior := existing[key]; prior != nil && prior.ID != "" {
