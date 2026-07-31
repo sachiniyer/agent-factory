@@ -18,6 +18,14 @@ import (
 func TestNewHomeRegistryModeSkipsRepoScopedTUIViewState(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	warnings := captureWarningLog(t)
+	// Unlike newTestHome, this drives the REAL newHome — which is the point, since
+	// the regression is in its launch sequence. That also means it reaches
+	// refreshSidebarProjects and the real cross-repo fetcher, so without a stub it
+	// spends the daemon HTTP timeout dialing a daemon no unit test has. Stub
+	// BEFORE newHome: the fetch happens during construction.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return nil, nil
+	}))
 
 	h := newHome(context.Background(), "bash", nil)
 
