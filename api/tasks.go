@@ -553,11 +553,20 @@ var tasksUpdateCmd = &cobra.Command{
 		// then send the existing ProjectPath patch through daemonUpdateTask — the
 		// same task.UpdateTask path every other surface already uses.
 		if cmd.Flags().Changed("project-path") {
-			rawPath := strings.TrimSpace(taskUpdateProjectPathFlag)
-			if rawPath == "" {
+			// Trim only to reject an all-whitespace value; resolve the flag as
+			// typed. A directory name may legitimately begin or end with a
+			// space, and the shell already makes the user quote one to get it
+			// here, so the whitespace is intent rather than a slip. Resolving a
+			// trimmed spelling would make such a repository unreachable — or
+			// worse, silently rebind the task to a different repository that
+			// happens to answer to the trimmed name. `af projects register`
+			// passes its path argument through untrimmed for the same reason;
+			// the TUI editor trims because a text field offers no quoting with
+			// which to express the intent.
+			if strings.TrimSpace(taskUpdateProjectPathFlag) == "" {
 				return jsonError(errors.New("project path must be non-empty"))
 			}
-			absPath, err := config.ResolveUserPath(rawPath)
+			absPath, err := config.ResolveUserPath(taskUpdateProjectPathFlag)
 			if err != nil {
 				return jsonError(fmt.Errorf("failed to resolve --project-path %q: %w", taskUpdateProjectPathFlag, err))
 			}

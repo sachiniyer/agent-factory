@@ -1176,7 +1176,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:723 --project-path -> api/tasks.go:538-550 TaskUpdate.ProjectPath -> daemonUpdateTask"
+        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> daemonUpdateTask"
       },
       "verdict": "parity",
       "notes": "The web half was subsumed by #1935: its seeded project picker sends update.project_path. The CLI now sends the same TaskUpdate.ProjectPath patch with `af tasks update --project-path`; `--repo` remains the authorization scope for the task's current project, so `--repo old --project-path new` is unambiguous. This also supplies a repair path for the wrong-project automation incident in #1891 without duplicating the daemon's rebind and RepoID logic."

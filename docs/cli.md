@@ -127,7 +127,7 @@ Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigg
 
 ### Project binding
 
-A task is bound to exactly one project when it is created, and every run's worktree is created inside it. The binding comes from `--repo`, or from the current directory's project. It is fixed at creation: `--repo` on `update` scopes *which* task may be edited, and never re-binds one.
+A task is bound to exactly one project when it is created, and every run's worktree is created inside it. The binding comes from `--repo`, or from the current directory's project. The two flags on `update` do different jobs: `--repo` scopes *which* task may be edited and never re-binds one, while `--project-path <repo>` moves the task to another existing git repository — that path becomes both its new working directory and its project binding. So `af tasks update <id> --repo /repos/alpha --project-path /repos/beta` authorizes the task in alpha and moves it to beta.
 
 The project a task belongs to is recorded as an id resolved when the task is bound, not re-derived from its path on each read. This is why deleting a directory a task points at — a subdirectory or a linked worktree — never hides the task from its own project.
 
