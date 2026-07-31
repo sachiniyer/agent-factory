@@ -51,9 +51,17 @@ The `<name>` passed to hooks via `--name` is a slug derived from the session tit
 3. drop every character that is not `[a-z0-9-]`
 4. truncate to 200 bytes (so the slug stays a legal filesystem component for `mktemp`/`mkdir`)
 5. trim leading/trailing `-`
-6. if empty, use `session`
+6. reject the remote-hook title if the result is empty
 
 Examples: `"Fix Auth Bug"` → `fix-auth-bug`, `"my_app"` → `myapp`, `"af-test"` stays `af-test`. Two titles that slugify to the same value are rejected at create time, since `delete_cmd` keys on the slug. There is no hidden hash suffix.
+
+A remote-hook title must therefore retain at least one ASCII letter or digit in
+the bounded result. Titles such as `日本語` and `!!!` are rejected before
+`launch_cmd` runs instead of receiving the generic name `session`. The check is
+applied after the 200-byte bound too: a title made of 200 hyphens followed by
+`a` is rejected because truncation removes its only letter. Add an ASCII
+component that survives the bound (for example, `日本語-2`) to derive a specific
+hook name.
 
 **Hook names are global across projects.** Session titles are otherwise unique only *within* a project — the same title may exist in several repos at once (see [cli.md](cli.md#af-sessions)). Remote hook names are the deliberate exception: the slug reaches your scripts verbatim, with no repo component, and they tag and reap real sandboxes by it. Two projects using one name would let a second `launch_cmd` clobber the first sandbox, and either `delete_cmd` reap the survivor. So a remote-hook session's title must not collide with a remote-hook session in *any* project; af refuses the create and names the project already using it. Local sessions are unaffected — only hook-backed remote sessions share this namespace.
 
