@@ -824,7 +824,10 @@ step "af_select handles a target with an open pane (#1996)"  _expect_af_select_o
 #
 # default_program is applied to the running daemon in place (#2480), so this
 # acceptance path must confirm that the new value is live now and must not
-# resurrect the obsolete instruction to restart the daemon (#2479).
+# resurrect the obsolete instruction to restart the daemon (#2479). Reading the
+# notice is not enough: the daemon's ListPrograms answer shares the resolver
+# used by a create with no explicit program, so read that live contract back
+# through the real HTTP socket too.
 _expect_config_editor_writes() {
     af_open_config || return 1
     # The manifest's tier-1 keys lead; the editor holds no key list of its own.
@@ -847,6 +850,28 @@ _expect_config_editor_writes() {
     grep -q "default_program = 'codex'" "$AGENT_FACTORY_HOME/config.toml" || {
         printf 'config.toml does not hold the edited value:\n'
         cat "$AGENT_FACTORY_HOME/config.toml"
+        return 1
+    }
+
+    local api_catalog socket_path programs
+    api_catalog="$(af api --json)" || {
+        printf 'could not resolve the daemon HTTP socket through af api\n'
+        return 1
+    }
+    socket_path="$(printf '%s' "$api_catalog" | jq -er '.data.socket_path')" || {
+        printf 'af api did not report a daemon HTTP socket:\n%s\n' "$api_catalog"
+        return 1
+    }
+    programs="$(curl --fail --silent --show-error \
+        --unix-socket "$socket_path" \
+        http://localhost/v1/ListPrograms \
+        -d '{}')" || {
+        printf 'could not read the live program catalog from the daemon\n'
+        return 1
+    }
+    printf '%s' "$programs" |
+        jq -e '.error == null and .data.default == "codex"' >/dev/null || {
+        printf 'daemon did not apply default_program = codex live:\n%s\n' "$programs"
         return 1
     }
 }
