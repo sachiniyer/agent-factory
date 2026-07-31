@@ -228,6 +228,12 @@ func vscodeArgs(flavor vscodeFlavor, socketPath, worktree string) []string {
 			"--disable-telemetry",
 			"--disable-update-check",
 			"--disable-workspace-trust",
+			// AF runs one editor per session but deliberately leaves code-server's
+			// user-data directory shared so settings and extensions carry across
+			// them. Its remembered last workspace is shared too, and without this
+			// flag a second server can redirect to another session's folder even
+			// though the positional argument below names the right worktree (#2683).
+			"--ignore-last-opened",
 			worktree,
 		}
 	}

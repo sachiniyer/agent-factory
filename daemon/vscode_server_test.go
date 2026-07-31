@@ -781,6 +781,24 @@ func TestVSCodeArgs_FlavorDialects(t *testing.T) {
 	}
 }
 
+// TestVSCodeArgs_CodeServerIgnoresSharedLastWorkspace pins the flag that makes
+// the positional worktree authoritative. AF deliberately shares code-server's
+// user-data directory so settings and extensions carry across sessions. Without
+// --ignore-last-opened, two concurrently running editors also share the last
+// workspace: opening session B can make its server redirect to session A's folder
+// even though B's argv ends in B's worktree (#2683).
+func TestVSCodeArgs_CodeServerIgnoresSharedLastWorkspace(t *testing.T) {
+	cs := strings.Join(vscodeArgs(flavorCodeServer, "/run/af/e.sock", "/session-b"), " ")
+	if !strings.Contains(cs, "--ignore-last-opened") {
+		t.Fatalf("code-server argv = %q; missing --ignore-last-opened lets shared user data override /session-b with another session's workspace", cs)
+	}
+
+	ov := strings.Join(vscodeArgs(flavorOpenVSCode, "/run/af/e.sock", "/session-b"), " ")
+	if strings.Contains(ov, "--ignore-last-opened") {
+		t.Fatalf("openvscode-server argv = %q; code-server's --ignore-last-opened flag must not leak into the other CLI dialect", ov)
+	}
+}
+
 // TestVSCodeArgs_ScrubsIPCHookFromChildEnv is codex's [33]. code-server's
 // shouldOpenInExistingInstance reads VSCODE_IPC_HOOK_CLI UNCONDITIONALLY, before
 // it starts any server: when it is set the CLI forwards the folder to that
