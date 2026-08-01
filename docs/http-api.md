@@ -155,8 +155,7 @@ Restarting the daemon (so it matches the `af` binary on disk) is the fix.
 
 ## Warm-up behavior
 
-The daemon binds its sockets **before** it finishes restoring sessions, which
-can take minutes on repos with remote-hook sessions. During that window:
+The daemon binds its sockets **before** it finishes restoring sessions. During that window:
 
 - `GET /v1/health` answers immediately (it is a pure liveness probe) — it does
   not wait for the restore.
