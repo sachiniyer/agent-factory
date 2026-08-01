@@ -435,7 +435,7 @@ cross-project glance that replaces the old all-projects rail. Selecting a
 project scopes the rail and Tasks view to it; the choice persists across
 reloads. Projects with no live sessions show an empty-state prompt (`No active
 sessions in <project> — + New`). The switcher menu footer holds the **+ Add
-project** affordance and the reversible delete-project control.
+project** affordance and the delete-project control.
 
 ### Tasks view
 
