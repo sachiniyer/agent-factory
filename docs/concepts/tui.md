@@ -63,8 +63,8 @@ For a named long-running command or a web preview with a URL/port, use
 
 - **`n`** creates a new local session; **`N`** creates a remote one.
 - **`a`** archives the selected session as the default done action (or restores
-  an archived, Lost, or Dead one). **`D`** permanently kills it and refuses when
-  the session still has recoverable work.
+  an archived, Lost, or Dead one). **`D`** permanently kills it, including any
+  uncommitted or unmerged work.
 - **`m`** opens the tasks view to manage [scheduled and event-driven
   automations](../tasks.md).
 - **`c`** retries a session that's parked on a [usage limit](../usage-limits.md).

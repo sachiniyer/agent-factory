@@ -69,8 +69,8 @@ The TUI opens with an empty sidebar. From here:
    has focus, **`←`** / **`→`** move focus between open panes.
 4. When you're done with a session, **`a`** archives it: tmux is torn down, the
    worktree is moved aside, and the session can be restored later. **`D`**
-   permanently kills a session and removes its worktree/branch; it refuses when
-   the branch still has recoverable work.
+   permanently kills a session and removes its worktree/branch, including any
+   uncommitted or unmerged work.
    If a session is marked Lost or Dead after a crash, reboot, or missing
    worktree, select it and press **`a`** or run `af sessions restore <title>` to
    recover it and resume its recorded agent conversation when possible.

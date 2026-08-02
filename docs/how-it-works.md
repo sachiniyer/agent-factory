@@ -183,7 +183,8 @@ press **`D`**:
 af sessions kill fix-auth-redirect
 ```
 
-By default, kill refuses when it can see recoverable work that would be lost.
+Kill permanently removes the session even when its branch has uncommitted or
+unmerged work.
 
 ## The Short Version
 
