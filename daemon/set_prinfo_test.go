@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
@@ -129,6 +130,39 @@ func TestSetPRInfo_ClearsWithZeroValue(t *testing.T) {
 	}
 	if data[0].PRInfo != (session.PRInfoData{}) {
 		t.Fatalf("persisted PR info after clear = %+v, want zero value", data[0].PRInfo)
+	}
+}
+
+// TestSetPRInfo_PublishesSessionUpdated pins the multi-client half of the
+// mutation (#2769). SetPRInfo is how the TUI's async `gh pr view` fetch lands, so
+// the PR badge it records is state every OTHER connected client — a second TUI
+// window, an open web rail — has to repaint from. A client only re-Snapshots
+// after its OWN mutation, so without this event the badge stays invisible
+// everywhere else until something unrelated happens to republish the session.
+//
+// The assertion is on the event payload rather than on a later Snapshot on
+// purpose: a Snapshot passes with no event published at all, which is exactly the
+// state this test exists to fail.
+func TestSetPRInfo_PublishesSessionUpdated(t *testing.T) {
+	const title = "prbadge"
+	manager, repo := tabEventSession(t, title)
+
+	// Subscribe after the session exists so the create's own events cannot be
+	// mistaken for this mutation's.
+	id, ch := manager.events.subscribe()
+	defer manager.events.unsubscribe(id)
+
+	want := session.PRInfoData{Number: 42, Title: "feat: thing", URL: "https://example/pr/42", State: "OPEN"}
+	if err := manager.SetPRInfo(SetPRInfoRequest{Title: title, RepoID: repo.ID, PRInfo: want}); err != nil {
+		t.Fatalf("SetPRInfo: %v", err)
+	}
+
+	got := drainNextSessionEvent(t, ch, agentproto.EventSessionUpdated)
+	if got.Title != title {
+		t.Fatalf("session.updated carried session %q, want %q", got.Title, title)
+	}
+	if got.PRInfo != want {
+		t.Fatalf("session.updated PR info = %+v, want %+v", got.PRInfo, want)
 	}
 }
 
