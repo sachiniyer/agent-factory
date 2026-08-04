@@ -197,6 +197,19 @@ func processGroupAlive(pgid int) (bool, error) {
 //
 // Anything we cannot interpret still surfaces: silence there would report a
 // live editor as reaped.
+//
+// The boundary, stated so it is not rediscovered as a surprise: EPERM cannot
+// distinguish a recycled id from a group that still holds a member we may not
+// signal (a privileged child that stayed in the group). proctree exposes no
+// pgid, so nothing here can enumerate the members and tell them apart. This
+// resolves that tie toward "gone" on the ground that a member af cannot signal
+// is a member af never started — the editor spawn path sets no
+// syscall.Credential and execs nothing setuid, so every process af puts in this
+// group is signalable by af for its whole life. A process outside that set was
+// never under af's teardown authority, and refusing forever does not gain
+// authority over it; it only strands the archive or kill of an editor that has
+// in fact stopped. If af ever gains a way to spawn a privileged child, this tie
+// must be broken by identity instead, the way the StartID checks below do it.
 func killProbeAlive(err error) (bool, error) {
 	switch {
 	case err == nil:
