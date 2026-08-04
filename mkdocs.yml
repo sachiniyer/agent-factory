@@ -92,16 +92,24 @@ extra:
 plugins:
   - search
 
-# Fail the build on broken in-repo links (the valuable check), but don't choke
-# on links that intentionally point outside docs/ (e.g. ../.github/…) or on
-# every cross-page anchor. `mkdocs build --strict` turns the warnings below into
-# errors.
+# Fail the build on broken in-repo links and on `#fragment` targets that no
+# heading produces, but don't choke on links that intentionally point outside
+# docs/ (e.g. ../.github/…). `mkdocs build --strict` turns the warnings below
+# into errors.
+#
+# `anchors` was `ignore` until #2623, on the theory that cross-page anchors
+# would be too noisy to gate on. Measured on the real tree instead of assumed:
+# the whole site produced exactly one warning, and it was a genuine dead link
+# (#2621 had just fixed five more of the same class, none of which this build
+# had ever complained about).
+# If some future link really is unfixable, name it here rather than switching
+# the whole class back off.
 validation:
   omitted_files: warn
   not_found: warn
   absolute_links: ignore
   unrecognized_links: ignore
-  anchors: ignore
+  anchors: warn
 
 nav:
   - Home: index.md
