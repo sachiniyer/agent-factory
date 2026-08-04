@@ -80,6 +80,15 @@ jobs:
       - name: Test auto-gate helper
         run: node --test .github/scripts/auto-gate.test.js
 
+      # Same rationale again, one layer up: this helper decides whether the web
+      # selftest RUNS, and its tests also assert the wiring that gives a red run
+      # teeth — that every job in this file is in Build's `needs`, that Build still
+      # runs when a need fails, and that the trigger filter and the helper's path
+      # list have not drifted apart. #2762 is what a check with no teeth costs, so
+      # the teeth are asserted in the required job rather than assumed.
+      - name: Test web-selftest scope helper and the gate wiring
+        run: node --test .github/scripts/web-selftest-scope.test.js
+
       # Same rationale as the auto-gate test above: the stale-external-pr helper
       # decides which fork PRs to auto-close, so its pure decision logic gates
       # here in the required Lint job. Built-in node:test, no install step.
@@ -281,6 +290,81 @@ jobs:
           fi
           echo "web/dist matches a fresh build."
 
+  # Should the Playwright web-driver selftest run on this PR? (#2762)
+  #
+  # The suite gates from here (see the `web-selftest` job below), and it is the
+  # most expensive thing in CI — a Go+Node+Chromium image, then a real daemon and a
+  # real browser. Charging every docs typo for that would slow the whole repo, so
+  # this job answers the question first, in ~20s, and the expensive job runs only
+  # when the answer is yes.
+  #
+  # The DECISION lives in a tested helper (.github/scripts/web-selftest-scope.js,
+  # gated by the Lint job above), not in this YAML: a filter that silently stops
+  # matching is a gate that silently stops gating, which is the exact failure #2762
+  # recorded. This step only resolves the changed-file list and hands it over.
+  #
+  # Every way of NOT knowing the diff answers "run it". A skipped expensive job is
+  # a hole; a needlessly-run one is just slow.
+  web-selftest-scope:
+    name: Web selftest scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      # depth 2 is exactly what the diff below needs and no more: on a
+      # pull_request event the checked-out HEAD is refs/pull/N/merge, whose first
+      # parent is the base tip and whose second is the PR head.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Decide whether the web selftest applies
+        id: scope
+        run: |
+          set -euo pipefail
+
+          # merge_group (and anything else that ever gains this workflow) has no
+          # merge commit to diff against here. Run the suite rather than guess:
+          # the queue only ever runs changes a PR already scoped.
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "::notice::event is ${GITHUB_EVENT_NAME}, not pull_request — running the web selftest."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # `git diff HEAD^1 HEAD` on the merge commit is the PR's effective change
+          # against the base — the same thing the workflow-level `paths:` filter
+          # would compute. If the parent is missing (a shallower clone than
+          # expected, a ref that is not a merge commit), that is a broken diff, not
+          # an empty one.
+          if ! base="$(git rev-parse --verify --quiet HEAD^1)"; then
+            echo "::warning::no base parent on HEAD — running the web selftest rather than guessing."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only "$base" HEAD > changed-paths.txt
+          node .github/scripts/web-selftest-scope.js changed-paths.txt >> "$GITHUB_OUTPUT"
+
+  # The web client's acceptance proof (#1592 Phase 5 PR6, docs/web-selftest.md),
+  # called as a reusable workflow so that Build can list it in `needs` — a job in
+  # another workflow cannot be a `needs` dependency, and `needs` is the only way to
+  # gate on anything but "Lint" and "Build" without a ruleset edit.
+  #
+  # Until #2762 this ran as a standalone `pull_request` workflow that gated
+  # nothing: a red run could merge, and nothing then ran it on master. The suite
+  # has caught real regressions the deterministic checks do not (#1932 a stale
+  # header, #1894 a detach that dropped scroll), so "advisory signal" was
+  # understating what it is.
+  #
+  # When the scope job says no, this is `skipped` — which Build's gate step treats
+  # as fine, unlike a failure or a cancellation.
+  web-selftest:
+    name: Web selftest
+    needs: [web-selftest-scope]
+    if: needs.web-selftest-scope.outputs.run == 'true'
+    uses: ./.github/workflows/web-selftest.yml
+
   # We cross-compile and ship darwin/arm64 and darwin/amd64 binaries from
   # stable-release.yml, but every job in this repo ran on ubuntu — so no test had
   # ever executed on the OS we ship to. macOS-only defects reached users instead
@@ -345,7 +429,12 @@ jobs:
     # blocks anyway, since it demands conclusion === "success", but the native path
     # would not.) So: run ALWAYS, and fail loudly on any unsuccessful need. Now a
     # red macOS job turns the REQUIRED check red instead of quietly skipping it.
-    needs: [lint, test, test-systemd, test-macos, web, registry-free]
+    #
+    # `skipped` is deliberately NOT a failure here: web-selftest skips whenever its
+    # scope job says the PR cannot reach the web client, and that is the normal
+    # answer on most PRs. A skipped *scope* job would be a different matter, but it
+    # has no `if:` and so only skips when the run itself is going away.
+    needs: [lint, test, test-systemd, test-macos, web, registry-free, web-selftest-scope, web-selftest]
     if: always()
     steps:
       - name: Gate on the jobs this check stands in for
@@ -355,6 +444,7 @@ jobs:
           # needs['test-macos'], not needs.test-macos: a hyphen in a property path is
           # parsed as subtraction, so the dotted form silently yields an empty string.
           echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} test-systemd=${{ needs['test-systemd'].result }} test-macos=${{ needs['test-macos'].result }} web=${{ needs.web.result }} registry-free=${{ needs['registry-free'].result }}"
+          echo "web-selftest-scope=${{ needs['web-selftest-scope'].result }} web-selftest=${{ needs['web-selftest'].result }}"
           exit 1
 
       - uses: actions/checkout@v6

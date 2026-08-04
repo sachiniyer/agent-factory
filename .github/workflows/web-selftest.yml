@@ -6,22 +6,33 @@ name: Web selftest
 # for the web client and, until #2069, it ran only when someone typed `make
 # web-selftest-container` by hand.
 #
-# It lives in its OWN workflow rather than as a job in pr.yml for two reasons:
+# It lives in its OWN workflow rather than as a job in pr.yml because it is
+# REUSABLE: pr.yml calls it (`jobs.web-selftest.uses`) so that Build can list it in
+# `needs` and it actually gates, while the `push` trigger below runs the same
+# definition on master. One harness definition, two schedules — a CI-only second
+# copy is how the thing CI runs stops being the thing developers run.
 #
-#   * pr.yml has no `paths:` filter because its Lint/Build jobs must run on every
-#     PR. This one is expensive — it builds a Go+Node+Chromium image, then boots a
-#     daemon and a browser — so it is worth filtering, and a workflow-level
-#     `paths:` is the only native way to do that.
-#   * It is deliberately NOT wired into pr.yml's Build job, so it does not gate
-#     merges. See "Why this does not gate" below.
-#
-# The fast, deterministic web checks (parity tests + bundle reproducibility) DO
-# gate — they are the `Web` job in pr.yml.
+# The fast, deterministic web checks (parity tests + bundle reproducibility) gate
+# separately — they are the `Web` job in pr.yml, and they run on every PR.
 
 on:
-  pull_request:
+  # Master (#2762). Before this trigger existed the suite ran on `pull_request`
+  # only, so nothing ever ran it on master: a red run could merge (it did not gate
+  # either) and then stayed invisible until some later PR happened to touch these
+  # paths — and then it looked like THAT PR's fault. Same shape as #2576, where
+  # tui-driver-selftest sat red on master for two days.
+  #
+  # This is a signal run, not a gate: master has already merged. Its job is to name
+  # the commit, so nobody inherits a bisect.
+  push:
     branches: [master]
     paths:
+      # KEEP IN SYNC with SELFTEST_PATHS in .github/scripts/web-selftest-scope.js,
+      # which is the source of truth for the PR-side filter. A trigger `paths:`
+      # cannot be computed, so this list is a literal copy — and
+      # web-selftest-scope.test.js reads this file and fails Lint if the two ever
+      # disagree, so the copy cannot drift silently.
+      #
       # The SPA itself, and the committed bundle the harness actually serves.
       - 'web/**'
       # The harness drives a REAL daemon, so the daemon's HTTP/WS surface and the
@@ -35,13 +46,41 @@ on:
       - 'scripts/container/Dockerfile.web-selftest'
       - 'scripts/container/web-selftest-entry.sh'
       - '.github/workflows/web-selftest.yml'
+      # The CI wiring that decides whether this gates, and the filter that decides
+      # when it runs. A change to either must re-prove the gate on its own PR.
+      - '.github/workflows/pr.yml'
+      - '.github/scripts/web-selftest-scope.js'
+
+  # The PR gate. A job in ANOTHER workflow cannot be a `needs` dependency, which is
+  # why this is `workflow_call` and not a second `pull_request` trigger: pr.yml
+  # calls it as a job, and pr.yml's Build — one of the repo's two required checks
+  # (ruleset 14851503) — lists that job in `needs`. See "How this gates" below.
+  #
+  # There is deliberately NO `paths:` here. A called workflow does not honour one
+  # (filters apply to pull_request/push only), and the caller does the scoping with
+  # .github/scripts/web-selftest-scope.js so the decision is tested rather than
+  # implicit.
+  workflow_call:
+
+  # Manual re-run, for "did master recover?" after a red push run. No path filter
+  # applies to a dispatch, so this always runs the suite.
+  workflow_dispatch:
 
 concurrency:
   group: web-selftest-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Superseding a PR run is free — a newer head replaces the question being asked.
+  # NOTHING else is superseded, and the condition names the one event that may be
+  # rather than excluding the one that may not: a master run is its own verdict for
+  # its own commit, and cancelling it is how the per-commit attribution that is the
+  # entire reason for the push trigger gets lost. A `workflow_dispatch` shares this
+  # group with the master run (both key off github.ref), so an exclusionary
+  # condition would also let a manual "did master recover?" kill the push run it was
+  # asked about. Volume is bounded by the `paths:` filter above.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only: checks out source and runs the harness in a container. It never
-# comments on or modifies the PR.
+# comments on or modifies the PR. pr.yml grants the same, which is what lets it
+# call this workflow — a called workflow can never request more than its caller.
 permissions:
   contents: read
 
@@ -79,21 +118,46 @@ jobs:
       # names the failing assertion. For a trace, reproduce locally:
       #   make web-selftest-container
 
-# ── Why this does not gate ────────────────────────────────────────────────────
+# ── How this gates ────────────────────────────────────────────────────────────
 #
 # This repo's ruleset (14851503) requires only "Lint" and "Build", so a new job
 # gates nothing unless pr.yml's Build job lists it in `needs` — the mechanism
-# documented on the auto-gate helper test. That was a deliberate choice NOT to
-# use here:
+# documented on the auto-gate helper test. That is how this gates:
 #
-#   * Cost: a cold Go+Node+Chromium image build plus a daemon+browser boot on
-#     every web PR, against ~40s for the deterministic checks that do gate.
+#   pr.yml: web-selftest-scope ─► web-selftest (uses: this workflow) ─► Build needs
+#
+# and Build fails loudly on any unsuccessful need rather than skipping, so a red
+# selftest turns the REQUIRED check red. A `skipped` need is fine and expected —
+# that is the scope job saying this PR cannot reach the web client.
+#
+# The two costs that once argued against gating are answered by the scope job, not
+# waived:
+#
+#   * Cost: a cold Go+Node+Chromium image build plus a daemon+browser boot. It is
+#     now paid only by PRs that touch the paths listed above; a docs typo skips it
+#     in seconds. Master pays it per matching commit, where it blocks nothing.
 #   * Flake surface: it drives a real browser against a real daemon over a real
-#     PTY. Those have been contention-sensitive (see the dev-box selftest flakes),
-#     and a flaky REQUIRED check blocks every merge in the repo, not just web PRs.
+#     PTY, and a flaky REQUIRED check blocks every merge in the repo. That risk is
+#     real and the answer is to keep it honest, never to defang it: a red run gets
+#     investigated, because twice on 2026-07-21 a "flake" here was a genuine
+#     product race (#2311, #2341). Retries, raised timeouts and xfail are how a
+#     real signal becomes silence.
 #
-# So it runs as a signal: red here means read it before merging. To promote it to
-# a gate, add `web-selftest` to pr.yml's Build `needs` — but note that a job in
-# ANOTHER workflow cannot be a `needs` dependency, so promoting it means moving it
-# into pr.yml (accepting the cost on every PR) or adding "Web selftest" to the
-# ruleset's required checks, which needs repo-admin access.
+# ── Why this serves the COMMITTED bundle rather than rebuilding ───────────────
+#
+# The harness builds af from source and web/embed.go embeds the COMMITTED
+# web/dist, so the suite exercises the bundle a released binary would actually
+# serve — which is what an acceptance proof should test. It deliberately does not
+# run `make web-build` first:
+#
+#   * pr.yml's `Web` job already owns dist↔src fidelity — it rebuilds the bundle
+#     and fails on any `git status --porcelain` diff — and Web is in Build's
+#     `needs` too. Rebuilding here would be a second implementation of a check
+#     that already blocks, and would HIDE a stale dist from the one job that
+#     catches it.
+#   * On master, where Web does not run, testing the committed artifact is the
+#     more useful of the two: it is the artifact that ships.
+#
+# So the pair is what covers source: Web proves dist == build(src), this proves
+# dist works. Locally, run `make web-build` before `make web-selftest-container`
+# or you validate the old bundle.

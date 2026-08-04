@@ -34,18 +34,35 @@ ports**, no access to the host tmux server, and no touch of the real
 
 ## In CI
 
-Since #2069 a PR touching `web/`, `daemon/`, `agentproto/`, `apiproto/` or the
-harness itself also runs this on a GitHub runner
+Since #2069 a PR touching `web/`, `daemon/`, `agentproto/`, `apiproto/`, the
+harness itself or the CI wiring around it also runs this on a GitHub runner
 (`.github/workflows/web-selftest.yml`), using the same `make` target — CI does
 not keep its own copy of the steps.
 
-It is a **signal, not a gate**: it is not in `pr.yml`'s `Build` `needs`, so a red
-run does not block the merge button. Read it before merging anyway. The reasoning
-(cost on every web PR, and the flake surface of a real browser driving a real
-daemon) and the promotion path are written out in that workflow.
+Since #2762 it **gates, and it runs on master**:
+
+- **On a PR** `pr.yml` calls the workflow as a job and lists it in `Build`'s
+  `needs`, so a red run turns a required check red. A cheap `Web selftest scope`
+  job decides first whether the change can reach the web client — the decision
+  lives in `.github/scripts/web-selftest-scope.js`, whose tests run in `Lint` — and
+  the expensive job is `skipped` when it cannot. Every way of failing to work out
+  the diff resolves to *run it*.
+- **On master** a `push` trigger runs the same definition with the same path
+  filter. It blocks nothing (master has already merged); its job is to name the
+  commit. Before #2762 nothing ran the suite on master at all, so a regression
+  stayed invisible until some later PR happened to touch these paths — and then it
+  looked like that PR's fault. Master runs are not cancelled by a newer push, so
+  each commit keeps its own verdict.
+
+A red run is worth investigating rather than re-running: twice on 2026-07-21 a
+"flake" here was a genuine web-client race (#2311, #2341).
 
 The deterministic web checks — typecheck, the unit/parity suites, and
-`web/dist` reproducibility — **do** gate, as pr.yml's `Web` job.
+`web/dist` reproducibility — gate too, as pr.yml's `Web` job. The two are a pair:
+`Web` proves the committed bundle matches `web/src`, and this suite proves that
+bundle works. This harness deliberately serves the **committed** `web/dist` rather
+than rebuilding, so it exercises the artifact a released binary embeds — which is
+also why you run `make web-build` before it locally.
 
 Failures give you Playwright's assertion output in the job log but no trace: the
 harness works inside the container's own copy of the tree, so its
