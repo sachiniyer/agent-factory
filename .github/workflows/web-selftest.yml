@@ -33,11 +33,20 @@ on:
       # web-selftest-scope.test.js reads this file and fails Lint if the two ever
       # disagree, so the copy cannot drift silently.
       #
+      # Go source wholesale. The harness BUILDS AND RUNS the whole `af` binary —
+      # it seeds through `$BIN sessions create` and `$BIN tasks add` and the spec
+      # round-trips those flows — so the packages that can break it are not a list
+      # anyone enumerates correctly (two review rounds proved that). Measured cold
+      # at ~4 minutes, in parallel with the longer Test jobs, so a Go-touching PR
+      # pays approximately nothing. Docs- and prose-only PRs still skip.
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
       # The SPA itself, and the committed bundle the harness actually serves.
       - 'web/**'
-      # The harness drives a REAL daemon, so the daemon's HTTP/WS surface and the
-      # embedding are as capable of breaking it as web/ is. #1932 (a header that
-      # went stale) and #1894 (a detach that dropped scroll) were both found here.
+      # Kept alongside '**/*.go' deliberately: these carry non-Go files (testdata,
+      # fixtures) the suite can depend on. #1932 (a header that went stale) and
+      # #1894 (a detach that dropped scroll) were both found here.
       - 'daemon/**'
       - 'agentproto/**'
       - 'apiproto/**'

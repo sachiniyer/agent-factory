@@ -343,7 +343,15 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git diff --name-only "$base" HEAD > changed-paths.txt
+          # --no-renames is load-bearing, not stylistic. With rename detection on,
+          # `git diff --name-only` reports a rename as the NEW path ONLY — so
+          # moving scripts/container/web-selftest-entry.sh to an unwatched name
+          # would delete a harness entrypoint while the changed-path list never
+          # mentions it, and the suite would skip the PR that broke it. Disabling
+          # detection reports the rename as a delete plus an add, so the watched
+          # source path is present. Verified: `git diff --name-only` prints 1 path
+          # for a pure rename, `--no-renames` prints both.
+          git diff --no-renames --name-only "$base" HEAD > changed-paths.txt
           node .github/scripts/web-selftest-scope.js changed-paths.txt >> "$GITHUB_OUTPUT"
 
   # The web client's acceptance proof (#1592 Phase 5 PR6, docs/web-selftest.md),

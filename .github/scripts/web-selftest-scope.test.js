@@ -23,17 +23,53 @@ test("a change that cannot reach the web client skips the suite", () => {
   const { run, matched } = scopeWebSelftest([
     "docs/web-selftest.md",
     "README.md",
-    "session/git/worktree.go",
-    "ui/overlay.go",
+    "CLAUDE.md",
+    "plugins/claude/agent-factory/skills/agent-factory/SKILL.md",
+    ".github/workflows/stale.yml",
   ]);
   assert.equal(run, false);
   assert.deepEqual(matched, []);
 });
 
+test("ANY Go source runs the suite — the harness builds and runs the whole binary", () => {
+  // This replaced an enumerated package list. The old list called
+  // session/git/worktree.go out of scope, which was wrong: the entry script
+  // seeds through `$BIN sessions create` and the spec round-trips those flows.
+  // Rather than add the packages review found (twice), the predicate now asks a
+  // question that is decidable: is this Go the binary is built from?
+  for (const path of [
+    "main.go", // root package — `**/*.go` must match at depth 0 too
+    "session/git/worktree.go",
+    "task/runner.go",
+    "api/sessions.go",
+    "commands/configcmd.go",
+    "apiclient/client.go",
+    "ui/overlay.go",
+    "internal/proctree/proctree_darwin.go",
+  ]) {
+    assert.equal(scopeWebSelftest([path]).run, true, `${path} is compiled into af and must be watched`);
+  }
+  assert.equal(scopeWebSelftest(["go.mod"]).run, true);
+  assert.equal(scopeWebSelftest(["go.sum"]).run, true);
+});
+
 test("one in-scope path among many out-of-scope ones still runs the suite", () => {
-  const { run, matched } = scopeWebSelftest(["README.md", "main.go", "daemon/tasks.go"]);
+  const { run, matched } = scopeWebSelftest(["README.md", "CHANGELOG.md", "daemon/tasks.go"]);
   assert.equal(run, true);
   assert.deepEqual(matched, ["daemon/tasks.go"]);
+});
+
+test("a rename OUT of a watched path is still seen (the --no-renames contract)", () => {
+  // `git diff --name-only` reports a pure rename as the NEW path only, so the
+  // scope job passes --no-renames and git emits the delete AND the add. This
+  // pins the helper's half of that contract: given both paths, the watched
+  // source still matches even though the destination does not.
+  const { run, matched } = scopeWebSelftest([
+    "scripts/container/backup-entry.sh", // the rename destination — not watched
+    "scripts/container/web-selftest-entry.sh", // the deleted source — watched
+  ]);
+  assert.equal(run, true);
+  assert.deepEqual(matched, ["scripts/container/web-selftest-entry.sh"]);
 });
 
 test("an exact-file pattern does not match a longer sibling name", () => {
@@ -85,6 +121,10 @@ test("the CI wiring watches itself, so a change to the gate re-proves the gate",
 
 test("every pattern is a shape this matcher actually implements", () => {
   for (const pattern of SELFTEST_PATHS) {
+    if (pattern.startsWith("**/*.")) {
+      assert.equal(pattern.slice(5).includes("*"), false, `${pattern}: only a plain **/*.ext is supported`);
+      continue;
+    }
     if (pattern.endsWith("/**")) {
       assert.equal(pattern.slice(0, -3).includes("*"), false, `${pattern}: only a TRAILING /** is supported`);
       continue;
@@ -92,10 +132,17 @@ test("every pattern is a shape this matcher actually implements", () => {
     assert.equal(
       pattern.includes("*"),
       false,
-      `${pattern}: matchesPattern implements exact paths and a trailing /** only. ` +
+      `${pattern}: matchesPattern implements exact paths, a trailing /** and a leading **/*.ext only. ` +
         "Teach it the new shape (and teach the workflow's paths: filter the same one) before adding this.",
     );
   }
+});
+
+test("**/*.ext matches by extension, not by a same-prefixed name", () => {
+  assert.equal(matchesPattern("**/*.go", "main.go"), true);
+  assert.equal(matchesPattern("**/*.go", "a/b/c.go"), true);
+  assert.equal(matchesPattern("**/*.go", "docs/going-further.md"), false);
+  assert.equal(matchesPattern("**/*.go", "web/src/ui.ts"), false);
 });
 
 // ── the copy of the list that lives in the workflow trigger ───────────────────

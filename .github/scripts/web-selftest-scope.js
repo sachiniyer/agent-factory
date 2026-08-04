@@ -19,11 +19,33 @@
 
 // Paths whose change can break the web selftest.
 //
-//   * web/**            the SPA, and the committed bundle the harness serves.
-//   * daemon/**         the harness drives a REAL daemon, so its HTTP/WS surface
-//     agentproto/**     and the wire types are as able to break the suite as web/
-//     apiproto/**       is. #1932 (a stale header) and #1894 (a detach that
-//                       dropped scroll) were both found exactly this way.
+// **Go source is watched wholesale**, and that is a deliberate correction. The
+// first cut enumerated the packages thought to matter (daemon, agentproto,
+// apiproto) and was wrong twice in review: it missed the harness invocation chain,
+// then missed `session/**` and `task/**` — which the entry script drives directly
+// via `$BIN sessions create|list|get|archive|restore|kill|tab-create|tab-delete`
+// and `$BIN tasks add`, with the spec round-tripping those flows in the browser.
+//
+// The second miss is the tell. The harness BUILDS AND RUNS THE WHOLE `af` BINARY,
+// so the honest predicate is not "which packages did I remember?" — a question
+// nobody answers correctly twice running — but "does this change any Go the binary
+// is built from?", which is decidable. Enumerating packages made the filter's
+// blind spots a function of my memory, and a gate whose blind spots nobody can
+// enumerate is the #2762 failure one level in.
+//
+// The cost that argued for a narrow list is gone: measured cold on a runner the
+// suite is ~4 minutes, and it runs in parallel with `Test` and `Test (macOS)`,
+// which are longer — so a Go-touching PR pays approximately nothing in wall clock.
+// Docs-, plugin- and prose-only PRs still skip it, which is what the filter is
+// actually for.
+//
+//   * **/*.go, go.mod, go.sum   everything the binary is built from.
+//   * web/**                    the SPA, and the committed bundle the harness serves.
+//   * daemon/**                 kept alongside `**/*.go` on purpose: these also
+//     agentproto/**             carry non-Go files (testdata, fixtures) that the
+//     apiproto/**               suite can depend on. #1932 (a stale header) and
+//                               #1894 (a detach that dropped scroll) were both
+//                               found exactly this way.
 //   * the harness itself — the WHOLE invocation chain, not just its middle. CI
 //     runs `make web-selftest-container`, so the closure is Makefile ->
 //     scripts/testbox.sh -> Dockerfile.web-selftest + web-selftest-entry.sh ->
@@ -34,6 +56,9 @@
 //     pr.yml's Build `needs` must re-prove the gate on the PR that makes it, not
 //     on some later one.
 const SELFTEST_PATHS = [
+  "**/*.go",
+  "go.mod",
+  "go.sum",
   "web/**",
   "daemon/**",
   "agentproto/**",
@@ -48,13 +73,24 @@ const SELFTEST_PATHS = [
   ".github/scripts/web-selftest-scope.js",
 ];
 
-// A deliberately tiny subset of GitHub's `paths:` globbing: a trailing `/**`
-// matches everything under a directory, anything else is an exact file path.
-// Every pattern above is one of those two shapes and the test asserts it stays
-// that way — a `*.ts`-style pattern would be silently mismatched here rather than
-// half-supported, which is how a filter starts skipping the suite it exists to
-// schedule.
+// A deliberately tiny subset of GitHub's `paths:` globbing, matching what the
+// trigger filter does for the three shapes actually used:
+//
+//   `**/*.ext`  any file with that extension, at any depth INCLUDING the root
+//               (GitHub's `**` matches zero or more directories, so `**/*.go`
+//               covers `main.go` as well as `daemon/x.go`)
+//   `dir/**`    everything under a directory
+//   anything else is an exact file path
+//
+// The test asserts every pattern stays one of those three — a shape this does not
+// implement would be silently mismatched rather than half-supported, which is how
+// a filter starts skipping the suite it exists to schedule.
 function matchesPattern(pattern, path) {
+  if (pattern.startsWith("**/*.")) {
+    // slice(4) keeps the dot: "**/*.go" -> ".go", so "cargo.go" matches on the
+    // extension but "going.md" cannot match on a bare suffix.
+    return path.endsWith(pattern.slice(4));
+  }
   if (pattern.endsWith("/**")) {
     return path.startsWith(pattern.slice(0, -2));
   }
