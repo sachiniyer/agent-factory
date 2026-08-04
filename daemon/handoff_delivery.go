@@ -43,7 +43,13 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// Persist only settled outcomes. Disk persistence strips transient ops, so
 		// writing while OpReplacing is raised would manufacture an unfenced state
 		// no in-memory reader was ever allowed to observe.
-		m.persistInstance(delivery.repoID, delivery.instance)
+		//
+		// The same write announces the settlement (#2782). Other clients were told
+		// about the swap at the checkpoint, with the fence raised; this is the event
+		// that lowers it for them. Without it a second window would sit on a
+		// permanently "working" row — the poll skips a fenced session and, once the
+		// fence drops, takes the settled state as its own baseline and reports nothing.
+		m.persistAndPublishInstance(delivery.repoID, delivery.instance)
 		m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
 		return nil
 	}
@@ -80,7 +86,7 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// turns a startup death into a fake delivery failure and invites commands
 		// into an unconfirmed binding.
 		delivery.instance.MarkStartupStateUnknown()
-		m.persistInstance(delivery.repoID, delivery.instance)
+		m.persistAndPublishInstance(delivery.repoID, delivery.instance)
 		return fmt.Errorf(
 			"handed %q off to %s, but the incoming agent never reached a confirmed ready state (%w); "+
 				"the session was retained as startup-unknown with its mission pending for inspection",

@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/ins
 
 The plugin checks for `af` and tells you this if it is missing. It never
 downloads or runs an installer itself — see [what the hook does
-not do](#the-preflight-hook) below.
+not do](#codex-hooks) below.
 
 ## Codex
 

@@ -58,6 +58,15 @@ type InstanceOptions struct {
 	// keeps its record and resumes through Recover. Empty for every ordinary
 	// create, which is why the fresh-injection path is unchanged.
 	ResumeConversation AgentConversationData
+	// RestoreTabs asks the first launch to rebuild the tab roster a previous
+	// record held, rather than coming up with only its agent tab (#2628). Set by
+	// the same single caller as ResumeConversation — the daemon's root-agent
+	// heal — because it has the same cause: replacing the record throws away
+	// state the general Lost-restore path keeps, and the tab list is the largest
+	// piece of it. Index 0 (the agent tab) is ignored: the launch spawns its own.
+	// Empty for every ordinary create, which still comes up with just the agent
+	// tab (#1100).
+	RestoreTabs []TabData
 	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
 	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4 PR2)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
@@ -336,6 +345,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		sessionEnvPassthrough: normalizedSessionEnv,
 		inPlace:               opts.InPlace,
 		carriedConversation:   opts.ResumeConversation,
+		carriedTabs:           append([]TabData(nil), opts.RestoreTabs...),
 		backend:               backend,
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,

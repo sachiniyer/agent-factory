@@ -29,6 +29,14 @@ type pendingHandoffEntry struct {
 // settled row waits for RefreshStatuses to provide LiveReady first. The same
 // target-before-op locks as handoff/send-prompt prevent a recovery paste from
 // racing a newer mutation.
+//
+// Every settlement below persists AND publishes (#2782). The events plane matters
+// more here than on the interactive path, not less: no client asked for this work,
+// so not even the window that started the handoff has a reason to re-Snapshot
+// afterwards — and the status poll is precisely what cannot report it, because it
+// skips a fenced row and then takes the settled state as its own baseline. Without
+// the publish, a row this loop finishes stays "working" on every open rail until
+// something unrelated republishes it.
 func (m *Manager) ResumePendingHandoffs() {
 	m.mu.Lock()
 	entries := make([]pendingHandoffEntry, 0, len(m.instances))
@@ -86,7 +94,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		if !entry.instance.ClearPendingHandoffMission(mission) {
 			return fmt.Errorf("pending mission changed while transferring it to limit retry")
 		}
-		m.persistInstance(entry.repoID, entry.instance)
+		m.persistAndPublishInstance(entry.repoID, entry.instance)
 		m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 		return nil
 	case session.LiveReady:
@@ -117,13 +125,13 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 			if !entry.instance.ClearPendingHandoffMission(mission) {
 				return fmt.Errorf("pending mission changed while parking its usage limit")
 			}
-			m.persistInstance(entry.repoID, entry.instance)
+			m.persistAndPublishInstance(entry.repoID, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 			return nil
 		}
 		if op == session.OpReplacing && errors.Is(err, task.ErrAgentReadiness) {
 			entry.instance.MarkStartupStateUnknown()
-			m.persistInstance(entry.repoID, entry.instance)
+			m.persistAndPublishInstance(entry.repoID, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 		}
 		return err
@@ -136,7 +144,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	if !entry.instance.ClearPendingHandoffMission(mission) {
 		return fmt.Errorf("pending mission changed after delivery")
 	}
-	m.persistInstance(entry.repoID, entry.instance)
+	m.persistAndPublishInstance(entry.repoID, entry.instance)
 	m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 	log.InfoLog.Printf("handoff %q: delivered pending mission", entry.instance.Title)
 	return nil

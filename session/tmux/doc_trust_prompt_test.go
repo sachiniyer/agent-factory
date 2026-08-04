@@ -81,6 +81,18 @@ const codexCurrentSafetyBufferingDialog = `  Our systems are thinking a bit more
   No action is required. Codex will keep waiting, and this menu will close when
   the response is ready.`
 
+// A capture taken while Codex has cleared its menu but has not finished
+// repainting it. The footer that makes the pane recognizable as the picker is
+// not on screen yet, so this frame matches no Codex shape at all — it is
+// neither the picker nor the ordinary composer.
+const codexCurrentSafetyBufferingPartialRedraw = `  Our systems are thinking a bit more about this request before responding.
+  Hang tight or retry with a faster model for a quicker response, though it
+  may be less capable of handling complex requests.
+
+› 1. Retry with a faster model
+  2. Dismiss and keep waiting
+  3. Learn more`
+
 const codexCurrentSafetyBufferingWaitSelected = `  Our systems are thinking a bit more about this request before responding.
   Hang tight or retry with a faster model for a quicker response, though it
   may be less capable of handling complex requests.
@@ -112,15 +124,42 @@ func runTrustPromptCheck(t *testing.T, program, content string) (handled bool, c
 	return session.CheckAndHandleTrustPrompt(), cmds
 }
 
+// trustPromptFrame is one pane capture paired with the cursor state tmux would
+// report while it is on screen. The pair is what the safety-picker path reads:
+// Codex's ListSelectionView implements no cursor position and so hides the
+// terminal cursor, while the ordinary composer exposes one. Cursor visibility is
+// therefore the only POSITIVE evidence that the modal is gone — the absence of
+// its chrome is not, because a mid-repaint capture also has none (#2760).
+type trustPromptFrame struct {
+	content       string
+	cursorVisible bool
+}
+
 // runTrustPromptSequence feeds one pane capture per Output call while keeping
 // one TmuxSession alive across checks. The safety-buffering path is stateful in
 // production: it remembers the model footer from a normal poll, navigates and
 // re-captures the picker, then verifies the model on a later poll.
+//
+// Every frame reports a hidden cursor, matching a pane the picker owns. Use
+// runTrustPromptFrames when a test needs the composer's visible cursor back.
 func runTrustPromptSequence(t *testing.T, program string, contents ...string) (*TmuxSession, *[]string) {
+	t.Helper()
+	frames := make([]trustPromptFrame, len(contents))
+	for idx, content := range contents {
+		frames[idx] = trustPromptFrame{content: content}
+	}
+	return runTrustPromptFrames(t, program, frames...)
+}
+
+// runTrustPromptFrames is runTrustPromptSequence with per-capture cursor state.
+// A frame's cursor answer stays in force until the next capture, matching
+// production order: the pane is captured first, then queried for its cursor.
+func runTrustPromptFrames(t *testing.T, program string, frames ...trustPromptFrame) (*TmuxSession, *[]string) {
 	t.Helper()
 	var (
 		cmds       []string
 		captureIdx int
+		cursor     = "0 0 0"
 	)
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -129,14 +168,16 @@ func runTrustPromptSequence(t *testing.T, program string, contents ...string) (*
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
-				// Codex's active ListSelectionView has no cursor position, so
-				// the TUI hides the terminal cursor while the picker is open.
-				return []byte("0 0 0"), nil
+				return []byte(cursor), nil
 			}
-			require.Less(t, captureIdx, len(contents), "unexpected extra pane capture")
-			content := contents[captureIdx]
+			require.Less(t, captureIdx, len(frames), "unexpected extra pane capture")
+			frame := frames[captureIdx]
 			captureIdx++
-			return []byte(content), nil
+			cursor = "0 0 0"
+			if frame.cursorVisible {
+				cursor = "0 0 1"
+			}
+			return []byte(frame.content), nil
 		},
 	}
 	session := newTmuxSession(toTmuxName("trust", ""), program, NewMockPtyFactory(t), cmdExec)
@@ -295,6 +336,196 @@ func TestCheckAndHandleTrustPrompt_CurrentCodexSafetyWording(t *testing.T) {
 		"tmux send-keys -t =af_trust: Down",
 		"tmux send-keys -t =af_trust: Enter",
 	}, sentKeystrokes(*commands))
+}
+
+func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForDelayedSelectionRender(t *testing.T) {
+	_, _, errors := captureTrustPromptLogs(t)
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingDialog, // immediate post-navigation capture is stale
+		codexCurrentSafetyBufferingWaitSelected,
+		normalPane,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"a stale post-navigation frame must leave the picker pending")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+	}, sentKeystrokes(*commands),
+		"Enter must wait until a later pane capture proves the literal target row is selected")
+	require.Empty(t, errors.String(),
+		"normal terminal rendering lag is not a failed safety-picker operation")
+
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the next daemon poll observes the delayed selected frame and accepts it")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands))
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the following poll verifies the unchanged model")
+	require.Empty(t, errors.String(),
+		"a recovered selection-render delay must not leave a false ERROR behind")
+}
+
+// A partial redraw matches no Codex shape at all, so it is not evidence that
+// the picker closed. Dropping the pending selection there lets the NEXT
+// complete-but-stale frame re-enter navigation and send the same Down a second
+// time: two rows of movement for one intended step, which parks the cursor on
+// "Learn more" and then accepts it — the overshoot this whole path exists to
+// prevent (#2181).
+func TestCheckAndHandleTrustPrompt_CodexSafetyPartialRedrawDoesNotRepeatNavigation(t *testing.T) {
+	info, _, errors := captureTrustPromptLogs(t)
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingPartialRedraw, // immediate post-navigation capture, mid-repaint
+		codexCurrentSafetyBufferingDialog,        // chrome is back, selection still stale
+		codexCurrentSafetyBufferingWaitSelected,
+		normalPane,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"a mid-repaint frame leaves the picker pending, not resolved")
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+	}, sentKeystrokes(*commands),
+		"one intended row of movement must be sent exactly once, however the pane repaints")
+
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the target row finally renders as selected and is accepted")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands))
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, errors.String())
+	require.Contains(t, info.String(), "verified model unchanged: gpt-5.6-sol max")
+}
+
+// The counterpart: Codex closes the picker itself ("this menu will close when
+// the response is ready"). The composer's visible cursor is the positive signal
+// that releases the pending selection, so a picker that resolves under af still
+// hands the session straight back.
+func TestCheckAndHandleTrustPrompt_CodexSafetyReleasesPendingSelectionWhenPickerCloses(t *testing.T) {
+	info, _, errors := captureTrustPromptLogs(t)
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	session, commands := runTrustPromptFrames(t, ProgramCodex,
+		trustPromptFrame{content: normalPane},
+		trustPromptFrame{content: codexCurrentSafetyBufferingDialog},
+		trustPromptFrame{content: normalPane, cursorVisible: true},
+		trustPromptFrame{content: normalPane, cursorVisible: true},
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+	}, sentKeystrokes(*commands), "Enter must never reach a picker that closed itself")
+	require.Contains(t, info.String(), "resolved before af accepted a choice")
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the released session is an ordinary pane again")
+	require.Empty(t, errors.String())
+}
+
+// The verification budget is a duration, not a capture count. daemon_poll_interval
+// is operator-configurable, so counting polls makes the budget mean whatever the
+// operator set: at 100ms a three-capture budget expires before a 500ms repaint can
+// land, reporting ordinary rendering lag as a failed safety operation.
+func TestCheckAndHandleTrustPrompt_CodexSafetyBudgetsRenderTimeNotPollCount(t *testing.T) {
+	_, _, errors := captureTrustPromptLogs(t)
+	clock := fakeCodexSafetyClock(t)
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingDialog, // immediate post-navigation capture
+		codexCurrentSafetyBufferingDialog, // fast daemon polls, all inside the window
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingWaitSelected,
+		normalPane,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	for poll := 0; poll < 3; poll++ {
+		*clock = clock.Add(100 * time.Millisecond)
+		require.True(t, session.CheckAndHandleTrustPrompt())
+		require.Empty(t, errors.String(),
+			"a 100ms daemon_poll_interval must not spend the render budget in %d polls", poll+1)
+	}
+
+	*clock = clock.Add(500 * time.Millisecond)
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the repaint the real fixture exercises lands well inside the window")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands))
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, errors.String())
+}
+
+func TestCheckAndHandleTrustPrompt_CodexSafetyEscalatesUnverifiedSelection(t *testing.T) {
+	info, _, errors := captureTrustPromptLogs(t)
+	clock := fakeCodexSafetyClock(t)
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexCurrentSafetyBufferingDialog,
+		codexCurrentSafetyBufferingDialog, // immediate post-navigation capture
+		codexCurrentSafetyBufferingDialog, // first later daemon poll
+		codexCurrentSafetyBufferingDialog, // bounded render window expires
+		codexCurrentSafetyBufferingWaitSelected,
+		normalPane,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt())
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, errors.String(),
+		"one stale render after navigation is expected and remains pending")
+	*clock = clock.Add(codexSafetySelectionVerificationWindow - time.Millisecond)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Empty(t, errors.String(),
+		"the bounded verification window must not escalate early")
+	*clock = clock.Add(time.Millisecond)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Contains(t, errors.String(),
+		`could not verify "Dismiss and keep waiting" as the selected row after 5s`,
+		"a picker that never renders the safe selection is a real operator-visible failure")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+	}, sentKeystrokes(*commands),
+		"af must fail closed without repeating navigation or pressing Enter")
+
+	// Escalation is a report, not a terminal state. A picker that finally paints
+	// the safe row is still accepted, and the operator gets the correction next
+	// to the ERROR rather than being left with a warning that never resolved.
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Contains(t, info.String(), "selection became verifiable")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands))
+	require.False(t, session.CheckAndHandleTrustPrompt())
+}
+
+// fakeCodexSafetyClock freezes the selection-verification clock and returns the
+// handle a test advances to model daemon polls arriving at a given interval.
+func fakeCodexSafetyClock(t *testing.T) *time.Time {
+	t.Helper()
+	now := time.Date(2026, time.August, 4, 12, 0, 0, 0, time.UTC)
+	previous := codexSafetyNow
+	codexSafetyNow = func() time.Time { return now }
+	t.Cleanup(func() { codexSafetyNow = previous })
+	return &now
 }
 
 func TestCheckAndHandleTrustPrompt_CodexSafetyModelDowngradeIsSurfaced(t *testing.T) {

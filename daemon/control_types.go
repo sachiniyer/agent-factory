@@ -83,6 +83,20 @@ type CreateSessionRequest struct {
 	// settable one would let any caller point a new session at another session's
 	// transcript.
 	resumeConversation session.AgentConversationData
+
+	// restoreTabs carries a reaped record's tab roster into its replacement
+	// (#2628), the second thing the root-agent heal drops by replacing the record
+	// rather than re-spawning into it. The general Lost-restore path reconnects
+	// every persisted tab by name; without this, a root with a terminal, process,
+	// web, or editor tab comes back with a one-row tab strip after a tmux outage.
+	//
+	// Unexported for the same reason as resumeConversation: gob skips unexported
+	// fields, so no RPC client can hand the daemon a tab roster to launch a
+	// session with. Which tabs a session comes up with is either a create's own
+	// default (just the agent tab, #1100) or something the daemon rebuilds from
+	// its OWN records — never a list a client gets to inject, which would let a
+	// caller spawn arbitrary commands and proxy targets under a new session.
+	restoreTabs []session.TabData
 }
 
 type CreateSessionResponse struct {

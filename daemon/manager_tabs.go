@@ -411,10 +411,26 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	prev := instance.GetPRInfo()
 	instance.SetPRInfo(info)
 
-	if err := persistInstanceData(repoID, instance.ToInstanceData()); err != nil {
+	data := instance.ToInstanceData()
+	if err := persistInstanceData(repoID, data); err != nil {
 		// Keep memory consistent with disk on a persist failure.
 		instance.SetPRInfo(prev)
 		return fmt.Errorf("failed to persist PR info: %w", err)
 	}
+
+	// Announce the recorded badge (#2769). This is the same class of mutation as
+	// the tab verbs — a durable metadata change one client makes on behalf of every
+	// client — and it was the last one still persisting silently. Only the TUI
+	// window that ran `gh pr view` knew the PR existed; a second window and the web
+	// rail kept rendering no badge (or a stale state, after a merge) until some
+	// unrelated update happened to republish the session.
+	//
+	// Published after the persist so no client can observe a badge that isn't
+	// durable yet, and while the repo start lock is still held so this announcement
+	// cannot be reordered behind a concurrent tab mutation's — session.updated
+	// carries a WHOLE InstanceData and every client re-projects the session
+	// wholesale from it, so the last event landing is the one that wins. Same
+	// discipline and same reasoning as CreateTab's publish.
+	m.publishEvent(agentproto.EventSessionUpdated, data)
 	return nil
 }

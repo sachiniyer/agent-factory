@@ -401,6 +401,13 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	for _, tab := range d.Tabs {
 		r.noteTmuxName(tab.TmuxName)
 	}
+	// A pending-teardown handle names a tmux session the same way a live tab
+	// does, and the retry logs it on every daemon start until the kill is
+	// confirmed — so the log tail prints these names most often for exactly the
+	// sessions whose teardown is stuck (#2776).
+	for _, cleanup := range d.PendingTabCleanup {
+		r.noteTmuxName(cleanup.TmuxName)
+	}
 }
 
 // noteTitle records one raw session title for structured-string and log
@@ -607,11 +614,14 @@ var sensitiveJSONKeys = map[string]bool{
 	// command, remote session directory, or container id.
 	"runtime_cleanup": true,
 	// tmux_name and session_name mirror the typed-path redaction
-	// (redactInstanceData drops TmuxName, Worktree.SessionName, and
-	// Tabs[].TmuxName): each carries the free-text session title. Without
-	// them the fallback path leaked titles the typed path already scrubs,
-	// including the nested tabs[].tmux_name and worktree.session_name the
-	// recursive walk below reaches (#1680).
+	// (redactInstanceData drops TmuxName, Worktree.SessionName,
+	// Tabs[].TmuxName, and PendingTabCleanup[].TmuxName): each carries the
+	// free-text session title. Without them the fallback path leaked titles
+	// the typed path already scrubs, including the nested tabs[].tmux_name
+	// and worktree.session_name the recursive walk below reaches (#1680).
+	// This walk is key-driven and depth-agnostic, which is why it kept
+	// covering pending_tab_cleanup[].tmux_name for the whole window the typed
+	// path did not (#2776) — the fallback is the broader net by design.
 	"tmux_name": true, "session_name": true,
 	// conversation and agent_conversation mirror the typed-path redaction
 	// (redactInstanceData clears Tabs[].Conversation.ID and
@@ -687,6 +697,17 @@ func redactInstanceData(d *session.InstanceData) {
 	// so it leaks the same free-text name Title carries and must be redacted too.
 	if d.TmuxName != "" {
 		d.TmuxName = redactedMarker
+	}
+	// A pending-teardown handle is a tmux name and nothing else, so it carries
+	// the title exactly as TmuxName above does. It was added with durable tab
+	// close (#2669) after this policy was written and inherited none of it, which
+	// left the title in pending_tab_cleanup[].tmux_name of every bundle whose
+	// instances.json decoded typed — the common case (#2776). The tab id beside
+	// it is minted, never derived from user text, and survives for triage.
+	for i := range d.PendingTabCleanup {
+		if d.PendingTabCleanup[i].TmuxName != "" {
+			d.PendingTabCleanup[i].TmuxName = redactedMarker
+		}
 	}
 	for i := range d.Tabs {
 		if d.Tabs[i].Command != "" {

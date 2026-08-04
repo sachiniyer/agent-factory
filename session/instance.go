@@ -206,6 +206,19 @@ type Instance struct {
 	// session ends up with is whatever the launch plan committed to Tabs[0].
 	carriedConversation AgentConversationData
 
+	// carriedTabs is the tab roster a PREVIOUS record held, to be rebuilt onto
+	// this instance once its agent tab is live (#2628). It has the same single
+	// caller as carriedConversation — the root-agent heal, the one path that
+	// replaces the record instead of re-spawning into it — and exists for the
+	// same reason: the general Lost-restore path reconnects every persisted tab
+	// by name, so without this a root that had a terminal, a process, a web, or
+	// an editor tab comes back with only its agent tab after a tmux outage.
+	//
+	// Written once by NewInstance and consumed once by restoreCarriedTabs, which
+	// clears it under i.mu so a second launch of the same object cannot rebuild
+	// the same tabs twice.
+	carriedTabs []TabData
+
 	// userKilled is the kill-intent tombstone (#1108): set (and persisted)
 	// before an explicit kill's teardown begins, so a record that survives a
 	// daemon crash or teardown failure mid-kill is provably a corpse the user
