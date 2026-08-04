@@ -236,6 +236,40 @@ async function createTerminalTab(page: Page): Promise<void> {
   await expect(menu).toBeHidden();
 }
 
+/**
+ * Focuses a freshly created shell tab and does not return until the shell is
+ * demonstrably READING keystrokes.
+ *
+ * `data-term-status="open"` says the socket is open, which is NOT the same as the
+ * shell being ready for input: on a loaded runner the first characters typed into a
+ * new tab can be lost before anything reads them. What that produces is not an
+ * obvious dropped keystroke but a MANGLED command — observed in CI, where the
+ * leading `for i in $(seq 1 80); do printf 'mouse` of a setup command vanished, the
+ * surviving tail left the shell sitting at a PS2 continuation prompt, the loop never
+ * ran, and the test then failed waiting on output that was never going to appear.
+ * The assertion that failed was 56 lines away from the behaviour under test, which
+ * is exactly what makes this kind of red expensive to read (#1897).
+ *
+ * A comment line is inert to the shell, so re-sending it can never change shell
+ * state; its ECHO is the proof that keystrokes now reach something that reads them.
+ * (If the leading `#` itself is the character that gets lost, the shell answers
+ * "command not found" — which contains the marker too, and equally proves it is
+ * reading.) This is setup only: it asserts nothing about the product beyond the
+ * precondition every one of these tests already assumed silently.
+ */
+async function typeableShellTab(p: Page): Promise<Locator> {
+  const host = p.locator(".af-term-host");
+  await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+  await host.click();
+  const marker = "af-shell-typeable";
+  await expect(async () => {
+    await p.keyboard.type(`# ${marker}`);
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText(marker, { timeout: 3_000 });
+  }).toPass({ timeout: 45_000, intervals: [500, 1_000, 2_000] });
+  return host;
+}
+
 interface ElementBox {
   x: number;
   y: number;
@@ -1282,12 +1316,10 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await row(p, SESSION_B).click();
     await resetToAgentTab(p);
     await createTerminalTab(p);
-    await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
-    const host = p.locator(".af-term-host");
+    const host = await typeableShellTab(p);
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
-    await host.click();
     await p.keyboard.type("for i in $(seq 1 80); do printf 'mouse-mode-%s\\n' \"$i\"; done");
     await p.keyboard.press("Enter");
     await expect(host).toContainText("mouse-mode-80", { timeout: 15_000 });
@@ -1464,10 +1496,8 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     await row(p, SESSION_B).click();
     await resetToAgentTab(p);
     await createTerminalTab(p);
-    await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
-    const host = p.locator(".af-term-host");
-    await host.click();
+    const host = await typeableShellTab(p);
     await p.keyboard.type("printf 'af-2787-copy-me\\n'");
     await p.keyboard.press("Enter");
     await expect(host).toContainText("af-2787-copy-me", { timeout: 15_000 });
@@ -1633,7 +1663,9 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
     await createTerminalTab(p);
     shellCreated = true;
     await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
-    await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+    // Same latent race as the tabs above: prove the shell reads keystrokes before
+    // typing one this test measures. The reset below discards the handshake's bytes.
+    await typeableShellTab(p);
 
     inputPayloads.length = 0;
     await p.keyboard.type("echo $((233700 + 42))");
