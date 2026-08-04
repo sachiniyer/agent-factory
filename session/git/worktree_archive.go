@@ -149,6 +149,7 @@ var (
 	removeDirectoryTree         = removeOpenedDirectory
 	moveDirInspectClaimedSource = identityAt
 	copyTreeBeforeSourceOpen    = func(string) error { return nil }
+	copyTreeAfterSourceInspect  = func(string) error { return nil }
 	copyTreeAfterSymlinkCreate  = func(string) error { return nil }
 	copyTreeAfterDestCreate     = func(string) error { return nil }
 	moveDirBeforeDestParentOpen = func(string) error { return nil }

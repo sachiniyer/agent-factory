@@ -1379,6 +1379,44 @@ func TestCopyTree_RejectsDirectoryToNamedPipeRaceWithoutBlocking(t *testing.T) {
 	})
 }
 
+// TestCopyTree_RejectsRegularToNamedPipeRaceWithoutBlocking is the #2708
+// regression, driven through the production walker. Traversal classifies each
+// entry from a stat of its NAME, then copies the object it opens under that name
+// a moment later; a process still writing to the worktree can swap the two. A
+// copier that trusts the earlier classification opens a FIFO as a regular file
+// and waits for a writer that never comes — the indefinite archive hang, with
+// the session's operation and kill guards held for the whole wait.
+//
+// The seam substitutes the node in exactly that window, so the stale "regular"
+// verdict reaches the file copier and only descriptor-level validation can
+// reject it. The whole copy, not just the failing entry, must return promptly.
+func TestCopyTree_RejectsRegularToNamedPipeRaceWithoutBlocking(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.MkdirAll(src, 0755))
+	raced := filepath.Join(src, "tracked.txt")
+	require.NoError(t, os.WriteFile(raced, []byte("tracked"), 0644))
+
+	originalHook := copyTreeAfterSourceInspect
+	t.Cleanup(func() { copyTreeAfterSourceInspect = originalHook })
+	swapped := false
+	copyTreeAfterSourceInspect = func(path string) error {
+		if path != raced || swapped {
+			return nil
+		}
+		swapped = true
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return syscall.Mkfifo(path, 0600)
+	}
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	assertNamedPipeCopyFailsPromptly(t, raced, func() error {
+		return copyTree(src, dest)
+	})
+	assert.True(t, swapped, "the test must reach the inspect/open window it covers")
+}
+
 // TestCopyFile_DoesNotFollowReplacementSymlink covers a regular path replaced
 // by a symlink between traversal metadata and open. The source open must reject
 // the link rather than archiving contents from outside the worktree.

@@ -287,6 +287,14 @@ func copyDirectoryLevel(
 			return fmt.Errorf("cannot move worktree across filesystems: failed to inspect source entry %s: %w", childSourcePath, err)
 		}
 		inspected := identityFromStat(stat)
+		// The inspect/open boundary: from here the entry's type is a stale fact
+		// about a pathname, and a worktree process can replace what that name
+		// resolves to. Every branch below re-establishes the type from the object
+		// it actually opened; this seam lets a test substitute a node in exactly
+		// this window (#2708).
+		if err := copyTreeAfterSourceInspect(childSourcePath); err != nil {
+			return err
+		}
 
 		var entry copiedEntry
 		switch inspected.fileType {
