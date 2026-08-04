@@ -25,7 +25,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		if msg.noticeID == m.transientNoticeID {
-			m.errBox.Clear()
+			// Expire, not Clear: the notice leaves the bar but stays readable
+			// through `E details`. Clearing here is what made that key dead 3
+			// seconds after every notice (#2618).
+			m.errBox.Expire()
 		}
 	case previewTickMsg:
 		// While the user is attached to an instance, the preview/terminal

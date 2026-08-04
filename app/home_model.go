@@ -746,12 +746,20 @@ func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPa
 // can own several panes, so "docs hidden" while a second `docs` pane is on
 // screen tells the user something they can see is false (#1997).
 //
-// The reason clause drops the word "terminal" to pay for the tab name: at 80
-// columns the old line already sat one cell under the limit, and the bar
-// truncates from the RIGHT, so a longer line silently eats the recovery hint
-// (#1973). Long instance titles still overflow — nothing can fit an unbounded
-// title — but the fragments are ordered worst-first, so what survives the
-// truncation is the half that matters: which pane went away.
+// The bar truncates from the RIGHT, so the LAST fragment is the one that dies,
+// and that fragment is the recovery hint — the `s` key, which is the cheaper of
+// the two remedies because it needs no resize and is the one a user cannot
+// discover by fiddling. #1973 bought room for it by dropping a word; #1997 then
+// spent that room making the subject a full pane identity, and at 80 columns the
+// line clipped to a dangling "resize wider or…" for even a five-character
+// session name (#2580).
+//
+// So the reason clause is now the thing that pays: it says "too narrow" without
+// counting the panes (the notice already names the one that went), which buys
+// back enough cells for the hint to survive an ordinary title at 80 columns.
+// Long titles still overflow — nothing fits an unbounded title — but the
+// fragments stay ordered worst-first, so what survives is which pane went away,
+// and since #2618 the clipped tail is readable in full with `E details`.
 func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	if p == nil || paneCount <= 1 {
 		return
@@ -760,8 +768,7 @@ func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	if label, ok := paneStatusLabel(p); ok {
 		subject = label + " hidden"
 	}
-	msg := fmt.Sprintf("%s — too narrow for %d panes; resize wider%s",
-		subject, paneCount, paneRecoveryStatusHint())
+	msg := fmt.Sprintf("%s — too narrow; resize%s", subject, paneRecoveryStatusHint())
 	m.pendingPaneAutoHideStatus = msg
 	m.paneAutoHideNoticeID = m.setTransientNotice(errors.New(msg))
 }
@@ -805,14 +812,18 @@ func paneStatusLabel(p *store.OpenPane) (string, bool) {
 	return fmt.Sprintf("%s · %s", p.Instance().Title, label), true
 }
 
+// paneRecoveryStatusHint names the key that brings the pane back without a
+// resize. It drops the filler "use": every cell it costs comes out of its own
+// survival at 80 columns, since it is the last fragment on a bar that truncates
+// from the right (#2580).
 func paneRecoveryStatusHint() string {
 	if key := bindingKeyWithDesc("pane list"); key != "" {
-		return fmt.Sprintf(" or use `%s` pane list", key)
+		return fmt.Sprintf(" or `%s` pane list", key)
 	}
 	if binding, ok := keys.GlobalKeyBindings[keys.KeyOpenPane]; ok {
 		help := binding.Help()
 		if help.Key != "" && help.Desc != "" {
-			return fmt.Sprintf(" or use `%s` %s", help.Key, help.Desc)
+			return fmt.Sprintf(" or `%s` %s", help.Key, help.Desc)
 		}
 	}
 	return ""

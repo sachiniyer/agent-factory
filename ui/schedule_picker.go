@@ -620,13 +620,13 @@ func (p *schedulePicker) chip(cell scheduleCell, text string) string {
 func (p *schedulePicker) hint() string {
 	switch p.activeCell() {
 	case cellRaw:
-		return "type cron • ↑/↓ fields • tab next"
+		return "type cron · ↑/↓ fields · tab next"
 	case cellWeekdays:
-		return "←/→ day • space toggle • ↑/↓ fields"
+		return "←/→ day · space toggle · ↑/↓ fields"
 	case cellType, cellMeridiem:
-		return "←/→ change • ↑/↓ fields • tab next"
+		return "←/→ change · ↑/↓ fields · tab next"
 	default:
-		return "type or ←/→ • ↑/↓ fields • tab next"
+		return "type or ←/→ · ↑/↓ fields · tab next"
 	}
 }
 

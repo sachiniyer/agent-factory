@@ -151,9 +151,9 @@ func (p *PromptOverlay) Render() string {
 	lines = append(lines, strings.Split(p.textarea.View(), "\n")...)
 	lines = append(lines, "")
 
-	hint := "enter newline • tab done • ctrl+c cancel"
+	hint := "enter newline · tab done · ctrl+c cancel"
 	if lipgloss.Width(hint) > textRect.W {
-		hint = "tab done • ctrl+c cancel"
+		hint = "tab done · ctrl+c cancel"
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
 

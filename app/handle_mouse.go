@@ -13,7 +13,6 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/tree"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // This file is the root mouse router (#1024 R4, RFC §2.5 — closes #1025).
@@ -773,22 +772,4 @@ func keyMsgFromString(s string) (tea.KeyMsg, bool) {
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: r}, true
 	}
 	return tea.KeyMsg{}, false
-}
-
-// overlayOrigin computes where overlay.PlaceOverlay(0, 0, fg, bg, true) puts
-// fg's top-left: centered on bg (or 0,0 when fg exceeds bg, matching
-// PlaceOverlay's clamp). The overlays register their button zones relative
-// to this origin.
-func overlayOrigin(fg, bg string) layout.Point {
-	fgW, fgH := lipgloss.Width(fg), lipgloss.Height(fg)
-	bgW, bgH := lipgloss.Width(bg), lipgloss.Height(bg)
-	x := (bgW - fgW) / 2
-	y := (bgH - fgH) / 2
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-	return layout.Point{X: x, Y: y}
 }

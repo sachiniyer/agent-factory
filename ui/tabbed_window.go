@@ -596,17 +596,26 @@ func (w *TabbedWindow) BeginScrollFill() {
 // only place the pane's tab is named inside the pane (the tab bar is gone), so
 // duplicate labels include their 1-based jump slot (#2150); the highlight
 // doubles as the pane's focus indicator.
+//
+// Every clause hanging off that identity — the preview's origin, the diverging
+// tree selection, scroll mode — is set off with "—", and only the fragments
+// INSIDE each identity are joined with " · " (#2579). All three used to pick a
+// different mark for the same relationship, and with two sessions whose tab
+// labels match, `alpha · ◆ Agent · selected: beta · ◆ Agent` flattened into four
+// indistinguishable fragments. That clause is the only signal that the
+// workspace is not showing the row under the cursor, so it has to read at a
+// glance.
 func (w *TabbedWindow) renderHeader(width int) string {
 	var text string
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
-		text = fmt.Sprintf(" Preview %s · %s (original %s) ", inst.Title, label, w.preview.original)
+		text = fmt.Sprintf(" Preview %s · %s — original %s ", inst.Title, label, w.preview.original)
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
 		if w.selectionHint != "" {
-			text = fmt.Sprintf(" %s · %s · selected: %s ", inst.Title, label, w.selectionHint)
+			text = fmt.Sprintf(" %s · %s — selected: %s ", inst.Title, label, w.selectionHint)
 		}
 	} else {
 		text = " no session selected "
@@ -615,7 +624,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		// Scroll mode is pane chrome, not terminal history. Keeping this cue in
 		// the header prevents an AF-owned footer row from consuming the first
 		// scroll gesture or changing the child's history coordinates (#2192).
-		text = strings.TrimSuffix(text, " ") + " · Scroll · Esc exits "
+		text = strings.TrimSuffix(text, " ") + " — Scroll · Esc exits "
 	}
 	style := paneHeaderStyle
 	switch {

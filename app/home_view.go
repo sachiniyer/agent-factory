@@ -15,22 +15,22 @@ import (
 
 func (m *home) handleError(err error) tea.Cmd {
 	log.ErrorLog.Printf("%v", err)
-	return m.showTransientError(err)
+	if err == nil {
+		return nil
+	}
+	return m.clearTransientMessageAfterDelay(m.setTransientFailure(err))
 }
 
 // handleNotice reports why af deliberately declined or redirected a user
 // action. The same transient UI surface carries both notices and failures, but
-// their logs must not: ERROR is reserved for an operation that actually failed.
+// their logs must not — ERROR is reserved for an operation that actually failed
+// — and neither must the details overlay's title (#2618).
 func (m *home) handleNotice(notice error) tea.Cmd {
 	log.InfoLog.Printf("%v", notice)
-	return m.showTransientError(notice)
-}
-
-func (m *home) showTransientError(err error) tea.Cmd {
-	if err == nil {
+	if notice == nil {
 		return nil
 	}
-	return m.clearTransientMessageAfterDelay(m.setTransientNotice(err))
+	return m.clearTransientMessageAfterDelay(m.setTransientNotice(notice))
 }
 
 func (m *home) showTransientMessage(message string) tea.Cmd {
@@ -40,7 +40,18 @@ func (m *home) showTransientMessage(message string) tea.Cmd {
 	return m.clearTransientMessageAfterDelay(m.setTransientNotice(errors.New(message)))
 }
 
+// setTransientNotice raises informational guidance: an action af declined, work
+// it started, a layout decision it made on the user's behalf.
 func (m *home) setTransientNotice(err error) uint64 {
+	m.transientNoticeID++
+	m.errBox.SetNotice(err)
+	return m.transientNoticeID
+}
+
+// setTransientFailure raises a real operation failure. Same bar, same timer —
+// only the category differs, which is what the details overlay titles itself
+// from.
+func (m *home) setTransientFailure(err error) uint64 {
 	m.transientNoticeID++
 	m.errBox.SetError(err)
 	return m.transientNoticeID
@@ -56,12 +67,23 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 	}
 }
 
+// showErrorDetails opens the last notice in full. It reads the RETAINED notice,
+// not the one currently painted: the bar drops a notice after 3 seconds, and
+// binding `E` to what is still on screen made the key silently dead in exactly
+// the case it exists for — a message the bar had to clip (#2618).
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
-	full := m.errBox.FullError()
+	full, failure := m.errBox.RetainedNotice()
 	if full == "" {
 		return m, nil
 	}
-	m.textOverlay = overlay.NewTextOverlay("Last error\n\n" + full)
+	// af hiding a pane and saying how to get it back is designed behavior. Filing
+	// it under "Last error" would report af working as intended as a fault, which
+	// is the same miscategorization #2575 found in the logs.
+	title := "Last notice"
+	if failure {
+		title = "Last error"
+	}
+	m.textOverlay = overlay.NewTextOverlay(title + "\n\n" + full)
 	m.textOverlayDismissAnyKey = false
 	m.textOverlayScrollable = true
 	m.textOverlayDismissPolicy = nil
@@ -94,7 +116,7 @@ func (m *home) confirmActionWithDetail(message, detail string, action tea.Cmd) t
 			if msg := action(); msg != nil {
 				if err, ok := msg.(error); ok {
 					log.ErrorLog.Printf("confirmation action failed: %v", err)
-					m.setTransientNotice(err)
+					m.setTransientFailure(err)
 				} else {
 					// Stash non-error messages so handleStateConfirm can
 					// forward them into the Bubble Tea event loop.
@@ -182,33 +204,33 @@ func (m *home) View() string {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.textOverlay.Render(), mainView, true)
+		return placeOverlay(m.textOverlay.Render(), mainView)
 	} else if m.state == stateConfirm {
 		if m.confirmationOverlay == nil {
 			log.ErrorLog.Printf("confirmation overlay is nil")
 		}
 		fg := m.confirmationOverlay.Render()
 		m.confirmationOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
-		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
+		return placeOverlay(fg, mainView)
 	} else if m.state == stateSearch {
 		if m.searchOverlay == nil {
 			log.ErrorLog.Printf("search overlay is nil")
 		}
 		fg := m.searchOverlay.Render()
 		m.searchOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
-		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
+		return placeOverlay(fg, mainView)
 	} else if m.state == stateSwitchProject {
 		if m.projectPickerOverlay == nil {
 			log.ErrorLog.Printf("project picker overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.projectPickerOverlay.Render(), mainView, true)
+		return placeOverlay(m.projectPickerOverlay.Render(), mainView)
 	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent || m.state == stateSelectBackend {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
-		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
+		return placeOverlay(fg, mainView)
 	} else if m.state == stateSelectTabKind {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("tab-kind selection overlay is nil")
@@ -216,19 +238,19 @@ func (m *home) View() string {
 		}
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
-		return overlay.PlaceOverlay(0, 0, fg, mainView, true)
+		return placeOverlay(fg, mainView)
 	} else if m.state == statePromptInput {
 		if m.promptOverlay == nil {
 			log.ErrorLog.Printf("prompt overlay is nil")
 			return mainView
 		}
-		return overlay.PlaceOverlay(0, 0, m.promptOverlay.Render(), mainView, true)
+		return placeOverlay(m.promptOverlay.Render(), mainView)
 	} else if m.state == stateHooks {
-		return overlay.PlaceOverlay(0, 0, m.renderHooksOverlay(), mainView, true)
+		return placeOverlay(m.renderHooksOverlay(), mainView)
 	} else if m.state == stateTasks {
-		return overlay.PlaceOverlay(0, 0, m.renderTasksOverlay(), mainView, true)
+		return placeOverlay(m.renderTasksOverlay(), mainView)
 	} else if m.state == stateConfigEditor {
-		return overlay.PlaceOverlay(0, 0, m.renderConfigOverlay(), mainView, true)
+		return placeOverlay(m.renderConfigOverlay(), mainView)
 	}
 
 	return mainView

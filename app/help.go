@@ -309,7 +309,7 @@ func (h helpTypeInstanceStart) toContent() string {
 		keyStyle.Render(helpKey(keys.KeyKill))+descStyle.Render("     - Kill (delete) the selected session"),
 		"",
 		headerStyle.Render("Actions:"),
-		firstRunActionLine("enter continue • esc close"),
+		firstRunActionLine("enter continue · esc close"),
 	)
 	return content
 }

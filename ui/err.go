@@ -11,7 +11,23 @@ import (
 
 type ErrBox struct {
 	height, width int
-	err           error
+	// err is what the bar RENDERS. It goes nil when the notice's visual timer
+	// expires (Expire) or when the action that raised it takes it back (Clear).
+	err error
+	// retained is the most recent notice, kept alive past its visual expiry so
+	// `E details` can still open it (#2618). Retraction drops it as well: a
+	// notice that stopped being TRUE must not stay reachable, while one that
+	// merely stopped being VISIBLE must.
+	//
+	// Retaining it is the whole point of the affordance. `E` exists for a
+	// message too long for the bar, and it used to go dead 3 seconds later — at
+	// exactly the moment the clipped half left the screen — so the one case it
+	// was built for was the one case it could not serve.
+	retained error
+	// retainedIsFailure records whether the retained notice reported a real
+	// failure (handleError) or informational guidance (handleNotice / a success
+	// message), which is what the details overlay titles itself from.
+	retainedIsFailure bool
 }
 
 var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Error)
@@ -20,12 +36,36 @@ func NewErrBox() *ErrBox {
 	return &ErrBox{}
 }
 
-func (e *ErrBox) SetError(err error) {
+// SetError shows a real operation failure.
+func (e *ErrBox) SetError(err error) { e.set(err, true) }
+
+// SetNotice shows informational guidance: an action af deliberately declined or
+// redirected, or something it did on the user's behalf. Same bar, different
+// category — see retainedIsFailure.
+func (e *ErrBox) SetNotice(err error) { e.set(err, false) }
+
+func (e *ErrBox) set(err error, failure bool) {
 	e.err = err
+	if err == nil {
+		return
+	}
+	e.retained = err
+	e.retainedIsFailure = failure
 }
 
+// Expire stops rendering the notice when its visual timer runs out, leaving it
+// readable through `E details`.
+func (e *ErrBox) Expire() {
+	e.err = nil
+}
+
+// Clear RETRACTS the notice: the caller is saying it is no longer true (a
+// "Starting…" that finished, narrow-width guidance the resize resolved), so it
+// leaves no trace behind for `E details` to reopen.
 func (e *ErrBox) Clear() {
 	e.err = nil
+	e.retained = nil
+	e.retainedIsFailure = false
 }
 
 func (e *ErrBox) SetSize(width, height int) {
@@ -33,11 +73,23 @@ func (e *ErrBox) SetSize(width, height int) {
 	e.height = height
 }
 
+// FullError is the notice currently ON the bar, sanitized. Empty once it
+// expires or is retracted.
 func (e *ErrBox) FullError() string {
 	if e.err == nil {
 		return ""
 	}
 	return sanitizeError(e.err.Error())
+}
+
+// RetainedNotice is the most recent notice that has not been retracted, whether
+// or not the bar is still showing it, plus whether it reported a failure. This
+// is what `E details` opens (#2618).
+func (e *ErrBox) RetainedNotice() (text string, failure bool) {
+	if e.retained == nil {
+		return "", false
+	}
+	return sanitizeError(e.retained.Error()), e.retainedIsFailure
 }
 
 func (e *ErrBox) String() string {

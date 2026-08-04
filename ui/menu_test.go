@@ -5,10 +5,12 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 )
 
 // readyUIInstance builds an actionable Ready-status instance for ui-package
@@ -572,5 +574,77 @@ func TestMenuNarrowPaneFocusDoesNotShowHideWithoutOpen(t *testing.T) {
 	out := m.String()
 	if strings.Contains(out, "hide pane") && !strings.Contains(out, "open pane") {
 		t.Fatalf("narrow pane footer must not show hide without the recovery/open action:\n%s", out)
+	}
+}
+
+// TestMenuCollapsesTheScrollPairIntoOneHint is #2580 item 1. Both scroll
+// bindings carry the identical desc "preview scroll", so the row spent 44 cells
+// saying one thing twice — `ctrl+u preview scroll · ctrl+d preview scroll` — in
+// a row that sheds hints by width. The pair renders as one chip, the form the
+// help overlay already uses for it.
+func TestMenuCollapsesTheScrollPairIntoOneHint(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetScrollAvailable(true)
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if got := strings.Count(out, "preview scroll"); got != 1 {
+		t.Fatalf("the scroll description renders %d times, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, "ctrl+u/ctrl+d preview scroll") {
+		t.Fatalf("the pair must render as one chip:\n%s", out)
+	}
+}
+
+// The chip's key glyphs come from the effective bindings, so a [keys] rebind
+// shows through — the reason this is a renderer pairing rather than a pinned
+// helpLabel, which only covers the default binding.
+func TestMenuScrollChipFollowsRebinds(t *testing.T) {
+	t.Cleanup(func() {
+		if err := keys.ApplyOverrides(nil); err != nil {
+			t.Fatalf("restoring default keymap: %v", err)
+		}
+	})
+	if err := keys.ApplyOverrides(map[string][]string{
+		"scroll_up":   {"ctrl+b"},
+		"scroll_down": {"ctrl+f"},
+	}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetScrollAvailable(true)
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if !strings.Contains(out, "ctrl+b/ctrl+f preview scroll") {
+		t.Fatalf("the chip must name the effective bindings:\n%s", out)
+	}
+}
+
+// Collapsing the pair must not cost either key its click target: the cells
+// under each glyph still press that key.
+func TestMenuScrollChipKeepsBothClickZones(t *testing.T) {
+	m := NewMenu()
+	reg := zones.NewRegistry()
+	m.SetZoneRegistry(reg)
+	m.SetOrigin(layout.Point{})
+	m.SetInstance(readyUIInstance())
+	m.SetScrollAvailable(true)
+	m.SetSize(200, 1)
+
+	reg.Reset()
+	line := strings.Split(xansi.Strip(m.String()), "\n")[0]
+
+	for _, want := range []string{"ctrl+u", "ctrl+d"} {
+		r, ok := reg.Find(zones.StatusHint(want))
+		if !ok {
+			t.Fatalf("no click zone for %q; got %v", want, reg.IDs())
+		}
+		if got := cellSlice(line, r.X, r.X+r.W); got != want {
+			t.Fatalf("the %q zone covers %q, want the key's own glyph", want, got)
+		}
 	}
 }

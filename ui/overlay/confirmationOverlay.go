@@ -359,7 +359,7 @@ func refusalNotices(short int) []string {
 func (c *ConfirmationOverlay) instruction(compact bool) string {
 	bold := lipgloss.NewStyle().Bold(true).Render
 	if compact {
-		return bold(c.ConfirmKey) + " confirm • " +
+		return bold(c.ConfirmKey) + " confirm · " +
 			bold(c.CancelKey) + "/" + bold("esc") + " cancel"
 	}
 	confirmKeys := bold(c.ConfirmKey)

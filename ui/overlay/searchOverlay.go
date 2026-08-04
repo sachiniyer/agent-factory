@@ -390,9 +390,9 @@ func (s *SearchOverlay) Render() string {
 	if !plan.compact {
 		lines = append(lines, "")
 	}
-	hint := "↑/↓ navigate • enter select • esc close"
+	hint := "↑/↓ navigate · enter select · esc close"
 	if plan.compact || lipgloss.Width(hint) > plan.contentWidth {
-		hint = "↑/↓ nav • enter • esc close"
+		hint = "↑/↓ nav · enter · esc close"
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), plan.contentWidth))
 

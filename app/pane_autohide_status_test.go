@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
@@ -237,8 +238,10 @@ func TestPane_AutoHideStatusNamesDisplacedTab(t *testing.T) {
 			rendered := h.errBox.String()
 			assert.Contains(t, rendered, tc.wantHiddenNamedAs,
 				"the toast names the tab that was actually displaced (#1997)")
-			assert.Contains(t, rendered, "resize wider",
+			assert.Contains(t, rendered, "resize",
 				"naming the tab must not push the recovery hint off the 80-column bar (#1973)")
+			assert.Contains(t, rendered, "`"+keys.GlobalKeyBindings[keys.KeyOpenPane].Help().Key+"`",
+				"nor the key half of it (#2580)")
 		})
 	}
 }
@@ -308,4 +311,48 @@ func TestPane_OpenPaneWindowIsIdempotent(t *testing.T) {
 	second := h.openPaneWindow(alpha, 0)
 	require.Same(t, first, second, "re-opening the same (instance, tab) returns the existing pane")
 	assert.Equal(t, 1, h.store.NumOpenPanes(), "no duplicate pane is appended")
+}
+
+// TestPane_AutoHideStatusKeepsTheRecoveryHintAtEightyColumns is #2580 item 3.
+// The bar truncates from the RIGHT, so the auto-hide notice's LAST fragment is
+// the one that dies — and that fragment is the `s` key, the cheaper of the two
+// remedies (no resize needed, and the only one a user cannot discover by
+// fiddling). #1973 bought room for it by dropping a word; #1997 then spent that
+// room making the subject a full pane identity (`alpha · ◆ Agent` rather than
+// `alpha`), pushing the hint back off the end at the default terminal size.
+//
+// The assertion is on the RENDERED bar, not the composed string: the composed
+// string always held the hint, which is exactly why this regressed unnoticed.
+// `clear-cmd` is the issue's own repro name — nine characters, not a long one.
+func TestPane_AutoHideStatusKeepsTheRecoveryHintAtEightyColumns(t *testing.T) {
+	for _, title := range []string{"alpha", "clear-cmd"} {
+		t.Run(title, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := instanceWithFakeBackend(t, title)
+			inst.AddTabForTest("agent", session.TabKindAgent)
+			inst.AddTabForTest("shell", session.TabKindShell)
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(0)
+			_ = h.selectionChanged()
+			resizeHome(h, 80, 24)
+
+			_, _ = h.openOrFocusPane(inst, 0)
+			_, _ = h.openOrFocusPane(inst, 1)
+			require.Equal(t, 1, len(h.visiblePanes), "precondition: only one pane fits at 80 columns")
+
+			rendered := h.errBox.String()
+			openPaneKey := keys.GlobalKeyBindings[keys.KeyOpenPane].Help().Key
+			require.NotEmpty(t, openPaneKey)
+
+			assert.Contains(t, rendered, title+" · ◆ Agent hidden",
+				"the subject still names the pane that was actually displaced (#1997)")
+			assert.Contains(t, rendered, "resize", "the resize remedy survives")
+			assert.Contains(t, rendered, "`"+openPaneKey+"`",
+				"the key that reopens the pane without a resize must survive the 80-column bar")
+			assert.NotContains(t, rendered, "\u2026",
+				"a notice that fits needs no ellipsis, and a dangling `or…` reads as a fault")
+			assert.NotContains(t, rendered, "E details",
+				"the bar only advertises the details key for a notice it had to clip")
+		})
+	}
 }

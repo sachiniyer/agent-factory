@@ -31,7 +31,7 @@ func TestPane_NumberJumpDisambiguatesDuplicateTerminalHeaders(t *testing.T) {
 	_, _ = h.handleTabJump(2)
 	require.Equal(t, 1, paneB.Tab())
 	view := h.View()
-	assert.Contains(t, view, "beta · 2 › Terminal · selected: beta · 3 › Terminal",
+	assert.Contains(t, view, "beta · 2 › Terminal — selected: beta · 3 › Terminal",
 		"the pane and tree identities remain distinct after jumping to slot 2")
 
 	_, _ = h.handleTabJump(3)

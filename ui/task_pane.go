@@ -599,7 +599,7 @@ func (s *TaskPane) renderListMode() string {
 			if programLabel == "" {
 				programLabel = programDefaultLabel
 			}
-			detail := fmt.Sprintf("      %s • last: %s", programLabel, lastRun)
+			detail := fmt.Sprintf("      %s · last: %s", programLabel, lastRun)
 			if tsk.LastRunStatus != "" {
 				// The full errored summary already has its own line above;
 				// keep this column short.
@@ -643,13 +643,13 @@ func (s *TaskPane) renderListMode() string {
 	}
 
 	if s.hasFocus {
-		hint := "↑/↓ select • n new • enter edit • r run now • x toggle • D delete • esc back"
-		short := "r run now • ↑/↓ • n new • enter • esc"
+		hint := "↑/↓ select · n new · enter edit · r run now · x toggle · D delete · esc back"
+		short := "r run now · ↑/↓ · n new · enter · esc"
 		// A watch task can't be manually run (#1758): drop "r run now" so the
 		// hint never advertises an action that always fails.
 		if s.selectedTaskIsWatch() {
-			hint = "↑/↓ select • n new • enter edit • x toggle • D delete • esc back"
-			short = "↑/↓ • n new • enter • esc"
+			hint = "↑/↓ select · n new · enter edit · x toggle · D delete · esc back"
+			short = "↑/↓ · n new · enter · esc"
 		}
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
 			hint = short

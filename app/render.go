@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
 // View render helpers extracted from app.go (#1145): overlay frame sizing and
@@ -306,4 +307,50 @@ func (m *home) renderProjectsRule() string {
 		return ""
 	}
 	return splitDividerStyle.Render(strings.Repeat("─", r.W))
+}
+
+// overlayOrigin computes where a modal's top-left lands on the frame: centered
+// on the frame, then lifted just far enough that its last row clears the status
+// bar. The overlays register their button zones relative to this origin, and
+// placeOverlay composites at it, so the two can never disagree about where the
+// modal is.
+//
+// The lift is #2578. PlaceOverlay's own centering measures the WHOLE frame, so a
+// modal tall enough to reach the bottom painted its border straight through the
+// hint row and cut the hints mid-word — `D kill` rendered as `D ki`, `? help` as
+// `elp`. The row read as corruption rather than as an overlay, on the help
+// screen, which is where a confused user goes.
+//
+// It is a clamp rather than "center within the region above the bar" on purpose:
+// only a modal that would actually collide moves. Every short modal keeps the
+// exact position it has always had, so the fix costs nothing anywhere it was not
+// needed.
+func overlayOrigin(fg, bg string) layout.Point {
+	fgW, fgH := lipgloss.Width(fg), lipgloss.Height(fg)
+	bgW, bgH := lipgloss.Width(bg), lipgloss.Height(bg)
+	y := centerOffset(bgH - fgH)
+	// A modal too tall to clear the bar even at the top of the frame keeps the
+	// old centering: showing it matters more than the hint row, and PlaceOverlay
+	// clamps a negative offset back anyway.
+	if highest := bgH - layout.StatusBarRows - fgH; highest >= 0 && y > highest {
+		y = highest
+	}
+	return layout.Point{X: centerOffset(bgW - fgW), Y: y}
+}
+
+// centerOffset halves the slack, never going negative — matching PlaceOverlay's
+// own clamp for a foreground wider or taller than its background.
+func centerOffset(slack int) int {
+	if slack <= 0 {
+		return 0
+	}
+	return slack / 2
+}
+
+// placeOverlay composites a modal onto the frame at overlayOrigin. Every modal
+// branch in View goes through it so none can reintroduce #2578 by calling
+// PlaceOverlay's centering directly.
+func placeOverlay(fg, bg string) string {
+	origin := overlayOrigin(fg, bg)
+	return overlay.PlaceOverlay(origin.X, origin.Y, fg, bg, false)
 }

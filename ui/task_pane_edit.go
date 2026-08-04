@@ -377,25 +377,25 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString("\n")
 	quitHint := configuredQuitHelp() + " quit"
 	if s.creating {
-		hint := "tab/shift+tab fields • enter create • esc cancel • " + quitHint
+		hint := "tab/shift+tab fields · enter create · esc cancel · " + quitHint
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = "tab fields • enter • esc cancel • " + quitHint
+			hint = "tab fields · enter · esc cancel · " + quitHint
 		}
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 	} else {
-		hint := "tab/shift+tab fields • enter save"
+		hint := "tab/shift+tab fields · enter save"
 		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = "tab fields • enter save"
+			hint = "tab fields · enter save"
 		}
 		b.WriteString(hintStyle.Render(fitLine(hint, s.width)))
 		b.WriteString("\n")
-		actions := "r run now • x toggle • D delete • esc list • " + quitHint
-		short := "r run • x toggle • D del • esc • " + quitHint
+		actions := "r run now · x toggle · D delete · esc list · " + quitHint
+		short := "r run · x toggle · D del · esc · " + quitHint
 		// A watch task can't be manually run (#1758): drop "r run" so the
 		// editor never advertises an action that always fails.
 		if s.selectedTaskIsWatch() {
-			actions = "x toggle • D delete • esc list • " + quitHint
-			short = "x toggle • D del • esc • " + quitHint
+			actions = "x toggle · D delete · esc list · " + quitHint
+			short = "x toggle · D del · esc · " + quitHint
 		}
 		if s.width > 0 && lipgloss.Width(actions) > s.width {
 			actions = short

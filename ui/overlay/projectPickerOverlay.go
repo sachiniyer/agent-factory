@@ -235,7 +235,7 @@ func (p *ProjectPickerOverlay) Render() string {
 			lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.addErr), cw))
 		}
 		lines = append(lines, "")
-		hint := "enter add • esc back"
+		hint := "enter add · esc back"
 		lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
 		return finishRender(style, fit, textRect, lines)
 	}
@@ -258,9 +258,9 @@ func (p *ProjectPickerOverlay) Render() string {
 	}
 
 	lines = append(lines, "")
-	hint := "j/k navigate • enter switch • esc cancel"
+	hint := "j/k navigate · enter switch · esc cancel"
 	if lipgloss.Width(hint) > cw {
-		hint = "j/k • enter • esc"
+		hint = "j/k · enter · esc"
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
 

@@ -200,11 +200,11 @@ func (h *HooksPane) String() string {
 	b.WriteString("\n")
 	if h.hasFocus {
 		if h.editing || h.adding {
-			b.WriteString(hintStyle.Render("enter save • esc cancel"))
+			b.WriteString(hintStyle.Render("enter save · esc cancel"))
 		} else {
-			hint := "n add • enter edit • D delete • esc back"
+			hint := "n add · enter edit · D delete · esc back"
 			if h.width > 0 && lipgloss.Width(hint) > h.width {
-				hint = "n add • enter • esc back"
+				hint = "n add · enter · esc back"
 			}
 			b.WriteString(hintStyle.Render(hint))
 		}

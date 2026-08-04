@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -510,9 +511,13 @@ func centerStart(box, content int) int {
 
 // hintDropOrder lists the options that may be dropped when the hint row is
 // wider than the status bar, least valuable first; options in the same inner
-// slice drop together (a lone "ctrl+d preview scroll" without its ctrl+u twin
-// reads like a bug). The full instance row is wider than common terminals, so
-// something has to go — and before this priority existed the CLAMP
+// slice drop together, because half of a pair is not a hint anyone can act on.
+// For the scroll pair that is now structural as well as editorial: the two
+// render as one chip (hintPairs), so dropping one alone would leave a chip
+// naming a key the row is no longer offering.
+//
+// The full instance row is wider than common terminals, so something has to go
+// — and before this priority existed the CLAMP
 // decided, silently cutting the RIGHT edge, i.e. `? help` and `q quit` first:
 // exactly the hints a lost user needs (#1083 play-test). New, help, quit, and
 // kill are deliberately absent from this list: `n new` is the tree-focus
@@ -625,10 +630,24 @@ type hintSpan struct {
 	x, w int
 }
 
+// hintPairs are adjacent options the row renders as ONE chip, keyed by the
+// leading option. Both bindings in a pair carry the identical description, so
+// printing each on its own spent 44 cells saying one thing twice —
+// `ctrl+u preview scroll · ctrl+d preview scroll` — in a row that sheds hints by
+// width (#2580). The chip is `ctrl+u/ctrl+d preview scroll`, the form the help
+// overlay already uses for this pair.
+//
+// The glyphs come from the effective bindings rather than a pinned helpLabel:
+// helpLabel covers only the DEFAULT binding by design, so a [keys] rebind of
+// scroll_up would have shown a label naming a key that no longer scrolls.
+var hintPairs = map[keys.KeyName]keys.KeyName{
+	keys.KeyShiftUp: keys.KeyShiftDown,
+}
+
 // renderHints renders the option row, skipping dropped options, and reports
 // each rendered hint's cell extent for the click zones. Separators follow
-// group membership of the options actually rendered: a bullet within a group,
-// a vertical bar between groups.
+// group membership of the options actually rendered: a middle dot within a
+// group, a vertical bar between groups.
 func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 	groupOf := func(i int) int {
 		for gi, g := range m.groups {
@@ -648,11 +667,21 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 	}
 	prevGroup := -1
 	first := true
+	skip := -1
 	for i, k := range m.options {
-		if drop[k] {
+		if drop[k] || i == skip {
 			continue
 		}
 		binding := keys.GlobalKeyBindings[k]
+
+		// A pair collapses only when its partner is the very next option, still
+		// rendered, and in the same group — otherwise the chip would claim a key
+		// the row is not actually offering.
+		partner, paired := hintPairs[k]
+		if paired {
+			paired = i+1 < len(m.options) && m.options[i+1] == partner &&
+				!drop[partner] && groupOf(i) == groupOf(i+1)
+		}
 
 		var (
 			localActionStyle = actionGroupStyle
@@ -678,24 +707,50 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 		first = false
 		prevGroup = group
 
-		start := col
+		keyText, descText := localKeyStyle, localDescStyle
 		if inActionGroup {
-			write(localActionStyle.Render(binding.Help().Key))
-			write(" ")
-			write(localActionStyle.Render(binding.Help().Desc))
-		} else {
-			write(localKeyStyle.Render(binding.Help().Key))
-			write(" ")
-			write(localDescStyle.Render(binding.Help().Desc))
+			keyText, descText = localActionStyle, localActionStyle
 		}
+
+		start := col
+		if paired {
+			// Each key claims the cells of its OWN glyph, so collapsing the pair
+			// costs neither of them its click target and a click still presses
+			// the key printed under the pointer. The shared description belongs
+			// to both and is claimed by neither.
+			partnerBinding := keys.GlobalKeyBindings[partner]
+			write(keyText.Render(binding.Help().Key))
+			spans = appendHintSpan(spans, binding, start, col-start)
+			write(keyText.Render("/"))
+			partnerStart := col
+			write(keyText.Render(partnerBinding.Help().Key))
+			spans = appendHintSpan(spans, partnerBinding, partnerStart, col-partnerStart)
+			write(" ")
+			write(descText.Render(binding.Help().Desc))
+			skip = i + 1
+			continue
+		}
+
+		write(keyText.Render(binding.Help().Key))
+		write(" ")
+		write(descText.Render(binding.Help().Desc))
 		// KeyJumpTab's "1-9" chip names nine keys, not one action — it gets
 		// no click zone. Everything else is clickable by its primary key.
 		if k != keys.KeyJumpTab {
-			if bkeys := binding.Keys(); len(bkeys) > 0 {
-				spans = append(spans, hintSpan{key: bkeys[0], x: start, w: col - start})
-			}
+			spans = appendHintSpan(spans, binding, start, col-start)
 		}
 	}
 
 	return menuStyle.Render(s.String()), spans
+}
+
+// appendHintSpan records a clickable extent for a binding, keyed by its primary
+// key string — what a click on those cells "presses". A binding with no keys
+// registers nothing rather than a zone that presses "".
+func appendHintSpan(spans []hintSpan, binding key.Binding, x, w int) []hintSpan {
+	bkeys := binding.Keys()
+	if len(bkeys) == 0 {
+		return spans
+	}
+	return append(spans, hintSpan{key: bkeys[0], x: x, w: w})
 }

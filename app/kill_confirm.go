@@ -298,7 +298,7 @@ func detachedHeadCommitWarning(worktreePath, branchName string, deleteBranch boo
 		}
 	}
 	return "Detached HEAD points to one or more commits not reachable from any ref that survives cleanup. " +
-		"Killing removes the worktree and permanently orphans them · this cannot be undone.", true
+		"Killing removes the worktree and permanently orphans them — this cannot be undone.", true
 }
 
 func refSurvivesWorktreeCleanup(ref, branchName string, deleteBranch bool) bool {
@@ -366,7 +366,7 @@ func unmergedSevereLine(branchName string, n int, baseLabel string) string {
 	if baseLabel != "" {
 		where = fmt.Sprintf("not on %s and not pushed anywhere", baseLabel)
 	}
-	return fmt.Sprintf("Branch %q has %d %s %s. Killing permanently deletes %s · this cannot be undone.", branchName, n, commitWord, where, pronoun)
+	return fmt.Sprintf("Branch %q has %d %s %s. Killing permanently deletes %s — this cannot be undone.", branchName, n, commitWord, where, pronoun)
 }
 
 // unmergedFailClosedLine mirrors the #815 could-not-verify warning for the

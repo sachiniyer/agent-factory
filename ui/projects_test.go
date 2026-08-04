@@ -181,3 +181,23 @@ func TestProjectsPaneEmptyShowsPlaceholder(t *testing.T) {
 	_, ok := p.SelectedProject()
 	assert.False(t, ok, "an empty section resolves no selected project")
 }
+
+// TestProjectsHeaderSpacingMatchesAutomations is #2580 item 2. The Projects
+// name carried a trailing space AND its hint carried a leading one, so the
+// header rendered a double space before the `·` while the Automations header
+// one line above it rendered a single space — the drift visible in one frame,
+// side by side.
+func TestProjectsHeaderSpacingMatchesAutomations(t *testing.T) {
+	p := newTestProjects(testProjectRows())
+	p.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 8})
+	header := stripANSI(strings.Split(p.String(), "\n")[0])
+
+	assert.Contains(t, header, "Projects (3) · enter switch",
+		"exactly one space before the separator")
+	assert.NotContains(t, header, "  · ", "no double space before the separator")
+
+	// The compact one-line summary is built through the same titleLine.
+	p.SetCompact(true)
+	compact := stripANSI(strings.Split(p.String(), "\n")[0])
+	assert.NotContains(t, compact, "  · ", "the compact summary doubles up the same way")
+}

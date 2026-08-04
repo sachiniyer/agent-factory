@@ -229,7 +229,10 @@ func projectsSwitchHint() string { return "· enter switch" }
 func (p *ProjectsPane) titleLine(name string, nameStyle lipgloss.Style) string {
 	w := p.rect.W
 	const shortName = " Projects "
-	hint := " " + projectsSwitchHint() + " "
+	// No leading pad: every `name` passed in already ends with a space, exactly
+	// as the Automations header's does, and adding another produced the double
+	// space the two headers showed side by side in one frame (#2580).
+	hint := projectsSwitchHint() + " "
 	if runewidth.StringWidth(name+hint) <= w {
 		return nameStyle.Render(name) + projectsHintStyle.Render(hint)
 	}
