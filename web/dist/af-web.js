@@ -9203,10 +9203,24 @@ function rowTitle(s) {
   if (s.backend_type === "remote") {
     title = "[remote] " + title;
   }
+  const recreate = rootRecreateNote(s);
+  if (recreate) {
+    title = `[${recreate}] ` + title;
+  }
   if (s.model_change) {
     title = "[model changed] " + title;
   }
   return title;
+}
+function rootRecreateNote(s) {
+  switch (s.root_recreate_context) {
+    case "fresh":
+      return "fresh context";
+    case "unknown":
+      return "context unknown";
+    default:
+      return "";
+  }
 }
 function limitBadgePrefix(s) {
   if (!s.limit_reset_at) {

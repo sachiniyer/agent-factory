@@ -115,6 +115,16 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	// this older whole-InstanceData payload lands last and makes every open client
 	// re-project the tab change away until an unrelated snapshot repairs it. Tab
 	// and status events announce under this same lock for exactly that reason.
+	//
+	// It also orders this goroutine behind the CREATE that spawned it, which is
+	// what keeps a fast capture from publishing before session.created. CreateSession
+	// holds this same per-repo lock from before it registers the capture until after
+	// it publishes EventSessionCreated, so this Lock() cannot be taken until that
+	// event is out. Clients upsert created and updated identically, so the reverse
+	// order would let the create's older payload land last and put a just-cleared
+	// notice back on the row. That guarantee lives in CreateSession's lock scope —
+	// narrowing it there re-opens this, which is why it is named here.
+
 	data := inst.ToInstanceData()
 	err = persistInstanceData(repoID, data)
 	if err == nil && noticeRefreshed {
