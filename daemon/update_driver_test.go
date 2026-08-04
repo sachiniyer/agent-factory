@@ -22,11 +22,21 @@ type driverHarness struct {
 	cachePath string
 	cfg       *config.Config
 	now       time.Time
+	// mu guards channels: the run tests drive the discovery stub from the
+	// driver's own goroutine while the test goroutine reads it.
+	mu sync.Mutex
 	// channels records the channel each discovery call asked for, so a test can
 	// assert BOTH that no network call happened and that the right one did.
 	channels []string
 	tag      string
 	err      error
+}
+
+// checkedChannels returns the channels asked for so far.
+func (h *driverHarness) checkedChannels() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.channels...)
 }
 
 func newDriverHarness(t *testing.T) *driverHarness {
@@ -49,7 +59,9 @@ func newDriverHarness(t *testing.T) *driverHarness {
 		config:         func() *config.Config { return h.cfg },
 		now:            func() time.Time { return h.now },
 		discover: func(channel string, _ time.Duration) (string, error) {
+			h.mu.Lock()
 			h.channels = append(h.channels, channel)
+			h.mu.Unlock()
 			return h.tag, h.err
 		},
 	}
@@ -105,7 +117,7 @@ func TestUpdateDriver_NeverWritesTheSharedThrottleCache(t *testing.T) {
 			require.NotEmpty(t, before, "the cache must exist, or this proves nothing")
 
 			require.Equal(t, tc.want, h.driver.checkOnce())
-			require.Equal(t, []string{config.UpdateChannelStable}, h.channels,
+			require.Equal(t, []string{config.UpdateChannelStable}, h.checkedChannels(),
 				"the window was open, so the driver must have made exactly one lookup")
 
 			require.Equal(t, before, h.readCacheFile(t),
@@ -121,7 +133,7 @@ func TestUpdateDriver_DoesNotCreateTheThrottleCache(t *testing.T) {
 	h := newDriverHarness(t)
 
 	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
-	require.Len(t, h.channels, 1)
+	require.Len(t, h.checkedChannels(), 1)
 
 	_, err := os.Stat(h.cachePath)
 	require.True(t, errors.Is(err, os.ErrNotExist), "the driver must not create the shared cache, got %v", err)
@@ -135,7 +147,7 @@ func TestUpdateDriver_DefersToARecentCheckByAnotherAf(t *testing.T) {
 	h.seedCache(t, config.UpdateChannelStable, h.now.Add(-1*time.Hour))
 
 	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
-	require.Empty(t, h.channels, "the shared window was closed, so no lookup may happen")
+	require.Empty(t, h.checkedChannels(), "the shared window was closed, so no lookup may happen")
 }
 
 // A channel switch invalidates the shared record (CheckCache.Due), and the
@@ -147,7 +159,7 @@ func TestUpdateDriver_FollowsAChannelSwitch(t *testing.T) {
 	h.cfg.UpdateChannel = config.UpdateChannelPreview
 
 	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
-	require.Equal(t, []string{config.UpdateChannelPreview}, h.channels)
+	require.Equal(t, []string{config.UpdateChannelPreview}, h.checkedChannels())
 }
 
 // Because the driver never records, the shared window cannot throttle it. Its
@@ -170,7 +182,7 @@ func TestUpdateDriver_ChecksAtMostOncePerCheckInterval(t *testing.T) {
 
 			base := h.now
 			h.driver.checkOnce()
-			require.Len(t, h.channels, 1)
+			require.Len(t, h.checkedChannels(), 1)
 
 			// Every wake for the next six hours: no further lookup. Offsets are
 			// measured from base, not compounded, so each case is the elapsed
@@ -182,13 +194,13 @@ func TestUpdateDriver_ChecksAtMostOncePerCheckInterval(t *testing.T) {
 				h.now = base.Add(elapsed)
 				require.Equal(t, updateCheckSkipped, h.driver.checkOnce(),
 					"a check %s after the last one must be suppressed", elapsed)
-				require.Len(t, h.channels, 1, "a second lookup inside the interval is the retry storm the throttle exists to prevent")
+				require.Len(t, h.checkedChannels(), 1, "a second lookup inside the interval is the retry storm the throttle exists to prevent")
 			}
 
 			// Past the interval it checks again.
 			h.now = base.Add(autoupdate.CheckInterval)
 			h.driver.checkOnce()
-			require.Len(t, h.channels, 2)
+			require.Len(t, h.checkedChannels(), 2)
 		})
 	}
 }
@@ -202,7 +214,7 @@ func TestUpdateDriver_OffSwitchMakesNoNetworkCall(t *testing.T) {
 		h.cfg.AutoUpdate = false
 
 		require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
-		require.Empty(t, h.channels)
+		require.Empty(t, h.checkedChannels())
 	})
 
 	t.Run("env override beats an enabled config", func(t *testing.T) {
@@ -210,7 +222,7 @@ func TestUpdateDriver_OffSwitchMakesNoNetworkCall(t *testing.T) {
 		t.Setenv(autoupdate.EnvironmentVariable, "0")
 
 		require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
-		require.Empty(t, h.channels)
+		require.Empty(t, h.checkedChannels())
 	})
 
 	t.Run("env override beats a disabled config", func(t *testing.T) {
@@ -219,7 +231,7 @@ func TestUpdateDriver_OffSwitchMakesNoNetworkCall(t *testing.T) {
 		t.Setenv(autoupdate.EnvironmentVariable, "1")
 
 		require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
-		require.Len(t, h.channels, 1)
+		require.Len(t, h.checkedChannels(), 1)
 	})
 }
 
@@ -230,13 +242,13 @@ func TestUpdateDriver_HonoursTheOffSwitchWithoutARestart(t *testing.T) {
 	h := newDriverHarness(t)
 
 	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
-	require.Len(t, h.channels, 1)
+	require.Len(t, h.checkedChannels(), 1)
 
 	h.cfg.AutoUpdate = false
 	h.now = h.now.Add(autoupdate.CheckInterval + time.Minute)
 
 	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
-	require.Len(t, h.channels, 1, "a disabled driver must make no further lookup")
+	require.Len(t, h.checkedChannels(), 1, "a disabled driver must make no further lookup")
 }
 
 // A config that cannot be resolved is a skip, not a check against assumed
@@ -246,7 +258,7 @@ func TestUpdateDriver_SkipsWithoutAConfig(t *testing.T) {
 	h.driver.config = func() *config.Config { return nil }
 
 	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
-	require.Empty(t, h.channels)
+	require.Empty(t, h.checkedChannels())
 }
 
 // Never report a downgrade. A preview user switching back to stable resolves an
@@ -288,7 +300,7 @@ func TestUpdateDriver_StandsDownWhileAnotherAfHoldsTheUpdateLock(t *testing.T) {
 	<-held
 
 	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
-	require.Empty(t, h.channels, "another af owns the check; the daemon must not pile on")
+	require.Empty(t, h.checkedChannels(), "another af owns the check; the daemon must not pile on")
 	require.True(t, h.driver.nextCheckNotBefore.IsZero(),
 		"standing down for a busy lock must not burn the six-hour backoff — nothing was checked")
 
@@ -338,7 +350,7 @@ func requireRunReturnsWithoutChecking(t *testing.T, h *driverHarness) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not end the loop; the gate did not hold")
 	}
-	require.Empty(t, h.channels)
+	require.Empty(t, h.checkedChannels())
 }
 
 // The loop is shutdown-aware: closing stopCh ends it, both while waiting for a
@@ -384,7 +396,7 @@ func TestUpdateDriver_RunPerformsACheck(t *testing.T) {
 		<-done
 	})
 
-	require.Eventually(t, func() bool { return len(h.channels) > 0 }, 10*time.Second, 5*time.Millisecond,
+	require.Eventually(t, func() bool { return len(h.checkedChannels()) > 0 }, 10*time.Second, 5*time.Millisecond,
 		"the loop must reach a release check")
 }
 
