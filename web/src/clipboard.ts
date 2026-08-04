@@ -12,6 +12,8 @@
 //     runaway-agent reflex is preserved.
 //   - Ctrl+Shift+C → an EXPLICIT always-copy: copies the selection if any, a
 //     no-op otherwise, and NEVER interrupts.
+//   - Cmd+C (macOS) → copy the selection when there IS one; otherwise untouched.
+//     Cmd+C is not an interrupt anywhere, so it never sends \x03 (#2787).
 //   - Ctrl+V / Ctrl+Shift+V → paste, by deferring to xterm's native browser
 //     paste (see below).
 //   - Shift+Enter in the AGENT tab → LF (Ctrl+J), which Codex and Claude bind to
@@ -71,9 +73,10 @@ const LF = "\n";
  *   - `false` → we fully handled it; xterm skips its own processing so it does not
  *     ALSO emit bytes for the key.
  *
- * Only Ctrl+* clipboard gestures and bare Shift+Enter in an agent composer are
- * claimed. Cmd+* (metaKey), Alt+*, and every Enter in a shell/process tab are left
- * untouched so their browser/xterm/application bindings keep working as before.
+ * Only Ctrl+* clipboard gestures, bare Cmd+C over a selection, and bare Shift+Enter
+ * in an agent composer are claimed. Every other Cmd+* (metaKey), Alt+*, and every
+ * Enter in a shell/process tab are left untouched so their browser/xterm/application
+ * bindings keep working as before.
  *
  * Paste note: for Ctrl+V (and Ctrl+Shift+V) we return `false` WITHOUT calling
  * preventDefault. In xterm, a custom handler that returns false makes _keyDown
@@ -109,7 +112,36 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
     deps.sendUserInput(LF);
     return false;
   }
-  // Leave Cmd+* (macOS) and Alt+* to the browser/xterm untouched.
+  // macOS copies with Cmd+C, and that gesture CANNOT be left to the browser (#2787).
+  // xterm keeps its own selection model and paints an overlay — it never makes a DOM
+  // selection — so the browser's native copy finds document.getSelection() empty and
+  // writes NOTHING, silently, without ever reaching the never-silent copy ladder in
+  // terminal.ts. (Cmd+V is the asymmetry that hid this: paste works because the
+  // browser fires a trusted `paste` event xterm forwards to the PTY; copy has no
+  // counterpart.) So claim the BARE gesture, and only when there is something to
+  // copy:
+  //
+  //   - a selection → preventDefault + copy, through the same deps.copy ladder as
+  //     Ctrl+C, so a failed write still surfaces a visible hint;
+  //   - no selection → untouched. Cmd+C is not an interrupt on macOS, so this path
+  //     must never emit \x03.
+  //
+  // The selection is deliberately KEPT. Clearing exists on Ctrl+C so a second press
+  // falls through to the interrupt; Cmd+C has no interrupt to fall through to, so
+  // clearing would just be a surprising selection loss.
+  //
+  // Bare only: Cmd+Shift+C is the browser's inspect-element toggle, and Cmd+Alt+C
+  // devtools too — claiming those would trade one broken shortcut for another.
+  // Cmd+V stays untouched; its trusted-paste path already works.
+  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "c") {
+    if (!deps.hasSelection()) {
+      return true;
+    }
+    ev.preventDefault();
+    deps.copy(deps.getSelection());
+    return false;
+  }
+  // Leave every other Cmd+* (macOS) and Alt+* to the browser/xterm untouched.
   if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
     return true;
   }

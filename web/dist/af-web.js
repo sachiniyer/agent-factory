@@ -7147,6 +7147,14 @@ function handleClipboardKeydown(ev, deps) {
     deps.sendUserInput(LF);
     return false;
   }
+  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "c") {
+    if (!deps.hasSelection()) {
+      return true;
+    }
+    ev.preventDefault();
+    deps.copy(deps.getSelection());
+    return false;
+  }
   if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
     return true;
   }
@@ -7284,8 +7292,15 @@ function terminalUserScrollPlan(source, hasScheduledVisibleFit) {
 function terminalMouseOverride(platform) {
   return ["Macintosh", "MacIntel", "MacPPC", "Mac68K"].includes(platform) ? "Option" : "Shift";
 }
+function terminalMouseOverrideFlag(override) {
+  return override === "Option" ? "altKey" : "shiftKey";
+}
 function terminalMouseOverrideHeld(event, override) {
-  return override === "Option" ? event.altKey : event.shiftKey;
+  return event[terminalMouseOverrideFlag(override)];
+}
+function invertTerminalMouseOverride(event, override) {
+  const flag = terminalMouseOverrideFlag(override);
+  Object.defineProperty(event, flag, { value: !event[flag], configurable: true, enumerable: true });
 }
 function historyWheelPlan(event, rows, rowHeight, remainder) {
   if (event.deltaY === 0) {
@@ -7444,8 +7459,10 @@ var AttachTerminal = class {
       // The stream is the source of truth; local echo/scrollback beyond the ring is
       // fine but the server never sees our convert-eol, so leave it raw.
       scrollback: 5e3,
-      // xterm uses Shift to force selection outside macOS. Opt macOS into its
-      // matching Option escape so every platform can leave app mouse mode.
+      // Names Option as macOS's force-selection modifier (Shift is xterm's built-in
+      // choice elsewhere), giving onMouseDownCapture ONE bit to invert on every
+      // platform. It also keeps Option out of xterm's block-select gesture, which
+      // would otherwise fire on the inverted bit.
       macOptionClickForcesSelection: true
     });
     this.fit = new import_addon_fit.FitAddon();
@@ -7456,7 +7473,8 @@ var AttachTerminal = class {
     this.mouseCaptureHint.setAttribute("role", "status");
     this.mouseCaptureHint.setAttribute("aria-live", "polite");
     this.mouseCaptureHint.setAttribute("aria-hidden", "true");
-    this.mouseCaptureHint.textContent = `App mouse active \xB7 Hold ${this.mouseOverride} to select or scroll`;
+    this.pointerHint = `App mouse active \xB7 Drag selects \xB7 Hold ${this.mouseOverride} for app clicks`;
+    this.wheelHint = `App mouse active \xB7 Hold ${this.mouseOverride} to scroll history`;
     this.term.element?.append(this.mouseCaptureHint);
     this.term.attachCustomWheelEventHandler((event) => this.handleHistoryWheel(event));
     const textarea = this.term.textarea;
@@ -7506,6 +7524,7 @@ var AttachTerminal = class {
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: true });
     container.addEventListener("pointerdown", this.onPointerDown, true);
+    container.addEventListener("mousedown", this.onMouseDownCapture, true);
     this.scheduleVisibleFit();
   }
   term;
@@ -7524,6 +7543,8 @@ var AttachTerminal = class {
   viewportRestoreFrame = null;
   mouseOverride;
   mouseCaptureHint;
+  pointerHint;
+  wheelHint;
   mouseCaptureHintTimer = null;
   mouseOverrideKeyHeld = false;
   historyWheelRemainder = 0;
@@ -7572,7 +7593,7 @@ var AttachTerminal = class {
   onWheel = (event) => {
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
-      this.showMouseCaptureHint();
+      this.showMouseCaptureHint(this.wheelHint);
     }
   };
   onTouchMove = () => this.handleUserScroll("touch");
@@ -7583,8 +7604,24 @@ var AttachTerminal = class {
       return;
     }
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
-      this.showMouseCaptureHint();
+      this.showMouseCaptureHint(this.pointerHint);
     }
+  };
+  // The inversion itself (#2787). It runs in the CAPTURE phase on the pane host, so
+  // it lands before both of xterm's mousedown listeners — they sit on xterm's own
+  // element, a descendant — and therefore before either reads the modifier.
+  //
+  // mousedown ONLY. mouseup carries xterm's alt-click-moves-cursor gesture, which
+  // reads the same altKey: a synthetic Option there would fire cursor-movement
+  // sequences into the PTY on every plain click. It is also unnecessary — xterm only
+  // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
+  // inversion already diverts, and the selection drag that replaces it is driven by
+  // document listeners that read no modifier at all.
+  onMouseDownCapture = (event) => {
+    if (!this.applicationOwnsMouse()) {
+      return;
+    }
+    invertTerminalMouseOverride(event, this.mouseOverride);
   };
   handleUserScroll(source) {
     if (this.pendingViewport === null) {
@@ -7624,6 +7661,7 @@ var AttachTerminal = class {
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
+    this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.closeSocket();
     this.term.dispose();
   }
@@ -7634,7 +7672,8 @@ var AttachTerminal = class {
     const mode = this.term.modes.mouseTrackingMode;
     return mode !== "none" && mode !== "x10";
   }
-  showMouseCaptureHint() {
+  showMouseCaptureHint(message) {
+    this.mouseCaptureHint.textContent = message;
     this.mouseCaptureHint.classList.add("af-visible");
     this.mouseCaptureHint.setAttribute("aria-hidden", "false");
     if (this.mouseCaptureHintTimer !== null) {

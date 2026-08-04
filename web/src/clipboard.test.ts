@@ -222,16 +222,51 @@ test("Ctrl+Shift+V also defers to native paste without preventDefault", () => {
   assert.equal(r.prevented(), 0);
 });
 
-// --- macOS Cmd+* and Alt+* are left entirely to the browser -------------------
+// --- macOS Cmd+C: copy a selection, otherwise stay out of the way -------------
+//
+// The previous version of this block was named "Cmd+C is NOT claimed (macOS browser
+// copies before xterm)" and asserted only that the handler returned true — trivially
+// true of ANY unclaimed key. The name asserted an ENVIRONMENT fact nothing checked,
+// and it was false: xterm paints its own selection overlay instead of making a DOM
+// selection, so the browser's native copy wrote nothing (#2787). Each test below now
+// asserts exactly what its name claims, and the browser half — that a real Cmd+C
+// really does land in the system clipboard — is pinned by the Playwright case in
+// web/selftest/web-driver.spec.ts, because no unit test can see it.
 
-test("Cmd+C is NOT claimed (macOS browser copies before xterm)", () => {
+test("Cmd+C WITH a selection copies it through the same never-silent ladder as Ctrl+C", () => {
   const r = rig({ selection: "sel" });
   const ret = handleClipboardKeydown(keyEvent({ key: "c", metaKey: true }, r.markPrevented), r.deps);
 
-  assert.equal(ret, true, "leave Cmd+C to the browser");
-  assert.deepEqual(r.clipboard, [], "our handler must not double-copy on macOS");
-  assert.equal(wireInput(r.wire), "");
+  assert.equal(ret, false, "we handled the copy, so xterm must not also process the key");
+  assert.deepEqual(r.clipboard, ["sel"], "the selection must reach deps.copy — the browser cannot copy it for us");
+  assert.equal(wireInput(r.wire), "", "Cmd+C is not an interrupt: nothing may reach the wire");
+  assert.equal(r.prevented(), 1, "preventDefault stops the browser's own (empty) copy from racing ours");
+  assert.equal(r.cleared(), 0, "Cmd+C keeps the selection — it has no interrupt to fall through to");
+});
+
+test("Cmd+C with NO selection is left untouched and NEVER interrupts", () => {
+  const r = rig({ selection: "" });
+  const ret = handleClipboardKeydown(keyEvent({ key: "c", metaKey: true }, r.markPrevented), r.deps);
+
+  assert.equal(ret, true, "nothing to copy — leave the gesture to the browser");
+  assert.deepEqual(r.clipboard, []);
+  assert.equal(wireInput(r.wire), "", "on macOS Cmd+C is not an interrupt: \\x03 here would kill the agent");
   assert.equal(r.prevented(), 0);
+});
+
+test("Cmd+Shift+C and Cmd+Alt+C stay with the browser (its devtools shortcuts)", () => {
+  for (const modifiers of [{ shiftKey: true }, { altKey: true }]) {
+    const r = rig({ selection: "sel" });
+    const ret = handleClipboardKeydown(
+      keyEvent({ key: "c", metaKey: true, ...modifiers }, r.markPrevented),
+      r.deps,
+    );
+
+    assert.equal(ret, true, JSON.stringify(modifiers));
+    assert.deepEqual(r.clipboard, [], `only the BARE Cmd+C is ours: ${JSON.stringify(modifiers)}`);
+    assert.equal(wireInput(r.wire), "", JSON.stringify(modifiers));
+    assert.equal(r.prevented(), 0, JSON.stringify(modifiers));
+  }
 });
 
 test("Cmd+V is NOT claimed (native paste path untouched)", () => {

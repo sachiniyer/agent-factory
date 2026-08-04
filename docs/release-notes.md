@@ -1,5 +1,25 @@
 # Release Notes
 
+## Copying out of the web terminal
+
+- **macOS `Cmd+C` now copies.** The web terminal claimed `Ctrl` chords only, so on
+  macOS the copy gesture fell through to the browser — which had nothing to copy,
+  because xterm paints its own selection rather than making a DOM one. It failed
+  **silently**: no error, no hint, and the next paste produced whatever had been on
+  the clipboard before. `Cmd+C` over a selection now copies it, through the same
+  never-silent path as `Ctrl+C`. With nothing selected it stays untouched, so it
+  never sends an interrupt — `Cmd+C` is not an interrupt on macOS. `Cmd+V` is
+  unchanged; it already worked.
+- **Behavior change — a plain drag now selects text, even while an agent owns the
+  mouse.** Claude Code and Codex both enable mouse tracking, which handed every drag
+  to the application: making a selection (and so copying anything) required holding
+  Option on macOS or Shift elsewhere. That is now inverted. **Dragging selects with
+  no modifier, and holding Option/Shift is what sends the drag to the application** —
+  so clicking an agent's own mouse-driven UI now needs the modifier. Nothing was
+  removed; only which gesture needs the modifier changed.
+- The wheel is deliberately **not** inverted: a mouse-aware application still
+  receives a plain scroll, and Option/Shift + wheel still scrolls terminal history.
+
 ## A healed root agent keeps its conversation
 
 - When the root agent's tmux vanished, the daemon re-created it as a **brand-new

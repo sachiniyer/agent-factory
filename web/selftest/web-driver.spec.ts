@@ -1255,7 +1255,7 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
   await expect(page.locator(".af-term-head button", { hasText: "Kill" })).toHaveCount(0);
 });
 
-test("#2681: application mouse mode offers a modifier escape for copy and history scroll", REAL_FIXTURE, async ({
+test("#2681/#2787: application mouse mode selects on a plain drag and keeps a modifier escape", REAL_FIXTURE, async ({
   browser,
 }) => {
   const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
@@ -1346,29 +1346,42 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
       await p.mouse.move(x + Math.min(width - 4, 150), y + height / 2, { steps: 8 });
       await p.mouse.up();
     };
+    // #2787: a PLAIN drag selects, even while the application owns the mouse. This is
+    // the whole of Sachin's second complaint — nothing can be copied out of an agent
+    // pane if making a selection needs a modifier nobody discovers. No unit test can
+    // see this: xterm itself decides, off the raw MouseEvent.
+    inputPayloads.length = 0;
     await drag();
     const selection = host.locator(".xterm-selection > div");
-    await expect(selection, "plain drag is also application-owned by design").toHaveCount(0);
+    await expect(selection, "a plain drag must select text even while the app owns the mouse").not.toHaveCount(0);
+    expect(inputPayloads, "a selecting drag must not ALSO report the button to the application").toHaveLength(0);
 
-    // The UI must explain the escape at the moment a user hits the application-owned
-    // pointer path. Selection and scroll then share one modifier rather than becoming
-    // two unrelated fixes.
+    // The hint explains what the plain gesture no longer does — the application did
+    // not get that click — and names the modifier that still gives it one.
     await expect.soft(mouseHint).toHaveClass(/af-visible/, { timeout: 2_000 });
     await expect.soft(mouseHint).toHaveAttribute("aria-hidden", "false");
-    await expect.soft(mouseHint).toContainText("Hold Shift to select or scroll");
-
-    await p.keyboard.down("Shift");
-    await drag();
-    await p.keyboard.up("Shift");
-    await expect(selection, "Shift+drag must force terminal selection while the app owns the mouse").not.toHaveCount(0);
+    await expect.soft(mouseHint).toContainText("Drag selects · Hold Shift for app clicks");
 
     const beforeCopyInputs = inputPayloads.length;
     await p.keyboard.press("Control+c");
     await expect(selection, "copy clears the selection so the next Ctrl+C can interrupt").toHaveCount(0);
     expect(inputPayloads, "copy must not send an interrupt or mouse bytes to the PTY").toHaveLength(beforeCopyInputs);
     await expect
-      .poll(() => p.evaluate(() => navigator.clipboard.readText()), { message: "the forced selection must reach the clipboard" })
+      .poll(() => p.evaluate(() => navigator.clipboard.readText()), { message: "the plain-drag selection must reach the clipboard" })
       .toContain("mode-80");
+
+    // The inverse half — the capability #2681 protects. Mouse-aware TUIs keep their
+    // pointer: the modifier hands the drag to the application instead of selecting.
+    inputPayloads.length = 0;
+    await p.keyboard.down("Shift");
+    await drag();
+    await p.keyboard.up("Shift");
+    // Both halves of the button — press AND release — so no straggling report can
+    // land in the log after the history-wheel check below zeroes it.
+    await expect
+      .poll(() => inputPayloads.length, { message: "Shift+drag must report the button to the mouse-aware application" })
+      .toBeGreaterThan(1);
+    await expect(selection, "the modifier hands the drag to the app, so it makes no selection").toHaveCount(0);
 
     const beforeHistoryScroll = await viewport.evaluate((el) => el.scrollTop);
     inputPayloads.length = 0;
@@ -1415,6 +1428,114 @@ test("#2681: application mouse mode offers a modifier escape for copy and histor
     // The real-browser suite intentionally shares one long-lived page between
     // serial tests. Restore its selection explicitly so this isolated B-tab
     // exercise cannot perturb the #1694 keyboard flow that follows.
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
+test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_FIXTURE, async ({ browser }) => {
+  // The defect this pins is invisible to a unit test, which is how it shipped: the
+  // old unit test asserted only that our handler declined Cmd+C, under a NAME that
+  // claimed "the macOS browser copies before xterm". It does not. xterm keeps its own
+  // selection model and paints an overlay, so document.getSelection() is empty and
+  // the browser's native copy writes NOTHING — silently. Only a real browser holding
+  // a real system clipboard can tell the two apart, so this reads the clipboard back.
+  const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+  const p = await ctx.newPage();
+  const inputPayloads: number[][] = [];
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    // Isolated context on B, like the mouse-mode exercise above: this mutates B's tab
+    // roster and restores it in finally, leaving the suite's shared page untouched.
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+    await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+
+    const host = p.locator(".af-term-host");
+    await host.click();
+    await p.keyboard.type("printf 'af-2787-copy-me\\n'");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("af-2787-copy-me", { timeout: 15_000 });
+
+    const outputRow = host.locator(".xterm-rows > div", { hasText: "af-2787-copy-me" }).last();
+    await expect(outputRow).toBeVisible();
+    const rowBox = await outputRow.boundingBox();
+    expect(rowBox, "the visible output row must have selectable geometry").toBeTruthy();
+    const { x, y, width, height } = rowBox as { x: number; y: number; width: number; height: number };
+    await p.mouse.move(x + 4, y + height / 2);
+    await p.mouse.down();
+    await p.mouse.move(x + Math.min(width - 4, 150), y + height / 2, { steps: 8 });
+    await p.mouse.up();
+    const selection = host.locator(".xterm-selection > div");
+    await expect(selection, "the drag must produce a terminal selection to copy").not.toHaveCount(0);
+
+    // Seed a sentinel so a failure is unambiguous: an unclaimed Cmd+C leaves THIS in
+    // the clipboard — the silent no-op the report describes — rather than erroring.
+    // Best-effort: if the seed itself is refused the assertion below still fails on
+    // the stale content, so it must not become its own failure mode.
+    await p.evaluate(() => navigator.clipboard.writeText("af-2787-clipboard-untouched").catch(() => {}));
+    inputPayloads.length = 0;
+    await p.keyboard.press("Meta+c");
+    // Not the leading "af-": a drag that starts past the midpoint of a cell snaps the
+    // selection to the next column, exactly as a real terminal does. What is being
+    // asserted is that the SELECTED TEXT reached the clipboard, not the pixel the
+    // drag began on.
+    await expect
+      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+        message: "Cmd+C must put the xterm selection on the system clipboard",
+      })
+      .toContain("2787-copy-me");
+    expect(
+      await p.evaluate(() => navigator.clipboard.readText()),
+      "the seeded sentinel must be GONE — an unclaimed Cmd+C leaves it in place",
+    ).not.toContain("untouched");
+    await expect(selection, "Cmd+C keeps the selection — it has no interrupt to fall through to").not.toHaveCount(0);
+    expect(inputPayloads, "Cmd+C is a copy, never an interrupt: nothing may reach the PTY").toHaveLength(0);
+
+    // Drop the selection through the path that owns clearing it — Ctrl+C copies and
+    // then clears, so the NEXT Ctrl+C can interrupt — rather than assuming a bare
+    // click deselects.
+    await p.keyboard.press("Control+c");
+    await expect(selection, "Ctrl+C copies and clears the selection").toHaveCount(0);
+
+    // With NOTHING selected, Cmd+C must stay a no-op. On macOS it is not the
+    // interrupt gesture, so emitting \x03 here would kill a running agent. Ordering
+    // the assertion behind a byte that MUST arrive makes the negative real: an
+    // interrupt would already be in the log ahead of the marker keystroke.
+    inputPayloads.length = 0;
+    await p.keyboard.press("Meta+c");
+    await p.keyboard.press("x");
+    await expect.poll(() => inputPayloads.length, { message: "the marker keystroke must reach the PTY" }).toBeGreaterThan(0);
+    expect(inputPayloads.flat(), "Cmd+C with no selection sends nothing — least of all \\x03").toEqual([0x78]);
+
+    // Ctrl+C keeps BOTH of its meanings on every platform (the reflex the interrupt
+    // path exists for): nothing selected, so this one really does interrupt.
+    inputPayloads.length = 0;
+    await p.keyboard.press("Control+c");
+    await expect
+      .poll(() => inputPayloads.flat(), { message: "Ctrl+C with no selection still interrupts" })
+      .toEqual([0x03]);
+  } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
     await row(page, SESSION_A).click();
     await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
   }
