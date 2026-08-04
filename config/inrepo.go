@@ -302,11 +302,13 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	if !isToml && metadata.shape == nil {
 		return nil, nil, fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyPath)
 	}
-	if _, present := metadata.shape["auto_yes"]; present {
-		warnRemovedAutoYesAt("in-repo config " + prettyPath)
-		// The raw bytes still feed the tolerant typed decoder below; removing the
-		// key from presence metadata is what keeps the allowlist and config
-		// provenance from treating this compatibility tombstone as live config.
+	if value, present := metadata.shape["auto_yes"]; present {
+		// Only a value that actually changed meaning on upgrade earns the notice
+		// (#2574) — but the key leaves the shape either way. The raw bytes still
+		// feed the tolerant typed decoder below; removing the key from presence
+		// metadata is what keeps the allowlist and config provenance from treating
+		// this compatibility tombstone as live config.
+		warnRemovedAutoYesValue(value, "in-repo config "+prettyPath)
 		delete(metadata.shape, "auto_yes")
 	}
 	presentKeys := make(map[string]bool, len(metadata.shape))

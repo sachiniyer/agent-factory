@@ -140,8 +140,11 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	if err != nil {
 		return nil, tomlParseError("personal project config "+prettyPath, err)
 	}
-	if _, present := metadata.shape["auto_yes"]; present {
-		warnRemovedAutoYesAt("personal project config " + prettyPath)
+	if value, present := metadata.shape["auto_yes"]; present {
+		// Warn only for a value that changed meaning on upgrade (#2574); strip the
+		// key regardless, or the allowlist check below would reject the file for a
+		// setting af itself removed.
+		warnRemovedAutoYesValue(value, "personal project config "+prettyPath)
 		delete(metadata.shape, "auto_yes")
 	}
 	for key := range metadata.shape {

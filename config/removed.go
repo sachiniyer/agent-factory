@@ -26,6 +26,36 @@ func warnRemovedAutoYes(shape map[string]any, source string) {
 	}
 }
 
+// warnRemovedAutoYesValue is warnRemovedAutoYes for the loaders that find the
+// removed key themselves (in-repo, personal project) because they also have to
+// strip it from their presence shape. They pass the decoded value so the same
+// #2574 rule decides, rather than each re-deriving "is this worth saying".
+func warnRemovedAutoYesValue(value any, source string) {
+	if removedAutoYesWarrantsNotice(value) {
+		warnRemovedAutoYesAt(source)
+	}
+}
+
+// removedAutoYesWarrantsNotice reports whether a decoded auto_yes value earns
+// the migration notice.
+//
+// `false` does not (#2574). The warning's job is to tell a user that behavior
+// they asked for silently stopped happening: `auto_yes = true` genuinely
+// changed meaning on upgrade, but `auto_yes = false` asked for nothing — the
+// post-removal default IS "don't auto-approve", so that user already has
+// exactly the behavior they configured. Pointing them at
+// `program_overrides.codex = "codex --ask-for-approval never"` is advice to
+// enable the thing they explicitly turned off. This is the difference between
+// "your setting was dropped" and "your setting was redundant", and only the
+// first is worth a notice on every af invocation forever.
+//
+// Anything that is not a boolean still warns: the value is malformed for a key
+// that no longer exists, and silence there would hide a typo.
+func removedAutoYesWarrantsNotice(value any) bool {
+	enabled, isBool := value.(bool)
+	return !isBool || enabled
+}
+
 // removedAutoYesWarned memoizes which sources have already received the
 // auto_yes-removal heads-up. A genuinely removed key deserves ONE migration
 // notice per source, not one per config load: the daemon loads config ~10x per
@@ -55,11 +85,14 @@ func resetRemovedAutoYesWarnings() {
 	removedAutoYesWarned.Clear()
 }
 
+// removedAutoYesInShape reports whether a decoded config carries an auto_yes
+// worth warning about — at the top level or under any root_agents profile. It
+// tests the VALUE, not mere presence: see removedAutoYesWarrantsNotice.
 func removedAutoYesInShape(shape map[string]any) bool {
 	if shape == nil {
 		return false
 	}
-	if _, present := shape["auto_yes"]; present {
+	if value, present := shape["auto_yes"]; present && removedAutoYesWarrantsNotice(value) {
 		return true
 	}
 	rootAgents, ok := shape["root_agents"].(map[string]any)
@@ -71,7 +104,7 @@ func removedAutoYesInShape(shape map[string]any) bool {
 		if !ok {
 			continue
 		}
-		if _, present := profile["auto_yes"]; present {
+		if value, present := profile["auto_yes"]; present && removedAutoYesWarrantsNotice(value) {
 			return true
 		}
 	}
