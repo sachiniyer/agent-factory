@@ -98,18 +98,39 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	// root whose command selects its own conversation records nothing at launch,
 	// so the heal could only say "context unknown" — and if the id just captured
 	// IS the carried one, af has now proven the continuity it could not see. Ask
-	// for the verdict again before the persist below, so the refreshed answer
-	// rides the same write rather than waiting for an unrelated one. A no-op for
-	// every ordinary session and for any notice already acknowledged.
-	if inst.RefreshRecreateContext() {
-		m.publishEvent(agentproto.EventSessionUpdated, inst.ToInstanceData())
-	}
+	// for the verdict again so the refreshed answer rides the write below rather
+	// than waiting for an unrelated one. A no-op for every ordinary session and
+	// for any notice already acknowledged.
+	//
+	// The previous value is captured BEFORE the refresh so a failed persist can
+	// put it back; reading it afterwards would only ever return the new one.
+	previousNotice := inst.RootRecreateContext()
+	noticeRefreshed := inst.RefreshRecreateContext()
 
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	err = persistInstanceData(repoID, inst.ToInstanceData())
+	// Snapshot INSIDE the lock, and announce inside it too. Both matter: a payload
+	// read before entering this ordering domain can be overtaken by a concurrent
+	// tab mutation that persists and publishes its newer roster first, and then
+	// this older whole-InstanceData payload lands last and makes every open client
+	// re-project the tab change away until an unrelated snapshot repairs it. Tab
+	// and status events announce under this same lock for exactly that reason.
+	data := inst.ToInstanceData()
+	err = persistInstanceData(repoID, data)
+	if err == nil && noticeRefreshed {
+		m.publishEvent(agentproto.EventSessionUpdated, data)
+	}
 	repoStartLock.Unlock()
 	if err != nil {
+		if noticeRefreshed {
+			// Memory and disk must not diverge over a write that did not happen. The
+			// refresh can go either way — clearing an `unknown` that capture just
+			// disproved, or escalating one — so leaving it applied would either drop a
+			// warning this daemon still owes the user or show one disk contradicts,
+			// and a restart would flip it back either way (the #2814 ack-path fix,
+			// applied to its sibling write).
+			inst.ReconcileRootRecreateContext(previousNotice)
+		}
 		log.WarningLog.Printf("failed to persist conversation id for %q: %v", inst.Title, err)
 	}
 }

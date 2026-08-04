@@ -301,6 +301,29 @@ func TestRefreshRecreateContextHoldsAnInheritedNotice(t *testing.T) {
 	assert.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext())
 }
 
+// TestASecondHealPreservesAnUnreadableCarriedNotice is the third-round #2814
+// Codex P2, and the sibling of the acknowledge-path rule: an older binary must
+// not destroy a newer daemon's pending outcome. severity() has to score an
+// unrecognized value as 0 so it can never outrank a note this binary would
+// actually render — but that score would otherwise let a locally-classified
+// verdict overwrite it on the next heal, losing roll-forward state nobody
+// acknowledged.
+func TestASecondHealPreservesAnUnreadableCarriedNotice(t *testing.T) {
+	future := RootRecreateContext("some-later-outcome")
+	require.Empty(t, future.Note(), "fixture guard: this value must be one this binary cannot render")
+
+	// A heal this binary classifies as a provable loss — the strongest verdict it
+	// can reach, so if anything could overwrite the carried value, this would.
+	inst := &Instance{
+		Program:               tmux.ProgramClaude,
+		carriedRecreateNotice: future,
+		Tabs:                  []*Tab{{Name: agentTabName}},
+	}
+	inst.NoteRecreateContext()
+	assert.Equal(t, future, inst.RootRecreateContext(),
+		"a value this binary cannot read must not be replaced by one it computed")
+}
+
 // TestRootRecreateContextSurvivesStorageRoundTrip is the load-bearing
 // persistence assertion. The marker must NOT be scrubbed by ForStorage the way
 // the projection-only diagnostics beside it are: a daemon restart is a likely

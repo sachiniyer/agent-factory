@@ -254,6 +254,21 @@ func (i *Instance) RefreshRecreateContext() bool {
 // sight, which is the whole bug. A pending notice is cleared by acknowledgement
 // and by nothing else; a later heal can only make it worse.
 func (i *Instance) noteRecreateContextLocked() {
+	// A carried notice this binary cannot READ is kept verbatim. severity() has to
+	// score an unrecognized value as 0 — it must never outrank a note this binary
+	// would actually show — but that score would then let a locally-classified
+	// outcome overwrite a newer daemon's pending state, destroying roll-forward
+	// data nobody acknowledged. Claims that cannot be compared are not compared:
+	// the binary that understands a value is the one that gets to replace it.
+	//
+	// The cost is real and deliberate: while running the older binary the rail
+	// shows no note for that root, because it has no words for the value it is
+	// holding. The heal outcome still reaches the application log, and the note
+	// returns the moment the newer daemon is back.
+	if i.carriedRecreateNotice != RootRecreateContextNone && i.carriedRecreateNotice.Note() == "" {
+		i.rootRecreateContext = i.carriedRecreateNotice
+		return
+	}
 	var created *AgentConversationData
 	if len(i.Tabs) > 0 {
 		created = conversationDataPtr(i.Tabs[0].Conversation)
