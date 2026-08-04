@@ -165,16 +165,19 @@ new files to dodge the limit — split them. See `docs/file-length-lint.md`.
 Every af session gets its own **worktree**, which isolates the branch, `HEAD`,
 the index, and the working tree. It does not isolate everything under `refs/`.
 
-**Never run a `git stash` command that touches the shared stack (#2801)** — that
-is `git stash` / `stash push`, `pop`, `drop`, `clear`, `branch`, `list`, and
-`apply` of a `stash@{N}` entry. **`git stash store` is banned too**, and it is the
-easy one to reach for by accident: it is the documented companion to `stash
-create`, and it pushes that commit straight onto the shared stack. Pin created
-commits under `refs/worktree/…` instead, exactly as below.
+**The rule is a property, not a list (#2801): never run a `git stash` command
+that reads or writes `refs/stash`.** Treat that as the test, because any list
+here will be incomplete — `push`, `save`, `pop`, `apply` with no argument (it
+defaults to the shared `stash@{0}`), `apply stash@{N}`, `drop`, `clear`,
+`branch`, `list`, and `store` all touch the shared stack, and `git stash` with no
+subcommand is `push`. `store` is the easiest to reach for by accident: it is the
+documented companion to `stash create`, and it pushes that commit straight onto
+the shared stack.
 
-Exactly two forms are fine, and they are the substitutes below: **`git stash
-create`**, which writes a dangling commit and never touches `refs/stash`, and
-**`git stash apply <a ref you named yourself>`**.
+**Exactly two forms never touch `refs/stash`, and they are the substitutes
+below:** `git stash create`, which only writes a dangling commit, and `git stash
+apply <a ref you named yourself>`. If a command is not one of those two, assume
+it is banned.
 
 `refs/stash` is a single stack for the whole repository, shared by every linked
 worktree: git-worktree(1) names `refs/bisect`, `refs/worktree`, and
@@ -192,34 +195,143 @@ the fix.
 concepts. Prefer this when untracked files are involved:
 
 ```bash
-# one chain: if the commit does not happen, nothing is parked and $wip must stay
-# unset — see below for why an unconditional $wip is dangerous
-git add -A && git commit -qm "wip: set aside" && wip=$(git rev-parse HEAD)
+# ONE chain. Each step runs only if the one before it succeeded, and the WIP
+# commit is named by a real ref before anything moves the branch off it.
+! { git rev-parse --verify --quiet MERGE_HEAD \
+    || git rev-parse --verify --quiet CHERRY_PICK_HEAD \
+    || git rev-parse --verify --quiet REVERT_HEAD; } >/dev/null \
+  && ! test -d "$(git rev-parse --git-path rebase-merge)" \
+  && ! test -d "$(git rev-parse --git-path rebase-apply)" \
+  && ! test -f "$(git rev-parse --git-path SQUASH_MSG)" \
+  && ! test -f "$(git rev-parse --git-path MERGE_MSG)" \
+  && ! git show-ref --verify --quiet refs/worktree/af-park \
+  && git add -A \
+  && git -c core.hooksPath=/dev/null commit -q -m "wip: set aside" \
+  && git update-ref refs/worktree/af-park HEAD "" \
+  && test -z "$(git status --porcelain -uall)" \
+  && git reset --hard refs/worktree/af-park^ \
+  && test -z "$(git status --porcelain -uall)"   # pristine, and still pristine
+
 # …do the thing that needed a clean tree, and do not commit while parked…
-git reset "$wip^"               # a MIXED reset: tracked edits come back
-                                # unstaged, new files untracked again
+
+# Restore. The first branch is the crash case: if the chain died between the
+# update-ref and the reset, HEAD is still the park commit and cherry-picking it
+# onto itself silently no-ops, leaving the WIP committed instead of restored.
+# It deliberately does NOT delete the ref — see below.
+if [ "$(git rev-parse HEAD)" = "$(git rev-parse refs/worktree/af-park)" ]; then
+  git reset refs/worktree/af-park^
+  echo "recovered from a partial park; check the tree, then:"
+  echo "  git update-ref -d refs/worktree/af-park"
+else
+  git cherry-pick -n refs/worktree/af-park && git reset -q \
+    && git update-ref -d refs/worktree/af-park
+fi
 ```
 
-Use a mixed reset, not `--soft`. `--soft` moves `HEAD` only, so after the
-`git add -A` above every parked change comes back **staged** — and the next
-`git commit` you make for unrelated reasons then sweeps the whole WIP into it.
-Neither reset restores an intentional staged/unstaged split; mixed at least
-restores the common case exactly.
+**Committing does not clean the tree — it records it.** After the commit, `git
+status` reads clean while every file still holds your WIP, so a test run there
+tests your changes, not the pristine state you were trying to get back to. The
+`git reset --hard` is what makes the tree pristine for real.
 
-The `&&` before `wip=` is load-bearing. `git commit` fails on an already-clean
-tree and whenever a pre-commit hook rejects, and an unconditional
-`wip=$(git rev-parse HEAD)` after that names **a real commit you care about** —
-`git reset "$wip^"` then uncommits *that* instead of restoring anything. Chained,
-a failed commit leaves `$wip` unset and the reset refuses. If the commit did not
-happen, stop: nothing was parked.
+**And the `update-ref` before it is what keeps this crash-durable.** Once the
+branch moves back, nothing points at the WIP commit any more, and a session
+killed at that moment would need reflog or `git fsck` to find its own work.
+`refs/worktree/af-park` is a real ref in the one namespace git does not share, so
+the commit stays reachable by name — which is why every later step, including the
+restore, reads from the ref rather than from a shell variable that dies with the
+shell.
 
-`$wip` is not decoration either. `HEAD~1` names *one commit back from wherever
-you are now*, so a cherry-pick, revert, or urgent fix while parked makes
-`git reset HEAD~1` uncommit **that** and strand the WIP in your history. Resetting
-to `"$wip^"` is still only right while `$wip` is the tip — check with
-`git rev-parse HEAD`. If you did commit on top, the WIP is already in the branch:
-drop that one commit with `git rebase --onto "$wip^" "$wip"`, then
-`git cherry-pick -n "$wip"` if you want its content back as uncommitted changes.
+**Hooks off, then prove the tree is clean.** A parking commit is scratch state
+you are about to un-commit, so project hooks have no business running on it — and
+a hook that *succeeds* is the dangerous kind here. Any hook that rewrites a
+tracked file and exits 0 (an auto-formatter) does so outside the index that was
+just committed, so the tree ends up holding an edit the parked commit does not
+have, and the `reset --hard` throws it away. Both halves of the guard were
+measured against that:
+
+- `-c core.hooksPath=/dev/null` rather than `--no-verify`, because `--no-verify`
+  only skips `pre-commit` and `commit-msg`; a `post-commit` hook still runs and
+  still loses its edit. Pointing `hooksPath` at a non-directory disables the lot,
+  for that one command only.
+- `test -z "$(git status --porcelain -uall)"` is the assertion, not a formality:
+  it says "the tree holds nothing the commit does not". Anything that dirties the
+  tree between the commit and the reset — a hook this repo does not have yet, a
+  file watcher, a sibling process — stops the chain instead of being discarded.
+  It sits **after** `update-ref` on purpose: a guard that stops the chain while
+  the WIP is committed but unnamed leaves you with a `wip: set aside` commit and
+  a restore that dies on `unknown revision`. Named first, that same failure lands
+  in the crash case below, which recovers it. It also runs a second time *after*
+  the reset, because a watcher that reacts to the reset itself drops its output
+  into the tree you were about to call pristine — the pre-reset check cannot see
+  something that does not exist yet.
+
+  **These checks narrow the window; they cannot close it.** Check-then-act is not
+  atomic, so a process that rewrites a tracked file between the last check and
+  the `reset --hard` still loses that edit, and the post-reset check will not
+  notice because the file matches `HEAD` again. If something else is actively
+  writing to your worktree — a dev server, a formatter daemon, a sibling
+  process — stop it before parking. No sequence of `git status` calls substitutes
+  for that.
+
+Two things about the crash branch. It restores with a mixed reset, and then
+**stops without deleting the ref**: if the tree drifted while the park was
+half-finished — a watcher rewriting the same file in that window — a mixed reset
+leaves the watcher's content in place, and deleting `af-park` there would leave
+the original WIP recoverable only from reflog. Confirm the tree looks right, then
+delete the ref by hand. Losing thirty seconds beats losing the work.
+  Verified: with a `post-commit` formatter and no `hooksPath` guard, the chain
+  halts with both the hook's edit and the parked work intact. `git diff --quiet`
+  is *not* enough (it ignores untracked paths), and neither is a bare
+  `status --porcelain`: under `status.showUntrackedFiles=no` that prints nothing
+  while `-uall` still reports `?? new.txt`. Measured both.
+
+The guards on the front of the chain are there for states that only show up in a
+real repo. Parking is refused while **any** sequencer operation is paused —
+merge, cherry-pick, revert, or either rebase backend — because `git commit`
+during a conflict either makes a *merge* commit (the restore then dies with `is a
+merge but no -m option was given`, exit 128) or resolves and clears
+`CHERRY_PICK_HEAD`, so `git cherry-pick --continue` has nothing left to resume.
+Both measured. And `af-park` must be absent before anything is committed, so a
+leftover from a crash produces a clean refusal rather than a stray commit.
+
+**If you do not need untracked files captured, prefer the `git stash create`
+recipe below.** It writes no commit, so branch history and the crash window above
+do not apply to it. Hooks still do — its cleanup runs `git checkout`, which fires
+`post-checkout` — so that command disables them the same way. This scratch-commit path earns its guards
+because it mutates history; that is the cost of capturing untracked files.
+
+**Neither recipe is safe while a sequencer operation is paused** — a merge,
+rebase, cherry-pick, revert or squash you have not finished. Both of them run
+`git reset`, which clears `CHERRY_PICK_HEAD` and friends, so `--continue` has
+nothing left to resume. Finish or abort that operation first; the scratch-commit
+chain refuses outright rather than let you try, and the stash recipe below has no
+such guard, so this paragraph is the guard. The same applies to committing the
+work instead: a plain `git commit` consumes those states too.
+
+**Send that chain as one chain.** Yes, it contains `reset --hard` in a document
+about not losing work, and it is safe for exactly one reason: everything it
+discards was captured a moment earlier, by steps it is chained behind. Break the
+`&&`s and it becomes a work-destroying sequence — `git commit` still fails on an
+already-clean tree, and the unchained lines then park the *previous* commit and
+hard-reset over your uncommitted work. That is not theoretical; it was measured,
+and the parked changes were gone.
+
+The leading `! git show-ref` is there for the leftover case. If a crash or a
+failed restore left `af-park` behind, the `""` guard on `update-ref` would catch
+it — but only *after* the commit had already happened, leaving a stray `wip: set
+aside` commit on your branch and a chain that stopped halfway. Checking first
+turns that into a clean refusal: nothing committed, nothing moved, work still in
+the tree. Every one of those paths was run. (Files ignored by `.gitignore` are
+neither captured nor removed — `node_modules` and friends stay exactly where they
+are.)
+
+Naming the commit matters for the restore too. `HEAD~1` means *one commit back
+from wherever you are now*, so a cherry-pick, revert, or urgent fix while parked
+would make a `git reset HEAD~1` uncommit **that** instead. Restoring with
+`cherry-pick -n` from the ref sidesteps the question entirely — it stays correct
+whatever landed meanwhile — and the trailing `git reset -q` unstages, putting
+tracked edits back to modified and new files back to untracked, where they
+started. Delete the ref last, once the work is safely back in the tree.
 
 **`git stash create` plus a per-worktree ref** — closest to `git stash`, and
 `refs/worktree/` genuinely *is* unshared, so no sibling can see or consume it:
@@ -231,9 +343,11 @@ if [ -z "$sha" ]; then
 # the trailing "" means "must not already exist" — a second save under the same
 # name would otherwise orphan the first, leaving it fsck-only
 elif git update-ref refs/worktree/af-wip "$sha" ""; then
-  git checkout -- :/            # only now: create records, it does not clean.
-                                # `:/` is the repo root — a bare `.` cleans only
-                                # below your cwd while create recorded the lot
+  git reset -q && git -c core.hooksPath=/dev/null checkout -- :/
+                                # Both halves: checkout copies out of the INDEX,
+                                # so without the reset a staged edit stays staged
+                                # and in the tree. `:/` is the repo root — a bare
+                                # `.` cleans only below your cwd.
 else
   echo "af-wip is taken — pick another name; tree left dirty on purpose"
 fi
@@ -241,6 +355,15 @@ fi
 # non-zero, and that is precisely when you still need the pointer.
 git stash apply refs/worktree/af-wip && git update-ref -d refs/worktree/af-wip
 ```
+
+**Do not use this one for staged *additions or renames*.** `stash create` records
+them, but the cleanup cannot undo them: `git reset -q` turns the new path back
+into an untracked file and `git checkout -- :/` does not remove untracked paths,
+so the tree keeps `?? n.txt` (or `?? g.txt` after a `git mv`) and the later
+`git stash apply` refuses rather than overwrite it. Measured, both. Modified
+tracked files, staged or not, are fine here; anything that adds or moves a path
+belongs in the scratch-commit recipe above, which captures it — or, simplest of
+all on a session branch, just commit it.
 
 **That guard is the load-bearing line, not decoration.** `git stash create`
 records nothing and prints an empty sha in two different situations — a clean
@@ -250,7 +373,10 @@ that and you have destroyed exactly the work you were setting aside.
 
 Two more ways `create` differs from `push`: it does not clean the working tree
 (`push` does that; `create` only records), and it does not capture untracked
-files — `git add` them first, or use the scratch commit above.
+files. **Do not `git add` them to work around that** — that produces exactly the
+staged addition the paragraph above says this cleanup cannot undo. Untracked
+files simply stay where they are, which is usually what you want; if you need
+them parked, use the scratch commit above.
 
 If you find a stash entry that is not yours, do not drop it: leave it on the
 stack, revert the foreign paths out of your tree, and say so in the PR.
