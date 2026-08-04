@@ -214,3 +214,102 @@ func TestResumePendingHandoffs_SettlementPersistFailureCannotRedeliverTheMission
 			"handoff itself does", len(prompts), prompts)
 	}
 }
+
+// blockingNthSwapBackend parks inside the Nth SwapAgent so a test can hold a
+// handoff transaction open at a chosen point. blockingSwapBackend blocks the
+// FIRST swap and closes its channel unconditionally; this one has to let an
+// earlier handoff through before it stops the next.
+type blockingNthSwapBackend struct {
+	*handoffBackend
+	blockAt int
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingNthSwapBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPlan) error {
+	b.mu.Lock()
+	b.calls++
+	block := b.calls == b.blockAt
+	b.mu.Unlock()
+	if block {
+		close(b.entered)
+		<-b.release
+	}
+	return b.handoffBackend.SwapAgent(i, plan)
+}
+
+// A settlement retry must not write while the session is inside another
+// operation (post-merge Codex finding on #2781).
+//
+// The retry is a WHOLE-ROW write of live memory. A second handoff raises
+// OpReplacing and rewrites Program before it records its own mission marker, and
+// disk strips the transient op — so a retry landing in that window persists the
+// incoming agent as SETTLED with no obligation at all. A crash before that
+// handoff's real checkpoint would then lose its takeover brief outright, which
+// trades the duplicate this PR fixes for a silently dropped mission.
+//
+// So the poll holds off while the row is busy and finishes the write once it is
+// free. The obligation is durable in memory; a skipped tick costs nothing.
+func TestFlushHandoffSettlements_HoldsOffWhileTheRowIsInsideAnotherHandoff(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+	backend := &blockingNthSwapBackend{
+		handoffBackend: base,
+		blockAt:        2,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	registerHandoffSubject(t, manager, repoID, repoPath, "settle-race", backend)
+
+	// First handoff: its settlement write fails, so the row owes one.
+	diskFull := errors.New("no space left on device")
+	injected := failSettlementWrite(t, "settle-race", diskFull, false)
+	if _, err := manager.HandoffSession(HandoffSessionRequest{
+		Title: "settle-race", RepoID: repoID, To: tmux.ProgramGemini,
+	}); !errors.Is(err, diskFull) {
+		t.Fatalf("first HandoffSession error = %v, want the settlement write failure", err)
+	}
+	if !injected() {
+		t.Fatal("no settlement write was ever attempted, so this test exercised nothing")
+	}
+	owed := recordFor(t, repoID, "settle-race")
+	if owed == nil || owed.PendingHandoffMission == "" || owed.Program != tmux.ProgramGemini {
+		t.Fatalf("record after the failed settlement = %+v, want gemini with its mission still pending", owed)
+	}
+
+	// Second handoff, parked inside SwapAgent: the fence is up and Program already
+	// names codex, but this handoff's own mission marker does not exist yet.
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.HandoffSession(HandoffSessionRequest{
+			Title: "settle-race", RepoID: repoID, To: tmux.ProgramCodex,
+		})
+		done <- err
+	}()
+	<-backend.entered
+
+	// The poll fires in that window.
+	manager.ResumePendingHandoffs()
+
+	mid := recordFor(t, repoID, "settle-race")
+	if mid == nil || mid.Program != owed.Program || mid.PendingHandoffMission != owed.PendingHandoffMission {
+		t.Fatalf("the retry wrote mid-transaction: record = %+v, want it untouched at %q with its mission "+
+			"still pending. Persisting live memory here stores the INCOMING agent as settled with no "+
+			"obligation, so a crash before that handoff's checkpoint loses its takeover brief", mid, owed.Program)
+	}
+
+	close(backend.release)
+	if err := <-done; err != nil {
+		t.Fatalf("second HandoffSession: %v", err)
+	}
+
+	// Once the row is free again the obligation is discharged — by this handoff's
+	// own settlement, or by the next poll's retry if that one also failed.
+	manager.ResumePendingHandoffs()
+	final := recordFor(t, repoID, "settle-race")
+	if final == nil || final.PendingHandoffMission != "" || final.Program != tmux.ProgramCodex {
+		t.Fatalf("record after the transaction finished = %+v, want a settled codex row with no pending mission", final)
+	}
+}

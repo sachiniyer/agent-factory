@@ -78,8 +78,44 @@ func (m *Manager) flushHandoffSettlements() {
 		if !registered {
 			continue
 		}
-		if err := m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance); err != nil {
+		if err := m.flushOneHandoffSettlement(entry); err != nil {
 			log.WarningLog.Printf("handoff %q: %v", entry.instance.Title, err)
 		}
 	}
+}
+
+// flushOneHandoffSettlement retries one owed write, but only while the session
+// is between operations.
+//
+// A retry is a WHOLE-ROW write of live memory, so running it inside another
+// session transaction would checkpoint that transaction's half-built state. A
+// second handoff is the concrete case: it raises OpReplacing and rewrites Program
+// BEFORE it records its own mission marker, and disk strips the transient op — so
+// a retry landing in that window stores the incoming agent as settled with no
+// obligation at all, and a crash before the real checkpoint loses that takeover
+// brief entirely. Trading a duplicated mission for a lost one is not a fix.
+//
+// The per-session op lock is what actually serializes this, because that is the
+// lock every lifecycle operation holds for its whole transaction; the in-flight-op
+// re-check under it is the same fence persistPollChange puts in front of the only
+// other poll-driven whole-row write. TryLock, never Lock: the poll goroutine must
+// not stall behind a slow teardown, and a skipped retry costs nothing — the
+// obligation stays owed for the next tick, and a newer settlement on the same row
+// discharges it outright.
+func (m *Manager) flushOneHandoffSettlement(entry pendingHandoffEntry) error {
+	opLock := m.opLockFor(entry.key)
+	if !opLock.TryLock() {
+		return nil
+	}
+	defer opLock.Unlock()
+
+	// Re-verify under the lock. Registration can change while the lock is acquired,
+	// and an op raised outside it must not be flattened by this write.
+	m.mu.Lock()
+	registered := m.instances[entry.key] == entry.instance
+	m.mu.Unlock()
+	if !registered || entry.instance.GetInFlightOp() != session.OpNone {
+		return nil
+	}
+	return m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance)
 }
