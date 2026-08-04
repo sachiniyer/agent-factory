@@ -307,6 +307,28 @@ func TestUpdateDriver_StandsDownWhileAnotherAfHoldsTheUpdateLock(t *testing.T) {
 	close(release)
 }
 
+// An unreadable shared window is not a licence to check anyway — there would be
+// nothing to coordinate with. It backs off like any other unactionable outcome,
+// so a permanently broken home does not log this every wake forever.
+func TestUpdateDriver_BacksOffWhenTheSharedWindowIsUnreadable(t *testing.T) {
+	h := newDriverHarness(t)
+	// A regular file where the cache's parent directory should be: the shared
+	// lock cannot be created under it, so the read fails for real rather than
+	// through an injected stub.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocked, []byte("x"), 0o644))
+	h.driver.cachePath = filepath.Join(blocked, autoupdate.CheckCacheFileName)
+
+	base := h.now
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+	require.Empty(t, h.checkedChannels(), "an unreadable window must not be checked past")
+
+	h.now = base.Add(autoupdate.CheckInterval - time.Second)
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+	require.False(t, h.driver.nextCheckNotBefore.IsZero(), "the failure must have armed the backoff")
+	require.True(t, h.driver.nextCheckNotBefore.After(h.now), "and it must still hold inside the interval")
+}
+
 // run's permanent gates: each ends the loop rather than being re-evaluated every
 // wake, so each must provably END it — not merely skip a check inside it.
 func TestUpdateDriver_PermanentGatesEndTheLoop(t *testing.T) {

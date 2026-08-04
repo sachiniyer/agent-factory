@@ -186,8 +186,22 @@ func (d *updateDriver) checkOnce() updateCheckOutcome {
 	if now.Before(d.nextCheckNotBefore) {
 		return updateCheckSkipped
 	}
-	due, acquired := d.windowOpen(channel, now)
-	if !acquired || !due {
+	due, acquired, err := d.windowOpen(channel, now)
+	switch {
+	case err != nil:
+		// The shared window is unreadable, so there is nothing to coordinate
+		// with — and checking anyway is exactly the uncoordinated behaviour the
+		// throttle exists to prevent. Back off like any other outcome this wake
+		// cannot act on, which also stops a permanently broken home (an
+		// unwritable AF directory) from logging this every fifteen minutes
+		// forever.
+		d.nextCheckNotBefore = now.Add(autoupdate.CheckInterval)
+		log.WarningLog.Printf("auto-update: daemon could not read the release-check cache: %v", err)
+		return updateCheckSkipped
+	case !acquired || !due:
+		// Either another af owns the check right now or one happened recently.
+		// Neither is this driver's outcome to back off for: the next wake should
+		// find the window as it is then, not as it was now.
 		return updateCheckSkipped
 	}
 	// Set BEFORE the lookup and on every outcome below. A failing GitHub, a
@@ -233,17 +247,19 @@ func (d *updateDriver) checkOnce() updateCheckOutcome {
 // Reading under the same non-blocking lock still buys the coordination that
 // matters: the daemon defers to a check another af just made, and stands down
 // while one is mid-flight. The lock is released before the network call, so this
-// driver can never make a launching af skip its own check.
-func (d *updateDriver) windowOpen(channel string, now time.Time) (due, acquired bool) {
-	acquired, err := autoupdate.TryWithCheckCache(d.cachePath, func(cache *autoupdate.CheckCache, _ time.Time) error {
+// driver can never make a launching af skip its own check. Taking that lock does
+// create the sibling .lock file, as every other user of the shared cache does —
+// "never writes" is about the cache record, which is the thing that closes the
+// window.
+func (d *updateDriver) windowOpen(channel string, now time.Time) (due, acquired bool, err error) {
+	acquired, err = autoupdate.TryWithCheckCache(d.cachePath, func(cache *autoupdate.CheckCache, _ time.Time) error {
 		due = cache.Due(channel, d.currentVersion, now)
 		return nil
 	})
 	if err != nil {
-		log.WarningLog.Printf("auto-update: daemon could not read the release-check cache: %v", err)
-		return false, false
+		return false, false, err
 	}
-	return due, acquired
+	return due, acquired, nil
 }
 
 // firstWake spreads the first check of a fleet across the wake interval. Every
