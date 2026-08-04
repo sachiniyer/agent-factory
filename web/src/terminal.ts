@@ -57,6 +57,7 @@ import {
   terminalMouseOverrideHeld,
   type TerminalMouseOverride,
   touchHistoryScrollPlan,
+  touchScrollClaimsGesture,
 } from "./terminal-mouse.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { currentXtermTheme } from "./theme.js";
@@ -128,6 +129,10 @@ export class AttachTerminal {
   // second finger arrived and the browser owns the pinch.
   private touchScrollY: number | null = null;
   private touchScrollRemainder = 0;
+  // Where the gesture started, and whether it has since travelled far enough to be a
+  // scroll rather than a tap. Until it has, the touch is left entirely alone.
+  private touchScrollOriginY = 0;
+  private touchScrollClaimed = false;
   // Whether the gesture in flight came from a finger, read off the pointer event that
   // precedes the browser's compatibility mouse events (onPointerDown).
   private lastPointerWasTouch = false;
@@ -199,13 +204,15 @@ export class AttachTerminal {
   // the application — which is why only the move is ever cancelled, never the
   // touchstart that a tap's compatibility mouse events depend on.
   private readonly onTouchStart = (event: TouchEvent): void => {
-    // Ownership is settled once, at the start of the gesture. A touch whose target is
-    // the viewport itself is a scrollbar drag the browser already handles — the same
-    // discriminator onPointerDown reads below, and taking it over would scroll
+    // Eligibility is settled once, at the start of the gesture. A touch whose target
+    // is the viewport itself is a scrollbar drag the browser already handles — the
+    // same discriminator onPointerDown reads below, and taking it over would scroll
     // BACKWARDS, since a thumb follows the finger while the content opposes it.
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     this.touchScrollY = event.touches.length === 1 && !onScrollbar ? event.touches[0].clientY : null;
+    this.touchScrollOriginY = this.touchScrollY ?? 0;
     this.touchScrollRemainder = 0;
+    this.touchScrollClaimed = false;
   };
   private readonly onTouchMove = (event: TouchEvent): void => {
     this.handleUserScroll("touch");
@@ -225,6 +232,16 @@ export class AttachTerminal {
       // xterm's own touch scrolling is live here; tracking the position anyway keeps
       // a mode change mid-drag from scrolling by everything travelled before it.
       return;
+    }
+    if (!this.touchScrollClaimed) {
+      if (!touchScrollClaimsGesture(this.touchScrollOriginY, y)) {
+        // Still within a tap's wobble. Leaving the event ALONE is the point: claiming
+        // it would cancel the touch, and a cancelled touch fires no compatibility
+        // mouse events — so an unsteady tap would stop reaching the application while
+        // a perfectly still one kept working.
+        return;
+      }
+      this.touchScrollClaimed = true;
     }
     const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
     this.touchScrollRemainder = plan.remainder;

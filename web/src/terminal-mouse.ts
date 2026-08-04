@@ -87,6 +87,28 @@ export function historyWheelPlan(
 }
 
 /**
+ * How far a finger must travel before a gesture counts as a scroll rather than a
+ * tap, in CSS pixels.
+ *
+ * This threshold is not comfort, it is a capability. Scrolling the terminal by touch
+ * means cancelling the touchmove, and a cancelled touch fires no compatibility mouse
+ * events — so treating the first pixel of jitter as a scroll silently costs a
+ * mouse-aware application the click that an unsteady tap should have delivered.
+ *
+ * 8px is Chromium's own touch slop, which is also the distance at which the browser
+ * would start scrolling on its own. Claiming at the same point is what keeps the two
+ * from overlapping: below it neither the browser nor af moves anything, and above it
+ * af has already taken the gesture. It stays under one terminal row, so a real scroll
+ * still begins within half a line of the finger.
+ */
+export const TOUCH_SCROLL_SLOP_PX = 8;
+
+/** Whether a one-finger gesture has travelled far enough to be a scroll. */
+export function touchScrollClaimsGesture(originY: number, y: number): boolean {
+  return Math.abs(y - originY) >= TOUCH_SCROLL_SLOP_PX;
+}
+
+/**
  * Convert one step of a one-finger drag into whole terminal rows (#2682).
  *
  * The sign convention is xterm's own: a finger moving UP the screen (clientY

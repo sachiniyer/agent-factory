@@ -457,10 +457,26 @@ async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number)
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
-/** Taps once at a point — the gesture that must keep reaching a mouse-aware
- *  application even when the drag above no longer does. */
+/**
+ * Taps once at a point — the gesture that must keep reaching a mouse-aware
+ * application even when the drag above no longer does.
+ *
+ * The tap CARRIES A FEW PIXELS OF MOVEMENT, because a real finger does. That jitter
+ * is the entire difference between a tap the terminal has to pass through and a
+ * scroll it has to claim, and it is invisible to a tap synthesized as a bare
+ * down-up: claiming a touch means cancelling it, and a cancelled touch fires no
+ * compatibility mouse events, so a tap held slightly unsteady would silently stop
+ * reaching the application while a perfectly still one kept working.
+ */
 async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  // Several small steps rather than one, because they are what a wobble really looks
+  // like and what a naive implementation accumulates: each is a fraction of a row on
+  // its own, so only the running total ever reaches one. Their sum stays under the
+  // scroll threshold, which is what makes this a tap and not a short drag.
+  for (const step of [2, 4, 6]) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + step }] });
+  }
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
@@ -1875,12 +1891,28 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
 
     // 3. A TAP still belongs to the application. That capability is what mouse mode
     //    was turned on for, and it is what forbids cancelling the touch outright
-    //    rather than only the drag.
+    //    rather than only the drag — including the unsteady tap that carries a few
+    //    pixels of movement, which is what a real finger produces and what a
+    //    cancel-every-move handler would swallow.
     inputPayloads.length = 0;
+    const beforeTap = await viewport.evaluate((el) => el.scrollTop);
     await touchTap(cdp, column, y + height * 0.5);
     await expect
       .poll(() => inputPayloads.length, { message: "a tap must still report a click to the mouse-aware application" })
       .toBeGreaterThan(0);
+    // …and that wobble must not ALSO have been read as a scroll. The direction is
+    // what carries the meaning, not the exact value: reading the wobble as a scroll
+    // pulls older output in, which only ever DECREASES scrollTop, while the reported
+    // click legitimately increases it — xterm scrolls to the bottom on user input
+    // whenever the view sits above it, and a mouse report reaches the PTY through
+    // exactly that path (CoreMouseService.triggerMouseEvent →
+    // CoreService.triggerDataEvent(…, wasUserInput) → onRequestScrollToBottom). An
+    // equality here would therefore fail on the fix working, and would also inherit
+    // the row-of-new-output fragility documented in #2816.
+    expect(
+      await viewport.evaluate((el) => el.scrollTop),
+      "a tap's wobble must never scroll back into history",
+    ).toBeGreaterThanOrEqual(beforeTap);
     await expect(mouseHint, "a working tap must not advertise an escape either").not.toHaveClass(/af-visible/);
   } finally {
     // The shell holding mouse mode dies with its tab, so nothing has to unwind the

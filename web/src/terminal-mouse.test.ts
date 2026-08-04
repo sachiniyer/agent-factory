@@ -7,7 +7,9 @@ import {
   terminalMouseOverride,
   terminalMouseOverrideFlag,
   terminalMouseOverrideHeld,
+  TOUCH_SCROLL_SLOP_PX,
   touchHistoryScrollPlan,
+  touchScrollClaimsGesture,
 } from "./terminal-mouse.js";
 
 test("application-mouse escape matches xterm's platform selection modifier", () => {
@@ -80,4 +82,22 @@ test("a touch drag scrolls the way the content follows the finger (#2682)", () =
 
   // A finger that has not moved must not scroll — and must not report -0 rows.
   assert.deepEqual(touchHistoryScrollPlan(100, 100, 24, 20, 0), { lines: 0, remainder: 0 });
+});
+
+test("a tap's wobble is not a scroll, in either direction (#2682)", () => {
+  // Claiming a gesture cancels the touch, and a cancelled touch fires no
+  // compatibility mouse events — so this threshold is what keeps an unsteady tap
+  // delivering its click to a mouse-aware application instead of silently doing
+  // nothing. Both directions, because a finger drifts either way.
+  assert.equal(touchScrollClaimsGesture(200, 203), false);
+  assert.equal(touchScrollClaimsGesture(200, 197), false);
+  assert.equal(touchScrollClaimsGesture(200, 200 + TOUCH_SCROLL_SLOP_PX - 1), false);
+
+  // At the threshold the gesture is a scroll — the same distance at which the
+  // browser would start one itself, so the two can never both act on it.
+  assert.equal(touchScrollClaimsGesture(200, 200 + TOUCH_SCROLL_SLOP_PX), true);
+  assert.equal(touchScrollClaimsGesture(200, 200 - TOUCH_SCROLL_SLOP_PX), true);
+
+  // Under one terminal row, or a real scroll would visibly lag the finger.
+  assert.ok(TOUCH_SCROLL_SLOP_PX < 13 * 1.2);
 });

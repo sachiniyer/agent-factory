@@ -6906,6 +6906,10 @@ function historyWheelPlan(event, rows, rowHeight, remainder) {
   const lines = Object.is(wholeRows, -0) ? 0 : wholeRows;
   return { lines, remainder: total - lines };
 }
+var TOUCH_SCROLL_SLOP_PX = 8;
+function touchScrollClaimsGesture(originY, y) {
+  return Math.abs(y - originY) >= TOUCH_SCROLL_SLOP_PX;
+}
 function touchHistoryScrollPlan(lastY, y, rows, rowHeight, remainder) {
   return historyWheelPlan({ deltaMode: 0, deltaY: lastY - y }, rows, rowHeight, remainder);
 }
@@ -7147,6 +7151,10 @@ var AttachTerminal = class {
   // second finger arrived and the browser owns the pinch.
   touchScrollY = null;
   touchScrollRemainder = 0;
+  // Where the gesture started, and whether it has since travelled far enough to be a
+  // scroll rather than a tap. Until it has, the touch is left entirely alone.
+  touchScrollOriginY = 0;
+  touchScrollClaimed = false;
   // Whether the gesture in flight came from a finger, read off the pointer event that
   // precedes the browser's compatibility mouse events (onPointerDown).
   lastPointerWasTouch = false;
@@ -7211,7 +7219,9 @@ var AttachTerminal = class {
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     this.touchScrollY = event.touches.length === 1 && !onScrollbar ? event.touches[0].clientY : null;
+    this.touchScrollOriginY = this.touchScrollY ?? 0;
     this.touchScrollRemainder = 0;
+    this.touchScrollClaimed = false;
   };
   onTouchMove = (event) => {
     this.handleUserScroll("touch");
@@ -7227,6 +7237,12 @@ var AttachTerminal = class {
     this.touchScrollY = y;
     if (!this.applicationOwnsMouse()) {
       return;
+    }
+    if (!this.touchScrollClaimed) {
+      if (!touchScrollClaimsGesture(this.touchScrollOriginY, y)) {
+        return;
+      }
+      this.touchScrollClaimed = true;
     }
     const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
     this.touchScrollRemainder = plan.remainder;
