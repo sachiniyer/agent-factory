@@ -26,16 +26,31 @@ const (
 	accessTokenRedaction  = "REDACTED"
 )
 
-// RedactAccessTokenURL replaces every access_token query value in raw while
-// preserving the rest of the URL for diagnostics. url.URL.Redacted is not a
-// substitute: it redacts userinfo only and leaves query parameters untouched.
+// RedactAccessTokenURL replaces every access_token value in raw while preserving
+// the rest of the URL for diagnostics. url.URL.Redacted is not a substitute: it
+// redacts userinfo only and leaves query parameters untouched.
 func RedactAccessTokenURL(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		// An unparseable URL cannot be safely separated from its credential.
 		return "[url redacted]"
 	}
-	q := parsed.Query()
+	if !redactAccessTokenQuery(parsed) {
+		// URL.Query discards malformed query pairs, so a structured miss says
+		// nothing about the raw text. The text pass reads the whole string
+		// rather than trusting a partially parsed query.
+		return RedactAccessTokenText(raw)
+	}
+	redactAccessTokenComponents(parsed)
+	return parsed.String()
+}
+
+// redactAccessTokenQuery replaces every access_token value in u's parsed query,
+// reporting whether the query carried one at all. Working through url.Values is
+// what keeps the neighbouring parameters readable: their separators are known to
+// be separators here, which is exactly the fact unstructured text lacks.
+func redactAccessTokenQuery(u *url.URL) bool {
+	q := u.Query()
 	found := false
 	for key := range q {
 		if strings.EqualFold(key, AccessTokenQueryParam) {
@@ -44,12 +59,55 @@ func RedactAccessTokenURL(raw string) string {
 		}
 	}
 	if !found {
-		// URL.Query discards malformed query pairs. The text pass still catches
-		// an exact access_token field without trusting a partially parsed query.
-		return RedactAccessTokenText(raw)
+		return false
 	}
-	parsed.RawQuery = q.Encode()
-	return parsed.String()
+	u.RawQuery = q.Encode()
+	return true
+}
+
+// redactAccessTokenComponents runs the text backstop over every part of u that
+// the query pass does not reach — most realistically the fragment, where an
+// implicit-grant callback parks its token (#2771), but a rootless URL carries
+// its whole body in Opaque and nothing stops a field from appearing in the path
+// or the userinfo either. url.URL's string fields are a closed set, so covering
+// them is a claim that stays true; covering "the separators a token can hide
+// behind" is the open-ended guess that missed ';' in #2687 and '#' in #2771.
+// Scheme is the one field left out, because the parser rejects '=' in it.
+//
+// Re-running the text pass over the serialized URL instead would defeat the
+// query pass: '&' does not end a value, so the scan would swallow every
+// parameter behind the one it just redacted.
+func redactAccessTokenComponents(u *url.URL) {
+	u.Opaque = RedactAccessTokenText(u.Opaque)
+	u.Host = RedactAccessTokenText(u.Host)
+	if path := RedactAccessTokenText(u.Path); path != u.Path {
+		// RawPath is honoured only while it still encodes Path, and a rewritten
+		// Path leaves it stale. Drop it so String re-escapes from the redacted
+		// value rather than reprinting the credential it was holding.
+		u.Path, u.RawPath = path, ""
+	}
+	if fragment := RedactAccessTokenText(u.Fragment); fragment != u.Fragment {
+		u.Fragment, u.RawFragment = fragment, ""
+	}
+	if u.User != nil {
+		u.User = redactAccessTokenUserinfo(u.User)
+	}
+}
+
+// redactAccessTokenUserinfo returns user with any access_token field redacted
+// out of its name or password, and returns user itself when there is none — an
+// untouched Userinfo reprints exactly as it parsed.
+func redactAccessTokenUserinfo(user *url.Userinfo) *url.Userinfo {
+	name := RedactAccessTokenText(user.Username())
+	password, hasPassword := user.Password()
+	redactedPassword := RedactAccessTokenText(password)
+	if name == user.Username() && redactedPassword == password {
+		return user
+	}
+	if !hasPassword {
+		return url.User(name)
+	}
+	return url.UserPassword(name, redactedPassword)
 }
 
 // RedactAccessTokenError strips an access_token from a failed request while
@@ -78,8 +136,17 @@ func RedactAccessTokenError(err error, token string) error {
 }
 
 // RedactAccessTokenText is the logging-boundary backstop for an access_token
-// query embedded in otherwise unstructured text. Call sites that know they are
+// field embedded in otherwise unstructured text. Call sites that know they are
 // handling a URL or request error must still use the structured helpers above.
+//
+// Every occurrence of the field name is redacted, whatever precedes it. The
+// match used to be gated on a hand-listed set of separators the field may follow
+// (`?&;` and whitespace), which made the default answer for an unlisted byte
+// "leave the credential alone": ';' had to be added in #2687 and '#' in #2771,
+// and the byte after that would have been the third fix. Matching a longer name
+// like "my_access_token=" now costs a diagnostic field whose value is a
+// credential anyway — the same trade the value scan below already makes, in the
+// same direction.
 func RedactAccessTokenText(text string) string {
 	needle := AccessTokenQueryParam + "="
 	if indexFoldASCII(text, needle) < 0 {
@@ -95,17 +162,8 @@ func RedactAccessTokenText(text string) string {
 			return redacted.String()
 		}
 		valueStart := i + len(needle)
-		if i > 0 && !accessTokenFieldBoundary(rest[i-1]) {
-			redacted.WriteString(rest[:valueStart])
-			rest = rest[valueStart:]
-			continue
-		}
-
-		// Query separators inside the value are ambiguous. Redact through the next
-		// unambiguous text boundary rather than risk preserving credential material
-		// after one. Losing neighbouring fields is safe; retaining a token is not.
 		valueEnd := valueStart
-		for valueEnd < len(rest) && !strings.ContainsRune(" \t\r\n#\"'", rune(rest[valueEnd])) {
+		for valueEnd < len(rest) && !accessTokenValueEnd(rest[valueEnd]) {
 			valueEnd++
 		}
 		redacted.WriteString(rest[:valueStart])
@@ -157,8 +215,18 @@ func indexFoldASCII(text, lowerASCII string) int {
 	return -1
 }
 
-func accessTokenFieldBoundary(char byte) bool {
-	return strings.ContainsRune("?&; \t\r\n", rune(char))
+// accessTokenValueEnd reports whether char is an unambiguous end of an
+// access_token value. Whitespace and quotes close a field in any text, and '#'
+// opens a URL fragment — which RedactAccessTokenURL hands back to this scan as
+// its own string, so a fragment token is still redacted rather than folded into
+// the query one.
+//
+// Every other byte counts as credential material, including the '&' and ';'
+// separators an upstream parser may or may not honour (#2690). That default is
+// the reason this half of the scan has never leaked: an unfamiliar delimiter
+// costs the neighbouring field, never the token.
+func accessTokenValueEnd(char byte) bool {
+	return strings.ContainsRune(" \t\r\n#\"'", rune(char))
 }
 
 // BearerToken extracts the token from an Authorization header value, matching the

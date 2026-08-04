@@ -55,6 +55,18 @@ func TestRedactAccessTokenURL(t *testing.T) {
 			wantPresent: []string{"box:8080", "access_token=REDACTED"},
 		},
 		{
+			name:        "fragment token redacted",
+			raw:         "http://box:8080/callback#access_token=sekrit",
+			wantAbsent:  []string{"sekrit"},
+			wantPresent: []string{"box:8080", "/callback", "access_token=REDACTED"},
+		},
+		{
+			name:        "fragment token redacted alongside a query token",
+			raw:         "http://box:8080/callback?tab=2&access_token=query-sekrit#access_token=fragment-sekrit",
+			wantAbsent:  []string{"query-sekrit", "fragment-sekrit"},
+			wantPresent: []string{"box:8080", "tab=2", "access_token=REDACTED"},
+		},
+		{
 			name:        "no token untouched",
 			raw:         "http://box:8080/v1/sessions/s/stream?tab=2",
 			wantAbsent:  []string{"REDACTED"},
@@ -89,6 +101,65 @@ func TestRedactAccessTokenURLRedactsEveryKeyCase(t *testing.T) {
 	for _, token := range []string{"lower-secret", "upper-secret"} {
 		if strings.Contains(got, token) {
 			t.Fatalf("RedactAccessTokenURL retained token value %q: %s", token, got)
+		}
+	}
+}
+
+// TestRedactAccessTokenURLRedactsEveryComponent is the structural counterpart to
+// the byte sweep below. Structured query redaction reaches the query and nothing
+// else, so every OTHER component of a url.URL is a place a token can ride past
+// it — the fragment of an implicit-grant callback most realistically (#2771).
+// The set of components is closed, so sweeping it is a claim the next added
+// field cannot quietly falsify, unlike "the separators we thought of".
+func TestRedactAccessTokenURLRedactsEveryComponent(t *testing.T) {
+	// Every case also carries a query token, so the structured pass matches and
+	// the whole-string text fallback never runs. That is the path the component
+	// token has to survive redaction on.
+	for _, tc := range []struct {
+		component string
+		raw       string
+	}{
+		{"fragment", "http://box:8080/callback?access_token=q-sekrit#access_token=component-sekrit"},
+		{"path", "http://box:8080/access_token=component-sekrit?access_token=q-sekrit"},
+		{"host", "http://access_token=component-sekrit/stream?access_token=q-sekrit"},
+		{"userinfo", "http://user:access_token=component-sekrit@box:8080/?access_token=q-sekrit"},
+		{"opaque", "mailto:access_token=component-sekrit?access_token=q-sekrit"},
+	} {
+		t.Run(tc.component, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			for _, secret := range []string{"component-sekrit", "q-sekrit"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("RedactAccessTokenURL(%q) = %q, %s token %q survived",
+						tc.raw, got, tc.component, secret)
+				}
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenTextRedactsAfterEveryPrecedingByte sweeps the exact
+// dimension this redactor keeps losing credentials on. The field match used to
+// be gated on a hand-listed set of separators that may precede it, so the
+// default answer for an unlisted byte was "leave the credential alone": ';' had
+// to be added in #2687 and '#' in #2771. A sweep of the whole byte space is the
+// only version of this test that cannot go stale the same way.
+func TestRedactAccessTokenTextRedactsAfterEveryPrecedingByte(t *testing.T) {
+	// No value terminator in the token, so a byte that fails to start the
+	// redaction leaves the whole sentinel visible.
+	const token = "af-sentinel-preceding-byte-sweep"
+	for b := 0; b < 256; b++ {
+		preceding := byte(b)
+		// []byte, not string(preceding): the latter would UTF-8 encode anything
+		// above 0x7f and never place the raw byte in front of the field.
+		input := "context" + string([]byte{preceding}) + AccessTokenQueryParam + "=" + token
+		got := RedactAccessTokenText(input)
+		if strings.Contains(got, token) {
+			t.Errorf("RedactAccessTokenText(%q) = %q; token survived after preceding byte %#02x",
+				input, got, preceding)
+		}
+		if !strings.Contains(got, accessTokenRedaction) {
+			t.Errorf("RedactAccessTokenText(%q) = %q; want the redaction marker after preceding byte %#02x",
+				input, got, preceding)
 		}
 	}
 }
@@ -156,7 +227,7 @@ type accessTokenRedactionCase struct {
 }
 
 func TestRedactAccessTokenTextNeverRetainsTokenValue(t *testing.T) {
-	const generatedCases = 3 * 4 * 6 * 3 * 8
+	const generatedCases = 3 * 4 * 6 * 3 * 10
 	caseNumber := 0
 	config := &quick.Config{
 		MaxCount: generatedCases,
@@ -184,8 +255,12 @@ func TestRedactAccessTokenTextNeverRetainsTokenValue(t *testing.T) {
 
 func generateAccessTokenRedactionCase(n int, source *rand.Rand) accessTokenRedactionCase {
 	caseID := n
-	position := n % 8
-	n /= 8
+	position := n % 10
+	n /= 10
+	// '#' is deliberately absent: it is a value TERMINATOR, so a token shaped
+	// around one is genuinely two fields, and the fragment half gets its own
+	// match. Its role as a field PREFIX is swept exhaustively by
+	// TestRedactAccessTokenTextRedactsAfterEveryPrecedingByte instead.
 	separators := []string{";", "&", "?"}
 	shapes := []func(string, string, string) string{
 		func(separator, marker, decoration string) string {
@@ -229,6 +304,10 @@ func generateAccessTokenRedactionCase(n int, source *rand.Rand) accessTokenRedac
 		"Get \"ws://box.test/stream?" + field + "\": dial failed",
 		"failure " + field + " # fragment",
 		"https://box.test/stream?" + field + "&before=1&" + field,
+		// Implicit-grant callbacks put the credential in the fragment, where no
+		// query separator precedes it at all (#2771).
+		"https://box.test/callback#" + field,
+		"https://box.test/callback?tab=2#" + field,
 	}
 	return accessTokenRedactionCase{Input: inputs[position], Token: token}
 }
