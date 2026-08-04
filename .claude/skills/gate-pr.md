@@ -38,23 +38,29 @@ from `app/detail-app` may auto-merge once the gates are clean.
    hand, so a manual merge cannot be looser than the automated one.
 
    ```bash
-   head="$(gh pr view <n> --json headRefOid -q .headRefOid)"; echo "head=$head"
+   head="$(gh pr view <n> --json headRefOid -q .headRefOid)"
+   echo "head=$head committed=$(gh api repos/sachiniyer/agent-factory/commits/$head --jq .commit.committer.date)"
 
-   # a) a verdict for THIS head. The body carries "Reviewed commit: `abc1234…`",
-   #    an abbreviation that must prefix $head. Codex posts it as a review on
-   #    some PRs and as an issue comment on others, so read both.
-   gh api --paginate repos/sachiniyer/agent-factory/pulls/<n>/reviews \
-     --jq '.[] | select(.user.login=="chatgpt-codex-connector[bot]") | "\(.submitted_at)\n\(.body)"'
-   gh api --paginate repos/sachiniyer/agent-factory/issues/<n>/comments \
-     --jq '.[] | select(.user.login=="chatgpt-codex-connector[bot]") | "\(.created_at)\n\(.body)"'
+   # a) every Codex verdict, NEWEST FIRST. The body carries "Reviewed commit:
+   #    `abc1234…`", an abbreviation that must prefix $head. Codex posts a
+   #    verdict as a review on some PRs and as an issue comment on others, and
+   #    can post several for one head — auto-gate.js merges both kinds into one
+   #    list and judges only the newest matching artifact, so read them in that
+   #    order rather than as two separate streams.
+   { gh api --paginate repos/sachiniyer/agent-factory/pulls/<n>/reviews
+     gh api --paginate repos/sachiniyer/agent-factory/issues/<n>/comments
+   } | jq -s -r 'add
+     | map(select(.user.login == "chatgpt-codex-connector[bot]"))
+     | sort_by(.updated_at // .submitted_at // .created_at) | reverse
+     | .[] | "=== \(.updated_at // .submitted_at // .created_at)\n\(.body)"'
 
    # b) live inline findings, minus the ones an allowed reply already cleared —
    #    the same subtraction auto-gate.js makes, so this can never block a PR
    #    the workflow would merge. A null .line is stale, already fixed.
-   gh api --paginate repos/sachiniyer/agent-factory/pulls/<n>/comments | jq -s 'add
+   gh api --paginate repos/sachiniyer/agent-factory/pulls/<n>/comments | jq -s -r 'add
      | ([ .[] | select(.in_reply_to_id
-                       and (.user.login | test("^(sachiniyer|app-detail-app)"))
-                       and (.body | test("RESOLVED|ACCEPTED|\\[gate-ack\\]")))
+                       and (.user.login | IN("sachiniyer", "app-detail-app", "app-detail-app[bot]"))
+                       and ((.body | test("\\b(?:RESOLVED|ACCEPTED)\\b")) or (.body | contains("[gate-ack]"))))
               | .in_reply_to_id ] | unique) as $cleared
      | .[] | select(.user.login == "chatgpt-codex-connector[bot]"
                     and .line and (.in_reply_to_id | not)
@@ -67,15 +73,23 @@ from `app/detail-app` may auto-merge once the gates are clean.
    single wrong answer this step must never produce. `auto-gate.js` paginates
    these same lists (`github.paginate`, `per_page: 100`).
 
+   Every filter above mirrors `auto-gate.js` exactly, in both directions: an
+   author is an exact login (a `sachiniyer-…` account is not `sachiniyer`), and
+   a marker is a whole word (`UNRESOLVED — sent back` contains `RESOLVED` and
+   must not clear anything). Looser than the workflow lets a live finding
+   through; stricter blocks a PR the workflow would merge. Neither is acceptable.
+
    Require all three:
 
-   - **A verdict that names this head.** Its `Reviewed commit:` must match
-     `headRefOid` and it must be newer than the head commit. An older verdict
-     read different bytes. Silence is not a pass: an unreviewed PR and a clean
-     one are byte-identical through the findings API, so (b) means nothing until
-     (a) holds. If nothing has posted, comment `@codex review this PR` and wait —
-     hours is normal. A `reached your Codex usage limits for code reviews` reply
-     is *not* a verdict.
+   - **A verdict that names this head.** Its `Reviewed commit:` must prefix
+     `headRefOid`, and its timestamp must be newer than the head commit's — the
+     `committed=` value printed above, which is why it is printed. An older
+     verdict read different bytes. Judge the **newest** matching artifact; an
+     older one it superseded is not the gate. Silence is not a pass: an
+     unreviewed PR and a clean one are byte-identical through the findings API,
+     so (b) means nothing until (a) holds. If nothing has posted, comment
+     `@codex review this PR` and wait — hours is normal. A `reached your Codex
+     usage limits for code reviews` reply is *not* a verdict.
    - **No `P0`–`P3` in that verdict body.** Findings usually live inline, but
      Codex does sometimes file one in the body with zero inline comments.
    - **Zero unresolved live inline findings.** These are independent of the
@@ -84,9 +98,10 @@ from `app/detail-app` may auto-merge once the gates are clean.
      inline query overrides the verdict, never the other way round.
 
    Clear a finding by replying **in-thread**, from `sachiniyer` or
-   `app-detail-app`, with `RESOLVED` or `ACCEPTED` and what changed or why the
-   finding is wrong. A top-level PR comment does not clear it — the reply has to
-   hang off that comment id:
+   `app-detail-app`, with `RESOLVED`, `ACCEPTED`, or `[gate-ack]` — all three
+   clear it (`hasResolutionMarker`) — plus what changed or why the finding is
+   wrong. A top-level PR comment does not clear it; the reply has to hang off
+   that comment id:
 
    ```bash
    gh api repos/sachiniyer/agent-factory/pulls/<n>/comments/<comment-id>/replies \
