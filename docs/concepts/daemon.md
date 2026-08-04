@@ -33,7 +33,8 @@ paragraph because it's why `af` doesn't corrupt itself:
 - **Keeps sessions alive.** If a session's process dies unexpectedly, the daemon
   re-spawns it in place — the worktree and record are preserved, so the agent
   comes back where it was. The always-on [root agent](../configuration.md#root-agents-always-ensured)
-  is maintained the same way.
+  is re-created rather than re-spawned — its record is replaced, but its recorded
+  conversation is carried across so it comes back on the same context.
 - **Runs the scheduler.** All [tasks](../tasks.md) — cron schedules and
   watch-script triggers — are hosted by the daemon. It arms the timers, watches
   the scripts, and delivers prompts on time, whether or not a TUI is open.
