@@ -744,16 +744,26 @@ func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) 
 	return persistInstanceData(repoID, instance.ToInstanceData())
 }
 
-// persistInstanceSnapshotErr is persistInstanceErr for a caller-owned atomic
-// projection. Handoff uses it to checkpoint the durable post-swap facts while
-// retaining its process-local OpReplacing delivery fence in memory. It is
-// intentionally separate from persistInstanceErr: ordinary writers must take
-// their Instance snapshot only after acquiring this serialization lock.
-func (m *Manager) persistInstanceSnapshotErr(repoID string, data session.InstanceData) error {
+// persistHandoffCheckpointErr is persistInstanceErr for the one writer whose
+// durable and live projections differ ON PURPOSE: the post-swap handoff
+// checkpoint. Disk takes the caller's atomic projection — the crash-recovery
+// posture, which cannot retain a process-local operation — while memory keeps the
+// OpReplacing delivery fence. It is intentionally separate from persistInstanceErr:
+// ordinary writers must take their Instance snapshot only after acquiring this
+// serialization lock, which is exactly why the caller's snapshot is a parameter here.
+//
+// The EVENT carries the live projection, not the checkpoint (#2782). Other clients
+// have to render the truth — incoming agent, replacement still in flight — and the
+// fence is what closes their action gates (CanHandoff/CanKill project off it).
+// Announcing the checkpoint would tell them the swap had already settled and
+// re-open gates the daemon is still holding shut.
+func (m *Manager) persistHandoffCheckpointErr(repoID string, instance *session.Instance, checkpoint session.InstanceData) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
-	return persistInstanceData(repoID, data)
+	err := persistInstanceData(repoID, checkpoint)
+	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+	return err
 }
 
 // persistInstance is the best-effort form of persistInstanceErr: a failed write
@@ -764,6 +774,46 @@ func (m *Manager) persistInstanceSnapshotErr(repoID string, data session.Instanc
 // held. Under m.mu, call persistInstanceData directly.
 func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
 	if err := m.persistInstanceErr(repoID, instance); err != nil {
+		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
+	}
+}
+
+// persistAndPublishInstance is persistInstance plus the session.updated
+// announcement a committed change owes every OTHER client (#1812, #2782).
+//
+// The two belong together wherever a mutation — not a poll — is what changed the
+// session. A client that did not make the change learns of it ONLY from the events
+// plane: it re-Snapshots after its own mutations, never after anyone else's. And
+// the status poll cannot be relied on to repair the gap, because it deliberately
+// skips a session with an operation in flight and, once the operation finishes,
+// snapshots the already-final state as its own baseline — seeing no change to
+// report.
+//
+// Published INSIDE the repo ordering lock, in the same critical section as the
+// persist that produced it, for the reason spelled out at the poll's publish in
+// limit.go: session.updated carries a WHOLE InstanceData and every client
+// re-projects the session wholesale from it, so publishing after the unlock lets an
+// older payload land last and revert newer state.
+//
+// The announcement goes out even when the write failed. That is deliberate and
+// matches the poll: what the other clients must converge on is MEMORY, which has
+// already changed. persistInstance is best-effort by contract — the next checkpoint
+// retries the write — so a failed write is not a reason to leave every other client
+// stale about a change that really happened.
+//
+// LOCK CONTRACT (#2106): inherits persistInstance's — never call it with m.mu held.
+func (m *Manager) persistAndPublishInstance(repoID string, instance *session.Instance) {
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	// Snapshot only AFTER serialization, for the #1917 reason on persistInstanceErr:
+	// a projection taken before the lock can erase state a writer committed while we
+	// waited. The same snapshot is both persisted and announced, so disk and the
+	// events plane can never disagree about which one this was.
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	repoStartLock.Unlock()
+	if err != nil {
 		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
 	}
 }

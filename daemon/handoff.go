@@ -234,7 +234,15 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// window must restore the incoming Program rather than lie that the outgoing
 	// agent still owns the pane. The projection also clears any outgoing-provider
 	// limit state, matching CommitHandoff's recovery posture.
-	if err := m.persistInstanceSnapshotErr(repoID, checkpoint); err != nil {
+	//
+	// This is also where the swap becomes visible to every OTHER client (#2782).
+	// Announcing it HERE rather than only at settlement is what the readiness wait
+	// makes necessary: it can run for a minute, and until it returns the rail in a
+	// second window would otherwise still offer the outgoing agent — including in
+	// the handoff picker, which excludes the current agent and would therefore
+	// exclude the wrong one. The event carries the LIVE projection, so those clients
+	// see the incoming agent WITH the fence raised, not a settled row.
+	if err := m.persistHandoffCheckpointErr(repoID, instance, checkpoint); err != nil {
 		// Preserve the existing best-effort persist contract: delivery can still
 		// make the live agent useful, and the final settled write retries below.
 		log.WarningLog.Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
