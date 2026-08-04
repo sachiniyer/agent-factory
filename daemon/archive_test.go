@@ -148,7 +148,7 @@ func TestArchiveSessionRunsOperatorHookAfterPaneTeardownBeforeMove(t *testing.T)
 			`test "$AF_WORKTREE_PATH" = %q && `+
 			`test "$AF_ARCHIVE_PATH" = %q && `+
 			`test ! -e "$AF_ARCHIVE_PATH" && `+
-			`find node_modules -depth -delete && printf ran > %q`,
+			`find . -type d -name node_modules -prune -exec rm -rf {} + && printf ran > %q`,
 		inst.ID, repoPath, srcPath, dest, marker,
 	)
 	writeOnArchiveCommand(t, command)
