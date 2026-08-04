@@ -405,7 +405,12 @@ func TestUpdateDriver_RunPerformsACheck(t *testing.T) {
 	h.driver.now = time.Now // the loop's backoff must be compared against a real clock
 	originalWake := updateDriverWakeInterval
 	updateDriverWakeInterval = time.Millisecond
-	t.Cleanup(func() { updateDriverWakeInterval = originalWake })
+	originalStartup := updateDriverStartupBackoff
+	updateDriverStartupBackoff = 0
+	t.Cleanup(func() {
+		updateDriverWakeInterval = originalWake
+		updateDriverStartupBackoff = originalStartup
+	})
 
 	stopCh := make(chan struct{})
 	done := make(chan struct{})
@@ -420,6 +425,79 @@ func TestUpdateDriver_RunPerformsACheck(t *testing.T) {
 
 	require.Eventually(t, func() bool { return len(h.checkedChannels()) > 0 }, 10*time.Second, 5*time.Millisecond,
 		"the loop must reach a release check")
+}
+
+// The self-throttle lives in memory, so a restart resets it. Without a startup
+// floor, a daemon that reaches ready and then dies repeatedly would check once
+// per restart — a rate-limit storm assembled out of individually throttled
+// processes, and the jitter is no floor because it is hash-derived and can land
+// near zero for a given home. So no check is eligible until the driver has been
+// running for a full interval.
+func TestUpdateDriver_MakesNoCheckBeforeTheStartupBackoff(t *testing.T) {
+	h := newDriverHarness(t)
+	h.driver.now = time.Now
+	originalWake := updateDriverWakeInterval
+	updateDriverWakeInterval = time.Millisecond
+	originalStartup := updateDriverStartupBackoff
+	updateDriverStartupBackoff = time.Hour
+	t.Cleanup(func() {
+		updateDriverWakeInterval = originalWake
+		updateDriverStartupBackoff = originalStartup
+	})
+
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		h.driver.run(stopCh)
+		close(done)
+	}()
+
+	// Hundreds of wakes at a millisecond apiece, none of them eligible.
+	time.Sleep(300 * time.Millisecond)
+	close(stopCh)
+	<-done
+
+	require.Empty(t, h.checkedChannels(),
+		"a restarted daemon must not be able to check before it has run for a full interval")
+}
+
+// And the production floor is the check interval itself — pinned so it cannot
+// drift down to something a restart loop could outrun.
+func TestUpdateDriverStartupBackoffIsAFullCheckInterval(t *testing.T) {
+	require.Equal(t, autoupdate.CheckInterval, updateDriverStartupBackoff)
+}
+
+// Taking the shared cache lock MkdirAll's the lock file's parent, so a probe on a
+// deleted home would recreate it — resetting watchDaemonHome's miss counter (it
+// clears on any successful stat) and keeping an abandoned daemon alive, which is
+// #1093 exactly. A release check is never worth resurrecting a home the user
+// deleted.
+func TestUpdateDriver_DoesNotRecreateADeletedHome(t *testing.T) {
+	h := newDriverHarness(t)
+	home := filepath.Dir(h.cachePath)
+	require.NoError(t, os.RemoveAll(home))
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+	require.Empty(t, h.checkedChannels(), "a deleted home means stand down, not check anyway")
+
+	_, err := os.Stat(home)
+	require.True(t, errors.Is(err, os.ErrNotExist),
+		"the release check must not recreate the agent-factory home; watchDaemonHome resets on any successful stat, so this would keep an abandoned daemon alive (#1093)")
+}
+
+// The absence check must fire only on a POSITIVE observation of absence. An
+// inconclusive stat is not evidence the home is gone, and treating it as such
+// would silently disable checks on a box whose home is merely unreadable.
+func TestUpdateDriver_TreatsAnInconclusiveHomeStatAsPresent(t *testing.T) {
+	h := newDriverHarness(t)
+	require.True(t, h.driver.homeExists())
+
+	// A path whose parent is a regular file: stat fails with ENOTDIR, not
+	// ErrNotExist.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocked, []byte("x"), 0o644))
+	h.driver.cachePath = filepath.Join(blocked, "sub", autoupdate.CheckCacheFileName)
+	require.True(t, h.driver.homeExists(), "an inconclusive stat must not be read as absence")
 }
 
 // Fleet spread: every autostart daemon starts at boot or login, so an unjittered

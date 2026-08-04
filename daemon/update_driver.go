@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"hash/fnv"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -46,6 +48,16 @@ var (
 	// has not opened yet — so it can afford `af upgrade`'s patience rather than
 	// the launch path's two seconds.
 	updateDriverCheckTimeout = 10 * time.Second
+	// updateDriverStartupBackoff is how long after start the driver waits before
+	// its first check is eligible. It is the whole check interval on purpose: the
+	// self-throttle below lives in memory, so a restart resets it, and without a
+	// startup floor a daemon that reaches ready and then dies repeatedly could
+	// check once per restart — a rate-limit storm assembled out of individually
+	// throttled processes. With the floor, a daemon must live a full interval to
+	// make one call, so restarts can only ever produce FEWER checks, never more.
+	// The cost is that a box which restarts its daemon more often than this never
+	// reports; that is the right trade for a surface that only reports.
+	updateDriverStartupBackoff = autoupdate.CheckInterval
 	// updateDriverGOOS is the platform gate, a var so tests can exercise it.
 	updateDriverGOOS = runtime.GOOS
 )
@@ -152,6 +164,10 @@ func (d *updateDriver) run(stopCh <-chan struct{}) {
 		return
 	}
 
+	// Arm the self-throttle from start, not from the first check: see
+	// updateDriverStartupBackoff.
+	d.nextCheckNotBefore = d.now().Add(updateDriverStartupBackoff)
+
 	timer := time.NewTimer(d.firstWake())
 	defer timer.Stop()
 	for {
@@ -184,6 +200,18 @@ func (d *updateDriver) checkOnce() updateCheckOutcome {
 
 	now := d.now()
 	if now.Before(d.nextCheckNotBefore) {
+		return updateCheckSkipped
+	}
+	// Probing the cache takes the shared file lock, and that path MkdirAll's the
+	// lock file's parent — so on a home that has been deleted out from under this
+	// daemon, a read-only probe would recreate it. That is not a cosmetic stray
+	// directory: watchDaemonHome exits only after consecutive missing
+	// observations and resets its counter on any successful stat, so recreating
+	// the home keeps an abandoned daemon alive indefinitely (#1093, the leaked
+	// daemon that fired a cron for 23 days) and resurrects the state the deletion
+	// was meant to remove. Nothing about a release check is worth that; stand
+	// down and let the home watcher own the shutdown.
+	if !d.homeExists() {
 		return updateCheckSkipped
 	}
 	due, acquired, err := d.windowOpen(channel, now)
@@ -260,6 +288,16 @@ func (d *updateDriver) windowOpen(channel string, now time.Time) (due, acquired 
 		return false, false, err
 	}
 	return due, acquired, nil
+}
+
+// homeExists reports whether the AF home still exists. Derived from cachePath
+// rather than resolved separately, so the directory checked is exactly the one
+// the cache lock would create. A stat error that is not "missing" (a permission
+// problem, say) counts as present: the check below must only ever suppress work
+// on a positive observation of absence, never on an inconclusive one.
+func (d *updateDriver) homeExists() bool {
+	_, err := os.Stat(filepath.Dir(d.cachePath))
+	return err == nil || !os.IsNotExist(err)
 }
 
 // firstWake spreads the first check of a fleet across the wake interval. Every
