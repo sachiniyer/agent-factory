@@ -445,8 +445,7 @@ async function dragTabOntoPaneHitTested(
  * prove only that our listeners ran, which is the false pass the issue warns about.
  * The context must be built with hasTouch, or Chromium ignores these entirely.
  */
-async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number): Promise<void> {
-  const steps = 12;
+async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number, steps = 12): Promise<void> {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: fromY }] });
   for (let step = 1; step <= steps; step++) {
     await cdp.send("Input.dispatchTouchEvent", {
@@ -1888,6 +1887,22 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     await expect(mouseHint, "a touch pointer must not be told to hold a key it has no way to press").not.toHaveClass(
       /af-visible/,
     );
+
+    // The SLOW drag, whose first move lands inside the tap threshold and is therefore
+    // the one move the terminal deliberately does not cancel. It has to end up in the
+    // same place as the fast one: scrolling history, and reporting nothing — a
+    // gesture that both scrolled and clicked would fire a TUI's button under a finger
+    // that was only reading. The drag above cannot see this; its first step is
+    // already past the threshold, so it exercises the cancelled-from-the-start path.
+    inputPayloads.length = 0;
+    const beforeSlow = await viewport.evaluate((el) => el.scrollTop);
+    await touchDrag(cdp, column, y + height * 0.35, y + height * 0.75, 40);
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), {
+        message: "a slow drag must reach scrollback too, not only a flick",
+      })
+      .toBeLessThan(beforeSlow);
+    expect(inputPayloads, "a slow scroll must not ALSO deliver a click to the application").toHaveLength(0);
 
     // 3. A TAP still belongs to the application. That capability is what mouse mode
     //    was turned on for, and it is what forbids cancelling the touch outright
