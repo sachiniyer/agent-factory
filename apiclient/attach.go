@@ -15,7 +15,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Seams for the terminal the driver proxies to/from. Production wires them to the
@@ -63,6 +62,17 @@ var attachDrainTimeout = 2 * time.Second
 // and restores the terminal on exit. The signature matches the attach seam
 // (app.attachOverlayCallback's `func() (chan struct{}, error)`), so local
 // full-screen attach drops in where the tmux driver used to be.
+//
+// ctx bounds the DIAL only. Once the stream is up, the driver reads on a
+// background context by design (see driveAttachStream), so cancelling ctx does
+// not end a live attach — verified against coder/websocket, whose conn outlives
+// the handshake context, and relied on by DialStream itself, which cancels its
+// own derived dial context for a remote target before this returns. Detach is a
+// WS-level signal, not a cancellation. Both callers pass a context that is never
+// cancelled mid-attach (the TUI passes Background; the CLI's command context is
+// rooted at Background), so this is a documented property rather than a live
+// exit path — but it is why terminal hand-back is armed against signals instead:
+// see terminalHandback.
 func (c *Client) AttachStream(ctx context.Context, title, repoID, tabID string, tab int) (chan struct{}, error) {
 	sc, err := c.DialStream(ctx, title, repoID, tabID, tab, 0) // 0 = live tail
 	if err != nil {
@@ -84,10 +94,16 @@ func (c *Client) AttachStream(ctx context.Context, title, repoID, tabID string, 
 		_ = sc.Conn.Close(websocket.StatusInternalError, "raw mode")
 		return nil, err
 	}
+	// Arm the hand-back HERE, in the statement right after the one that took the
+	// terminal, and hand it to the driver rather than the raw termios. Arming it
+	// inside the driver instead would leave a window — MakeRaw has already run,
+	// the driver goroutine has not been scheduled yet — in which a signal exits
+	// with the user's termios raw, which is the very bug this closes (#2784).
+	handback := beginTerminalHandback(attachStdout, oldState)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		driveAttachStream(sc.Conn, oldState, in)
+		driveAttachStream(sc.Conn, handback, in)
 	}()
 	return done, nil
 }
@@ -120,8 +136,21 @@ var attachWriteTimeout = 10 * time.Second
 // timer and the drain-complete path close it). The io seams are captured as
 // locals up front so no goroutine re-reads package-level vars a test swaps back
 // in Cleanup.
-func driveAttachStream(conn *websocket.Conn, oldState *term.State, in cancelreader.CancelReader) {
+func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in cancelreader.CancelReader) {
 	defer in.Close()
+	// Give the terminal back on every exit from here — the drained detach at the
+	// bottom, a server disconnect, a signal, and the ones nobody wrote a handler
+	// for. A tail-called restore covers only the anticipated exits; #2784 is what
+	// the others cost the user. Deferred, so a panic anywhere below still hands
+	// the terminal back — and still crashes the process with its stack trace,
+	// because a recovered panic is a bug nobody ever sees. See terminalHandback.
+	//
+	// On the normal path the terminal still goes back exactly where it used to.
+	// Defers unwind last-registered-first, so this runs after the body has waited
+	// out copyDone (every byte the pane program wrote is on the terminal) and
+	// stdinDone (the input pump has proven it is gone, #2671), and still ahead of
+	// the in.Close registered above it.
+	defer handback.release()
 	// Snapshot EVERY package-level seam/tunable once, here, before any goroutine
 	// spawns. The goroutines then read only these locals — never the package vars
 	// a test swaps and restores in Cleanup. This single entry read is sequenced
@@ -259,13 +288,7 @@ func driveAttachStream(conn *websocket.Conn, oldState *term.State, in cancelread
 	_ = in.Cancel()
 	closeConn()
 	<-stdinDone
-	// The stream is fully drained (copyDone), so this lands strictly after any
-	// modes the pane program set — neutralize the terminal (#845, local edition),
-	// then hand the termios back to whatever owned it before attach (bubbletea for
-	// the TUI, the shell for the CLI). oldState is nil only in tests that drive the
-	// proxy without a real TTY.
-	_, _ = io.WriteString(out, tmux.NeutralTerminalRestore)
-	if oldState != nil {
-		_ = term.Restore(int(os.Stdin.Fd()), oldState)
-	}
+	// The terminal goes back from here via the deferred handback.release() above:
+	// the stream is fully drained (copyDone) and the stdin pump is gone, so the
+	// hand-back still lands strictly after any modes the pane program set.
 }

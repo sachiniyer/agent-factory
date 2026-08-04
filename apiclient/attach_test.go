@@ -201,7 +201,12 @@ func startDriverWithInput(t *testing.T, in io.Reader) (srvConn *websocket.Conn, 
 	input, err := newAttachInputReader(in)
 	require.NoError(t, err)
 	d := make(chan struct{})
-	go func() { defer close(d); driveAttachStream(sc.Conn, nil, input) }()
+	// nil termios: no raw mode was taken, so the hand-back writes the neutral
+	// restore to the captured stdout and touches no real terminal (and arms no
+	// signal watch). AttachStream is where production arms it, next to its
+	// MakeRaw; this stands in for that here.
+	handback := beginTerminalHandback(out, nil)
+	go func() { defer close(d); driveAttachStream(sc.Conn, handback, input) }()
 	return server, out, d
 }
 
@@ -454,6 +459,28 @@ func TestAttachStream_ServerExitClosesAttach(t *testing.T) {
 		t.Fatalf("write exit: %v", err)
 	}
 	waitClosed(t, done)
+}
+
+// TestAttachStream_ServerExitRestoresTheTerminal is the hand-back half of the
+// exit above. A pane that ends on its own is an exit the user never asked for,
+// and it owes the terminal back exactly like a detach does — the audit half of
+// #2784 that covers server disconnect. Unit-level companion to the real-pty
+// tests in attach_pty_test.go: this one pins the neutral restore bytes on the
+// stdout seam, those pin the termios.
+func TestAttachStream_ServerExitRestoresTheTerminal(t *testing.T) {
+	server, _, out, done := startDriver(t)
+	// Drain so the client's post-exit close handshake completes promptly.
+	go func() {
+		for {
+			if _, _, err := server.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	require.NoError(t, agentproto.WriteControl(context.Background(), server, agentproto.NewExitMessage(0)))
+	waitClosed(t, done)
+	require.True(t, strings.HasSuffix(out.String(), tmux.NeutralTerminalRestore),
+		"a server-side exit must hand the terminal back too; stdout ended with %q", out.String())
 }
 
 // TestAttachStream_ServerExitCancelsStdinBeforeReturning is the terminal
