@@ -56,6 +56,7 @@ import {
   terminalMouseOverride,
   terminalMouseOverrideHeld,
   type TerminalMouseOverride,
+  touchHistoryScrollPlan,
 } from "./terminal-mouse.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { currentXtermTheme } from "./theme.js";
@@ -122,6 +123,14 @@ export class AttachTerminal {
   private mouseOverrideKeyHeld = false;
   private handedOffDrag = false;
   private historyWheelRemainder = 0;
+  // The screen position the current one-finger drag last scrolled from, plus its
+  // sub-row carry. Null whenever no gesture is af's to scroll: none is down, or a
+  // second finger arrived and the browser owns the pinch.
+  private touchScrollY: number | null = null;
+  private touchScrollRemainder = 0;
+  // Whether the gesture in flight came from a finger, read off the pointer event that
+  // precedes the browser's compatibility mouse events (onPointerDown).
+  private lastPointerWasTouch = false;
   // Incremented only by an actual user scroll input while a peer-owned anchor is
   // pending. Output and resize reflows can move viewportY too, so position deltas
   // alone do not prove that a user intended to override the saved reading line.
@@ -180,14 +189,72 @@ export class AttachTerminal {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  private readonly onTouchMove = (): void => this.handleUserScroll("touch");
+  // Application mouse mode switches xterm's OWN touch scrolling off — both of its
+  // touch listeners return early while mouse events are active — and nothing takes
+  // over: the finger is on the screen, and the .xterm-viewport holding the scrollback
+  // is that screen's SIBLING, so the browser has no ancestor to pan. A phone
+  // therefore loses scrollback entirely the moment an agent enables mouse tracking,
+  // and unlike the wheel (#2681) it has no modifier to escape with. So af scrolls
+  // history itself here (#2682): the DRAG is terminal-owned, the TAP still reaches
+  // the application — which is why only the move is ever cancelled, never the
+  // touchstart that a tap's compatibility mouse events depend on.
+  private readonly onTouchStart = (event: TouchEvent): void => {
+    // Ownership is settled once, at the start of the gesture. A touch whose target is
+    // the viewport itself is a scrollbar drag the browser already handles — the same
+    // discriminator onPointerDown reads below, and taking it over would scroll
+    // BACKWARDS, since a thumb follows the finger while the content opposes it.
+    const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
+    this.touchScrollY = event.touches.length === 1 && !onScrollbar ? event.touches[0].clientY : null;
+    this.touchScrollRemainder = 0;
+  };
+  private readonly onTouchMove = (event: TouchEvent): void => {
+    this.handleUserScroll("touch");
+    if (this.touchScrollY === null) {
+      return;
+    }
+    if (event.touches.length !== 1) {
+      // A second finger arrived: hand the REST of this gesture to the browser rather
+      // than scrolling by a pinch's motion or by the distance it covered untracked.
+      this.touchScrollY = null;
+      return;
+    }
+    const last = this.touchScrollY;
+    const y = event.touches[0].clientY;
+    this.touchScrollY = y;
+    if (!this.applicationOwnsMouse()) {
+      // xterm's own touch scrolling is live here; tracking the position anyway keeps
+      // a mode change mid-drag from scrolling by everything travelled before it.
+      return;
+    }
+    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
+    this.touchScrollRemainder = plan.remainder;
+    if (plan.lines !== 0) {
+      this.term.scrollLines(plan.lines);
+    }
+    // Claim the pan. Left to the browser it chains out to the document, which toggles
+    // the URL bar, resizes .af-app and refits the terminal mid-gesture (#2493) — and
+    // an uncancelled drag can still synthesize the compatibility mouse events the
+    // application would read as a drag it never got the button press for.
+    event.preventDefault();
+  };
   private readonly onPointerDown = (event: PointerEvent): void => {
+    // A pointer event always precedes its compatibility mouse counterpart — for a tap
+    // the browser fires pointerdown at touch-down and mousedown only after the finger
+    // lifts — so this is what tells onMouseDownCapture below whether the click it is
+    // about to rewrite came from a finger.
+    this.lastPointerWasTouch = event.pointerType === "touch";
     // The xterm screen is a sibling of its scrollable viewport. A pointer whose
     // target is the viewport itself is therefore a scrollbar/track gesture, while
     // an ordinary terminal click targets the screen and keeps the saved anchor.
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
       this.handleUserScroll("scrollbar");
+      return;
+    }
+    // Both halves of the hint are desktop advice a finger cannot take: the drag it
+    // describes scrolls history here rather than selecting (#2682), and there is no
+    // modifier to hold for the app clicks it offers — a tap gives those directly.
+    if (event.pointerType === "touch") {
       return;
     }
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
@@ -204,10 +271,19 @@ export class AttachTerminal {
   // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
   // inversion already diverts, and the selection drag that replaces it is driven by
   // document listeners that read no modifier at all.
+  //
+  // Mouse pointers ONLY. The inversion trades a plain click for a selection and hands
+  // the click back behind a modifier — a trade a touch device cannot take, because it
+  // has no modifier to hold, so inverting a tap would leave a phone with NO way to
+  // click a mouse-driven TUI at all. Touch does not need the trade either: its two
+  // gestures already separate without one, the drag scrolling history (#2682) and the
+  // tap staying the click.
   private readonly onMouseDownCapture = (event: MouseEvent): void => {
-    if (!this.applicationOwnsMouse()) {
+    if (!this.applicationOwnsMouse() || this.lastPointerWasTouch) {
       // Outside application mouse mode a plain drag already selects, and the
-      // modifier keeps its xterm meaning (Shift extends an existing selection).
+      // modifier keeps its xterm meaning (Shift extends an existing selection). A
+      // touch has no modifier to invert or to hand a drag off with, per the note
+      // above, so it leaves here too.
       return;
     }
     // Held → this drag is being handed to the application, and the REST of it has
@@ -373,7 +449,11 @@ export class AttachTerminal {
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
-    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: true });
+    container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
+    // Capture, so the drag is resolved before xterm's own touch listeners (which sit
+    // on a descendant) see it, and NON-passive, because claiming the pan means
+    // calling preventDefault — a passive listener's is ignored outright.
+    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
     this.scheduleVisibleFit();
@@ -404,6 +484,7 @@ export class AttachTerminal {
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
+    this.container.removeEventListener("touchstart", this.onTouchStart, true);
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
@@ -458,6 +539,13 @@ export class AttachTerminal {
     }, 4_000);
   }
 
+  /** The painted height of one terminal row, which turns a pixel-denominated gesture
+   *  into rows. Falls back to a font-size estimate before the first row exists. */
+  private rowHeight(): number {
+    const renderedRow = this.container.querySelector<HTMLElement>(".xterm-rows > div");
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+  }
+
   private handleHistoryWheel(event: WheelEvent): boolean {
     // Chromium's wheel event can omit modifier flags even while the keyboard key
     // remains down (notably through automation and trackpad momentum). xterm sees
@@ -469,9 +557,7 @@ export class AttachTerminal {
       return true;
     }
 
-    const renderedRow = this.container.querySelector<HTMLElement>(".xterm-rows > div");
-    const rowHeight = renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
-    const plan = historyWheelPlan(event, this.term.rows, rowHeight, this.historyWheelRemainder);
+    const plan = historyWheelPlan(event, this.term.rows, this.rowHeight(), this.historyWheelRemainder);
     this.historyWheelRemainder = plan.remainder;
     if (plan.lines !== 0) {
       this.term.scrollLines(plan.lines);

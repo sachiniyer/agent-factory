@@ -37,7 +37,16 @@
 // playwright.config.ts): AF_WEB_BASE_URL and the two seeded session titles
 // AF_WEB_SESSION_A / AF_WEB_SESSION_B. No token is needed.
 
-import { expect, type Browser, type BrowserContext, type Locator, type Page, type Route, test } from "@playwright/test";
+import {
+  expect,
+  type Browser,
+  type BrowserContext,
+  type CDPSession,
+  type Locator,
+  type Page,
+  type Route,
+  test,
+} from "@playwright/test";
 import { decode, Op } from "../src/frame.js";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
@@ -423,6 +432,36 @@ async function dragTabOntoPaneHitTested(
     },
     { tabText, edge, paneIndex, band: 0.3 }, // EDGE_BAND in split.ts
   );
+}
+
+/**
+ * Drags one finger down the page from `fromY` to `toY`, through CDP's
+ * Input.dispatchTouchEvent — the same call Playwright's own touchscreen.tap makes.
+ *
+ * That routing is the point (#2682). These arrive as TRUSTED touch events at the
+ * browser's gesture pipeline, so Chromium decides who owns the drag exactly as it
+ * does on a phone: whether it pans, whether preventDefault claims it, and whether
+ * compatibility mouse events follow. TouchEvents synthesized in page.evaluate would
+ * prove only that our listeners ran, which is the false pass the issue warns about.
+ * The context must be built with hasTouch, or Chromium ignores these entirely.
+ */
+async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number): Promise<void> {
+  const steps = 12;
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: fromY }] });
+  for (let step = 1; step <= steps; step++) {
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: fromY + ((toY - fromY) * step) / steps }],
+    });
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+/** Taps once at a point — the gesture that must keep reaching a mouse-aware
+ *  application even when the drag above no longer does. */
+async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
 /** Points the task modal's schedule picker (#2057) at the "every N minutes" preset.
@@ -1716,6 +1755,142 @@ test("#2337: agent Shift+Enter preserves xterm input effects while shell keeps C
       await resetToAgentTab(p);
     }
     await ctx.close();
+  }
+});
+
+test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under application mouse mode", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // A phone, not a narrow desktop window. hasTouch/isMobile put Chromium into real
+  // touch emulation, so every gesture below is a trusted touch the browser routes
+  // itself. A resized desktop window keeps delivering wheel events and would pass
+  // this whole test while a real phone stayed stuck — the false pass #2682 names up
+  // front, and the reason there is no unit test standing in for this one.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  const inputPayloads: number[][] = [];
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    // At this width the rail is an off-canvas drawer, so reaching a terminal at all
+    // goes through the hamburger — the mobile path the report was filed from.
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app.af-nav-open"), "opening a session must close the drawer over it").toHaveCount(0);
+    // Isolated context on B, like the mouse-mode exercise above: this mutates B's tab
+    // roster and restores it in finally, leaving the suite's shared page untouched.
+    await resetToAgentTab(p);
+
+    await createTerminalTab(p);
+    await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
+    const host = await typeableShellTab(p);
+    const xterm = host.locator(".xterm");
+    const viewport = host.locator(".xterm-viewport");
+    const mouseHint = host.locator(".af-mouse-capture-hint");
+    await p.keyboard.type("for i in $(seq 1 200); do printf 'touch-scroll-%s\\n' \"$i\"; done");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("touch-scroll-200", { timeout: 20_000 });
+
+    // Aim at the screen — the element a finger actually lands on. The scrollable
+    // .xterm-viewport is its SIBLING, which is the whole reason a browser has nothing
+    // to pan here and why the terminal has to move history itself.
+    const screen = host.locator(".xterm-screen");
+    const screenBox = await screen.boundingBox();
+    expect(screenBox, "the terminal screen must have geometry to drag on").toBeTruthy();
+    const { x, y, width, height } = screenBox as ElementBox;
+    const column = x + width / 2;
+    const dragIntoHistory = (): Promise<void> => touchDrag(cdp, column, y + height * 0.3, y + height * 0.8);
+    const dragTowardNewest = (): Promise<void> => touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+
+    // 1. The ordinary shell, where xterm's own touch handling is live. ESTABLISH that
+    //    state rather than assume it: af starts every tmux session with `mouse on`
+    //    (session/tmux/start.go), so a pane can already be tracking before any agent
+    //    runs — which is why this breakage is not exotic. Turning every tracking mode
+    //    off and waiting for xterm to agree is what keeps the two halves distinct, and
+    //    keeps the fix below from quietly taking over the path xterm still owns.
+    await p.keyboard.type("printf '\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l'");
+    await p.keyboard.press("Enter");
+    await expect(xterm, "the plain half must run with application mouse tracking OFF").not.toHaveClass(
+      /enable-mouse-events/,
+    );
+    const bottom = await viewport.evaluate((el) => el.scrollTop);
+    expect(bottom, "200 lines of fresh output must leave real scrollback above the view").toBeGreaterThan(0);
+    await dragIntoHistory();
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "a one-finger drag must reach scrollback in a plain shell" })
+      .toBeLessThan(bottom);
+    const parked = await viewport.evaluate((el) => el.scrollTop);
+    await dragTowardNewest();
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "dragging the other way must come back toward the newest output" })
+      .toBeGreaterThan(parked);
+
+    // 2. The report. A full-screen TUI turns mouse tracking on, and xterm answers by
+    //    switching its OWN touch scrolling off (both of its touch listeners return
+    //    early while mouse events are active). Nothing takes over: the finger is on
+    //    the screen, and the scrollable element is not one of its ancestors. Typing
+    //    the mode in returns the viewport to the bottom on its own — xterm scrolls to
+    //    bottom on genuine user input — so the sample below is taken after it settles.
+    await p.keyboard.type("printf '\\033[?1000h\\033[?1006h'");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), { message: "typing must return the viewport to the newest output" })
+      .toBeGreaterThan(parked);
+
+    inputPayloads.length = 0;
+    const captured = await viewport.evaluate((el) => el.scrollTop);
+    await dragIntoHistory();
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), {
+        message: "a one-finger drag must still reach scrollback while an application owns the mouse",
+      })
+      .toBeLessThan(captured);
+    expect(inputPayloads, "the scroll gesture must not ALSO report a drag to the application").toHaveLength(0);
+
+    // The desktop escape is advice a phone cannot take: there is no Shift to hold,
+    // and the gesture it would name just worked.
+    await expect(mouseHint, "a touch pointer must not be told to hold a key it has no way to press").not.toHaveClass(
+      /af-visible/,
+    );
+
+    // 3. A TAP still belongs to the application. That capability is what mouse mode
+    //    was turned on for, and it is what forbids cancelling the touch outright
+    //    rather than only the drag.
+    inputPayloads.length = 0;
+    await touchTap(cdp, column, y + height * 0.5);
+    await expect
+      .poll(() => inputPayloads.length, { message: "a tap must still report a click to the mouse-aware application" })
+      .toBeGreaterThan(0);
+    await expect(mouseHint, "a working tap must not advertise an escape either").not.toHaveClass(/af-visible/);
+  } finally {
+    // The shell holding mouse mode dies with its tab, so nothing has to unwind the
+    // mode itself — and the mouse-report bytes the tap left on its command line go
+    // with it rather than into a later `type()`.
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
   }
 });
 

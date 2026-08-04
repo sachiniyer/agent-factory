@@ -20,6 +20,23 @@
 - The wheel is deliberately **not** inverted: a mouse-aware application still
   receives a plain scroll, and Option/Shift + wheel still scrolls terminal history.
 
+## Scrolling the web terminal on a phone
+
+- **A one-finger drag scrolls the terminal again while an agent owns the mouse.**
+  Claude Code, Codex, and any full-screen TUI enable mouse tracking, and xterm
+  answers by switching its own touch scrolling off — so on a phone the pane stopped
+  at the last screen with no way back into history, which is most of the reason to
+  open one. The drag now moves terminal history itself.
+- A **tap** still reaches the application, so a mouse-driven TUI keeps its clicks.
+  The change above it — a plain *drag* now selects text, with app clicks behind
+  Option/Shift — deliberately stops at the mouse: a phone has no modifier to hold, so
+  applying it to a finger would leave a mouse-driven TUI unreachable there. On touch
+  the two gestures separate without a modifier: the drag scrolls, the tap clicks. A
+  pinch is still the browser's.
+- The escape hint no longer shows for a touch. It names a key to hold — Shift, or
+  Option on macOS — that a phone has no way to press, and the gesture it was there
+  to rescue now works on its own.
+
 ## A healed root agent keeps its conversation
 
 - When the root agent's tmux vanished, the daemon re-created it as a **brand-new

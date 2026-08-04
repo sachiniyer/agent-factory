@@ -7317,6 +7317,9 @@ function historyWheelPlan(event, rows, rowHeight, remainder) {
   const lines = Object.is(wholeRows, -0) ? 0 : wholeRows;
   return { lines, remainder: total - lines };
 }
+function touchHistoryScrollPlan(lastY, y, rows, rowHeight, remainder) {
+  return historyWheelPlan({ deltaMode: 0, deltaY: lastY - y }, rows, rowHeight, remainder);
+}
 
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
@@ -7522,7 +7525,8 @@ var AttachTerminal = class {
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     container.addEventListener("pointerenter", this.onPointerEnter);
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
-    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: true });
+    container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
+    container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
     this.scheduleVisibleFit();
@@ -7549,6 +7553,14 @@ var AttachTerminal = class {
   mouseOverrideKeyHeld = false;
   handedOffDrag = false;
   historyWheelRemainder = 0;
+  // The screen position the current one-finger drag last scrolled from, plus its
+  // sub-row carry. Null whenever no gesture is af's to scroll: none is down, or a
+  // second finger arrived and the browser owns the pinch.
+  touchScrollY = null;
+  touchScrollRemainder = 0;
+  // Whether the gesture in flight came from a finger, read off the pointer event that
+  // precedes the browser's compatibility mouse events (onPointerDown).
+  lastPointerWasTouch = false;
   // Incremented only by an actual user scroll input while a peer-owned anchor is
   // pending. Output and resize reflows can move viewportY too, so position deltas
   // alone do not prove that a user intended to override the saved reading line.
@@ -7598,11 +7610,50 @@ var AttachTerminal = class {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  onTouchMove = () => this.handleUserScroll("touch");
+  // Application mouse mode switches xterm's OWN touch scrolling off — both of its
+  // touch listeners return early while mouse events are active — and nothing takes
+  // over: the finger is on the screen, and the .xterm-viewport holding the scrollback
+  // is that screen's SIBLING, so the browser has no ancestor to pan. A phone
+  // therefore loses scrollback entirely the moment an agent enables mouse tracking,
+  // and unlike the wheel (#2681) it has no modifier to escape with. So af scrolls
+  // history itself here (#2682): the DRAG is terminal-owned, the TAP still reaches
+  // the application — which is why only the move is ever cancelled, never the
+  // touchstart that a tap's compatibility mouse events depend on.
+  onTouchStart = (event) => {
+    const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
+    this.touchScrollY = event.touches.length === 1 && !onScrollbar ? event.touches[0].clientY : null;
+    this.touchScrollRemainder = 0;
+  };
+  onTouchMove = (event) => {
+    this.handleUserScroll("touch");
+    if (this.touchScrollY === null) {
+      return;
+    }
+    if (event.touches.length !== 1) {
+      this.touchScrollY = null;
+      return;
+    }
+    const last = this.touchScrollY;
+    const y = event.touches[0].clientY;
+    this.touchScrollY = y;
+    if (!this.applicationOwnsMouse()) {
+      return;
+    }
+    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
+    this.touchScrollRemainder = plan.remainder;
+    if (plan.lines !== 0) {
+      this.term.scrollLines(plan.lines);
+    }
+    event.preventDefault();
+  };
   onPointerDown = (event) => {
+    this.lastPointerWasTouch = event.pointerType === "touch";
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
       this.handleUserScroll("scrollbar");
+      return;
+    }
+    if (event.pointerType === "touch") {
       return;
     }
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && this.applicationOwnsMouse()) {
@@ -7619,8 +7670,15 @@ var AttachTerminal = class {
   // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
   // inversion already diverts, and the selection drag that replaces it is driven by
   // document listeners that read no modifier at all.
+  //
+  // Mouse pointers ONLY. The inversion trades a plain click for a selection and hands
+  // the click back behind a modifier — a trade a touch device cannot take, because it
+  // has no modifier to hold, so inverting a tap would leave a phone with NO way to
+  // click a mouse-driven TUI at all. Touch does not need the trade either: its two
+  // gestures already separate without one, the drag scrolling history (#2682) and the
+  // tap staying the click.
   onMouseDownCapture = (event) => {
-    if (!this.applicationOwnsMouse()) {
+    if (!this.applicationOwnsMouse() || this.lastPointerWasTouch) {
       return;
     }
     const handedOff = terminalMouseOverrideHeld(event, this.mouseOverride);
@@ -7684,6 +7742,7 @@ var AttachTerminal = class {
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.container.removeEventListener("pointerenter", this.onPointerEnter);
     this.container.removeEventListener("wheel", this.onWheel, true);
+    this.container.removeEventListener("touchstart", this.onTouchStart, true);
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
@@ -7730,13 +7789,17 @@ var AttachTerminal = class {
       this.mouseCaptureHintTimer = null;
     }, 4e3);
   }
+  /** The painted height of one terminal row, which turns a pixel-denominated gesture
+   *  into rows. Falls back to a font-size estimate before the first row exists. */
+  rowHeight() {
+    const renderedRow = this.container.querySelector(".xterm-rows > div");
+    return renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
+  }
   handleHistoryWheel(event) {
     if (!this.applicationOwnsWheel() || !terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld) {
       return true;
     }
-    const renderedRow = this.container.querySelector(".xterm-rows > div");
-    const rowHeight = renderedRow?.getBoundingClientRect().height ?? (this.term.options.fontSize ?? 13) * 1.2;
-    const plan = historyWheelPlan(event, this.term.rows, rowHeight, this.historyWheelRemainder);
+    const plan = historyWheelPlan(event, this.term.rows, this.rowHeight(), this.historyWheelRemainder);
     this.historyWheelRemainder = plan.remainder;
     if (plan.lines !== 0) {
       this.term.scrollLines(plan.lines);

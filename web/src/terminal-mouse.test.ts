@@ -7,6 +7,7 @@ import {
   terminalMouseOverride,
   terminalMouseOverrideFlag,
   terminalMouseOverrideHeld,
+  touchHistoryScrollPlan,
 } from "./terminal-mouse.js";
 
 test("application-mouse escape matches xterm's platform selection modifier", () => {
@@ -61,4 +62,22 @@ test("history wheel converts pixels, lines, and pages without losing trackpad fr
   });
   assert.deepEqual(historyWheelPlan({ deltaY: 3, deltaMode: 1 }, 24, 10, 0), { lines: 3, remainder: 0 });
   assert.deepEqual(historyWheelPlan({ deltaY: -1, deltaMode: 2 }, 24, 10, 0), { lines: -24, remainder: 0 });
+});
+
+test("a touch drag scrolls the way the content follows the finger (#2682)", () => {
+  // Dragging DOWN pulls older output into view: negative lines, like a wheel scrolled
+  // back. Getting this backwards is the one failure a real device shows instantly and
+  // a green unit suite would still call a fix, so pin the direction, not just the
+  // magnitude.
+  assert.deepEqual(touchHistoryScrollPlan(100, 140, 24, 20, 0), { lines: -2, remainder: 0 });
+  assert.deepEqual(touchHistoryScrollPlan(140, 100, 24, 20, 0), { lines: 2, remainder: 0 });
+
+  // A drag is delivered as many small steps, so sub-row motion has to accumulate
+  // across them or a slow scroll never moves at all.
+  const first = touchHistoryScrollPlan(100, 108, 24, 16, 0);
+  assert.deepEqual(first, { lines: 0, remainder: -0.5 });
+  assert.deepEqual(touchHistoryScrollPlan(108, 116, 24, 16, first.remainder), { lines: -1, remainder: 0 });
+
+  // A finger that has not moved must not scroll — and must not report -0 rows.
+  assert.deepEqual(touchHistoryScrollPlan(100, 100, 24, 20, 0), { lines: 0, remainder: 0 });
 });
