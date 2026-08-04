@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/internal/namegen"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -313,14 +314,8 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// user with no project selected off to configure hooks for a directory that
 	// is not even a project. Ahead of that check, this one names the actual
 	// blocker, which is also why nothing below needs a repo-less path anymore.
-	//
-	// The action and its key lead the sentence, and the explanation trails: the
-	// transient notice clips to the terminal width and the TAIL is what vanishes
-	// (#1973), so at 120 columns "Press ctrl+p" placed last was the part that
-	// disappeared — leaving a message that named a problem and no way out.
 	if m.repoRoot == "" {
-		return m, m.handleNotice(errors.New(
-			"select a project first — press ctrl+p to pick one; af is running with no active project, so there is no repo for this session to live in"))
+		return m, m.handleNotice(errors.New(noActiveProjectNotice()))
 	}
 	m.pendingProgram = m.program
 	// Every create starts with an empty prompt field and an unchosen backend. The
@@ -409,6 +404,28 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	m.menu.SetNamingBackend(false)
 	m.menu.SetState(ui.StateNewInstance)
 	return m, nil
+}
+
+// noActiveProjectNotice is the refusal a create gets with no active project.
+//
+// The action and its key LEAD the sentence and the explanation trails: the
+// transient notice clips to the terminal width and the TAIL is what vanishes
+// (#1973). Driving the real TUI at 120 columns with the explanation first cut
+// exactly the recovery step, leaving a message that named a problem and no way
+// out of it.
+//
+// The key is read from the binding rather than spelled here, because
+// switch_project is REBINDABLE (`[keys]` config) — keys.go's own note on
+// KeySetPrompt calls out that hardcoding ctrl+p "would silently drift the day a
+// user rebinds that action". A user who unbound it entirely gets the section
+// instead of a key that does nothing.
+func noActiveProjectNotice() string {
+	pick := "pick one in the Projects section"
+	if k := keys.GlobalKeyBindings[keys.KeySwitchProject].Help().Key; k != "" {
+		pick = fmt.Sprintf("press %s to pick one", k)
+	}
+	return "select a project first — " + pick +
+		"; af is running with no active project, so there is no repo for this session to live in"
 }
 
 // suggestSessionName picks a readable random "adjective-noun" name for the

@@ -466,6 +466,7 @@ func TestStartNewInstanceResetsTheBackendField(t *testing.T) {
 	t.Chdir(repoDir)
 
 	h := newTestHome(t)
+	h.repoRoot = repoDir
 	h.errBox.SetSize(120, 1)
 	h.pendingBackend = config.BackendDocker
 
