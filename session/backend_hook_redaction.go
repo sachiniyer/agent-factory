@@ -2,149 +2,100 @@ package session
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
+// Token redaction for hook output that lands in a persisted error.
+//
+// WHAT THIS IS, AND WHAT IT IS NOT. This is defense in depth against the
+// ACCIDENT of a launch_cmd echoing its endpoint into a diagnostic — the common
+// case by far, and the one worth catching. It is NOT a security boundary, and it
+// cannot become one: a hook script is the user's own code, the token is its own
+// secret, and `echo "token is $TOK"` defeats any redactor ever written. Chasing
+// completeness here buys a guarantee that does not exist.
+//
+// So the contract is deliberately modest and, in exchange, sound:
+//
+//   - It may MISS a token in sufficiently mangled output.
+//   - It must never CORRUPT the diagnostic, panic, or run super-linearly. The
+//     output it is redacting is the only window a user has onto a failed remote
+//     provision; losing that window to a redactor bug is a worse outcome than the
+//     leak it was trying to prevent.
+//
+// Two passes, in order of how much they can trust their input:
+//
+//  1. Complete JSON documents go through encoding/json, which is exact. Strings
+//     inside them are re-sanitized recursively, so a structured log that
+//     serializes the endpoint into a field is covered.
+//  2. Everything else is matched as raw bytes: a token key, a colon, a quoted
+//     value. This catches truncated output, where a killed launch_cmd wrote the
+//     credential and then died before closing its JSON.
+
+// maxHookTokenKeyEncodedLen bounds the token-key scan. A five-character JSON key
+// is at most 32 bytes when every character uses a six-byte \u escape, including
+// the surrounding quotes. Bounding this is what keeps a malformed escape flood
+// linear while still accepting JSON-equivalent spellings and case variants.
 const maxHookTokenKeyEncodedLen = 32
 
-type serializedTokenPhase uint8
+// maxHookTokenQuoteEscapeDepth is how many backslashes may precede a quote that
+// still counts as a delimiter. Depth 0 is a raw JSON object, 1 is one serialized
+// into a string field, 2 is that logged again. Beyond this the output is noise,
+// and over-matching a delimiter only ever redacts more.
+const maxHookTokenQuoteEscapeDepth = 6
 
-const (
-	serializedTokenNone serializedTokenPhase = iota
-	serializedTokenPartialKey
-	serializedTokenColon
-	serializedTokenValue
-	serializedTokenValueTail
-)
+// maxHookTokenKeyDecodeDepth bounds how many escaping levels a key spelling is
+// peeled through before it is judged not to be `token`.
+const maxHookTokenKeyDecodeDepth = 3
 
-type serializedTokenContinuation struct {
-	phase     serializedTokenPhase
-	keyPrefix string
-}
+// redactHookOutputTokens preserves the hook's diagnostic text while replacing
+// every quoted JSON token value it can recognize.
+func redactHookOutputTokens(output string) string {
+	output = redactCompleteHookJSON(output)
 
-// redactSerializedHookJSONStrings handles a JSON string containing serialized
-// endpoint JSON whether it is a top-level record, an object field, or surrounded
-// by logger metadata. Every quote boundary is considered so JSON-equivalent
-// encodings such as leading whitespace and \u007b are covered. The scanner
-// examines every byte once and reconsiders each closing quote as the next
-// possible opener, so malformed prefixes cannot phase-shift later values.
-func redactSerializedHookJSONStrings(output string) string {
+	ranges := hookTokenRedactionRanges(output)
+	if len(ranges) == 0 {
+		return output
+	}
 	var redacted strings.Builder
 	written := 0
-	candidateStart := -1
-	syntheticStart := false
-	candidateInvalid := false
-	escapedOpenerStart := -1
-	unicodeEscapeDigits := 0
-	tokenContinuation := serializedTokenContinuation{}
-	escaped := false
-	sanitizeCandidate := func(start, end int, syntheticStart, syntheticEnd bool) {
-		replacement, changed, nextContinuation := sanitizeSerializedHookJSONString(
-			output[start:end], syntheticStart, syntheticEnd, tokenContinuation,
-		)
-		if changed {
-			appendSerializedHookJSONReplacement(&redacted, output, &written,
-				start, end, replacement)
+	for _, redaction := range ranges {
+		if redaction.start < written {
+			continue
 		}
-		tokenContinuation = nextContinuation
+		redacted.WriteString(output[written:redaction.start])
+		redacted.WriteString("[REDACTED]")
+		written = redaction.end
 	}
-	for cursor := 0; cursor < len(output); cursor++ {
-		if candidateStart < 0 {
-			if output[cursor] == '"' {
-				candidateStart = cursor
-				syntheticStart = false
-				candidateInvalid = false
-				escapedOpenerStart = -1
-				unicodeEscapeDigits = 0
-				escaped = false
-			}
-			continue
-		}
-		if output[cursor] == '\n' || output[cursor] == '\r' {
-			sanitizeCandidate(candidateStart, cursor, syntheticStart, true)
-			// The next line can continue the impossible outer string with escaped
-			// endpoint JSON. Treat its first byte as following a synthetic opening
-			// quote until a real unescaped quote supplies the closing boundary.
-			candidateStart = cursor + 1
-			syntheticStart = true
-			candidateInvalid = false
-			escapedOpenerStart = -1
-			unicodeEscapeDigits = 0
-			escaped = false
-			continue
-		}
-		if unicodeEscapeDigits > 0 {
-			if isJSONHexDigit(output[cursor]) {
-				unicodeEscapeDigits--
-				continue
-			}
-			candidateInvalid = true
-			unicodeEscapeDigits = 0
-		}
-		if escaped {
-			switch output[cursor] {
-			case 'u':
-				unicodeEscapeDigits = 4
-			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
-			default:
-				candidateInvalid = true
-			}
-			if output[cursor] == '"' && candidateInvalid {
-				escapedOpenerStart = cursor + 1
-			}
-			escaped = false
-			continue
-		}
-		if escapedOpenerStart >= 0 {
-			switch output[cursor] {
-			case ' ', '\t':
-				continue
-			case '{', '[':
-				candidateStart = escapedOpenerStart
-				syntheticStart = true
-				candidateInvalid = false
-				escapedOpenerStart = -1
-				unicodeEscapeDigits = 0
-			case '\\':
-				if isEscapedJSONContainerOpener(output, cursor) {
-					candidateStart = escapedOpenerStart
-					syntheticStart = true
-					candidateInvalid = false
-					escapedOpenerStart = -1
-					unicodeEscapeDigits = 0
-				} else {
-					escapedOpenerStart = -1
-				}
-			default:
-				escapedOpenerStart = -1
-			}
-		}
-		if output[cursor] == '\\' {
-			escaped = true
-			continue
-		}
-		if output[cursor] < 0x20 {
-			candidateInvalid = true
-		}
-		if output[cursor] != '"' {
-			continue
-		}
+	redacted.WriteString(output[written:])
+	return redacted.String()
+}
 
-		candidateEnd := cursor + 1
-		sanitizeCandidate(candidateStart, candidateEnd, syntheticStart, false)
-		candidateStart = cursor
-		syntheticStart = false
-		candidateInvalid = false
-		escapedOpenerStart = -1
-		unicodeEscapeDigits = 0
-		escaped = false
-	}
-	if candidateStart >= 0 {
-		// A killed hook may leave the outer JSON string unfinished even though
-		// its escaped inner token value is complete. Close only for decoding,
-		// sanitize the decoded prefix, then drop the synthetic closing quote so
-		// the diagnostic remains faithful to the interrupted output.
-		sanitizeCandidate(candidateStart, len(output), syntheticStart, true)
+// redactCompleteHookJSON handles structured log records, including ones that
+// serialize another JSON document into a string field. The byte matcher below
+// cannot see through arbitrary escaping, so decode complete values first — that
+// path is exact — and recursively sanitize JSON-bearing strings. UseNumber keeps
+// unrelated resource IDs byte-exact when a sanitized value is re-encoded.
+func redactCompleteHookJSON(output string) string {
+	var redacted strings.Builder
+	written := 0
+	for cursor := 0; cursor < len(output); {
+		candidate, next := extractJSONAt(output, cursor)
+		if candidate == "" {
+			break
+		}
+		start := next - len(candidate)
+		if start < written {
+			cursor = next
+			continue
+		}
+		replacement, changed := redactHookJSONDocument(candidate)
+		if changed {
+			redacted.WriteString(output[written:start])
+			redacted.WriteString(replacement)
+			written = next
+		}
+		cursor = next
 	}
 	if written == 0 {
 		return output
@@ -153,185 +104,271 @@ func redactSerializedHookJSONStrings(output string) string {
 	return redacted.String()
 }
 
-func isJSONHexDigit(value byte) bool {
-	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
+func redactHookJSONDocument(document string) (string, bool) {
+	decoder := json.NewDecoder(strings.NewReader(document))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return document, false
+	}
+
+	value, changed := redactHookJSONValue(value)
+	if !changed {
+		return document, false
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return document, false
+	}
+	return string(encoded), true
 }
 
-func isEscapedJSONContainerOpener(output string, start int) bool {
-	if start+6 > len(output) || output[start] != '\\' || output[start+1] != 'u' ||
-		output[start+2] != '0' || output[start+3] != '0' {
-		return false
+func redactHookJSONValue(value any) (any, bool) {
+	switch value := value.(type) {
+	case map[string]any:
+		changed := false
+		for key, child := range value {
+			if strings.EqualFold(key, "token") {
+				value[key] = "[REDACTED]"
+				changed = true
+				continue
+			}
+			redacted, childChanged := redactHookJSONValue(child)
+			if childChanged {
+				value[key] = redacted
+				changed = true
+			}
+		}
+		return value, changed
+	case []any:
+		changed := false
+		for index, child := range value {
+			redacted, childChanged := redactHookJSONValue(child)
+			if childChanged {
+				value[index] = redacted
+				changed = true
+			}
+		}
+		return value, changed
+	case string:
+		// A complete outer record can carry an incomplete serialized endpoint, so
+		// run the full redaction over the decoded string before re-encoding.
+		redacted := redactHookOutputTokens(value)
+		return redacted, redacted != value
+	default:
+		return value, false
 	}
-	return output[start+4] == '7' && (output[start+5] == 'b' || output[start+5] == 'B') ||
-		output[start+4] == '5' && (output[start+5] == 'b' || output[start+5] == 'B')
 }
 
-func sanitizeSerializedHookJSONString(
-	candidate string,
-	syntheticStart, syntheticEnd bool,
-	continuation serializedTokenContinuation,
-) ([]byte, bool, serializedTokenContinuation) {
-	document := candidate
-	if syntheticStart {
-		document = `"` + document
-	}
-	if syntheticEnd {
-		document += `"`
-	}
-	var decoded string
-	if json.Unmarshal([]byte(document), &decoded) != nil {
-		return nil, false, continuation
-	}
-	sanitized, nextContinuation := redactHookTokenContinuation(decoded, continuation)
-	if nextContinuation.phase == serializedTokenNone {
-		nextContinuation = hookOutputTokenContinuation(sanitized)
-	}
-	sanitized = redactHookOutputTokens(sanitized)
-	if sanitized == decoded {
-		return nil, false, nextContinuation
-	}
-	encoded, _ := json.Marshal(sanitized)
-	start, end := 0, len(encoded)
-	if syntheticStart {
-		start++
-	}
-	if syntheticEnd {
-		end--
-	}
-	return encoded[start:end], true, nextContinuation
+type hookOutputRange struct {
+	start int
+	end   int
 }
 
-func hookOutputTokenContinuation(output string) serializedTokenContinuation {
+// hookTokenRedactionRanges finds `token`-keyed string values in raw bytes,
+// without needing the surrounding document to parse or even to be complete.
+//
+// The escape depth of the enclosing context is deliberately IGNORED. A serialized
+// endpoint reaches a log line as `\"token\":\"…\"`, and once an outer string is
+// truncated or split across a raw newline its delimiters no longer nest
+// consistently — that ambiguity is what a stateful scanner has to guess at, and
+// guessing is what makes it phase-shift. Matching the field wherever it appears,
+// at whatever depth, needs no guess: a false positive only redacts more.
+// A raw line break can land anywhere in the field — inside the key, before the
+// colon, inside the value — because the writer was interrupted or the logger
+// wrapped. Rather than teach the matcher to carry state across those breaks (the
+// thing that makes such scanners phase-shift), run it a second time over a view
+// with the breaks removed and map the hits back to real offsets. One mechanism
+// covers every split position; over-matching across a line break only redacts
+// more.
+func hookTokenRedactionRanges(output string) []hookOutputRange {
+	ranges := scanHookTokenRanges(output)
+	if stripped, offsets := stripRawLineBreaks(output); len(offsets) > 0 {
+		for _, joined := range scanHookTokenRanges(stripped) {
+			if joined.start >= len(offsets) || joined.end <= joined.start {
+				continue
+			}
+			end := len(output)
+			if joined.end <= len(offsets) {
+				end = offsets[joined.end-1] + 1
+			}
+			ranges = append(ranges, hookOutputRange{start: offsets[joined.start], end: end})
+		}
+	}
+	return mergeHookOutputRanges(ranges)
+}
+
+// stripRawLineBreaks returns output without its raw line breaks, plus the
+// original offset of every retained byte. It returns no offsets when there was
+// nothing to strip, so the common case does not pay for a second scan.
+func stripRawLineBreaks(output string) (string, []int) {
+	if !strings.ContainsAny(output, "\n\r") {
+		return "", nil
+	}
+	var stripped strings.Builder
+	stripped.Grow(len(output))
+	offsets := make([]int, 0, len(output))
+	for cursor := 0; cursor < len(output); cursor++ {
+		if output[cursor] == '\n' || output[cursor] == '\r' {
+			continue
+		}
+		stripped.WriteByte(output[cursor])
+		offsets = append(offsets, cursor)
+	}
+	return stripped.String(), offsets
+}
+
+// mergeHookOutputRanges sorts and coalesces so the writer can emit one pass.
+func mergeHookOutputRanges(ranges []hookOutputRange) []hookOutputRange {
+	if len(ranges) < 2 {
+		return ranges
+	}
+	slices.SortFunc(ranges, func(a, b hookOutputRange) int { return a.start - b.start })
+	merged := ranges[:1]
+	for _, candidate := range ranges[1:] {
+		last := &merged[len(merged)-1]
+		if candidate.start <= last.end {
+			if candidate.end > last.end {
+				last.end = candidate.end
+			}
+			continue
+		}
+		merged = append(merged, candidate)
+	}
+	return merged
+}
+
+func scanHookTokenRanges(output string) []hookOutputRange {
+	var ranges []hookOutputRange
 	for cursor := 0; cursor < len(output); cursor++ {
 		if output[cursor] != '"' {
 			continue
 		}
 		keyEnd, ok := hookTokenKeyEnd(output, cursor)
 		if !ok {
-			if _, complete := jsonStringEnd(output, cursor); !complete && len(output)-cursor < maxHookTokenKeyEncodedLen {
-				return serializedTokenContinuation{
-					phase:     serializedTokenPartialKey,
-					keyPrefix: output[cursor:],
-				}
+			continue
+		}
+
+		separator := skipHookTokenPadding(output, keyEnd)
+		if separator >= len(output) || output[separator] != ':' {
+			continue
+		}
+		valueStart := skipHookTokenPadding(output, separator+1)
+		if valueStart >= len(output) || output[valueStart] != '"' {
+			continue
+		}
+
+		valueEnd, complete := hookTokenValueEnd(output, valueStart)
+		candidate := hookOutputRange{start: valueStart + 1, end: valueEnd}
+		if len(ranges) > 0 && candidate.start <= ranges[len(ranges)-1].end {
+			if candidate.end > ranges[len(ranges)-1].end {
+				ranges[len(ranges)-1].end = candidate.end
 			}
-			continue
+		} else {
+			ranges = append(ranges, candidate)
 		}
-		separator := skipJSONWhitespace(output, keyEnd)
-		if separator == len(output) {
-			return serializedTokenContinuation{phase: serializedTokenColon}
-		}
-		if output[separator] != ':' {
-			continue
-		}
-		valueStart := skipJSONWhitespace(output, separator+1)
-		if valueStart == len(output) {
-			return serializedTokenContinuation{phase: serializedTokenValue}
-		}
-		if output[valueStart] != '"' {
-			continue
-		}
-		valueEnd, complete := jsonStringEnd(output, valueStart)
 		if !complete {
-			return serializedTokenContinuation{phase: serializedTokenValueTail}
+			break
 		}
-		cursor = valueEnd - 2
+		// Reconsider the closing quote as a possible overlapping key boundary.
+		cursor = valueEnd - 1
 	}
-	return serializedTokenContinuation{}
+	return ranges
 }
 
-func redactHookTokenContinuation(
-	output string,
-	continuation serializedTokenContinuation,
-) (string, serializedTokenContinuation) {
-	start := 0
-	if continuation.phase == serializedTokenPartialKey {
-		combined := continuation.keyPrefix + output
-		keyEnd, complete := jsonStringEnd(combined, 0)
-		if !complete {
-			if len(combined) < maxHookTokenKeyEncodedLen {
-				continuation.keyPrefix = combined
-				return output, continuation
-			}
-			return output, serializedTokenContinuation{}
-		}
-		var key string
-		if keyEnd > maxHookTokenKeyEncodedLen || json.Unmarshal([]byte(combined[:keyEnd]), &key) != nil ||
-			!strings.EqualFold(key, "token") {
-			return output, serializedTokenContinuation{}
-		}
-		start = keyEnd - len(continuation.keyPrefix)
-		continuation = serializedTokenContinuation{phase: serializedTokenColon}
+// hookTokenKeyEnd reports the end of a `token` key opening at start, accepting
+// any JSON-equivalent spelling within the bounded length. The key's own quotes
+// may themselves be escaped, so both delimiters are normalized before decoding.
+func hookTokenKeyEnd(input string, start int) (int, bool) {
+	limit := start + maxHookTokenKeyEncodedLen
+	if limit > len(input) {
+		limit = len(input)
 	}
-	if continuation.phase == serializedTokenColon {
-		start = skipJSONWhitespace(output, start)
-		if start == len(output) {
-			return output, continuation
-		}
-		if output[start] != ':' {
-			return output, serializedTokenContinuation{}
-		}
-		start++
-		continuation = serializedTokenContinuation{phase: serializedTokenValue}
-	}
-	if continuation.phase == serializedTokenValue {
-		start = skipJSONWhitespace(output, start)
-		if start == len(output) {
-			return output, continuation
-		}
-		if output[start] != '"' {
-			return output, serializedTokenContinuation{}
-		}
-		end, complete := jsonStringEnd(output, start)
-		redacted := output[:start] + `"[REDACTED]"` + output[end:]
-		if !complete {
-			return redacted, serializedTokenContinuation{phase: serializedTokenValueTail}
-		}
-		return redacted, serializedTokenContinuation{}
-	}
-	if continuation.phase == serializedTokenValueTail {
-		end, complete := jsonStringContinuationEnd(output)
-		if !complete {
-			return "", continuation
-		}
-		return output[end:], serializedTokenContinuation{}
-	}
-	return output, serializedTokenContinuation{}
-}
-
-func jsonStringContinuationEnd(input string) (int, bool) {
 	escaped := false
-	for cursor := 0; cursor < len(input); cursor++ {
+	for cursor := start + 1; cursor < limit; cursor++ {
 		switch {
 		case escaped:
 			escaped = false
+			if input[cursor] == '"' {
+				// An escaped quote closes a key whose delimiters are themselves
+				// escaped — `\"token\"` inside a serialized document.
+				if hookTokenKeyMatches(input[start+1 : cursor-1]) {
+					return cursor + 1, true
+				}
+			}
 		case input[cursor] == '\\':
 			escaped = true
 		case input[cursor] == '"':
-			return cursor + 1, true
+			return cursor + 1, hookTokenKeyMatches(input[start+1 : cursor])
+		}
+	}
+	return 0, false
+}
+
+// hookTokenKeyMatches reports whether a key body spells `token`, peeling one
+// escaping level at a time. A serialized document reaches a log line already
+// escaped once, so `token` and `\\u0074oken` are both this key — the depth
+// depends on how many times the record was nested, which is not knowable here.
+func hookTokenKeyMatches(body string) bool {
+	// Reject on length and shape before decoding. A malformed diagnostic can put
+	// a quote every other byte, and this runs at each one.
+	if len(body) < len("token") || len(body) > maxHookTokenKeyEncodedLen {
+		return false
+	}
+	if !strings.Contains(body, `\`) {
+		return strings.EqualFold(body, "token")
+	}
+	// However it is spelled, this key contains a literal `t` or a `\u` escape.
+	// Without one there is nothing to decode, and a quote flood hits this at
+	// every boundary.
+	if !strings.ContainsAny(body, "tT") && !strings.Contains(body, `\u`) {
+		return false
+	}
+	candidate := strings.TrimSuffix(body, `\`)
+	for depth := 0; depth <= maxHookTokenKeyDecodeDepth; depth++ {
+		if strings.EqualFold(candidate, "token") {
+			return true
+		}
+		var decoded string
+		if json.Unmarshal([]byte(`"`+candidate+`"`), &decoded) != nil || decoded == candidate {
+			return false
+		}
+		candidate = decoded
+	}
+	return false
+}
+
+// hookTokenValueEnd returns the offset of the value's closing quote. The earliest
+// plausible terminator wins: a raw newline ends the line, and an escaped or bare
+// quote ends the value. Stopping early can leave a fragment of a token that
+// itself contains a quote; running long would swallow the rest of the
+// diagnostic, which is the thing this output exists to show.
+func hookTokenValueEnd(input string, start int) (int, bool) {
+	for cursor := start + 1; cursor < len(input); cursor++ {
+		switch input[cursor] {
+		case '"':
+			end := cursor
+			for end > start+1 && input[end-1] == '\\' && end > cursor-maxHookTokenQuoteEscapeDepth {
+				end--
+			}
+			return end, true
+		case '\n', '\r':
+			return cursor, false
 		}
 	}
 	return len(input), false
 }
 
-// appendSerializedHookJSONReplacement preserves a shared quote boundary between
-// malformed adjacent strings. The scanner intentionally reuses every closing
-// quote as a possible opener, so two sanitized spans can overlap by that byte.
-func appendSerializedHookJSONReplacement(
-	redacted *strings.Builder,
-	output string,
-	written *int,
-	start, end int,
-	replacement []byte,
-) {
-	overlap := *written - start
-	if overlap <= 0 {
-		redacted.WriteString(output[*written:start])
-		overlap = 0
+// skipHookTokenPadding skips whitespace and the stray backslashes that separate
+// a serialized key from its colon once the enclosing escaping is inconsistent.
+func skipHookTokenPadding(input string, start int) int {
+	for start < len(input) {
+		switch input[start] {
+		case ' ', '\t', '\r', '\n', '\\':
+			start++
+		default:
+			return start
+		}
 	}
-	if overlap < len(replacement) {
-		redacted.Write(replacement[overlap:])
-	}
-	if end > *written {
-		*written = end
-	}
+	return start
 }

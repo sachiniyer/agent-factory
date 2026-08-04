@@ -433,7 +433,7 @@ func TestHookScriptRejectsAgentNameUsedAsDataAndGetsConfiguredEnvironment(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := strings.Fields(string(out))
+	names := strings.Fields(string(out.Stdout))
 	if !slices.Contains(names, customName) {
 		t.Fatalf("hook environment omitted configured variable %s", customName)
 	}

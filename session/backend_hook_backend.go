@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -213,7 +214,15 @@ func (p *hookProvisioner) manualReapCommand() string {
 //
 // Reaping a FAILED launch's sandbox is a separate act with a real criterion, and
 // it is delete_cmd's job, not a side effect of how we captured output: see reap.
-func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
+//
+// The two streams go to two SEPARATE files. That is not a detail: docs/remote-hooks.md
+// has always said "only launch_cmd's JSON on stdout matters" and "keep non-JSON
+// output on stderr", but a single shared file threw that contract away before the
+// parser ever saw it. A launch_cmd logging JSON to stderr could then win the
+// endpoint (#2637). Two regular files keep every property the comment above is
+// about — still no pipe, still nothing a surviving tunnel can hold open — while
+// letting launch read the stream the docs actually promise.
+func runHookScriptWithEnvironment(timeout time.Duration, name, program string, passthrough []string, args ...string) (hookScriptOutput, *exec.Cmd, error) {
 	agentName := sessionenv.AgentForCommand(program)
 	if agentName == "" && strings.TrimSpace(program) == "" {
 		agentName = tmux.ProgramClaude
@@ -222,30 +231,52 @@ func runHookScriptWithEnvironment(timeout time.Duration, name, program string, p
 	return runHookScriptWithResolvedEnvironment(timeout, name, agentName, authSelectors, passthrough, args...)
 }
 
-func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent string, authSelectors, passthrough []string, args ...string) ([]byte, *exec.Cmd, error) {
+// hookScriptOutput is one hook script's captured output, kept per-stream because
+// the endpoint contract is a STDOUT contract (docs/remote-hooks.md). Combined is
+// only for diagnostics, where both streams are worth showing.
+type hookScriptOutput struct {
+	Stdout []byte
+	Stderr []byte
+}
+
+// Combined renders both streams for an error message. Interleaving is not
+// recoverable from two files and is not worth a pipe to regain: stderr carries
+// the script's narrative and stdout carries at most the endpoint line, so
+// concatenating them loses nothing a reader was relying on.
+func (o hookScriptOutput) Combined() []byte {
+	switch {
+	case len(o.Stderr) == 0:
+		return o.Stdout
+	case len(o.Stdout) == 0:
+		return o.Stderr
+	}
+	combined := make([]byte, 0, len(o.Stderr)+len(o.Stdout)+1)
+	combined = append(combined, bytes.TrimRight(o.Stderr, "\n")...)
+	combined = append(combined, '\n')
+	return append(combined, o.Stdout...)
+}
+
+func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent string, authSelectors, passthrough []string, args ...string) (hookScriptOutput, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// A regular file, not a pipe: see the doc comment. Unlinked immediately on
+	// Regular files, not pipes: see the doc comment. Unlinked immediately on
 	// return — a lingering writer keeps its fd valid and simply writes into an
 	// unlinked inode that disappears when it exits.
-	f, err := os.CreateTemp("", "af-hook-out-*")
+	stdoutFile, stderrFile, cleanup, err := createHookOutputFiles()
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating the hook output file failed: %w", err)
+		return hookScriptOutput{}, nil, err
 	}
-	defer func() {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-	}()
+	defer cleanup()
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	filtered, err := sessionenv.FilterWithAuthSelectors(os.Environ(), agent, authSelectors, passthrough)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolving the hook environment policy failed: %w", err)
+		return hookScriptOutput{}, nil, fmt.Errorf("resolving the hook environment policy failed: %w", err)
 	}
 	cmd.Env = filtered
-	cmd.Stdout = f
-	cmd.Stderr = f
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
 	// Lead a process group so that a FAILED launch's descendants can be torn down
 	// as a TREE before delete_cmd reaps — see quiesceLaunchGroup. Setting the
 	// group signals nothing by itself: a successful launch_cmd's tunnel is never
@@ -262,11 +293,34 @@ func runHookScriptWithResolvedEnvironment(timeout time.Duration, name, agent str
 		runErr = fmt.Errorf("%w: %w", context.DeadlineExceeded, runErr)
 	}
 
-	out, readErr := os.ReadFile(f.Name())
+	stdout, readErr := os.ReadFile(stdoutFile.Name())
 	if readErr != nil && runErr == nil {
-		return nil, cmd, fmt.Errorf("reading the hook output failed: %w", readErr)
+		return hookScriptOutput{}, cmd, fmt.Errorf("reading the hook output failed: %w", readErr)
 	}
-	return out, cmd, runErr
+	stderr, readErr := os.ReadFile(stderrFile.Name())
+	if readErr != nil && runErr == nil {
+		return hookScriptOutput{}, cmd, fmt.Errorf("reading the hook output failed: %w", readErr)
+	}
+	return hookScriptOutput{Stdout: stdout, Stderr: stderr}, cmd, runErr
+}
+
+func createHookOutputFiles() (*os.File, *os.File, func(), error) {
+	stdoutFile, err := os.CreateTemp("", "af-hook-stdout-*")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("creating the hook output file failed: %w", err)
+	}
+	stderrFile, err := os.CreateTemp("", "af-hook-stderr-*")
+	if err != nil {
+		_ = stdoutFile.Close()
+		_ = os.Remove(stdoutFile.Name())
+		return nil, nil, nil, fmt.Errorf("creating the hook output file failed: %w", err)
+	}
+	return stdoutFile, stderrFile, func() {
+		_ = stdoutFile.Close()
+		_ = os.Remove(stdoutFile.Name())
+		_ = stderrFile.Close()
+		_ = os.Remove(stderrFile.Name())
+	}, nil
 }
 
 // hookProvisioner holds the state of one hook provisioning so its launch step
@@ -382,220 +436,6 @@ func hookOutputSuffix(out []byte) string {
 	return fmt.Sprintf("; its output was:\n%s", trimmed)
 }
 
-// redactHookOutputTokens preserves the hook's diagnostic text while replacing
-// every quoted JSON token field it can recognize. It intentionally does not
-// require a complete JSON value: a killed launch_cmd may leave its endpoint
-// object truncated after writing the bearer credential. Hook output is attached
-// to persistent session errors, so that tail must be safe too.
-func redactHookOutputTokens(output string) string {
-	output = redactCompleteHookJSON(output)
-	output = redactSerializedHookJSONStrings(output)
-	ranges := hookTokenRedactionRanges(output)
-	if len(ranges) == 0 {
-		return output
-	}
-
-	var redacted strings.Builder
-	written := 0
-	for _, redaction := range ranges {
-		redacted.WriteString(output[written:redaction.start])
-		redacted.WriteString(`"[REDACTED]"`)
-		written = redaction.end
-	}
-	redacted.WriteString(output[written:])
-	return redacted.String()
-}
-
-// redactCompleteHookJSON handles structured log records that serialize another
-// JSON document into a string field. The byte-oriented fallback below cannot
-// recognize the escaped delimiters in that inner document, so decode complete
-// values first and recursively sanitize JSON-bearing strings. UseNumber keeps
-// unrelated resource IDs exact when a sanitized value is re-encoded.
-func redactCompleteHookJSON(output string) string {
-	var redacted strings.Builder
-	written := 0
-	for cursor := 0; cursor < len(output); {
-		candidate, next := extractJSONAt(output, cursor)
-		if candidate == "" {
-			break
-		}
-		start := next - len(candidate)
-		replacement, changed := redactHookJSONDocument(candidate)
-		if changed {
-			redacted.WriteString(output[written:start])
-			redacted.WriteString(replacement)
-			written = next
-		}
-		cursor = next
-	}
-	if written == 0 {
-		return output
-	}
-	redacted.WriteString(output[written:])
-	return redacted.String()
-}
-
-func redactHookJSONDocument(document string) (string, bool) {
-	decoder := json.NewDecoder(strings.NewReader(document))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return document, false
-	}
-
-	value, changed := redactHookJSONValue(value)
-	if !changed {
-		return document, false
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return document, false
-	}
-	return string(encoded), true
-}
-
-func redactHookJSONValue(value any) (any, bool) {
-	switch value := value.(type) {
-	case map[string]any:
-		changed := false
-		for key, child := range value {
-			if strings.EqualFold(key, "token") {
-				value[key] = "[REDACTED]"
-				changed = true
-				continue
-			}
-			redacted, childChanged := redactHookJSONValue(child)
-			if childChanged {
-				value[key] = redacted
-				changed = true
-			}
-		}
-		return value, changed
-	case []any:
-		changed := false
-		for index, child := range value {
-			redacted, childChanged := redactHookJSONValue(child)
-			if childChanged {
-				value[index] = redacted
-				changed = true
-			}
-		}
-		return value, changed
-	case string:
-		// A complete outer log can contain an incomplete serialized endpoint.
-		// Once decoded, run both complete-document and truncated-field redaction
-		// over the inner diagnostic before re-encoding the outer record.
-		redacted := redactHookOutputTokens(value)
-		return redacted, redacted != value
-	default:
-		return value, false
-	}
-}
-
-type hookOutputRange struct {
-	start int
-	end   int
-}
-
-// hookTokenRedactionRanges examines every quote outside a value already marked
-// for redaction as a possible key boundary. Token keys have a fixed, bounded
-// encoded length, so malformed escaped-quote floods cannot make key detection
-// rescan the remaining output. A recognized value is scanned once, then skipped
-// because every byte inside it will be replaced.
-func hookTokenRedactionRanges(output string) []hookOutputRange {
-	var ranges []hookOutputRange
-	for cursor := 0; cursor < len(output); cursor++ {
-		if output[cursor] != '"' {
-			continue
-		}
-
-		keyEnd, ok := hookTokenKeyEnd(output, cursor)
-		if !ok {
-			continue
-		}
-
-		separator := skipJSONWhitespace(output, keyEnd)
-		if separator >= len(output) || output[separator] != ':' {
-			continue
-		}
-		valueStart := skipJSONWhitespace(output, separator+1)
-		if valueStart >= len(output) || output[valueStart] != '"' {
-			continue
-		}
-
-		valueEnd, complete := jsonStringEnd(output, valueStart)
-		candidate := hookOutputRange{start: valueStart, end: valueEnd}
-		if len(ranges) > 0 && candidate.start <= ranges[len(ranges)-1].end {
-			if candidate.end > ranges[len(ranges)-1].end {
-				ranges[len(ranges)-1].end = candidate.end
-			}
-		} else {
-			ranges = append(ranges, candidate)
-		}
-		if !complete {
-			break
-		}
-		// Reconsider the closing quote as a possible overlapping key boundary.
-		cursor = valueEnd - 2
-	}
-	return ranges
-}
-
-// A five-character JSON key is at most 32 bytes when every character uses a
-// six-byte \u escape, including the surrounding quotes. Bounding this scan is
-// what keeps malformed output linear while still accepting JSON-equivalent key
-// spellings and case variants for redaction.
-func hookTokenKeyEnd(input string, start int) (int, bool) {
-	limit := start + maxHookTokenKeyEncodedLen
-	if limit > len(input) {
-		limit = len(input)
-	}
-	escaped := false
-	for cursor := start + 1; cursor < limit; cursor++ {
-		switch {
-		case escaped:
-			escaped = false
-		case input[cursor] == '\\':
-			escaped = true
-		case input[cursor] == '"':
-			end := cursor + 1
-			var key string
-			if err := json.Unmarshal([]byte(input[start:end]), &key); err != nil || !strings.EqualFold(key, "token") {
-				return 0, false
-			}
-			return end, true
-		}
-	}
-	return 0, false
-}
-
-func jsonStringEnd(input string, start int) (int, bool) {
-	escaped := false
-	for cursor := start + 1; cursor < len(input); cursor++ {
-		switch {
-		case escaped:
-			escaped = false
-		case input[cursor] == '\\':
-			escaped = true
-		case input[cursor] == '"':
-			return cursor + 1, true
-		}
-	}
-	return len(input), false
-}
-
-func skipJSONWhitespace(input string, start int) int {
-	for start < len(input) {
-		switch input[start] {
-		case ' ', '\t', '\r', '\n':
-			start++
-		default:
-			return start
-		}
-	}
-	return start
-}
-
 func decodeHookEndpointJSON(candidate string) (hookEndpointJSON, bool) {
 	decoder := json.NewDecoder(strings.NewReader(candidate))
 	opening, err := decoder.Token()
@@ -650,9 +490,14 @@ func decodeHookEndpointJSON(candidate string) (hookEndpointJSON, bool) {
 }
 
 // launch runs the user's launch_cmd with the provision spec as flags, then
-// recovers the {url,token} JSON it echoes. stderr may interleave progress or JSON
-// logs, so launch scans each complete value in the combined output and selects by
-// endpoint shape, mirroring how docker/ssh validate their agent-server banner.
+// recovers the {url,token} JSON it echoes on STDOUT — the stream docs/remote-hooks.md
+// reserves for it ("only launch_cmd's JSON on stdout matters"). stderr is the
+// script's own narrative and is never a source of endpoints, so a launch_cmd that
+// logs JSON there cannot outrank the real record (#2637).
+//
+// Shape is still checked, because stdout can hold more than the endpoint: the
+// documented schema is the discriminator, mirroring how docker/ssh validate their
+// agent-server banner.
 func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	args := []string{
 		"--name", p.slug,
@@ -705,43 +550,54 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 		// it. The path is added AFTER, so #1946's diagnostic detail and #1955's
 		// contract both hold.
 		return nil, fmt.Errorf("launch_cmd failed (%s): %w%s", p.hooks.LaunchCmd, err,
-			hookOutputSuffix(out))
+			hookOutputSuffix(out.Combined()))
 	}
 
-	output := string(out)
+	endpoint, sawJSON := selectHookEndpoint(string(out.Stdout))
+	if endpoint != nil {
+		return endpoint, nil
+	}
+	if !sawJSON {
+		return nil, fmt.Errorf("launch_cmd (%s) exited 0 but printed no {\"url\",\"token\"} JSON on stdout "+
+			"(see docs/remote-hooks.md for the recipe)%s", p.hooks.LaunchCmd, hookOutputSuffix(out.Combined()))
+	}
+	return nil, fmt.Errorf("launch_cmd (%s) exited 0 and printed JSON on stdout, but none contained a non-empty url and token; "+
+		"it must echo the af agent-server's {\"url\",\"token\"}%s", p.hooks.LaunchCmd, hookOutputSuffix(out.Combined()))
+}
+
+// selectHookEndpoint returns the first value in stdout matching the documented
+// endpoint schema, and whether stdout held any JSON at all (which separates
+// "printed nothing usable" from "printed the wrong shape" in the error).
+//
+// Only complete, top-level values are considered. A value nested inside
+// malformed output is never promoted: recovering one would mean deciding, from
+// text that is by definition unparseable, whether it was an independent record
+// or a field of someone's log line — a question with no sound answer. stdout
+// carrying a bare endpoint object is the documented contract, so refusing to
+// guess costs a well-behaved script nothing.
+func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 	sawJSON := false
-	for cursor := 0; cursor < len(output); {
-		jsonStr, next, endpointCandidate := extractEndpointJSONAt(output, cursor)
-		if jsonStr == "" {
+	for cursor := 0; cursor < len(stdout); {
+		candidate, next := extractJSONAt(stdout, cursor)
+		if candidate == "" {
 			break
 		}
 		cursor = next
 		sawJSON = true
-		if !endpointCandidate {
-			continue
-		}
 
 		// The documented endpoint schema itself is the discriminator. Reject
 		// unknown fields so a structured log that merely includes url and token
 		// cannot win. First match is deliberate: logs may also follow the endpoint,
 		// so choosing by last position would only reverse the ambiguity.
-		ej, ok := decodeHookEndpointJSON(jsonStr)
+		ej, ok := decodeHookEndpointJSON(candidate)
 		if !ok {
 			continue
 		}
 		// ej.TLSFingerprint is intentionally not read — TLS was removed; an old
 		// script that still echoes it parses fine and the value is dropped.
-		return &AgentServerEndpoint{
-			URL:   ej.URL,
-			Token: ej.Token,
-		}, nil
+		return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true
 	}
-	if !sawJSON {
-		return nil, fmt.Errorf("launch_cmd (%s) exited 0 but printed no {\"url\",\"token\"} JSON "+
-			"(see docs/remote-hooks.md for the recipe)%s", p.hooks.LaunchCmd, hookOutputSuffix(out))
-	}
-	return nil, fmt.Errorf("launch_cmd (%s) exited 0 and printed JSON, but none contained a non-empty url and token; "+
-		"it must echo the af agent-server's {\"url\",\"token\"}%s", p.hooks.LaunchCmd, hookOutputSuffix(out))
+	return nil, sawJSON
 }
 
 // reap runs delete_cmd to tear down whatever launch_cmd provisioned, idempotently
@@ -787,7 +643,8 @@ func (p *hookProvisioner) reap() error {
 		log.InfoLog.Printf("hook runtime: reaped remote session %q via delete_cmd", p.slug)
 		return nil
 	}
-	reapErr := fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug, strings.TrimSpace(string(out)), err)
+	reapErr := fmt.Errorf("backend=hook: delete_cmd failed for %q: %s: %w", p.slug,
+		strings.TrimSpace(redactHookOutputTokens(string(out.Combined()))), err)
 	if errors.Is(err, context.DeadlineExceeded) {
 		// A timeout is proof of NOTHING: delete_cmd was SIGKILLed mid-reap, so the
 		// remote workspace may still be running. Mark it unknown-state so

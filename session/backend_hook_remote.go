@@ -75,354 +75,174 @@ func FindSlugCollision(candidate string, existing []*Instance) string {
 
 // extractJSON finds the first complete top-level JSON value (object or array)
 // in output, ignoring text outside JSON delimiters. It handles pretty-printed /
-// multi-line JSON and stderr interleaving around (but not inside) the JSON
-// payload — launch_cmd may write provisioning progress to stderr and echo its
-// endpoint JSON to stdout, and the shared capture file contains both. Returns
+// multi-line JSON and prose around (but not inside) the JSON payload. Returns
 // empty string if no valid JSON value is found.
+//
+// This is a diagnostic-grade scanner: it reports what it can recognize in
+// arbitrary text and stays silent otherwise. Endpoint selection does NOT rely on
+// its recovery of nested values — see selectHookEndpoint, which takes only
+// complete top-level values off stdout.
 func extractJSON(output string) string {
 	value, _ := extractJSONAt(output, 0)
 	return value
 }
 
+// jsonRange is one balanced delimiter pair found by the scanner, linked to its
+// children so a malformed wrapper can be searched without rescanning overlapping
+// suffixes. end is -1 while the pair is still open.
+type jsonRange struct {
+	start       int
+	end         int
+	firstChild  int
+	lastChild   int
+	nextSibling int
+}
+
+// maxJSONResyncQuotes bounds how many quote boundaries are retried when a first
+// pass finds nothing. Prose with an unmatched quote phase-shifts every delimiter
+// after it, and a raw newline only resynchronizes at end of line — this covers
+// the same-line case with a fixed number of extra passes instead of a restart at
+// every opener, which is what made the pre-#2637 scanner quadratic.
+const maxJSONResyncQuotes = 8
+
 // extractJSONAt returns the first complete JSON value at or after start and the
-// byte offset immediately after it. The cursor lets shape-aware callers inspect
-// every value in a combined stdout/stderr stream without rescanning prior output.
-type jsonCandidateRange struct {
-	start            int
-	end              int
-	firstChild       int
-	lastChild        int
-	nextSibling      int
-	state            jsonContainerState
-	objectKeySeen    bool
-	embedded         bool
-	endpointEmbedded bool
-}
-
-type jsonContainerState uint8
-
-const (
-	jsonContainerInvalid jsonContainerState = iota
-	jsonObjectExpectKey
-	jsonObjectExpectColon
-	jsonContainerExpectValue
-	jsonContainerExpectComma
-)
-
-func initialJSONContainerState(opener byte) jsonContainerState {
-	if opener == '{' {
-		return jsonObjectExpectKey
-	}
-	return jsonContainerExpectValue
-}
-
-func consumeJSONContainerString(candidate *jsonCandidateRange, valid bool) {
-	if !valid {
-		candidate.state = jsonContainerInvalid
-		return
-	}
-	switch candidate.state {
-	case jsonObjectExpectKey:
-		candidate.objectKeySeen = true
-		candidate.state = jsonObjectExpectColon
-	case jsonContainerInvalid:
-		if candidate.objectKeySeen {
-			candidate.state = jsonObjectExpectColon
-		}
-	case jsonContainerExpectValue:
-		candidate.state = jsonContainerExpectComma
-	default:
-		candidate.state = jsonContainerInvalid
-	}
-}
-
+// byte offset immediately after it. The cursor lets callers walk every value in
+// a stream without rescanning prior output.
 func extractJSONAt(output string, start int) (string, int) {
-	value, next, _, _ := extractJSONCandidateAt(output, start, true)
-	return value, next
-}
-
-// extractEndpointJSONAt also reports whether a recovered value was independent
-// of a surrounding array. Generic malformed-prose parsing may recover such a
-// value, but launch must not promote an endpoint-shaped log array element into
-// the provisioner's top-level endpoint record.
-func extractEndpointJSONAt(output string, start int) (string, int, bool) {
-	value, next, eligible, enclosingEnd := extractJSONCandidateAt(output, start, true)
-	if !eligible && enclosingEnd > next {
-		next = enclosingEnd
+	if value, next := scanJSONAt(output, start); value != "" {
+		return value, next
 	}
-	return value, next, eligible
+	quotes := 0
+	for cursor := start; cursor < len(output) && quotes < maxJSONResyncQuotes; cursor++ {
+		if output[cursor] != '"' {
+			continue
+		}
+		quotes++
+		if value, next := scanJSONAt(output, cursor+1); value != "" {
+			return value, next
+		}
+	}
+	return "", len(output)
 }
 
-func extractJSONCandidateAt(output string, start int, allowEOFResync bool) (string, int, bool, int) {
-	var candidates []jsonCandidateRange
+func scanJSONAt(output string, start int) (string, int) {
+	var ranges []jsonRange
 	var stack []int
 	inString := false
 	escape := false
-	jsonStringStart := -1
-	stringCandidateStart := -1
-	lineRescanned := false
+
+	openRange := func(cursor int) {
+		index := len(ranges)
+		ranges = append(ranges, jsonRange{start: cursor, end: -1, firstChild: -1, lastChild: -1, nextSibling: -1})
+		if len(stack) > 0 {
+			parent := stack[len(stack)-1]
+			if ranges[parent].firstChild < 0 {
+				ranges[parent].firstChild = index
+			} else {
+				ranges[ranges[parent].lastChild].nextSibling = index
+			}
+			ranges[parent].lastChild = index
+		}
+		stack = append(stack, index)
+	}
+
 	for cursor := start; cursor < len(output); cursor++ {
 		c := output[cursor]
-		if len(stack) == 0 {
-			if c != '{' && c != '[' {
-				continue
-			}
-			candidates = append(candidates[:0], jsonCandidateRange{
-				start:       cursor,
-				firstChild:  -1,
-				lastChild:   -1,
-				nextSibling: -1,
-				state:       initialJSONContainerState(c),
-			})
-			stack = append(stack[:0], 0)
-			inString = false
-			escape = false
-			jsonStringStart = -1
-			continue
-		}
-
-		// Retain the most recent opener in an impossible JSON string. Retrying
-		// only that suffix recovers a later endpoint past any number of malformed
-		// wrapper openers without making suffix retries grow with input size.
-		if inString && (c == '{' || c == '[') {
-			stringCandidateStart = cursor
-		}
-		// A raw newline cannot occur inside a JSON string. Treat it as a hard
-		// resynchronization boundary so an unterminated stderr diagnostic cannot
-		// hide a complete endpoint record written on the next line to stdout.
-		if inString && (c == '\n' || c == '\r') {
-			if stringCandidateStart >= 0 && !lineRescanned {
-				cursor = stringCandidateStart - 1
-				candidates = candidates[:0]
-				stack = stack[:0]
+		if inString {
+			switch {
+			case escape:
+				escape = false
+			case c == '\\':
+				escape = true
+			case c == '"':
+				inString = false
+			case c == '\n' || c == '\r':
+				// A raw newline cannot appear inside a JSON string, so the quote that
+				// opened this one was prose, not a string. Resynchronize here or an
+				// unterminated diagnostic swallows every delimiter after it.
 				inString = false
 				escape = false
-				jsonStringStart = -1
-				stringCandidateStart = -1
-				lineRescanned = true
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+			escape = false
+		case '{', '[':
+			openRange(cursor)
+		case '}', ']':
+			if len(stack) == 0 {
 				continue
 			}
-			candidates = candidates[:0]
-			stack = stack[:0]
-			inString = false
-			escape = false
-			jsonStringStart = -1
-			stringCandidateStart = -1
-			lineRescanned = false
-			continue
-		}
-		if escape {
-			escape = false
-			continue
-		}
-		if c == '\\' && inString {
-			escape = true
-			continue
-		}
-		if c == '"' {
-			if inString {
-				inString = false
-				parent := stack[len(stack)-1]
-				consumeJSONContainerString(&candidates[parent],
-					json.Valid([]byte(output[jsonStringStart:cursor+1])))
-				jsonStringStart = -1
-			} else {
-				inString = true
-				jsonStringStart = cursor
+			top := stack[len(stack)-1]
+			ranges[top].end = cursor + 1
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 {
+				continue
 			}
-			continue
-		}
-		if inString {
-			continue
-		}
-		if c == '\n' || c == '\r' {
-			stringCandidateStart = -1
-			lineRescanned = false
-			continue
-		}
-
-		parent := stack[len(stack)-1]
-		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
-			continue
-		}
-		if c == ':' {
-			if candidates[parent].state == jsonObjectExpectColon {
-				candidates[parent].state = jsonContainerExpectValue
-			} else {
-				candidates[parent].state = jsonContainerInvalid
+			if value, ok := firstValidJSONRange(output, ranges, top); ok {
+				return value, ranges[top].end
 			}
-			continue
-		}
-		if c == ',' {
-			if candidates[parent].state == jsonContainerExpectComma ||
-				candidates[parent].state == jsonContainerInvalid {
-				candidates[parent].state = initialJSONContainerState(output[candidates[parent].start])
-			} else {
-				candidates[parent].state = jsonContainerInvalid
-			}
-			continue
-		}
-		if c == '{' || c == '[' {
-			structuredValue := candidates[parent].state == jsonContainerExpectValue
-			if structuredValue {
-				candidates[parent].state = jsonContainerExpectComma
-			} else {
-				candidates[parent].state = jsonContainerInvalid
-			}
-			parent := stack[len(stack)-1]
-			index := len(candidates)
-			candidates = append(candidates, jsonCandidateRange{
-				start:       cursor,
-				firstChild:  -1,
-				lastChild:   -1,
-				nextSibling: -1,
-				state:       initialJSONContainerState(c),
-				embedded: candidates[parent].embedded ||
-					(structuredValue && output[candidates[parent].start] == '{'),
-				endpointEmbedded: candidates[parent].endpointEmbedded || structuredValue,
-			})
-			if candidates[parent].firstChild < 0 {
-				candidates[parent].firstChild = index
-			} else {
-				candidates[candidates[parent].lastChild].nextSibling = index
-			}
-			candidates[parent].lastChild = index
-			stack = append(stack, index)
-			continue
-		}
-		if c != '}' && c != ']' {
-			candidates[parent].state = jsonContainerInvalid
-			continue
-		}
-
-		candidateIndex := stack[len(stack)-1]
-		candidates[candidateIndex].end = cursor + 1
-		stack = stack[:len(stack)-1]
-		if len(stack) != 0 {
-			continue
-		}
-
-		candidate := candidates[0]
-		valid, errorAt, recoverable := inspectJSONCandidate(output, candidate)
-		if valid {
-			return output[candidate.start:candidate.end], candidate.end, !candidate.endpointEmbedded, candidate.end
-		}
-		if recoverable {
-			candidate, recoverable = firstJSONCandidateAfterError(output, candidates, 0, errorAt)
-		}
-		if recoverable {
-			return output[candidate.start:candidate.end], candidate.end,
-				!candidate.endpointEmbedded, candidates[0].end
-		}
-		candidates = candidates[:0]
-		stringCandidateStart = -1
-	}
-	if allowEOFResync && stringCandidateStart >= 0 && !lineRescanned {
-		return extractJSONCandidateAt(output, stringCandidateStart, false)
-	}
-	if len(candidates) > 0 {
-		unfinished := candidates[0]
-		unfinished.end = len(output)
-		if _, errorAt, ok := inspectJSONCandidate(output, unfinished); ok {
-			if candidate, ok := firstJSONCandidateAfterError(output, candidates, 0, errorAt); ok {
-				return output[candidate.start:candidate.end], candidate.end,
-					!candidate.endpointEmbedded, len(output)
-			}
+			// Nothing in this tree parsed; it is prose. Drop it and keep scanning.
+			ranges = ranges[:0]
 		}
 	}
-	return "", len(output), false, len(output)
+	// Wrappers left open at EOF: their completed children may still be valid.
+	if len(ranges) > 0 {
+		if value, ok := firstValidJSONRange(output, ranges, 0); ok {
+			return value, len(output)
+		}
+	}
+	return "", len(output)
 }
 
-// firstJSONCandidateAfterError descends only through children that begin after
-// their parent's first syntax error. Children before that point are structured
-// values embedded in the malformed parent, not independent launch records. At
-// each level direct children are disjoint; recursion happens only after an early
-// syntax error, avoiding overlapping full-document validation.
-func firstJSONCandidateAfterError(
-	output string,
-	candidates []jsonCandidateRange,
-	parent int,
-	errorAt int,
-) (jsonCandidateRange, bool) {
-	for index := candidates[parent].firstChild; index >= 0; index = candidates[index].nextSibling {
-		candidate := candidates[index]
-		if candidate.embedded || candidate.start < errorAt {
-			continue
-		}
-		if candidate.end <= candidate.start {
-			if nested, ok := firstCompletedJSONDescendant(output, candidates, index); ok {
-				return nested, true
-			}
-			continue
-		}
-		valid, childErrorAt, recoverable := inspectJSONCandidate(output, candidate)
+// firstValidJSONRange returns the first range in this subtree that parses as a
+// complete JSON value, preferring the outermost. Each range is inspected at most
+// once, and descent is bounded to children that begin after the parent's first
+// syntax error — everything before it was already covered by the parent's failed
+// parse, so total inspected bytes stay linear in the output size.
+func firstValidJSONRange(output string, ranges []jsonRange, index int) (string, bool) {
+	candidate := ranges[index]
+	errorAt := candidate.start
+	if candidate.end > candidate.start {
+		valid, position, recoverable := inspectJSONRange(output, candidate)
 		if valid {
-			return candidate, true
+			return output[candidate.start:candidate.end], true
 		}
 		if !recoverable {
+			return "", false
+		}
+		errorAt = position
+	}
+	for child := candidate.firstChild; child >= 0; child = ranges[child].nextSibling {
+		if ranges[child].start < errorAt {
 			continue
 		}
-		if nested, ok := firstJSONCandidateAfterError(output, candidates, index, childErrorAt); ok {
-			return nested, true
+		if value, ok := firstValidJSONRange(output, ranges, child); ok {
+			return value, true
 		}
 	}
-	return jsonCandidateRange{}, false
+	return "", false
 }
 
-// firstCompletedJSONDescendant walks through unfinished malformed wrappers
-// without reparsing their overlapping suffixes. Structural object-property
-// children stay excluded by embedded; every remaining candidate is visited at
-// most once, including a deep chain left open at EOF.
-func firstCompletedJSONDescendant(
-	output string,
-	candidates []jsonCandidateRange,
-	parent int,
-) (jsonCandidateRange, bool) {
-	for index := candidates[parent].firstChild; index >= 0; index = candidates[index].nextSibling {
-		candidate := candidates[index]
-		if candidate.embedded {
-			continue
-		}
-		if candidate.end <= candidate.start {
-			if nested, ok := firstCompletedJSONDescendant(output, candidates, index); ok {
-				return nested, true
-			}
-			continue
-		}
-		valid, errorAt, recoverable := inspectJSONCandidate(output, candidate)
-		if valid {
-			return candidate, true
-		}
-		if recoverable {
-			if nested, ok := firstJSONCandidateAfterError(output, candidates, index, errorAt); ok {
-				return nested, true
-			}
-		}
-	}
-	return jsonCandidateRange{}, false
-}
-
-// inspectJSONCandidate parses directly from the output string so an early
-// syntax error does not copy the candidate's entire remaining suffix. The error
-// position tells recovery which descendants occurred only after the parent had
-// already ceased to be valid JSON.
-func inspectJSONCandidate(output string, candidate jsonCandidateRange) (bool, int, bool) {
+// inspectJSONRange parses directly from the output string so an early syntax
+// error does not copy the range's entire remaining suffix. The error position
+// tells recovery which descendants the failed parse had not already reached.
+func inspectJSONRange(output string, candidate jsonRange) (bool, int, bool) {
 	decoder := json.NewDecoder(strings.NewReader(output[candidate.start:candidate.end]))
 	var raw json.RawMessage
-	err := decoder.Decode(&raw)
-	if err == nil {
+	if err := decoder.Decode(&raw); err == nil {
 		return true, 0, false
+	} else if syntaxErr, ok := err.(*json.SyntaxError); ok {
+		position := candidate.start + int(syntaxErr.Offset) - 1
+		if position < candidate.start {
+			position = candidate.start
+		}
+		if position > candidate.end {
+			position = candidate.end
+		}
+		return false, position, true
 	}
-	syntaxErr, ok := err.(*json.SyntaxError)
-	if !ok {
-		return false, 0, false
-	}
-	position := candidate.start + int(syntaxErr.Offset) - 1
-	if position < candidate.start {
-		position = candidate.start
-	}
-	if position > candidate.end {
-		position = candidate.end
-	}
-	return false, position, true
+	return false, 0, false
 }

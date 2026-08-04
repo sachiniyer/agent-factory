@@ -98,7 +98,7 @@ credential value in argv or endpoint JSON.
 - `url` (**required**) — the `af agent-server`'s base URL (`http://host:port` or `ws://host:port`), reachable from the daemon. It must be plain HTTP — a `wss://`/`https://` URL is rejected (af serves no TLS).
 - `token` (**required**) — the bearer token the server printed on startup.
 
-These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. Keep non-JSON output on stderr. If `launch_cmd` fails in any way after it has started, af runs `delete_cmd` to reap whatever it may have provisioned — see [`delete_cmd` runs on any failed launch](#delete_cmd-runs-on-any-failed-launch).
+These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. Keep non-JSON output on stderr — af reads the endpoint from **stdout only**, and it must be a complete top-level object with no fields beyond those above, so a structured log that happens to carry `url` and `token` is never mistaken for it. If `launch_cmd` fails in any way after it has started, af runs `delete_cmd` to reap whatever it may have provisioned — see [`delete_cmd` runs on any failed launch](#delete_cmd-runs-on-any-failed-launch).
 
 ### `delete_cmd`
 
@@ -158,7 +158,7 @@ This applies only to a `launch_cmd` that **just failed**, where everything it st
 Many `launch_cmd`s must leave a process running to make the agent-server reachable — an `ssh -L` forward, a `kubectl port-forward`, a tunnel client. That process is not a leak: it is the thing af then dials. af treats it as **yours** and never touches it.
 
 - af bounds and kills **the script**, never anything a script that **succeeded** left running. (A launch that *failed* is torn down as a tree — see [Script timeouts](#script-timeouts). If you want a process to survive even that, start it with `setsid`.)
-- The script's stdout/stderr go to a temporary **file**, not a pipe. A background process may inherit them and keep writing as long as it likes: af has already stopped reading, and there is no pipe whose closure could disturb it.
+- The script's stdout and stderr go to two temporary **files**, not pipes. A background process may inherit them and keep writing as long as it likes: af has already stopped reading, and there is no pipe whose closure could disturb it. Keeping them apart is what lets af read the endpoint from stdout alone — a `launch_cmd` that logs JSON to stderr cannot have that log mistaken for its endpoint.
 - af stops reading when the **script** exits, and its **exit status** decides success.
 
 You may redirect a tunnel's output (`>/dev/null 2>&1 &`) or disown it if you prefer tidy logs, but you do not have to — both behave identically.
