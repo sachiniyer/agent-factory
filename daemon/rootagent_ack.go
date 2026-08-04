@@ -70,6 +70,30 @@ func (m *Manager) acknowledgeRootRecreate(instance *session.Instance) {
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 }
 
+// streamShowsAgentPane reports whether a PTY stream request addresses the
+// session's AGENT tab — the only pane that answers "did this root keep its
+// context?" (#2629).
+//
+// It mirrors bindTab's addressing precedence: a supplied ?tab_id= is the
+// authority (matched against the roster's own agent tab, which is Tabs[0] by
+// construction), and only a request with no id falls back to the ordinal, where
+// the agent tab is slot 0 and an absent ?tab= defaults there.
+//
+// Both unknown answers resolve to false — an id that matches no tab, or an
+// instance with no roster. Not acknowledging costs the user one extra look at a
+// notice; acknowledging on a pane that may not be the agent's silently retires
+// the warning, and only one of those is recoverable.
+func streamShowsAgentPane(instance *session.Instance, tabID string, tab int) bool {
+	if instance == nil {
+		return false
+	}
+	if tabID == "" {
+		return tab == 0
+	}
+	tabs := instance.GetTabs()
+	return len(tabs) > 0 && tabs[0].ID == tabID
+}
+
 // repoIDForInstance returns the repo this instance is tracked under, or false
 // when it is not the daemon's tracked instance for any key.
 //

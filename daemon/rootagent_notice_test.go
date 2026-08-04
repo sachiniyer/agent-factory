@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -181,6 +182,69 @@ func TestOpeningTheSessionPaneClearsTheRecreateNotice(t *testing.T) {
 		return loadRootRecordForTest(t, repo.ID).RootRecreateContext == session.RootRecreateContextNone
 	}, 5*time.Second, 20*time.Millisecond,
 		"the clear must be durable, or the notice returns on the next daemon start")
+}
+
+// TestASecondHealCarriesTheUnacknowledgedNotice is the #2814 Codex P2 at the
+// daemon seam: the pending notice has to ride the reap into the next create, or
+// the floor inside the instance has nothing to floor against.
+func TestASecondHealCarriesTheUnacknowledgedNotice(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	require.Empty(t, (*seen)[0].PendingRecreateNotice, "a first-ever root inherits no notice")
+
+	first.SetStatusForTest(session.Lost)
+	manager.EnsureRootAgents()
+	second := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, second)
+	require.Equal(t, session.RootRecreateContextFresh, second.RootRecreateContext(),
+		"fixture guard: the first heal must leave a notice for the second to inherit")
+
+	// tmux dies again before anyone opened the pane.
+	second.SetStatusForTest(session.Lost)
+	manager.EnsureRootAgents()
+
+	require.Len(t, *seen, 3)
+	require.Equal(t, session.RootRecreateContextFresh, (*seen)[2].PendingRecreateNotice,
+		"the unacknowledged notice must reach the replacement, or a clean second heal erases it")
+	third := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, third)
+	require.Equal(t, session.RootRecreateContextFresh, third.RootRecreateContext())
+}
+
+// TestStreamShowsAgentPane is the #2814 Codex P2 that #2628 made reachable: a
+// healed root now comes back WITH its shell/process tabs, so a pane can stream
+// one of those. Streaming a terminal says nothing about whether the agent kept
+// its context, and acknowledging there retires the notice before it has told
+// anybody anything.
+func TestStreamShowsAgentPane(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "root", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	// Binding a tmux session materializes the agent tab (with its stable id), and
+	// a web tab stands in for any second pane a healed root now brings back.
+	inst.SetTmuxSession(tmux.NewTmuxSession("root", tmux.ProgramClaude))
+	inst.AddWebTabForTest("web", "http://localhost:5173/")
+	tabs := inst.GetTabs()
+	require.Len(t, tabs, 2)
+	agentID, otherID := tabs[0].ID, tabs[1].ID
+	require.NotEmpty(t, agentID)
+	require.NotEmpty(t, otherID)
+
+	assert.True(t, streamShowsAgentPane(inst, "", 0), "no id and no ordinal is the agent pane")
+	assert.True(t, streamShowsAgentPane(inst, agentID, 0), "the agent tab addressed by its stable id")
+	assert.True(t, streamShowsAgentPane(inst, agentID, 1),
+		"a supplied id is the authority; a stale ordinal beside it must not decide")
+	assert.False(t, streamShowsAgentPane(inst, "", 1), "a second tab by ordinal is not the agent pane")
+	assert.False(t, streamShowsAgentPane(inst, otherID, 0), "a second tab by id is not the agent pane")
+	assert.False(t, streamShowsAgentPane(inst, "tab-gone", 0),
+		"an id that matches no tab is unknown, and unknown must not acknowledge")
+	assert.False(t, streamShowsAgentPane(nil, "", 0))
 }
 
 // TestAcknowledgeKeepsTheNoticeWhenThePersistFails is the #2814 Codex P2. The

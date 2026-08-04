@@ -109,6 +109,13 @@ type CreateSessionRequest struct {
 	// record" would let a caller stamp an ordinary session with a notice about a
 	// history loss that never happened.
 	replacesReapedRecord bool
+
+	// pendingRecreateNotice carries an UNACKNOWLEDGED re-create notice from the
+	// record the heal just reaped (#2629), so a second tmux death before anyone
+	// opened the pane cannot erase the warning about the first. Unexported like
+	// its siblings: a client-settable one would let a caller stamp any session
+	// with a history-loss warning.
+	pendingRecreateNotice session.RootRecreateContext
 }
 
 type CreateSessionResponse struct {

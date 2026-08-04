@@ -3,6 +3,7 @@ package daemon
 import (
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -92,6 +93,16 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	}
 	if !inst.SetAgentConversationForRuntime(token, conv) {
 		return
+	}
+	// A pending re-create notice was decided before this id existed (#2629). A
+	// root whose command selects its own conversation records nothing at launch,
+	// so the heal could only say "context unknown" — and if the id just captured
+	// IS the carried one, af has now proven the continuity it could not see. Ask
+	// for the verdict again before the persist below, so the refreshed answer
+	// rides the same write rather than waiting for an unrelated one. A no-op for
+	// every ordinary session and for any notice already acknowledged.
+	if inst.RefreshRecreateContext() {
+		m.publishEvent(agentproto.EventSessionUpdated, inst.ToInstanceData())
 	}
 
 	repoStartLock := m.startLockForRepo(repoID)

@@ -397,7 +397,8 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		restoreTabs:        carried.tabs,
 		// True only for a heal, including one whose reaped root had nothing to
 		// carry — that is the heal whose replacement most needs the marker.
-		replacesReapedRecord: reapedRoot,
+		replacesReapedRecord:  reapedRoot,
+		pendingRecreateNotice: carried.notice,
 	}
 	data, err := m.CreateSession(context.Background(), req)
 	if err != nil && req.resumeConversation.HasID() {
@@ -583,6 +584,11 @@ type reapedRootState struct {
 	// ignores index 0 and rebuilds the rest; keeping the roster whole means the
 	// snapshot is exactly what the record held, not a pre-filtered view of it.
 	tabs []session.TabData
+	// notice is an unacknowledged re-create warning the reaped record still
+	// carried (#2629) — a root healed twice before anyone looked at it. It floors
+	// the replacement'"'"'s own verdict so the older, unseen loss is not erased by a
+	// cleaner second heal.
+	notice session.RootRecreateContext
 }
 
 // reapDeadRoot removes a Dead root instance so ensureRootAgent can re-create
@@ -625,7 +631,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// and a roster that never coexisted; there is no reason to leave that open
 	// when the whole record is available atomically.
 	snapshot := inst.ToInstanceData()
-	carried := reapedRootState{tabs: snapshot.Tabs}
+	carried := reapedRootState{tabs: snapshot.Tabs, notice: snapshot.RootRecreateContext}
 	if snapshot.AgentConversation != nil {
 		carried.conversation = *snapshot.AgentConversation
 	}

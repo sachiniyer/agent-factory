@@ -218,6 +218,14 @@ type Instance struct {
 	// the same tabs twice.
 	carriedTabs []TabData
 
+	// carriedRecreateNotice is an UNACKNOWLEDGED re-create notice inherited from
+	// the record this create replaces (#2629). A root can lose its history and
+	// then have tmux die again before anyone opens its pane; the second heal
+	// classifies the second replacement, which answers a different question, so
+	// without this floor a clean second heal would erase the warning about the
+	// first. Write-once by NewInstance; read on every (re)classification.
+	carriedRecreateNotice RootRecreateContext
+
 	// rootRecreateContext is the one-shot note a re-created root carries when it
 	// did not demonstrably come back on its prior conversation (#2629). Set at
 	// first launch by noteRecreateContext, persisted, rendered on the row by

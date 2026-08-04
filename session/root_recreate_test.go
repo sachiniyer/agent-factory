@@ -191,6 +191,116 @@ func TestAcknowledgeRootRecreateContextPreservesUnknownValues(t *testing.T) {
 		"the newer daemon's state must survive an older binary's stream opens")
 }
 
+// TestPendingNoticeSurvivesASecondHeal is the #2814 Codex P2. A root can lose
+// its history and then have tmux die AGAIN before anyone opens its pane. The
+// second heal classifies the second replacement — which may well have resumed
+// cleanly — and answers a different question than the pending warning asked. If
+// that clean verdict overwrote the warning, the original loss would go back out
+// of sight, unseen and unacknowledged: the exact bug this feature exists to end.
+func TestPendingNoticeSurvivesASecondHeal(t *testing.T) {
+	current := AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID}
+
+	// The second heal resumes the conversation the FIRST replacement came up on,
+	// so on its own inputs it is a clean carry-over.
+	inst := &Instance{
+		Program:               tmux.ProgramClaude,
+		carriedConversation:   current,
+		carriedRecreateNotice: RootRecreateContextFresh,
+		Tabs:                  []*Tab{{Name: agentTabName, Conversation: current}},
+	}
+	require.Equal(t, RootRecreateContextNone,
+		ClassifyRootRecreateContext(current, &current, tmux.ProgramClaude),
+		"fixture guard: this heal must classify clean on its own, or the test proves nothing")
+
+	inst.NoteRecreateContext()
+	assert.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext(),
+		"a clean second heal must not erase an unacknowledged warning about the first")
+}
+
+// TestASecondHealCanOnlyEscalateAPendingNotice: the floor is one-directional.
+// An inherited "unknown" must be upgraded by a second heal that proves a loss,
+// and never the other way round.
+func TestASecondHealCanOnlyEscalateAPendingNotice(t *testing.T) {
+	prior := AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID}
+
+	escalates := &Instance{
+		Program:               tmux.ProgramCodex,
+		carriedConversation:   prior,
+		carriedRecreateNotice: RootRecreateContextUnknown,
+		Tabs:                  []*Tab{{Name: agentTabName}},
+	}
+	escalates.NoteRecreateContext()
+	assert.Equal(t, RootRecreateContextFresh, escalates.RootRecreateContext(),
+		"a proven loss outranks an inherited unproven one")
+
+	holds := &Instance{
+		Program:               tmux.ProgramClaude,
+		carriedConversation:   prior,
+		carriedRecreateNotice: RootRecreateContextFresh,
+		Tabs:                  []*Tab{{Name: agentTabName}},
+	}
+	holds.NoteRecreateContext()
+	assert.Equal(t, RootRecreateContextFresh, holds.RootRecreateContext(),
+		"an inherited proven loss is not downgraded to unknown")
+}
+
+// TestRefreshRecreateContextResolvesUnknownOnceCaptureProvesContinuity is the
+// other #2814 Codex P2. A root whose command selects its own conversation
+// records nothing at launch, so the heal can only say "unknown". When the async
+// provider capture later commits the id the agent actually came up on, and that
+// id is the carried one, af has proven the continuity it could not see — and a
+// warning that stays up after that is a stale warning.
+func TestRefreshRecreateContextResolvesUnknownOnceCaptureProvesContinuity(t *testing.T) {
+	prior := AgentConversationData{Agent: tmux.ProgramCodex, ID: priorConversationID}
+	inst := &Instance{
+		Program:             tmux.ProgramCodex,
+		carriedConversation: prior,
+		Tabs:                []*Tab{{Name: agentTabName}},
+	}
+	inst.NoteRecreateContext()
+	require.Equal(t, RootRecreateContextUnknown, inst.RootRecreateContext(),
+		"fixture guard: a pinned-resume launch records nothing, so the verdict starts unknown")
+
+	// The capture goroutine commits the id the agent really came up on.
+	inst.Tabs[0].Conversation = prior
+	assert.True(t, inst.RefreshRecreateContext(), "the verdict changed and the caller must persist it")
+	assert.Equal(t, RootRecreateContextNone, inst.RootRecreateContext(),
+		"af has now proven the root resumed; the warning must come down")
+}
+
+// TestRefreshRecreateContextNeverResurrectsAnAcknowledgedNotice: acknowledgement
+// is final. Late evidence about a launch nobody is being warned about must not
+// put a notice back on a row the user already dealt with.
+func TestRefreshRecreateContextNeverResurrectsAnAcknowledgedNotice(t *testing.T) {
+	inst := &Instance{Program: tmux.ProgramCodex, Tabs: []*Tab{{Name: agentTabName}}}
+	inst.NoteRecreateContext()
+	require.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext())
+	require.True(t, inst.AcknowledgeRootRecreateContext())
+
+	assert.False(t, inst.RefreshRecreateContext(), "an acknowledged notice is done")
+	assert.Equal(t, RootRecreateContextNone, inst.RootRecreateContext())
+}
+
+// TestRefreshRecreateContextHoldsAnInheritedNotice: late evidence about THIS
+// launch cannot clear a warning inherited from an earlier heal — that warning
+// is about a loss this capture says nothing about.
+func TestRefreshRecreateContextHoldsAnInheritedNotice(t *testing.T) {
+	prior := AgentConversationData{Agent: tmux.ProgramCodex, ID: priorConversationID}
+	inst := &Instance{
+		Program:               tmux.ProgramCodex,
+		carriedConversation:   prior,
+		carriedRecreateNotice: RootRecreateContextFresh,
+		Tabs:                  []*Tab{{Name: agentTabName}},
+	}
+	inst.NoteRecreateContext()
+	require.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext())
+
+	inst.Tabs[0].Conversation = prior
+	assert.False(t, inst.RefreshRecreateContext(),
+		"proving THIS launch resumed says nothing about the earlier loss")
+	assert.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext())
+}
+
 // TestRootRecreateContextSurvivesStorageRoundTrip is the load-bearing
 // persistence assertion. The marker must NOT be scrubbed by ForStorage the way
 // the projection-only diagnostics beside it are: a daemon restart is a likely

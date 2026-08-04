@@ -67,6 +67,11 @@ type InstanceOptions struct {
 	// Empty for every ordinary create, which still comes up with just the agent
 	// tab (#1100).
 	RestoreTabs []TabData
+	// PendingRecreateNotice carries an unacknowledged re-create notice from the
+	// record this create replaces (#2629), so a second heal cannot erase a
+	// warning about the first that nobody has seen yet. Set by the same single
+	// caller as the two fields above. Empty for every ordinary create.
+	PendingRecreateNotice RootRecreateContext
 	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
 	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4 PR2)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
@@ -408,6 +413,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		inPlace:               opts.InPlace,
 		carriedConversation:   opts.ResumeConversation,
 		carriedTabs:           append([]TabData(nil), opts.RestoreTabs...),
+		carriedRecreateNotice: opts.PendingRecreateNotice,
 		backend:               backend,
 		remoteClient:          remoteClient,
 		runtimeTeardown:       res.Teardown,

@@ -96,6 +96,31 @@ func ClassifyRootRecreateContext(carried AgentConversationData, created *AgentCo
 	}
 }
 
+// severity orders the outcomes by how much they claim was lost, so a pending
+// notice can be escalated across a second heal but never quietly downgraded.
+// None is "nothing to report", Unknown is "af cannot tell", Fresh is "provably
+// gone" — and a proven loss must outrank an unproven one.
+func (c RootRecreateContext) severity() int {
+	switch c {
+	case RootRecreateContextFresh:
+		return 2
+	case RootRecreateContextUnknown:
+		return 1
+	default:
+		// Includes any value this binary does not know. It renders nothing, so it
+		// must not be able to outrank a notice this binary would actually show.
+		return 0
+	}
+}
+
+// moreSevereRecreateContext returns whichever of two outcomes claims more loss.
+func moreSevereRecreateContext(a, b RootRecreateContext) RootRecreateContext {
+	if b.severity() > a.severity() {
+		return b
+	}
+	return a
+}
+
 // sameAgent reports whether the launch came up on the provider the carried
 // conversation belongs to. An UNKNOWN launched agent ("" — no tmux binding, or a
 // command no matcher recognizes) is deliberately not treated as a match: the
@@ -188,6 +213,47 @@ func (i *Instance) ReconcileRootRecreateContext(ctx RootRecreateContext) bool {
 func (i *Instance) NoteRecreateContext() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.noteRecreateContextLocked()
+}
+
+// RefreshRecreateContext re-runs the classification against evidence that
+// arrived AFTER the launch settled — the async provider capture — and reports
+// whether the note changed.
+//
+// It exists because a root whose command pins its own conversation selection
+// (`codex resume --last`) records nothing synchronously, so the launch can only
+// answer "unknown". Minutes later the capture goroutine discovers the id the
+// agent actually came up on, and if that is the carried conversation, af has
+// PROVEN the continuity it could not see before. Leaving the row warning
+// `context unknown` after that is a stale warning, and a stale warning is how a
+// real one stops being read.
+//
+// Gated on a notice still being pending, which is what keeps this from
+// resurrecting one the user already acknowledged: acknowledgement is final, and
+// later evidence about a launch nobody is being warned about changes nothing.
+// It cannot silently downgrade a notice inherited from an EARLIER heal either —
+// noteRecreateContextLocked floors every result at that carried notice.
+func (i *Instance) RefreshRecreateContext() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.rootRecreateContext == RootRecreateContextNone {
+		return false
+	}
+	before := i.rootRecreateContext
+	i.noteRecreateContextLocked()
+	return i.rootRecreateContext != before
+}
+
+// noteRecreateContextLocked is the shared body. Caller holds i.mu for writing.
+//
+// The result is FLOORED at any notice inherited from an earlier heal. A root can
+// lose its history and then have tmux die again before anyone opens the pane;
+// the second heal's inputs describe the second replacement and answer a
+// different question, so classifying it alone would let a clean second heal
+// erase an unacknowledged warning about the first — putting the loss back out of
+// sight, which is the whole bug. A pending notice is cleared by acknowledgement
+// and by nothing else; a later heal can only make it worse.
+func (i *Instance) noteRecreateContextLocked() {
 	var created *AgentConversationData
 	if len(i.Tabs) > 0 {
 		created = conversationDataPtr(i.Tabs[0].Conversation)
@@ -196,5 +262,6 @@ func (i *Instance) NoteRecreateContext() {
 	// session, so a root whose program was repointed to another agent is
 	// identified as that agent — which is what separates the provable
 	// agent-change fallback from a command that picked its own conversation.
-	i.rootRecreateContext = ClassifyRootRecreateContext(i.carriedConversation, created, i.currentAgentNameLocked())
+	classified := ClassifyRootRecreateContext(i.carriedConversation, created, i.currentAgentNameLocked())
+	i.rootRecreateContext = moreSevereRecreateContext(i.carriedRecreateNotice, classified)
 }
