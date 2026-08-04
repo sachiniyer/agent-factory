@@ -42,6 +42,10 @@ type schedulePicker struct {
 	cursor        int             // index into cells() — the focused cell
 	focused       bool
 	width         int
+	// now returns the current time for the Custom preview's next-run
+	// derivation; a fixed value in tests so the rendered time is deterministic
+	// (the same seam AutomationsPane uses for its next-run column).
+	now func() time.Time
 }
 
 // scheduleType pairs a schedule.Type with its selector label, in selector
@@ -90,7 +94,7 @@ func newSchedulePicker() *schedulePicker {
 	raw.CharLimit = 64
 	raw.Blur()
 
-	p := &schedulePicker{raw: raw}
+	p := &schedulePicker{raw: raw, now: time.Now}
 	p.reset()
 	return p
 }
@@ -469,10 +473,11 @@ func (p *schedulePicker) selectedWeekdays() []time.Weekday {
 }
 
 // render draws the picker block: the type selector, only the inputs the current
-// type needs, the plain-English preview, and the generated cron shown
-// read-only. Each line is clipped to the pane width; the returned block carries
-// no trailing newline (the form adds it). Sub-lines are indented so the block
-// reads as one unit under the "Schedule:" label even on a narrow terminal.
+// type needs, and the read-only preview line (see renderPreviewLine, which
+// decides what that line is worth saying and may drop it). Each line is clipped
+// to the pane width; the returned block carries no trailing newline (the form
+// adds it). Sub-lines are indented so the block reads as one unit under the
+// "Schedule:" label even on a narrow terminal.
 func (p *schedulePicker) render() string {
 	t := CurrentTheme()
 	labelStyle := lipgloss.NewStyle().Bold(true)
@@ -483,10 +488,9 @@ func (p *schedulePicker) render() string {
 
 	lines := []string{labelStyle.Render("Schedule:") + " " + p.renderTypeSelector(selectedStyle, dimSelectedStyle)}
 	lines = append(lines, p.renderContextLines()...)
-	// Preview (plain-English) and the generated cron share one read-only line to
-	// keep the picker compact enough to fit an 80x24 pane; the preview leads so
-	// it survives on a narrow terminal even if the trailing cron clips.
-	lines = append(lines, indentSub+previewStyle.Render(p.Describe())+dimStyle.Render("  ·  "+p.Cron()))
+	if preview := p.renderPreviewLine(previewStyle, dimStyle); preview != "" {
+		lines = append(lines, preview)
+	}
 	if p.focused {
 		lines = append(lines, indentSub+dimStyle.Render(p.hint()))
 	}
@@ -498,6 +502,32 @@ func (p *schedulePicker) render() string {
 }
 
 const indentSub = "  "
+
+// renderPreviewLine builds the read-only line under the picker's inputs, or ""
+// when there is nothing worth a line.
+//
+// For a preset the plain-English preview and the generated cron share the line
+// to keep the picker inside an 80x24 pane; the preview leads so it survives a
+// narrow terminal even if the trailing cron clips.
+//
+// Custom has no plain-English form: Describe() is "Custom: "+raw and Cron() is
+// raw, so that pairing printed the expression twice on the preview line and
+// three times in the block — the Cron input right above already shows it
+// (#2596). Custom gets the one fact that input line cannot carry instead: when
+// the expression next fires, in the same "Jan 02 15:04" shape the automations
+// rail's next-run column uses. A half-typed or invalid expression has no next
+// run, so the line is dropped rather than padded back out with a repeat —
+// which also retires the empty-raw case that used to render a bare "Custom:".
+func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
+	if p.kind() == schedule.Custom {
+		sched, err := task.ParseCron(p.Cron())
+		if err != nil {
+			return ""
+		}
+		return indentSub + preview.Render("Next run "+sched.Next(p.now()).Format("Jan 02 15:04"))
+	}
+	return indentSub + preview.Render(p.Describe()) + dim.Render("  ·  "+p.Cron())
+}
 
 func (p *schedulePicker) renderTypeSelector(selected, dim lipgloss.Style) string {
 	label := scheduleTypes[p.typ].label

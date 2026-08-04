@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/schedule"
@@ -212,6 +213,63 @@ func TestSchedulePickerCustomAcceptsAndValidatesRaw(t *testing.T) {
 	p.raw.SetValue("0 9 * * 1-5")
 	assert.Equal(t, "", p.validate())
 	assert.Equal(t, "0 9 * * 1-5", p.Cron())
+}
+
+// TestSchedulePickerCustomRendersExpressionOnce is the #2596 regression: a
+// Custom schedule used to print its expression three times in two lines — once
+// in the editable Cron input, then twice more on the preview line, because
+// Describe() ("Custom: <raw>") and Cron() (<raw>) collapse to the same string
+// for Custom. The expression must appear exactly once in the block.
+func TestSchedulePickerCustomRendersExpressionOnce(t *testing.T) {
+	p := newSchedulePicker()
+	p.setType(schedule.Custom)
+	p.raw.SetValue("0 0 1 1 *")
+	p.setWidth(80)
+	p.setFocused(true)
+
+	out := stripANSI(p.render())
+	assert.Equal(t, 1, strings.Count(out, "0 0 1 1 *"),
+		"the cron expression belongs in the Cron input only, not echoed by the preview:\n%s", out)
+	assert.NotContains(t, out, "Custom: ",
+		"Describe()'s \"Custom: <raw>\" echo adds nothing the Cron input above does not already show")
+	assert.Contains(t, out, "Cron", "the editable raw-cron input keeps its label")
+}
+
+// TestSchedulePickerCustomPreviewShowsNextRun pins what replaces the removed
+// echo (#2596): the one fact the Cron input line cannot carry — when the
+// expression next fires — in the same shape the automations rail uses. An
+// expression that does not parse yet (the user is mid-type) has no next run, so
+// the line is dropped rather than filled with a repeat.
+func TestSchedulePickerCustomPreviewShowsNextRun(t *testing.T) {
+	p := newSchedulePicker()
+	// Fixed clock in a fixed zone: Next() answers in its argument's location, so
+	// the rendered time is the same string on every machine and in CI.
+	p.now = func() time.Time { return time.Date(2026, time.August, 4, 12, 0, 0, 0, time.UTC) }
+	p.setType(schedule.Custom)
+	p.setWidth(80)
+	p.setFocused(true)
+
+	p.raw.SetValue("0 0 1 1 *")
+	assert.Contains(t, stripANSI(p.render()), "Next run Jan 01 00:00",
+		"a parseable custom expression previews its next fire time")
+
+	p.raw.SetValue("0 0 1 1")
+	out := stripANSI(p.render())
+	assert.NotContains(t, out, "Next run",
+		"a half-typed expression has no next run to show")
+	assert.Contains(t, out, "Schedule:", "the rest of the block still renders")
+}
+
+// TestSchedulePickerPresetPreviewKeepsCron guards the other half of #2596: only
+// Custom loses the trailing cron. Every preset still pairs its plain-English
+// preview with the generated expression, because there the two differ and the
+// pairing is what lets a user trust what gets saved.
+func TestSchedulePickerPresetPreviewKeepsCron(t *testing.T) {
+	p := newSchedulePicker()
+	p.setWidth(80)
+	p.setFocused(true)
+	assert.Contains(t, stripANSI(p.render()), "Every day at 9:00 AM  ·  0 9 * * *",
+		"a preset keeps preview · cron")
 }
 
 // TestSchedulePickerSwitchToCustomPrefillsCron verifies switching into Custom
