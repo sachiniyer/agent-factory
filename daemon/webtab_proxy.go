@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"strings"
 
@@ -329,366 +328,6 @@ func (m *Manager) stopVSCodeForInstance(key, instanceID string) error {
 	return err
 }
 
-// webTabProxyHandler reverse-proxies /v1/webtab/{sessionId}/{tabId}/{rest...}
-// to the tab's loopback dev-server target ON THE DAEMON MACHINE. This is what
-// makes a localhost dev-server preview visible to a REMOTE web-UI viewer (over
-// Tailscale/SSH): the browser fetches this same-origin daemon path, the daemon
-// (which shares the machine with the dev server) fetches the loopback target and
-// relays it back. Same-origin also sidesteps the dev server's X-Frame-Options.
-//
-// THE URL MODEL — the browser-visible path MIRRORS the upstream path. The client
-// mints the iframe src with the target's OWN path appended to the tab prefix
-// (web/src/tabaddr.ts webProxyPath), so
-//
-//	target   http://localhost:3000/app/viewer.html
-//	iframe   /v1/webtab/<sid>/<tabId>/app/viewer.html
-//	upstream /app/viewer.html
-//
-// and this handler simply strips the prefix and forwards {rest...} VERBATIM. A
-// bare request to the tab root redirects to the target's path so the mirror holds
-// from the first navigation on (see mirrorRootRedirect).
-//
-// Mirroring the path — rather than re-resolving the remainder against the target —
-// is what makes the whole class of sub-path bugs disappear, because the browser's
-// own URL resolution now happens at the SAME DEPTH as the dev server's:
-//
-//   - a sibling link (x.css on /app/viewer.html) resolves to /v1/webtab/<sid>/<t>/app/x.css
-//     → upstream /app/x.css;
-//   - a PARENT-relative link (../shared.css) resolves to /v1/webtab/<sid>/<t>/shared.css
-//     → upstream /shared.css — depth is preserved, so it cannot climb out of the prefix;
-//   - a Set-Cookie Path=/app re-scopes by pure PREFIX-PREPEND to
-//     /v1/webtab/<sid>/<t>/app, which is exactly the browser path those cookies must
-//     ride on;
-//   - a subdirectory target (/app/viewer.html) works outright.
-//
-// This REPLACES the document-resolution rule of #1806 (resolveUpstreamPath) and
-// retires the subdirectory-target limits that PR documented as known.
-//
-// It proxies ONLY loopback targets (localhost/127.0.0.1/::1); an external target
-// is rejected here (it is iframed directly by the web UI, never routed through the
-// daemon) so the daemon can never be turned into an open proxy / SSRF vector. The
-// route is auth-gated by withAuth like the rest of the API, with the loopback
-// exemption (#1697) honored and the webtabTokenCookie fallback for iframe
-// sub-resource requests.
-func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Request) {
-	// A network browser can authorize an iframe's first navigation only through a
-	// query parameter. Treat that parameter as a ONE-HOP bootstrap transport, not
-	// as part of the preview app's address: store the already-authenticated value
-	// in an HttpOnly cookie, then redirect to the exact same browser path with every
-	// decoded spelling of only our private parameter removed.
-	//
-	// This runs before manager access by design. Resolving a VS Code target may
-	// START the editor, and arbitrary preview code must never run while its own
-	// window.location still contains the daemon bearer. The clean cookie-backed
-	// follow-up is the first request allowed to resolve or contact any target.
-	if cleanWebTabTokenBootstrap(w, r) {
-		return
-	}
-	if cs.manager == nil {
-		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
-		return
-	}
-	// Refuse until the restore has finished (#1878). The HTTP listener binds long
-	// before it (#829, deliberately), so a stale iframe left open across a daemon
-	// restart starts re-requesting the moment the port answers — and every request
-	// resolves through resolveStreamSession, which calls refreshLocked and REPLACES
-	// the instance map from disk. The proxy was doing lifecycle work that
-	// RestoreInstances documents as its own: "every RPC that mutates it is gated on
-	// Ready". This route is HTTP rather than net/rpc, so it slipped that gate and a
-	// pre-warm-up request drove its own restore.
-	//
-	// It answers a NOTICE rather than writeHTTPError's JSON envelope: the pane
-	// frames this route, so an error body is rendered AT THE USER. A raw envelope in
-	// the iframe is the exact failure the editor's notice pages exist to avoid, and
-	// this reply is the likeliest of all to be seen — a daemon restart points every
-	// open pane at it at once. Retry is set, so a pane caught mid-restore resolves
-	// into its content on its own, with no reload.
-	//
-	// Kind-agnostic by necessity AND by rights: resolving the kind is the very thing
-	// that touches the manager, so it is not known here — and a dev-server preview
-	// must not be told VS Code is starting.
-	if err := cs.requireStateMutationAdmission(); err != nil {
-		if IsDaemonUpgradeProbationErr(err) {
-			writeTabNoticePage(w, "Validating upgrade", "af is validating a daemon upgrade — this tab will reload when validation finishes.", true)
-			return
-		}
-		writeTabNoticePage(w, "Starting up", "af is starting up — this tab will load as soon as the daemon has restored its sessions.", true)
-		return
-	}
-	sessionID := r.PathValue("sessionId")
-	tabID := r.PathValue("tabId")
-	rest := r.PathValue("rest")
-	// Defense in depth: ServeMux cleans a LITERAL ".." out of the path (an
-	// unescaped /../ is redirected away before any handler sees it), but an ENCODED
-	// one — %2E%2E%2F — is NOT cleaned: it decodes on the way into rest and arrives
-	// here intact. Reject the residue so a crafted request can never escape the
-	// proxied prefix. rest is the decoded view of the remainder, so testing it here
-	// covers the escaped form the proxy actually forwards.
-	//
-	// Only a whole SEGMENT equal to ".." climbs. Testing for ".." anywhere in the
-	// string also rejected legitimate routes that merely contain it — /assets/
-	// bundle..js and friends never reached the dev server at all (#2104).
-	if hasDotDotSegment(rest) {
-		writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
-		return
-	}
-	// The remainder in the request's OWN encoding, which rest cannot express: the
-	// forwarded path is built from this so an encoded slash survives the hop.
-	escapedRest, ok := escapedRestOf(r.URL.EscapedPath())
-	if !ok {
-		writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
-		return
-	}
-	upstreamEscaped := "/" + strings.TrimLeft(escapedRest, "/")
-	upstreamPath, err := url.PathUnescape(upstreamEscaped)
-	if err != nil {
-		// Unreachable via a real request (net/http rejects a malformed escape while
-		// parsing the request line), but fail closed rather than forward a path
-		// whose two encodings disagree.
-		writeHTTPError(w, r, http.StatusBadRequest, fmt.Errorf("invalid web tab path"))
-		return
-	}
-
-	// Addressed by the tab's STABLE id: a stale id (its tab was closed) is a clean
-	// 404 here, never a silent bind to whatever tab took its old ordinal (#1810).
-	target, err := cs.manager.WebTabTarget(sessionID, tabID)
-	tabKind := target.Kind
-	if err != nil {
-		// A machine with no editor installed is an ordinary, actionable state, not
-		// a failure: render the install hint INTO the pane (the iframe shows this
-		// document) rather than an error page, and log nothing — this resolves on
-		// every request, so an error log here would spam once per asset fetch.
-		if errors.Is(err, errVSCodeBinaryMissing) {
-			writeVSCodeNoticePage(w, vscodeInstallHint)
-			return
-		}
-		// A cold code-server can outrun the start timeout on a slow machine. The
-		// process is still coming up, so show a self-refreshing notice that turns
-		// into the editor once it listens, rather than a dead error page the user
-		// has to react to.
-		if errors.Is(err, errVSCodeStarting) {
-			writeVSCodeNoticePageRetry(w, "VS Code is still starting…", true)
-			return
-		}
-		// An editor that started and then exited without ever listening is a broken
-		// install/config, not a transient state: render it INTO the pane like the
-		// other two, since the iframe shows this document and a raw JSON error
-		// envelope is unreadable there.
-		//
-		// Deliberately NON-retrying, unlike the still-starting notice: the
-		// supervisor records this failure and replays it for a cooldown rather than
-		// respawning, so a self-refreshing page would spend that whole window
-		// re-rendering the same replayed error — the UI fighting the very cooldown
-		// that exists to stop a spawn loop.
-		if errors.Is(err, errVSCodeStartExited) {
-			writeVSCodeNoticePage(w, "VS Code exited while starting. Check that the editor binary runs correctly, then reopen this tab.")
-			return
-		}
-		writeHTTPError(w, r, http.StatusNotFound, err)
-		return
-	}
-	// Only loopback targets are proxied. An external target must never be fetched
-	// by the daemon (open-proxy / SSRF) — the web UI iframes those directly.
-	//
-	// A unix-socket target is exempt because the check does not APPLY to it, not
-	// because it is trusted less carefully. IsLoopbackWebTarget asks "does this
-	// name a host off this machine?", and a socket names no host at all: it is a
-	// path the daemon itself chose inside a directory only the daemon can write
-	// (#1873). There is no address for an attacker to point anywhere, which is a
-	// stronger guarantee than the string check the TCP path settles for — under
-	// which the old editor target passed precisely because it WAS loopback, the
-	// confused-deputy hole this transport closes.
-	if !target.isUnixSocket() && !session.IsLoopbackWebTarget(target.URL) {
-		writeHTTPError(w, r, http.StatusBadRequest,
-			fmt.Errorf("web tab target %q is not loopback; external URLs are iframed directly, not proxied",
-				agentproto.RedactAccessTokenURL(target.URL)))
-		return
-	}
-	targetURL, err := url.Parse(target.URL)
-	if err != nil {
-		writeHTTPError(w, r, http.StatusInternalServerError, fmt.Errorf("invalid web tab target: %w",
-			agentproto.RedactAccessTokenError(err, "")))
-		return
-	}
-
-	// The path prefix this tab's cookies are scoped under. Upstream Set-Cookie
-	// paths are rewritten beneath it so a cookie-backed dev app (login/session/
-	// CSRF) works in the iframe without its cookies colliding with the daemon's
-	// own /v1/webtab/ token cookie or leaking to a sibling tab. Because the browser
-	// path mirrors the upstream path, this is a pure prefix-prepend and the
-	// re-scoped cookie lands on exactly the requests the app scoped it to.
-	tabPathPrefix := webtabPathPrefix + sessionID + "/" + tabID
-
-	// Keep the browser-visible URL mirroring the upstream one: a bare hit on the
-	// tab root is sent to the target's own path, after which every relative URL the
-	// app emits resolves at the right depth on its own.
-	if rest == "" {
-		if dest, ok := mirrorRootRedirect(tabPathPrefix, targetURL, r.URL.RawQuery); ok {
-			http.Redirect(w, r, dest, http.StatusFound)
-			return
-		}
-	}
-
-	proxy := &httputil.ReverseProxy{
-		// A socket-bound editor is reached by DIALING THE PATH: the URL's host is
-		// the dummy vscode.invalid and never resolves, so the transport must
-		// replace the dial rather than the address. Everything above the dial —
-		// the path mirror, the cookie and Location rewrites, the WS upgrade — is
-		// unchanged, which is the point: only the transport moved (#1873).
-		//
-		// nil Transport (a web tab) keeps http.DefaultTransport, whose connection
-		// pooling and proxy env handling this must not disturb.
-		Transport: target.roundTripper(),
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = targetURL.Scheme
-			pr.Out.URL.Host = targetURL.Host
-			pr.Out.Host = targetURL.Host
-			// The browser path mirrors the upstream path, so the remainder under
-			// the tab prefix IS the upstream path: forward it VERBATIM, in the
-			// browser's own encoding. Path and RawPath are set TOGETHER — decoded
-			// and escaped views of one string — so url.String() reproduces that
-			// encoding instead of re-canonicalizing it, and a %2F that is data
-			// inside a segment reaches the dev server as %2F rather than turning
-			// into a path separator that names a different route.
-			//
-			// Deriving both from the escaped path also keeps the property the
-			// decoded wildcard gave for free: a literal "?"/"#"/"%" in a filename
-			// arrives already escaped (%3F/%23/%25) and stays that way, so it can
-			// never be misread as a query/fragment/escape.
-			pr.Out.URL.Path = upstreamPath
-			pr.Out.URL.RawPath = upstreamEscaped
-			// Never leak the daemon credential upstream: drop the Authorization
-			// header and the daemon's own token cookie, but FORWARD the dev app's
-			// cookies so cookie-backed dev servers work in the iframe.
-			pr.Out.Header.Del("Authorization")
-			forwardAppCookies(pr.Out)
-			// Tell a VS Code editor which prefix the BROWSER reaches it under.
-			//
-			// The two editors differ here and it decides whether the fallback one
-			// works at all. code-server emits RELATIVE URLs derived from the request
-			// path's depth, so stripping the prefix is enough and this header is inert
-			// to it. openvscode-server emits ABSOLUTE ones, and resolves its base from
-			// X-Forwarded-Prefix — without it, its assets and WS point at the daemon's
-			// ROOT rather than under /v1/webtab/..., and the editor never loads.
-			//
-			// Its --server-base-path flag is the documented alternative, but it cannot
-			// be used here: it bakes ONE prefix into the process, while a single
-			// per-SESSION editor is reached under a DIFFERENT prefix per tab index.
-			// This header is per-request, so it composes with a shared editor.
-			//
-			// Set only for a vscode tab: for a web tab the target is an arbitrary dev
-			// server, and a framework that honors this header would start rewriting its
-			// URLs — a behavior change to today's previews that belongs in its own
-			// change, not smuggled in here.
-			if tabKind == session.TabKindVSCode {
-				pr.Out.Header.Set("X-Forwarded-Prefix", tabPathPrefix)
-			}
-			// Strip ONLY the daemon's own credential, and do it at the STRING level
-			// so the target's query survives byte-for-byte. Parsing and re-encoding
-			// (url.Values.Encode) would sort the params and rewrite escaping (a
-			// literal space becomes %20→+), silently changing an order- or
-			// signature-sensitive dev endpoint — the exact preservation targetQueryOf
-			// promises on the client. The app's own params, including its own
-			// ?access_token= (a DIFFERENT name from the daemon's), ride through
-			// untouched.
-			// Strip BOTH af credential query params before forwarding: af_webtab_token
-			// (this gate's) and af_preview_token (the preview origin's). They share a
-			// cookie jar and a path scope (RFC 6265 §8.5 — cookies are not port-scoped),
-			// so a crafted request to this origin can carry either, and the strip set
-			// must cover everything ANY af gate accepts, never just this one's (the
-			// webtab_url.go rule; the daemon-bearer half of it is why the first strip
-			// exists). Neither may reach the untrusted dev server.
-			pr.Out.URL.RawQuery = stripRawQueryParam(pr.Out.URL.RawQuery, webtabTokenQueryParam)
-			pr.Out.URL.RawQuery = stripRawQueryParam(pr.Out.URL.RawQuery, previewTokenQueryParam)
-			pr.SetXForwarded()
-			// SetXForwarded derives X-Forwarded-Proto from the DAEMON-facing hop,
-			// which OVERWRITES what the client's own hop reported (#1875). The
-			// daemon's listener is plain HTTP by design, so behind a TLS-terminating
-			// front proxy — the recommended network deployment — an inbound
-			// "X-Forwarded-Proto: https" became "http" on the way upstream, and the
-			// dev server was told an https:// page was plain HTTP. An app that builds
-			// absolute URLs or a WS endpoint from that header then emits http://ws://
-			// under an https:// page, which the browser blocks as mixed content.
-			//
-			// The ORIGINAL client's scheme is the honest answer, so it is restored
-			// here — for BOTH tab kinds, since one Rewrite serves them and a plain dev
-			// server reads this header exactly as an editor does.
-			//
-			// Resolved to a single value rather than forwarding the chain verbatim:
-			// requestIsHTTPS already applies the first-entry rule (a chain may read
-			// "https, http"), and plenty of upstreams test this header by exact match,
-			// so handing them "https, http" would read as not-https and fix nothing.
-			// The first entry IS the value every reader wants.
-			//
-			// Trusted only to UPGRADE, matching the reasoning on requestIsHTTPS: a
-			// forged header buys a peer nothing but http:// links from an https:// page
-			// for itself, and authenticates nothing — the auth gate still verifies the
-			// token.
-			if requestIsHTTPS(pr.In) {
-				pr.Out.Header.Set("X-Forwarded-Proto", "https")
-			}
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			// The proxied preview is served same-origin as the SPA, so a dev server
-			// that sends X-Frame-Options would block its own preview from framing.
-			// Strip it (and the frame-ancestors CSP directive) so the loopback
-			// preview always renders — this only affects the user's own dev server,
-			// viewed through their own daemon.
-			resp.Header.Del("X-Frame-Options")
-			stripFrameAncestors(resp.Header)
-			// The upstream ANSWERED, so whatever it says, this is not an af-generated
-			// failure — strip any marker it set before the client can read it as one
-			// (#1909). Without this an app could forge af's own dead-server verdict
-			// against itself: its answered 502 would suppress its page and show the
-			// fallback, the very bug the marker fixes, in reverse.
-			//
-			// This is the STRIP half of the #1879 rule — what the client trusts, the
-			// proxy must control — and the two halves cannot collide: ModifyResponse
-			// runs only when the upstream answered, the ErrorHandler only when it did
-			// not. Del is canonical-key based, so a lowercase forgery is caught too.
-			resp.Header.Del(webtabErrorHeader)
-			// Relay the dev app's Set-Cookie back to the browser, re-scoped under
-			// this tab's proxy path (and Domain dropped so it defaults to the daemon
-			// host) so the cookie lands on the right path and coexists with the
-			// daemon's token cookie.
-			rewriteSetCookiePaths(resp.Header, tabPathPrefix)
-			// Send the app's own redirects back through the prefix rather than out
-			// to the daemon's origin, which is where a bare "/login" would otherwise
-			// land (#1843).
-			rewriteRedirectLocation(resp, tabPathPrefix, targetURL)
-			rewriteRefreshURL(resp.Header, tabPathPrefix, targetURL)
-			return nil
-		},
-		ErrorHandler: func(w http.ResponseWriter, proxyReq *http.Request, err error) {
-			// ReverseProxy reports the request context ending as a transport
-			// error. That means the browser navigated away, disconnected, or the
-			// tab was torn down; there is no live client to warn or manufacture a
-			// dead-server response for. Keep genuine live-request transport
-			// failures on the warning + marked-502 path below.
-			if proxyReq != nil && errors.Is(err, proxyReq.Context().Err()) {
-				return
-			}
-			safeErr := agentproto.RedactAccessTokenError(err,
-				agentproto.AccessTokenFromQuery(targetURL.Query()))
-			log.WarningLog.Printf("web tab proxy to %s failed: %v",
-				agentproto.RedactAccessTokenURL(targetURL.String()), safeErr)
-			// Mark this 502 as AF's OWN before writing it (#1909). Reaching here means
-			// the upstream never answered — the transport failed, or ModifyResponse
-			// rejected the response — so no upstream header has been copied to w and
-			// this marker cannot be an upstream's. That is precisely what makes it
-			// trustworthy: the client renders its dead-server fallback for a marked
-			// 502 and the app's own page for an unmarked one.
-			//
-			// Set before writeHTTPError: that writes the status, after which headers
-			// no longer reach the client.
-			w.Header().Set(webtabErrorHeader, webtabErrorUpstreamUnreachable)
-			writeHTTPError(w, proxyReq, http.StatusBadGateway,
-				fmt.Errorf("web tab dev server at %s is unreachable: %w", targetURL.Host, safeErr))
-		},
-	}
-	proxy.ServeHTTP(w, r)
-}
-
 // cleanWebTabTokenBootstrap persists the daemon credential presented on the
 // app-origin web-tab navigation and, when the private query transport is present,
 // redirects to the same request URI without it. It reports whether it wrote that
@@ -893,6 +532,33 @@ func rewriteRefreshURL(h http.Header, prefix string, target *url.URL) {
 		return
 	}
 	h.Set("Refresh", strings.TrimSpace(delay)+"; url="+quote+dest+quote)
+}
+
+// corsGrantHeaders are the response headers by which a server hands a DIFFERENT
+// origin permission to read it (or to time it). Every one is stripped from an
+// upstream response on a per-tab preview origin: cross-tab isolation there is the
+// browser's refusal to expose one tab origin's response to another, and each of
+// these is a way for the previewed dev server to waive exactly that refusal.
+//
+// Timing-Allow-Origin is included deliberately. It grants no body, but it turns
+// the Resource Timing API into a cross-origin side channel over a surface whose
+// contents are another session's, and nothing legitimate on this route needs it.
+var corsGrantHeaders = []string{
+	"Access-Control-Allow-Origin",
+	"Access-Control-Allow-Credentials",
+	"Access-Control-Allow-Methods",
+	"Access-Control-Allow-Headers",
+	"Access-Control-Expose-Headers",
+	"Access-Control-Max-Age",
+	"Timing-Allow-Origin",
+}
+
+// stripCORSGrants removes every corsGrantHeaders entry. Del is canonical-key based,
+// so a lowercase or oddly-cased spelling from the upstream is caught too.
+func stripCORSGrants(h http.Header) {
+	for _, name := range corsGrantHeaders {
+		h.Del(name)
+	}
 }
 
 // stripFrameAncestors removes the frame-ancestors directive from any

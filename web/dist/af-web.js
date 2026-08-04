@@ -6362,6 +6362,26 @@ async function reorderTab(id, title, tabName, index, tabId, token2) {
   return af("ReorderTab", { id, title, repo_id: "", tab_id: tabId, tab_name: tabName, new_index: index }, token2);
 }
 var WEBTAB_ERROR_HEADER = "x-af-webtab-error";
+async function fetchPreviewOrigin(sessionId, tabId, token2) {
+  const url = `/v1/preview-auth?session=${encodeURIComponent(sessionId)}&tab=${encodeURIComponent(tabId)}`;
+  const headers = {};
+  if (token2 !== "") {
+    headers.Authorization = `Bearer ${token2}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "GET", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return "";
+    }
+    const env = await resp.json();
+    if (env?.error != null) {
+      return "";
+    }
+    return env?.data?.origin ?? "";
+  } catch {
+    return "";
+  }
+}
 async function probeWebTab(path, token2, timeoutMs) {
   const headers = {};
   if (token2 !== "") {
@@ -9789,6 +9809,25 @@ function paneAddressUsesOrdinal(webTarget, realId) {
   }
   return realId === "";
 }
+function canUsePreviewOrigin(loc) {
+  if (loc.protocol !== "http:") {
+    return false;
+  }
+  const host = loc.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+}
+function previewOriginSrc(origin, target) {
+  const base = `${origin.replace(/\/$/, "")}/${targetPathOf(target)}`;
+  const query = targetQueryOf(target);
+  return query ? `${base}?${query}` : base;
+}
+function webSandbox(isVSCode, onPreviewOrigin) {
+  const base = "allow-scripts allow-forms allow-popups allow-modals";
+  if (isVSCode) {
+    return `${base} allow-same-origin allow-downloads`;
+  }
+  return onPreviewOrigin ? `${base} allow-same-origin` : base;
+}
 
 // src/tablabel.ts
 function tabIcon(kind) {
@@ -9844,6 +9883,54 @@ function el(tag, cls) {
 function webFallbackMs() {
   const override = globalThis.__afWebtabFallbackMs;
   return typeof override === "number" ? override : 2500;
+}
+var PREVIEW_PROBE_HOST = "afprobe.localhost";
+var PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+function previewProbeMs() {
+  const override = globalThis.__afPreviewProbeMs;
+  return typeof override === "number" ? override : 2500;
+}
+var previewReachable = /* @__PURE__ */ new Map();
+function previewOriginReachable(origin) {
+  let port;
+  try {
+    port = new URL(origin).port;
+  } catch {
+    return Promise.resolve(false);
+  }
+  const cached = previewReachable.get(port);
+  if (cached !== void 0) {
+    return cached;
+  }
+  const probe = new Promise((resolve) => {
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.setAttribute("aria-hidden", "true");
+    frame.style.display = "none";
+    let done = false;
+    const finish = (ok) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      window.clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      frame.remove();
+      resolve(ok);
+    };
+    const onMessage = (e) => {
+      if (e.source === frame.contentWindow && e.data === PREVIEW_PROBE_MESSAGE) {
+        finish(true);
+      }
+    };
+    const timer = window.setTimeout(() => finish(false), previewProbeMs());
+    window.addEventListener("message", onMessage);
+    frame.src = `http://${PREVIEW_PROBE_HOST}:${port}/`;
+    document.body.appendChild(frame);
+  });
+  previewReachable.set(port, probe);
+  return probe;
 }
 function hostLabel(target) {
   try {
@@ -10366,10 +10453,7 @@ var SplitView = class {
     bar.append(reload, urlText, open);
     const frame = document.createElement("iframe");
     frame.className = "af-webframe";
-    frame.setAttribute(
-      "sandbox",
-      isVSCode ? "allow-scripts allow-forms allow-popups allow-modals allow-same-origin allow-downloads" : "allow-scripts allow-forms allow-popups allow-modals"
-    );
+    frame.setAttribute("sandbox", webSandbox(isVSCode, false));
     if (isVSCode) {
       frame.setAttribute("allow", "clipboard-read; clipboard-write");
     }
@@ -10446,6 +10530,21 @@ var SplitView = class {
       frame.hidden = true;
     };
     const external = !proxied;
+    let previewSrcOnce = null;
+    const resolvePreviewSrc = (fresh) => {
+      if (fresh) {
+        previewSrcOnce = null;
+      }
+      if (previewSrcOnce === null) {
+        previewSrcOnce = webProxied && !this.archived && canUsePreviewOrigin(window.location) ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
+          if (origin === "") {
+            return "";
+          }
+          return await previewOriginReachable(origin) ? previewOriginSrc(origin, target) : "";
+        }) : Promise.resolve("");
+      }
+      return previewSrcOnce;
+    };
     const load = async (bust = false) => {
       const seq = ++probeSeq;
       if (webProxied) {
@@ -10462,8 +10561,18 @@ var SplitView = class {
         showExternalFallback();
         return;
       }
+      const previewSrc = await resolvePreviewSrc(bust);
+      if (disposed || seq !== probeSeq) {
+        return;
+      }
+      const base = previewSrc !== "" ? previewSrc : src;
+      frame.setAttribute("sandbox", webSandbox(isVSCode, previewSrc !== ""));
+      if (previewSrc !== "") {
+        open.href = previewSrc;
+        fbLink.href = previewSrc;
+      }
       showFrame();
-      const next = bust && webProxied ? cacheBustedWebSrc(src, nextReloadNonce()) : src;
+      const next = bust && webProxied ? cacheBustedWebSrc(base, nextReloadNonce()) : base;
       if (frame.getAttribute("src") === next) {
         frame.src = "";
       }

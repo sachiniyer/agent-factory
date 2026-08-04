@@ -106,6 +106,13 @@ VITE_MARKER=AF_VITE_OK
 # not: an absolute path escapes the tab prefix and cannot be attributed back to a
 # tab (#1811), so it has to 404 rather than be answered with the SPA shell.
 VITE_ABS_TITLE=AF_ABS_ASSET_EXECUTED
+# The PER-TAB preview origin port (#1856 step 3b). It is deliberately NOT written
+# into config.json: preview_listen_addr is off by default, and leaving it off is
+# what keeps every test above covering the same-origin /v1/webtab/ mirror — the path
+# a REMOTE viewer keeps using, and the one that must not regress. The one test that
+# needs per-tab origins turns the key on through `af config set` (which rebinds the
+# listener live, #2480) and turns it back off when it is done.
+PREVIEW_PORT=8893
 # The web-tab session for the mirror-path / asset tests, kept SEPARATE from
 # SESSION_WEB so it is immune to the tab-consuming order of the tests there.
 # Substring caveat as above: no name may contain another session's name.
@@ -592,6 +599,10 @@ done
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_DEAD" --kind web --port "$DEAD_PORT" --name deadport >/dev/null
 # Fail loudly HERE if the port is somehow live: the whole fixture is the ABSENCE of
 # a server, and a regression would otherwise read as a confusing Playwright miss.
+if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PREVIEW_PORT/"; then
+    echo "FATAL: something is listening on $PREVIEW_PORT; the per-tab preview origin needs it free (#1856)" >&2
+    exit 1
+fi
 if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$DEAD_PORT/"; then
     echo "FATAL: something is listening on $DEAD_PORT; the dead-dev-server fixture needs it free (#1813)" >&2
     exit 1
@@ -712,6 +723,7 @@ export AF_WEB_DEAD_PORT="$DEAD_PORT"
 export AF_VITE_MARKER="$VITE_MARKER"
 export AF_VITE_ABS_TITLE="$VITE_ABS_TITLE"
 export AF_WEBTAB_NOURL_NAME="$NOURL_TAB"
+export AF_WEB_PREVIEW_PORT="$PREVIEW_PORT"
 # The af CLI + the mock repo it targets, so a test can mutate state OUT-OF-BAND —
 # as an agent or a script does, from outside the browser — and assert the open SPA
 # reacts to the daemon's event (#1812). AGENT_FACTORY_HOME is already exported

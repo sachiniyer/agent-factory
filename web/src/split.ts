@@ -48,19 +48,22 @@ import {
   tabsRebound,
   validate,
 } from "./layout.js";
-import { probeWebTab } from "./api.js";
+import { fetchPreviewOrigin, probeWebTab } from "./api.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
 // iframeIsProxied, which also answers it for a vscode tab (always proxied, and with no
 // target to classify). Calling it directly here would re-fork the question.
 import {
   cacheBustedWebSrc,
+  canUsePreviewOrigin,
   iframeIdentity,
   iframeIsProxied,
   type IframeSpec,
   nextReloadNonce,
   paneAddressUsesOrdinal,
+  previewOriginSrc,
   webProxyPath,
+  webSandbox,
 } from "./tabaddr.js";
 import { tabIcon, tabLabel } from "./tablabel.js";
 import { sessionStreamEndpoint } from "./stream_endpoint.js";
@@ -129,6 +132,93 @@ function el(tag: string, cls: string): HTMLElement {
 function webFallbackMs(): number {
   const override = (globalThis as { __afWebtabFallbackMs?: number }).__afWebtabFallbackMs;
   return typeof override === "number" ? override : 2500;
+}
+
+/** The reserved hostname the daemon answers on the preview port with a tiny page
+ *  that posts back to its parent. Mirrors daemon/preview_origin.go
+ *  previewProbeLabel/previewProbeMessage. */
+const PREVIEW_PROBE_HOST = "afprobe.localhost";
+const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+
+/** How long to wait for the probe frame to report. Overridable for tests. */
+function previewProbeMs(): number {
+  const override = (globalThis as { __afPreviewProbeMs?: number }).__afPreviewProbeMs;
+  return typeof override === "number" ? override : 2500;
+}
+
+/** Memoized per preview PORT, not per tab: reachability is a property of the port
+ *  and the browser, identical for every tab on it, so one probe answers for the
+ *  whole page. Keyed on the port so a `preview_listen_addr` change (applied live,
+ *  #2480) is re-probed rather than inheriting the old answer. */
+const previewReachable = new Map<string, Promise<boolean>>();
+
+/** Whether THIS BROWSER can actually reach the preview port behind `origin`
+ *  (#1856 step 3b) — the only question that decides whether a per-tab origin is
+ *  usable, and one no server-side signal can answer.
+ *
+ *  The daemon cannot distinguish a same-machine browser from one at the far end of
+ *  `ssh -L 8443:127.0.0.1:8443 remote`: both arrive on loopback and both see a
+ *  loopback `location`, yet only the first can reach the preview port (the tunnel
+ *  usually forwards 8443 alone). Guessing costs the user a working preview. The
+ *  same probe covers Safari, which does not resolve *.localhost at all, without
+ *  sniffing a user agent — and it correctly says YES when someone HAS forwarded the
+ *  preview port too.
+ *
+ *  It is a FRAMED probe rather than a fetch because the SPA's CSP is
+ *  `default-src 'self'`: every fetch/XHR/WebSocket to another origin is blocked,
+ *  while `frame-src ... http:` is already permissive for web tabs. The frame is
+ *  sandboxed to scripts only (an opaque origin, no same-origin grant), the daemon's
+ *  page posts one fixed secret-free string, and the message is accepted only from
+ *  the exact frame this created — so nothing else on the page can forge a yes.
+ *
+ *  Fails CLOSED: any timeout, error, or unexpected sender leaves the pane on the
+ *  same-origin mirror, which is the behavior every release before this one had. */
+function previewOriginReachable(origin: string): Promise<boolean> {
+  let port: string;
+  try {
+    port = new URL(origin).port;
+  } catch {
+    return Promise.resolve(false);
+  }
+  const cached = previewReachable.get(port);
+  if (cached !== undefined) {
+    return cached;
+  }
+  // Keyed on the PORT, so a listener that moved is a different key and gets its own
+  // probe; only a listener that came back on the SAME port reuses this answer, which
+  // is the case where the answer is still true.
+  const probe = new Promise<boolean>((resolve) => {
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.setAttribute("aria-hidden", "true");
+    frame.style.display = "none";
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) {
+        return;
+      }
+      done = true;
+      window.clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      frame.remove();
+      resolve(ok);
+    };
+    const onMessage = (e: MessageEvent): void => {
+      // Only the frame we just created may answer, and only with the fixed string.
+      if (e.source === frame.contentWindow && e.data === PREVIEW_PROBE_MESSAGE) {
+        finish(true);
+      }
+    };
+    const timer = window.setTimeout(() => finish(false), previewProbeMs());
+    window.addEventListener("message", onMessage);
+    // No `load` handler: a browser that cannot resolve the name still fires load on
+    // its own error page, so the POSTED MESSAGE is the only trustworthy signal.
+    frame.src = `http://${PREVIEW_PROBE_HOST}:${port}/`;
+    document.body.appendChild(frame);
+  });
+  previewReachable.set(port, probe);
+  return probe;
 }
 
 /** A retained layout, plus the tab identities its leaf ordinals were bound against.
@@ -888,12 +978,15 @@ export class SplitView {
     // code-server runs as the user with a terminal and arbitrary code execution,
     // so anything able to serve through this frame already owns the machine. The
     // boundary is that the daemon controls what is served here, not the sandbox.
-    frame.setAttribute(
-      "sandbox",
-      isVSCode
-        ? "allow-scripts allow-forms allow-popups allow-modals allow-same-origin allow-downloads"
-        : "allow-scripts allow-forms allow-popups allow-modals",
-    );
+    //
+    // A web tab on its OWN preview origin (#1856) is the third case, and load()
+    // re-sets the attribute for it just before navigating (see webSandbox): there the
+    // frame is CROSS-origin to the SPA, so allow-same-origin gives the dev server a
+    // real origin of its own — localStorage, its own cookies, service workers — while
+    // still leaving it unable to reach this document or its token. It is set at
+    // navigation time rather than here because which origin a frame ends up on is not
+    // known until the daemon has been asked, and the fallback must not carry it.
+    frame.setAttribute("sandbox", webSandbox(isVSCode, false));
     // The editor needs the clipboard for copy/paste to behave like a real VS Code;
     // an arbitrary framed site does not get it.
     if (isVSCode) {
@@ -1086,6 +1179,49 @@ export class SplitView {
     // Item A routes it to the persistent fallback instead of the frame.
     const external = !proxied;
 
+    // The tab's OWN preview origin (#1856 step 3b), resolved lazily and at most once
+    // per mount: "" means there is none and the mirror src stands. Memoized on the
+    // PROMISE, not the value, so a Retry racing the first load cannot issue a second
+    // /v1/preview-auth round trip or pick a different answer than the frame already
+    // navigated to.
+    //
+    // It is asked for only when this page could actually reach one. A remote viewer
+    // (the SPA served from anything but a loopback address) would resolve an
+    // af….localhost name to its OWN machine, so it keeps the same-origin sandboxed
+    // mirror — unchanged from every release before this one, and the only thing that
+    // works through a single forwarded port.
+    let previewSrcOnce: Promise<string> | null = null;
+    const resolvePreviewSrc = (fresh: boolean): Promise<string> => {
+      if (fresh) {
+        // A user-initiated ↻ / Retry re-asks. `preview_listen_addr` applies LIVE
+        // (#2480), so between two loads of the SAME pane the listener may have moved
+        // port or been turned off — and a cached answer would keep pointing the frame
+        // at a dead port instead of falling back to the mirror or picking up the new
+        // one. Re-asking is what ↻ already means for the liveness probe and the cache
+        // buster; the origin is the third thing "give me the current page" covers.
+        previewSrcOnce = null;
+      }
+      if (previewSrcOnce === null) {
+        previewSrcOnce =
+          webProxied && !this.archived && canUsePreviewOrigin(window.location)
+            ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
+                if (origin === "") {
+                  return "";
+                }
+                // The daemon says a per-tab origin EXISTS; only the browser can say
+                // whether it is REACHABLE from here. Under
+                // `ssh -L 8443:127.0.0.1:8443 remote` this page's location is
+                // loopback while the preview port is on the far end and unforwarded,
+                // and Safari does not resolve *.localhost at all. Both look identical
+                // from the daemon, and getting either wrong would abandon a working
+                // mirror for a frame that loads nothing.
+                return (await previewOriginReachable(origin)) ? previewOriginSrc(origin, target) : "";
+              })
+            : Promise.resolve("");
+      }
+      return previewSrcOnce;
+    };
+
     const load = async (bust = false): Promise<void> => {
       const seq = ++probeSeq;
       if (webProxied) {
@@ -1106,11 +1242,34 @@ export class SplitView {
         showExternalFallback();
         return;
       }
+      // Which origin this frame will sit on. Resolved AFTER the liveness probe, which
+      // deliberately keeps using the same-origin mirror path: that request is the
+      // PARENT's and must stay readable by it, and it is exactly the route that stays
+      // available when there is no preview origin.
+      const previewSrc = await resolvePreviewSrc(bust);
+      if (disposed || seq !== probeSeq) {
+        return; // torn down, or a newer Retry owns this pane now
+      }
+      const base = previewSrc !== "" ? previewSrc : src;
+      // The frame's sandbox follows the origin it is about to load, never the other
+      // way round: allow-same-origin is granted ONLY for a cross-origin per-tab
+      // preview, where it cannot reach this document. On the same-origin mirror the
+      // frame keeps its opaque origin, which is what has always kept an agent-supplied
+      // dev server away from the SPA's bearer token.
+      frame.setAttribute("sandbox", webSandbox(isVSCode, previewSrc !== ""));
+      // Both open affordances follow the frame: a per-tab preview origin is the
+      // address that actually renders the app correctly, so "Open" must hand the user
+      // that one rather than the mirror it was built from.
+      if (previewSrc !== "") {
+        open.href = previewSrc;
+        fbLink.href = previewSrc;
+      }
       showFrame();
       // A user-initiated reload of a PROXIED target is cache-busted (#1900): without
       // it, re-assigning the same URL may be answered from the browser's HTTP cache
       // (or an intermediary's) with exactly the stale page ↻ exists to escape. Built
-      // from the pristine `src` each time, so the param is replaced, not accumulated.
+      // from the pristine `base` each time — the mirror src, or this tab's own preview
+      // origin — so the param is replaced, not accumulated.
       //
       // The value comes from the module-scope nextReloadNonce(), never a counter local
       // to this mount: the browser's cache outlives the pane, so a per-mount sequence
@@ -1128,7 +1287,7 @@ export class SplitView {
       // nothing there — the editor is not the thing a developer is iterating on, and
       // its notices are already served no-store — while code-server does read its own
       // query string (?folder=…), so injecting one is unforced risk for no gain.
-      const next = bust && webProxied ? cacheBustedWebSrc(src, nextReloadNonce()) : src;
+      const next = bust && webProxied ? cacheBustedWebSrc(base, nextReloadNonce()) : base;
       // Re-assigning src is what forces a reload (contentWindow.reload throws
       // cross-origin), but assigning a URL the frame ALREADY holds does not navigate —
       // so clear it first in exactly that case. A cache-busted URL always differs, so

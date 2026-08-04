@@ -97,15 +97,15 @@ func webListenerPolicy(cfg *config.Config) tokenGatePolicy {
 // preview origin is not the control-plane listener and does not inherit its
 // require_token/require_loopback_token posture.
 //
-// It returns the STRICT zero value — token mandatory for every peer, no
+// It returns the STRICT zero value — credential mandatory for every peer, no
 // exemptions — deliberately. The preview origin serves untrusted, repo/agent-
-// controlled content, and its credential is the PER-TAB preview token
-// (previewListenerAuth), not the daemon bearer — so it must NOT inherit the control
+// controlled content, and its credential is the PER-TAB origin label
+// (previewOriginAuth), not the daemon bearer — so it must NOT inherit the control
 // plane's require_token/require_loopback_token relaxations, under which the web UI
-// opens with no token. Here the token is mandatory for every peer, always: the gate
-// derives the request's own-tab token and compares (a loopback browser is exactly
-// the peer this must authenticate). The listener still serves no content until step
-// 3b, so the strict posture never blocks a real surface.
+// opens with no token. Here the credential is mandatory for every peer, always: the
+// gate re-derives the label of the tab the request's Host names and compares. A
+// loopback browser is exactly the peer this must authenticate — exempting it would
+// make every tab's preview readable from every other tab's origin.
 func previewListenerPolicy(_ *config.Config) tokenGatePolicy {
 	return tokenGatePolicy{}
 }
@@ -130,10 +130,16 @@ const (
 	withoutWebShell webShell = iota
 	// withWebShell serves the browser SPA on every non-/v1 path — the daemon.
 	withWebShell
-	// previewShell answers every non-/v1 path with the preview origin's OWN 404.
-	// It must NOT reuse withoutWebShell's message: that text names the control-plane
-	// address, which the preview port must not advertise (least of all to an
-	// unauthenticated peer), and "agent-server" is simply wrong here (#1856).
+	// previewShell wraps the preview listener in previewShellHandler, which answers a
+	// request whose Host carries no af-shaped per-tab label with the preview origin's
+	// OWN explanatory 404 and passes everything else to the gate. It must NOT reuse
+	// withoutWebShell's message: that text names the control-plane address, which the
+	// preview port must not advertise (least of all to an unauthenticated peer), and
+	// "agent-server" is simply wrong here (#1856).
+	//
+	// Note it filters by HOST, not by path: on a per-tab preview origin the tab owns
+	// the whole path space (including /v1/...), so a path filter would shadow a real
+	// route of the app being previewed.
 	previewShell
 )
 
@@ -145,9 +151,9 @@ const (
 // origin.
 type tcpListenerAuth struct {
 	// expectedForRequest returns the credential THIS request must present, derived
-	// per request (the preview listener's per-tab HMAC token, keyed on the sid/tid in
-	// the path). It becomes authGate.expectedTokenForRequest. There is no single
-	// credential to advertise, so the banner token is empty and per-tab tokens are
+	// per request (the preview listener's per-tab HMAC label, keyed on the tab its
+	// Host names). It becomes authGate.expectedTokenForRequest. There is no single
+	// credential to advertise, so the banner token is empty and per-tab origins are
 	// vended via /v1/preview-auth. Fail-closed: an empty return denies (ConstantTimeEqual).
 	expectedForRequest func(*http.Request) (string, error)
 	// presented extracts the credential a request carries; it becomes
@@ -169,8 +175,28 @@ type livePosture struct {
 	// policyFromConfig derives the gate's token/loopback posture from the snapshot
 	// (require_token / require_loopback_token) — the control-plane web listener. The
 	// preview listener leaves it false: its gate posture is the fixed strict zero
-	// value (previewListenerPolicy), and only its CORS list is live.
+	// value (previewListenerPolicy).
 	policyFromConfig bool
+	// previewOrigin marks the web-tab preview listener, which carries no control
+	// plane and whose whole path space belongs to the previewed app. It is ONE flag
+	// because it is one fact, and three consequences follow from it (all in
+	// requestPosture.previewOrigin / servePosture):
+	//
+	//   - the cross-origin allow-list is forced EMPTY, ignoring cors_allowed_origins.
+	//     This is the load-bearing half of #1856's cross-tab isolation: per-tab
+	//     origins isolate a READ only while the browser refuses to expose one tab
+	//     origin's response to another, which it does only while no
+	//     Access-Control-Allow-Origin comes back. An operator sets
+	//     cors_allowed_origins to let a separately-hosted UI call the CONTROL API;
+	//     letting it reach the preview origin would hand tab A's dev-server JS a
+	//     readable response from tab B.
+	//   - the OPTIONS and /v1/auth-info shortcuts are withheld, so they cannot shadow
+	//     a previewed app's own route or method.
+	//   - a gate denial renders the framed notice instead of a JSON envelope.
+	//
+	// Zero value false keeps the control listener's behavior, and it is inert for the
+	// agent-server (static posture, no livePosture at all).
+	previewOrigin bool
 }
 
 // startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
@@ -259,7 +285,12 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				g.tokenDisabled = !c.RequireToken
 				g.loopbackExempt = boundLoopback && !c.RequireLoopbackToken
 			}
-			return requestPosture{gate: g, cors: c.CORSAllowedOrigins}
+			cors := c.CORSAllowedOrigins
+			if live.previewOrigin {
+				// The preview origin answers no cross-origin reader, ever — see previewOrigin.
+				cors = nil
+			}
+			return requestPosture{gate: g, cors: cors, previewOrigin: live.previewOrigin}
 		})
 	} else {
 		gate := &authGate{
@@ -283,7 +314,7 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 	case withWebShell:
 		handler = webShellHandler(handler)
 	case previewShell:
-		handler = noWebShellHandler(handler, noPreviewContentMessage)
+		handler = previewShellHandler(handler)
 	default: // withoutWebShell — the agent-server
 		handler = noWebShellHandler(handler, noWebShellMessage)
 	}

@@ -206,6 +206,22 @@ type requestPosture struct {
 	// cors is the exact-match browser-origin allow-list; empty ⇒ no
 	// Access-Control-Allow-Origin is emitted.
 	cors []string
+	// previewOrigin marks a listener that carries NO control plane and whose whole
+	// path space belongs to the previewed app (#1856 step 3b). It changes three
+	// things below, and all three follow from that one fact:
+	//
+	//   - the OPTIONS short-circuit is withheld. It exists to answer a CORS preflight
+	//     before the gate; this listener never emits an allow-origin, so there is no
+	//     preflight to succeed — and answering OPTIONS here would steal the method
+	//     from a previewed app that handles it (a dev server's own CORS API, WebDAV).
+	//   - /v1/auth-info is not answered. It is a control-plane probe about a token
+	//     this listener does not use, and the path belongs to the app.
+	//   - a denial renders the framed notice rather than the JSON envelope (see
+	//     servePosture). This route is shown IN a pane.
+	//
+	// Zero value false keeps the control-plane behavior, so only the preview
+	// listener opts in.
+	previewOrigin bool
 }
 
 // servePosture runs the auth + CORS flow for one request against a posture the
@@ -213,23 +229,42 @@ type requestPosture struct {
 // of its own — that is the whole point: the one read happened once, above.
 func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p requestPosture) {
 	applyCORSPolicy(w, r, p.cors)
-	if r.Method == http.MethodOptions {
-		// CORS preflight carries no credentials — answer it before the gate
-		// so cross-origin discovery works for the web client without a token.
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	// The auth-info probe is answered BEFORE the gate: its whole purpose is
-	// to let a tokenless client discover whether it needs a token, so gating
-	// it would defeat it. It reports the gate's decision FOR THIS PEER, so a
-	// loopback client sees auth_required=false while a network client on the
-	// same daemon sees true — the same authRequired predicate the gate
-	// enforces below, never a different answer.
-	if r.URL.Path == authInfoPath {
-		writeAuthInfo(w, r, p.gate)
-		return
+	// Both shortcuts below are CONTROL-PLANE conveniences, and both are withheld on a
+	// per-tab preview origin, where every path and every method belongs to the
+	// previewed app (see requestPosture.previewOrigin). Answering them there would
+	// shadow a real route of the dev server being previewed — the exact thing the
+	// per-tab origin exists to stop.
+	if !p.previewOrigin {
+		if r.Method == http.MethodOptions {
+			// CORS preflight carries no credentials — answer it before the gate
+			// so cross-origin discovery works for the web client without a token.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// The auth-info probe is answered BEFORE the gate: its whole purpose is
+		// to let a tokenless client discover whether it needs a token, so gating
+		// it would defeat it. It reports the gate's decision FOR THIS PEER, so a
+		// loopback client sees auth_required=false while a network client on the
+		// same daemon sees true — the same authRequired predicate the gate
+		// enforces below, never a different answer.
+		if r.URL.Path == authInfoPath {
+			writeAuthInfo(w, r, p.gate)
+			return
+		}
 	}
 	if p.gate != nil && !p.gate.authorize(r) {
+		if p.previewOrigin {
+			// A preview origin's denial is RENDERED IN A PANE, so it must not be the
+			// JSON envelope. The everyday cause is a daemon restart: the secret rotates
+			// and the registry empties, so an iframe left open keeps addressing a host
+			// that no longer names a tab. Say that, and say what fixes it.
+			//
+			// Deliberately NON-retrying: the old address can never become valid again
+			// under the new secret, so a self-refreshing page would spin forever. The
+			// web client mints a fresh origin when it rebuilds the pane.
+			writePreviewExpiredPage(w)
+			return
+		}
 		writeHTTPError(w, r, http.StatusUnauthorized, errUnauthorized)
 		return
 	}

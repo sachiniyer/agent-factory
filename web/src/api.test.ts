@@ -15,6 +15,7 @@ import {
   type CreateSessionInput,
   createTab,
   errorText,
+  fetchPreviewOrigin,
   handoffSession,
   isMutationCommittedError,
   killSession,
@@ -897,4 +898,69 @@ test("listDirectory REJECTS a refused directory rather than resolving to an empt
   );
   assert.ok(err instanceof ApiError, "a refusal must reach the caller as an error");
   assert.equal(err.message, "cannot read /work/locked: permission denied", "the daemon's own reason, verbatim");
+});
+
+// --- fetchPreviewOrigin (#1856 step 3b) -------------------------------------
+//
+// The per-tab preview origin is an ENHANCEMENT over the same-origin mirror every
+// release before this one used. So the contract that matters most is what happens
+// when it is unavailable: every failure mode must resolve to "", which the caller
+// reads as "keep the mirror". A throw, or a stray undefined, would cost the user a
+// working preview to gain a nicer one.
+
+/** Stubs global.fetch with a single canned response for the preview-auth probe. */
+function stubPreviewAuth(resp: Partial<Response> & { json?: () => Promise<unknown> }): { url: string; auth?: string } {
+  const cap: { url: string; auth?: string } = { url: "" };
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    cap.url = url;
+    cap.auth = (init.headers as Record<string, string> | undefined)?.Authorization;
+    return resp as unknown as Response;
+  };
+  return cap;
+}
+
+test("fetchPreviewOrigin returns the daemon's origin and sends the bearer", async () => {
+  const cap = stubPreviewAuth({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: { origin: "http://afabc.localhost:8444" }, error: null }),
+  });
+  assert.equal(await fetchPreviewOrigin("sess 1", "tab/2", "tok"), "http://afabc.localhost:8444");
+  assert.equal(cap.url, "/v1/preview-auth?session=sess%201&tab=tab%2F2", "ids must be encoded, not concatenated");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("fetchPreviewOrigin omits Authorization for a tokenless client", async () => {
+  const cap = stubPreviewAuth({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: { origin: "http://afabc.localhost:8444" }, error: null }),
+  });
+  await fetchPreviewOrigin("s", "t", "");
+  assert.equal(cap.auth, undefined, "an empty token is the no-credential sentinel, not a bogus 'Bearer '");
+});
+
+test("fetchPreviewOrigin: an unbound preview listener yields '' — the mirror stands", async () => {
+  stubPreviewAuth({ ok: true, status: 200, json: async () => ({ data: { origin: "" }, error: null }) });
+  assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
+});
+
+test("fetchPreviewOrigin: every failure degrades to '' rather than throwing", async () => {
+  // A non-2xx (an older daemon with no such route, a 401).
+  stubPreviewAuth({ ok: false, status: 404, json: async () => ({ data: null, error: "unknown route" }) });
+  assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
+
+  // A 200 whose envelope carries an error.
+  stubPreviewAuth({ ok: true, status: 200, json: async () => ({ data: null, error: "boom" }) });
+  assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
+
+  // A body that is not the expected shape.
+  stubPreviewAuth({ ok: true, status: 200, json: async () => ({ data: {}, error: null }) });
+  assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
+
+  // A transport failure.
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
+    throw new TypeError("network down");
+  };
+  assert.equal(await fetchPreviewOrigin("s", "t", "tok"), "");
 });

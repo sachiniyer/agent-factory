@@ -20,7 +20,16 @@ import { tabBarSig, tabIdentity, tabRealId } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { type SessionData, TabKind } from "./types.js";
 import { leaves, remapByIdentity, resolveDragTab, tabsRebound } from "./layout.js";
-import { iframeIdentity, iframeIsProxied, isLoopbackWebUrl, paneAddressUsesOrdinal, webProxyPath } from "./tabaddr.js";
+import {
+  canUsePreviewOrigin,
+  iframeIdentity,
+  iframeIsProxied,
+  isLoopbackWebUrl,
+  paneAddressUsesOrdinal,
+  previewOriginSrc,
+  webProxyPath,
+  webSandbox,
+} from "./tabaddr.js";
 
 // --- tabRealId: the real id, never a synthesized one -----------------------
 
@@ -474,4 +483,87 @@ test("a VSCODE pane's proxy path is the bare tab prefix — there is no target t
     webProxyPath("sess-1", "id-vscode", "", "tok"),
     "/v1/webtab/sess-1/id-vscode/?af_webtab_token=tok",
   );
+});
+
+// --- per-tab PREVIEW ORIGIN (#1856 step 3b) ---------------------------------
+//
+// The preview origin is what finally makes an ABSOLUTE-path asset work. Under the
+// /v1/webtab/<sid>/<tid>/ mirror, an app that emits /assets/app.js resolves it
+// against the daemon's ROOT, escapes the prefix, and 404s (#1811 made that honest;
+// it could not fix it). On a per-tab origin the tab owns the root, so the browser
+// resolves the very same absolute path onto the dev server's own /assets/app.js.
+// These pin the addressing half of that; the daemon half is pinned in
+// daemon/preview_origin_test.go.
+
+test("previewOriginSrc: a root target frames the origin root, so absolute paths resolve", () => {
+  assert.equal(
+    previewOriginSrc("http://afabc.localhost:8444", "http://localhost:3000/"),
+    "http://afabc.localhost:8444/",
+  );
+  assert.equal(
+    previewOriginSrc("http://afabc.localhost:8444", "http://localhost:3000"),
+    "http://afabc.localhost:8444/",
+  );
+});
+
+test("previewOriginSrc: the target's path and query are mirrored onto the tab's own origin", () => {
+  assert.equal(
+    previewOriginSrc("http://afabc.localhost:8444", "http://localhost:3000/app/viewer.html?doc=123&a=b"),
+    "http://afabc.localhost:8444/app/viewer.html?doc=123&a=b",
+  );
+});
+
+test("previewOriginSrc: no credential is appended — the origin's hostname IS the credential", () => {
+  const src = previewOriginSrc("http://afabc.localhost:8444", "http://localhost:3000/app");
+  assert.ok(!src.includes("af_webtab_token"), "no daemon bearer may ride a preview-origin URL");
+  assert.ok(!src.includes("af_preview_token"), "the retired query transport must not be revived");
+  assert.ok(!src.includes("token"), src);
+});
+
+test("previewOriginSrc: a trailing slash on the vended origin does not double up", () => {
+  assert.equal(
+    previewOriginSrc("http://afabc.localhost:8444/", "http://localhost:3000/app"),
+    "http://afabc.localhost:8444/app",
+  );
+});
+
+// canUsePreviewOrigin is THE guard that keeps remote viewing unchanged: a
+// *.localhost name is resolved by the browser to its OWN loopback, so a per-tab
+// origin exists only when the daemon and the browser are the same machine.
+test("canUsePreviewOrigin: a loopback-served SPA may use per-tab origins", () => {
+  for (const hostname of ["localhost", "127.0.0.1", "127.1.2.3", "::1", "[::1]", "LOCALHOST", "localhost."]) {
+    assert.equal(canUsePreviewOrigin({ protocol: "http:", hostname }), true, hostname);
+  }
+});
+
+test("canUsePreviewOrigin: a REMOTE viewer keeps the same-origin sandboxed mirror", () => {
+  for (const hostname of ["box.ts.net", "192.168.1.10", "example.com", "10.0.0.5", "afbox.localhost.evil.com"]) {
+    assert.equal(canUsePreviewOrigin({ protocol: "http:", hostname }), false, hostname);
+  }
+});
+
+test("canUsePreviewOrigin: an https page cannot frame a plain-http per-tab origin", () => {
+  assert.equal(canUsePreviewOrigin({ protocol: "https:", hostname: "localhost" }), false);
+});
+
+// --- the sandbox follows the ORIGIN, never the other way round ---------------
+
+test("webSandbox: a same-origin mirror frame gets NO allow-same-origin", () => {
+  const s = webSandbox(false, false);
+  assert.ok(!s.includes("allow-same-origin"), s);
+  assert.ok(s.includes("allow-scripts"), s);
+});
+
+test("webSandbox: a cross-origin per-tab preview frame may have a real origin", () => {
+  const s = webSandbox(false, true);
+  assert.ok(s.includes("allow-same-origin"), s);
+  assert.ok(!s.includes("allow-downloads"), "downloads stay a vscode-only grant");
+});
+
+test("webSandbox: a vscode frame keeps its own grant regardless of origin", () => {
+  for (const onPreview of [false, true]) {
+    const s = webSandbox(true, onPreview);
+    assert.ok(s.includes("allow-same-origin"), s);
+    assert.ok(s.includes("allow-downloads"), s);
+  }
 });

@@ -51,7 +51,7 @@ func boundWebListeners(t *testing.T, cfg *config.Config) (*Manager, *webListener
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	m, err := NewManager(cfg)
 	require.NoError(t, err)
-	wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}))
+	wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}), newPreviewMux(&controlServer{manager: m}))
 	m.webListeners = wl
 	failed, err := wl.reconcile(m.Config())
 	require.NoError(t, err)
@@ -247,7 +247,7 @@ func TestWebListenersRetainCloserAfterUnexpectedListenerDeath(t *testing.T) {
 
 			m, err := NewManager(cfg)
 			require.NoError(t, err)
-			wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}))
+			wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}), newPreviewMux(&controlServer{manager: m}))
 			m.webListeners = wl
 
 			var listener *readObservedListener
@@ -324,7 +324,7 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 
 			m, err := NewManager(cfg)
 			require.NoError(t, err)
-			wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}))
+			wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}), newPreviewMux(&controlServer{manager: m}))
 			m.webListeners = wl
 
 			var listener *readObservedListener

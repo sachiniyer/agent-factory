@@ -133,7 +133,7 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// because a web port could not open. The auth/CORS keys apply live per request
 	// (livePosture) and never come through here. A tokenless network bind is
 	// reported, not refused (#2168 Phase 0), by bindWebLocked's banner.
-	wl := newWebListeners(manager, mux)
+	wl := newWebListeners(manager, mux, newPreviewMux(cs))
 	manager.webListeners = wl
 	if _, err := wl.reconcile(manager.cfg); err != nil {
 		log.WarningLog.Printf("daemon web listener(s): %v", err)

@@ -37,9 +37,14 @@ import (
 //     here succeeds.
 type webListeners struct {
 	manager *Manager
-	// webMux is the shared control-plane mux (also served on the unix socket). The
-	// preview listener builds its own mux fresh per bind (newPreviewMux is stateless).
+	// webMux is the shared control-plane mux (also served on the unix socket).
 	webMux http.Handler
+	// previewMux is the web-tab preview listener's OWN mux: one catch-all route that
+	// resolves a tab from the request's per-tab host label and proxies it (#1856). It
+	// is deliberately NOT webMux — the preview origin serves previews only and never
+	// the control API — and it is built once, like webMux, so a rebind cannot hand the
+	// two listeners different handler graphs.
+	previewMux http.Handler
 	// listenTCP is the bind boundary for both restartable listeners. Keeping it
 	// on the owner lets lifecycle tests distinguish an underlying listener death
 	// from the owner's server-close path while exercising the real HTTP server.
@@ -68,8 +73,8 @@ type webListeners struct {
 
 // newWebListeners builds the manager (never binds — startHTTPServer's initial
 // bind and ApplyConfig's rebinds both go through reconcileFromLocked/bind* below).
-func newWebListeners(manager *Manager, webMux http.Handler) *webListeners {
-	return &webListeners{manager: manager, webMux: webMux, listenTCP: net.Listen}
+func newWebListeners(manager *Manager, webMux, previewMux http.Handler) *webListeners {
+	return &webListeners{manager: manager, webMux: webMux, previewMux: previewMux, listenTCP: net.Listen}
 }
 
 // reconcile brings the two socket listeners in line with newCfg, rebinding only
@@ -186,9 +191,11 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 }
 
 // bindPreviewLocked is bindWebLocked for the web-tab preview listener: same
-// bind-new-before-close discipline, its own mux (newPreviewMux), its own per-tab
-// credential (previewListenerAuth), and its own always-strict gate posture (only
-// its CORS list is live). Caller holds wl.mu.
+// bind-new-before-close discipline, its own mux (previewMux), its own per-tab
+// credential (previewOriginAuth), its own always-strict gate posture, and the
+// previewOrigin posture — a forced-empty CORS allow-list (the cross-tab read
+// isolation #1856 rests on), no control-plane path/method shortcuts, and framed
+// denials. Caller holds wl.mu.
 func (wl *webListeners) bindPreviewLocked(addr string) error {
 	if addr == "" {
 		if wl.previewClose != nil {
@@ -204,8 +211,8 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 	cfg := wl.manager.Config()
 	policy := previewListenerPolicy(cfg)
 	notice := config.PreviewListenerExposureNotice(cfg)
-	closer, info, err := startTCPListenerWithListen(newPreviewMux(), addr, cfg, policy, previewShell, previewListenerAuth(wl.manager),
-		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false}, wl.listenTCP)
+	closer, info, err := startTCPListenerWithListen(wl.previewMux, addr, cfg, policy, previewShell, previewOriginAuth(wl.manager),
+		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false, previewOrigin: true}, wl.listenTCP)
 	if err != nil {
 		return fmt.Errorf("apply preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))
 	}
@@ -234,7 +241,7 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 	if old != nil {
 		_ = old()
 	}
-	log.InfoLog.Printf("web-tab preview listener bound on %s (serves no content yet — preview routing lands in a later step)", info.Addr)
+	log.InfoLog.Printf("%s", previewOriginBanner(info.Addr))
 	if notice != "" {
 		log.WarningLog.Printf("%s", notice)
 	}

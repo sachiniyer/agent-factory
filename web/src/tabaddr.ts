@@ -248,3 +248,88 @@ export function paneAddressUsesOrdinal(webTarget: string | null, realId: string)
   }
   return realId === ""; // a legacy terminal streams by ?tab=<ordinal>
 }
+
+/** Whether a per-tab preview origin is even worth ASKING about from this page
+ *  (#1856 step 3b) — a cheap precondition, never the whole answer.
+ *
+ *  A per-tab origin is an `http://af….localhost:<port>` name, and *.localhost is
+ *  resolved by the BROWSER to its own loopback (RFC 6761) — never by DNS, never to
+ *  the daemon's machine. Two things follow, and only the first is decidable here:
+ *
+ *  - an `https://` page cannot frame a plain-`http://` origin at all (mixed
+ *    content), and a page served from a non-loopback host is definitively remote;
+ *  - but a loopback `location` does NOT prove the daemon is local. Under
+ *    `ssh -L 8443:127.0.0.1:8443 remote` the browser URL is `http://localhost:8443`
+ *    while the daemon — and its preview port — are on the far end, and that port is
+ *    usually not forwarded. Switching a frame there on the strength of this check
+ *    alone would abandon a WORKING tunnelled mirror for an address that resolves to
+ *    the viewer's own machine.
+ *
+ *  So this gates the round trip, and `previewOriginReachable` (split.ts) decides:
+ *  it asks the browser to actually load something from the preview port. That also
+ *  answers the browser-support question — Safari does not resolve *.localhost — with
+ *  no user-agent sniffing.
+ *
+ *  Mirrors isLoopbackWebUrl's host rules on the PAGE's own address rather than a
+ *  target's. */
+export function canUsePreviewOrigin(loc: { protocol: string; hostname: string }): boolean {
+  if (loc.protocol !== "http:") {
+    return false; // an https:// page cannot frame a plain-http per-tab origin
+  }
+  const host = loc.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+}
+
+/** The iframe src for a web tab on its OWN preview origin (#1856 step 3b).
+ *
+ *  `origin` is what GET /v1/preview-auth vended for this tab — `http://af<label>
+ *  .localhost:<port>`, where the label is an unguessable per-tab HMAC that IS the
+ *  credential the preview listener authenticates. Nothing else is appended to
+ *  authenticate: unlike webProxyPath there is no token query param, because the
+ *  address itself carries the capability and a cross-site frame cannot be relied on
+ *  to send a cookie at all.
+ *
+ *  The tab owns this origin's ROOT, so the target's path is mirrored directly onto
+ *  it: target http://localhost:3000/app/viewer.html?doc=1 becomes
+ *  http://af….localhost:8444/app/viewer.html?doc=1. That is the whole point of the
+ *  per-tab origin — an ABSOLUTE-path asset the app emits (/assets/app.js) now
+ *  resolves to the dev server's own /assets/app.js instead of escaping a mirror
+ *  prefix and 404ing (#1811).
+ *
+ *  The target's own query rides through verbatim, raw, for the same reason
+ *  webProxyPath keeps it: for plenty of dev servers the query IS the address. */
+export function previewOriginSrc(origin: string, target: string): string {
+  const base = `${origin.replace(/\/$/, "")}/${targetPathOf(target)}`;
+  const query = targetQueryOf(target);
+  return query ? `${base}?${query}` : base;
+}
+
+/** The `sandbox` attribute an iframe pane must carry, given WHAT it frames.
+ *
+ *  Three cases, and the difference between them is entirely "can this content reach
+ *  the SPA and its bearer token":
+ *
+ *  - a WEB tab on the same-origin `/v1/webtab/` mirror gets NO allow-same-origin.
+ *    It frames an arbitrary agent-supplied dev server on the SPA's own origin, so
+ *    the opaque origin is the only thing standing between that content and the
+ *    parent document. This is the default, and every remote viewer stays on it.
+ *  - a WEB tab on its OWN preview origin (#1856) gets allow-same-origin, because
+ *    the frame is CROSS-origin to the SPA: the browser's own origin check already
+ *    denies it the parent, so the grant costs nothing and buys the dev server a real
+ *    origin — localStorage, its own cookies, service workers, the things a preview
+ *    that "just works" needs. Note the classic sandbox-escape (allow-scripts +
+ *    allow-same-origin letting a frame remove its own sandbox attribute) requires
+ *    the frame to be SAME-origin with the parent; it does not apply here, and that
+ *    is precisely why this grant waited for the origin split.
+ *  - a VSCODE tab always gets it, plus downloads. Its content is a process the
+ *    daemon itself spawned, and VS Code cannot run under an opaque origin at all.
+ *
+ *  Kept here, beside the addressing that decides which origin a frame lands on, so
+ *  the grant and its precondition are read together and unit-testable. */
+export function webSandbox(isVSCode: boolean, onPreviewOrigin: boolean): string {
+  const base = "allow-scripts allow-forms allow-popups allow-modals";
+  if (isVSCode) {
+    return `${base} allow-same-origin allow-downloads`;
+  }
+  return onPreviewOrigin ? `${base} allow-same-origin` : base;
+}

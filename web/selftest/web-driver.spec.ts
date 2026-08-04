@@ -105,6 +105,21 @@ const DEAD_PORT = process.env.AF_WEB_DEAD_PORT ?? "8892";
 // they run in file order against the state the previous one left.
 const SESSION_ORDER = process.env.AF_WEB_SESSION_ORDER ?? "probe-order";
 
+/** session.TabKindWeb — the kind travels as a bare int in the snapshot projection
+ *  (web/src/types.ts TabKind.Web), never as a name. */
+const TabKindWeb = 3;
+
+/** Whether a web tab's target is loopback, i.e. one the daemon will actually
+ *  proxy. Mirrors tabaddr.ts isLoopbackWebUrl closely enough for fixture picking. */
+function isLoopbackTarget(raw: string): boolean {
+  try {
+    const host = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "::1" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+
 /** A rail row by its session title. */
 function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
@@ -2716,6 +2731,148 @@ test("web tab (#1806/#1811): a Vite-shaped subdirectory app previews, and its ab
   const viteFrame = page.frames().find((f) => f.url().includes("/app/viewer.html"));
   expect(viteFrame, "the previewed frame should be attached").toBeTruthy();
   expect(await viteFrame!.title()).not.toContain(VITE_ABS_TITLE);
+});
+
+test("web tab (#1856): a per-tab preview origin loads absolute-path assets and still cannot read across origins", REAL_FIXTURE, async () => {
+  const afBin = process.env.AF_BIN;
+  const previewPort = process.env.AF_WEB_PREVIEW_PORT;
+  test.skip(!afBin || !previewPort, "AF_BIN/AF_WEB_PREVIEW_PORT are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  // preview_listen_addr rebinds the listener LIVE (#2480), so this needs no daemon
+  // restart — and it is turned back off in the finally, because every other web-tab
+  // test in this file deliberately covers the same-origin mirror path (the one a
+  // REMOTE viewer keeps using) and must find the default posture.
+  const setPreview = (value: string): void => {
+    execFileSync(afBin as string, ["config", "set", "preview_listen_addr", value], { stdio: "pipe" });
+  };
+  const originRe = new RegExp(`^http://af[a-z2-7]{32}\\.localhost:${previewPort}`);
+
+  setPreview(`127.0.0.1:${previewPort}`);
+  try {
+    await page.reload();
+
+    // A SIBLING preview origin for the cross-origin read below. It is minted through
+    // the same endpoint the SPA uses, for a REAL web tab found via the snapshot —
+    // the endpoint refuses to mint for a (session, tab) pair that names no live tab,
+    // which is what stops an unreadable cross-origin GET from filling the registry.
+    //
+    // Read from the snapshot rather than scraped from another session's open pane:
+    // this file's web-tab tests permute and consume each other's tabs in file order,
+    // so a scraped src would make this assertion depend on what ran before it.
+    const snap = await page.request.post("/v1/Snapshot", { data: { repo_id: "" } });
+    expect(snap.ok()).toBe(true);
+    const instances = ((await snap.json()) as {
+      data: { instances: { id: string; title: string; tabs?: { id?: string; kind: number; url?: string }[] }[] };
+    }).data.instances;
+    // kind travels as a bare int (TabKind.Web === 3), and the target must be
+    // LOOPBACK: an external web tab is a valid iframe tab but the daemon refuses to
+    // proxy it, so it would prove less about a served sibling.
+    const sibling = instances
+      .filter((i) => !i.title.includes(SESSION_VITE))
+      .flatMap((i) =>
+        (i.tabs ?? [])
+          .filter((tb) => tb.kind === TabKindWeb && tb.id && isLoopbackTarget(tb.url ?? ""))
+          .map((tb) => ({ sid: i.id, tid: tb.id as string })),
+      )[0];
+    expect(sibling, "the fixture must hold a loopback web tab outside the vite session").toBeTruthy();
+    const auth = await page.request.get(
+      `/v1/preview-auth?session=${encodeURIComponent(sibling!.sid)}&tab=${encodeURIComponent(sibling!.tid)}`,
+    );
+    expect(auth.ok(), "the control plane must vend a preview origin once the listener is bound").toBe(true);
+    const otherOrigin = ((await auth.json()) as { data: { origin: string } }).data.origin;
+    expect(otherOrigin, "a live web tab must mint an origin").toMatch(originRe);
+
+    // Now the vite-shaped app — the fixture whose ABSOLUTE-path asset the mirror
+    // path structurally cannot serve (#1811, asserted 404 in the test above).
+    await row(page, SESSION_VITE).click();
+    await page.locator(".af-tabbar").locator(".af-tab", { hasText: "vite" }).click();
+    const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+    await expect(frame).toHaveCount(1, { timeout: 15_000 });
+    // The frame is on the tab's OWN origin, whose ROOT is the dev server's root, and
+    // the target's path is mirrored onto it. No credential rides the URL: the opaque
+    // host label IS the credential.
+    await expect(frame).toHaveAttribute("src", originRe, { timeout: 15_000 });
+    const src = (await frame.getAttribute("src")) ?? "";
+    expect(new URL(src).pathname).toBe("/app/viewer.html");
+    expect(src, "no af credential may ride a per-tab preview URL").not.toContain("af_webtab_token");
+    expect(src, "no af credential may ride a per-tab preview URL").not.toContain("af_preview_token");
+    const previewOrigin = new URL(src).origin;
+    expect(previewOrigin).not.toBe(otherOrigin);
+
+    const framed = page.frameLocator(".af-webframe");
+    await expect(framed.locator("#marker")).toHaveText(VITE_MARKER, { timeout: 15_000 });
+    // Relative assets keep working — the origin move must not cost what the mirror
+    // already delivered.
+    await expect(framed.locator("#sib")).toHaveCSS("color", "rgb(1, 2, 3)", { timeout: 15_000 });
+    await expect(framed.locator("#par")).toHaveCSS("color", "rgb(4, 5, 6)", { timeout: 15_000 });
+
+    const viteFrame = page.frames().find((f) => f.url().startsWith(previewOrigin));
+    expect(viteFrame, "the previewed frame should be attached").toBeTruthy();
+
+    // THE HEADLINE. /assets/app.js — the absolute path that 404s through the mirror —
+    // resolves against this tab's own origin root, loads, and EXECUTES. Its only
+    // effect is to set the document title, so the title is the proof.
+    await expect.poll(() => viteFrame!.title(), { timeout: 15_000 }).toContain(VITE_ABS_TITLE);
+
+    // The frame has a REAL origin of its own (that is what allow-same-origin buys it:
+    // localStorage, cookies, service workers) …
+    expect(await viteFrame!.evaluate(() => window.origin)).toBe(previewOrigin);
+    expect(
+      await viteFrame!.evaluate(() => {
+        try {
+          window.localStorage.setItem("af-probe", "1");
+          return "usable";
+        } catch {
+          return "opaque";
+        }
+      }),
+    ).toBe("usable");
+
+    // … and it STILL cannot reach the af web UI. This is the whole reason the
+    // sandbox could be relaxed: the frame is CROSS-origin to the SPA, so the
+    // browser's own origin check denies it the parent document — and with it the
+    // bearer token — regardless of allow-same-origin.
+    expect(
+      await viteFrame!.evaluate(() => {
+        try {
+          return String(window.parent.document.title);
+        } catch {
+          return "blocked";
+        }
+      }),
+      "a previewed dev server must never reach the af web UI's document",
+    ).toBe("blocked");
+
+    // And it cannot read ANOTHER TAB's preview either. The discriminator matters:
+    // the no-cors probe RESOLVES, which proves the daemon really served that
+    // request — so the cors-mode failure is the browser refusing to expose a
+    // cross-origin response, not the address being dead.
+    expect(
+      await viteFrame!.evaluate(async (other) => {
+        try {
+          await fetch(other + "/", { mode: "no-cors", cache: "no-store" });
+          return "reached";
+        } catch {
+          return "unreachable";
+        }
+      }, otherOrigin),
+      "the sibling tab's origin must really be served — otherwise the read test below proves nothing",
+    ).toBe("reached");
+    expect(
+      await viteFrame!.evaluate(async (other) => {
+        try {
+          const r = await fetch(other + "/", { cache: "no-store" });
+          return await r.text();
+        } catch {
+          return "blocked";
+        }
+      }, otherOrigin),
+      "one tab's preview must not be readable from another tab's origin",
+    ).toBe("blocked");
+  } finally {
+    setPreview("");
+    await page.reload();
+  }
 });
 
 test("web tab (#1810): closing a LOWER tab leaves an open preview on its OWN dev server", REAL_FIXTURE, async () => {

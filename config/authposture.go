@@ -87,13 +87,18 @@ func ListenerExposureNotice(cfg *Config) string {
 // ignore the real one.
 //
 // It also does not gate on require_token. That key governs the control-plane
-// listener's bearer token; the preview origin's own auth is a separate concern
-// (a preview-scoped credential, wired in a later step). Today this listener
-// serves NOTHING — the preview routes have not moved onto it yet — so the honest
-// notice on a network bind is that the origin is reachable and currently inert,
-// not a warning about content that is not served. It exists now so the posture
-// is established at the seam and the later step only has to change the message,
-// never discover it needs one.
+// listener's bearer token; the preview origin's own auth is a separate concern —
+// each tab is served on its OWN unguessable hostname, and that hostname is the
+// credential (#1856 step 3b), so the control listener's posture says nothing about
+// who may read a preview.
+//
+// What the notice must say on a network bind is that binding one is pointless as
+// well as exposed. Per-tab origins live under *.localhost, which a browser resolves
+// to ITS OWN loopback — so a remote viewer cannot reach a per-tab origin however the
+// port is bound, and keeps the sandboxed same-origin preview served from
+// listen_addr. A network bind therefore exposes a port that no remote browser can
+// usefully address, while making the previewed dev servers reachable by anything
+// that learns a tab's hostname.
 //
 // Same emit-at-most-once-per-daemon-start discipline as ListenerExposureNotice:
 // a string, reported by the one startup site, never on a per-request path.
@@ -102,8 +107,9 @@ func PreviewListenerExposureNotice(cfg *Config) string {
 		return ""
 	}
 	return fmt.Sprintf("preview_listen_addr %q is reachable from the network · it is the web-tab preview origin, "+
-		"kept separate from listen_addr so it never serves the daemon control API · it serves no content yet "+
-		"(web-tab previews move onto it in a later step) · set it to a loopback address such as 127.0.0.1:8444, "+
-		"or \"\" to disable it, if it should not be network-reachable",
+		"kept separate from listen_addr so it never serves the daemon control API · it serves your previewed dev "+
+		"servers, each on its own hostname · a network bind gains nothing: per-tab origins are *.localhost names, "+
+		"which a remote browser resolves to its own machine, so remote viewers keep the same-origin preview on "+
+		"listen_addr · set it to a loopback address such as 127.0.0.1:8444, or \"\" to disable it",
 		cfg.PreviewListenAddr)
 }

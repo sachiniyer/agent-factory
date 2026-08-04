@@ -42,19 +42,27 @@ type Manager struct {
 	webListeners *webListeners
 
 	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
-	// a PER-TAB credential (#1856 step 3): the token for (sessionID, tabID) is
-	// previewTabToken(previewSecret, sid, tid). It is minted once, in memory, at
+	// a PER-TAB credential (#1856 step 3): the origin label for (sessionID, tabID) is
+	// previewTabHostLabel(previewSecret, sid, tid). It is minted once, in memory, at
 	// daemon start (crypto/rand, 256 bits) and never written to disk — so it rotates
 	// on every restart and leaves no persistent secret. It is DELIBERATELY distinct
 	// from the daemon bearer token: the preview origin serves untrusted,
 	// repo/agent-controlled content, so a credential that leaked from there must
 	// authorize preview serving of ITS OWN TAB only, never another tab and never the
-	// control API (DeliverPrompt et al.). The preview listener's gate derives the
-	// expected token from the sid/tid in the request and compares; an authenticated
-	// control-plane client obtains a tab's token via GET /v1/preview-auth?session=&tab=.
-	// The secret itself is NEVER vended or logged — only the per-tab derivations are.
-	// Immutable after construction, read lock-free.
+	// control API (DeliverPrompt et al.). The preview listener's gate re-derives the
+	// expected label from the tab a request's Host names and compares; an
+	// authenticated control-plane client obtains a tab's origin via
+	// GET /v1/preview-auth?session=&tab=. The secret itself is NEVER vended or logged
+	// — only the per-tab derivations are. Immutable after construction, read lock-free.
 	previewSecret string
+
+	// previewOrigins maps a minted per-tab preview host label back to its tab. The
+	// label is a one-way HMAC, so this is the only direction that exists: the daemon
+	// can compute a tab's label, never read a label back into a tab. Populated by
+	// /v1/preview-auth and read by the preview listener's gate and proxy. Its own
+	// mutex, deliberately: the gate must resolve a request without ever touching a
+	// session lock (#1878's "the proxy must not do the restore's job").
+	previewOrigins *previewOriginRegistry
 
 	// limitDetector is the resolved usage-limit matcher set (#1146), built from
 	// cfg.LimitPatterns (it compiles the override regexes) and reused across poll
@@ -361,6 +369,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	mgr := &Manager{
 		cfg:                    cfg,
 		previewSecret:          previewSecret,
+		previewOrigins:         newPreviewOriginRegistry(),
 		pollReloadCh:           make(chan struct{}, 1),
 		ready:                  make(chan struct{}),
 		lifecycle:              lifecycle,

@@ -13,11 +13,11 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
-// The web-tab preview listener (#1856), step 1: config + a SECOND TCP listener
-// that opens a port but serves nothing yet. These tests pin the step-1 contract —
-// disabled by default, binds when configured, serves NEITHER the control API nor
-// content, and a bind failure never touches the daemon — so a later step only has
-// to add routing, not re-establish any of this.
+// The web-tab preview listener (#1856): config + a SECOND TCP listener whose ONLY
+// surface is the per-tab preview origins. These tests pin the listener contract —
+// disabled by default, binds when configured, serves neither the control API nor
+// anything on a host that is not a per-tab origin, and a bind failure never touches
+// the daemon.
 
 // previewHTTPClient dials a concrete host:port over plain HTTP. The preview
 // listener is a real TCP socket, so a real client is the honest way to prove what
@@ -52,17 +52,16 @@ func TestStartHTTPServer_NoPreviewWhenDisabled(t *testing.T) {
 	require.Empty(t, listeners.PreviewBoundAddr)
 }
 
-// TestStartHTTPServer_PreviewBindsButServesNothing is the core invariant, now
-// through the step-2 credential (#1856). A configured preview_listen_addr binds a
-// second port, the lifecycle reports it bound, and that port serves NEITHER the
-// daemon control API NOR any content — and it authenticates its OWN ephemeral
-// credential, not the daemon bearer.
+// TestStartHTTPServer_PreviewServesPreviewsOnly is the listener's core contract
+// (#1856). A configured preview_listen_addr binds a SECOND port; that port serves
+// NEITHER the daemon control API nor anything at all on a host that is not one of
+// its per-tab preview origins; and it authenticates its OWN per-tab credential —
+// the origin's hostname — not the daemon bearer.
 //
-// The separation is the headline: the daemon token is REJECTED on the preview port
-// (it is not the preview credential), while the preview token authenticates and
-// then still finds no content. Both prove the preview origin is a distinct,
-// non-control surface.
-func TestStartHTTPServer_PreviewBindsButServesNothing(t *testing.T) {
+// The separation is the headline: the daemon token buys nothing here, and no path
+// on the bare bound address is a route, because on this listener a tab owns its
+// origin's WHOLE path space and only the Host names a tab.
+func TestStartHTTPServer_PreviewServesPreviewsOnly(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"        // control listener, tokenless loopback default
@@ -84,37 +83,24 @@ func TestStartHTTPServer_PreviewBindsButServesNothing(t *testing.T) {
 	previewAddr := listeners.PreviewBoundAddr
 	client := previewHTTPClient()
 
-	// The DAEMON token is the wrong credential for the preview origin: the gate
-	// rejects it. This is the separation — a control-plane credential cannot reach
-	// the preview surface at all.
+	// The DAEMON token is the wrong credential for the preview origin, and the bare
+	// bound address is not a preview origin at all — so a control-API path there is
+	// answered by the preview origin's own explanatory 404, never dispatched.
 	daemonToken, err := LoadToken(mustTokenPath(t))
 	require.NoError(t, err)
-	tok := previewTabToken(m.previewSecret, "s1", "t1")
-	require.NotEqual(t, daemonToken, tok, "the preview credential must be distinct from the daemon bearer")
+	require.Equal(t, http.StatusNotFound,
+		previewGet(t, client, "http://"+previewAddr+"/v1/Snapshot", daemonToken),
+		"the preview port must expose no control API, and the daemon token must buy nothing on it")
 
-	snapWithDaemon := previewGet(t, client, "http://"+previewAddr+"/v1/Snapshot", daemonToken)
-	require.Equal(t, http.StatusUnauthorized, snapWithDaemon,
-		"the daemon token must NOT authorize the preview origin — the credentials are separate")
+	// Same for the mirrored app-origin route: that path belongs to the CONTROL
+	// listener, and on the preview listener it names no tab, because only the Host does.
+	require.Equal(t, http.StatusNotFound,
+		previewGet(t, client, "http://"+previewAddr+"/v1/webtab/s1/t1/asset.js", daemonToken),
+		"the app-origin mirror path is not a route on the preview listener")
 
-	// A control-API path on the preview origin has NO tab identity, so the per-tab
-	// gate can derive no expected token and rejects it outright — the preview origin
-	// exposes no control API, and /v1/Snapshot never even reaches a dispatch. Even a
-	// real per-tab token cannot reach it: the token authenticates a TAB's route, and
-	// /v1/Snapshot is not one.
-	snapWithPreview := previewGet(t, client, "http://"+previewAddr+"/v1/Snapshot", tok)
-	require.Equal(t, http.StatusUnauthorized, snapWithPreview,
-		"a non-tab /v1 path on the preview origin has no per-tab credential — it must 401, never dispatch")
-
-	// A real tab route, authenticated with that tab's token, is the ONLY thing that
-	// gets past the gate — and finds no content yet (404), proving the gate works and
-	// the origin still serves nothing.
-	assetWithPreview := previewGet(t, client, "http://"+previewAddr+"/v1/webtab/s1/t1/asset.js", tok)
-	require.Equal(t, http.StatusNotFound, assetWithPreview,
-		"authenticated on its own tab route, the preview origin still serves no content (404, not a dispatch)")
-
-	// The non-/v1 404 sits OUTSIDE the gate (previewShell answers a root request
-	// UNAUTHENTICATED, before the token is consulted — so this deliberately sends no
-	// token). It must carry the PREVIEW origin's own message: not the SPA, and
+	// The non-preview-host 404 sits OUTSIDE the gate (previewShellHandler answers it
+	// UNAUTHENTICATED, before any credential is consulted — so this deliberately sends
+	// none). It must carry the PREVIEW origin's own message: not the SPA, and
 	// crucially NOT the agent-server's text, which names the control-plane address
 	// and would advertise it to an unauthenticated peer.
 	rootResp, err := client.Get("http://" + previewAddr + "/")
@@ -122,7 +108,7 @@ func TestStartHTTPServer_PreviewBindsButServesNothing(t *testing.T) {
 	rootBody, _ := io.ReadAll(rootResp.Body)
 	_ = rootResp.Body.Close()
 	require.Equal(t, http.StatusNotFound, rootResp.StatusCode,
-		"the preview origin serves no content — root must 404, not return the SPA")
+		"the bare preview address serves nothing — root must 404, not return the SPA")
 	require.Contains(t, string(rootBody), "preview origin",
 		"the preview port must answer with its own message")
 	require.NotContains(t, string(rootBody), "localhost:8443",

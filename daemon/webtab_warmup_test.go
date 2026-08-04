@@ -57,7 +57,7 @@ func warmingManager(t *testing.T) *Manager {
 func TestWebTabProxy_WarmUpRequestDoesNotDriveItsOwnRestore(t *testing.T) {
 	upstream := newEchoPathUpstream(t)
 	// Sets AGENT_FACTORY_HOME and persists a session + web tab under it.
-	_, _, sessionID, tabIDs, _ := newWebTabProxyFixtureN(t, upstream.URL)
+	_, _, _, sessionID, tabIDs, _ := newWebTabProxyFixtureN(t, upstream.URL)
 
 	warming := warmingManager(t)
 	mux := newHTTPMux(&controlServer{manager: warming})

@@ -229,7 +229,7 @@ var configManifest = []ManifestEntry{
 		Key:        "preview_listen_addr",
 		Type:       "string",
 		Default:    `""`,
-		Purpose:    "Address for a separate web-tab preview server, kept apart from the main interface · off by default; it hosts previews only and never the control API.",
+		Purpose:    "Address for a separate per-tab web-tab preview origin, kept apart from the main interface · off by default; it hosts previews only and never the control API, and it works for same-machine viewing only.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,

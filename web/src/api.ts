@@ -741,6 +741,50 @@ export type WebTabHealth = "ok" | "dead";
 const WEBTAB_ERROR_HEADER = "x-af-webtab-error";
 
 /**
+ * Asks the daemon for a web tab's own PREVIEW ORIGIN (#1856 step 3b), or "" when
+ * there is none.
+ *
+ * A per-tab preview origin is `http://af<label>.localhost:<preview_port>`, where the
+ * tab's dev server owns the origin ROOT — so the app's ABSOLUTE-path assets resolve
+ * (the thing the `/v1/webtab/` mirror structurally cannot do, #1811) and each tab is
+ * a genuinely distinct origin, which is what makes a cross-tab read impossible: the
+ * preview listener answers no `Access-Control-Allow-Origin`, ever.
+ *
+ * The origin IS the credential. Its host label is an unguessable per-tab HMAC the
+ * preview listener verifies, so this endpoint — behind the daemon bearer on the
+ * CONTROL origin — is the only way to obtain one. Nothing is appended to the src to
+ * authenticate it, and deliberately so: the per-tab origin is cross-site with the
+ * SPA, and a cross-site frame's cookies are exactly what a browser may decline to
+ * send.
+ *
+ * "" is the everyday answer, not an error: `preview_listen_addr` is empty by default,
+ * so unless an operator opted in there is no preview listener, and the caller keeps
+ * the same-origin sandboxed mirror. A transport/auth failure returns "" too — this is
+ * an ENHANCEMENT path, and the fallback it degrades to is the behavior every release
+ * before this one had, so a failure here must never cost the user their preview.
+ */
+export async function fetchPreviewOrigin(sessionId: string, tabId: string, token: string): Promise<string> {
+  const url = `/v1/preview-auth?session=${encodeURIComponent(sessionId)}&tab=${encodeURIComponent(tabId)}`;
+  const headers: Record<string, string> = {};
+  if (token !== "") {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const resp = await fetch(url, { method: "GET", headers, cache: "no-store" });
+    if (!resp.ok) {
+      return "";
+    }
+    const env = (await resp.json()) as Envelope<{ origin?: string }>;
+    if (env?.error != null) {
+      return "";
+    }
+    return env?.data?.origin ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Probes a proxied web tab's mirror path and reports whether its dev server is up.
  *
  * This exists because the pane's iframe is sandboxed WITHOUT allow-same-origin

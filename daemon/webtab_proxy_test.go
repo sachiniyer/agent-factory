@@ -21,7 +21,7 @@ import (
 // route's key).
 func newWebTabProxyFixture(t *testing.T, target string) (mux *http.ServeMux, sessionID, tabID string) {
 	t.Helper()
-	m, _, sessionID, ids, _ := newWebTabProxyFixtureN(t, target)
+	_, m, _, sessionID, ids, _ := newWebTabProxyFixtureN(t, target)
 	return m, sessionID, ids[0]
 }
 
@@ -31,17 +31,17 @@ func newWebTabProxyFixtureWithInstance(t *testing.T, target string) (
 	mux *http.ServeMux, inst *session.Instance, sessionID, tabID string,
 ) {
 	t.Helper()
-	m, inst, sessionID, ids, _ := newWebTabProxyFixtureN(t, target)
+	_, m, inst, sessionID, ids, _ := newWebTabProxyFixtureN(t, target)
 	return m, inst, sessionID, ids[0]
 }
 
 // newWebTabProxyFixtureN is newWebTabProxyFixture for N web tabs, returning the
-// tracked instance plus each tab's stable id in creation order (so tabs sit at
+// manager and tracked instance plus each tab's stable id in creation order (so tabs sit at
 // ordinals 1..N after the agent tab) and a closer that closes the Nth web tab. It
 // is what the misroute tests need: they must close a LOWER tab and prove a HIGHER
 // one still resolves to its own dev server.
 func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
-	mux *http.ServeMux, inst *session.Instance, sessionID string, tabIDs []string, closeWebTab func(n int),
+	manager *Manager, mux *http.ServeMux, inst *session.Instance, sessionID string, tabIDs []string, closeWebTab func(n int),
 ) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
@@ -50,7 +50,7 @@ func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
 	if err != nil {
 		t.Fatalf("RepoFromPath: %v", err)
 	}
-	manager, err := NewManager(config.DefaultConfig())
+	manager, err = NewManager(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -82,7 +82,7 @@ func newWebTabProxyFixtureN(t *testing.T, targets ...string) (
 			t.Fatalf("CloseTab(web%d): %v", n, err)
 		}
 	}
-	return newHTTPMux(&controlServer{manager: manager}), inst, inst.ID, tabIDs, closeWebTab
+	return manager, newHTTPMux(&controlServer{manager: manager}), inst, inst.ID, tabIDs, closeWebTab
 }
 
 // proxyGet issues a proxied GET for the remainder `sub` under the tab's prefix.
@@ -500,7 +500,7 @@ func TestWebTabProxy_ClosingLowerTabKeepsPreviewOnItsOwnServer(t *testing.T) {
 	}))
 	defer serverB.Close()
 
-	mux, _, id, ids, closeWebTab := newWebTabProxyFixtureN(t, serverA.URL, serverB.URL)
+	_, mux, _, id, ids, closeWebTab := newWebTabProxyFixtureN(t, serverA.URL, serverB.URL)
 	tabA, tabB := ids[0], ids[1]
 
 	// Before: webB's id serves B.

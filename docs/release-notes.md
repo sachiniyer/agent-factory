@@ -1,5 +1,28 @@
 # Release Notes
 
+## Absolute-path assets load in a web-tab preview
+
+- Setting `preview_listen_addr` (for example `127.0.0.1:8444`) now opens a second
+  plain-HTTP port that serves each web tab from **its own origin**, where the dev
+  server owns the origin root. An app that hard-codes absolute asset paths
+  (`/assets/app.js`, Vite/CRA/Next defaults) previews correctly with no base-path
+  configuration — previously those requests escaped the tab's proxy prefix and 404'd
+  honestly, and the only fix was to reconfigure the dev server.
+- Each tab being a genuinely distinct origin is also what isolates previews: the
+  preview port answers no cross-origin allow-origin header, so one preview's
+  JavaScript cannot read another's response, and none of them can reach the web UI
+  or its bearer token. A tab's origin carries an opaque per-tab credential the
+  daemon mints in memory and rotates on every restart.
+- **Same-machine viewing only, off by default, and checked rather than guessed.**
+  `*.localhost` names are resolved by the browser to its own loopback, so before
+  switching a frame the web UI loads a probe page from the preview port and waits for
+  it to report. If it cannot reach the port the tab silently keeps the preview it has
+  always had — the same-origin, sandboxed mirror under `/v1/webtab/…`. That covers
+  viewing remotely (Tailscale, SSH), the `ssh -L 8443:…` case where the browser's own
+  address looks local but the daemon is not, and Safari, which does not resolve
+  `*.localhost` at all. Nothing opens unless you set the key. See
+  [Web UI → per-tab preview origins](web.md#per-tab-preview-origins).
+
 ## Copying out of the web terminal
 
 - **macOS `Cmd+C` now copies.** The web terminal claimed `Ctrl` chords only, so on

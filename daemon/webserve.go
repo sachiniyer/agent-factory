@@ -66,15 +66,17 @@ const noWebShellMessage = "this is an af agent-server (a headless single-workspa
 	"The web UI is served by the daemon: run 'af daemon' and open http://localhost:8443. " +
 	"This server speaks only the /v1/agent/* API that a daemon drives."
 
-// noPreviewContentMessage is the preview origin's non-/v1 404 (#1856). It is
-// deliberately NOT noWebShellMessage: that text names the control-plane address
-// (http://localhost:8443), and the preview port — which will host untrusted
+// noPreviewContentMessage is what the preview origin answers a request whose Host
+// is not one of its per-tab preview hostnames (#1856) — the bare bound address, a
+// plain localhost, anything but an af label. It is deliberately NOT
+// noWebShellMessage: that text names the control-plane address
+// (http://localhost:8443), and the preview port — which hosts untrusted
 // repo/agent-controlled content and answers this branch UNAUTHENTICATED — must
 // never advertise the control plane, nor call itself an "agent-server". It
-// discloses only that this is the preview origin and where the UI lives, no
-// address and no state.
-const noPreviewContentMessage = "this is the af web-tab preview origin; it serves web-tab previews only, opened from the af web UI. " +
-	"There is nothing to browse here directly."
+// discloses only that this is the preview origin and that its addresses come from
+// the UI: no control-plane address, no state, no hint about what is running.
+const noPreviewContentMessage = "this is the af web-tab preview origin; it serves web-tab previews only, " +
+	"each on its own hostname handed out by the af web UI. There is nothing to browse at this address."
 
 // noWebShellHandler wraps the authed API handler for listeners that serve NO
 // frontend (the agent-server, the preview origin). It answers every non-/v1 path

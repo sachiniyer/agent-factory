@@ -553,33 +553,83 @@ brings the tab back to life.
     target's path, so the URL mirrors from the first navigation on. WebSocket-based
     hot reload is proxied on a best-effort basis.
 
-!!! warning "Absolute asset paths are not proxied"
+!!! warning "Absolute asset paths need a per-tab preview origin"
     An app that hard-codes **absolute** asset paths (`/assets/app.js`,
-    `/static/js/bundle.js`) will not find them through the proxy. An absolute path
-    resolves against the **origin root**, so it escapes the tab's prefix before the
-    daemon ever sees which tab it belongs to. Configure the dev server with a
-    matching base path (**Vite** `base`, **CRA/webpack** `homepage` /
-    `publicPath`, **Next** `basePath`) or serve relative asset URLs.
+    `/static/js/bundle.js`) will not find them through the mirror path above. An
+    absolute path resolves against the **origin root**, so it escapes the tab's
+    prefix before the daemon ever sees which tab it belongs to, and the request
+    returns a **404** naming the problem rather than the web UI's own HTML (which
+    would be a silent, unexplained breakage).
 
-    Such a request returns a **404** naming the problem. It cannot be rerouted:
-    the preview iframe is sandboxed to an **opaque origin** (so a previewed dev
-    server can never reach the web UI or read its token), and a browser sends no
-    `Referer` from such a frame, leaving nothing to attribute the request by.
-    Answering it with the web UI's own page instead would hand the app HTML where
-    it asked for JavaScript — a silent, unexplained breakage — so it fails loudly
-    instead. Lifting the limitation needs a dedicated preview origin
-    ([#1856](https://github.com/sachiniyer/agent-factory/issues/1856)).
+    It cannot be rerouted on this path, and not for a tunable reason: the mirrored
+    preview is framed with an **opaque origin** so a previewed dev server can never
+    reach the web UI or read its token, and a browser sends no `Referer` from such
+    a frame — there is nothing to attribute the request by.
+
+    There are two ways out:
+
+    - **Turn on per-tab preview origins** (below). Each tab gets its own origin
+      whose root *is* the dev server's root, so absolute paths are correct by
+      construction. Same-machine viewing only.
+    - **Configure the dev server with a matching base path** (**Vite** `base`,
+      **CRA/webpack** `homepage` / `publicPath`, **Next** `basePath`), or serve
+      relative asset URLs. This is the option that also works remotely.
+
+### Per-tab preview origins
+
+Set [`preview_listen_addr`](configuration.md#global-config) (for example
+`127.0.0.1:8444`) and the daemon opens a **second** plain-HTTP port that serves
+**previews only — never the control API**. Each web tab is then served from its
+own origin:
+
+```
+http://af<opaque-label>.localhost:8444/
+```
+
+The tab's dev server owns that origin's **root**, so `/assets/app.js` resolves to
+the dev server's own `/assets/app.js` with no base-path configuration and no
+guessing. Because each tab is a genuinely **distinct origin**, the browser also
+isolates them from each other and from the web UI: one preview's JavaScript cannot
+read another's response (the preview port answers no CORS allow-origin header) and
+cannot reach the web UI or its token. The hostname's opaque label is a per-tab
+credential the daemon mints and verifies; it is held in memory and rotates on every
+daemon restart, so preview URLs are not durable bookmarks.
+
+What to know before turning it on:
+
+- **Same-machine only, and af checks rather than guesses.** `*.localhost` names are
+  resolved by the browser to *its own* loopback, so a per-tab origin only works when
+  the browser can reach the preview port. Before switching a frame, the web UI loads
+  a tiny probe page from that port and waits for it to report; if it does not, the
+  tab silently keeps the same-origin mirror described above. That covers the case a
+  location check alone gets wrong: under `ssh -L 8443:127.0.0.1:8443 remote` the
+  browser's address is `http://localhost:8443` while the daemon is remote and the
+  preview port is not forwarded. Forward the preview port too and per-tab origins
+  start working through the tunnel; leave it unforwarded and nothing changes.
+- **Browser support is handled the same way.** Chromium- and Firefox-based browsers
+  resolve `*.localhost` to loopback (RFC 6761); Safari does not. There the probe
+  simply never reports and previews keep using the mirror — no configuration needed,
+  and nothing to detect by hand.
+- **Viewing remotely is unchanged.** A Tailscale or SSH viewer keeps the
+  same-origin, sandboxed preview it has always had. Binding `preview_listen_addr` to
+  a network interface gains nothing (a remote browser still resolves `*.localhost`
+  to its own machine), and the daemon warns about it at start.
+- **It is off by default.** No second port opens unless you set the key, and a bind
+  conflict is logged and skipped, never fatal.
 
 !!! note "Previews over a token-protected listener"
-    Over a **token-protected** network listener, iframe sub-resource requests are
-    kept authorized via a path-scoped cookie (see
+    Over a **token-protected** network listener, iframe sub-resource requests on the
+    mirror path are kept authorized via a path-scoped cookie (see
     [Remote HTTP auth](remote-http-auth.md)). If a preview loads only partially
     over a direct network listener, prefer an **SSH-forwarded loopback** port
-    (which needs no token) — the common remote-preview path.
+    (which needs no token) — the common remote-preview path. Per-tab preview
+    origins do not apply remotely.
 
-The iframe is sandboxed (scripts and forms run, but it gets an opaque origin, so a
-proxied preview cannot reach the web UI or read its token). A small **reload**
-control sits above every web tab for dev-preview refreshes.
+A mirrored preview is sandboxed to an opaque origin, so it cannot reach the web UI
+or read its token. A preview on its **own** origin is sandboxed too, but with a real
+origin of its own (it needs one for `localStorage`, cookies and service workers) —
+safe because the browser's own cross-origin rules already keep it away from the web
+UI. A small **reload** control sits above every web tab for dev-preview refreshes.
 
 ## VS Code tabs
 

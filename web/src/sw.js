@@ -188,7 +188,9 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   const url = new URL(request.url);
-  // Cross-origin is somebody else's problem — an external web tab, most likely.
+  // Cross-origin is somebody else's problem — an external web tab, or a per-tab
+  // web-tab preview origin (#1856), which is a different origin entirely and so has
+  // no service worker of its own for this one to stand in for.
   if (url.origin !== self.location.origin) {
     return;
   }

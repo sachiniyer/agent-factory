@@ -413,8 +413,12 @@ type Config struct {
 	//
 	// It is NOT listen_addr and does not serve listen_addr's surface: the preview
 	// origin must never carry the daemon control API (that is the whole security
-	// point — see PreviewListenerExposureNotice). Today it serves nothing; the
-	// preview routes move onto it in a later step.
+	// point — see PreviewListenerExposureNotice). What it serves is one PER-TAB
+	// origin per web tab (http://af<label>.localhost:<port>/), where the tab's dev
+	// server owns the origin root — so absolute-path assets resolve and the browser
+	// isolates one preview from another. *.localhost resolves to the BROWSER's own
+	// loopback, so this is same-machine viewing only; a remote viewer keeps the
+	// same-origin sandboxed preview on listen_addr.
 	//
 	// Global-only (daemon network surface), like listen_addr: a cloned repo must
 	// never be able to open a network port. See docs/configuration.md.
