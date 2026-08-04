@@ -37,3 +37,41 @@ func TestHookOutputSuffixRedactsTokenSplitAtOuterEscape(t *testing.T) {
 	assert.NotContains(t, suffix, secret, "a line break inside the outer escape pair must not expose the token")
 	assert.Contains(t, suffix, "[REDACTED]")
 }
+
+// CodeQL go/unsafe-quoting (critical) flagged rebuilding a JSON document around
+// a key body taken from arbitrary hook output. Decoding happens in place now, so
+// a body carrying its own quote is rejected rather than reparsed. These are the
+// shapes that would match if a decoder tolerated trailing bytes after the first
+// value — the latent hazard behind that alert.
+func TestHookTokenKeyRejectsQuoteInjection(t *testing.T) {
+	for _, body := range []string{
+		`token","x`,
+		`token"`,
+		`to"ken`,
+		`token":"leaked`,
+		"token\x00",
+	} {
+		assert.False(t, hookTokenKeyMatches(body), "%q must not be accepted as a token key", body)
+	}
+	for _, body := range []string{
+		`token`,
+		`TOKEN`,
+		`\u0074oken`,
+		`\\u0074oken`,
+	} {
+		assert.True(t, hookTokenKeyMatches(body), "%q spells the token key", body)
+	}
+}
+
+// A quote in the value must not let the surrounding diagnostic be swallowed or
+// the redaction range invert — the class that previously panicked while
+// formatting a provisioning error.
+func TestHookOutputSuffixSurvivesQuotesInTokenValue(t *testing.T) {
+	for _, output := range []string{
+		`{"token":"a"b"} trailing diagnostic`,
+		`"token":"` + `"""""`,
+		`\"token\":\"a\"b\"`,
+	} {
+		require.NotPanics(t, func() { _ = hookOutputSuffix([]byte(output)) }, "output %q", output)
+	}
+}

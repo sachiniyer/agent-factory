@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -324,18 +325,77 @@ func hookTokenKeyMatches(body string) bool {
 	if !strings.ContainsAny(body, "tT") && !strings.Contains(body, `\u`) {
 		return false
 	}
-	candidate := strings.TrimSuffix(body, `\`)
+	candidate := body
 	for depth := 0; depth <= maxHookTokenKeyDecodeDepth; depth++ {
 		if strings.EqualFold(candidate, "token") {
 			return true
 		}
-		var decoded string
-		if json.Unmarshal([]byte(`"`+candidate+`"`), &decoded) != nil || decoded == candidate {
+		decoded, ok := decodeJSONStringBody(candidate)
+		if !ok || decoded == candidate {
 			return false
 		}
 		candidate = decoded
 	}
 	return false
+}
+
+// decodeJSONStringBody interprets the escape sequences in one JSON string body —
+// the bytes BETWEEN a pair of quotes, never the quotes themselves.
+//
+// It decodes in place rather than wrapping the body back in quotes and handing
+// it to encoding/json. Rebuilding a document around bytes that came out of
+// arbitrary hook output is the shape of an injection even where it happens to be
+// safe: today `json.Unmarshal` rejects a body containing a bare quote only
+// because it requires the WHOLE input to be one value, so a later switch to
+// `json.Decoder.Decode`, which stops at the first value, would silently let
+// `token","x` match as this key. Not reconstructing the document removes the
+// question (CodeQL go/unsafe-quoting).
+//
+// Anything that cannot appear inside a JSON string is rejected outright, so a
+// malformed fragment is refused rather than guessed at.
+func decodeJSONStringBody(body string) (string, bool) {
+	var decoded strings.Builder
+	decoded.Grow(len(body))
+	for cursor := 0; cursor < len(body); cursor++ {
+		if body[cursor] == '"' || body[cursor] < 0x20 {
+			return "", false
+		}
+		if body[cursor] != '\\' {
+			decoded.WriteByte(body[cursor])
+			continue
+		}
+		cursor++
+		if cursor >= len(body) {
+			return "", false
+		}
+		switch body[cursor] {
+		case '"', '\\', '/':
+			decoded.WriteByte(body[cursor])
+		case 'b':
+			decoded.WriteByte('\b')
+		case 'f':
+			decoded.WriteByte('\f')
+		case 'n':
+			decoded.WriteByte('\n')
+		case 'r':
+			decoded.WriteByte('\r')
+		case 't':
+			decoded.WriteByte('\t')
+		case 'u':
+			if cursor+4 >= len(body) {
+				return "", false
+			}
+			point, err := strconv.ParseUint(body[cursor+1:cursor+5], 16, 32)
+			if err != nil {
+				return "", false
+			}
+			decoded.WriteRune(rune(point))
+			cursor += 4
+		default:
+			return "", false
+		}
+	}
+	return decoded.String(), true
 }
 
 // hookTokenValueEnd returns the offset of the value's closing quote. The earliest
