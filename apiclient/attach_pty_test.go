@@ -180,14 +180,16 @@ func TestAttachStream_UnkillableSignalRetakesTheTerminal(t *testing.T) {
 
 	require.NoError(t, h.cmd.Process.Signal(syscall.SIGINT))
 
-	// Wait for the hand-back to actually HAPPEN before requiring it to be undone.
-	// The neutral restore written to the terminal is the observable for that, and
-	// without this the first probe can beat the signal handler: it would find a
-	// terminal that is still raw because nothing had touched it yet, and report
-	// that as a successful retake. Ordering the two makes the test prove the whole
-	// sequence — handed back, then taken again — instead of just the end state.
-	h.waitForOutput(t, tmux.NeutralTerminalRestore,
-		"the signal must make the attach hand the terminal back in the first place")
+	// Wait for the hand-back to actually LAND before requiring it to be undone,
+	// and take a COOKED ECHO as the proof rather than the neutral-restore bytes.
+	//
+	// Those bytes are written first and the tcsetattr follows them (see
+	// terminalHandback.restoreLocked), so a probe typed in between finds a
+	// terminal that is still raw and reads as a successful retake — the false PASS
+	// this ordering exists to prevent, just through a narrower window. An echo is
+	// the first thing that can only happen AFTER the termios actually changed.
+	h.requireTerminalCooked(t, "the signal must make the attach hand the terminal back "+
+		"in the first place")
 
 	// Then the terminal must come BACK to raw, and the attach must still be
 	// reading it. Polled rather than asserted once, for two reasons: the retake
@@ -243,6 +245,12 @@ func TestAttachTerminalHandbackHelper(t *testing.T) {
 		attachTermSize = func() (uint16, uint16, bool) { panic(attachHelperPanic) }
 		t.Cleanup(func() { attachTermSize = prev })
 	case "unkillable-int":
+		// Widen the pause between hand-back and retake so the handed-back window is
+		// comfortably observable from the parent, which has to SEE the terminal go
+		// cooked before it can require it to come back. Only the pause changes; the
+		// sequence under test — restore, re-raise, survive, retake — is untouched.
+		// Same seam-swapping the rest of this package's tests use for its timeouts.
+		handbackRetakeGrace = 2 * time.Second
 		// Stand in for Bubble Tea, which calls Notify for SIGINT/SIGTERM at startup:
 		// that is what hides the inherited ignore from signal.Ignored. The parent
 		// started this process with SIGINT inherited as ignored, so the re-raise the
@@ -430,6 +438,38 @@ func shellTrapFor(mode string) string {
 		return `trap "" INT`
 	}
 	return ""
+}
+
+// requireTerminalCooked waits until a typed probe is echoed back locally. The
+// echo is the only observable that is ordered strictly AFTER the hand-back's
+// tcsetattr, which is what makes it the right thing to wait for: the terminal is
+// provably cooked from this point, so anything the caller then requires of a
+// retake cannot be satisfied by a terminal that was simply never touched.
+//
+// Arrival at the pane is deliberately not required here. During the hand-back
+// the terminal is not the attach's to read, so whether the bytes reach the pane
+// says nothing either way.
+func (h *ptyAttach) requireTerminalCooked(t *testing.T, why string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for i := 1; time.Now().Before(deadline); i++ {
+		token := fmt.Sprintf("cooked%d", i)
+		from := len(h.output())
+		_, err := h.ptmx.WriteString(token + "\r")
+		require.NoError(t, err, "type into the terminal")
+		// The echo is produced by the line discipline at write time, so it needs a
+		// short wait, not a long one — and a short wait is what lets this poll the
+		// window rather than sit through it.
+		echoBy := time.Now().Add(200 * time.Millisecond)
+		for time.Now().Before(echoBy) {
+			if strings.Contains(h.output()[from:], token+"\r\n") {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	t.Fatalf("%s\nthe terminal never went cooked, so the attach never handed it back (%s)\npty output: %q",
+		why, h.childState(), h.output())
 }
 
 // requireTerminalRetaken polls until a typed probe both reaches the pane and is
