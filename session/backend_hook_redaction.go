@@ -305,6 +305,14 @@ func hookTokenKeyEnd(input string, start int) (int, bool) {
 	if limit > len(input) {
 		limit = len(input)
 	}
+	// However `token` is spelled, its bytes contain a literal t/T or a \u escape.
+	// Rejecting the whole window on that once — rather than attempting a decode at
+	// each escaped quote inside it — is what keeps an escaped-quote flood cheap
+	// now that the window is wide enough for deeply escaped keys.
+	if window := input[start:limit]; !strings.ContainsAny(window, "tT") &&
+		!strings.Contains(window, `\u`) {
+		return 0, false
+	}
 	escaped := false
 	for cursor := start + 1; cursor < limit; cursor++ {
 		switch {
