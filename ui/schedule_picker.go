@@ -524,7 +524,17 @@ func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
 		if err != nil {
 			return ""
 		}
-		return indentSub + preview.Render("Next run "+sched.Next(p.now()).Format("Jan 02 15:04"))
+		// A cron can be syntactically legal and still match no date at all —
+		// "0 0 31 2 *" is February 31st. ValidateCronExpr accepts it and
+		// ParseCron succeeds, but Next gives up after five years and returns
+		// the ZERO time.Time, which formats as a thoroughly plausible
+		// "Jan 01 00:00". Promising a fire time the task will never reach is
+		// worse than the echo this line replaced, so name the absence.
+		next := sched.Next(p.now())
+		if next.IsZero() {
+			return indentSub + preview.Render("No upcoming run")
+		}
+		return indentSub + preview.Render("Next run "+next.Format("Jan 02 15:04"))
 	}
 	return indentSub + preview.Render(p.Describe()) + dim.Render("  ·  "+p.Cron())
 }

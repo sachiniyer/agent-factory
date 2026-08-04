@@ -51,6 +51,26 @@ func TestAutomationsCollapsedRowsAreTitleOnly(t *testing.T) {
 	assert.NotContains(t, out, "watch: tail -f ci.log", "the collapsed row hides the watch command")
 }
 
+// TestAutomationsExpandedRowOmitsUnsatisfiableNextRun is the rail's half of the
+// same trap the schedule picker's Custom preview hits: "0 0 31 2 *" validates
+// and parses, but robfig's Next gives up after five years and returns the ZERO
+// time.Time, which formats as a plausible-looking "next Jan 01 00:00". The row
+// must not promise a fire time the task will never reach.
+func TestAutomationsExpandedRowOmitsUnsatisfiableNextRun(t *testing.T) {
+	a := newTestAutomations([]task.Task{
+		{ID: "1", Name: "feb-31", CronExpr: "0 0 31 2 *", Enabled: true},
+	})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	require.Contains(t, out, "feb-31", "precondition: the row renders at all")
+	assert.NotContains(t, out, "next Jan 01 00:00",
+		"the zero time must never be formatted as a real next run:\n%s", out)
+	assert.Contains(t, out, "no upcoming run",
+		"say so plainly rather than dropping the fragment:\n%s", out)
+}
+
 // TestAutomationsExpandedRowRevealsDetail pins the #1126 expansion: the focused
 // cursor's row reveals its trigger and next/last-run detail on a line beneath
 // the title, and no other row does.

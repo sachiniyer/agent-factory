@@ -194,13 +194,24 @@ func (a *AutomationsPane) ScrollDown() {
 // nextRunSummary derives the "next/last" column of a compact row: a cron
 // task's next fire time (from its schedule), a watch task's supervision
 // state, plus the last run when one is recorded.
+//
+// A cron can be syntactically legal and still match no date at all —
+// "0 0 31 2 *" is February 31st. ParseCron succeeds on it, but Next gives up
+// after five years and returns the ZERO time.Time, which formats as a
+// thoroughly plausible "next Jan 01 00:00"; name the absence instead of
+// promising a fire time the task will never reach. The schedule picker's
+// Custom preview guards the same trap (see renderPreviewLine).
 func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	var parts []string
 	if tsk.IsWatch() {
 		parts = append(parts, watchTaskStatus(tsk))
 	} else if tsk.Enabled && tsk.CronExpr != "" {
 		if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
-			parts = append(parts, "next "+sched.Next(a.now()).Format("Jan 02 15:04"))
+			if next := sched.Next(a.now()); next.IsZero() {
+				parts = append(parts, "no upcoming run")
+			} else {
+				parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+			}
 		}
 	}
 	if tsk.LastRunAt != nil {

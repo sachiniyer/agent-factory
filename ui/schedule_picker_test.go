@@ -260,6 +260,35 @@ func TestSchedulePickerCustomPreviewShowsNextRun(t *testing.T) {
 	assert.Contains(t, out, "Schedule:", "the rest of the block still renders")
 }
 
+// TestSchedulePickerCustomPreviewOmitsUnsatisfiableNextRun covers the cron
+// expressions that are syntactically legal but can never match a date —
+// "0 0 31 2 *" (February 31st), "0 0 31 4 *" (April 31st). ValidateCronExpr
+// accepts them and ParseCron succeeds, but robfig's Next gives up after five
+// years and returns the ZERO time.Time, which formats as a perfectly plausible
+// "Jan 01 00:00". Rendering that would promise a fire time to a task that has
+// none — worse than saying nothing.
+func TestSchedulePickerCustomPreviewOmitsUnsatisfiableNextRun(t *testing.T) {
+	for _, expr := range []string{"0 0 31 2 *", "0 0 30 2 *", "0 0 31 4 *"} {
+		t.Run(expr, func(t *testing.T) {
+			require.NoError(t, task.ValidateCronExpr(expr),
+				"precondition: the picker accepts this expression, so the preview must cope with it")
+
+			p := newSchedulePicker()
+			p.now = func() time.Time { return time.Date(2026, time.August, 4, 12, 0, 0, 0, time.UTC) }
+			p.setType(schedule.Custom)
+			p.raw.SetValue(expr)
+			p.setWidth(80)
+			p.setFocused(true)
+
+			out := stripANSI(p.render())
+			assert.NotContains(t, out, "Next run",
+				"a cron that never matches has no next run to promise:\n%s", out)
+			assert.Contains(t, out, "No upcoming run",
+				"say so plainly rather than leaving the line blank:\n%s", out)
+		})
+	}
+}
+
 // TestSchedulePickerPresetPreviewKeepsCron guards the other half of #2596: only
 // Custom loses the trailing cron. Every preset still pairs its plain-English
 // preview with the generated expression, because there the two differ and the
