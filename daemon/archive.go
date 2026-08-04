@@ -303,11 +303,25 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		// it. A logged-and-swallowed write failure would leave the record pointing
 		// at the pre-archive path, so a restart would send the Lost-restore loop to
 		// rebuild a worktree whose bytes are sitting in the archive directory.
+		//
+		// The hook ran BEFORE the move, so this branch is reachable with both
+		// failing. The move error stays the primary cause — it is what the caller
+		// must act on — but the hook error is not redundant with it and must not be
+		// dropped (#2763): a broken cleanup command is invisible otherwise, since
+		// this path never reaches the committed-archive warning below, and every
+		// later attempt fails the same way and reports the same single cause. Log
+		// it as well as returning it, matching the committed path, so an archive
+		// driven by a task still leaves the diagnosis in the daemon log.
+		hookNote := ""
+		if hookErr != nil {
+			log.WarningLog.Printf("archive of session %q failed and its on-archive hook also failed: %v", req.Title, hookErr)
+			hookNote = fmt.Sprintf(" (its on-archive hook also failed: %v)", hookErr)
+		}
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); its worktree is at %s — check that path before restarting the daemon: %w", req.Title, perr, instance.GetWorktreePath(), err)
+			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); its worktree is at %s — check that path before restarting the daemon: %w%s", req.Title, perr, instance.GetWorktreePath(), err, hookNote)
 		}
-		return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w", req.Title, err)
+		return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w%s", req.Title, err, hookNote)
 	}
 
 	// Success: worktree relocated, tmux down. Commit the inert Archived state

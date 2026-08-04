@@ -183,6 +183,37 @@ func TestArchiveSessionHookFailureCommitsArchiveAndSurfacesWarning(t *testing.T)
 	assert.Equal(t, session.Archived, persistedStatus(t, repoID, "worker"))
 }
 
+// TestArchiveSessionMoveFailureAlsoSurfacesHookFailure is the #2763 regression.
+// The hook runs at the teardown chokepoint, BEFORE the relocation, so a single
+// archive attempt can fail both. The move failure is what the caller must act
+// on, but it is not the only thing that broke: an operator whose cleanup command
+// is failing learns that only from this message, and every later archive of that
+// session fails the same way and reports the same single cause. An occupied
+// destination is the deterministic move failure — the relocate refuses to move
+// onto an existing path, before touching the source.
+func TestArchiveSessionMoveFailureAlsoSurfacesHookFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	writeOnArchiveCommand(t, "printf 'prune failed loudly\\n'; exit 23")
+	dest, err := archivedWorktreePath(repoID, "worker")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dest, 0755))
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to archive session")
+	assert.Contains(t, err.Error(), dest, "the move failure must stay the primary reported cause")
+	assert.Contains(t, err.Error(), "on-archive hook",
+		"a hook failure must not be discarded because the move failed too")
+	assert.Contains(t, err.Error(), "exit status 23")
+	assert.Contains(t, err.Error(), "prune failed loudly",
+		"the operator needs the hook's own output to fix it")
+
+	assert.True(t, exists(srcPath), "a failed move must leave the worktree where the agent can be restored")
+	assert.Equal(t, session.Lost, inst.GetStatus(), "the session must be left recoverable in place")
+}
+
 func TestArchiveSessionHookFailureBoundsCapturedOutputToATail(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	_, _ = registerArchivable(t, manager, repoID, repoPath, "worker")
