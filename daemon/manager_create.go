@@ -135,6 +135,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),
 		ResumeConversation:             req.resumeConversation,
+		RestoreTabs:                    req.restoreTabs,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 	})
 	if err != nil {

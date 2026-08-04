@@ -397,6 +397,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 	}
 
+	// Rebuild the tab roster a reaped record handed this create, if any (#2628).
+	// Only the root-agent heal sets one; it must run after the agent session is
+	// up (its name is what the siblings are derived from) and before setupTabs,
+	// which is what actually restores or re-spawns each rebuilt tab.
+	i.restoreCarriedTabs()
+
 	// Bring up the instance's non-agent tabs (#930 PR 2/4). This is best-effort:
 	// a tab failure leaves the instance fully usable with just the agent tab (the
 	// failed tab renders a fallback), so it must not fail the whole start. Runs
