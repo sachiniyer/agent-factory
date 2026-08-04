@@ -80,7 +80,7 @@ Working style:
   daemon and ~15 live sessions are running, so a local run risks disturbing
   production sessions rather than merely burning CPU. `app/` is the same deal —
   its tests drive real tmux. Never bare `go test ./...`; use
-  `go test $(go list ./... | grep -v '/daemon')` if you need breadth.
+  `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth.
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
   merge own PRs once the `gate-pr` gates pass, close issues that aren't worth
   doing. Green CI is the floor, not the bar — the Codex review lands after it.
@@ -98,7 +98,7 @@ go build ./...
 # box, and never ./daemon/... or ./app/... on the host — they spawn real af
 # daemons and drive real tmux, next to ~15 live sessions.
 go test ./<changed-package>/...
-go test $(go list ./... | grep -v '/daemon')   # only if you need breadth
+go test $(go list ./... | grep -vE '/(daemon|app)')   # only if you need breadth
 
 # The containerized suites below are NOT routine pre-PR gates — CI runs
 # `go test -race ./...` on every push, and ~20 concurrent container runs took

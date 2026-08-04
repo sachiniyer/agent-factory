@@ -160,7 +160,10 @@ jq -s -r --slurpfile ru "$G/rules.json" --slurpfile st "$G/statuses.json" '
   | ($st[0].statuses // [] | map(select(.context == $req.context and ($req.integration_id // null) == null))) as $sctx
   | if (($mine | length) == 0 and ($sctx | length) == 0)
     then "  MISSING REQUIRED  \($req.context)\(if $req.integration_id then " (app \($req.integration_id))" else "" end)"
-    elif (($mine | map(select(.status == "completed" and .conclusion == "success")) | length) == 0
+    elif (($mine | map(select(.status == "completed"
+            and (.conclusion == "success"
+                 or (.conclusion == "skipped" and $req.context == "Deploy" and .app.slug == "github-actions"))))
+           | length) == 0
           and ($sctx | map(select(.state == "success")) | length) == 0)
     then "  REQUIRED NOT GREEN  \($req.context)"
     else empty end' "$G/checkruns.json" >> "$G/bad.txt"
@@ -233,6 +236,10 @@ jq -s --arg head "$HEAD" '
   | sort_by(.updated_at // .submitted_at // .created_at // "")
   | last // empty
 ' "$G/reviews.json" "$G/issue-comments.json" > "$G/verdict.json"
+
+# A marker from an earlier run must never outlive it: once a real verdict exists
+# for this head, the freshness and body checks below have to run again.
+rm -f "$G/verdict-override"
 
 if [[ ! -s "$G/verdict.json" ]]; then
   # The ONLY sanctioned way past a missing verdict. It must name the exact head,
@@ -458,7 +465,7 @@ remove --force "$WT"` when you are done — not with `rm -rf`, which leaves the
 worktree registered and blocks the next run's `git worktree add`.
 
 - **Cheap checks locally, the matrix in CI.** Run `gofmt -l .`, `go build ./...`, `golangci-lint run --timeout=3m --fast`, `deadcode -test ./...`, `scripts/lint-file-length.sh`, and `go test` on **only the package you changed**. Do **not** run `make test-container`, `make remote-roundtrip-container`, or `make playtest-container` as a routine gate — CI runs `go test -race ./...` on every push, so a local container run duplicates it while rebuilding the whole Go tree; ~20 sessions doing that concurrently took the shared box to a load average of 160. Push, then fix what CI reports on your PR head. One targeted container run is fine to reproduce a CI failure you cannot diagnose from the logs — then stop.
-- **Never bare `go test ./...` on the host. If your change is in `daemon/` or `app/`, run no tests for it locally at all — push and let CI test it.** Not `go test ./daemon/`, not a `-run`-scoped subset, not `-race`. This is a safety rule rather than a performance one: those tests spawn real `af` daemons and drive real tmux on a box where the maintainer's own daemon and ~15 live sessions are running, so a local run risks killing production sessions, not just burning CPU. `go test $(go list ./... | grep -v '/daemon')` if you need breadth elsewhere.
+- **Never bare `go test ./...` on the host. If your change is in `daemon/` or `app/`, run no tests for it locally at all — push and let CI test it.** Not `go test ./daemon/`, not a `-run`-scoped subset, not `-race`. This is a safety rule rather than a performance one: those tests spawn real `af` daemons and drive real tmux on a box where the maintainer's own daemon and ~15 live sessions are running, so a local run risks killing production sessions, not just burning CPU. `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth elsewhere.
 - **Watch every new test FAIL first**, against the unmodified tree. Quote the failure in the PR. A test never observed red is not evidence.
 - **TUI changes: drive the real TUI.** `app/` tests swap the backend factory and cannot see real provisioning — a green unit suite proves nothing about them. The scenario subcommand needs a script path:
   ```bash
