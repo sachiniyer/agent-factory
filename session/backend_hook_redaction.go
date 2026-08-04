@@ -33,11 +33,13 @@ import (
 //     value. This catches truncated output, where a killed launch_cmd wrote the
 //     credential and then died before closing its JSON.
 
-// maxHookTokenKeyEncodedLen bounds the token-key scan. A five-character JSON key
-// is at most 32 bytes when every character uses a six-byte \u escape, including
-// the surrounding quotes. Bounding this is what keeps a malformed escape flood
-// linear while still accepting JSON-equivalent spellings and case variants.
-const maxHookTokenKeyEncodedLen = 32
+// maxHookTokenKeyEncodedLen bounds the token-key scan. A five-character key is
+// 30 bytes when every character uses a six-byte \u escape, and each further
+// serialization level doubles its backslashes: 35 bytes at depth 2, 45 at depth
+// 3. 96 covers those with room to spare while still keeping a malformed escape
+// flood linear — the earlier 32-byte bound silently gave up on a serialized
+// Unicode-escaped key and left its token in the error (Codex P2 on #2718).
+const maxHookTokenKeyEncodedLen = 96
 
 // maxHookTokenQuoteEscapeDepth is how many backslashes may precede a quote that
 // still counts as a delimiter. Depth 0 is a raw JSON object, 1 is one serialized
@@ -164,6 +166,9 @@ func redactHookJSONValue(value any) (any, bool) {
 type hookOutputRange struct {
 	start int
 	end   int
+	// complete records that the value's closing quote was found, as opposed to
+	// the scan stopping at a line break or at the end of truncated output.
+	complete bool
 }
 
 // hookTokenRedactionRanges finds `token`-keyed string values in raw bytes,
@@ -189,11 +194,26 @@ func hookTokenRedactionRanges(output string) []hookOutputRange {
 			if joined.start >= len(offsets) || joined.end <= joined.start {
 				continue
 			}
-			end := len(output)
-			if joined.end <= len(offsets) {
-				end = offsets[joined.end-1] + 1
+			// Only a value that CLOSES in the joined view is a field split by a line
+			// break. An unterminated one runs to whatever quote appears next, which
+			// may be pages of unrelated diagnostics away — and the raw pass already
+			// redacts that tail to end of line, so dropping it here loses nothing
+			// (Codex P2 on #2718).
+			if !joined.complete {
+				continue
 			}
-			ranges = append(ranges, hookOutputRange{start: offsets[joined.start], end: end})
+			if joined.end > len(offsets) {
+				continue
+			}
+			candidate := hookOutputRange{start: offsets[joined.start], end: offsets[joined.end-1] + 1}
+			// A field split by a line break crosses exactly one. More than that is
+			// the scan running away through unrelated lines, and replacing those
+			// would hide the failure this output exists to report.
+			if strings.Count(output[candidate.start:candidate.end], "\n")+
+				strings.Count(output[candidate.start:candidate.end], "\r") > 1 {
+				continue
+			}
+			ranges = append(ranges, candidate)
 		}
 	}
 	return mergeHookOutputRanges(ranges)
@@ -260,7 +280,7 @@ func scanHookTokenRanges(output string) []hookOutputRange {
 		}
 
 		valueEnd, complete := hookTokenValueEnd(output, valueStart)
-		candidate := hookOutputRange{start: valueStart + 1, end: valueEnd}
+		candidate := hookOutputRange{start: valueStart + 1, end: valueEnd, complete: complete}
 		if len(ranges) > 0 && candidate.start <= ranges[len(ranges)-1].end {
 			if candidate.end > ranges[len(ranges)-1].end {
 				ranges[len(ranges)-1].end = candidate.end
@@ -292,8 +312,14 @@ func hookTokenKeyEnd(input string, start int) (int, bool) {
 			escaped = false
 			if input[cursor] == '"' {
 				// An escaped quote closes a key whose delimiters are themselves
-				// escaped — `\"token\"` inside a serialized document.
-				if hookTokenKeyMatches(input[start+1 : cursor-1]) {
+				// escaped — `\"token\"` inside a serialized document. Drop the whole
+				// run of backslashes before it, not one: at depth 2 and beyond the
+				// delimiter carries several, and a leftover kept the key from matching.
+				body := input[start+1 : cursor]
+				for len(body) > 0 && body[len(body)-1] == '\\' {
+					body = body[:len(body)-1]
+				}
+				if hookTokenKeyMatches(body) {
 					return cursor + 1, true
 				}
 			}

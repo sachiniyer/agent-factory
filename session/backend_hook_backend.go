@@ -569,16 +569,17 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 // endpoint schema, and whether stdout held any JSON at all (which separates
 // "printed nothing usable" from "printed the wrong shape" in the error).
 //
-// Only complete, top-level values are considered. A value nested inside
-// malformed output is never promoted: recovering one would mean deciding, from
-// text that is by definition unparseable, whether it was an independent record
-// or a field of someone's log line — a question with no sound answer. stdout
-// carrying a bare endpoint object is the documented contract, so refusing to
-// guess costs a well-behaved script nothing.
+// Only complete, top-level values are considered — topLevelJSONAt, never the
+// diagnostic extractor. A value nested inside malformed output is never
+// promoted: recovering one would mean deciding, from text that is by definition
+// unparseable, whether it was an independent record or a field of someone's log
+// line — a question with no sound answer. stdout carrying a bare endpoint object
+// is the documented contract, so refusing to guess costs a well-behaved script
+// nothing.
 func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 	sawJSON := false
 	for cursor := 0; cursor < len(stdout); {
-		candidate, next := extractJSONAt(stdout, cursor)
+		candidate, next := topLevelJSONAt(stdout, cursor)
 		if candidate == "" {
 			break
 		}
