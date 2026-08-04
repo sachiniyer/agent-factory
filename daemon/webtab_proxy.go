@@ -814,9 +814,15 @@ func rewriteSetCookiePaths(h http.Header, prefix string) {
 			continue
 		}
 		orig := c.Path
-		if orig == "" {
-			orig = "/"
-		}
+		// Collapse leading slashes rather than mirroring them, which is the one
+		// place the cookie re-scope deliberately parts company with the path mirror
+		// (#2777). A cookie Path is matched by the browser against the request path
+		// it will actually send, and this daemon's router cleans repeated slashes
+		// out of a request path before any handler sees it (net/http ServeMux
+		// redirects "/p//api" to "/p/api"), so a cookie scoped to a doubled-slash
+		// path would match no request the browser ever makes and the app would
+		// silently lose it. Empty means "/" per RFC 6265 §5.2.4.
+		orig = "/" + strings.TrimLeft(orig, "/")
 		c.Path = joinURLPath(prefix, orig)
 		c.Domain = "" // default to the proxy host
 		if s := c.String(); s != "" {

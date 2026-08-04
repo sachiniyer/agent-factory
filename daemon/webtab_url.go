@@ -269,6 +269,13 @@ func normalizedHostPort(host, scheme string) string {
 // The path is carried in the target's own escaping, for the reason spelled out on
 // escapedRestOf: a %2F inside a segment is data, and re-canonicalizing it here
 // would redirect to a route the dev server does not serve.
+//
+// Its own SEGMENTS ride along for the same reason, empty ones included (#2777) —
+// and net/http then normalizes an empty segment away at both ends of the hop
+// (http.Redirect runs path.Clean over the Location; ServeMux cleans the request
+// path and 301s). Naming the target verbatim is still the right output: what this
+// owes its caller is the tab's own path, not a guess at which parts of it the
+// transport will keep. See TestWebTabProxy_EmptyPathSegmentIsNormalizedByNetHTTP.
 func mirrorRootRedirect(prefix string, target *url.URL, rawQuery string) (string, bool) {
 	if target.Path == "" || target.Path == "/" {
 		return "", false
@@ -294,9 +301,12 @@ func mirrorRootRedirect(prefix string, target *url.URL, rawQuery string) (string
 //
 // Prefixing them separately drifts for a path whose FIRST segment carries an
 // encoded slash: http://host/%2Ffoo parses to Path "//foo" and EscapedPath
-// "/%2Ffoo", and joinURLPath's TrimLeft eats BOTH leading slashes of the decoded
-// form but only the one real slash of the escaped one — so Path said ".../foo"
-// while RawPath said ".../%2Ffoo", and the redirect flattened the segment.
+// "/%2Ffoo". The decoded form leads with two slashes and the escaped one with a
+// single real slash, so any per-view normalization applies unequally — which is
+// how the two used to disagree (Path ".../foo" against RawPath ".../%2Ffoo"),
+// making net/url drop the raw form and the redirect flatten the segment. Joining
+// the escaped view alone and re-deriving the decoded one removes the second view
+// that could drift.
 //
 // A path that fails to re-parse keeps the old join rather than dropping the
 // redirect: unreachable, since EscapedPath only ever emits valid escapes.
@@ -394,12 +404,19 @@ func escapedRestOf(escapedPath string) (string, bool) {
 }
 
 // joinURLPath joins a base path and a sub path with exactly one slash between
-// them. Used to re-scope an upstream cookie's Path under the tab's proxy prefix.
-// Because the browser path mirrors the upstream path, prepending the prefix is all
-// a correct re-scope takes.
+// them, leaving everything else about sub alone. Because the browser path mirrors
+// the upstream path, prepending the prefix is all a correct re-scope takes.
+//
+// "Exactly one slash" is about the SEPARATOR, not about sub's own leading bytes:
+// only the one slash that would double the separator is removed (#2777). Trimming
+// them all silently rewrote any path whose first segment is empty — an upstream
+// serving "//foo" was mirrored as ".../foo", a different path — and it did so
+// inside a helper whose whole job is to prepend a prefix. A caller that wants
+// leading slashes collapsed collapses them itself, where the reason can be
+// written down; see rewriteSetCookiePaths.
 func joinURLPath(base, sub string) string {
 	if base == "" || base == "/" {
 		return sub
 	}
-	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(sub, "/")
+	return strings.TrimRight(base, "/") + "/" + strings.TrimPrefix(sub, "/")
 }

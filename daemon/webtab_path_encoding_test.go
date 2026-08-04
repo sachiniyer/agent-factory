@@ -525,6 +525,23 @@ func TestMirrorRootRedirect_CarriesTargetQueryAndEncoding(t *testing.T) {
 			target: "http://localhost:8899/%2Fa/b.css",
 			want:   prefix + "/%2Fa/b.css",
 		},
+		{
+			// A LITERAL double slash: the target's first path segment is empty. The
+			// join used to trim every leading slash off the remainder rather than the
+			// one that would double the separator, so the mirror silently named a
+			// DIFFERENT path than the tab was pointed at (#2777). What net/http then
+			// does with the doubled slash is its own decision — it collapses it at
+			// both ends, see TestWebTabProxy_EmptyPathSegmentIsNormalizedByNetHTTP —
+			// but the redirect's job is to mirror the target, not to pre-empt that.
+			name:   "literal double slash in the target path survives the join",
+			target: "http://localhost:8899//foo",
+			want:   prefix + "//foo",
+		},
+		{
+			name:   "literal double slash deeper in the target path survives",
+			target: "http://localhost:8899/a//b.css",
+			want:   prefix + "/a//b.css",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -540,5 +557,95 @@ func TestMirrorRootRedirect_CarriesTargetQueryAndEncoding(t *testing.T) {
 				t.Fatalf("mirrorRootRedirect(%q, %q) = %q, want %q", tc.target, tc.rawQuery, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWebTabProxy_EmptyPathSegmentIsNormalizedByNetHTTP records WHERE a doubled
+// slash in a mirrored path is actually decided — and it is nowhere in this repo.
+//
+// mirrorRootRedirect now names the target's path verbatim, empty segment and all
+// (#2777), which is the honest thing for a mirror to say. net/http then normalizes
+// it away at BOTH ends of the hop, and this test exists so the next reader learns
+// that from a test rather than from an afternoon:
+//
+//   - outbound, http.Redirect runs path.Clean over a relative Location before
+//     writing the header, so the browser is handed the COLLAPSED path;
+//   - inbound, ServeMux's own cleanPath answers a 301 for any request path with a
+//     repeated slash, before a handler runs — the same layer that cleans a literal
+//     "/../" (TestWebTabProxy_LiteralTraversalNeverReachesUpstream).
+//
+// So the webtab mirror cannot carry an empty path segment at all, and #2777's
+// collapse was invisible from outside the daemon. Neither layer is worth defeating:
+// the only way past them is to escape the slash, and %2F means a literal slash
+// INSIDE a segment — data rather than a separator (TestWebTabProxy_PreservesEncodedSlash)
+// — so emitting it for a real separator would ask the dev server for something
+// other than what the tab's target said.
+func TestWebTabProxy_EmptyPathSegmentIsNormalizedByNetHTTP(t *testing.T) {
+	upstream := newEchoPathUpstream(t)
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL+"//foo")
+
+	// The mirror names "//foo" (pinned on mirrorRootRedirect above); http.Redirect
+	// cleans it on the way into the header.
+	root := httptest.NewRecorder()
+	mux.ServeHTTP(root, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/webtab/%s/%s/", id, tabID), nil))
+	if root.Code != http.StatusFound {
+		t.Fatalf("tab root: status = %d, want 302 (body: %s)", root.Code, root.Body.String())
+	}
+	loc := root.Header().Get("Location")
+	if want := fmt.Sprintf("/v1/webtab/%s/%s/foo", id, tabID); loc != want {
+		t.Fatalf("mirror redirect Location = %q, want %q — http.Redirect's path.Clean decides this, not the mirror", loc, want)
+	}
+
+	// And a browser that asks for the doubled form anyway is 301'd to the same
+	// place by the router, so both directions agree on one URL.
+	hop := httptest.NewRecorder()
+	mux.ServeHTTP(hop, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/webtab/%s/%s//foo", id, tabID), nil))
+	if hop.Code != http.StatusMovedPermanently {
+		t.Fatalf("doubled-slash request: status = %d, want the router's 301 (body: %s)", hop.Code, hop.Body.String())
+	}
+	if got := hop.Header().Get("Location"); got != loc {
+		t.Fatalf("router cleaned to %q, want %q — the two normalizations must agree", got, loc)
+	}
+
+	// The end of the chain still serves the tab: an empty segment costs a redirect,
+	// never a dead end.
+	final := httptest.NewRecorder()
+	mux.ServeHTTP(final, httptest.NewRequest(http.MethodGet, loc, nil))
+	if final.Code != http.StatusOK {
+		t.Fatalf("cleaned request: status = %d, want 200 (body: %s)", final.Code, final.Body.String())
+	}
+	if got, want := final.Body.String(), "PATH=/foo"; !contains(got, want) {
+		t.Fatalf("upstream saw %q, want it to contain %q", got, want)
+	}
+}
+
+// TestWebTabProxy_DoubledCookiePathCollapses pins the one place the cookie
+// re-scope deliberately parts company with the path mirror (#2777).
+//
+// A cookie Path is matched by the browser against the request path it will
+// actually send, and the test above is why that path never carries an empty
+// segment: the router cleans it first. So a cookie re-scoped to a doubled-slash
+// path would match no request the browser ever makes, and a login/session/CSRF
+// cookie would silently stop being sent. Collapsing here is what keeps the
+// re-scope landing on real requests — and it is now the caller's own decision
+// rather than a side effect of the shared join.
+func TestWebTabProxy_DoubledCookiePathCollapses(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "appsess", Value: "abc", Path: "//api"})
+		fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+	mux, id, tabID := newWebTabProxyFixture(t, upstream.URL)
+
+	rec := proxyGet(t, mux, id, tabID, "api/login")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	app := cookieNamed(rec, "appsess")
+	if app == nil {
+		t.Fatal("upstream Set-Cookie (appsess) was not relayed to the client")
+	}
+	if want := fmt.Sprintf("/v1/webtab/%s/%s/api", id, tabID); app.Path != want {
+		t.Fatalf("relayed cookie Path = %q, want %q — a doubled-slash scope matches no request the router lets through", app.Path, want)
 	}
 }
