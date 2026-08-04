@@ -420,40 +420,22 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 // SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
 // The controlServer handlers stay: the gob control socket still SERVES every
 // verb for CLI/internal callers; only the TUI-only Go client wrappers were
-// removed. SnapshotNoSpawn below remains the CLI's non-spawning, instances-only
-// read.
+// removed. The sessions read (SnapshotNoSpawn) moved to apiclient in Phase 2
+// PR2; ListTasksNoSpawn below remains the CLI's non-spawning, instances-only
+// read on net/rpc.
 
-// ErrDaemonUnavailable signals that a non-spawning daemon read (SnapshotNoSpawn)
-// found no reachable, ready daemon: the control socket is absent/refused or the
-// daemon is still restoring instances (#829). It is the CLI read path's cue to
-// fall back to reading instances.json off disk — never to spawn a daemon or to
-// surface a transient RPC error from a read-only command (#1029 PR 2).
+// ErrDaemonUnavailable signals that a non-spawning daemon read (e.g.
+// ListTasksNoSpawn) found no reachable, ready daemon: the control socket is
+// absent/refused or the daemon is still restoring instances (#829). It is the
+// CLI read path's cue to fall back to reading off disk — never to spawn a
+// daemon or to surface a transient RPC error from a read-only command
+// (#1029 PR 2).
 var ErrDaemonUnavailable = errors.New("daemon not available")
 
-// SnapshotNoSpawn returns the daemon's authoritative session snapshot WITHOUT
-// starting a daemon. Unlike Snapshot — which calls EnsureDaemon and spawns a
-// daemon when none is running — this dials the existing control socket only if
-// it is already serving. It is the read path for CLI commands (sessions
-// list/get/whoami) that must keep working with no daemon present (scripts, CI)
-// and must never launch one. When no live state is available it returns
-// ErrDaemonUnavailable so the caller falls back to disk; it returns the live
-// instances only on a clean Snapshot success.
-func SnapshotNoSpawn(req SnapshotRequest) ([]session.InstanceData, error) {
-	var resp SnapshotResponse
-	if err := callDaemonNoEnsure("Snapshot", req, &resp); err != nil {
-		// A dial failure means no daemon is running; a starting error (#829)
-		// means one is warming up. Either way there is no authoritative live
-		// state to read, so signal the caller to fall back to disk rather than
-		// spawning a daemon or failing a read-only command.
-		return nil, ErrDaemonUnavailable
-	}
-	return resp.Instances, nil
-}
-
 // PreviewSession captures one session tab through the daemon's sole Preview
-// handler. Unlike SnapshotNoSpawn, previewing a live terminal is an active read:
-// it ensures the daemon is running and waits through daemon warm-up, just like
-// the other session control calls.
+// handler. Unlike ListTasksNoSpawn, previewing a live terminal is an active
+// read: it ensures the daemon is running and waits through daemon warm-up, just
+// like the other session control calls.
 func PreviewSession(req PreviewRequest) (content string, gone, tabGone bool, err error) {
 	var resp PreviewResponse
 	if err := callDaemon("Preview", req, &resp); err != nil {
@@ -569,12 +551,12 @@ func DeliverPrompt(req DeliverPromptRequest) (string, error) {
 }
 
 // ListTasksNoSpawn returns the daemon's authoritative task list WITHOUT
-// starting a daemon (#1029 PR 3). Like SnapshotNoSpawn it dials the existing
-// control socket only if it is already serving and returns ErrDaemonUnavailable
-// otherwise, so a read-only CLI command (tasks list/get) falls back to reading
-// tasks.json off disk rather than ever launching a daemon. Task reads do not
-// depend on the instance restore, so there is no warm-up starting-error window
-// to wait out here.
+// starting a daemon (#1029 PR 3). It dials the existing control socket only if
+// it is already serving and returns ErrDaemonUnavailable otherwise, so a
+// read-only CLI command (tasks list/get) falls back to reading tasks.json off
+// disk rather than ever launching a daemon. Task reads do not depend on the
+// instance restore, so there is no warm-up starting-error window to wait out
+// here.
 func ListTasksNoSpawn() ([]task.Task, error) {
 	var resp ListTasksResponse
 	if err := callDaemonNoEnsure("ListTasks", ListTasksRequest{}, &resp); err != nil {

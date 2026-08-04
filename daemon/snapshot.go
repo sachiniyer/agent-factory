@@ -8,14 +8,14 @@ import (
 
 // Snapshot RPC types and the delivery-failure alarm projection (#960 PR 3,
 // #1238). Extracted from control.go so that file stays under its length ceiling
-// (#1145). The remaining net/rpc client entry points (Snapshot / SnapshotNoSpawn)
-// and the controlServer.Snapshot handler live in control.go alongside the other
-// RPCs; this file owns the wire shapes and the alarm assembly.
+// (#1145). The controlServer.Snapshot handler lives in control.go alongside the
+// other RPCs; this file owns the wire shapes and the alarm assembly.
 //
 // The TUI's SnapshotWithAlarms read moved onto the HTTP apiclient in #1592 Phase
 // 2 PR3 (apiclient.Client.SnapshotWithAlarms), so the net/rpc SnapshotWithAlarms
 // client wrapper that used to live here is gone — the TUI was its only caller.
-// CLI/API callers use the instances-only Snapshot/SnapshotNoSpawn read.
+// The sessions SnapshotNoSpawn read moved to apiclient in Phase 2 PR2; task
+// reads (ListTasksNoSpawn) stay on net/rpc.
 
 // SnapshotRequest asks the daemon for the authoritative session list of a repo
 // (#960 PR 3). RepoID scopes the read like the other sessions verbs (empty =
