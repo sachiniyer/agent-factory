@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,6 +50,15 @@ func TestStartNewInstanceInRegistryModeRefusesWithoutProject(t *testing.T) {
 				"the message must name the action that unblocks the user, not a git error from the daemon")
 			assert.NotContains(t, full, "exit status 128",
 				"the cryptic daemon-side git failure is exactly what this guard exists to prevent")
+			// The notice clips to the terminal width and the TAIL is what vanishes
+			// (#1973), so the key that unblocks the user has to arrive before the
+			// explanation — at 120 columns a trailing "press ctrl+p" is cut, which
+			// was the shape the first real-TUI drive of this guard produced.
+			action := strings.Index(full, "ctrl+p")
+			why := strings.Index(full, "no active project")
+			require.NotEqual(t, -1, action, "the message must name the key that picks a project")
+			require.NotEqual(t, -1, why)
+			assert.Less(t, action, why, "the action must survive width-clipping; the explanation is the part that may be cut")
 		})
 	}
 }
