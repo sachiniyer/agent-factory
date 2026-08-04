@@ -41,10 +41,16 @@ on:
       - 'daemon/**'
       - 'agentproto/**'
       - 'apiproto/**'
-      # The harness itself.
+      # The harness itself — the WHOLE invocation chain. CI runs `make
+      # web-selftest-container`, so the closure is Makefile -> scripts/testbox.sh ->
+      # Dockerfile.web-selftest + web-selftest-entry.sh -> copy-src.sh (sourced by
+      # the entry to stage /src into /work). A PR editing only one link must run the
+      # suite it just changed.
+      - 'Makefile'
       - 'scripts/testbox.sh'
       - 'scripts/container/Dockerfile.web-selftest'
       - 'scripts/container/web-selftest-entry.sh'
+      - 'scripts/container/copy-src.sh'
       - '.github/workflows/web-selftest.yml'
       # The CI wiring that decides whether this gates, and the filter that decides
       # when it runs. A change to either must re-prove the gate on its own PR.

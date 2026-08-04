@@ -60,6 +60,23 @@ test("an empty change list skips — the workflow never asks about an unknown di
   assert.equal(scopeWebSelftest([]).run, false);
 });
 
+test("the whole harness invocation chain is watched, not just its middle", () => {
+  // CI runs `make web-selftest-container`, so every link between that command and
+  // the browser can break the suite. Missing a link means a PR that edits only
+  // that link merges without running the suite it just changed — the same "reads
+  // as coverage" failure this whole PR exists to remove (Codex review on #2762
+  // caught Makefile and copy-src.sh absent from the first cut).
+  for (const link of [
+    "Makefile", // defines the web-selftest-container target CI invokes
+    "scripts/testbox.sh", // the target's implementation
+    "scripts/container/Dockerfile.web-selftest", // the image it builds
+    "scripts/container/web-selftest-entry.sh", // what runs inside
+    "scripts/container/copy-src.sh", // sourced by the entry to stage /src -> /work
+  ]) {
+    assert.equal(scopeWebSelftest([link]).run, true, `${link} is part of the harness and must be watched`);
+  }
+});
+
 test("the CI wiring watches itself, so a change to the gate re-proves the gate", () => {
   assert.equal(scopeWebSelftest([".github/workflows/pr.yml"]).run, true);
   assert.equal(scopeWebSelftest([".github/scripts/web-selftest-scope.js"]).run, true);

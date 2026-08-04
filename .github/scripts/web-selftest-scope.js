@@ -24,17 +24,25 @@
 //     agentproto/**     and the wire types are as able to break the suite as web/
 //     apiproto/**       is. #1932 (a stale header) and #1894 (a detach that
 //                       dropped scroll) were both found exactly this way.
-//   * the harness itself, and the CI wiring that decides whether it gates — a
-//     change to this file or to pr.yml's Build `needs` must re-prove the gate on
-//     the PR that makes it, not on some later one.
+//   * the harness itself — the WHOLE invocation chain, not just its middle. CI
+//     runs `make web-selftest-container`, so the closure is Makefile ->
+//     scripts/testbox.sh -> Dockerfile.web-selftest + web-selftest-entry.sh ->
+//     copy-src.sh (the entry sources it to stage /src into /work). Miss a link and
+//     a PR editing only that link merges without running the suite it just
+//     changed, which is the same "reads as coverage" failure as #2762 itself.
+//   * the CI wiring that decides whether it gates — a change to this file or to
+//     pr.yml's Build `needs` must re-prove the gate on the PR that makes it, not
+//     on some later one.
 const SELFTEST_PATHS = [
   "web/**",
   "daemon/**",
   "agentproto/**",
   "apiproto/**",
+  "Makefile",
   "scripts/testbox.sh",
   "scripts/container/Dockerfile.web-selftest",
   "scripts/container/web-selftest-entry.sh",
+  "scripts/container/copy-src.sh",
   ".github/workflows/web-selftest.yml",
   ".github/workflows/pr.yml",
   ".github/scripts/web-selftest-scope.js",
