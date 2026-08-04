@@ -310,6 +310,31 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// and let NewInstance surface the canonical error rather than duplicating it.
 	nameNamespace := runtimeNamespaceForKind(runtimeKind)
 
+	// An in-place session and an off-box runtime are contradictory, and
+	// NewInstance is where that is enforced — but it runs long after this
+	// function, and this function MUTATES (#2778). For an explicit title held
+	// only by an archived session, the reuse rename below relocates that
+	// session's worktree and rewrites its durable record; a refusal raised later
+	// at NewInstance would leave that rename standing for a create that could
+	// never have succeeded, which is the one state reserveCreate's admission
+	// comment promises it never produces (#2127, #2415).
+	//
+	// It also refuses the plain case earlier and better: `--here` against a
+	// docker/ssh/hook repo now fails before a title is reserved, rather than
+	// after provisioning work has begun.
+	//
+	// Through session.InPlaceBackendConflict rather than a local comparison
+	// against runtimeKind, so the daemon's answer and NewInstance's cannot drift
+	// — including on the deliberate non-firing for a backend value that will not
+	// resolve, which belongs to the factory's canonical error.
+	if err := session.InPlaceBackendConflict(session.InstanceOptions{
+		Backend:     session.BackendKind(req.Backend),
+		ForceRemote: req.ForceRemote,
+		InPlace:     req.InPlace,
+	}, repo.Root); err != nil {
+		return nil, "", nil, nil, err
+	}
+
 	var renamedArchived *session.InstanceData
 	title := req.Title
 	if title == "" {
