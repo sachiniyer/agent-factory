@@ -350,7 +350,8 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 
 // findArchivedOnlyCollisionLocked returns the ONE loaded archived instance whose
 // title collides with `title`, together with its manager-map key — but only when
-// it is the sole claim across reservations, loaded instances, and durable rows.
+// it is the sole claim across reservations, loaded instances, and durable rows,
+// and only when no exclusive operation is already running against it (#2779).
 // A live/reserved collision returns nil so ordinary availability validation
 // reports it. Multiple claims return an error immediately: renaming an arbitrary
 // loaded winner would mutate user state and still leave the requested runtime
@@ -398,6 +399,49 @@ func (m *Manager) findArchivedOnlyCollisionLocked(repoID, repoPath, title string
 		// With no loaded archived row there is nothing this helper could mutate,
 		// so leave that path's established diagnostic in charge.
 		return nil, "", nil
+	}
+
+	// An exclusive lifecycle operation already owns this archived session, so it
+	// is not a free name to rename around (#2779). killsInFlight is that fence:
+	// restore, kill, archive and the root-kill path each claim it under m.mu
+	// before touching a session, and the reuse rename — which relocates a
+	// worktree, rewrites a durable record and re-keys the manager map — is every
+	// bit as exclusive, yet it was the one such mutation that never asked.
+	//
+	// What that cost: RestoreArchived claims the fence, takes the per-session op
+	// lock, and then RELEASES m.mu before moving the worktree — it has to, because
+	// the move is a bounded git subprocess and no manager-wide lock may be held
+	// across it. reserveCreate holds m.mu across the rename, but m.mu was never
+	// what the two contended on. Both ended up inside
+	// GitWorktree.relocateWorktreeTo on the SAME worktree object, which has no
+	// internal synchronization: one call reads the source path the other is
+	// rewriting, and their filesystem steps interleave. In the observed ordering
+	// the create won, the restoring session was renamed to "<title> (archived)"
+	// with its worktree moved out from under the restore, and the restore then
+	// failed against a source that no longer existed — the user's uncommitted work
+	// left in an archive directory nothing had asked to move.
+	//
+	// Reading the fence HERE is what makes the check sound rather than
+	// approximate. m.mu is the only thing ordering the two: reserveCreate holds it
+	// unbroken from this read through the rename, so a claim either lands before
+	// this read — and refuses the create — or cannot land until the rename has
+	// finished and re-keyed the row, where the claimant's own
+	// `m.instances[key] != instance` recheck catches it. There is no third
+	// interleaving.
+	//
+	// It lives in this shared helper rather than in renameArchivedForReuseLocked
+	// for the same reason #2415 moved the record-independent checks up: all three
+	// callers ask this function whether an archived row may be renamed, and the
+	// two that run BEFORE the rename are what turn this into a side-effect-free
+	// refusal instead of one discovered after the worktree had already moved.
+	//
+	// Refusing, rather than quietly returning "no collision": the ordinary
+	// availability error would say the title is taken without saying that
+	// something is actively doing something about it. Naming the in-flight
+	// operation is what makes "retry in a moment" the obvious next step.
+	if _, busy := m.killsInFlight[archivedKey]; busy {
+		return nil, "", fmt.Errorf("cannot reuse session name %q: an operation is already in progress for the archived session %q; retry once it finishes",
+			title, archived.Title)
 	}
 
 	// diskData contains the persisted copy of the loaded archived row as well as
