@@ -101,3 +101,78 @@ func TestHookOutputSuffixRedactsDeeplyEscapedTokenKeys(t *testing.T) {
 		})
 	}
 }
+
+// Second review round on #2841.
+
+// P1 3716833778: a mismatched closer let the hand-rolled scan pop the record's
+// opener, re-framing the log's nested endpoint as a top-level value.
+func TestHookLaunchRejectsNestedEndpointAfterMismatchedCloser(t *testing.T) {
+	h := newHookState(t, `
+echo '{"level":],"endpoint":{"url":"http://wrong.invalid","token":"logged-secret"}}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "mismatched closer").provisionOrReap()
+	require.NoError(t, err)
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
+}
+
+// P2 3716726113: an unterminated JSON-ish log on stdout left openers on the
+// stack to EOF, so a launch that DID echo an endpoint was reported as printing
+// none — and its working sandbox reaped.
+func TestHookLaunchRecoversAfterUnterminatedStdoutLog(t *testing.T) {
+	for _, prefix := range []string{"progress {{", `partial {"level":`, "noise ["} {
+		t.Run(prefix, func(t *testing.T) {
+			h := newHookState(t, "echo '"+prefix+"'\n"+
+				`echo '{"url":"http://10.0.0.7:8080","token":"secret"}'`+"\nexit 0\n", "")
+			res, err := newHookProvisioner(h, "unterminated stdout "+prefix).provisionOrReap()
+			require.NoError(t, err, "an unterminated stdout log must not hide the endpoint")
+			require.NotNil(t, res.Endpoint)
+			assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+			assert.False(t, h.deleteRan(t), "a working sandbox must not be reaped")
+		})
+	}
+}
+
+// A pretty-printed endpoint still parses: the line-anchored rule requires the
+// value to BEGIN a line, not to fit on one.
+func TestHookLaunchAcceptsPrettyPrintedEndpoint(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{' '  "url": "http://10.0.0.7:8080",' '  "token": "secret"' '}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "pretty endpoint").provisionOrReap()
+	require.NoError(t, err)
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+}
+
+// P2 3716726118 / 3716726119 / 3716833785: a token hard-wrapped by a logger —
+// once, several times, with CRLF, or wrapped and then truncated — left its tail
+// in the error. The continuation is bounded by whitespace, which a bearer token
+// never contains.
+func TestHookOutputSuffixRedactsWrappedTokenTails(t *testing.T) {
+	tests := []struct{ name, output, secret string }{
+		{"crlf wrap", "{\"token\":\"prefix-\r\nsecret-tail\"}", "secret-tail"},
+		{"multiple wraps", "{\"token\":\"a-\nsecret-middle-\nsecret-tail\"}", "secret-middle-"},
+		{"wrapped and truncated", "{\"token\":\"prefix-\nsecret-tail", "secret-tail"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			suffix := hookOutputSuffix([]byte(test.output))
+			assert.NotContains(t, suffix, test.secret)
+			assert.Contains(t, suffix, "[REDACTED]")
+		})
+	}
+}
+
+// P2 3716833781: the advertised depth-3 Unicode-escaped key must actually be
+// redacted end to end, not merely fit the widened scan window.
+func TestHookOutputSuffixRedactsDepthThreeUnicodeTokenKey(t *testing.T) {
+	output := `INFO endpoint="{\\\"\\\\u0074\\\\u006f\\\\u006b\\\\u0065\\\\u006e\\\":\\\"depth3-secret\\\"}"`
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, "depth3-secret")
+	assert.Contains(t, suffix, "[REDACTED]")
+}

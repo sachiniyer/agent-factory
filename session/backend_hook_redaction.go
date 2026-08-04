@@ -189,34 +189,60 @@ type hookOutputRange struct {
 // more.
 func hookTokenRedactionRanges(output string) []hookOutputRange {
 	ranges := scanHookTokenRanges(output)
+	for index := range ranges {
+		ranges[index].end = extendHookTokenValue(output, ranges[index])
+	}
 	if stripped, offsets := stripRawLineBreaks(output); len(offsets) > 0 {
 		for _, joined := range scanHookTokenRanges(stripped) {
 			if joined.start >= len(offsets) || joined.end <= joined.start {
 				continue
 			}
-			// Only a value that CLOSES in the joined view is a field split by a line
-			// break. An unterminated one runs to whatever quote appears next, which
-			// may be pages of unrelated diagnostics away — and the raw pass already
-			// redacts that tail to end of line, so dropping it here loses nothing
-			// (Codex P2 on #2718).
-			if !joined.complete {
-				continue
-			}
-			if joined.end > len(offsets) {
-				continue
-			}
-			candidate := hookOutputRange{start: offsets[joined.start], end: offsets[joined.end-1] + 1}
-			// A field split by a line break crosses exactly one. More than that is
-			// the scan running away through unrelated lines, and replacing those
-			// would hide the failure this output exists to report.
-			if strings.Count(output[candidate.start:candidate.end], "\n")+
-				strings.Count(output[candidate.start:candidate.end], "\r") > 1 {
-				continue
-			}
-			ranges = append(ranges, candidate)
+			start := offsets[joined.start]
+			ranges = append(ranges, hookOutputRange{
+				start: start,
+				end:   extendHookTokenValue(output, hookOutputRange{start: start, end: start}),
+			})
 		}
 	}
 	return mergeHookOutputRanges(ranges)
+}
+
+// extendHookTokenValue follows a token value that a raw line break interrupted.
+//
+// A logger may hard-wrap a long credential, once or several times, and a killed
+// launch_cmd may leave it wrapped AND unterminated — in every case the tail is
+// still the secret. The continuation is bounded by WHITESPACE rather than by a
+// line count: a bearer token contains none, and prose does. That is what keeps a
+// truncated token from swallowing the diagnostic behind it, which is the only
+// account a user gets of a failed provision. The cost is at most the first word
+// of a following line, which is the safe direction to err.
+func extendHookTokenValue(output string, value hookOutputRange) int {
+	end := value.end
+	if end < value.start {
+		end = value.start
+	}
+	for end < len(output) {
+		switch output[end] {
+		case '\n', '\r':
+			// Only cross a break if the value actually continues after it.
+			next := end
+			for next < len(output) && (output[next] == '\n' || output[next] == '\r') {
+				next++
+			}
+			if next >= len(output) || output[next] == ' ' || output[next] == '\t' ||
+				output[next] == '"' {
+				return end
+			}
+			end = next
+		case ' ', '\t', '"':
+			return end
+		case '\\':
+			end += 2
+		default:
+			end++
+		}
+	}
+	return len(output)
 }
 
 // stripRawLineBreaks returns output without its raw line breaks, plus the

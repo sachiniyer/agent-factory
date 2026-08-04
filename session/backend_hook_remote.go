@@ -112,22 +112,48 @@ func extractJSONAt(output string, start int) (string, int) {
 	return findJSONAt(output, start, true)
 }
 
-// topLevelJSONAt returns only values that stand on their own: a complete JSON
-// value at the top level of the scan, never one recovered from inside a
-// malformed wrapper.
+// topLevelJSONAt returns the first value that stands on its own: a complete JSON
+// value beginning a line, decoded by encoding/json rather than by matching
+// delimiters here.
 //
-// Endpoint selection needs this and the diagnostic extractor above cannot give
-// it. Recovering a child of a malformed wrapper is right for redaction, where
+// Endpoint selection needs this and the diagnostic extractor cannot give it.
+// Recovering a child of a malformed wrapper is right for redaction, where
 // finding more JSON only means sanitizing more, and wrong for the endpoint,
-// where it promotes `{"level":INVALID,"endpoint":{…}}`'s inner object to a
-// launch record and makes the daemon dial the logged URL (Codex P1 on #2718).
+// where it promotes the inner object of `{"level":INVALID,"endpoint":{…}}` to a
+// launch record and makes the daemon dial the logged URL.
+//
+// Two properties do the work, and both are load-bearing:
+//
+//   - The real parser decides. A hand-rolled delimiter scan pops on any closer,
+//     so `{"level":],…}` ends the record early and re-frames the log's nested
+//     endpoint as top level. encoding/json simply rejects it.
+//   - A candidate must BEGIN A LINE. That is what makes resynchronization safe:
+//     an unclosed `progress {{` on an earlier line is skipped without its
+//     children ever becoming candidates, because they do not start a line.
+//     docs/remote-hooks.md has launch_cmd echo one JSON object on stdout, so a
+//     record that starts mid-line is someone's log, not the endpoint.
 func topLevelJSONAt(output string, start int) (string, int) {
-	// No quote resynchronization either. Restarting the scan past an unmatched
-	// quote re-frames whatever follows as top level, which turns a log record's
-	// nested endpoint back into a launch record — the same promotion this
-	// function exists to refuse. stdout is documented to carry the endpoint
-	// object and nothing else, so there is no prose here to resynchronize past.
-	return scanJSONAt(output, start, false)
+	for cursor := start; cursor < len(output); {
+		lineEnd := strings.IndexAny(output[cursor:], "\r\n")
+		next := len(output)
+		if lineEnd >= 0 {
+			next = cursor + lineEnd + 1
+		}
+		open := cursor
+		for open < len(output) && (output[open] == ' ' || output[open] == '\t') {
+			open++
+		}
+		if open < len(output) && (output[open] == '{' || output[open] == '[') {
+			decoder := json.NewDecoder(strings.NewReader(output[open:]))
+			var raw json.RawMessage
+			if err := decoder.Decode(&raw); err == nil {
+				// InputOffset is relative to the reader, which started at open.
+				return string(raw), open + int(decoder.InputOffset())
+			}
+		}
+		cursor = next
+	}
+	return "", len(output)
 }
 
 func findJSONAt(output string, start int, recover bool) (string, int) {
