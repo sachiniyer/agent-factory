@@ -135,12 +135,16 @@ func TestAttachStream_IgnoredSignalDoesNotDisturbTheAttach(t *testing.T) {
 	// wrongly ran would have to beat BOTH. The hand-back writes the neutral
 	// restore to the terminal, so its bytes appearing at all mean the attach gave
 	// back a terminal it is still proxying to; and a restored terminal is cooked,
-	// so it would echo the round trip below locally.
+	// so it would echo the probe below locally.
+	//
+	// No hand-back happens on this path (the signal is filtered out before the
+	// watch is armed), so the terminal never changes state under the probes and a
+	// single strict probe is right here.
 	require.NotContains(t, h.output(), tmux.NeutralTerminalRestore,
 		"the attach handed the terminal back on a signal that could never kill it")
-	from := len(h.output())
-	h.roundTrip(t, "ping", "the attach must still be reading the terminal")
-	require.NotContains(t, h.output()[from:], "ping\r\n",
+	arrived, echoed := h.attachProbe(t, "ping", 30*time.Second)
+	require.True(t, arrived, "the attach must still be reading the terminal (%s)", h.childState())
+	require.False(t, echoed,
 		"the terminal echoed locally, so the attach handed back a terminal it is still using")
 
 	// A signal that CAN kill it still hands the terminal back — skipping one
@@ -169,18 +173,31 @@ func TestAttachStream_IgnoredSignalDoesNotDisturbTheAttach(t *testing.T) {
 func TestAttachStream_UnkillableSignalRetakesTheTerminal(t *testing.T) {
 	h := startAttachInPTY(t, "unkillable-int")
 	h.waitForOutput(t, attachHelperReady, "the helper should reach raw-mode attach")
+	// Prove the round trip works BEFORE the signal, while the terminal state is
+	// stable. Establishing liveness afterwards instead would race the hand-back
+	// window, and a probe lost there would be reported as a dead attach.
+	h.roundTrip(t, "presignal", "the attach must be reading the terminal before the signal")
+
 	require.NoError(t, h.cmd.Process.Signal(syscall.SIGINT))
 
-	// The attach is alive at all — the first thing the signal must not have done.
-	h.roundTrip(t, "sync", "the attach must survive a signal that cannot kill it")
+	// Wait for the hand-back to actually HAPPEN before requiring it to be undone.
+	// The neutral restore written to the terminal is the observable for that, and
+	// without this the first probe can beat the signal handler: it would find a
+	// terminal that is still raw because nothing had touched it yet, and report
+	// that as a successful retake. Ordering the two makes the test prove the whole
+	// sequence — handed back, then taken again — instead of just the end state.
+	h.waitForOutput(t, tmux.NeutralTerminalRestore,
+		"the signal must make the attach hand the terminal back in the first place")
 
-	// Then the terminal must come BACK to raw. This one is polled rather than
-	// asserted once: the retake deliberately waits out a grace period, so that a
-	// signal which really is fatal kills the process before anything re-raws a
-	// terminal it is about to abandon. Each probe round trip also re-proves the
-	// attach is still reading.
-	h.requireTerminalRetaken(t, "the terminal is still cooked after a signal that could not "+
-		"kill the process: the attach handed it back and never took it again")
+	// Then the terminal must come BACK to raw, and the attach must still be
+	// reading it. Polled rather than asserted once, for two reasons: the retake
+	// deliberately waits out a grace period so a genuinely fatal signal kills the
+	// process before anything re-raws a terminal it is about to abandon, and a
+	// probe typed while the hand-back is still in effect is not the attach's to
+	// receive at all.
+	h.requireTerminalRetaken(t, "the terminal never came back to raw under a live attach "+
+		"after a signal that could not kill the process: the attach handed it back and "+
+		"never took it again")
 
 	// And the terminal it retook still comes back for real when the attach ends.
 	require.NoError(t, h.cmd.Process.Signal(syscall.SIGTERM))
@@ -316,8 +333,6 @@ type ptyAttach struct {
 	// before the close, so reading it after is ordered.
 	exited  chan struct{}
 	exitErr error
-	// typed accumulates what roundTrip has sent, matching what the helper reports.
-	typed string
 }
 
 // startAttachInPTY allocates a pty, proves it starts out as a working cooked
@@ -417,46 +432,108 @@ func shellTrapFor(mode string) string {
 	return ""
 }
 
-// requireTerminalRetaken polls until a typed probe stops being echoed locally —
-// the terminal going back to raw under a still-running attach. Polling is the
-// point: the transition happens after the watcher's grace period, so a one-shot
-// check races it and would pass against a build that never retakes.
+// requireTerminalRetaken polls until a typed probe both reaches the pane and is
+// NOT echoed locally — the terminal back in raw mode under a still-running
+// attach.
+//
+// Retried with a fresh token, because a single probe proves less than it looks
+// like it does and both ways it can come back short mean "ask again":
+//
+//   - echoed: the terminal is still cooked. The retake waits out a grace period
+//     on purpose, so early probes SHOULD see this;
+//   - never arrived: the byte did not reach the pane this time. A single probe
+//     with a long timeout would spend the whole budget here and then report it
+//     as "the terminal never came back", which is a different defect from the
+//     one that happened.
+//
+// Only the deadline is a failure, and the message separates those two cases by
+// counting them, so a future failure names its own mechanism instead of leaving
+// the next reader to infer it from a truncated CI log.
 func (h *ptyAttach) requireTerminalRetaken(t *testing.T, why string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
+	probes, reached, lastEchoed := 0, 0, false
 	for i := 1; time.Now().Before(deadline); i++ {
-		token := fmt.Sprintf("probe%d", i)
-		from := len(h.output())
-		h.roundTrip(t, token, "the attach must still be reading the terminal")
-		if !strings.Contains(h.output()[from:], token+"\r\n") {
-			return // no local echo: raw again
+		arrived, echoed := h.attachProbe(t, fmt.Sprintf("probe%d", i), time.Second)
+		probes++
+		if arrived {
+			reached++
 		}
-		time.Sleep(50 * time.Millisecond)
+		lastEchoed = echoed
+		if arrived && !echoed {
+			return
+		}
 	}
-	t.Fatalf("%s\npty output: %q", why, h.output())
+	diagnosis := "the terminal stayed COOKED: the attach handed it back and never took it again"
+	if reached == 0 {
+		diagnosis = "no probe ever reached the pane: the attach stopped reading the terminal " +
+			"altogether, which is a live attach gone deaf rather than a terminal left raw — " +
+			"treat this as a PRODUCT failure, not a flaky test"
+	}
+	t.Fatalf("%s\n%s\n%d probes typed, %d reached the pane, last one echoed locally: %v (%s)\npty output: %q",
+		why, diagnosis, probes, reached, lastEchoed, h.childState(), h.output())
 }
 
 func (h *ptyAttach) output() string { return h.out.String() }
 
-// roundTrip types a token into the attached terminal and waits for the helper to
-// report it arriving through the PTY stream. It doubles as a synchronization
-// point: when it returns, the child has read the terminal, written the socket
-// and printed to stdout since whatever the caller did before it.
-func (h *ptyAttach) roundTrip(t *testing.T, token, why string) {
+// attachProbe types a token into the terminal and reports two things: whether
+// the helper saw it arrive through the PTY stream, and whether the terminal
+// echoed it locally. Arrival means the attach is reading the terminal; a local
+// echo means the terminal is cooked.
+//
+// A probe can legitimately go unanswered, which is why this reports rather than
+// asserts. While a hand-back is in effect the terminal belongs to the shell and
+// not to the pane, so bytes typed in that window are not the attach's to
+// receive. The caller decides whether an unanswered probe is a failure or a
+// reason to type again.
+func (h *ptyAttach) attachProbe(t *testing.T, token string, within time.Duration) (arrived, echoed bool) {
 	t.Helper()
-	h.typed += token
+	from := len(h.output())
 	_, err := h.ptmx.WriteString(token + "\r")
 	require.NoError(t, err, "type into the attached terminal")
-	// Match the tokens THIS test typed at the tail of a report line rather than
-	// assuming they are the whole of it: the helper reports everything the stream
-	// has delivered, and a terminal hands the attach whatever was queued on it
-	// before the attach started — the harness baseline probe, typically.
+	// Match the token ALONE inside a report line, never an accumulation of every
+	// token typed so far. The helper reports what the stream DELIVERED, which is
+	// not always what the parent typed — anything queued on the terminal before
+	// the attach started arrives too, and a single byte that never arrives
+	// desynchronizes an accumulated expectation permanently, so every later probe
+	// waits out its full timeout for a string that can no longer appear. Unique
+	// tokens need no accumulation to be unambiguous.
 	//
-	// Anchoring to the report line also keeps a cooked terminal honest. Searching
-	// the raw output for the token would match the LOCAL ECHO of it, which is
-	// precisely the symptom the caller is testing for the absence of.
-	want := regexp.MustCompile(regexp.QuoteMeta(attachHelperSawPrefix) + `[^\r\n]*` + regexp.QuoteMeta(h.typed))
-	h.waitForOutputMatch(t, want, why)
+	// Anchoring to the report line still keeps a cooked terminal honest: the local
+	// echo of the token carries no report prefix, so it cannot satisfy this.
+	want := regexp.MustCompile(regexp.QuoteMeta(attachHelperSawPrefix) + `[^\r\n]*` + regexp.QuoteMeta(token))
+	deadline := time.Now().Add(within)
+	for {
+		if want.MatchString(h.output()) {
+			return true, strings.Contains(h.output()[from:], token+"\r\n")
+		}
+		if !time.Now().Before(deadline) {
+			return false, strings.Contains(h.output()[from:], token+"\r\n")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// roundTrip is attachProbe where an unanswered probe IS the failure — use it
+// only when the terminal state is stable, never across a hand-back.
+func (h *ptyAttach) roundTrip(t *testing.T, token, why string) {
+	t.Helper()
+	if arrived, _ := h.attachProbe(t, token, 30*time.Second); !arrived {
+		t.Fatalf("%s\ntyped %q and it never reached the pane through the attach (%s)\npty output: %q",
+			why, token, h.childState(), h.output())
+	}
+}
+
+// childState describes the helper process for a failure message. A test that
+// timed out waiting on the pane should say whether the process it was waiting
+// for is even alive — otherwise the next reader has to guess, as I did.
+func (h *ptyAttach) childState() string {
+	select {
+	case <-h.exited:
+		return fmt.Sprintf("helper process exited: %v", h.exitErr)
+	default:
+		return "helper process still running"
+	}
 }
 
 // wait blocks until the child exits and returns its exit error (nil only if it
@@ -475,26 +552,14 @@ func (h *ptyAttach) wait(t *testing.T) error {
 // waitForOutput blocks until want shows up on the pty.
 func (h *ptyAttach) waitForOutput(t *testing.T, want, why string) {
 	t.Helper()
-	h.waitForOutputFunc(t, func(out string) bool { return strings.Contains(out, want) },
-		why, fmt.Sprintf("%q", want))
-}
-
-// waitForOutputMatch is waitForOutput for a pattern rather than a literal.
-func (h *ptyAttach) waitForOutputMatch(t *testing.T, want *regexp.Regexp, why string) {
-	t.Helper()
-	h.waitForOutputFunc(t, want.MatchString, why, want.String())
-}
-
-func (h *ptyAttach) waitForOutputFunc(t *testing.T, match func(string) bool, why, want string) {
-	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if match(h.output()) {
+		if strings.Contains(h.output(), want) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("%s: never saw %s on the pty; output: %q", why, want, h.output())
+	t.Fatalf("%s: never saw %q on the pty (%s)\npty output: %q", why, want, h.childState(), h.output())
 }
 
 // requireTerminalUsable types a line into the terminal and requires the line
