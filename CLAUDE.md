@@ -59,13 +59,32 @@ Working style:
   permanently destroy the session and prune its owned branch. Don't let sessions
   accumulate.
 - Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
-- Run `golangci-lint run --timeout=3m --fast`, `gofmt -l .`, `go build ./...`,
-  `make test-container`, `deadcode -test ./...`, and
-  `scripts/lint-file-length.sh` before opening a PR — CI blocks on all six. On
-  a shared dev box, never run bare `go test ./...` on the host; see
-  docs/container-testing.md.
+- Before opening a PR run the **cheap local checks** — `gofmt -l .`,
+  `go build ./...`, `golangci-lint run --timeout=3m --fast`,
+  `deadcode -test ./...`, `scripts/lint-file-length.sh` — plus `go test` on
+  **only the non-daemon package you changed**. Then push and let CI run the
+  rest, and fix what CI reports on your PR head.
+- **Do not run containerized suites as a routine pre-PR gate.** Not
+  `make test-container`, not `make remote-roundtrip-container`, not
+  `make playtest-container`. Each spins a container that rebuilds the whole Go
+  tree; ~20 sessions doing it at once took this 16-core box to a load average of
+  160 and made the maintainer's machine unusable. CI already runs
+  `go test -race ./...` on every push, so a local container run buys nothing and
+  costs him the box. One exception: if CI fails on something you genuinely
+  cannot diagnose from the logs, **one** targeted container run to reproduce —
+  then stop.
+- **If your change is in `daemon/`, run no daemon tests locally at all — push
+  and let CI test it.** Not `go test ./daemon/`, not a `-run`-scoped subset,
+  not `-race`. This is a safety rule rather than a performance one: those tests
+  spawn real `af` daemons and touch tmux on a machine where the maintainer's own
+  daemon and ~15 live sessions are running, so a local run risks disturbing
+  production sessions rather than merely burning CPU. `app/` is the same deal —
+  its tests drive real tmux. Never bare `go test ./...`; use
+  `go test $(go list ./... | grep -v '/daemon')` if you need breadth.
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
-  merge own PRs after CI green, close issues that aren't worth doing. The
+  merge own PRs once the `gate-pr` gates pass, close issues that aren't worth
+  doing. Green CI is the floor, not the bar — the Codex review lands after it.
+  Whoever wrote the PR gates and merges it; that is not a root queue. The
   audit trail is in PR descriptions and issue close-out comments, not
   pre-approval.
 
@@ -75,21 +94,19 @@ Working style:
 # Build
 go build ./...
 
-# Run the full test suite — inside a container, isolated from the host
-# tmux server and real AF home (see docs/container-testing.md)
-make test-container
+# Test the package you changed. Never bare `go test ./...` on a shared dev
+# box, and never ./daemon/... or ./app/... on the host — they spawn real af
+# daemons and drive real tmux, next to ~15 live sessions.
+go test ./<changed-package>/...
+go test $(go list ./... | grep -v '/daemon')   # only if you need breadth
 
-# Focused remote-hook integration harness — mock remote round-trip
-# inside the same container fence (see docs/container-testing.md)
-make remote-roundtrip-container
-
-# Host-side runs: never bare `go test ./...` on a shared dev box — the
-# daemon package spawns real af daemons. Skip it, or use the container.
-go test $(go list ./... | grep -v '/daemon')
-
-# TUI play-testing — containerized sandbox (throwaway home, mock repo,
-# private tmux); see docs/container-testing.md
-make playtest-container
+# The containerized suites below are NOT routine pre-PR gates — CI runs
+# `go test -race ./...` on every push, and ~20 concurrent container runs took
+# this box to load 160. Reach for one ONLY to reproduce a CI failure you
+# cannot diagnose from the logs, then stop. See docs/container-testing.md.
+make test-container                # full suite, isolated tmux + AF home
+make remote-roundtrip-container    # mock remote round-trip
+make playtest-container            # TUI sandbox (throwaway home, mock repo)
 
 # Reclaim the docker disk the container harness holds — and only that (#2133).
 # Every target above already cleans up after itself on the way out; this one

@@ -40,7 +40,9 @@ lost sessions as recoverable until proven otherwise.
 6. **Never use broad host kills**:
    - Never run bare `tmux kill-server`; sandbox tmux work needs a private
      `TMUX` or `TMUX_TMPDIR`.
-   - Never run bare `go test ./...` on the host; use `make test-container`.
+   - Never run bare `go test ./...` on the host, and never `./daemon/...` or
+     `./app/...` — they spawn real af daemons and drive real tmux beside live
+     sessions. Test one non-daemon package, or let CI run the matrix.
    - Never `pgrep` and kill the real daemon by broad process name.
 
    If cleanup is required, scope it to the recorded sandbox path, private tmux

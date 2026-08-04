@@ -7,7 +7,9 @@ user_invocable: true
 # Dispatch AF Session
 
 Dispatch focused implementation work to an `af` session with the standard
-Captain Claude contract. Root verifies and merges; worker sessions do not.
+Captain Claude contract. **The session that writes the PR gates and merges it.**
+Root does not sit between a finished PR and master — that queue is what turns a
+green PR into a week-old PR.
 
 ## Steps
 
@@ -19,22 +21,35 @@ Captain Claude contract. Root verifies and merges; worker sessions do not.
 
    Task: <specific implementation request>
 
-   Do NOT merge. Root verifies the PR.
+   You own this PR end to end, including the merge. Follow the gate-pr skill
+   and merge it yourself when its gates pass. Do not hand the PR back to root.
 
-   Gates:
-   - golangci-lint run --timeout=3m --fast
+   Local gates (cheap only, before opening the PR):
    - gofmt -l .
    - go build ./...
-   - make test-container
+   - golangci-lint run --timeout=3m --fast
    - deadcode -test ./...
    - scripts/lint-file-length.sh
+   - go test ./<only the package you changed>/...  (skip if it is daemon/ or app/)
    - <any task-specific gate>
+
+   Do NOT run make test-container / remote-roundtrip-container /
+   playtest-container as a routine gate — CI runs the full matrix on every
+   push, and concurrent container runs take the shared box down. Push, let CI
+   run the rest, and fix what it reports on your PR head.
+
+   Merge gates (gate-pr, after the PR is open):
+   - every triggered check finished, none failed
+   - a Codex review for the exact head SHA — no review is NOT a clean review
+   - zero unresolved inline findings, each cleared by an in-reply-to RESOLVED
+   - merge with: gh pr merge <n> --squash --match-head-commit <gated sha>
 
    Sign the PR as Captain Claude.
    Include: Closes #<n>
 
-   NOTIFY ROOT:
-   af sessions send-prompt root "DONE <name>: <PR#/status>"
+   NOTIFY ROOT when the PR is merged, or when a gate blocks you and you
+   cannot clear it yourself:
+   af sessions send-prompt root "DONE <name>: <PR# merged | blocked on X>"
    ```
 
    If the notification message contains backticks, write it to a temp file and
@@ -42,13 +57,17 @@ Captain Claude contract. Root verifies and merges; worker sessions do not.
    shell-execute in root's repo:
    ```bash
    tmp="$(mktemp)"
-   printf '%s\n' 'DONE <name>: PR #<n> (`make test-container` passed)' > "$tmp"
+   printf '%s\n' 'DONE <name>: PR #<n> merged (`golangci-lint` + CI green)' > "$tmp"
    af sessions send-prompt root "$(cat "$tmp")"
    rm -f "$tmp"
    ```
 
 2. **Include box-safety rules** — every prompt must say:
-   - No bare host `go test`; use `make test-container` only.
+   - No bare host `go test ./...`. Test only the package you changed, and if
+     that package is `daemon/` or `app/`, run NO tests for it locally — push
+     and let CI. They spawn real af daemons and drive real tmux on a box with
+     ~15 live sessions.
+   - No routine container runs; CI covers the matrix.
    - Never run `scripts/tui-driver.sh` against a real repo (#1303).
    - No sub-sessions.
    - No dev-install.
@@ -82,9 +101,9 @@ Captain Claude contract. Root verifies and merges; worker sessions do not.
    Use a unique session name that identifies the issue or slice. Keep the
    prompt self-contained because the receiving agent inherits no root context.
 
-4. **Expect work to completion** — after notifying root, the worker should
-   continue to the next assigned slice when one exists. It should not idle
-   just because the first PR is open.
+4. **Expect work to completion** — a session is done when its PR is **merged**,
+   not when it is open. After notifying root it should continue to the next
+   assigned slice when one exists, rather than idling on an open PR.
 
 5. **Run the idle sweep** — periodically inspect sessions for stale, blocked,
    or completed work:
@@ -93,13 +112,17 @@ Captain Claude contract. Root verifies and merges; worker sessions do not.
    af sessions preview <name>
    ```
 
-   Re-prompt sessions that have stopped without a root notification. Archive or
-   kill only when the session is genuinely done or unrecoverable.
+   Re-prompt sessions that have stopped without a root notification. A session
+   sitting idle on an open, un-merged PR is the failure this contract exists to
+   prevent — ask it which gate is blocking rather than merging on its behalf.
 
 6. **Reap completed sessions** — once all PRs for a session's ticket have
-   merged, clean up the session and its worktree:
+   merged, archive it (restorable) rather than killing it:
    ```bash
-   af sessions kill <name>
+   af sessions archive <name>
    ```
 
-   Do not reap a session while any of its PRs are still under review.
+   Archive is the default "done" action because it stays restorable. Use
+   `af sessions kill` only when you mean to permanently destroy the session and
+   prune its owned branch. Do not reap a session while any of its PRs are still
+   open — it is the one that has to clear the findings.

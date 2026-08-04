@@ -12,12 +12,19 @@ Create a PR for the current branch against `master`.
 
 1. **Pre-flight checks** — before creating the PR, run these and fix any issues:
    ```bash
-   golangci-lint run --timeout=3m --fast
    gofmt -l .                    # fix any output with: gofmt -w <file>
    go build ./...
-   make test-container           # never run bare go test ./... on a shared host
+   golangci-lint run --timeout=3m --fast
    deadcode -test ./...
    scripts/lint-file-length.sh
+   go test ./<only the package you changed>/...   # skip if it is daemon/ or app/
+
+   # Do NOT run make test-container as a routine gate — CI runs
+   # `go test -race ./...` on every push, and a local container run rebuilds the
+   # whole Go tree, which takes the shared box down when sessions do it in
+   # parallel. Never bare `go test ./...` on the host. If your change is in
+   # daemon/ or app/, run NO tests for it locally — they spawn real af daemons
+   # and drive real tmux next to live sessions. Push and let CI test it.
    ```
 
 2. **Review changes** — examine the diff against master:
@@ -47,7 +54,7 @@ Create a PR for the current branch against `master`.
    - [x] `golangci-lint run --timeout=3m --fast` passes
    - [x] `gofmt -l .` produces no output
    - [x] `go build ./...` passes
-   - [x] `make test-container` passes
+   - [x] `go test` on the changed package passes (CI runs the full matrix)
    - [x] `deadcode -test ./...` produces no output
    - [x] `scripts/lint-file-length.sh` passes
    - [ ] Manually tested in TUI (if applicable)

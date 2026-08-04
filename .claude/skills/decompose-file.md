@@ -44,12 +44,15 @@ merges before the next file begins.
 6. **Run the gates**:
    ```bash
    gofmt -w <changed-go-files>
-   golangci-lint run --timeout=3m --fast
    gofmt -l .
    go build ./...
-   make test-container
+   golangci-lint run --timeout=3m --fast
    deadcode -test ./...
    scripts/lint-file-length.sh
+   go test ./<the package you split>/...   # skip if it is daemon/ or app/
+
+   # No make test-container — CI runs `go test -race ./...` on every push.
+   # A decomposition is exactly the case CI covers well: same code, moved.
    ```
 
    If the change is TUI-visible, also play-test the affected flow before
