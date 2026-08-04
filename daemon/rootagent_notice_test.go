@@ -182,3 +182,33 @@ func TestOpeningTheSessionPaneClearsTheRecreateNotice(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond,
 		"the clear must be durable, or the notice returns on the next daemon start")
 }
+
+// TestAcknowledgeKeepsTheNoticeWhenThePersistFails is the #2814 Codex P2. The
+// clear is committed to memory before it is committed to disk, so a failed
+// write used to leave THIS daemon's snapshots without the notice while disk
+// still carried it — and every later pane open took the "nothing to clear" fast
+// path and never retried. The user lost the warning until a restart reloaded
+// the stale record. A failed persist must leave the note exactly as it was.
+func TestAcknowledgeKeepsTheNoticeWhenThePersistFails(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, "root", "af_2629_persistfail")
+	inst.NoteRecreateContext()
+	require.Equal(t, session.RootRecreateContextFresh, inst.RootRecreateContext())
+
+	// Make the targeted write fail the way a drifted store does: persistInstanceData
+	// refuses when no record with that title is on disk, rather than inventing one.
+	require.NoError(t, config.LoadState().SaveInstances(repo.ID, []byte("[]")))
+	require.Error(t, persistInstanceData(repo.ID, inst.ToInstanceData()),
+		"fixture guard: the write this test needs to fail must actually fail")
+
+	manager.acknowledgeRootRecreate(inst)
+
+	require.Equal(t, session.RootRecreateContextFresh, inst.RootRecreateContext(),
+		"a clear that could not be persisted must not be applied in memory either")
+}

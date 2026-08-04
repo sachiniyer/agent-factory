@@ -1,5 +1,7 @@
 package session
 
+import "strings"
+
 // Root-agent re-create context (#2629).
 //
 // Healing a root replaces its session record rather than re-spawning into it,
@@ -49,18 +51,37 @@ const (
 )
 
 // ClassifyRootRecreateContext decides what a root heal's conversation carry did,
-// from the conversation the reaped record held and the one the replacement
-// actually came up with.
+// from the conversation the reaped record held, the one the replacement actually
+// came up with, and the agent the replacement actually launched.
 //
 // It reads the conversation the new record CARRIES rather than what the create
 // was asked to do: a create can be handed a conversation and still come up on a
 // different one, and the record is the thing that will be resumed from next
 // time.
 //
+// launchedAgent is what disambiguates the one genuinely ambiguous outcome. A
+// replacement that recorded NO conversation reaches that state two ways, and
+// they deserve opposite answers:
+//
+//   - The launch runs a DIFFERENT agent than the carried conversation belongs to
+//     (a claude root re-created as codex, because the root program was repointed).
+//     ResumeProgramWithConversationID refuses on the agent mismatch, and the
+//     launch starts that agent's own new conversation — so the carried one is
+//     provably not resumed, whether or not the new id is captured synchronously.
+//     codex ids are discovered asynchronously, so this case ALWAYS arrives here
+//     with no recorded conversation; reading it as "unknown" would hide the
+//     documented agent-change fallback behind the one word that means af cannot
+//     tell.
+//   - The launch runs the SAME agent but recorded nothing, which happens only
+//     when the resolved command pins its own conversation selection (`claude
+//     --continue`, `codex resume --last`) and both the resume rewrite and the
+//     fresh-id injection therefore decline. There the agent may well have
+//     continued something; af genuinely cannot say.
+//
 // This is the single authority for that judgment — the daemon's log line and
 // the note on the row both come from here — so the log and the rail can never
 // disagree about whether a root resumed.
-func ClassifyRootRecreateContext(carried AgentConversationData, created *AgentConversationData) RootRecreateContext {
+func ClassifyRootRecreateContext(carried AgentConversationData, created *AgentConversationData, launchedAgent string) RootRecreateContext {
 	switch {
 	case !carried.HasID():
 		// Nothing was recorded to carry, so nothing was resumed. The root really is
@@ -68,11 +89,21 @@ func ClassifyRootRecreateContext(carried AgentConversationData, created *AgentCo
 		return RootRecreateContextFresh
 	case created != nil && created.Agent == carried.Agent && created.ID == carried.ID:
 		return RootRecreateContextNone
-	case created == nil:
+	case created == nil && sameAgent(launchedAgent, carried.Agent):
 		return RootRecreateContextUnknown
 	default:
 		return RootRecreateContextFresh
 	}
+}
+
+// sameAgent reports whether the launch came up on the provider the carried
+// conversation belongs to. An UNKNOWN launched agent ("" — no tmux binding, or a
+// command no matcher recognizes) is deliberately not treated as a match: the
+// unknown-continuity verdict has to be earned by positively identifying the same
+// provider, not fall out of a question that could not be answered.
+func sameAgent(launchedAgent, carriedAgent string) bool {
+	launched := strings.TrimSpace(launchedAgent)
+	return launched != "" && launched == strings.TrimSpace(carriedAgent)
 }
 
 // Note returns the short note a rail row renders for this outcome, or "" when
@@ -104,10 +135,18 @@ func (i *Instance) RootRecreateContext() RootRecreateContext {
 // session's pane IS the acknowledgement: the note exists to tell a user
 // something they would otherwise learn only by reading the log, and once they
 // are looking at the agent it has done its job.
+//
+// It clears only a value THIS binary actually renders (Note() != ""). A record
+// written by a newer daemon can carry an outcome this version does not know: it
+// renders nothing for it, deliberately, and a value nobody was ever shown has
+// not been acknowledged by anybody. Clearing it would let an older binary erase
+// roll-forward state on a stream open — silently destroying the notice a newer
+// daemon was going to display. Leaving it is the safe direction: the binary that
+// understands it is the one that gets to clear it.
 func (i *Instance) AcknowledgeRootRecreateContext() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.rootRecreateContext == RootRecreateContextNone {
+	if i.rootRecreateContext.Note() == "" {
 		return false
 	}
 	i.rootRecreateContext = RootRecreateContextNone
@@ -153,5 +192,9 @@ func (i *Instance) NoteRecreateContext() {
 	if len(i.Tabs) > 0 {
 		created = conversationDataPtr(i.Tabs[0].Conversation)
 	}
-	i.rootRecreateContext = ClassifyRootRecreateContext(i.carriedConversation, created)
+	// currentAgentNameLocked reads the LAUNCHED command off the bound tmux
+	// session, so a root whose program was repointed to another agent is
+	// identified as that agent — which is what separates the provable
+	// agent-change fallback from a command that picked its own conversation.
+	i.rootRecreateContext = ClassifyRootRecreateContext(i.carriedConversation, created, i.currentAgentNameLocked())
 }

@@ -233,6 +233,11 @@ func TestEnsureRootAgentsFallsBackToAFreshAgentWhenTheCarriedCreateFails(t *test
 // the carry goes, the log must SAY which. A fresh agent is a legitimate outcome
 // when the prior conversation cannot be recovered — but if it reads the same as
 // a successful carry-over, #2616 just becomes invisible again in a new form.
+//
+// The verdict comes from session.ClassifyRootRecreateContext, the same call that
+// decides the note on the row (#2629), so these cases double as the log half of
+// that classification — including the launched agent that separates a repointed
+// root from a command that picked its own conversation.
 func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) {
 	prior := session.AgentConversationData{Agent: tmux.ProgramClaude, ID: priorRootConversationID}
 
@@ -240,6 +245,7 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 		name        string
 		carried     session.AgentConversationData
 		created     *session.AgentConversationData
+		launched    string
 		wantInfo    string
 		wantWarning string
 	}{
@@ -247,24 +253,38 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 			name:        "nothing recorded to carry",
 			carried:     session.AgentConversationData{},
 			created:     nil,
+			launched:    tmux.ProgramClaude,
 			wantWarning: "had no recorded conversation to carry",
 		},
 		{
 			name:     "carried",
 			carried:  prior,
 			created:  &session.AgentConversationData{Agent: tmux.ProgramClaude, ID: priorRootConversationID},
+			launched: tmux.ProgramClaude,
 			wantInfo: "resumed its prior claude conversation " + priorRootConversationID,
 		},
 		{
 			name:        "resolved command pins its own conversation",
 			carried:     prior,
 			created:     nil,
+			launched:    tmux.ProgramClaude,
 			wantWarning: "context continuity is unknown",
+		},
+		{
+			// A repointed root_agents program: the launch runs codex, so the claude
+			// conversation is provably unresumable. Naming BOTH agents is what makes
+			// the cause diagnosable from the log alone.
+			name:        "the root now runs a different agent",
+			carried:     prior,
+			created:     nil,
+			launched:    tmux.ProgramCodex,
+			wantWarning: "now runs codex, so its prior claude conversation " + priorRootConversationID + " cannot be resumed",
 		},
 		{
 			name:        "recorded but not resumed",
 			carried:     prior,
 			created:     &session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "5299e00d-1111-4222-8333-f7045e07a242"},
+			launched:    tmux.ProgramClaude,
 			wantWarning: "did not come up on its prior claude conversation " + priorRootConversationID,
 		},
 	}
@@ -280,7 +300,7 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 				log.WarningLog.SetOutput(prevWarning)
 			})
 
-			reportRootConversationCarry("/repo", tc.carried, tc.created)
+			reportRootConversationCarry("/repo", tc.carried, tc.created, tc.launched)
 
 			if tc.wantInfo != "" {
 				require.Contains(t, info.String(), tc.wantInfo)

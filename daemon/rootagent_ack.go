@@ -36,9 +36,13 @@ func (m *Manager) acknowledgeRootRecreate(instance *session.Instance) {
 		// clear, and mutating it would only affect an object about to be dropped.
 		return
 	}
+	// Captured BEFORE the clear so a failed persist can put it back. Reading it
+	// afterwards would only ever return the cleared value.
+	previous := instance.RootRecreateContext()
 	if !instance.AcknowledgeRootRecreateContext() {
-		// Another stream got here first. Exactly one of them persists and
-		// announces; the losers must not re-announce an unchanged row.
+		// Another stream got here first, or the value is one this binary does not
+		// render and therefore has not shown anybody. Exactly one acknowledger
+		// persists and announces; the losers must not re-announce an unchanged row.
 		return
 	}
 
@@ -50,7 +54,14 @@ func (m *Manager) acknowledgeRootRecreate(instance *session.Instance) {
 
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
-		log.WarningLog.Printf("could not clear the re-create notice on session %q; it will show again until the next successful write: %v", instance.Title, err)
+		// Put the note back in memory, the way SetPRInfo rolls its value back: the
+		// clear above is not durable, so leaving it applied would make THIS daemon's
+		// snapshots drop the notice while disk still carries it — and every later
+		// stream open would take the early return above and never retry the write.
+		// The user would lose the warning until a restart reloaded the stale record.
+		// Restored, the next pane open tries the whole acknowledgement again.
+		instance.ReconcileRootRecreateContext(previous)
+		log.WarningLog.Printf("could not clear the re-create notice on session %q; leaving it set so the next pane open retries: %v", instance.Title, err)
 		return
 	}
 	// Announce the cleared row so every OTHER open client drops the note too — a

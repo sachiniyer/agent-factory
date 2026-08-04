@@ -26,52 +26,83 @@ func TestClassifyRootRecreateContext(t *testing.T) {
 	prior := AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID}
 
 	tests := []struct {
-		name    string
-		carried AgentConversationData
-		created *AgentConversationData
-		want    RootRecreateContext
-		note    string
+		name     string
+		carried  AgentConversationData
+		created  *AgentConversationData
+		launched string
+		want     RootRecreateContext
+		note     string
 	}{
 		{
-			name:    "resumed the exact conversation",
-			carried: prior,
-			created: &AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID},
-			want:    RootRecreateContextNone,
-			note:    "",
+			name:     "resumed the exact conversation",
+			carried:  prior,
+			created:  &AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID},
+			launched: tmux.ProgramClaude,
+			want:     RootRecreateContextNone,
+			note:     "",
 		},
 		{
-			name:    "nothing was recorded to carry",
-			carried: AgentConversationData{},
-			created: nil,
-			want:    RootRecreateContextFresh,
-			note:    "fresh context",
+			name:     "nothing was recorded to carry",
+			carried:  AgentConversationData{},
+			created:  nil,
+			launched: tmux.ProgramClaude,
+			want:     RootRecreateContextFresh,
+			note:     "fresh context",
 		},
 		{
-			name:    "came up on a different conversation",
-			carried: prior,
-			created: &AgentConversationData{Agent: tmux.ProgramClaude, ID: "5299e00d-1111-4222-8333-f7045e07a242"},
-			want:    RootRecreateContextFresh,
-			note:    "fresh context",
+			name:     "came up on a different conversation",
+			carried:  prior,
+			created:  &AgentConversationData{Agent: tmux.ProgramClaude, ID: "5299e00d-1111-4222-8333-f7045e07a242"},
+			launched: tmux.ProgramClaude,
+			want:     RootRecreateContextFresh,
+			note:     "fresh context",
 		},
 		{
-			name:    "the resolved command selects its own conversation",
-			carried: prior,
-			created: nil,
-			want:    RootRecreateContextUnknown,
-			note:    "context unknown",
+			// The SAME agent recorded nothing, which happens only when the resolved
+			// command pins its own conversation selection.
+			name:     "the resolved command selects its own conversation",
+			carried:  prior,
+			created:  nil,
+			launched: tmux.ProgramClaude,
+			want:     RootRecreateContextUnknown,
+			note:     "context unknown",
 		},
 		{
-			name:    "a different agent's id is not the same conversation",
-			carried: prior,
-			created: &AgentConversationData{Agent: tmux.ProgramCodex, ID: priorConversationID},
-			want:    RootRecreateContextFresh,
-			note:    "fresh context",
+			// The #2814 Codex P2. A claude root repointed to codex records nothing
+			// synchronously (codex ids are discovered asynchronously), but the claude
+			// conversation is PROVABLY not resumed — a codex process cannot be in it.
+			// Reading this as "unknown" hid the documented agent-change fallback
+			// behind the one word that means af cannot tell.
+			name:     "the root now runs a different agent",
+			carried:  prior,
+			created:  nil,
+			launched: tmux.ProgramCodex,
+			want:     RootRecreateContextFresh,
+			note:     "fresh context",
+		},
+		{
+			// An unidentifiable launch must not EARN the unknown verdict: it is the
+			// answer to "same provider?", and that question was not answered.
+			name:     "the launched agent cannot be identified",
+			carried:  prior,
+			created:  nil,
+			launched: "",
+			want:     RootRecreateContextFresh,
+			note:     "fresh context",
+		},
+		{
+			name:     "a different agent's id is not the same conversation",
+			carried:  prior,
+			created:  &AgentConversationData{Agent: tmux.ProgramCodex, ID: priorConversationID},
+			launched: tmux.ProgramCodex,
+			want:     RootRecreateContextFresh,
+			note:     "fresh context",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ClassifyRootRecreateContext(tc.carried, tc.created)
+			got := ClassifyRootRecreateContext(tc.carried, tc.created, tc.launched)
 			assert.Equal(t, tc.want, got)
 			assert.Equal(t, tc.note, got.Note())
 		})
@@ -94,23 +125,35 @@ func TestNoteRecreateContextReadsTheCommittedConversation(t *testing.T) {
 	prior := AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID}
 
 	t.Run("resumed", func(t *testing.T) {
-		inst := &Instance{carriedConversation: prior, Tabs: []*Tab{{Name: agentTabName, Conversation: prior}}}
+		inst := &Instance{Program: tmux.ProgramClaude, carriedConversation: prior,
+			Tabs: []*Tab{{Name: agentTabName, Conversation: prior}}}
 		inst.NoteRecreateContext()
 		assert.Equal(t, RootRecreateContextNone, inst.RootRecreateContext())
 	})
 	t.Run("landed on a different conversation", func(t *testing.T) {
 		fresh := AgentConversationData{Agent: tmux.ProgramClaude, ID: "5299e00d-1111-4222-8333-f7045e07a242"}
-		inst := &Instance{carriedConversation: prior, Tabs: []*Tab{{Name: agentTabName, Conversation: fresh}}}
+		inst := &Instance{Program: tmux.ProgramClaude, carriedConversation: prior,
+			Tabs: []*Tab{{Name: agentTabName, Conversation: fresh}}}
 		inst.NoteRecreateContext()
 		assert.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext())
 	})
-	t.Run("recorded nothing", func(t *testing.T) {
-		inst := &Instance{carriedConversation: prior, Tabs: []*Tab{{Name: agentTabName}}}
+	t.Run("same agent recorded nothing", func(t *testing.T) {
+		inst := &Instance{Program: tmux.ProgramClaude, carriedConversation: prior,
+			Tabs: []*Tab{{Name: agentTabName}}}
 		inst.NoteRecreateContext()
 		assert.Equal(t, RootRecreateContextUnknown, inst.RootRecreateContext())
 	})
+	t.Run("the root now runs a different agent", func(t *testing.T) {
+		// The repointed-program fallback: the launch resolves to codex, whose ids
+		// are captured asynchronously, so nothing is recorded here — but a codex
+		// process is provably not in the carried claude conversation.
+		inst := &Instance{Program: tmux.ProgramCodex, carriedConversation: prior,
+			Tabs: []*Tab{{Name: agentTabName}}}
+		inst.NoteRecreateContext()
+		assert.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext())
+	})
 	t.Run("had nothing to carry", func(t *testing.T) {
-		inst := &Instance{Tabs: []*Tab{{Name: agentTabName}}}
+		inst := &Instance{Program: tmux.ProgramClaude, Tabs: []*Tab{{Name: agentTabName}}}
 		inst.NoteRecreateContext()
 		assert.Equal(t, RootRecreateContextFresh, inst.RootRecreateContext())
 	})
@@ -129,6 +172,23 @@ func TestAcknowledgeRootRecreateContextIsOneShot(t *testing.T) {
 	unmarked := &Instance{}
 	assert.False(t, unmarked.AcknowledgeRootRecreateContext(),
 		"an ordinary session is never acknowledging anything")
+}
+
+// TestAcknowledgeRootRecreateContextPreservesUnknownValues is the #2814 Codex
+// P2: a record written by a NEWER daemon can carry an outcome this binary does
+// not render. Nobody was shown it, so nobody acknowledged it — and clearing it
+// on a stream open would let an old binary silently erase roll-forward state
+// the newer daemon was going to display. The binary that understands a value is
+// the one that gets to clear it.
+func TestAcknowledgeRootRecreateContextPreservesUnknownValues(t *testing.T) {
+	future := RootRecreateContext("some-later-outcome")
+	require.Empty(t, future.Note(), "fixture guard: this value must be one this binary does not render")
+
+	inst := &Instance{rootRecreateContext: future}
+	assert.False(t, inst.AcknowledgeRootRecreateContext(),
+		"a value this binary never rendered has not been acknowledged")
+	assert.Equal(t, future, inst.RootRecreateContext(),
+		"the newer daemon's state must survive an older binary's stream opens")
 }
 
 // TestRootRecreateContextSurvivesStorageRoundTrip is the load-bearing

@@ -419,7 +419,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	}
 	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", repo.Root, program)
 	if reapedRoot {
-		reportRootConversationCarry(repo.Root, carried.conversation, data.AgentConversation)
+		reportRootConversationCarry(repo.Root, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(repo.Root, carried.tabs, data.Tabs)
 	}
 	m.rootEnsureSucceeded(st)
@@ -480,20 +480,27 @@ func countNonAgentTabs(tabs []session.TabData) int {
 // that decides the note on the row (#2629), not a second copy of the rule. The
 // log adds one distinction the note does not need (nothing recorded to carry vs
 // recorded and not resumed); it cannot add a different verdict.
-func reportRootConversationCarry(repoRoot string, carried session.AgentConversationData, created *session.AgentConversationData) {
-	switch session.ClassifyRootRecreateContext(carried, created) {
+func reportRootConversationCarry(repoRoot string, carried session.AgentConversationData, created *session.AgentConversationData, launchedAgent string) {
+	switch session.ClassifyRootRecreateContext(carried, created, launchedAgent) {
 	case session.RootRecreateContextNone:
 		log.InfoLog.Printf("re-created root agent for %s resumed its prior %s conversation %s", repoRoot, carried.Agent, carried.ID)
 	case session.RootRecreateContextUnknown:
 		log.WarningLog.Printf("re-created root agent for %s did not record its prior %s conversation %s; the resolved command may select its own conversation, so context continuity is unknown",
 			repoRoot, carried.Agent, carried.ID)
 	default:
-		if !carried.HasID() {
+		switch {
+		case !carried.HasID():
 			log.WarningLog.Printf("re-created root agent for %s had no recorded conversation to carry; it starts with a fresh context", repoRoot)
-			return
+		case created == nil:
+			// The provable agent-change fallback: the root now runs a different
+			// agent, so its prior conversation cannot be resumed at all. Naming both
+			// agents is what makes a repointed root_agents program diagnosable.
+			log.WarningLog.Printf("re-created root agent for %s now runs %s, so its prior %s conversation %s cannot be resumed; it starts with a fresh context",
+				repoRoot, launchedAgent, carried.Agent, carried.ID)
+		default:
+			log.WarningLog.Printf("re-created root agent for %s did not come up on its prior %s conversation %s; it starts with a fresh context",
+				repoRoot, carried.Agent, carried.ID)
 		}
-		log.WarningLog.Printf("re-created root agent for %s did not come up on its prior %s conversation %s; it starts with a fresh context",
-			repoRoot, carried.Agent, carried.ID)
 	}
 }
 
