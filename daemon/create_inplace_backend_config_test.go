@@ -79,3 +79,34 @@ func TestReserveCreate_InPlaceOnLocalRepoStillReservesTheTitle(t *testing.T) {
 	assert.Equal(t, "here", title)
 	assert.Nil(t, renamed)
 }
+
+// TestReserveCreate_RootAgentSurvivesARemoteBackendRepo pins the one in-place
+// caller that is not a user request: the daemon's always-ensured root agent.
+//
+// A root agent is documented as the `af sessions create --here` shape — in-place
+// at the repo root, no worktree, no branch — so it is local by construction. Left
+// to resolve the repo's `backend` key it would have been read as a docker/ssh/hook
+// create, which before #2778 silently produced a root running in a sandbox clone
+// that could not see the working tree its record claimed, and after #2778 would
+// have taken the always-on guarantee away from those repos instead.
+//
+// The reserved title makes this a real root create rather than a lookalike.
+func TestReserveCreate_RootAgentSurvivesARemoteBackendRepo(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	writeRepoBackendConfig(t, repoPath, map[string]any{"backend": "docker"})
+
+	repo, title, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath:      repoPath,
+		Title:         session.RootSessionTitle,
+		Program:       "claude",
+		InPlace:       true,
+		Backend:       string(session.BackendLocal),
+		allowReserved: true,
+	})
+	require.NoError(t, err, "the daemon's in-place root agent must still be creatable in a repo whose config selects a sandbox backend")
+	require.NotNil(t, release)
+	defer release()
+
+	assert.Equal(t, repoID, repo.ID)
+	assert.Equal(t, session.RootSessionTitle, title)
+}

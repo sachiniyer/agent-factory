@@ -363,10 +363,28 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 
 	program := rootAgentProgramForProfile(repo.Root, resolution.RootAgent)
 	req := CreateSessionRequest{
-		Title:         session.RootSessionTitle,
-		RepoPath:      repo.Root,
-		Program:       program,
-		InPlace:       true,
+		Title:    session.RootSessionTitle,
+		RepoPath: repo.Root,
+		Program:  program,
+		InPlace:  true,
+		// Say local out loud, because InPlace already decided it. A root agent is
+		// documented as the `af sessions create --here` shape — in-place at the
+		// repo root, no worktree, no branch (configuration.md § root_agents) — and
+		// an in-place session has no meaning on a runtime that works in a sandbox
+		// clone it cannot see.
+		//
+		// Left empty, the create resolves the repo's `backend` key, so a project
+		// that opted into docker/ssh/hook silently got a root whose agent ran in a
+		// clone while its record claimed the working tree — the #2778 contradiction,
+		// on the one session the daemon guarantees. Once #2778 refuses that
+		// contradiction, the same repos would instead lose their always-on root
+		// entirely. Neither is what `root_agents` asks for.
+		//
+		// This does not override the repo's choice for anything else: `backend`
+		// still governs every ordinary session there. It only stops the reserved,
+		// daemon-owned, hardcoded-in-place session from being read as a sandbox
+		// create it can never be.
+		Backend:       string(session.BackendLocal),
 		allowReserved: true,
 		// Zero on every path that did not just reap a root — a first-ever create,
 		// or a kill whose grace window elapsed (KillSession already deleted that
