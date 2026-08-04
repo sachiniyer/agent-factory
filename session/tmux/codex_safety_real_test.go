@@ -15,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/term"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 const codexSafetyRealFixtureEnv = "AF_CODEX_SAFETY_REAL_FIXTURE"
@@ -23,7 +25,7 @@ const codexSafetyRealFixtureEnv = "AF_CODEX_SAFETY_REAL_FIXTURE"
 // onto one test-owned server. It leaves the user's default tmux server entirely
 // untouched while still exercising the real capture-pane/send-keys boundary.
 type socketExecutor struct {
-	label string
+	socket string
 }
 
 func (e socketExecutor) Run(command *exec.Cmd) error {
@@ -37,7 +39,18 @@ func (e socketExecutor) Output(command *exec.Cmd) ([]byte, error) {
 }
 
 func (e socketExecutor) scope(command *exec.Cmd) {
-	command.Args = append([]string{command.Args[0], "-L", e.label}, command.Args[1:]...)
+	command.Args = append([]string{command.Args[0], "-S", e.socket}, command.Args[1:]...)
+}
+
+// tmuxAt builds a tmux command against this test's private server. `-S` names
+// the socket outright rather than deriving it from TMUX_TMPDIR, because the
+// derived path is what breaks: the package sandbox roots TMUX_TMPDIR under
+// os.TempDir(), which on macOS is /var/folders/<hash>/T (~49 bytes), and a
+// label appended to that overruns darwin's 104-byte sun_path — tmux then
+// refuses with a bare "exit status 1" that names nothing. testguard.SocketPath
+// hands back a short path and fails up front if it ever stops being short.
+func tmuxAt(socket string, args ...string) *exec.Cmd {
+	return exec.Command("tmux", append([]string{"-S", socket}, args...)...)
 }
 
 func TestCodexSafetyDelayedRenderFixtureProcess(t *testing.T) {
@@ -62,7 +75,13 @@ func TestCodexSafetyDelayedRenderFixtureProcess(t *testing.T) {
 	renderFixturePane(codexCurrentSafetyBufferingWaitSelected, false)
 	require.NoError(t, waitForFixtureByte(reader, '\r'))
 	renderFixturePane(codexSafetyRealNormalPane, true)
-	time.Sleep(5 * time.Second)
+
+	// Hold the pane open until the test's cleanup kills the session, and no
+	// longer. A timed exit races the runner: exit-empty would tear the server
+	// down mid-assertion on a loaded box, and cleanup would then report the
+	// session it wanted gone as a failure to remove it. Reads end at EOF when
+	// the server does go away, so nothing outlives it either.
+	_, _ = reader.ReadByte()
 }
 
 const codexSafetyRealNormalPane = `• Working
@@ -90,8 +109,11 @@ func waitForFixtureByte(reader *bufio.Reader, wanted byte) error {
 }
 
 func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForRealTmuxRender(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("tmux is not installed: %v", err)
+	}
 	info, _, errorLogs := captureTrustPromptLogs(t)
-	label := fmt.Sprintf("af2673-%d-%d", os.Getpid(), time.Now().UnixNano())
+	socketPath := testguard.SocketPath(t, "af2673.sock")
 	name := "af_safety-render-2673"
 	fixtureDir := t.TempDir()
 	fixturePath := filepath.Join(fixtureDir, ProgramCodex)
@@ -100,19 +122,24 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForRealTmuxRender(t *testing.
 	require.NoError(t, os.Symlink(executable, fixturePath))
 
 	program := fixturePath + " -test.run=^TestCodexSafetyDelayedRenderFixtureProcess$"
-	start := exec.Command(
-		"tmux", "-L", label, "new-session", "-d",
-		"-s", name, "-x", "100", "-y", "24", program,
-	)
+	start := tmuxAt(socketPath, "new-session", "-d", "-s", name, "-x", "100", "-y", "24", program)
 	start.Env = append(os.Environ(), codexSafetyRealFixtureEnv+"=1")
-	require.NoError(t, start.Run())
-	require.NoError(t, exec.Command("tmux", "-L", label, "set-option", "-g", "exit-empty", "on").Run())
+	// CombinedOutput, not Run: tmux explains every refusal on stderr, and
+	// discarding it leaves a bare "exit status 1" to diagnose from CI alone.
+	out, err := start.CombinedOutput()
+	require.NoError(t, err, "start isolated tmux fixture session: %s", out)
+	out, err = tmuxAt(socketPath, "set-option", "-g", "exit-empty", "on").CombinedOutput()
+	require.NoError(t, err, "set exit-empty on the isolated server: %s", out)
 
-	socketPath := tmuxSocketPath(t, label, name)
-	serverPID := tmuxServerPID(t, label, name)
+	serverPID := tmuxServerPID(t, socketPath, name)
 	t.Cleanup(func() {
-		if killErr := exec.Command("tmux", "-L", label, "kill-session", "-t", name).Run(); killErr != nil {
-			t.Errorf("kill isolated tmux session: %v", killErr)
+		if killOut, killErr := tmuxAt(socketPath, "kill-session", "-t", exactTarget(name)).CombinedOutput(); killErr != nil {
+			// A session that is already gone is cleanup's goal reached early,
+			// not a failure — kill-session and has-session both exit nonzero
+			// once the server is down, so ask before reporting.
+			if probeErr := tmuxAt(socketPath, "has-session", "-t", exactTarget(name)).Run(); probeErr == nil {
+				t.Errorf("kill isolated tmux session: %v: %s", killErr, killOut)
+			}
 		}
 		if !eventually(2*time.Second, 20*time.Millisecond, func() bool {
 			return stderrors.Is(syscall.Kill(serverPID, 0), syscall.ESRCH)
@@ -125,11 +152,12 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForRealTmuxRender(t *testing.
 		}
 	})
 
-	session := newTmuxSession(name, program, MakePtyFactory(), socketExecutor{label: label})
+	session := newTmuxSession(name, program, MakePtyFactory(), socketExecutor{socket: socketPath})
 	waitForRealPane(t, session, codexSafetyRealNormalPane)
 	require.False(t, session.CheckAndHandleTrustPrompt(), "normal pane establishes the pre-dialog model")
 
-	require.NoError(t, exec.Command("tmux", "-L", label, "send-keys", "-t", exactTarget(name), "x").Run())
+	out, err = tmuxAt(socketPath, "send-keys", "-t", exactTarget(name), "x").CombinedOutput()
+	require.NoError(t, err, "raise the fixture's safety picker: %s", out)
 	waitForRealPane(t, session, "Dismiss and keep waiting")
 	require.True(t, session.CheckAndHandleTrustPrompt(), "the live safety picker blocks prompt delivery")
 	require.Empty(t, errorLogs.String(), "one stale frame after a real navigation key is pending, not an error")
@@ -143,20 +171,9 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyWaitsForRealTmuxRender(t *testing.
 	require.Contains(t, info.String(), "verified model unchanged: gpt-5.6-sol max")
 }
 
-func tmuxSocketPath(t *testing.T, label, name string) string {
+func tmuxServerPID(t *testing.T, socket, name string) int {
 	t.Helper()
-	output, err := exec.Command(
-		"tmux", "-L", label, "display-message", "-p", "-t", exactTarget(name), "#{socket_path}",
-	).Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(output))
-}
-
-func tmuxServerPID(t *testing.T, label, name string) int {
-	t.Helper()
-	output, err := exec.Command(
-		"tmux", "-L", label, "display-message", "-p", "-t", exactTarget(name), "#{pid}",
-	).Output()
+	output, err := tmuxAt(socket, "display-message", "-p", "-t", exactTarget(name), "#{pid}").Output()
 	require.NoError(t, err)
 	pid, err := strconv.Atoi(strings.TrimSpace(string(output)))
 	require.NoError(t, err)
