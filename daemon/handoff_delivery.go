@@ -49,9 +49,15 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// that lowers it for them. Without it a second window would sit on a
 		// permanently "working" row — the poll skips a fenced session and, once the
 		// fence drops, takes the settled state as its own baseline and reports nothing.
-		m.persistAndPublishInstance(delivery.repoID, delivery.instance)
+		//
+		// It is also durable rather than best-effort: it is what retires the on-disk
+		// delivery obligation, and a lost one makes the next daemon send this mission
+		// again (#2781, see persistHandoffSettlement). Conversation capture still runs
+		// — it describes the incoming runtime, which the failed write does not put in
+		// doubt — and the persist failure is what settle reports.
+		perr := m.persistHandoffSettlement(delivery.repoID, delivery.key, delivery.instance)
 		m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
-		return nil
+		return perr
 	}
 
 	serr := task.WaitForReadyAndSendPrompt(context.Background(), delivery.instance, delivery.mission)
@@ -85,6 +91,11 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// the record and pending mission, but make it inert: claiming Running here
 		// turns a startup death into a fake delivery failure and invites commands
 		// into an unconfirmed binding.
+		//
+		// Best-effort is still right for THIS write, unlike settlement's (#2781):
+		// it raises a suppression marker over a mission that was never delivered.
+		// Losing it costs a redundant recovery attempt at worst, never a second
+		// execution of work the agent already did.
 		delivery.instance.MarkStartupStateUnknown()
 		m.persistAndPublishInstance(delivery.repoID, delivery.instance)
 		return fmt.Errorf(

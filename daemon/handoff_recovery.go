@@ -38,6 +38,12 @@ type pendingHandoffEntry struct {
 // the publish, a row this loop finishes stays "working" on every open rail until
 // something unrelated republishes it.
 func (m *Manager) ResumePendingHandoffs() {
+	// Repair any settlement write that did not land before scanning for missions
+	// to deliver. A stale obligation on disk is exactly what this pass would
+	// replay after a restart, so retiring it is the same job as finishing one
+	// (#2781).
+	m.flushHandoffSettlements()
+
 	m.mu.Lock()
 	entries := make([]pendingHandoffEntry, 0, len(m.instances))
 	for key, instance := range m.instances {
@@ -94,9 +100,9 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		if !entry.instance.ClearPendingHandoffMission(mission) {
 			return fmt.Errorf("pending mission changed while transferring it to limit retry")
 		}
-		m.persistAndPublishInstance(entry.repoID, entry.instance)
+		perr := m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance)
 		m.clearPendingHandoffRetry(entry.repoID, entry.instance)
-		return nil
+		return perr
 	case session.LiveReady:
 		// Positive readiness is the authorization to paste. LiveRunning is not:
 		// startup output and an already-delivered mission both look Running, so
@@ -125,10 +131,16 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 			if !entry.instance.ClearPendingHandoffMission(mission) {
 				return fmt.Errorf("pending mission changed while parking its usage limit")
 			}
-			m.persistAndPublishInstance(entry.repoID, entry.instance)
+			perr := m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
+			if perr != nil {
+				return errors.Join(err, perr)
+			}
 			return nil
 		}
+		// Best-effort, unlike the settlement writes above (#2781): this raises a
+		// suppression marker over a mission that was never delivered, so losing it
+		// costs another recovery attempt, never a duplicate execution.
 		if op == session.OpReplacing && errors.Is(err, task.ErrAgentReadiness) {
 			entry.instance.MarkStartupStateUnknown()
 			m.persistAndPublishInstance(entry.repoID, entry.instance)
@@ -144,8 +156,11 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	if !entry.instance.ClearPendingHandoffMission(mission) {
 		return fmt.Errorf("pending mission changed after delivery")
 	}
-	m.persistAndPublishInstance(entry.repoID, entry.instance)
+	perr := m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance)
 	m.clearPendingHandoffRetry(entry.repoID, entry.instance)
+	if perr != nil {
+		return perr
+	}
 	log.InfoLog.Printf("handoff %q: delivered pending mission", entry.instance.Title)
 	return nil
 }

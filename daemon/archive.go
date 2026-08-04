@@ -803,6 +803,19 @@ func (m *Manager) persistInstance(repoID string, instance *session.Instance) {
 //
 // LOCK CONTRACT (#2106): inherits persistInstance's — never call it with m.mu held.
 func (m *Manager) persistAndPublishInstance(repoID string, instance *session.Instance) {
+	if err := m.persistAndPublishInstanceErr(repoID, instance); err != nil {
+		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
+	}
+}
+
+// persistAndPublishInstanceErr is persistAndPublishInstance with the write error
+// RETURNED rather than logged, for the caller whose durability gates correctness
+// rather than merely dating a checkpoint: the handoff settlement (#2781, see
+// persistHandoffSettlement). It is the persistInstanceErr/persistInstance pairing
+// one layer up, and the announcement stays unconditional either way — memory has
+// already changed, so every other client must converge on it whether or not disk
+// agreed yet.
+func (m *Manager) persistAndPublishInstanceErr(repoID string, instance *session.Instance) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	// Snapshot only AFTER serialization, for the #1917 reason on persistInstanceErr:
@@ -813,9 +826,7 @@ func (m *Manager) persistAndPublishInstance(repoID string, instance *session.Ins
 	err := persistInstanceData(repoID, data)
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
-	if err != nil {
-		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, err)
-	}
+	return err
 }
 
 // archivePersist is the durable persist ArchiveSession runs at its commit. A

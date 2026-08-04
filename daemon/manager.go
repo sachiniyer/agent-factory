@@ -223,6 +223,14 @@ type Manager struct {
 	// stable instance identity so a same-title successor cannot inherit an old
 	// retry delay. Guarded by m.mu.
 	handoffRetryDue map[string]time.Time
+	// handoffSettleOwed holds sessions whose handoff SETTLEMENT write failed —
+	// the write that retires the on-disk delivery obligation. Keyed like
+	// handoffRetryDue by stable instance identity. It exists because that write
+	// is the only thing standing between a delivered mission and a second
+	// execution of it after an unclean restart (#2781), and no other writer or
+	// poll would ever repair it; flushHandoffSettlements drains this on the same
+	// poll pass as mission recovery. Guarded by m.mu.
+	handoffSettleOwed map[string]pendingHandoffEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
 	// daemon instance key. A remote probe failure is transport-shaped — one
 	// blip fails identically to a dead sandbox — so the poll accumulates
@@ -380,6 +388,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		lostRestoreStates:      make(map[string]*lostRestoreState),
 		limitResumeStates:      make(map[string]*limitResumeState),
 		handoffRetryDue:        make(map[string]time.Time),
+		handoffSettleOwed:      make(map[string]pendingHandoffEntry),
 		remoteLossStates:       make(map[string]*remoteLossState),
 		instanceOpLocks:        make(map[string]*sync.Mutex),
 		pausedPolls:            make(map[string]time.Time),

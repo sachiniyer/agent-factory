@@ -40,6 +40,14 @@ func appendInstanceData(repoID string, data session.InstanceData) error {
 	})
 }
 
+// testHookPersistInstanceData runs on every targeted record write, after the
+// storage projection is applied and before any disk I/O, so a test can fail one
+// exact write in isolation. The #2781 duplicate-delivery repro needs the handoff
+// settlement's persist — and only that one — to fail while every other write in
+// the same session stays real. Returns nil in production, and for any write a
+// test does not target.
+var testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
+
 // persistInstanceData replaces the on-disk record for data.Title in repoID's
 // instances file with data, under the per-repo file lock, leaving every other
 // record untouched. It is the targeted, clobber-safe persist primitive for
@@ -62,6 +70,9 @@ func appendInstanceData(repoID string, data session.InstanceData) error {
 // us).
 func persistInstanceData(repoID string, data session.InstanceData) error {
 	data = data.ForStorage()
+	if err := testHookPersistInstanceData(repoID, data); err != nil {
+		return err
+	}
 	found := false
 	sameTitleDifferentID := false
 	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
