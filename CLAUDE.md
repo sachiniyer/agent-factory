@@ -143,6 +143,101 @@ new files to dodge the limit — split them. See `docs/file-length-lint.md`.
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations
 
+## Git hygiene in a shared repo
+
+Every af session gets its own **worktree**, which isolates the branch, `HEAD`,
+the index, and the working tree. It does not isolate everything under `refs/`.
+
+**Never run a `git stash` command that touches the shared stack (#2801)** — that
+is `git stash` / `stash push`, `pop`, `drop`, `clear`, `branch`, `list`, and
+`apply` of a `stash@{N}` entry. **`git stash store` is banned too**, and it is the
+easy one to reach for by accident: it is the documented companion to `stash
+create`, and it pushes that commit straight onto the shared stack. Pin created
+commits under `refs/worktree/…` instead, exactly as below.
+
+Exactly two forms are fine, and they are the substitutes below: **`git stash
+create`**, which writes a dangling commit and never touches `refs/stash`, and
+**`git stash apply <a ref you named yourself>`**.
+
+`refs/stash` is a single stack for the whole repository, shared by every linked
+worktree: git-worktree(1) names `refs/bisect`, `refs/worktree`, and
+`refs/rewritten` as the only unshared namespaces under `refs/`, and `refs/stash`
+is not among them. With a dozen-plus sessions running against one project, a
+sibling's `git stash pop` takes whatever is on top of that shared stack, which
+may be *your* entry. Nothing errors — the pop succeeds and returns the wrong
+content, so foreign changes land in your tree looking like your own work. This
+has already happened twice, and the recent one was caught only because the popped
+files were visibly unrelated to that session's task. There is no `stash.ref`
+config and no way to make `refs/stash` per-worktree; the substitutes below are
+the fix.
+
+**Scratch commit, then reset** — durable, survives a crash, and needs no new
+concepts. Prefer this when untracked files are involved:
+
+```bash
+# one chain: if the commit does not happen, nothing is parked and $wip must stay
+# unset — see below for why an unconditional $wip is dangerous
+git add -A && git commit -qm "wip: set aside" && wip=$(git rev-parse HEAD)
+# …do the thing that needed a clean tree, and do not commit while parked…
+git reset "$wip^"               # a MIXED reset: tracked edits come back
+                                # unstaged, new files untracked again
+```
+
+Use a mixed reset, not `--soft`. `--soft` moves `HEAD` only, so after the
+`git add -A` above every parked change comes back **staged** — and the next
+`git commit` you make for unrelated reasons then sweeps the whole WIP into it.
+Neither reset restores an intentional staged/unstaged split; mixed at least
+restores the common case exactly.
+
+The `&&` before `wip=` is load-bearing. `git commit` fails on an already-clean
+tree and whenever a pre-commit hook rejects, and an unconditional
+`wip=$(git rev-parse HEAD)` after that names **a real commit you care about** —
+`git reset "$wip^"` then uncommits *that* instead of restoring anything. Chained,
+a failed commit leaves `$wip` unset and the reset refuses. If the commit did not
+happen, stop: nothing was parked.
+
+`$wip` is not decoration either. `HEAD~1` names *one commit back from wherever
+you are now*, so a cherry-pick, revert, or urgent fix while parked makes
+`git reset HEAD~1` uncommit **that** and strand the WIP in your history. Resetting
+to `"$wip^"` is still only right while `$wip` is the tip — check with
+`git rev-parse HEAD`. If you did commit on top, the WIP is already in the branch:
+drop that one commit with `git rebase --onto "$wip^" "$wip"`, then
+`git cherry-pick -n "$wip"` if you want its content back as uncommitted changes.
+
+**`git stash create` plus a per-worktree ref** — closest to `git stash`, and
+`refs/worktree/` genuinely *is* unshared, so no sibling can see or consume it:
+
+```bash
+sha=$(git stash create "wip")   # dangling commit; refs/stash is NOT touched
+if [ -z "$sha" ]; then
+  echo "nothing recorded — do NOT clean the tree"
+# the trailing "" means "must not already exist" — a second save under the same
+# name would otherwise orphan the first, leaving it fsck-only
+elif git update-ref refs/worktree/af-wip "$sha" ""; then
+  git checkout -- :/            # only now: create records, it does not clean.
+                                # `:/` is the repo root — a bare `.` cleans only
+                                # below your cwd while create recorded the lot
+else
+  echo "af-wip is taken — pick another name; tree left dirty on purpose"
+fi
+# …later. Delete the ref only if the apply succeeded: a conflicted apply exits
+# non-zero, and that is precisely when you still need the pointer.
+git stash apply refs/worktree/af-wip && git update-ref -d refs/worktree/af-wip
+```
+
+**That guard is the load-bearing line, not decoration.** `git stash create`
+records nothing and prints an empty sha in two different situations — a clean
+tree, and a failure — and the failure is easy to hit: a half-added `git add -N`
+file makes it exit non-zero with `Entry … not uptodate`. Clean the tree after
+that and you have destroyed exactly the work you were setting aside.
+
+Two more ways `create` differs from `push`: it does not clean the working tree
+(`push` does that; `create` only records), and it does not capture untracked
+files — `git add` them first, or use the scratch commit above.
+
+If you find a stash entry that is not yours, do not drop it: leave it on the
+stack, revert the foreign paths out of your tree, and say so in the PR.
+
 ## Conventions
 
 - All Go files must be `gofmt`-formatted

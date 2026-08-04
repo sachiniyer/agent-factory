@@ -52,6 +52,27 @@ Captain Claude contract. Root verifies and merges; worker sessions do not.
    - Never run `scripts/tui-driver.sh` against a real repo (#1303).
    - No sub-sessions.
    - No dev-install.
+   - Never run a `git stash` command that touches the shared stack (#2801) —
+     `git stash`/`push`, `pop`, `drop`, `clear`, `branch`, `list`, `store`,
+     `apply stash@{N}`. `refs/stash` is one stack shared by every worktree,
+     so a sibling session's `git stash pop` can hand you its work or silently
+     consume yours — it has already happened twice. `git stash create` and
+     `git stash apply <your own ref>` are fine; they never touch `refs/stash`.
+     Set changes aside worktree-locally instead:
+     ```bash
+     git add -A && git commit -qm "wip: set aside" && wip=$(git rev-parse HEAD)
+     # …later, and only while $wip is still the tip: git reset "$wip^"
+     # or, closest to stash — refs/worktree/ is per-worktree, refs/stash is not.
+     # Keep it one chain: an empty sha means create recorded NOTHING, the
+     # trailing "" refuses to overwrite an earlier save, and `:/` cleans from the
+     # repo root (a bare `.` misses everything outside your cwd). Cleaning the
+     # tree after any of those failures destroys the work you set aside.
+     sha=$(git stash create "wip") && [ -n "$sha" ] \
+       && git update-ref refs/worktree/af-wip "$sha" "" && git checkout -- :/
+     # later, and only if the apply succeeds — a conflicted apply needs the ref:
+     # git stash apply refs/worktree/af-wip && git update-ref -d refs/worktree/af-wip
+     ```
+     CLAUDE.md's "Git hygiene in a shared repo" has the caveats.
 
 3. **Send or create the session**:
    ```bash
