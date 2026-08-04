@@ -174,11 +174,34 @@ func verifyVSCodeOwnerNonce(owner vscodeOwnerRecord) (bool, error) {
 }
 
 func processGroupAlive(pgid int) (bool, error) {
-	err := syscall.Kill(-pgid, 0)
+	return killProbeAlive(syscall.Kill(-pgid, 0))
+}
+
+// killProbeAlive classifies the result of a signal-0 `kill(2)` probe, for a
+// single pid or a whole process group.
+//
+// EPERM counts as GONE, not as a failure (#2823). POSIX returns it only when
+// processes exist in the group and the caller may signal none of them — and the
+// editor we recorded was started by this daemon under this uid, so it was
+// signalable by construction. If nothing in the group is ours to signal, our
+// editor is not in it: the group we were waiting on has emptied and the numeric
+// id has been reused by a process belonging to someone else. That is precisely
+// "not alive" for every caller here, and no amount of further waiting can make
+// an unsignalable group ours.
+//
+// Treating it as an error instead failed archive and kill with "confirming
+// previous editor process group N stopped: operation not permitted" — a
+// teardown the user could do nothing about, on a condition that means the
+// teardown had already succeeded. macOS recycles pgids fast enough to hit it on
+// CI; nothing about the bug is Darwin-specific.
+//
+// Anything we cannot interpret still surfaces: silence there would report a
+// live editor as reaped.
+func killProbeAlive(err error) (bool, error) {
 	switch {
 	case err == nil:
 		return true, nil
-	case errors.Is(err, syscall.ESRCH):
+	case errors.Is(err, syscall.ESRCH), errors.Is(err, syscall.EPERM):
 		return false, nil
 	default:
 		return false, err
@@ -253,7 +276,11 @@ func (v *vscodeSupervisor) stopPersistedOwner(owner vscodeOwnerRecord) error {
 		// Snapshot may omit a process it could not inspect. Distinguish a truly
 		// absent leader from that unknown before treating the surviving group as
 		// the pinned group recorded by the previous daemon.
-		if err := syscall.Kill(owner.PID, 0); err == nil || !errors.Is(err, syscall.ESRCH) {
+		// Same classification as the group probe, and for the same reason: a
+		// signalable pid that the snapshot missed is genuinely ambiguous and must
+		// fail closed, but EPERM says the pid belongs to someone else — so it is
+		// not our recorded leader, which is therefore absent (#2823).
+		if alive, probeErr := killProbeAlive(syscall.Kill(owner.PID, 0)); probeErr != nil || alive {
 			return fmt.Errorf("could not determine whether pid %d still has the recorded editor identity", owner.PID)
 		}
 		alive, groupErr := v.processGroupAlive(owner.PID)

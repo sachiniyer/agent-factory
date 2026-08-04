@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -647,4 +650,60 @@ func TestEnsureVSCodeServer_RefusesMidArchive(t *testing.T) {
 	if !strings.Contains(err.Error(), "being archived or removed") {
 		t.Fatalf("err = %v, want one naming the in-flight teardown", err)
 	}
+}
+
+// TestKillProbeAlive is #2823. `kill(-pgid, 0)` was classified as
+// alive / dead / hard-error, and EPERM fell into the hard-error arm — so a
+// recycled process-group id turned an ordinary teardown into
+// "confirming previous editor process group N stopped: operation not
+// permitted", failing an archive or kill the user could do nothing about.
+//
+// EPERM is not ambiguity. POSIX returns it only when processes exist in the
+// group and the caller may signal NONE of them. The editor we recorded was
+// started by this daemon, under this uid, so it was signalable by construction:
+// if nothing in the group is, our editor is not in it. The group we were
+// waiting on is therefore gone and the numeric id has been reused — which is
+// exactly "not alive" for every caller here, and waiting longer cannot make an
+// unsignalable group ours.
+func TestKillProbeAlive(t *testing.T) {
+	otherErr := errors.New("some unrelated failure")
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantAlive bool
+		wantErr   error
+	}{
+		{name: "signal delivered", err: nil, wantAlive: true},
+		{name: "no such group", err: syscall.ESRCH},
+		{name: "recycled id owned by someone else", err: syscall.EPERM},
+		{name: "wrapped EPERM", err: fmt.Errorf("kill: %w", syscall.EPERM)},
+		{name: "anything else is still an error", err: otherErr, wantErr: otherErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			alive, err := killProbeAlive(tc.err)
+			assert.Equal(t, tc.wantAlive, alive)
+			if tc.wantErr == nil {
+				assert.NoError(t, err, "an answerable kill(2) result must not abort teardown")
+				return
+			}
+			assert.ErrorIs(t, err, tc.wantErr,
+				"an error we cannot interpret must still surface rather than read as 'gone'")
+		})
+	}
+}
+
+// The wait loop is where a misclassified EPERM actually reached the user, so it
+// is pinned through the real classifier rather than only at the seam.
+func TestWaitForProcessGroupExitTreatsEPERMAsExited(t *testing.T) {
+	v := newVSCodeSupervisor()
+	calls := 0
+	v.groupAlive = func(int) (bool, error) {
+		calls++
+		return killProbeAlive(syscall.EPERM)
+	}
+
+	exited, err := v.waitForProcessGroupExit(4242, 2*time.Second)
+	require.NoError(t, err, "a recycled process-group id must not fail the teardown (#2823)")
+	assert.True(t, exited, "the group we recorded is gone once nothing in it is ours to signal")
+	assert.Equal(t, 1, calls, "an answered probe must not spin until the deadline")
 }
