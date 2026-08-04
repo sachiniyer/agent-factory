@@ -138,7 +138,7 @@ func TestKillEscalatingNoWarnOnZombie(t *testing.T) {
 	p := startZombie(t)
 
 	var lines []string
-	logf := func(format string, args ...any) {
+	logf := func(_ ReapOutcome, format string, args ...any) {
 		lines = append(lines, format)
 	}
 	start := time.Now()

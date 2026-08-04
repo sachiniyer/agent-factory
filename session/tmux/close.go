@@ -172,10 +172,14 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// always gets to finish. CLI kills run daemon-side (KillSession RPC).
 	processes := closeProcessOutcome{captureErr: captureErr}
 	if len(leaked) > 0 {
+		// Close IS the requested teardown (#2765): a caller asked for this session
+		// to die, so every process in its pane tree dying with it is the operation
+		// succeeding, not a leak — most visibly the `af sessions archive --self`
+		// caller, which lives in this very tree and is blocked on this very call.
 		if waitForProcesses {
-			processes.remaining = reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 		} else {
-			go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+			go reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 		}
 	}
 

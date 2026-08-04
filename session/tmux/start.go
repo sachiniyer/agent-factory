@@ -76,7 +76,9 @@ func (t *TmuxSession) Start(workDir string) error {
 			if cleanupErr != nil {
 				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 			} else if len(leaked) > 0 {
-				go reapLeakedProcesses(t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+				// Start failed and we are tearing the partial session down ourselves;
+				// its processes are going with it by design, not escaping (#2765).
+				go reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 			}
 		}
 		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)

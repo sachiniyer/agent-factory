@@ -668,11 +668,17 @@ func reapWorktreeWriters(worktreePath string) {
 	if len(procs) == 0 {
 		return
 	}
-	proctree.KillEscalating(procs, worktreeReapGrace, worktreeReapTermWait, func(format string, args ...any) {
+	proctree.KillEscalating(procs, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
+		// Every tier stays a WARNING here, and the outcome is deliberately unused
+		// (#2765). This reaper does not run on the requested-teardown side of that
+		// split: it fires only when a process is STILL WRITING into a worktree
+		// after the agent and its tmux session were already torn down, which is the
+		// definition of having escaped its pane tree. There is no routine case.
+		//
 		// worktreePath is a runtime value that may legally contain `%`, so it MUST
 		// be a `%s` ARGUMENT, never spliced into the format string (the #1211 rule
 		// the tmux reaper follows). `format` is KillEscalating's own constant literal.
-		log.WarningLog.Printf("worktree %s: "+format, append([]any{worktreePath}, args...)...)
+		log.WarningLog.Printf("worktree %s: leaked past its session: "+format, append([]any{worktreePath}, args...)...)
 	})
 }
 

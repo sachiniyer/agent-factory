@@ -282,14 +282,40 @@ func WaitForExits(procs []Process, timeout time.Duration) []Process {
 	}
 }
 
+// ReapOutcome classifies what KillEscalating had to do to one process, and it
+// exists so the CALLER can choose the severity of the line (#2765).
+//
+// KillEscalating is handed a list of processes and told to escalate. It cannot
+// know WHY they are on that list — whether they escaped something that was
+// supposed to contain them, or are simply being destroyed along with the session
+// someone asked it to tear down. That difference is the difference between a
+// finding and a routine step, and the messages below used to answer it anyway by
+// calling every process "leaked". They no longer classify: they report the
+// action, the caller supplies the cause, and severity is the two combined.
+type ReapOutcome int
+
+const (
+	// ReapSignalled: the process was still alive when the grace period ended and
+	// was sent SIGTERM. Routine on a teardown someone asked for; a finding when
+	// the process was supposed to be contained by something it outlived.
+	ReapSignalled ReapOutcome = iota
+	// ReapNeededKill: the process ignored SIGTERM and had to be SIGKILLed.
+	ReapNeededKill
+	// ReapUnkillable: the process survived SIGKILL, or a signal failed for a
+	// reason other than it having already gone away. Abnormal under every
+	// teardown reason there is — an uninterruptible sleep, a wedged mount, a
+	// permission the reaper does not have.
+	ReapUnkillable
+)
+
 // KillEscalating gives procs the grace period to exit on their own, SIGTERMs
 // survivors, waits termWait, SIGKILLs what remains, and returns anything
 // still alive after a final bounded wait (should be empty). Every signal is
 // identity-verified (see Signal) and reported through logf, one line per
-// process. logf may be nil.
-func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(format string, args ...any)) []Process {
+// process, with the ReapOutcome the caller maps to a severity. logf may be nil.
+func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
 	if logf == nil {
-		logf = func(string, ...any) {}
+		logf = func(ReapOutcome, string, ...any) {}
 	}
 	survivors := WaitForExits(procs, grace)
 	if len(survivors) == 0 {
@@ -299,9 +325,9 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(fo
 		err := Signal(p, syscall.SIGTERM)
 		switch {
 		case err == nil:
-			logf("reaping leaked process %d (%s) with SIGTERM: %s", p.PID, p.Comm, Cmdline(p.PID))
+			logf(ReapSignalled, "process %d (%s) was still alive after the grace period; sent SIGTERM: %s", p.PID, p.Comm, Cmdline(p.PID))
 		case !errors.Is(err, ErrIdentityChanged):
-			logf("failed to SIGTERM leaked process %d (%s): %v", p.PID, p.Comm, err)
+			logf(ReapUnkillable, "failed to SIGTERM surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
 	survivors = WaitForExits(survivors, termWait)
@@ -309,14 +335,14 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(fo
 		err := Signal(p, syscall.SIGKILL)
 		switch {
 		case err == nil:
-			logf("leaked process %d (%s) ignored SIGTERM; sent SIGKILL", p.PID, p.Comm)
+			logf(ReapNeededKill, "process %d (%s) ignored SIGTERM; sent SIGKILL", p.PID, p.Comm)
 		case !errors.Is(err, ErrIdentityChanged):
-			logf("failed to SIGKILL leaked process %d (%s): %v", p.PID, p.Comm, err)
+			logf(ReapUnkillable, "failed to SIGKILL surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
 	remaining := WaitForExits(survivors, time.Second)
 	for _, p := range remaining {
-		logf("leaked process %d (%s) survived SIGKILL", p.PID, p.Comm)
+		logf(ReapUnkillable, "process %d (%s) survived SIGKILL", p.PID, p.Comm)
 	}
 	return remaining
 }

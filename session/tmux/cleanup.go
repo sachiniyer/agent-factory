@@ -340,7 +340,9 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		wg.Add(1)
 		go func(match string, leaked []proctree.Process) {
 			defer wg.Done()
-			reapLeakedProcesses(match, leaked, reapGraceWait, reapTermWait)
+			// These sessions were just killed BY this sweep, on request: their
+			// processes are being destroyed with them, not caught escaping (#2765).
+			reapSessionProcesses(reapOnRequest, match, leaked, reapGraceWait, reapTermWait)
 		}(match, leaked)
 	}
 	wg.Wait()
@@ -360,7 +362,10 @@ func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.P
 		sweepErr = errors.Join(sweepErr, refreshErr)
 		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome)
 		sweepErr = errors.Join(sweepErr, inspectErr)
-		remaining := reapLeakedProcesses(match, marked, reapGraceWait, reapTermWait)
+		// The tmux session is GONE and these processes are still alive carrying its
+		// ownership markers: they outlived the pane tree that was supposed to
+		// contain them. This is the real leak, and the one worth a WARNING (#2765).
+		remaining := reapSessionProcesses(reapEscaped, match, marked, reapGraceWait, reapTermWait)
 		if len(remaining) > 0 {
 			pids := make([]string, 0, len(remaining))
 			for _, process := range remaining {

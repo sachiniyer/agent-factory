@@ -40,8 +40,11 @@ import (
 // never returned as errors.
 
 var (
-	// reapGraceWait is how long leaked processes get to exit on their own
-	// after kill-session (SIGHUP) before being SIGTERMed. Matches
+	// reapGraceWait is how long a captured process gets to exit on its own
+	// after kill-session (SIGHUP) before being SIGTERMed. "Captured", not
+	// "leaked": most of them are a requested teardown's own pane tree going down
+	// with the session, and only the vanished-session sweep is looking at
+	// processes that escaped one (#2765). Matches
 	// paneExitWait's reasoning: long enough for an agent to flush state,
 	// short enough to bound the sweep. var, not const, so tests can lower it.
 	reapGraceWait = 3 * time.Second
@@ -317,18 +320,75 @@ func selfAndAncestorProcesses(snap map[int]proctree.Process) map[int]bool {
 	return ancestors
 }
 
-// reapLeakedProcesses waits for the captured processes to exit after
+// reapReason says WHY a captured process tree is being reaped. It is the
+// caller's answer and never proctree's: KillEscalating is handed a list and
+// cannot know whether those processes escaped anything (#2765).
+//
+// The distinction is not cosmetic. Every reap used to report every process as
+// "leaked", and the single most reliable way to produce that line was to use the
+// feature exactly as designed — `af sessions archive --self`. A session that
+// archives itself makes the request from INSIDE the pane tree it is asking to
+// tear down, and it is blocked on the very RPC doing the tearing, so it cannot
+// exit within the grace period and is guaranteed to be SIGTERMed. Reaping it is
+// not a leak; it is what "archive this session" MEANS. An operator grepping the
+// log for leaks found their own supported gesture, which is exactly the noise
+// that teaches people to stop reading the log.
+type reapReason struct {
+	// clause names the cause in the log line, so the reader is told which of the
+	// two situations they are looking at rather than left to infer it.
+	clause string
+	// expected is true when a process still alive at SIGTERM time is a normal
+	// consequence of this teardown rather than a finding about it.
+	expected bool
+}
+
+var (
+	// reapOnRequest: someone asked for this session to be destroyed — a kill, an
+	// archive, `af reset`, or the cleanup of a session that failed to start.
+	// Everything in the pane tree is SUPPOSED to die, including the caller that
+	// asked. Only the escalation tiers beyond a plain SIGTERM stay warnable here:
+	// a process ignoring SIGTERM or surviving SIGKILL is abnormal no matter who
+	// asked for the teardown.
+	reapOnRequest = reapReason{clause: "tearing down on request", expected: true}
+	// reapEscaped: the tmux session is already GONE and these processes are still
+	// alive carrying its ownership markers. They outlived the pane tree that was
+	// supposed to contain them — the leak this reaper was built for (#1104), and
+	// the case the WARNING is worth reading.
+	reapEscaped = reapReason{clause: "leaked past its pane tree", expected: false}
+)
+
+// reapSessionProcesses waits for the captured processes to exit after
 // kill-session, then escalates SIGTERM → SIGKILL on survivors (identity
 // verified — see proctree.KillEscalating). Runs synchronously; teardown
 // paths that must stay snappy call it in a goroutine. Every signal is logged
-// per-process.
-func reapLeakedProcesses(sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
-	return proctree.KillEscalating(procs, grace, termWait, func(format string, args ...any) {
-		// sanitizedName is a runtime value that deliberately preserves `%` (see
-		// tmux name sanitization), so it must be a `%s` ARGUMENT — never spliced
-		// into the format string, where its `%` sequences would be interpreted
-		// and corrupt the log (#1211). `format` itself is a constant literal
-		// supplied by KillEscalating, so concatenating it is safe.
-		log.WarningLog.Printf("tmux %s: "+format, append([]any{sanitizedName}, args...)...)
+// per-process, at the severity the reason and the outcome agree on.
+func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
+	return proctree.KillEscalating(procs, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
+		logReapOutcome(reason, sanitizedName, outcome, format, args...)
 	})
+}
+
+// logReapOutcome writes one per-process reap line at the severity the reason and
+// the outcome agree on. Split out of the closure above so the mapping is one
+// named thing a test can drive through every tier — including the ones an
+// end-to-end teardown cannot force on demand (a process that ignores SIGTERM,
+// one that survives SIGKILL).
+//
+// Only a plain SIGTERM on a requested teardown is routine. The escalation tiers
+// stay warnable under every reason: a process ignoring SIGTERM or surviving
+// SIGKILL is abnormal regardless of who asked for the teardown, and folding
+// those into the downgrade would trade one kind of unreadable log for another.
+func logReapOutcome(reason reapReason, sanitizedName string, outcome proctree.ReapOutcome, format string, args ...any) {
+	logger := log.WarningLog
+	if reason.expected && outcome == proctree.ReapSignalled {
+		logger = log.InfoLog
+	}
+	// sanitizedName is a runtime value that deliberately preserves `%` (see tmux
+	// name sanitization), so it must be a `%s` ARGUMENT — never spliced into the
+	// format string, where its `%` sequences would be interpreted and corrupt the
+	// log (#1211). The clause goes through the same door: it is a constant today,
+	// and passing it as an argument is what keeps that from becoming load-bearing.
+	// `format` itself is a constant literal supplied by KillEscalating, so
+	// concatenating it is safe.
+	logger.Printf("tmux %s: %s: "+format, append([]any{sanitizedName, reason.clause}, args...)...)
 }

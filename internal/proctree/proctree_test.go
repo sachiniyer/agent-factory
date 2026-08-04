@@ -227,7 +227,7 @@ func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
 	kill = func(pid int, sig syscall.Signal) error { return syscall.ESRCH }
 
 	var logged []string
-	logf := func(format string, args ...any) {
+	logf := func(_ ReapOutcome, format string, args ...any) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 	// Zero grace so the alive child is treated as a survivor immediately,

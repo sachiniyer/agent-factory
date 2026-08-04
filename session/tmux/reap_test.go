@@ -97,8 +97,14 @@ func TestReapLogsSessionNameLiterally(t *testing.T) {
 
 	// A session name packed with format specifiers — the exact hazard #1211
 	// describes (tmux sanitization preserves `%`).
+	//
+	// reapEscaped, because that reason keeps a plain SIGTERM on WARNING (#2765)
+	// and this test is about the WARNING logger's format-string safety. The
+	// on-request reason routes the same line to INFO and is covered separately in
+	// reap_severity_test.go — including its own #1211 assertion, so neither
+	// severity can drift into splicing the name into the format string.
 	const name = "af_fmt%d%s%n_evil"
-	reapLeakedProcesses(name, []proctree.Process{proc}, time.Millisecond, 300*time.Millisecond)
+	reapSessionProcesses(reapEscaped, name, []proctree.Process{proc}, time.Millisecond, 300*time.Millisecond)
 
 	out := buf.String()
 	require.Contains(t, out, "tmux "+name+":",
