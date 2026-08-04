@@ -303,74 +303,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// during shutdown still find a live socket.
 	defer watchers.Stop()
 
-	pollInterval := time.Duration(cfg.DaemonPollInterval) * time.Millisecond
-
 	wg := &sync.WaitGroup{}
-	wg.Add(1)
 	stopCh := make(chan struct{})
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(pollInterval)
-		defer ticker.Stop()
-		for {
-			if err := manager.RefreshInstances(); err != nil {
-				log.WarningLog.Printf("failed to refresh daemon instances: %v", err)
-			}
-
-			// Compute and persist each session's status (Ready/Dead/Running). The
-			// daemon is the sole
-			// owner of status now (#935/#960 PR 5): it computes the liveness here
-			// and the TUI renders it from Snapshot instead of computing its own.
-			manager.RefreshStatuses()
-
-			// Always-ensure the root agent for repos opted in via root_agents
-			// (#1106). Runs after RefreshStatuses so a root whose tmux died is
-			// marked Dead and healed in the same tick; the loop body runs once
-			// before the first ticker wait, so the first ensure happens right
-			// after the restore. A (re-)create blocks this poll briefly while
-			// the session starts — acceptable for a rare, backoff-throttled
-			// event. root_agents is read from the daemon's startup config;
-			// changing it takes effect on the next daemon restart.
-			manager.EnsureRootAgents()
-
-			// Best-effort restore of Lost sessions (#1108): the general form
-			// of the root self-heal, for every session whose tmux vanished
-			// with no kill on record. Runs after RefreshStatuses (which marks
-			// them Lost) and after EnsureRootAgents (which owns the reserved
-			// root title). Backoff-throttled per session, like root-ensure.
-			manager.RestoreLostSessions()
-
-			// Complete a handoff mission whose post-swap checkpoint survived a
-			// daemon restart before delivery was confirmed. This runs after status
-			// and Lost recovery so it acts only on a positively ready pane, and
-			// before limit resume so a newly observed incoming limit can inherit the
-			// exact rendered mission in the same tick.
-			manager.ResumePendingHandoffs()
-
-			// Opt-in auto-resume of usage-limit-blocked sessions (#1146 PR3):
-			// re-prompt a LiveLimitReached row once its limit window elapsed. A
-			// no-op unless limit_auto_resume is set, so a default install keeps
-			// a limit surface-only. Runs after RestoreLostSessions because a
-			// session must be settled onto its liveness first; it borrows the
-			// same per-session op-lock discipline.
-			manager.ResumeLimitedSessions()
-
-			// Handle stop before ticker.
-			select {
-			case <-stopCh:
-				return
-			case <-manager.pollReloadCh:
-				// daemon_poll_interval changed via ApplyConfig (#2480): reset the
-				// ticker to the new cadence in place — no dropped poll goroutine, no
-				// session touched. Validated positive at config-set time; guard
-				// anyway since Reset panics on a non-positive duration.
-				if next := time.Duration(manager.Config().DaemonPollInterval) * time.Millisecond; next > 0 {
-					ticker.Reset(next)
-				}
-			case <-ticker.C:
-			}
-		}
-	}()
+	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an
@@ -401,6 +336,15 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return fmt.Errorf("failed to mark daemon ready: %w", err)
 	}
 	log.InfoLog.Printf("daemon ready")
+
+	// Start the daemon-owned release check only now, past the readiness barrier:
+	// a box that never opens the TUI never reaches the launch-path updater, so
+	// the daemon does its own checking (#2212). It reports what it finds and
+	// installs nothing — see daemon/update_driver.go for why activation is a
+	// separate slice. Started after markReady so it can never compete with the
+	// restore or delay readiness, and registered on the same stopCh/wg as the
+	// other loops so shutdown stops it.
+	startUpdateDriver(manager, stopCh, wg)
 
 	// Block until a signal, a Shutdown RPC, or the home-deleted self-check
 	// ends the daemon (sigChan and shutdownCh were armed before the restore

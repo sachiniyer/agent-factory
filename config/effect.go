@@ -32,10 +32,20 @@ const (
 	// live, so it is reported here rather than falsely claimed applied) are these.
 	// (The network listener keys used to be here; #2480 PR2 made them applied-live.)
 	EffectNextDaemonStart
-	// EffectNextAfLaunch: the daemon never reads the key at all — af's own CLI or TUI
-	// does, on its next launch (auto_update and update_channel are read by the
-	// updater; theme, keys, and detach_keys by the TUI). A notice for these must NOT
-	// imply a running daemon did anything, because none did.
+	// EffectNextAfLaunch: nothing a running daemon does with the key changes what
+	// the user just asked to change — af's own CLI or TUI does, on its next launch
+	// (auto_update and update_channel are read by the updater; theme, keys, and
+	// detach_keys by the TUI). A notice for these must NOT imply a running daemon
+	// applied the change, because the thing the key controls is not the daemon's to
+	// apply.
+	//
+	// auto_update and update_channel are the near miss: since #2212 the daemon's
+	// release check reads both from its live config, so flipping auto_update off
+	// does stop the daemon checking within a wake. But that check only REPORTS a
+	// release — the installer is still af's, at launch — so next-af-launch remains
+	// the honest answer for what the user set, and it errs toward promising less
+	// than happens rather than claiming a daemon acted. The slice that lets the
+	// daemon install owns re-deciding this.
 	EffectNextAfLaunch
 )
 
@@ -79,7 +89,9 @@ var keyEffectClasses = map[string]EffectClass{
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
 	"branch_prefix": EffectNextDaemonStart,
-	// Next af launch — the daemon never reads these; af's CLI/TUI does.
+	// Next af launch — af's CLI/TUI owns what these control. The daemon's release
+	// check reads auto_update and update_channel (#2212), but it only reports a
+	// release; installing is still af's, at launch. See EffectNextAfLaunch.
 	"auto_update":    EffectNextAfLaunch,
 	"update_channel": EffectNextAfLaunch,
 	"theme":          EffectNextAfLaunch,

@@ -1,0 +1,489 @@
+package daemon
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/autoupdate"
+	"github.com/stretchr/testify/require"
+)
+
+// driverHarness builds a driver over a real on-disk throttle cache in a temp AF
+// home, with the clock, config, and release lookup under the test's control.
+type driverHarness struct {
+	driver *updateDriver
+	// cachePath is the real last_update_check file the driver reads.
+	cachePath string
+	cfg       *config.Config
+	now       time.Time
+	// channels records the channel each discovery call asked for, so a test can
+	// assert BOTH that no network call happened and that the right one did.
+	channels []string
+	tag      string
+	err      error
+}
+
+func newDriverHarness(t *testing.T) *driverHarness {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	// The env override is process-global; unset it so a developer running the
+	// suite with auto-update disabled does not silently pass every gate below.
+	t.Setenv(autoupdate.EnvironmentVariable, "")
+
+	h := &driverHarness{
+		cachePath: filepath.Join(home, autoupdate.CheckCacheFileName),
+		cfg:       &config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelStable},
+		now:       time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC),
+		tag:       "v1.0.300",
+	}
+	h.driver = &updateDriver{
+		cachePath:      h.cachePath,
+		currentVersion: "1.0.200",
+		config:         func() *config.Config { return h.cfg },
+		now:            func() time.Time { return h.now },
+		discover: func(channel string, _ time.Duration) (string, error) {
+			h.channels = append(h.channels, channel)
+			return h.tag, h.err
+		},
+	}
+	return h
+}
+
+// seedCache writes a real cache record for channel at checkedAt, the same shape
+// the launch path writes.
+func (h *driverHarness) seedCache(t *testing.T, channel string, checkedAt time.Time) {
+	t.Helper()
+	cache := autoupdate.NewCheckCache(h.cachePath)
+	require.NoError(t, cache.Record(channel, "v1.0.200", h.driver.currentVersion, checkedAt))
+}
+
+func (h *driverHarness) readCacheFile(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile(h.cachePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+	return data
+}
+
+// The load-bearing guarantee of this slice. The launch path is still the only
+// thing that installs, and it installs only when the shared six-hour window is
+// open. A daemon that RECORDED its checks would close that window on its own
+// cadence and leave the interactive updater arriving to a closed window every
+// time — a box that updates today would stop updating, in exchange for a driver
+// that installs nothing.
+//
+// So: the driver must leave the cache byte-identical on every path, including
+// the one where it does the most work (window open, network call made, newer
+// release found).
+func TestUpdateDriver_NeverWritesTheSharedThrottleCache(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tag  string
+		err  error
+		want updateCheckOutcome
+	}{
+		{name: "newer release found", tag: "v1.0.300", want: updateCheckAvailable},
+		{name: "already up to date", tag: "v1.0.100", want: updateCheckUpToDate},
+		{name: "lookup failed", err: errors.New("github is down"), want: updateCheckFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newDriverHarness(t)
+			h.tag, h.err = tc.tag, tc.err
+			// Seed a stale record so the shared window is genuinely open: this
+			// test must exercise the branch that does the work, not a skip.
+			h.seedCache(t, config.UpdateChannelStable, h.now.Add(-7*time.Hour))
+			before := h.readCacheFile(t)
+			require.NotEmpty(t, before, "the cache must exist, or this proves nothing")
+
+			require.Equal(t, tc.want, h.driver.checkOnce())
+			require.Equal(t, []string{config.UpdateChannelStable}, h.channels,
+				"the window was open, so the driver must have made exactly one lookup")
+
+			require.Equal(t, before, h.readCacheFile(t),
+				"the daemon must not close the shared throttle window: it installs nothing, and recording here stops the launch-path updater from ever finding the window open")
+		})
+	}
+}
+
+// The cache is never written even when it does not exist yet — the driver must
+// not be what creates it, or a first daemon start would close a window no af has
+// opened.
+func TestUpdateDriver_DoesNotCreateTheThrottleCache(t *testing.T) {
+	h := newDriverHarness(t)
+
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+	require.Len(t, h.channels, 1)
+
+	_, err := os.Stat(h.cachePath)
+	require.True(t, errors.Is(err, os.ErrNotExist), "the driver must not create the shared cache, got %v", err)
+}
+
+// The other half of coordinating on the shared window: a check another af made
+// recently stands this driver down, so the daemon adds at most one lookup per
+// six-hour window rather than one per wake.
+func TestUpdateDriver_DefersToARecentCheckByAnotherAf(t *testing.T) {
+	h := newDriverHarness(t)
+	h.seedCache(t, config.UpdateChannelStable, h.now.Add(-1*time.Hour))
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+	require.Empty(t, h.channels, "the shared window was closed, so no lookup may happen")
+}
+
+// A channel switch invalidates the shared record (CheckCache.Due), and the
+// driver must ask about the channel the config names right now — not the one it
+// asked about last time.
+func TestUpdateDriver_FollowsAChannelSwitch(t *testing.T) {
+	h := newDriverHarness(t)
+	h.seedCache(t, config.UpdateChannelStable, h.now.Add(-1*time.Hour))
+	h.cfg.UpdateChannel = config.UpdateChannelPreview
+
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+	require.Equal(t, []string{config.UpdateChannelPreview}, h.channels)
+}
+
+// Because the driver never records, the shared window cannot throttle it. Its
+// own backoff is what keeps a failing GitHub from being retried every wake —
+// the retry-storm half of the #459 → #1466 → #1861 argument, which moving off
+// the launch path does not change.
+func TestUpdateDriver_ChecksAtMostOncePerCheckInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tag  string
+		err  error
+	}{
+		{name: "after a newer release", tag: "v1.0.300"},
+		{name: "after up to date", tag: "v1.0.100"},
+		{name: "after a failed lookup", err: errors.New("github is down")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newDriverHarness(t)
+			h.tag, h.err = tc.tag, tc.err
+
+			base := h.now
+			h.driver.checkOnce()
+			require.Len(t, h.channels, 1)
+
+			// Every wake for the next six hours: no further lookup. Offsets are
+			// measured from base, not compounded, so each case is the elapsed
+			// time it claims to be.
+			for _, elapsed := range []time.Duration{
+				updateDriverWakeInterval,
+				autoupdate.CheckInterval - time.Second,
+			} {
+				h.now = base.Add(elapsed)
+				require.Equal(t, updateCheckSkipped, h.driver.checkOnce(),
+					"a check %s after the last one must be suppressed", elapsed)
+				require.Len(t, h.channels, 1, "a second lookup inside the interval is the retry storm the throttle exists to prevent")
+			}
+
+			// Past the interval it checks again.
+			h.now = base.Add(autoupdate.CheckInterval)
+			h.driver.checkOnce()
+			require.Len(t, h.channels, 2)
+		})
+	}
+}
+
+// The off switch is complete: no release lookup, no network call, nothing. Both
+// the persistent config key and the process-level env override, which is what an
+// operator sets on a daemon unit.
+func TestUpdateDriver_OffSwitchMakesNoNetworkCall(t *testing.T) {
+	t.Run("auto_update = false", func(t *testing.T) {
+		h := newDriverHarness(t)
+		h.cfg.AutoUpdate = false
+
+		require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+		require.Empty(t, h.channels)
+	})
+
+	t.Run("env override beats an enabled config", func(t *testing.T) {
+		h := newDriverHarness(t)
+		t.Setenv(autoupdate.EnvironmentVariable, "0")
+
+		require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+		require.Empty(t, h.channels)
+	})
+
+	t.Run("env override beats a disabled config", func(t *testing.T) {
+		h := newDriverHarness(t)
+		h.cfg.AutoUpdate = false
+		t.Setenv(autoupdate.EnvironmentVariable, "1")
+
+		require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+		require.Len(t, h.channels, 1)
+	})
+}
+
+// The off switch is re-read every wake, so an operator who disables auto-update
+// on a running daemon is honoured without restarting it — the point of a switch
+// on a box whose defining property is that nobody opens the TUI.
+func TestUpdateDriver_HonoursTheOffSwitchWithoutARestart(t *testing.T) {
+	h := newDriverHarness(t)
+
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+	require.Len(t, h.channels, 1)
+
+	h.cfg.AutoUpdate = false
+	h.now = h.now.Add(autoupdate.CheckInterval + time.Minute)
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+	require.Len(t, h.channels, 1, "a disabled driver must make no further lookup")
+}
+
+// A config that cannot be resolved is a skip, not a check against assumed
+// defaults.
+func TestUpdateDriver_SkipsWithoutAConfig(t *testing.T) {
+	h := newDriverHarness(t)
+	h.driver.config = func() *config.Config { return nil }
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+	require.Empty(t, h.channels)
+}
+
+// Never report a downgrade. A preview user switching back to stable resolves an
+// older tag, and the shared IsNewer ordering must keep this loop from calling
+// that an update — the same rule the installer follows.
+func TestUpdateDriver_NeverReportsADowngrade(t *testing.T) {
+	h := newDriverHarness(t)
+	h.driver.currentVersion = "1.0.300-preview-4"
+	h.tag = "v1.0.299"
+
+	require.Equal(t, updateCheckUpToDate, h.driver.checkOnce())
+}
+
+// A stable release outranks a preview of the same base, so a preview user is
+// told about the release that supersedes theirs.
+func TestUpdateDriver_ReportsAStableReleaseOverAPreviewOfTheSameBase(t *testing.T) {
+	h := newDriverHarness(t)
+	h.driver.currentVersion = "1.0.300-preview-4"
+	h.tag = "v1.0.300"
+
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+}
+
+// A lock held by another af — one mid-download on the launch path — stands the
+// driver down without a network call, and without consuming its own backoff.
+func TestUpdateDriver_StandsDownWhileAnotherAfHoldsTheUpdateLock(t *testing.T) {
+	h := newDriverHarness(t)
+	require.NoError(t, os.WriteFile(h.cachePath, []byte("{}"), 0o644))
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_, _ = autoupdate.TryWithCheckCache(h.cachePath, func(*autoupdate.CheckCache, time.Time) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce())
+	require.Empty(t, h.channels, "another af owns the check; the daemon must not pile on")
+	require.True(t, h.driver.nextCheckNotBefore.IsZero(),
+		"standing down for a busy lock must not burn the six-hour backoff — nothing was checked")
+
+	close(release)
+}
+
+// run's permanent gates: each ends the loop rather than being re-evaluated every
+// wake, so each must provably END it — not merely skip a check inside it.
+func TestUpdateDriver_PermanentGatesEndTheLoop(t *testing.T) {
+	t.Run("unsupported platform", func(t *testing.T) {
+		h := newDriverHarness(t)
+		original := updateDriverGOOS
+		updateDriverGOOS = "windows"
+		t.Cleanup(func() { updateDriverGOOS = original })
+
+		requireRunReturnsWithoutChecking(t, h)
+	})
+
+	t.Run("version is not a release version", func(t *testing.T) {
+		h := newDriverHarness(t)
+		h.driver.currentVersion = "" // a build with no version stamped
+
+		requireRunReturnsWithoutChecking(t, h)
+	})
+
+	t.Run("no resolvable home", func(t *testing.T) {
+		h := newDriverHarness(t)
+		h.driver.cachePath = ""
+
+		requireRunReturnsWithoutChecking(t, h)
+	})
+}
+
+// requireRunReturnsWithoutChecking drives run against a stop channel that never
+// closes, so ONLY a gate can end it. The wake interval is left at its production
+// value: a gate that failed to end the loop would sit on that timer, and this
+// reports it in seconds instead of waiting out the test binary's timeout.
+func requireRunReturnsWithoutChecking(t *testing.T, h *driverHarness) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		h.driver.run(make(chan struct{}))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not end the loop; the gate did not hold")
+	}
+	require.Empty(t, h.channels)
+}
+
+// The loop is shutdown-aware: closing stopCh ends it, both while waiting for a
+// wake and immediately after one.
+func TestUpdateDriver_RunStopsOnShutdown(t *testing.T) {
+	h := newDriverHarness(t)
+	originalWake := updateDriverWakeInterval
+	updateDriverWakeInterval = time.Millisecond
+	t.Cleanup(func() { updateDriverWakeInterval = originalWake })
+
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		h.driver.run(stopCh)
+		close(done)
+	}()
+
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after stopCh closed")
+	}
+}
+
+// The loop actually checks: a real run with a short wake makes a lookup. Without
+// this the gate tests above would pass on a driver that never checks at all.
+func TestUpdateDriver_RunPerformsACheck(t *testing.T) {
+	h := newDriverHarness(t)
+	h.driver.now = time.Now // the loop's backoff must be compared against a real clock
+	originalWake := updateDriverWakeInterval
+	updateDriverWakeInterval = time.Millisecond
+	t.Cleanup(func() { updateDriverWakeInterval = originalWake })
+
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		h.driver.run(stopCh)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		close(stopCh)
+		<-done
+	})
+
+	require.Eventually(t, func() bool { return len(h.channels) > 0 }, 10*time.Second, 5*time.Millisecond,
+		"the loop must reach a release check")
+}
+
+// Fleet spread: every autostart daemon starts at boot or login, so an unjittered
+// first wake would point them all at the GitHub API at once. The offset is
+// derived from the home, so it is stable for a box and different across boxes.
+func TestUpdateDriverJitter(t *testing.T) {
+	window := 15 * time.Minute
+
+	require.Equal(t, updateDriverJitter("/home/a/.agent-factory/last_update_check", window),
+		updateDriverJitter("/home/a/.agent-factory/last_update_check", window),
+		"a box's offset must be stable across daemon restarts")
+
+	seen := map[time.Duration]int{}
+	for _, home := range []string{"/home/a", "/home/b", "/home/c", "/home/d", "/home/e", "/home/f"} {
+		offset := updateDriverJitter(home, window)
+		require.GreaterOrEqual(t, offset, time.Duration(0))
+		require.Less(t, offset, window)
+		seen[offset]++
+	}
+	require.Greater(t, len(seen), 1, "different homes must not all land on the same offset")
+
+	require.Zero(t, updateDriverJitter("/home/a", 0), "a zero window must not divide by zero")
+}
+
+// The wiring contract with RunDaemon: the driver joins the daemon's WaitGroup, so
+// shutdown WAITS for it, and it releases on the daemon's stopCh, so it cannot hang
+// that shutdown. Both halves matter — a driver missing from the wg would be torn
+// down mid-check, and one deaf to stopCh would wedge every daemon stop.
+func TestStartUpdateDriver_JoinsAndReleasesTheDaemonWaitGroup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	// Disabled: this test is about lifecycle, and the loop must reach no network.
+	t.Setenv(autoupdate.EnvironmentVariable, "0")
+	withVersion(t, "1.0.200")
+	originalWake := updateDriverWakeInterval
+	updateDriverWakeInterval = time.Millisecond
+	t.Cleanup(func() { updateDriverWakeInterval = originalWake })
+
+	manager := &Manager{}
+	manager.live.Store(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelStable})
+
+	wg := &sync.WaitGroup{}
+	stopCh := make(chan struct{})
+	startUpdateDriver(manager, stopCh, wg)
+
+	waited := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("the driver left the WaitGroup while still running; a daemon shutdown would not wait for it")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(stopCh)
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the driver did not release the WaitGroup on stopCh; a daemon shutdown would hang")
+	}
+}
+
+// The driver reads the daemon's LIVE config, so an af config set applied to a
+// running daemon (Manager.ApplyConfig) reaches it without a restart.
+func TestNewUpdateDriverReadsTheLiveConfig(t *testing.T) {
+	manager := &Manager{}
+	manager.live.Store(&config.Config{AutoUpdate: false, UpdateChannel: config.UpdateChannelPreview})
+
+	driver := newUpdateDriver(manager)
+	require.False(t, driver.config().AutoUpdate)
+
+	manager.live.Store(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelPreview})
+	require.True(t, driver.config().AutoUpdate, "the driver must re-read the live config, not a snapshot")
+	require.Equal(t, config.UpdateChannelPreview, driver.config().UpdateChannel)
+}
+
+// The cache the driver reads is the one the launch path writes: same file, same
+// format. A driver pointed at a different path would silently stop coordinating.
+func TestUpdateDriverReadsTheSharedCacheFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	driver := newUpdateDriver(&Manager{})
+	require.Equal(t, autoupdate.CheckCachePath(), driver.cachePath)
+	require.Equal(t, filepath.Join(home, autoupdate.CheckCacheFileName), driver.cachePath)
+
+	// And it parses what the launch path writes.
+	require.NoError(t, autoupdate.RecordCheck(driver.cachePath, config.UpdateChannelStable, "v1.0.200", "1.0.200"))
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal([]byte(driverCacheBytes(t, driver.cachePath)), &decoded))
+	require.Contains(t, decoded, "channels")
+}
+
+func driverCacheBytes(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
+}

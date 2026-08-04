@@ -63,6 +63,15 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
   `update_channel: "stable"` it asks GitHub's `releases/latest` endpoint,
   which is pinned to the newest non-prerelease release — previews never
   appear there, and there is no release list to page through.
+- **A running daemon checks too, and reports rather than installs.** An
+  autostart daemon serving the web UI and firing tasks may go weeks without
+  an interactive launch, so it runs the same channel-aware check itself. It
+  shares the one 6-hour window with the launch path — it stands down when an
+  interactive `af` has just checked, and never closes the window on its own,
+  so an `af` launch always finds the window it would have found anyway. When
+  it finds a newer release it logs it; it does not swap the binary. Setting
+  `auto_update = false` (or `AGENT_FACTORY_AUTO_UPDATE=0` in the daemon's
+  environment) stops the daemon check entirely.
 - **Preview tracking is opt-in** via the global config key
   `update_channel: "preview"` (see
   [configuration.md](configuration.md)) — the updater then lists releases
