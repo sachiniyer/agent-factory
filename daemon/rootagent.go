@@ -395,6 +395,9 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		// that record, so there is nothing to continue or rebuild).
 		resumeConversation: carried.conversation,
 		restoreTabs:        carried.tabs,
+		// True only for a heal, including one whose reaped root had nothing to
+		// carry — that is the heal whose replacement most needs the marker.
+		replacesReapedRecord: reapedRoot,
 	}
 	data, err := m.CreateSession(context.Background(), req)
 	if err != nil && req.resumeConversation.HasID() {
@@ -472,16 +475,23 @@ func countNonAgentTabs(tabs []session.TabData) int {
 // come up on a different one (the resolved program runs another agent, or pins
 // its own resume flag), and the record is the thing that will be resumed from
 // next time.
+//
+// The judgment itself is session.ClassifyRootRecreateContext — the SAME call
+// that decides the note on the row (#2629), not a second copy of the rule. The
+// log adds one distinction the note does not need (nothing recorded to carry vs
+// recorded and not resumed); it cannot add a different verdict.
 func reportRootConversationCarry(repoRoot string, carried session.AgentConversationData, created *session.AgentConversationData) {
-	switch {
-	case !carried.HasID():
-		log.WarningLog.Printf("re-created root agent for %s had no recorded conversation to carry; it starts with a fresh context", repoRoot)
-	case created != nil && created.Agent == carried.Agent && created.ID == carried.ID:
+	switch session.ClassifyRootRecreateContext(carried, created) {
+	case session.RootRecreateContextNone:
 		log.InfoLog.Printf("re-created root agent for %s resumed its prior %s conversation %s", repoRoot, carried.Agent, carried.ID)
-	case created == nil:
+	case session.RootRecreateContextUnknown:
 		log.WarningLog.Printf("re-created root agent for %s did not record its prior %s conversation %s; the resolved command may select its own conversation, so context continuity is unknown",
 			repoRoot, carried.Agent, carried.ID)
 	default:
+		if !carried.HasID() {
+			log.WarningLog.Printf("re-created root agent for %s had no recorded conversation to carry; it starts with a fresh context", repoRoot)
+			return
+		}
 		log.WarningLog.Printf("re-created root agent for %s did not come up on its prior %s conversation %s; it starts with a fresh context",
 			repoRoot, carried.Agent, carried.ID)
 	}

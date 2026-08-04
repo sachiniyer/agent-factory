@@ -669,6 +669,14 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileAgentModelChange(d.ModelChange) {
 		changed = true
 	}
+	// Same shape for the re-created-root notice (#2629): it appears when the
+	// daemon heals a root and clears when any client opens that session's pane,
+	// both while the liveness sits at Ready. Reconciling it here is what makes an
+	// already-open rail drop the note once the user has actually looked, instead
+	// of showing it until the next restart.
+	if inst.ReconcileRootRecreateContext(d.RootRecreateContext) {
+		changed = true
+	}
 	// Backends without user-managed tabs (the off-box docker/ssh/hook runtimes)
 	// have a tab list their runtime owns — a single agent tab, fixed at Launch —
 	// so there is nothing for the snapshot to reconcile against. Skipping is a

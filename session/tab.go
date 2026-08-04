@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
@@ -426,4 +427,32 @@ func TabIdentifiers(t *Tab) string {
 		return fmt.Sprintf("%q (shown as %q)", t.Name, label)
 	}
 	return fmt.Sprintf("%q", t.Name)
+}
+
+// tabProgram resolves the program a tab's tmux session runs, by kind: the agent
+// program for Agent tabs, $SHELL for Shell tabs, and the explicit command for
+// Process tabs (falling back to $SHELL when empty).
+func tabProgram(kind TabKind, command, agentProgram string) string {
+	switch kind {
+	case TabKindAgent:
+		return agentProgram
+	case TabKindProcess:
+		if command != "" {
+			return command
+		}
+		return defaultShell()
+	default:
+		return defaultShell()
+	}
+}
+
+// defaultShell returns the user's $SHELL, falling back to /bin/sh — exactly the
+// resolution the old UI terminal cache used (ui/terminal.go) before the shell
+// tab was promoted onto the Instance.
+func defaultShell() string {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	return shell
 }

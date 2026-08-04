@@ -97,6 +97,18 @@ type CreateSessionRequest struct {
 	// its OWN records — never a list a client gets to inject, which would let a
 	// caller spawn arbitrary commands and proxy targets under a new session.
 	restoreTabs []session.TabData
+
+	// replacesReapedRecord marks the create as a HEAL rather than a new session
+	// (#2629), so the launch can mark a root that did not come back on its prior
+	// conversation. It is separate from the two carries above because the heal
+	// that most needs the marker — a reaped root with no recorded conversation at
+	// all — carries nothing, and is otherwise indistinguishable from a first-ever
+	// create.
+	//
+	// Unexported like its siblings. A client-settable "this replaces a reaped
+	// record" would let a caller stamp an ordinary session with a notice about a
+	// history loss that never happened.
+	replacesReapedRecord bool
 }
 
 type CreateSessionResponse struct {

@@ -394,6 +394,15 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if liveness == session.LiveLimitReached {
 		titleText = limitBadgePrefix(i) + titleText
 	}
+	// A re-created root that did not come back on its prior conversation (#2629)
+	// is orthogonal to liveness too — the row is Ready and looks exactly like one
+	// that resumed cleanly, which is the whole bug. The note says which, until the
+	// user opens the pane and the daemon clears it. The wording comes from the
+	// shared session vocabulary, so the TUI and the web rail cannot render two
+	// different words for one fact.
+	if note := i.RootRecreateContext().Note(); note != "" {
+		titleText = "[" + note + "] " + titleText
+	}
 	// A verified post-safety-dialog model change is orthogonal to liveness: the
 	// session can keep working and otherwise look healthy. Add it LAST so it is
 	// the outermost prefix; narrow rails retain the reason before lower-priority

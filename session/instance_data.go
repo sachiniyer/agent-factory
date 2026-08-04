@@ -57,6 +57,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		PendingHandoffMission: i.pendingHandoffMission,
 		UserKilled:            i.userKilled,
 		StartupStateUnknown:   i.startupStateUnknown,
+		RootRecreateContext:   i.rootRecreateContext,
 	}
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
 
@@ -216,6 +217,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		pendingHandoffMission: data.PendingHandoffMission,
 		userKilled:            data.UserKilled,
 		startupStateUnknown:   data.StartupStateUnknown,
+		// Survives the restart on purpose (#2629): a root that came back amnesiac
+		// is still amnesiac, and a daemon restart is a likely part of the same
+		// outage. An unrecognized value from a newer binary loads as-is and
+		// renders nothing, which is the rollforward-safe direction.
+		rootRecreateContext: data.RootRecreateContext,
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	worktreeReaped := false

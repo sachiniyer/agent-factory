@@ -256,10 +256,30 @@ export function rowTitle(s: SessionData): string {
   if (s.backend_type === "remote") {
     title = "[remote] " + title;
   }
+  const recreate = rootRecreateNote(s);
+  if (recreate) {
+    title = `[${recreate}] ` + title;
+  }
   if (s.model_change) {
     title = "[model changed] " + title;
   }
   return title;
+}
+
+/** Mirrors session.RootRecreateContext.Note (session/root_recreate.go): the short
+ *  note a re-created root carries when it did not demonstrably come back on its
+ *  prior conversation (#2629). The switch is exhaustive over the values af writes
+ *  and returns "" for anything else, so a value a newer daemon adds renders no
+ *  note rather than a guessed one. */
+export function rootRecreateNote(s: SessionData): string {
+  switch (s.root_recreate_context) {
+    case "fresh":
+      return "fresh context";
+    case "unknown":
+      return "context unknown";
+    default:
+      return "";
+  }
 }
 
 /** Mirrors ui/tree/render.go:limitBadgePrefix: "[limit] resets <t> " when a reset

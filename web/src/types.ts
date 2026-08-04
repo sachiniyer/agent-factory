@@ -118,6 +118,13 @@ export interface SessionData {
   is_root?: boolean;
   /** Live, projection-only model diagnostic; never restored from instances.json. */
   model_change?: AgentModelChange;
+  /** One-shot note on a re-created root agent that did not demonstrably come back
+   *  on its prior conversation (#2629): "fresh" when its context is provably gone,
+   *  "unknown" when the resolved command selects its own conversation so af cannot
+   *  say. The daemon clears it the first time any client opens the session's pane.
+   *  An unrecognized value renders no note — a newer daemon must never make this
+   *  rail invent one. */
+  root_recreate_context?: "fresh" | "unknown";
   /** Usage-limit reset time (RFC3339), present only for a LimitReached row. */
   limit_reset_at?: string;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */

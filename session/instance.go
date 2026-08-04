@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -218,6 +217,12 @@ type Instance struct {
 	// clears it under i.mu so a second launch of the same object cannot rebuild
 	// the same tabs twice.
 	carriedTabs []TabData
+
+	// rootRecreateContext is the one-shot note a re-created root carries when it
+	// did not demonstrably come back on its prior conversation (#2629). Set at
+	// first launch by noteRecreateContext, persisted, rendered on the row by
+	// every rail, and cleared the first time a client opens the session's pane.
+	rootRecreateContext RootRecreateContext
 
 	// userKilled is the kill-intent tombstone (#1108): set (and persisted)
 	// before an explicit kill's teardown begins, so a record that survives a
@@ -964,32 +969,4 @@ func (i *Instance) setTmuxLocked(ts *tmux.TmuxSession) {
 		return
 	}
 	i.Tabs[0].tmux = ts
-}
-
-// tabProgram resolves the program a tab's tmux session runs, by kind: the agent
-// program for Agent tabs, $SHELL for Shell tabs, and the explicit command for
-// Process tabs (falling back to $SHELL when empty).
-func tabProgram(kind TabKind, command, agentProgram string) string {
-	switch kind {
-	case TabKindAgent:
-		return agentProgram
-	case TabKindProcess:
-		if command != "" {
-			return command
-		}
-		return defaultShell()
-	default:
-		return defaultShell()
-	}
-}
-
-// defaultShell returns the user's $SHELL, falling back to /bin/sh — exactly the
-// resolution the old UI terminal cache used (ui/terminal.go) before the shell
-// tab was promoted onto the Instance.
-func defaultShell() string {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
-	return shell
 }

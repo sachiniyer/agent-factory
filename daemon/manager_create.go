@@ -197,6 +197,15 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		}
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
+	// A heal (the root-agent ensure loop replacing a record it just reaped) marks
+	// what became of the prior conversation, so a root that came back without its
+	// history says so on its row instead of only in the application log (#2629).
+	// Here, before the projection below, so the marker rides out on the create's
+	// own persist and EventSessionCreated rather than in a second write behind
+	// them. Never for an ordinary create: starting fresh is what those ARE.
+	if req.replacesReapedRecord {
+		instance.NoteRecreateContext()
+	}
 	data := instance.ToInstanceData()
 	conversationToken := instance.AgentRuntimeToken()
 

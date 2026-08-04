@@ -111,6 +111,35 @@ test("title prefixes match render.go precedence", () => {
   );
 });
 
+test("[fresh context] note mirrors session.RootRecreateContext.Note (#2629)", () => {
+  // The whole complaint: a root that came back without its history rendered
+  // identically to one that resumed. It must not any more.
+  assert.equal(rowTitle(sess({ title: "root", root_recreate_context: "fresh" })), "[fresh context] root");
+  // The honest middle case — af cannot tell whether the agent continued.
+  assert.equal(
+    rowTitle(sess({ title: "root", root_recreate_context: "unknown" })),
+    "[context unknown] root",
+  );
+  // Silent for every ordinary row, and for a root that resumed cleanly.
+  assert.equal(rowTitle(sess({ title: "root" })), "root");
+  // A value only a newer daemon knows renders no note rather than a guessed one.
+  assert.equal(
+    rowTitle(sess({ title: "root", root_recreate_context: "something-later" as never })),
+    "root",
+  );
+  // The model diagnostic stays outermost, matching render.go's ordering.
+  assert.equal(
+    rowTitle(
+      sess({
+        title: "root",
+        root_recreate_context: "fresh",
+        model_change: { before: "gpt-5.6-sol max", after: "gpt-5.6-luna low" },
+      }),
+    ),
+    "[model changed] [fresh context] root",
+  );
+});
+
 test("[limit] badge shows the reset time like render.go's limitBadgePrefix", () => {
   const noReset = rowTitle(sess({ title: "w", liveness: Liveness.LimitReached }));
   assert.equal(noReset, "[limit] w");

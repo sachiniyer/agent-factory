@@ -142,6 +142,12 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		_ = sub.Close()
 		return // Accept already wrote the error response.
 	}
+	// The client now has this session's pane in front of it — a TUI/CLI attach or
+	// a web pane render, all three of which arrive here. That is the moment a
+	// re-created root's "fresh context" note has done its job, so clear it (#2629).
+	// After Accept, not before: a stream that failed to upgrade showed the user
+	// nothing, and a note cleared without being read is a note that never existed.
+	cs.manager.acknowledgeRootRecreate(instance)
 	servePTYStream(binding, sub, conn)
 }
 

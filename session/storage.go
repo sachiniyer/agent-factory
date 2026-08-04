@@ -148,9 +148,23 @@ type InstanceData struct {
 	// AgentConversation mirrors the Agent tab's provider conversation id for
 	// API/CLI consumers. The per-tab source of truth is TabData.Conversation.
 	AgentConversation *AgentConversationData `json:"agent_conversation,omitempty"`
-	Worktree          GitWorktreeData        `json:"worktree"`
-	PRInfo            PRInfoData             `json:"pr_info,omitempty"`
-	BackendType       string                 `json:"backend_type,omitempty"`
+	// RootRecreateContext is the one-shot note a re-created root agent carries
+	// when it did not demonstrably come back on its prior conversation (#2629):
+	// the rails render it on the row so a root that lost its history is
+	// discoverable in `af`, not only in the application log.
+	//
+	// PERSISTED, unlike the projection-only diagnostics above — ForStorage
+	// deliberately leaves it alone. A root that came back amnesiac is still
+	// amnesiac after a daemon restart, and the restart is a likely part of the
+	// same outage; scrubbing it would erase the notice in exactly the situation
+	// that produced it. It is cleared instead by acknowledgement — the first
+	// time a client opens the session's pane. Additive + omitempty on the
+	// TaskRunActive rollforward precedent: a record written before this field
+	// decodes to no note.
+	RootRecreateContext RootRecreateContext `json:"root_recreate_context,omitempty"`
+	Worktree            GitWorktreeData     `json:"worktree"`
+	PRInfo              PRInfoData          `json:"pr_info,omitempty"`
+	BackendType         string              `json:"backend_type,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not
