@@ -19,6 +19,7 @@ import {
   isMutationCommittedError,
   killSession,
   listBackends,
+  listDirectory,
   listPrograms,
   listProjects,
   probeWebTab,
@@ -861,4 +862,39 @@ test("reapConfigAssistant omits the Authorization header for a tokenless client"
   };
   await reapConfigAssistant("");
   assert.equal(hadAuth, false, 'a tokenless ("") client sends no Authorization header (#1696)');
+});
+
+// --- the Add-project picker's read (#2788) ---------------------------------
+
+test("listDirectory asks the daemon to browse a path on ITS filesystem", async () => {
+  const cap = stubFetch();
+  await listDirectory("/work", "tok");
+
+  assert.equal(cap.url, "/v1/ListDirectory");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.equal(cap.body.path, "/work", "the path is sent verbatim — the daemon owns resolution");
+});
+
+test("listDirectory sends an empty path to mean 'start at the daemon's home'", async () => {
+  const cap = stubFetch();
+  await listDirectory("", "tok");
+  assert.equal(cap.body.path, "", "the browser has no idea what the daemon host's home is");
+});
+
+test("listDirectory REJECTS a refused directory rather than resolving to an empty listing", async () => {
+  // The whole point of the endpoint's error contract. If this ever resolved, the
+  // picker would render "No subdirectories here." over a directory it was simply
+  // not allowed to read — a confident wrong answer about the user's own disk.
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "cannot read /work/locked: permission denied" } }),
+  });
+  const err = await listDirectory("/work/locked", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError, "a refusal must reach the caller as an error");
+  assert.equal(err.message, "cannot read /work/locked: permission denied", "the daemon's own reason, verbatim");
 });

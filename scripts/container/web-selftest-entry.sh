@@ -41,6 +41,19 @@ MOCK3=/work/mock-repo-3
 # A real git repo that is deliberately given NO sessions and NO tasks, so it is a
 # project ONLY once registered (#2456): the add/delete-registered-empty selftest.
 MOCK_EMPTY=/work/mock-repo-empty
+# The Add-project directory picker's browse tree (#2788). A deliberate shape:
+# TWO levels to descend through, a real git checkout to select at the bottom, a
+# plain directory beside it that must stay navigable-but-not-a-target, and a
+# doomed directory the test deletes out of band mid-run so a navigation gets a
+# REAL daemon refusal (proving the picker renders an error, not an empty list).
+# It lives outside /work's mock repos so descending into it cannot depend on
+# whatever the session fixtures leave lying around next to them.
+BROWSE=/work/browse
+BROWSE_L1=level-one
+BROWSE_L2=level-two
+BROWSE_REPO=browsable-repo
+BROWSE_PLAIN=plain-dir
+BROWSE_DOOMED=doomed-dir
 BIN=/work/bin/af
 LISTEN=127.0.0.1:8899
 BASE_URL="http://${LISTEN}"
@@ -176,6 +189,24 @@ for repo in "$MOCK" "$MOCK2" "$MOCK3" "$MOCK_EMPTY"; do
         )
     fi
 done
+
+# --- the Add-project picker's browse tree (#2788) ---------------------------
+# $BROWSE/level-one/level-two/{browsable-repo,plain-dir,doomed-dir}. Only
+# browsable-repo is a git checkout, so the picker must mark exactly it as
+# selectable; doomed-dir is removed by the test itself, from outside the browser,
+# to make one navigation fail for real.
+mkdir -p "$BROWSE/$BROWSE_L1/$BROWSE_L2/$BROWSE_PLAIN" \
+    "$BROWSE/$BROWSE_L1/$BROWSE_L2/$BROWSE_DOOMED"
+if [ ! -d "$BROWSE/$BROWSE_L1/$BROWSE_L2/$BROWSE_REPO/.git" ]; then
+    mkdir -p "$BROWSE/$BROWSE_L1/$BROWSE_L2/$BROWSE_REPO"
+    (
+        cd "$BROWSE/$BROWSE_L1/$BROWSE_L2/$BROWSE_REPO"
+        git init -q -b master
+        printf '# browsable\nPicked through the web directory picker.\n' >README.md
+        git add -A
+        git commit -qm "initial project"
+    )
+fi
 
 # #2189: the primary repo has a real, versioned remote-hook configuration. The
 # commands only need to be discoverable for ListBackends' side-effect-free
@@ -688,5 +719,11 @@ export AF_WEBTAB_NOURL_NAME="$NOURL_TAB"
 export AF_BIN="$BIN"
 export AF_MOCK_REPO="$MOCK"
 export AF_MOCK_REPO_EMPTY="$MOCK_EMPTY"
+export AF_BROWSE_ROOT="$BROWSE"
+export AF_BROWSE_L1="$BROWSE_L1"
+export AF_BROWSE_L2="$BROWSE_L2"
+export AF_BROWSE_REPO="$BROWSE_REPO"
+export AF_BROWSE_PLAIN="$BROWSE_PLAIN"
+export AF_BROWSE_DOOMED="$BROWSE_DOOMED"
 
 npx playwright test

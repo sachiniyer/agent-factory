@@ -20,7 +20,8 @@
 // only the input UX changed — and the raw expression stays reachable as the
 // picker's Custom type.
 
-import { asForm, field, h, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
+import { h } from "./dom.js";
+import { asForm, field, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
 import { icon } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron } from "./schedule.js";

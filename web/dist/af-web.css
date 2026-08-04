@@ -1664,6 +1664,129 @@ body {
   font-size: var(--af-fs-sm);
   line-height: 1.4;
 }
+.af-dirpicker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-sp-2);
+  padding: var(--af-sp-2);
+  background: var(--af-bg-inset);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+}
+.af-dirpicker-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+}
+.af-dirpicker-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-xs);
+  font-family: var(--af-font-mono);
+}
+.af-dirpicker-up,
+.af-dirpicker-home,
+.af-dirpicker-use-here,
+.af-dirpicker-use {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.5rem;
+  font-size: var(--af-fs-xs);
+}
+.af-dirpicker-error {
+  margin: 0;
+  color: var(--af-danger);
+  font-size: var(--af-fs-xs);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.af-dirpicker-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 13rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--af-bg-raised);
+  border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-r-sm);
+}
+.af-dirpicker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-1);
+  padding-right: var(--af-sp-1);
+}
+.af-dirpicker-row + .af-dirpicker-row {
+  border-top: 1px solid var(--af-border-subtle);
+}
+.af-dirpicker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.42rem 0.6rem;
+  background: transparent;
+  border: none;
+  color: var(--af-text);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.af-dirpicker-item:hover:not(:disabled) {
+  background: var(--af-bg-inset);
+}
+.af-dirpicker-item:disabled,
+.af-dirpicker-use:disabled,
+.af-dirpicker-use-here:disabled,
+.af-dirpicker-home:disabled,
+.af-dirpicker-up:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.af-dirpicker-item:focus-visible,
+.af-dirpicker-use:focus-visible,
+.af-dirpicker-use-here:focus-visible,
+.af-dirpicker-home:focus-visible,
+.af-dirpicker-up:focus-visible {
+  outline: 2px solid var(--af-accent);
+  outline-offset: -2px;
+}
+.af-dirpicker-name {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.af-dirpicker-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.af-dirpicker-meta {
+  flex: 0 0 auto;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-2xs);
+}
+.af-dirpicker-row-repo .af-dirpicker-meta {
+  color: var(--af-accent);
+}
+.af-dirpicker-empty,
+.af-dirpicker-note {
+  margin: 0;
+  padding: 0 0.2rem;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-xs);
+  line-height: 1.4;
+}
+.af-dirpicker-note:empty {
+  display: none;
+}
 .af-modal-hint {
   margin: 0;
   color: var(--af-text-2);

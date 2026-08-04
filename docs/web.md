@@ -437,6 +437,17 @@ reloads. Projects with no live sessions show an empty-state prompt (`No active
 sessions in <project> — + New`). The switcher menu footer holds the **+ Add
 project** affordance and the delete-project control.
 
+**+ Add project** opens a modal with a minimal **directory picker** over the
+daemon host's filesystem, plus the free-text path field. The picker starts at the
+directory you last browsed (else the daemon host's home), lists directories only,
+one per line — click to descend, **Up** for the parent, **Home** to jump back —
+and marks which entries are git checkouts. Only a checkout offers **Use**; a plain
+directory stays navigable but is not a target. **Use** fills the path field rather
+than submitting, so what gets registered is always the string on screen. The field
+remains the escape hatch: paste any absolute (or `~`-prefixed) path the picker
+cannot reach and it is registered the same way. A directory the daemon cannot read
+comes back as its own error above the list — never as an empty one.
+
 ### Tasks view
 
 The **Tasks** view lists the scheduled automations the daemon owns and drives their

@@ -162,6 +162,18 @@ var httpRoutes = []HTTPRoute{
 		RequestFields: jsonFields(reflect.TypeOf(ListProjectsRequest{})),
 		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProjects) },
 	},
+	// The Add-project picker's read (#2788). PUBLIC, not internal: a client that
+	// cannot see the daemon host's filesystem needs it to offer anything better
+	// than "type an absolute path", so it is client-facing by definition — and
+	// the internalHTTPRoutes note below is explicit that a verb a user could
+	// reasonably want belongs here.
+	{
+		Method:        http.MethodPost,
+		Path:          "/v1/ListDirectory",
+		Description:   "List the child DIRECTORIES of one directory on the daemon's filesystem, marking which are git checkouts — the read behind an Add-project picker. Resolves ~ and symlinks and answers with canonical paths; an unreadable directory is an error, never an empty list.",
+		RequestFields: jsonFields(reflect.TypeOf(ListDirectoryRequest{})),
+		handler:       func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListDirectory) },
+	},
 	{
 		Method:        http.MethodPost,
 		Path:          "/v1/DeliverPrompt",

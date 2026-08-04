@@ -12,7 +12,7 @@
 // rest of the client (createElement + addEventListener via h(), no innerHTML).
 
 import { ApiError, reapConfigAssistant, spawnConfigAssistant } from "./api.js";
-import { h } from "./modals.js";
+import { h } from "./dom.js";
 import { configAssistantStreamEndpoint } from "./stream_endpoint.js";
 import { AttachTerminal, type TerminalStatus } from "./terminal.js";
 

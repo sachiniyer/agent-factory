@@ -259,9 +259,14 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// GetConfig/ListPrograms, not a durable mutation. If SetConfigValue is ever
 	// unblocked during probation, this reasoning collapses and ApplyConfig must be
 	// revisited: the two policies are only safe together (#2480).
-	"ApplyConfig":             allowedDuringProbation,
-	"GetConfig":               allowedDuringProbation,
-	"ListBackends":            allowedDuringProbation,
+	"ApplyConfig":  allowedDuringProbation,
+	"GetConfig":    allowedDuringProbation,
+	"ListBackends": allowedDuringProbation,
+	// A read of the daemon host's directory names (#2788): no manager, no daemon
+	// state, nothing an upgrade window is protecting. It sits with ListProjects
+	// for the same reason — the Add-project view a client builds out of the two
+	// must not have to wait on a probation it has no stake in.
+	"ListDirectory":           allowedDuringProbation,
 	"ListProjects":            allowedDuringProbation,
 	"ListPrograms":            allowedDuringProbation,
 	"ListTasks":               allowedDuringProbation,

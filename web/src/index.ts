@@ -30,6 +30,7 @@ import {
   isMutationCommittedError,
   handoffSession,
   listBackends,
+  listDirectory,
   listProjects,
   listPrograms,
   suggestSessionName,
@@ -772,11 +773,12 @@ function openDeleteProject(root: string, label: string, sessionCount: number): v
   );
 }
 
-/** Opens the add-project modal (#2456): the user types a path to a git checkout
- *  on the daemon host, and RegisterProject resolves+validates it. A rejection
- *  (not a git repo, unreadable) is shown inline (the daemon's own message, via
- *  errorText — NOT the login-framed describeError) and the modal stays open to
- *  correct; on success the modal closes.
+/** Opens the add-project modal (#2456): the user names a path to a git checkout
+ *  on the daemon host — typed, or picked in the #2788 directory browser above the
+ *  field — and RegisterProject resolves+validates it. A rejection (not a git repo,
+ *  unreadable) is shown inline (the daemon's own message, via errorText — NOT the
+ *  login-framed describeError) and the modal stays open to correct; on success the
+ *  modal closes.
  *
  *  The registered repo appears in the switcher and is selectable in the New session
  *  picker IMMEDIATELY — no session required (the #2456 union: projectSummaries /
@@ -787,6 +789,19 @@ function openDeleteProject(root: string, label: string, sessionCount: number): v
 function openAddProject(): void {
   openModal(
     addProjectModal({
+      // #2788: the picker's daemon read. The token is resolved PER CALL, not
+      // captured when the modal opens, so a re-login mid-browse keeps working.
+      loadDirectory: (path: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      // The daemon's own message ("cannot read /x: permission denied"), never the
+      // login-framed describeError — a refused directory is not an auth failure.
+      errorText,
       onSubmit: (path: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).

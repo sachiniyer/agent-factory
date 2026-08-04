@@ -638,6 +638,25 @@
       "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
     },
     {
+      "id": "project.browse",
+      "title": "Browse the daemon host's directories to find a repo to add",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/dirpicker.ts directoryPicker → web/src/modals.ts addProjectModal; web/src/api.ts listDirectory (ListDirectory RPC)"
+      },
+      "cli": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "verdict": "deliberate",
+      "issue": "#2788",
+      "notes": "#2788 adds the daemon ListDirectory RPC (POST /v1/ListDirectory) and the web Add-project picker that reads it. It is deliberately web-only, and the reason is the same for both other surfaces: they already run WHERE the filesystem is, next to a shell. `af projects add` is typed at a prompt that has $PWD, tab-completion and `ls`, so a browser inside the CLI would reimplement the shell badly; the TUI's '+ Add project…' overlay sits in a terminal on that same host, one keystroke from the same shell. The web is the only surface with no such access — a phone, or any browser away from the daemon host, cannot see the paths it is being asked to type — which is why the affordance exists there and nowhere else. All three keep the free-text path as the input the submit actually reads (project.add), so nothing the picker can reach is reachable ONLY through it. Re-open this only if the TUI overlay grows the same complaint; the RPC is surface-agnostic and would serve it unchanged."
+    },
+    {
       "id": "project.rebind",
       "title": "Rebind a stable project identity to a replacement checkout",
       "tui": {
@@ -1411,6 +1430,7 @@
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListBackends": "backend.list",
+      "POST /v1/ListDirectory": "project.browse",
       "POST /v1/ListProjects": "project.list",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
@@ -1492,6 +1512,7 @@
       "HandoffSession": "session.handoff",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",
+      "ListDirectory": "project.browse",
       "ListPrograms": "enum.agent-programs",
       "ListProjects": "project.list",
       "ListTasks": "task.list",

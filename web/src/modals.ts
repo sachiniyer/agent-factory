@@ -16,8 +16,10 @@
 // innerHTML with markup and no inline handlers, so the daemon's default-src 'self'
 // policy holds.
 
-import type { CreateSessionInput } from "./api.js";
+import type { CreateSessionInput, DirectoryListing } from "./api.js";
 import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, backendNotice, backendSelectable } from "./backends.js";
+import { type DirectoryPickerHandle, directoryPicker } from "./dirpicker.js";
+import { h } from "./dom.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, handoffAgentChoices, programChoices } from "./programs.js";
 
 /** A live modal: its root element plus in-place patch controls index.ts drives
@@ -27,28 +29,6 @@ export interface ModalHandle {
   setBusy(busy: boolean): void;
   setError(msg: string | null): void;
   close(): void;
-}
-
-/** Minimal hyperscript (shared by the modal builders and the projects/tasks panes,
- *  #1592 Phase 5 PR8): create an element, apply props, append children — CSP-safe
- *  createElement, no innerHTML. */
-export function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  props: Partial<HTMLElementTagNameMap[K]> & { class?: string } = {},
-  ...children: (Node | string)[]
-): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (key === "class") {
-      el.className = value as string;
-    } else {
-      (el as unknown as Record<string, unknown>)[key] = value;
-    }
-  }
-  for (const child of children) {
-    el.append(child);
-  }
-  return el;
 }
 
 /** Builds the shared modal chrome: a backdrop, a titled card, a body slot, an
@@ -85,6 +65,13 @@ export function modalChrome(opts: {
   );
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", opts.title);
+  // Programmatically focusable, but NOT in the tab order (-1, not 0). Every modal
+  // that opens with a text field focuses that field; one that deliberately does
+  // not (add-project with its picker, #2788) still has to put focus INSIDE the
+  // dialog, or Tab and Enter keep driving the control behind the overlay that
+  // opened it. Focusing the card itself is the dialog-pattern answer: it is
+  // announced (role/aria-modal/aria-label above) and raises no virtual keyboard.
+  card.tabIndex = -1;
   // Stop a click inside the card from bubbling to the backdrop's cancel handler.
   card.addEventListener("click", (e) => e.stopPropagation());
 
@@ -574,21 +561,35 @@ export function confirmDeleteProjectModal(
   return handle;
 }
 
-/** The add-project modal (#2456): a single path input that registers a git
- *  checkout as a durable, sessionless project through the RegisterProject RPC.
- *  The path names a directory ON THE DAEMON HOST (absolute, or ~-prefixed which
- *  the daemon expands) — a browser has no shared cwd to resolve a relative path
- *  against, so the daemon owns resolution and validation. A non-git or unreadable
- *  path comes back as the daemon's actionable error, shown inline; on success the
- *  modal closes and the repo appears in the switcher immediately (the #2456 union:
- *  the derived project list ∪ the daemon's registry), no session required.
+/** The add-project modal (#2456): registers a git checkout as a durable,
+ *  sessionless project through the RegisterProject RPC. The path names a
+ *  directory ON THE DAEMON HOST (absolute, or ~-prefixed which the daemon
+ *  expands) — a browser has no shared cwd to resolve a relative path against, so
+ *  the daemon owns resolution and validation. A non-git or unreadable path comes
+ *  back as the daemon's actionable error, shown inline; on success the modal
+ *  closes and the repo appears in the switcher immediately (the #2456 union: the
+ *  derived project list ∪ the daemon's registry), no session required.
+ *
+ *  #2788 adds a minimal directory picker above the field, because on a phone (or
+ *  any browser away from the daemon host) a typed absolute path is close to
+ *  unusable. `loadDirectory` is the daemon read it browses with; passing it in
+ *  keeps this module free of the API/token layer, exactly as the create modal's
+ *  catalogs are passed in. Omit it and the modal degrades to the plain field it
+ *  was — which is also what happens if the read fails.
+ *
+ *  The FIELD stays the single source of truth for the submit: picking a repo
+ *  writes its path there rather than registering behind the user's back, so what
+ *  gets sent is always the string on screen, and a path the browser cannot reach
+ *  is still typeable.
  *
  *  onSubmit is async in index.ts, which drives setBusy/setError around it. */
 export function addProjectModal(callbacks: {
   onSubmit: (path: string) => void;
   onCancel: () => void;
+  loadDirectory?: (path: string) => Promise<DirectoryListing>;
+  errorText?: (e: unknown) => string;
 }): ModalHandle {
-  const { handle, body } = modalChrome({
+  const { handle, body, confirmBtn } = modalChrome({
     title: "Add project",
     confirmLabel: "Add project",
     confirmClass: "af-primary",
@@ -602,6 +603,34 @@ export function addProjectModal(callbacks: {
     autocomplete: "off",
   });
   pathInput.setAttribute("aria-label", "Repository path");
+
+  const { loadDirectory, errorText } = callbacks;
+  let picker: DirectoryPickerHandle | null = null;
+  if (loadDirectory && errorText) {
+    picker = directoryPicker({
+      load: loadDirectory,
+      errorText,
+      onSelect: (path) => {
+        // Fill the field rather than submit: the user sees and can edit exactly
+        // what will be registered. Focus moves to the confirm button so Enter
+        // finishes the job in one more keystroke on a phone keyboard.
+        pathInput.value = path;
+        handle.setError(null);
+        confirmBtn.focus();
+      },
+    });
+    // NOT field(): that wraps its control in a <label>, and a label holding a
+    // grid of buttons is both semantically wrong and a click-target hazard. Same
+    // caption styling, plain container.
+    body.append(
+      h(
+        "div",
+        { class: "af-modal-field" },
+        h("span", { class: "af-modal-label" }, "Browse the daemon host"),
+        picker.el,
+      ),
+    );
+  }
 
   body.append(
     field("Repository path", pathInput),
@@ -620,16 +649,35 @@ export function addProjectModal(callbacks: {
   asForm(card, () => {
     const path = pathInput.value.trim();
     if (path === "") {
-      handle.setError("Enter a repository path.");
+      handle.setError("Enter a repository path, or pick one above.");
       return;
     }
     handle.setError(null);
     callbacks.onSubmit(path);
   });
 
-  // Focus the sole input so the user can type immediately, matching every other
-  // input modal (add-task, create-session, …) — no click required.
-  queueMicrotask(() => pathInput.focus());
+  // With no picker, focus the sole input so the user can type immediately,
+  // matching every other input modal (add-task, create-session, …).
+  //
+  // WITH a picker, focus the DIALOG instead of the input. Not the input, because
+  // this feature exists for the phone and autofocusing a text field there raises
+  // the virtual keyboard over the very browser the user opened the modal to use.
+  // But focus must still land inside the dialog: the modal is opened from the
+  // project menu, so leaving focus where it was parks it on the "+ Add project"
+  // button BEHIND the overlay, where Tab walks the page underneath and Enter
+  // re-triggers the button that opened this (#2800 review). Escape is unaffected
+  // either way — index.ts handles it at the document level.
+  //
+  // The first load starts here, after the modal is built, so a slow filesystem
+  // never delays the modal appearing.
+  queueMicrotask(() => {
+    if (picker) {
+      card.focus();
+      picker.start();
+      return;
+    }
+    pathInput.focus();
+  });
   return handle;
 }
 

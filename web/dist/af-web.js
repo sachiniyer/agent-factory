@@ -6317,6 +6317,10 @@ async function listProjects(token2) {
   const resp = await af("ListProjects", {}, token2);
   return resp.projects ?? [];
 }
+async function listDirectory(path, token2) {
+  const resp = await af("ListDirectory", { path }, token2);
+  return { ...resp, entries: resp.entries ?? [] };
+}
 function requireSessionID(id, action) {
   if (id === "") {
     throw new ApiError(0, `cannot ${action}: this session has no stable id to target safely`);
@@ -6442,78 +6446,7 @@ async function reapConfigAssistant(token2) {
   }
 }
 
-// src/backends.ts
-var REPO_DEFAULT = "";
-function backendChoices(catalog) {
-  if (catalog === null) {
-    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
-  }
-  const choices = [
-    {
-      value: REPO_DEFAULT,
-      // "Repo default" with no parenthetical when the daemon reports no default:
-      // that is the misconfigured case, where naming a backend would be inventing
-      // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
-      // Taken from the daemon, not inferred here. A repo whose declared default is
-      // broken resolves to that broken backend and FAILS — it does not quietly run
-      // local — so the default is not automatically a safe harbour.
-      status: catalog.default_status,
-      reason: catalog.default_status === "available" ? "" : catalog.default_reason ?? ""
-    }
-  ];
-  for (const opt of catalog.backends) {
-    choices.push({
-      value: opt.name,
-      label: opt.label,
-      status: opt.status,
-      reason: opt.status === "available" ? "" : opt.reason ?? ""
-    });
-  }
-  return choices;
-}
-function backendNotice(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 ? "" : choice.reason;
-}
-function backendSelectable(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 || choice.status === "available";
-}
-
-// src/programs.ts
-var PROGRAM_REPO_DEFAULT = "";
-function programChoices(catalog, keep = "") {
-  const choices = [
-    {
-      value: PROGRAM_REPO_DEFAULT,
-      // "Repo default" with no parenthetical when the daemon reports no default —
-      // naming an agent there would be inventing one.
-      label: catalog === null || catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`
-    }
-  ];
-  for (const opt of catalog?.programs ?? []) {
-    choices.push({ value: opt.name, label: opt.name });
-  }
-  const extra = keep.trim();
-  if (extra !== "" && !choices.some((c) => c.value === extra)) {
-    choices.push({ value: extra, label: extra });
-  }
-  return choices;
-}
-function handoffAgentChoices(catalog, current) {
-  const cur = current.trim();
-  const choices = [];
-  for (const opt of catalog?.programs ?? []) {
-    if (opt.name === cur) {
-      continue;
-    }
-    choices.push({ value: opt.name, label: opt.name });
-  }
-  return choices;
-}
-
-// src/modals.ts
+// src/dom.ts
 function h(tag, props = {}, ...children) {
   const el2 = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
@@ -6527,350 +6460,6 @@ function h(tag, props = {}, ...children) {
     el2.append(child);
   }
   return el2;
-}
-function modalChrome(opts) {
-  const body = h("div", { class: "af-modal-body" });
-  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
-  errorLine.hidden = true;
-  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
-  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
-  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
-  const card = h(
-    "div",
-    { class: "af-modal-card", role: "dialog" },
-    h("h2", { class: "af-modal-title" }, opts.title),
-    body,
-    errorLine,
-    footer
-  );
-  card.setAttribute("aria-modal", "true");
-  card.setAttribute("aria-label", opts.title);
-  card.addEventListener("click", (e) => e.stopPropagation());
-  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
-  backdrop.addEventListener("click", () => opts.onCancel());
-  cancelBtn.addEventListener("click", () => opts.onCancel());
-  const handle = {
-    el: backdrop,
-    setBusy(busy) {
-      confirmBtn.disabled = busy;
-      cancelBtn.disabled = busy;
-      card.classList.toggle("af-modal-busy", busy);
-    },
-    setError(msg) {
-      if (msg) {
-        errorLine.textContent = msg;
-        errorLine.hidden = false;
-      } else {
-        errorLine.textContent = "";
-        errorLine.hidden = true;
-      }
-    },
-    close() {
-      backdrop.remove();
-    }
-  };
-  return { handle, body, confirmBtn, cancelBtn, errorLine };
-}
-function asForm(card, onSubmit) {
-  const form = h("form", { class: "af-modal-form" });
-  while (card.firstChild) {
-    form.append(card.firstChild);
-  }
-  card.append(form);
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    onSubmit();
-  });
-}
-function newSessionModal(projects, defaultProject2, callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
-    title: "New session",
-    confirmLabel: "Create",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
-  });
-  const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
-  titleInput.setAttribute("aria-label", "Session title");
-  let suggestedName = "";
-  const projectSelect = h("select", { class: "af-input" });
-  projectSelect.setAttribute("aria-label", "Project");
-  if (projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet \u2014 add one from the project switcher first");
-    opt.disabled = true;
-    opt.selected = true;
-    projectSelect.append(opt);
-    confirmBtn.disabled = true;
-  } else {
-    for (const p of projects) {
-      projectSelect.append(h("option", { value: p }, projectLabel(p)));
-    }
-    if (defaultProject2 && projects.includes(defaultProject2)) {
-      projectSelect.value = defaultProject2;
-    }
-  }
-  const programSelect = h("select", { class: "af-input" });
-  programSelect.setAttribute("aria-label", "Program");
-  let programs = programChoices(null);
-  const backendSelect = h("select", { class: "af-input" });
-  backendSelect.setAttribute("aria-label", "Backend");
-  const backendHint = h("p", { class: "af-modal-hint" });
-  backendHint.setAttribute("role", "status");
-  let choices = backendChoices(null);
-  let busy = false;
-  const syncSubmitState = () => {
-    backendHint.textContent = backendNotice(choices, backendSelect.value);
-    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
-  };
-  const chromeSetBusy = handle.setBusy.bind(handle);
-  handle.setBusy = (b) => {
-    busy = b;
-    chromeSetBusy(b);
-    syncSubmitState();
-  };
-  const renderChoices = () => {
-    const previous = backendSelect.value;
-    backendSelect.replaceChildren();
-    for (const choice of choices) {
-      backendSelect.append(h("option", { value: choice.value }, choice.label));
-    }
-    backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
-    syncSubmitState();
-  };
-  backendSelect.addEventListener("change", syncSubmitState);
-  const renderPrograms = () => {
-    const previous = programSelect.value;
-    programSelect.replaceChildren();
-    for (const choice of programs) {
-      programSelect.append(h("option", { value: choice.value }, choice.label));
-    }
-    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
-  };
-  let loadSeq = 0;
-  const loadCatalogsFor = (repoPath) => {
-    const seq = ++loadSeq;
-    void callbacks.loadPrograms(repoPath).then((catalog) => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      programs = programChoices(catalog);
-      renderPrograms();
-    }).catch(() => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      programs = programChoices(null);
-      renderPrograms();
-    });
-    if (repoPath === "") {
-      choices = backendChoices(null);
-      renderChoices();
-      return;
-    }
-    void callbacks.loadBackends(repoPath).then((catalog) => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      choices = backendChoices(catalog);
-      renderChoices();
-    }).catch(() => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      choices = backendChoices(null);
-      renderChoices();
-    });
-  };
-  projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
-  const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
-  promptArea.setAttribute("aria-label", "Initial prompt");
-  body.append(
-    field("Title", titleInput),
-    field("Project", projectSelect),
-    field("Program", programSelect),
-    field("Backend", backendSelect),
-    backendHint,
-    field("Prompt", promptArea)
-  );
-  renderPrograms();
-  renderChoices();
-  loadCatalogsFor(projectSelect.value);
-  void callbacks.suggestName().then((name) => {
-    if (name !== "") {
-      suggestedName = name;
-      titleInput.placeholder = name;
-    }
-  }).catch(() => {
-  });
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const typed = titleInput.value.trim();
-    const title = typed !== "" ? typed : suggestedName;
-    if (projectSelect.value === "") {
-      handle.setError("A project is required.");
-      return;
-    }
-    if (title === "") {
-      handle.setError("A title is required.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit({
-      title,
-      repoPath: projectSelect.value,
-      program: programSelect.value,
-      prompt: promptArea.value,
-      // REPO_DEFAULT ("") when the user did not choose — createSession then omits
-      // `backend` entirely and the repo's config decides (#1933).
-      backend: backendSelect.value
-    });
-  });
-  queueMicrotask(() => titleInput.focus());
-  return handle;
-}
-function handoffModal(sessionTitle, currentAgent, callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
-    title: `Hand off ${sessionTitle}`,
-    confirmLabel: "Hand off",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
-  });
-  const agentSelect = h("select", { class: "af-input" });
-  agentSelect.setAttribute("aria-label", "New agent");
-  confirmBtn.disabled = true;
-  const renderChoices = (choices) => {
-    agentSelect.replaceChildren();
-    for (const choice of choices) {
-      agentSelect.append(h("option", { value: choice.value }, choice.label));
-    }
-    confirmBtn.disabled = choices.length === 0;
-  };
-  body.append(
-    field("New agent", agentSelect),
-    h(
-      "p",
-      { class: "af-modal-text" },
-      "The new agent starts fresh with a summary of the work so far. Same worktree and branch \u2014 nothing is discarded."
-    )
-  );
-  void callbacks.loadPrograms().then((catalog) => {
-    const choices = handoffAgentChoices(catalog, currentAgent);
-    renderChoices(choices);
-    if (choices.length === 0) {
-      handle.setError("No other agent is available to hand off to.");
-    }
-  }).catch(() => {
-    renderChoices([]);
-    handle.setError("Could not load the agent list. Try again.");
-  });
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const target = agentSelect.value;
-    if (target === "") {
-      handle.setError("Pick an agent to hand off to.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit(target);
-  });
-  queueMicrotask(() => agentSelect.focus());
-  return handle;
-}
-function confirmModal(opts) {
-  const copy = {
-    kill: {
-      title: `Kill ${opts.sessionTitle}?`,
-      confirmLabel: "Kill",
-      confirmClass: "af-danger",
-      body: "This permanently destroys the session and prunes its branch. This can't be undone."
-    },
-    archive: {
-      title: `Archive ${opts.sessionTitle}?`,
-      confirmLabel: "Archive",
-      confirmClass: "af-primary",
-      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later."
-    },
-    restore: {
-      title: `Restore ${opts.sessionTitle}?`,
-      confirmLabel: "Restore",
-      confirmClass: "af-primary",
-      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail."
-    }
-  }[opts.action];
-  const { handle, body } = modalChrome({
-    title: copy.title,
-    confirmLabel: copy.confirmLabel,
-    confirmClass: copy.confirmClass,
-    onCancel: opts.onCancel
-  });
-  body.append(h("p", { class: "af-modal-text" }, copy.body));
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    handle.setError(null);
-    opts.onConfirm();
-  });
-  return handle;
-}
-function confirmDeleteProjectModal(opts) {
-  const word = opts.sessionCount === 1 ? "session" : "sessions";
-  const { handle, body } = modalChrome({
-    title: `Delete project ${opts.projectLabel}?`,
-    confirmLabel: "Delete project",
-    confirmClass: "af-danger",
-    onCancel: opts.onCancel
-  });
-  const message = opts.sessionCount === 0 ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched \u2014 you can add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`;
-  body.append(h("p", { class: "af-modal-text" }, message));
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    handle.setError(null);
-    opts.onConfirm();
-  });
-  return handle;
-}
-function addProjectModal(callbacks) {
-  const { handle, body } = modalChrome({
-    title: "Add project",
-    confirmLabel: "Add project",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
-  });
-  const pathInput = h("input", {
-    type: "text",
-    class: "af-input",
-    placeholder: "/path/to/repo  or  ~/repo",
-    autocomplete: "off"
-  });
-  pathInput.setAttribute("aria-label", "Repository path");
-  body.append(
-    field("Repository path", pathInput),
-    h(
-      "p",
-      { class: "af-modal-hint" },
-      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into."
-    )
-  );
-  pathInput.addEventListener("input", () => handle.setError(null));
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const path = pathInput.value.trim();
-    if (path === "") {
-      handle.setError("Enter a repository path.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit(path);
-  });
-  queueMicrotask(() => pathInput.focus());
-  return handle;
-}
-function field(label, control) {
-  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
-}
-function projectLabel(root2) {
-  const parts = root2.replace(/\/+$/, "").split("/");
-  const base = parts[parts.length - 1] || root2;
-  const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
-  return parent ? `${base}  (${parent}/${base})` : base;
 }
 
 // src/config.ts
@@ -8421,6 +8010,45 @@ var EventStream = class {
   }
 };
 
+// src/backends.ts
+var REPO_DEFAULT = "";
+function backendChoices(catalog) {
+  if (catalog === null) {
+    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
+  }
+  const choices = [
+    {
+      value: REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default:
+      // that is the misconfigured case, where naming a backend would be inventing
+      // one. The reason says what is wrong with the key.
+      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
+      // Taken from the daemon, not inferred here. A repo whose declared default is
+      // broken resolves to that broken backend and FAILS — it does not quietly run
+      // local — so the default is not automatically a safe harbour.
+      status: catalog.default_status,
+      reason: catalog.default_status === "available" ? "" : catalog.default_reason ?? ""
+    }
+  ];
+  for (const opt of catalog.backends) {
+    choices.push({
+      value: opt.name,
+      label: opt.label,
+      status: opt.status,
+      reason: opt.status === "available" ? "" : opt.reason ?? ""
+    });
+  }
+  return choices;
+}
+function backendNotice(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 ? "" : choice.reason;
+}
+function backendSelectable(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 || choice.status === "available";
+}
+
 // node_modules/lucide/dist/esm/icons/archive-restore.mjs
 var ArchiveRestore = [
   ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
@@ -8509,6 +8137,16 @@ var FolderGit2 = [
   ],
   ["circle", { cx: "13", cy: "12", r: "2" }],
   ["circle", { cx: "20", cy: "19", r: "2" }]
+];
+
+// node_modules/lucide/dist/esm/icons/folder.mjs
+var Folder = [
+  [
+    "path",
+    {
+      d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+    }
+  ]
 ];
 
 // node_modules/lucide/dist/esm/icons/funnel.mjs
@@ -8602,6 +8240,7 @@ var ICONS = {
   diamond: Diamond,
   ellipsis: Ellipsis,
   "external-link": ExternalLink,
+  folder: Folder,
   "folder-git": FolderGit2,
   funnel: Funnel,
   "git-branch": GitBranch,
@@ -8635,6 +8274,597 @@ function icon(name, className = "") {
     svg.append(child);
   }
   return svg;
+}
+
+// src/dirpicker.ts
+var INITIAL_PICKER_STATE = { listing: null, error: null, loading: false };
+function pickerLoading(prev) {
+  return { ...prev, loading: true };
+}
+function pickerLoaded(listing) {
+  return { listing, error: null, loading: false };
+}
+function pickerFailed(prev, message) {
+  return { listing: prev.listing, error: message, loading: false };
+}
+function entryNote(entry) {
+  const parts = [];
+  if (entry.is_repo) {
+    parts.push("git repo");
+  }
+  if (entry.is_symlink) {
+    parts.push("link");
+  }
+  return parts.join(" \xB7 ");
+}
+function truncationNote(listing) {
+  if (!listing.truncated) {
+    return "";
+  }
+  return `Showing the first ${listing.entries.length} directories \u2014 type the path below to reach one that is not listed.`;
+}
+var LAST_DIR_KEY = "af.addproject.dir";
+function loadLastBrowsedDir() {
+  try {
+    return localStorage.getItem(LAST_DIR_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+function persistLastBrowsedDir(path) {
+  try {
+    localStorage.setItem(LAST_DIR_KEY, path);
+  } catch {
+  }
+}
+function directoryPicker(callbacks) {
+  let state = INITIAL_PICKER_STATE;
+  let nav = 0;
+  const upBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-up" }, "Up");
+  upBtn.setAttribute("aria-label", "Go to the parent directory");
+  upBtn.disabled = true;
+  const pathLabel = h("span", { class: "af-dirpicker-path" }, "Loading\u2026");
+  const homeBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-home" }, "Home");
+  homeBtn.setAttribute("aria-label", "Go to the daemon host's home directory");
+  homeBtn.hidden = true;
+  const useHereBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-use-here" }, "Use this");
+  useHereBtn.hidden = true;
+  const head = h("div", { class: "af-dirpicker-head" }, upBtn, pathLabel, homeBtn, useHereBtn);
+  const errorLine = h("p", { class: "af-dirpicker-error", role: "alert" });
+  errorLine.hidden = true;
+  const list = h("div", { class: "af-dirpicker-list" });
+  list.setAttribute("role", "list");
+  const emptyLine = h("p", { class: "af-dirpicker-empty" }, "No subdirectories here.");
+  emptyLine.hidden = true;
+  const note = h("p", { class: "af-dirpicker-note" });
+  const el2 = h("div", { class: "af-dirpicker" }, head, errorLine, list, emptyLine, note);
+  let renderedPath = null;
+  function navigate(path, fallbackToHome = false) {
+    const ticket = ++nav;
+    state = pickerLoading(state);
+    render();
+    void callbacks.load(path).then((listing) => {
+      if (ticket !== nav) {
+        return;
+      }
+      state = pickerLoaded(listing);
+      persistLastBrowsedDir(listing.path);
+      render();
+    }).catch((e) => {
+      if (ticket !== nav) {
+        return;
+      }
+      if (fallbackToHome) {
+        navigate("");
+        return;
+      }
+      state = pickerFailed(state, callbacks.errorText(e));
+      render();
+    });
+  }
+  function render() {
+    const { listing, error, loading } = state;
+    pathLabel.textContent = listing ? listing.path : loading ? "Loading\u2026" : "";
+    pathLabel.title = listing?.path ?? "";
+    upBtn.disabled = loading || !listing || listing.parent === "";
+    homeBtn.hidden = !listing || listing.home === "" || listing.home === listing.path;
+    homeBtn.disabled = loading;
+    useHereBtn.hidden = !listing?.is_repo;
+    if (listing?.is_repo) {
+      useHereBtn.disabled = loading;
+      useHereBtn.title = `Use ${listing.path} as the project`;
+    }
+    if (error) {
+      errorLine.textContent = error;
+      errorLine.hidden = false;
+    } else {
+      errorLine.textContent = "";
+      errorLine.hidden = true;
+    }
+    const scrollTop = list.scrollTop;
+    list.replaceChildren();
+    if (listing) {
+      for (const entry of listing.entries) {
+        list.append(row(entry, loading));
+      }
+    }
+    if (listing && listing.path === renderedPath) {
+      list.scrollTop = scrollTop;
+    }
+    renderedPath = listing?.path ?? null;
+    emptyLine.hidden = !listing || listing.entries.length > 0 || error !== null;
+    note.textContent = listing ? truncationNote(listing) : "";
+  }
+  function row(entry, loading) {
+    const label = h(
+      "span",
+      { class: "af-dirpicker-name" },
+      icon(entry.is_repo ? "folder-git" : "folder"),
+      h("span", { class: "af-dirpicker-text" }, entry.name)
+    );
+    const meta = entryNote(entry);
+    const open = h("button", { type: "button", class: "af-dirpicker-item" }, label);
+    if (meta) {
+      open.append(h("span", { class: "af-dirpicker-meta" }, meta));
+    }
+    open.title = entry.path;
+    open.setAttribute("aria-label", `Open ${entry.path}`);
+    open.disabled = loading;
+    open.addEventListener("click", (e) => {
+      e.stopPropagation();
+      navigate(entry.path);
+    });
+    const item = h("div", { class: "af-dirpicker-row" }, open);
+    item.setAttribute("role", "listitem");
+    if (entry.is_repo) {
+      item.classList.add("af-dirpicker-row-repo");
+      const use = h("button", { type: "button", class: "af-ghost af-dirpicker-use" }, "Use");
+      use.title = `Use ${entry.path} as the project`;
+      use.setAttribute("aria-label", `Use ${entry.path} as the project`);
+      use.disabled = loading;
+      use.addEventListener("click", (e) => {
+        e.stopPropagation();
+        callbacks.onSelect(entry.path);
+      });
+      item.append(use);
+    }
+    return item;
+  }
+  upBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const parent = state.listing?.parent;
+    if (parent) {
+      navigate(parent);
+    }
+  });
+  homeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const home = state.listing?.home;
+    if (home) {
+      navigate(home);
+    }
+  });
+  useHereBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const path = state.listing?.path;
+    if (path) {
+      callbacks.onSelect(path);
+    }
+  });
+  return {
+    el: el2,
+    start() {
+      const remembered = loadLastBrowsedDir();
+      navigate(remembered, remembered !== "");
+    }
+  };
+}
+
+// src/programs.ts
+var PROGRAM_REPO_DEFAULT = "";
+function programChoices(catalog, keep = "") {
+  const choices = [
+    {
+      value: PROGRAM_REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default —
+      // naming an agent there would be inventing one.
+      label: catalog === null || catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`
+    }
+  ];
+  for (const opt of catalog?.programs ?? []) {
+    choices.push({ value: opt.name, label: opt.name });
+  }
+  const extra = keep.trim();
+  if (extra !== "" && !choices.some((c) => c.value === extra)) {
+    choices.push({ value: extra, label: extra });
+  }
+  return choices;
+}
+function handoffAgentChoices(catalog, current) {
+  const cur = current.trim();
+  const choices = [];
+  for (const opt of catalog?.programs ?? []) {
+    if (opt.name === cur) {
+      continue;
+    }
+    choices.push({ value: opt.name, label: opt.name });
+  }
+  return choices;
+}
+
+// src/modals.ts
+function modalChrome(opts) {
+  const body = h("div", { class: "af-modal-body" });
+  const errorLine = h("p", { class: "af-modal-error", role: "alert" });
+  errorLine.hidden = true;
+  const cancelBtn = h("button", { type: "button", class: "af-ghost" }, "Cancel");
+  const confirmBtn = h("button", { type: "submit", class: opts.confirmClass }, opts.confirmLabel);
+  const footer = h("div", { class: "af-modal-foot" }, cancelBtn, confirmBtn);
+  const card = h(
+    "div",
+    { class: "af-modal-card", role: "dialog" },
+    h("h2", { class: "af-modal-title" }, opts.title),
+    body,
+    errorLine,
+    footer
+  );
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-label", opts.title);
+  card.tabIndex = -1;
+  card.addEventListener("click", (e) => e.stopPropagation());
+  const backdrop = h("div", { class: "af-modal-backdrop" }, card);
+  backdrop.addEventListener("click", () => opts.onCancel());
+  cancelBtn.addEventListener("click", () => opts.onCancel());
+  const handle = {
+    el: backdrop,
+    setBusy(busy) {
+      confirmBtn.disabled = busy;
+      cancelBtn.disabled = busy;
+      card.classList.toggle("af-modal-busy", busy);
+    },
+    setError(msg) {
+      if (msg) {
+        errorLine.textContent = msg;
+        errorLine.hidden = false;
+      } else {
+        errorLine.textContent = "";
+        errorLine.hidden = true;
+      }
+    },
+    close() {
+      backdrop.remove();
+    }
+  };
+  return { handle, body, confirmBtn, cancelBtn, errorLine };
+}
+function asForm(card, onSubmit) {
+  const form = h("form", { class: "af-modal-form" });
+  while (card.firstChild) {
+    form.append(card.firstChild);
+  }
+  card.append(form);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    onSubmit();
+  });
+}
+function newSessionModal(projects, defaultProject2, callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: "New session",
+    confirmLabel: "Create",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
+  titleInput.setAttribute("aria-label", "Session title");
+  let suggestedName = "";
+  const projectSelect = h("select", { class: "af-input" });
+  projectSelect.setAttribute("aria-label", "Project");
+  if (projects.length === 0) {
+    const opt = h("option", { value: "" }, "No projects yet \u2014 add one from the project switcher first");
+    opt.disabled = true;
+    opt.selected = true;
+    projectSelect.append(opt);
+    confirmBtn.disabled = true;
+  } else {
+    for (const p of projects) {
+      projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+    if (defaultProject2 && projects.includes(defaultProject2)) {
+      projectSelect.value = defaultProject2;
+    }
+  }
+  const programSelect = h("select", { class: "af-input" });
+  programSelect.setAttribute("aria-label", "Program");
+  let programs = programChoices(null);
+  const backendSelect = h("select", { class: "af-input" });
+  backendSelect.setAttribute("aria-label", "Backend");
+  const backendHint = h("p", { class: "af-modal-hint" });
+  backendHint.setAttribute("role", "status");
+  let choices = backendChoices(null);
+  let busy = false;
+  const syncSubmitState = () => {
+    backendHint.textContent = backendNotice(choices, backendSelect.value);
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value);
+  };
+  const chromeSetBusy = handle.setBusy.bind(handle);
+  handle.setBusy = (b) => {
+    busy = b;
+    chromeSetBusy(b);
+    syncSubmitState();
+  };
+  const renderChoices = () => {
+    const previous = backendSelect.value;
+    backendSelect.replaceChildren();
+    for (const choice of choices) {
+      backendSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
+    syncSubmitState();
+  };
+  backendSelect.addEventListener("change", syncSubmitState);
+  const renderPrograms = () => {
+    const previous = programSelect.value;
+    programSelect.replaceChildren();
+    for (const choice of programs) {
+      programSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+  };
+  let loadSeq = 0;
+  const loadCatalogsFor = (repoPath) => {
+    const seq = ++loadSeq;
+    void callbacks.loadPrograms(repoPath).then((catalog) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      programs = programChoices(catalog);
+      renderPrograms();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      programs = programChoices(null);
+      renderPrograms();
+    });
+    if (repoPath === "") {
+      choices = backendChoices(null);
+      renderChoices();
+      return;
+    }
+    void callbacks.loadBackends(repoPath).then((catalog) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      choices = backendChoices(catalog);
+      renderChoices();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      choices = backendChoices(null);
+      renderChoices();
+    });
+  };
+  projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
+  const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
+  promptArea.setAttribute("aria-label", "Initial prompt");
+  body.append(
+    field("Title", titleInput),
+    field("Project", projectSelect),
+    field("Program", programSelect),
+    field("Backend", backendSelect),
+    backendHint,
+    field("Prompt", promptArea)
+  );
+  renderPrograms();
+  renderChoices();
+  loadCatalogsFor(projectSelect.value);
+  void callbacks.suggestName().then((name) => {
+    if (name !== "") {
+      suggestedName = name;
+      titleInput.placeholder = name;
+    }
+  }).catch(() => {
+  });
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const typed = titleInput.value.trim();
+    const title = typed !== "" ? typed : suggestedName;
+    if (projectSelect.value === "") {
+      handle.setError("A project is required.");
+      return;
+    }
+    if (title === "") {
+      handle.setError("A title is required.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit({
+      title,
+      repoPath: projectSelect.value,
+      program: programSelect.value,
+      prompt: promptArea.value,
+      // REPO_DEFAULT ("") when the user did not choose — createSession then omits
+      // `backend` entirely and the repo's config decides (#1933).
+      backend: backendSelect.value
+    });
+  });
+  queueMicrotask(() => titleInput.focus());
+  return handle;
+}
+function handoffModal(sessionTitle, currentAgent, callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: `Hand off ${sessionTitle}`,
+    confirmLabel: "Hand off",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const agentSelect = h("select", { class: "af-input" });
+  agentSelect.setAttribute("aria-label", "New agent");
+  confirmBtn.disabled = true;
+  const renderChoices = (choices) => {
+    agentSelect.replaceChildren();
+    for (const choice of choices) {
+      agentSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    confirmBtn.disabled = choices.length === 0;
+  };
+  body.append(
+    field("New agent", agentSelect),
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "The new agent starts fresh with a summary of the work so far. Same worktree and branch \u2014 nothing is discarded."
+    )
+  );
+  void callbacks.loadPrograms().then((catalog) => {
+    const choices = handoffAgentChoices(catalog, currentAgent);
+    renderChoices(choices);
+    if (choices.length === 0) {
+      handle.setError("No other agent is available to hand off to.");
+    }
+  }).catch(() => {
+    renderChoices([]);
+    handle.setError("Could not load the agent list. Try again.");
+  });
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const target = agentSelect.value;
+    if (target === "") {
+      handle.setError("Pick an agent to hand off to.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(target);
+  });
+  queueMicrotask(() => agentSelect.focus());
+  return handle;
+}
+function confirmModal(opts) {
+  const copy = {
+    kill: {
+      title: `Kill ${opts.sessionTitle}?`,
+      confirmLabel: "Kill",
+      confirmClass: "af-danger",
+      body: "This permanently destroys the session and prunes its branch. This can't be undone."
+    },
+    archive: {
+      title: `Archive ${opts.sessionTitle}?`,
+      confirmLabel: "Archive",
+      confirmClass: "af-primary",
+      body: "This tears down the session's terminal and moves its worktree to the archive. You can restore it later."
+    },
+    restore: {
+      title: `Restore ${opts.sessionTitle}?`,
+      confirmLabel: "Restore",
+      confirmClass: "af-primary",
+      body: "This moves the session's worktree back next to its repo and re-spawns the agent, returning it to the live rail."
+    }
+  }[opts.action];
+  const { handle, body } = modalChrome({
+    title: copy.title,
+    confirmLabel: copy.confirmLabel,
+    confirmClass: copy.confirmClass,
+    onCancel: opts.onCancel
+  });
+  body.append(h("p", { class: "af-modal-text" }, copy.body));
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    handle.setError(null);
+    opts.onConfirm();
+  });
+  return handle;
+}
+function confirmDeleteProjectModal(opts) {
+  const word = opts.sessionCount === 1 ? "session" : "sessions";
+  const { handle, body } = modalChrome({
+    title: `Delete project ${opts.projectLabel}?`,
+    confirmLabel: "Delete project",
+    confirmClass: "af-danger",
+    onCancel: opts.onCancel
+  });
+  const message = opts.sessionCount === 0 ? "Remove this project from the list. It has no sessions to archive, and your real git repo is untouched \u2014 you can add it again anytime." : `Archive ${opts.sessionCount} ${word} and remove this project. Archived sessions stay restorable and your real git repo is untouched \u2014 restore any of them to bring the project back.`;
+  body.append(h("p", { class: "af-modal-text" }, message));
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    handle.setError(null);
+    opts.onConfirm();
+  });
+  return handle;
+}
+function addProjectModal(callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: "Add project",
+    confirmLabel: "Add project",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const pathInput = h("input", {
+    type: "text",
+    class: "af-input",
+    placeholder: "/path/to/repo  or  ~/repo",
+    autocomplete: "off"
+  });
+  pathInput.setAttribute("aria-label", "Repository path");
+  const { loadDirectory, errorText: errorText2 } = callbacks;
+  let picker = null;
+  if (loadDirectory && errorText2) {
+    picker = directoryPicker({
+      load: loadDirectory,
+      errorText: errorText2,
+      onSelect: (path) => {
+        pathInput.value = path;
+        handle.setError(null);
+        confirmBtn.focus();
+      }
+    });
+    body.append(
+      h(
+        "div",
+        { class: "af-modal-field" },
+        h("span", { class: "af-modal-label" }, "Browse the daemon host"),
+        picker.el
+      )
+    );
+  }
+  body.append(
+    field("Repository path", pathInput),
+    h(
+      "p",
+      { class: "af-modal-hint" },
+      "An absolute path to a git checkout on the daemon host (~ is expanded there). It becomes an empty project you can create sessions into."
+    )
+  );
+  pathInput.addEventListener("input", () => handle.setError(null));
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const path = pathInput.value.trim();
+    if (path === "") {
+      handle.setError("Enter a repository path, or pick one above.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit(path);
+  });
+  queueMicrotask(() => {
+    if (picker) {
+      card.focus();
+      picker.start();
+      return;
+    }
+    pathInput.focus();
+  });
+  return handle;
+}
+function field(label, control) {
+  return h("label", { class: "af-modal-field" }, h("span", { class: "af-modal-label" }, label), control);
+}
+function projectLabel(root2) {
+  const parts = root2.replace(/\/+$/, "").split("/");
+  const base = parts[parts.length - 1] || root2;
+  const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
+  return parent ? `${base}  (${parent}/${base})` : base;
 }
 
 // src/install.ts
@@ -13235,6 +13465,18 @@ function openDeleteProject(root2, label, sessionCount) {
 function openAddProject() {
   openModal(
     addProjectModal({
+      // #2788: the picker's daemon read. The token is resolved PER CALL, not
+      // captured when the modal opens, so a re-login mid-browse keeps working.
+      loadDirectory: (path) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      // The daemon's own message ("cannot read /x: permission denied"), never the
+      // login-framed describeError — a refused directory is not an auth failure.
+      errorText,
       onSubmit: (path) => {
         const tok = token;
         if (tok === null || !modal) {
@@ -13900,6 +14142,7 @@ lucide/dist/esm/icons/diamond.mjs:
 lucide/dist/esm/icons/ellipsis.mjs:
 lucide/dist/esm/icons/external-link.mjs:
 lucide/dist/esm/icons/folder-git-2.mjs:
+lucide/dist/esm/icons/folder.mjs:
 lucide/dist/esm/icons/funnel.mjs:
 lucide/dist/esm/icons/git-branch.mjs:
 lucide/dist/esm/icons/menu.mjs:

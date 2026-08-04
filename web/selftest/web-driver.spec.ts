@@ -4416,6 +4416,171 @@ test("add + delete a registered empty project (#2456): appears while another is 
   await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
 });
 
+test("add-project directory picker (#2788): descend, ascend, pick a repo — and a refusal is an ERROR, never an empty list", REAL_FIXTURE, async () => {
+  // The acceptance run the issue asks for, against the REAL daemon: descend at
+  // least two levels, ascend, confirm a git checkout is selectable and a plain
+  // directory is not, and confirm a directory the daemon cannot read renders as
+  // an error rather than as "nothing here".
+  //
+  // Fixture (scripts/container/web-selftest-entry.sh):
+  //   $AF_BROWSE_ROOT/level-one/level-two/{browsable-repo, plain-dir, doomed-dir}
+  const browseRoot = process.env.AF_BROWSE_ROOT;
+  const level1 = process.env.AF_BROWSE_L1 ?? "level-one";
+  const level2 = process.env.AF_BROWSE_L2 ?? "level-two";
+  const browseRepo = process.env.AF_BROWSE_REPO ?? "browsable-repo";
+  const plainDir = process.env.AF_BROWSE_PLAIN ?? "plain-dir";
+  const doomedDir = process.env.AF_BROWSE_DOOMED ?? "doomed-dir";
+  expect(browseRoot, "the picker flow needs AF_BROWSE_ROOT (set by web-selftest-entry.sh)").toBeTruthy();
+  // The descent chain from the filesystem root: every component of the browse
+  // root, then the two fixture levels. Derived from the path rather than
+  // hardcoded, so moving the fixture cannot leave this walking a stale tree.
+  const descent = [...(browseRoot as string).split("/").filter(Boolean), level1, level2];
+  const { rmSync } = await import("node:fs");
+
+  // A clean start: no remembered directory, so the FIRST open is the "else $HOME"
+  // half of the issue's start rule — a path the DAEMON chose, which the browser
+  // has no way to know.
+  await page.evaluate(() => localStorage.removeItem("af.addproject.dir"));
+
+  await page.locator(".af-project-switch").click();
+  await page.locator(".af-project-menu .af-project-add").click();
+  const addModal = page.locator(".af-modal-card");
+  await expect(addModal.locator(".af-modal-title")).toHaveText("Add project");
+
+  const picker = addModal.locator(".af-dirpicker");
+  const pickerPath = picker.locator(".af-dirpicker-path");
+  const upBtn = picker.locator(".af-dirpicker-up");
+  const pickerError = picker.locator(".af-dirpicker-error");
+  const dirRow = (name: string): Locator =>
+    picker.locator(".af-dirpicker-row").filter({ has: page.locator(".af-dirpicker-text", { hasText: new RegExp(`^${name}$`) }) });
+
+  const homeBtn = picker.locator(".af-dirpicker-home");
+  await expect(picker).toBeVisible();
+
+  // Focus must be INSIDE the dialog. This modal deliberately does not focus its
+  // text field (that raises the virtual keyboard over the picker on a phone), so
+  // without an explicit target focus would stay on the "+ Add project" button
+  // BEHIND the overlay — where Tab walks the page underneath and Enter re-opens
+  // what you are already in (#2800 review).
+  await expect
+    // `!!…?.closest()`, not `… !== null`: with a null activeElement the optional
+    // chain yields undefined, and `undefined !== null` is TRUE — an assertion that
+    // passes precisely when nothing is focused.
+    .poll(() => page.evaluate(() => !!document.activeElement?.closest(".af-modal-card")))
+    .toBe(true);
+  await expect(pickerPath).toHaveText(/^\//, { timeout: 15_000 });
+  const daemonHome = (await pickerPath.textContent()) ?? "";
+  // The shortcut is hidden where it would be a no-op: this IS the daemon's home.
+  await expect(homeBtn).toBeHidden();
+
+  // ASCEND to the filesystem root. The up affordance is the daemon's `parent`
+  // field, so this also proves the root is where it stops: at "/" there is no
+  // parent, and the control must go dead rather than loop.
+  //
+  // Loop on the PATH, not on the button's disabled state: every control is
+  // disabled while a listing is in flight, so a disabled-button predicate would
+  // read "we have arrived" off a mid-navigation frame. Playwright's actionability
+  // wait makes the click itself block until the previous load settles.
+  for (let i = 0; i < 12; i++) {
+    const before = await pickerPath.textContent();
+    if (before === "/") {
+      break;
+    }
+    await upBtn.click();
+    await expect(pickerPath).not.toHaveText(before ?? "", { timeout: 15_000 });
+  }
+  await expect(pickerPath).toHaveText("/");
+  await expect(upBtn).toBeDisabled();
+
+  // From the root the shortcut appears and takes the picker back — the daemon
+  // host's home is a fact only the daemon knows, carried on every listing.
+  await expect(homeBtn).toBeVisible();
+  await homeBtn.click();
+  await expect(pickerPath).toHaveText(daemonHome);
+  await expect(upBtn).toBeEnabled();
+
+  // Back up to the root, then DESCEND to the fixture's leaf — more than the two
+  // levels the issue asks for, and every hop is a real round trip to the daemon.
+  for (let i = 0; i < 12; i++) {
+    const before = await pickerPath.textContent();
+    if (before === "/") {
+      break;
+    }
+    await upBtn.click();
+    await expect(pickerPath).not.toHaveText(before ?? "", { timeout: 15_000 });
+  }
+  for (const step of descent) {
+    await dirRow(step).locator(".af-dirpicker-item").click();
+  }
+  await expect(pickerPath).toHaveText(`${browseRoot}/${level1}/${level2}`);
+
+  // A git checkout is marked and selectable; a plain directory beside it is
+  // navigable but visibly not a target — no "Use", no mark.
+  await expect(dirRow(browseRepo).locator(".af-dirpicker-meta")).toHaveText("git repo");
+  await expect(dirRow(browseRepo).locator(".af-dirpicker-use")).toBeVisible();
+  await expect(dirRow(plainDir).locator(".af-dirpicker-use")).toHaveCount(0);
+  await expect(dirRow(plainDir).locator(".af-dirpicker-meta")).toHaveCount(0);
+
+  // A REAL refusal, no mocking: delete a listed directory from outside the
+  // browser, then navigate into it. The daemon answers with an error, and the
+  // picker must show it while STAYING where it is — the list underneath is still
+  // level-two's, not an empty one.
+  rmSync(`${browseRoot}/${level1}/${level2}/${doomedDir}`, { recursive: true, force: true });
+  await dirRow(doomedDir).locator(".af-dirpicker-item").click();
+  await expect(pickerError).toBeVisible();
+  await expect(pickerError).toContainText("no such directory");
+  await expect(pickerPath).toHaveText(`${browseRoot}/${level1}/${level2}`); // it did not move
+  await expect(dirRow(browseRepo)).toBeVisible();
+  await expect(picker.locator(".af-dirpicker-empty")).toBeHidden();
+
+  // The permission-denied half. It is FORCED through route interception rather
+  // than chmod because this harness runs the daemon as root, and root reads a
+  // 0o000 directory happily — a fixture that cannot produce the denial would be
+  // asserting nothing. What is under test here is the CLIENT's rendering of the
+  // daemon's refusal; that the daemon actually refuses an unreadable directory
+  // (instead of answering 200 with []) is proven against a real filesystem in
+  // daemon/listdir_test.go.
+  await page.route("**/v1/ListDirectory", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ data: null, error: { message: `cannot read ${browseRoot}/${level1}/${level2}/${plainDir}: permission denied` } }),
+    });
+  });
+  await dirRow(plainDir).locator(".af-dirpicker-item").click();
+  await expect(pickerError).toContainText("permission denied");
+  await expect(picker.locator(".af-dirpicker-empty")).toBeHidden();
+  await expect(dirRow(browseRepo)).toBeVisible();
+  await page.unroute("**/v1/ListDirectory");
+
+  // Picking fills the free-text field — the escape hatch stays the single input
+  // the submit reads, so what gets registered is always what is on screen.
+  const pathInput = addModal.locator('input[aria-label="Repository path"]');
+  await dirRow(browseRepo).locator(".af-dirpicker-use").click();
+  await expect(pathInput).toHaveValue(`${browseRoot}/${level1}/${level2}/${browseRepo}`);
+
+  // And the picked path is real: it registers through the same RegisterProject
+  // round trip a typed path takes, and the repo shows up in the switcher.
+  await addModal.locator("button.af-primary").click();
+  await expect(addModal).toBeHidden();
+  await page.locator(".af-project-switch").click();
+  await expect(projectItem(page, browseRepo)).toHaveCount(1);
+
+  // Clean up so the following tests see the fixture's project set, not this one's.
+  await projectItem(page, browseRepo).click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText(browseRepo);
+  await page.locator(".af-project-switch").click();
+  await page.locator(".af-project-menu .af-project-delete").click();
+  const delModal = page.locator(".af-modal-card");
+  await expect(delModal).toBeVisible();
+  await delModal.locator("button.af-danger").click();
+  await expect(delModal).toBeHidden();
+  await expect(page.locator(".af-project-switch-name")).not.toHaveText(browseRepo, { timeout: 30_000 });
+  await page.locator(".af-project-switch").click();
+  await projectItem(page, "mock-repo").click();
+  await expect(page.locator(".af-project-switch-name")).toHaveText("mock-repo");
+});
+
 test("delete project (#1735, redesign PR2, Fix 2): deleting an archived-only-bound project makes it go away — not a no-op", REAL_FIXTURE, async () => {
   // Use the SECOND project (SESSION_C, no task): switch to it, then delete it from the
   // switcher menu footer. Delete archives its one live session; with no task left, the

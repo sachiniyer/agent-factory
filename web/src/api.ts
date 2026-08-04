@@ -536,6 +536,46 @@ export async function listProjects(token: string): Promise<RegisteredProject[]> 
   return resp.projects ?? [];
 }
 
+/** One navigable child directory of a browsed directory (#2788). `path` is the
+ *  daemon-resolved CANONICAL path — for a symlink that is the target's path, not
+ *  the link's — so navigating by it lands where the header says. `is_repo` marks
+ *  the entries that can actually become a project. */
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  is_repo: boolean;
+  is_symlink: boolean;
+}
+
+/** One directory on the daemon host, as the Add-project picker sees it (#2788).
+ *  `path`/`parent` are canonical and daemon-computed: the client navigates by the
+ *  strings it is handed and never does ".." surgery of its own. `parent` is ""
+ *  at the filesystem root. `truncated` reports a capped listing, so "that is
+ *  everything" is never implied by silence. */
+export interface DirectoryListing {
+  path: string;
+  parent: string;
+  home: string;
+  is_repo: boolean;
+  entries: DirectoryEntry[];
+  truncated: boolean;
+}
+
+/** Lists the child directories of one directory ON THE DAEMON HOST, for the
+ *  Add-project picker. An empty `path` starts at the daemon's home.
+ *
+ *  A directory the daemon cannot read REJECTS with the daemon's own message
+ *  ("cannot read /x: permission denied") rather than resolving to an empty
+ *  listing — the caller must render that as an error, because an empty list and
+ *  a refusal mean opposite things and look identical once flattened. */
+export async function listDirectory(path: string, token: string): Promise<DirectoryListing> {
+  const resp = await af<DirectoryListing>("ListDirectory", { path }, token);
+  // Go marshals a nil slice as null; the daemon sends [] today, but a client that
+  // renders `undefined.map` on an older daemon is a worse failure than a defaulted
+  // empty list — which here is only ever reached on a 200, never on a refusal.
+  return { ...resp, entries: resp.entries ?? [] };
+}
+
 // --- tab mutations (#1592 Phase 5 PR7) -------------------------------------
 //
 // The web tab bar's write verbs, mirroring the TUI's `t`/`w` keys: `t` creates a

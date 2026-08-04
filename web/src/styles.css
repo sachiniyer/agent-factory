@@ -2216,6 +2216,162 @@ body {
   line-height: 1.4;
 }
 
+/* The Add-project directory picker (#2788): a minimal browser, not a file
+ * manager. One inset panel — a path header with the up/select controls, an error
+ * line, the scrolling list of child directories, and a truncation note. It reuses
+ * .af-ghost for its buttons and the same --af-* tokens as every other surface, so
+ * it inherits light/dark with no visual language of its own. */
+.af-dirpicker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-sp-2);
+  padding: var(--af-sp-2);
+  background: var(--af-bg-inset);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-r-md);
+}
+
+.af-dirpicker-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+}
+
+/* The current directory. Long paths are the norm, so it shrinks and ellipsises
+ * rather than pushing the up/select controls off a phone screen; the full path
+ * stays available as the element's title. Deliberately NOT the `direction: rtl`
+ * trick that ellipsises from the left — it relocates a path's leading "/" to the
+ * far end, which reads as a different path. */
+.af-dirpicker-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-xs);
+  font-family: var(--af-font-mono);
+}
+
+.af-dirpicker-up,
+.af-dirpicker-home,
+.af-dirpicker-use-here,
+.af-dirpicker-use {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.5rem;
+  font-size: var(--af-fs-xs);
+}
+
+/* A refused directory. Deliberately as loud as a modal error: it is the one
+ * message that must never be mistaken for "this directory is empty". */
+.af-dirpicker-error {
+  margin: 0;
+  color: var(--af-danger);
+  font-size: var(--af-fs-xs);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.af-dirpicker-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 13rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--af-bg-raised);
+  border: 1px solid var(--af-border-subtle);
+  border-radius: var(--af-r-sm);
+}
+
+.af-dirpicker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-1);
+  padding-right: var(--af-sp-1);
+}
+
+.af-dirpicker-row + .af-dirpicker-row {
+  border-top: 1px solid var(--af-border-subtle);
+}
+
+.af-dirpicker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.42rem 0.6rem;
+  background: transparent;
+  border: none;
+  color: var(--af-text);
+  font: inherit;
+  font-size: var(--af-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.af-dirpicker-item:hover:not(:disabled) {
+  background: var(--af-bg-inset);
+}
+
+.af-dirpicker-item:disabled,
+.af-dirpicker-use:disabled,
+.af-dirpicker-use-here:disabled,
+.af-dirpicker-home:disabled,
+.af-dirpicker-up:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.af-dirpicker-item:focus-visible,
+.af-dirpicker-use:focus-visible,
+.af-dirpicker-use-here:focus-visible,
+.af-dirpicker-home:focus-visible,
+.af-dirpicker-up:focus-visible {
+  outline: 2px solid var(--af-accent);
+  outline-offset: -2px;
+}
+
+.af-dirpicker-name {
+  display: flex;
+  align-items: center;
+  gap: var(--af-sp-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.af-dirpicker-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "git repo" / "link" — the row's only distinguishing mark besides its icon.
+ * A plain directory carries none, which is what says "navigable, but not a
+ * project target". */
+.af-dirpicker-meta {
+  flex: 0 0 auto;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-2xs);
+}
+
+.af-dirpicker-row-repo .af-dirpicker-meta {
+  color: var(--af-accent);
+}
+
+.af-dirpicker-empty,
+.af-dirpicker-note {
+  margin: 0;
+  padding: 0 0.2rem;
+  color: var(--af-text-2);
+  font-size: var(--af-fs-xs);
+  line-height: 1.4;
+}
+
+.af-dirpicker-note:empty {
+  display: none;
+}
+
 /* A field-level advisory (#1933: why a backend is not selectable, or why a repo's
  * default backend cannot run). Muted, not --af-danger: nothing has failed and the
  * user has done nothing wrong — it states a repo-config fact at choose time. The

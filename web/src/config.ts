@@ -26,7 +26,7 @@
 // Patched in place like the rest of the shell and CSP-safe (createElement +
 // addEventListener via the shared h() helper, no innerHTML with markup).
 
-import { h } from "./modals.js";
+import { h } from "./dom.js";
 import type { ConfigEntry } from "./types.js";
 
 /** What the config view can ask the shell to do. Saving is the shell's job (it
