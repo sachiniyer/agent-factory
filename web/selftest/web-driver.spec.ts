@@ -1360,8 +1360,26 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await p.keyboard.press("Enter");
     await expect(xterm).toHaveClass(/enable-mouse-events/);
 
+    // Sample the baseline only once the terminal has stopped growing. A shell prompt
+    // still landing after this read moves scrollTop by a row for reasons that have
+    // nothing to do with who owns the wheel, and the assertion below would report
+    // that as the wheel having scrolled. Two identical samples, the same idiom as
+    // settledHitTestableTabMenu.
+    let previousTop = Number.NaN;
+    let bottom = 0;
+    await expect
+      .poll(
+        async () => {
+          const top = await viewport.evaluate((el) => el.scrollTop);
+          const stable = top === previousTop;
+          previousTop = top;
+          bottom = top;
+          return stable;
+        },
+        { message: "output must settle before the wheel baseline is sampled", timeout: 10_000 },
+      )
+      .toBe(true);
     inputPayloads.length = 0;
-    const bottom = await viewport.evaluate((el) => el.scrollTop);
     await host.hover();
     await p.mouse.wheel(0, -900);
     await expect.poll(() => inputPayloads.length, { message: "application mouse mode must receive the plain wheel" }).toBeGreaterThan(0);
@@ -1414,6 +1432,22 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
       .poll(() => inputPayloads.length, { message: "Shift+drag must report the button to the mouse-aware application" })
       .toBeGreaterThan(1);
     await expect(selection, "the modifier hands the drag to the app, so it makes no selection").toHaveCount(0);
+
+    // …and it arrives as a PLAIN button. The modifier is af's escape hatch, not
+    // something the user aimed at the application, so it must not reach the app as a
+    // Shift/Alt chord. xterm forwards the rest of a drag from DOCUMENT-level
+    // listeners that encode each event's own modifiers, so press and release can
+    // easily disagree — an incoherent sequence for any TUI with modified-click
+    // bindings. SGR (1006) puts the modifiers in the button field: +4 shift, +8 meta,
+    // +16 ctrl.
+    const buttons = [...inputPayloads.map((bytes) => String.fromCharCode(...bytes)).join("").matchAll(/\x1b\[<(\d+);/g)].map(
+      (m) => Number(m[1]),
+    );
+    expect(buttons.length, "the app must receive both the press and the release").toBeGreaterThan(1);
+    expect(
+      buttons.filter((b) => b & 4),
+      "af's escape modifier must never leak into the app's mouse reports as Shift",
+    ).toEqual([]);
 
     const beforeHistoryScroll = await viewport.evaluate((el) => el.scrollTop);
     inputPayloads.length = 0;

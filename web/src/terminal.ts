@@ -120,6 +120,7 @@ export class AttachTerminal {
   private readonly wheelHint: string;
   private mouseCaptureHintTimer: number | null = null;
   private mouseOverrideKeyHeld = false;
+  private handedOffDrag = false;
   private historyWheelRemainder = 0;
   // Incremented only by an actual user scroll input while a peer-owned anchor is
   // pending. Output and resize reflows can move viewportY too, so position deltas
@@ -150,6 +151,9 @@ export class AttachTerminal {
   private readonly onWindowBlur = (): void => {
     // A modifier released in another tab/window never sends this terminal keyup.
     this.mouseOverrideKeyHeld = false;
+    // Nor does a button released there send this window a mouseup, which would
+    // otherwise strand the drag's document listeners until the next release.
+    this.endHandedOffDrag();
   };
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
@@ -206,7 +210,32 @@ export class AttachTerminal {
       // modifier keeps its xterm meaning (Shift extends an existing selection).
       return;
     }
+    // Held → this drag is being handed to the application, and the REST of it has
+    // to stay consistent with the press it is about to receive.
+    const handedOff = terminalMouseOverrideHeld(event, this.mouseOverride);
     invertTerminalMouseOverride(event, this.mouseOverride);
+    if (handedOff) {
+      this.beginHandedOffDrag();
+    }
+  };
+  // The rest of a handed-off drag. xterm forwards move/release from DOCUMENT-level
+  // listeners and encodes each event's OWN modifiers into the report, so stripping
+  // only the mousedown would hand a mouse-aware TUI an incoherent sequence: an
+  // unmodified press followed by a Shift/Alt-flagged drag and release. The modifier
+  // is af's escape hatch, not input the user aimed at the application, so it must
+  // not arrive as a modified-click binding.
+  //
+  // STRIPS only, and only while a handed-off drag is in flight. With the modifier
+  // NOT held the drag is a selection, and mouseup must keep its true altKey there:
+  // xterm's alt-click-moves-cursor reads exactly that flag and would otherwise fire
+  // cursor-movement sequences into the PTY on every plain click.
+  private readonly onHandedOffDragModifier = (event: MouseEvent): void => {
+    if (terminalMouseOverrideHeld(event, this.mouseOverride)) {
+      invertTerminalMouseOverride(event, this.mouseOverride);
+    }
+    if (event.type === "mouseup") {
+      this.endHandedOffDrag();
+    }
   };
 
   private handleUserScroll(source: TerminalUserScrollSource): void {
@@ -378,6 +407,7 @@ export class AttachTerminal {
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
+    this.endHandedOffDrag();
     this.closeSocket();
     this.term.dispose();
   }
@@ -391,6 +421,27 @@ export class AttachTerminal {
     // DECSET 9/X10 reports button-down only. xterm keeps wheel events for
     // scrollback there; VT200, drag, and any-event modes report wheel input.
     return mode !== "none" && mode !== "x10";
+  }
+
+  /** Tracks the modifier strip on the document for exactly the life of one
+   *  handed-off drag — xterm registers its own forwarders the same way, and events
+   *  can leave this pane mid-drag, so the pane host is not a wide enough net. */
+  private beginHandedOffDrag(): void {
+    if (this.handedOffDrag) {
+      return;
+    }
+    this.handedOffDrag = true;
+    document.addEventListener("mousemove", this.onHandedOffDragModifier, true);
+    document.addEventListener("mouseup", this.onHandedOffDragModifier, true);
+  }
+
+  private endHandedOffDrag(): void {
+    if (!this.handedOffDrag) {
+      return;
+    }
+    this.handedOffDrag = false;
+    document.removeEventListener("mousemove", this.onHandedOffDragModifier, true);
+    document.removeEventListener("mouseup", this.onHandedOffDragModifier, true);
   }
 
   private showMouseCaptureHint(message: string): void {

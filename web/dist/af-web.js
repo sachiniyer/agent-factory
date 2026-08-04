@@ -7547,6 +7547,7 @@ var AttachTerminal = class {
   wheelHint;
   mouseCaptureHintTimer = null;
   mouseOverrideKeyHeld = false;
+  handedOffDrag = false;
   historyWheelRemainder = 0;
   // Incremented only by an actual user scroll input while a peer-owned anchor is
   // pending. Output and resize reflows can move viewportY too, so position deltas
@@ -7574,6 +7575,7 @@ var AttachTerminal = class {
   onWindowFocus = () => this.scheduleVisibleFit();
   onWindowBlur = () => {
     this.mouseOverrideKeyHeld = false;
+    this.endHandedOffDrag();
   };
   onVisibilityChange = () => {
     if (document.visibilityState === "visible") {
@@ -7621,7 +7623,30 @@ var AttachTerminal = class {
     if (!this.applicationOwnsMouse()) {
       return;
     }
+    const handedOff = terminalMouseOverrideHeld(event, this.mouseOverride);
     invertTerminalMouseOverride(event, this.mouseOverride);
+    if (handedOff) {
+      this.beginHandedOffDrag();
+    }
+  };
+  // The rest of a handed-off drag. xterm forwards move/release from DOCUMENT-level
+  // listeners and encodes each event's OWN modifiers into the report, so stripping
+  // only the mousedown would hand a mouse-aware TUI an incoherent sequence: an
+  // unmodified press followed by a Shift/Alt-flagged drag and release. The modifier
+  // is af's escape hatch, not input the user aimed at the application, so it must
+  // not arrive as a modified-click binding.
+  //
+  // STRIPS only, and only while a handed-off drag is in flight. With the modifier
+  // NOT held the drag is a selection, and mouseup must keep its true altKey there:
+  // xterm's alt-click-moves-cursor reads exactly that flag and would otherwise fire
+  // cursor-movement sequences into the PTY on every plain click.
+  onHandedOffDragModifier = (event) => {
+    if (terminalMouseOverrideHeld(event, this.mouseOverride)) {
+      invertTerminalMouseOverride(event, this.mouseOverride);
+    }
+    if (event.type === "mouseup") {
+      this.endHandedOffDrag();
+    }
   };
   handleUserScroll(source) {
     if (this.pendingViewport === null) {
@@ -7662,6 +7687,7 @@ var AttachTerminal = class {
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
+    this.endHandedOffDrag();
     this.closeSocket();
     this.term.dispose();
   }
@@ -7671,6 +7697,25 @@ var AttachTerminal = class {
   applicationOwnsWheel() {
     const mode = this.term.modes.mouseTrackingMode;
     return mode !== "none" && mode !== "x10";
+  }
+  /** Tracks the modifier strip on the document for exactly the life of one
+   *  handed-off drag — xterm registers its own forwarders the same way, and events
+   *  can leave this pane mid-drag, so the pane host is not a wide enough net. */
+  beginHandedOffDrag() {
+    if (this.handedOffDrag) {
+      return;
+    }
+    this.handedOffDrag = true;
+    document.addEventListener("mousemove", this.onHandedOffDragModifier, true);
+    document.addEventListener("mouseup", this.onHandedOffDragModifier, true);
+  }
+  endHandedOffDrag() {
+    if (!this.handedOffDrag) {
+      return;
+    }
+    this.handedOffDrag = false;
+    document.removeEventListener("mousemove", this.onHandedOffDragModifier, true);
+    document.removeEventListener("mouseup", this.onHandedOffDragModifier, true);
   }
   showMouseCaptureHint(message) {
     this.mouseCaptureHint.textContent = message;
