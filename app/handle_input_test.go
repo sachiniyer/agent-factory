@@ -114,7 +114,7 @@ func TestHandleMenuHighlightingDoesNotInterceptNamingText(t *testing.T) {
 }
 
 func TestNamingProgramPickerTitleUsesSentenceCase(t *testing.T) {
-	h := newTestHome(t)
+	h := activeProjectHome(t)
 	resizeHome(h, 80, 24)
 	_, _ = h.startNewInstance(false)
 	require.Equal(t, stateNew, h.state)
@@ -185,7 +185,7 @@ func TestHandleMenuHighlightingNewInstanceActions(t *testing.T) {
 }
 
 func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
-	h := newTestHome(t)
+	h := activeProjectHome(t)
 
 	existing, err := session.NewInstance(session.InstanceOptions{
 		Title:   "existing",
@@ -225,6 +225,7 @@ func TestStartNewRemoteWithoutHooksExplains(t *testing.T) {
 	t.Chdir(repoDir)
 
 	h := newTestHome(t)
+	h.repoRoot = repoDir
 	h.errBox.SetSize(120, 1)
 
 	model, cmd := h.startNewInstance(true)
@@ -251,6 +252,7 @@ func TestStartNewRemoteWithoutHooksLeadsWithTheCause(t *testing.T) {
 	t.Chdir(repoDir)
 
 	h := newTestHome(t)
+	h.repoRoot = repoDir
 	h.errBox.SetSize(120, 1)
 
 	h.startNewInstance(true)
@@ -268,6 +270,7 @@ func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
 	t.Chdir(repoDir)
 
 	h := newTestHome(t)
+	h.repoRoot = repoDir
 	h.errBox.SetSize(120, 1)
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
@@ -423,7 +426,7 @@ func TestHandleStateNewPreflightErrorKeepsNamingFlow(t *testing.T) {
 // NOT be silently replaced by it — the shadow name is gone the moment a space is
 // typed, so adopting it would create a name that was never on screen.
 func TestHandleStateNewWhitespaceViaRealInput(t *testing.T) {
-	h := newTestHome(t)
+	h := activeProjectHome(t)
 	h.errBox.SetSize(120, 1)
 
 	_, _ = h.startNewInstance(false)
@@ -670,7 +673,7 @@ func TestNamingCreateFlow_NoDoubleTransition(t *testing.T) {
 // the name field left untouched, pressing enter adopts the generated shadow
 // placeholder as the session title instead of erroring "title cannot be empty".
 func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
-	h := newTestHome(t)
+	h := activeProjectHome(t)
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
 	_, _ = h.startNewInstance(false)
@@ -696,7 +699,7 @@ func TestHandleStateNewEmptySubmitAdoptsPlaceholder(t *testing.T) {
 // still EMPTY, so the row keeps showing the shadow placeholder rather than a real,
 // full-contrast name the user never chose and would have to backspace out.
 func TestHandleStateNewEmptySubmitFailedGateKeepsPlaceholder(t *testing.T) {
-	h := newTestHome(t)
+	h := activeProjectHome(t)
 	h.errBox.SetSize(120, 1)
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error {
 		return errors.New("Claude Code is not installed or not on PATH")
@@ -730,7 +733,7 @@ func TestCancelNamingClearsPlaceholder(t *testing.T) {
 		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newTestHome(t)
+			h := activeProjectHome(t)
 			_, _ = h.startNewInstance(false)
 			require.NotNil(t, h.namingInstance)
 			require.NotEmpty(t, h.namingPlaceholder, "precondition: a placeholder was generated")

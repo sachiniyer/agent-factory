@@ -37,6 +37,7 @@ func TestTUIRefreshSeesCLIChangesThroughDaemon(t *testing.T) {
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
+	h.repoRoot = repo.Root
 	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
 
 	t.Cleanup(func() {
@@ -79,6 +80,7 @@ func TestTUIRefreshSwapsKillRecreatedSameTitle(t *testing.T) {
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
+	h.repoRoot = repo.Root
 	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
 
 	t.Cleanup(func() {
@@ -243,6 +245,7 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
 	h.repoID = repo.ID
+	h.repoRoot = repo.Root
 	writeIntegrationConfig(t, os.Getenv("AGENT_FACTORY_HOME"))
 
 	t.Cleanup(func() {

@@ -277,7 +277,7 @@ func TestStartNewInstanceResetsThePromptField(t *testing.T) {
 	repoDir := setupRealRepo(t)
 	t.Chdir(repoDir)
 
-	h := newTestHome(t)
+	h := activeProjectHome(t)
 	h.errBox.SetSize(120, 1)
 	h.pendingPrompt = "a prompt stranded by some earlier create"
 

@@ -80,7 +80,7 @@ func newE2EHarness(t *testing.T) *e2eHarness {
 	if testing.Short() {
 		t.Skip("timing-sensitive E2E flow; skipped under -short — see #2052")
 	}
-	h := newTestHome(t)
+	h := activeProjectHome(t)
 	eh := &e2eHarness{t: t, home: h}
 
 	restoreBackend := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, absPath string) (session.Backend, error) {

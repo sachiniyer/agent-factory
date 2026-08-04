@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -156,6 +157,11 @@ func TestRealLocalBackend_FullLifecycle(t *testing.T) {
 func newRealE2EHarness(t *testing.T) *e2eHarness {
 	t.Helper()
 	h := newTestHome(t)
+	// The caller has already chdir'd into the real repo these flows drive, and
+	// that repo is the active project a create targets (#2764).
+	if repo, err := config.CurrentRepo(); err == nil {
+		h.repoRoot = repo.Root
+	}
 	eh := &e2eHarness{t: t, home: h}
 	installDirectSessionStarter(t)
 

@@ -26,9 +26,27 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
 
+// activeProjectHome is newTestHome plus the active project an ordinary run
+// always has.
+//
+// newTestHome leaves repoRoot empty, and production only reaches that state in
+// registry mode (launched outside a git repo, #2477) — where session creation
+// refuses outright rather than opening a naming form it cannot submit (#2764).
+// So a test that drives the naming/create flow has to name the project the
+// session goes into. Tests that already chdir'd into a repo they assert against
+// assign that root directly instead of minting a second one here.
+func activeProjectHome(t *testing.T) *home {
+	t.Helper()
+	h := newTestHome(t)
+	h.repoRoot = setupRealRepo(t)
+	return h
+}
+
 // newTestHome builds a minimal home with real UI components and a tempdir-
 // scoped storage. AGENT_FACTORY_HOME is redirected so nothing escapes into
 // the user's real config dir.
+//
+// repoRoot is deliberately left empty — see activeProjectHome.
 func newTestHome(t *testing.T) *home {
 	t.Helper()
 	tmp := testguard.SocketTempDir(t)
