@@ -43,16 +43,29 @@ from `app/detail-app` may auto-merge once the gates are clean.
    # a) a verdict for THIS head. The body carries "Reviewed commit: `abc1234…`",
    #    an abbreviation that must prefix $head. Codex posts it as a review on
    #    some PRs and as an issue comment on others, so read both.
-   gh api repos/sachiniyer/agent-factory/pulls/<n>/reviews \
+   gh api --paginate repos/sachiniyer/agent-factory/pulls/<n>/reviews \
      --jq '.[] | select(.user.login=="chatgpt-codex-connector[bot]") | "\(.submitted_at)\n\(.body)"'
-   gh api repos/sachiniyer/agent-factory/issues/<n>/comments \
+   gh api --paginate repos/sachiniyer/agent-factory/issues/<n>/comments \
      --jq '.[] | select(.user.login=="chatgpt-codex-connector[bot]") | "\(.created_at)\n\(.body)"'
 
-   # b) live inline findings — a null .line is stale, already fixed
-   gh api repos/sachiniyer/agent-factory/pulls/<n>/comments \
-     --jq '.[] | select(.user.login=="chatgpt-codex-connector[bot]" and .line != null and .in_reply_to_id == null)
-                 | "\(.id) \(.path):\(.line)\n\(.body)"'
+   # b) live inline findings, minus the ones an allowed reply already cleared —
+   #    the same subtraction auto-gate.js makes, so this can never block a PR
+   #    the workflow would merge. A null .line is stale, already fixed.
+   gh api --paginate repos/sachiniyer/agent-factory/pulls/<n>/comments | jq -s 'add
+     | ([ .[] | select(.in_reply_to_id
+                       and (.user.login | test("^(sachiniyer|app-detail-app)"))
+                       and (.body | test("RESOLVED|ACCEPTED|\\[gate-ack\\]")))
+              | .in_reply_to_id ] | unique) as $cleared
+     | .[] | select(.user.login == "chatgpt-codex-connector[bot]"
+                    and .line and (.in_reply_to_id | not)
+                    and (.id | IN($cleared[]) | not))
+     | "\(.id) \(.path):\(.line)\n\(.body)"'
    ```
+
+   `--paginate` is not optional. A page is 30 comments, and `gh api` fetches one
+   page without it — so a finding on page 2 reads as "no findings", which is the
+   single wrong answer this step must never produce. `auto-gate.js` paginates
+   these same lists (`github.paginate`, `per_page: 100`).
 
    Require all three:
 
@@ -76,9 +89,14 @@ from `app/detail-app` may auto-merge once the gates are clean.
    hang off that comment id:
 
    ```bash
-   gh api repos/sachiniyer/agent-factory/pulls/comments/<comment-id>/replies \
+   gh api repos/sachiniyer/agent-factory/pulls/<n>/comments/<comment-id>/replies \
      -f body='RESOLVED — <what changed, or why this is wrong>'
    ```
+
+   The PR number belongs in that path. `pulls/comments/<id>/replies` — the shape
+   the review-comment objects themselves are fetched from — is not a route, and
+   answers `404 Not Found` while looking like a posted reply if you do not read
+   the response.
 
    If a finding is valid, route it back to the authoring session and stop. Do
    not merge a PR with a valid unresolved finding.
