@@ -385,7 +385,10 @@ func decodeJSONStringBody(body string) (string, bool) {
 			if cursor+4 >= len(body) {
 				return "", false
 			}
-			point, err := strconv.ParseUint(body[cursor+1:cursor+5], 16, 32)
+			// A JSON \uXXXX escape is exactly 16 bits, so parse it as 16 — the
+			// conversion to rune is then bounded by the type rather than by the
+			// happenstance that this slice is four digits long.
+			point, err := strconv.ParseUint(body[cursor+1:cursor+5], 16, 16)
 			if err != nil {
 				return "", false
 			}
