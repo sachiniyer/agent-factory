@@ -86,18 +86,38 @@ gate keeps testing the current boundary as releases cut.
 
 ## How assertion 2 queries the daemon
 
-There is no "what version are you?" RPC on the daemon today — that is
-[#1920](https://github.com/sachiniyer/agent-factory/pull/1920). So the daemon's
-version is read from the image it is **actually executing**: copy
-`/proc/<pid>/exe` and ask it. This is a real query, not an inference from the
-binary on disk, and that distinction is the whole bug — after an upgrade the
-on-disk binary is N while a daemon that was never restarted is still executing
-the N-1 image. `/proc/<pid>/exe` still resolves to those bytes even though the
-path now reads `(deleted)`.
+The daemon answers a control-socket ping with **its own version**
+([#1920](https://github.com/sachiniyer/agent-factory/pull/1920) added
+`PingResponse.Version`), and `af daemon status --json` surfaces it as
+`.data.version`. That is what assertion 2 reads. It reports the *responding*
+daemon's version or nothing at all — never the client's — which is the property
+the assertion needs: after an upgrade the on-disk binary is N while a daemon
+that was never restarted still answers as N-1, and a version read off the
+installed binary would report N and call the skew healthy.
 
-`lc_doctor_fail_count` **feature-detects** `af doctor --json`: it parses the text
-summary today, and switches to the structured summary the moment #1920 lands. No
-follow-up edit needed here.
+When the daemon reports nothing, `lc_daemon_version` falls back to the image it
+is **actually executing**: copy `/proc/<pid>/exe` and ask it. `/proc/<pid>/exe`
+still resolves to those bytes even though the path now reads `(deleted)`. The
+fallback is feature-detected rather than version-gated, because two different
+daemons answer with nothing and only one of them is old:
+
+* one older than **v1.0.206**, before `af daemon status --json` grew the member
+  (`PingResponse.Version` itself landed in v1.0.200). Scenario B installs the
+  two newest stable releases, so this is only reachable if the boundary is ever
+  pinned backwards — but the harness must not quietly stop measuring if it is;
+* one that refuses *this* client's ping — which is the
+  [#1921](https://github.com/sachiniyer/agent-factory/issues/1921) skew the gate
+  exists to catch. The route that goes quiet is exactly the route under test, so
+  the fallback is load-bearing rather than legacy politeness.
+
+Neither route can read the new binary on disk, so a daemon left on the old bytes
+cannot hide behind it. If **both** come back empty, `lc_assert_no_version_skew`
+fails the run: `lc_assert_eq "" ""` would otherwise report "no skew" having
+compared nothing against nothing, and that green is worse than a red one.
+
+`lc_doctor_fail_count` **feature-detects** `af doctor --json` the same way: the
+structured summary when the flag is there (it is, since #1920), the text
+`Summary:` line for an older N-1 client.
 
 ## Isolation
 
@@ -251,13 +271,15 @@ you have seen it fail.
 * **macOS / launchd.** `lc_unit_active` and `lc_unit_main_pid` already have
   Darwin branches, so assertion #4 asserts the *same property* against launchd
   (`state = running` and `pid = N` in the `gui/<uid>` domain af restarts) rather
-  than a re-invented one. The blocker for the `macos-latest` leg is **assertion
-  2**: `lc_daemon_version` reads `/proc/<pid>/exe`, which macOS has no
-  equivalent of — `ps` would report the path, whose bytes are the NEW binary
-  after an upgrade, i.e. exactly the inference this assertion refuses to make.
-  The macOS leg therefore wants **#1920**'s daemon-reported version. Given
-  #1931 turned on macOS CI and immediately found three real darwin defects
-  (#1939, #1940, #1941), this leg is worth landing soon.
+  than a re-invented one. **Assertion 2 is no longer the blocker** — it asks the
+  daemon for its version and only falls back to `/proc/<pid>/exe`. What still
+  blocks the `macos-latest` leg is daemon **discovery**: `lc_daemon_pids`
+  identifies a daemon by reading `/proc/<pid>/cmdline` and `/proc/<pid>/environ`
+  (the check that proves a pid serves *this* throwaway home before the harness
+  signals it), and assertions 1 and 3 plus teardown are built on it. Porting
+  that scan is the work. Given #1931 turned on macOS CI and immediately found
+  three real darwin defects (#1939, #1940, #1941), this leg is worth landing
+  soon.
 * **#1916's reset-vs-relaunch race** — this scenario upgrades, it does not
   reset.
 * **Downgrades and channel switches** (`--allow-downgrade`, preview → stable).

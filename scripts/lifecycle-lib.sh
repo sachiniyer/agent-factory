@@ -365,22 +365,59 @@ lc_daemon_pids() {
 
 lc_daemon_count() { lc_daemon_pids "$1" | wc -l | tr -d ' '; }
 
-# lc_daemon_version <pid> — the version of the image the daemon is ACTUALLY
-# running, by copying /proc/<pid>/exe and asking it.
+# lc_daemon_version <bin> <pid> — the version of the daemon that is ACTUALLY
+# running, asked of the daemon itself.
 #
-# This is a real query, not an inference from the binary on disk — which is the
-# whole point: after an upgrade the on-disk binary is N while a daemon that was
-# never restarted is still executing the N-1 image, and /proc/<pid>/exe still
-# resolves to those bytes even though the path now reads "(deleted)".
+# Never an inference from the binary on disk, by either route — that is the
+# whole assertion. After an upgrade the on-disk binary is N while a daemon that
+# was never restarted is still serving as N-1, and a version read off the
+# installed binary would report N and call the skew healthy.
 #
-# Linux-only (needs /proc). macOS has no equivalent, which is one reason the
-# macOS leg is not wired yet — see the header of scripts/lifecycle.sh.
+# The daemon answers a control-socket ping with its own version, which
+# `af daemon status --json` surfaces as .data.version (#1920 added
+# PingResponse.Version in v1.0.200; the status member arrived with #2240 in
+# v1.0.206). A daemon that never answers leaves it empty — `af daemon status`
+# reports the responding daemon's version or nothing, never the client's.
 #
-# SWAP POINT (#1920): once `af doctor --json` ships a `daemon version` check,
-# this can become a plain query of the daemon's own reported version. Until
-# then this is the only way to learn a running daemon's version.
+# FEATURE-DETECTED, not version-gated, because two different daemons answer
+# with nothing and only one of them is old:
+#
+#   * a daemon older than v1.0.206, which has no such field. Scenario B installs
+#     whatever the two newest stable releases are, so this is reachable only if
+#     the boundary is ever pinned backwards, but the harness must not silently
+#     stop measuring if it is.
+#   * a daemon that refuses THIS client's ping — the #1921 skew ("unknown field
+#     …") that this gate exists to catch. So the fallback is load-bearing, not
+#     legacy politeness: the case where the daemon-reported value goes quiet is
+#     exactly the case where the assertion must still have a number.
+#
+# When both are empty the caller must FAIL rather than compare nothing against
+# nothing — see lc_assert_no_version_skew.
 lc_daemon_version() {
+    local bin="$1" pid="$2" out
+    # jq prints the string "null" for a member the daemon did not report; that
+    # is an absent version, not a version named "null".
+    out="$(lc_status_field "$bin" '.data.version')"
+    case "$out" in
+    null | "") out="" ;;
+    esac
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    lc_daemon_image_version "$pid"
+}
+
+# lc_daemon_image_version <pid> — the fallback: the version of the image the
+# daemon is executing, by copying /proc/<pid>/exe and asking it. /proc/<pid>/exe
+# still resolves to those bytes even though the path now reads "(deleted)".
+#
+# Linux-only (needs /proc); macOS has no equivalent. Assertion 2 no longer
+# depends on this, but daemon DISCOVERY still does — see lc_daemon_pids and the
+# header of scripts/lifecycle.sh.
+lc_daemon_image_version() {
     local pid="$1" tmp out
+    [ -n "$pid" ] || return 1
     tmp="$(mktemp "${TMPDIR:-/tmp}/lc-daemon-image.XXXXXX")" || return 1
     if ! cp "/proc/$pid/exe" "$tmp" 2>/dev/null; then
         rm -f "$tmp"
@@ -391,6 +428,23 @@ lc_daemon_version() {
     rm -f "$tmp"
     [ -n "$out" ] || return 1
     printf '%s\n' "$out"
+}
+
+# lc_assert_no_version_skew <client-version> <daemon-version> <what> — assertion
+# 2, with its operands proven to exist first.
+#
+# AUDIT: `lc_assert_eq "" ""` PASSES. If the daemon's version could not be read
+# (it never answered AND /proc was unreadable, or the pid is dead) and the client
+# version also came back empty, the single most important assertion in this gate
+# would report "no skew" having compared nothing against nothing. An unreadable
+# version is a failure, never a pass.
+lc_assert_no_version_skew() {
+    local client="$1" daemon="$2" what="$3"
+    if [ -z "$client" ] || [ -z "$daemon" ]; then
+        lc_fail "$what: cannot compare versions (client='$client', daemon='$daemon') — refusing to report 'no skew' from unreadable values"
+        return 1
+    fi
+    lc_assert_eq "$client" "$daemon" "$what"
 }
 
 # lc_client_version <bin> — the version the installed binary reports.
@@ -407,15 +461,15 @@ lc_status_field() {
 
 # lc_doctor_fail_count <bin> — how many checks doctor reports as FAIL.
 #
-# Feature-detects `--json` so this auto-upgrades the moment #1920 lands: today
-# it parses the "Summary: 9 PASS, 7 WARN, 0 FAIL" line, and the instant doctor
-# grows a --json flag it reads the structured summary instead. No follow-up
-# edit needed here.
+# Feature-detects `--json`, which today's releases have (#1920) and older ones
+# do not: it reads the structured summary when the flag is there and falls back
+# to parsing the "Summary: 9 PASS, 7 WARN, 0 FAIL" line for a release that
+# predates it. The detection stays because scenario B runs an N-1 client.
 lc_doctor_fail_count() {
     local bin="$1" out n
     if "$bin" doctor --help 2>&1 | grep -q -- '--json'; then
         out=$("$bin" doctor --json 2>/dev/null)
-        # #1920's envelope: {data:{summary:{fail:N}}}. Fall through to the text
+        # {data:{summary:{fail:N}}} (doctor/json.go). Fall through to the text
         # parser if the shape is not what we expect rather than silently
         # reporting 0 FAILs — a wrong 0 here would make the whole gate a no-op.
         n=$(printf '%s' "$out" | jq -r '.data.summary.fail // empty' 2>/dev/null)

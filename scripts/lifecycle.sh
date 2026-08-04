@@ -42,11 +42,13 @@
 #
 #   * macOS/launchd. Assertion #4 is already written for it (lc_unit_active /
 #     lc_unit_main_pid have Darwin branches, so the mac leg asserts the SAME
-#     property against launchd). The blocker for turning on the macos-latest leg
-#     is assertion 2: lc_daemon_version reads /proc/<pid>/exe, which macOS has no
-#     equivalent of — `ps` reports the path, whose bytes are the NEW binary after
-#     an upgrade, i.e. exactly the inference that assertion refuses to make. That
-#     leg wants #1920's daemon-reported version.
+#     property against launchd). Assertion 2 no longer blocks it: #1920 shipped
+#     the daemon-reported version and lc_daemon_version now asks the daemon,
+#     falling back to /proc only when it does not answer. What still blocks the
+#     macos-latest leg is daemon DISCOVERY — lc_daemon_pids matches a daemon by
+#     reading /proc/<pid>/cmdline and /proc/<pid>/environ, which macOS has no
+#     equivalent of, and assertions 1/3 plus teardown are built on it. Turning
+#     the leg on means porting that scan first, not just this one read.
 #   * Assertion #4 (supervision) on container runs: no systemd inside, so it is
 #     SKIPped there and only really runs on the CI runner. A SKIP is not a pass —
 #     the run exits non-zero unless AF_LIFECYCLE_ALLOW_PARTIAL=1 acknowledges it.
@@ -521,7 +523,7 @@ scenario_b() {
         lc_fail "scenario-b/$mode: no daemon came up on the old release; nothing to upgrade"
         return 1
     fi
-    before_daemon_ver="$(lc_daemon_version "$before_pid")"
+    before_daemon_ver="$(lc_daemon_version "$bin" "$before_pid")"
     lc_say "before upgrade: daemon pid=$before_pid version=$before_daemon_ver sessions=$before_sessions"
 
     # Hard gate. Scenario B's whole premise is "there is state to preserve"; if
@@ -622,7 +624,7 @@ scenario_b() {
     if [ -z "$after_pid" ]; then
         lc_fail "assertion 1/2/3: NO daemon is running after the upgrade"
     else
-        after_daemon_ver="$(lc_daemon_version "$after_pid")"
+        after_daemon_ver="$(lc_daemon_version "$bin" "$after_pid")"
         lc_say "after upgrade: daemon pid=$after_pid version=$after_daemon_ver client=$client_ver"
 
         # 1. the daemon is RESTARTED onto the NEW binary — not left on the old.
@@ -631,21 +633,14 @@ scenario_b() {
             "assertion 1: the daemon is not running a since-replaced binary"
 
         # 2. client version == daemon version. Queried, not inferred: the
-        #    daemon's version comes from the image it is ACTUALLY executing
-        #    (/proc/<pid>/exe), so a daemon left on the old bytes cannot hide
-        #    behind a new binary on disk. This is the #1921 skew condition.
-        #
-        #    AUDIT: `lc_assert_eq "" ""` PASSES. If lc_daemon_version could not
-        #    read /proc/<pid>/exe (a permission change, a macOS runner, a dead
-        #    pid) and lc_client_version also came back empty, the single most
-        #    important assertion in this gate would report "no skew" having
-        #    compared nothing against nothing. Both operands must exist first.
-        if [ -z "$after_daemon_ver" ] || [ -z "$client_ver" ]; then
-            lc_fail "assertion 2: cannot compare versions (daemon='$after_daemon_ver', client='$client_ver') — refusing to report 'no skew' from unreadable values"
-        else
-            lc_assert_eq "$client_ver" "$after_daemon_ver" \
-                "assertion 2: no version skew (client == daemon)"
-        fi
+        #    daemon reports its own version over the control socket, and when it
+        #    will not answer, the fallback reads the image it is ACTUALLY
+        #    executing (/proc/<pid>/exe). Neither route can read the new binary
+        #    on disk, so a daemon left on the old bytes cannot hide behind it.
+        #    This is the #1921 skew condition. lc_assert_no_version_skew refuses
+        #    to compare an unreadable version against anything.
+        lc_assert_no_version_skew "$client_ver" "$after_daemon_ver" \
+            "assertion 2: no version skew (client == daemon)"
 
         # 3. exactly ONE daemon; no orphan/second survived the restart.
         lc_assert_eq "1" "$(lc_daemon_count "$home")" "assertion 3: exactly one daemon afterwards"

@@ -87,6 +87,101 @@ else
     no "the no-injection case was treated as a missing injection"
 fi
 
+printf '\n=== assertion 2 must read the DAEMON, and unreadable is never a pass ===\n'
+
+# The version under test is the RUNNING daemon's, never the binary on disk: the
+# whole #1921 machine is "new binary installed, old daemon still serving". The
+# daemon reports its own version over the control socket, so that is what
+# lc_daemon_version asks for first, and the /proc image read is the fallback.
+if (
+    lc_status_field() { printf '1.0.215\n'; }
+    lc_daemon_image_version() { printf 'IMAGE-FALLBACK\n'; }
+    [ "$(lc_daemon_version af 4242)" = "1.0.215" ]
+); then
+    ok "the daemon's own reported version is used when it answers"
+else
+    no "lc_daemon_version did not use the version the daemon reported"
+fi
+
+# jq prints the STRING "null" for a member the daemon did not report. Taking it
+# at face value would hand assertion 2 a version named "null" and skip the
+# fallback — an old daemon (pre-v1.0.206) would then redden a healthy upgrade,
+# and, worse, so would a daemon that refused this client's ping, which is the
+# very skew the gate exists to catch.
+if (
+    lc_status_field() { printf 'null\n'; }
+    lc_daemon_image_version() { printf '1.0.214\n'; }
+    [ "$(lc_daemon_version af 4242)" = "1.0.214" ]
+); then
+    ok "an unreported version falls back to the running image, not the string 'null'"
+else
+    no "a 'null' daemon status member was treated as a version"
+fi
+if (
+    lc_status_field() { printf '\n'; }
+    lc_daemon_image_version() { printf '1.0.214\n'; }
+    [ "$(lc_daemon_version af 4242)" = "1.0.214" ]
+); then
+    ok "an empty daemon status member falls back to the running image"
+else
+    no "an empty daemon status member did not fall back"
+fi
+
+# Neither route could answer. The caller must see nothing and a non-zero status
+# — never a plausible-looking string.
+if (
+    lc_status_field() { printf 'null\n'; }
+    lc_daemon_image_version() { return 1; }
+    out="$(lc_daemon_version af 4242)"
+    rc=$?
+    [ -z "$out" ] && [ "$rc" != 0 ]
+); then
+    ok "both routes silent => empty version and a non-zero status"
+else
+    no "an unreadable daemon version produced output or a success status"
+fi
+
+# And the assertion itself. `lc_assert_eq "" ""` PASSES, so comparing two
+# unreadable versions would report "no skew" having compared nothing against
+# nothing — the exact shape of green this harness exists to refuse.
+for pair in "|" "1.0.215|" "|1.0.215"; do
+    client="${pair%|*}"
+    daemon="${pair#*|}"
+    if (
+        LC_FAIL=0
+        LC_PASS=0
+        LC_FAILED_NAMES=()
+        lc_assert_no_version_skew "$client" "$daemon" "assertion 2" >/dev/null 2>&1
+        [ "$LC_FAIL" = 1 ] && [ "$LC_PASS" = 0 ]
+    ); then
+        ok "an unreadable version FAILS assertion 2 (client='$client', daemon='$daemon')"
+    else
+        no "assertion 2 passed on an unreadable version (client='$client', daemon='$daemon')"
+    fi
+done
+if (
+    LC_FAIL=0
+    LC_PASS=0
+    LC_FAILED_NAMES=()
+    lc_assert_no_version_skew "1.0.215" "1.0.214" "assertion 2" >/dev/null 2>&1
+    [ "$LC_FAIL" = 1 ] && [ "$LC_PASS" = 0 ]
+); then
+    ok "a real skew still FAILS assertion 2"
+else
+    no "a real client/daemon skew did not fail assertion 2"
+fi
+if (
+    LC_FAIL=0
+    LC_PASS=0
+    LC_FAILED_NAMES=()
+    lc_assert_no_version_skew "1.0.215" "1.0.215" "assertion 2" >/dev/null 2>&1
+    [ "$LC_PASS" = 1 ] && [ "$LC_FAIL" = 0 ]
+); then
+    ok "matching versions pass assertion 2"
+else
+    no "matching client/daemon versions did not pass assertion 2"
+fi
+
 printf '\n=== external release availability is not a product failure ===\n'
 
 # The authenticated release-list probe must carry an unavailable result as a
