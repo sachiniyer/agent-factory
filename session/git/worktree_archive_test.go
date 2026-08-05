@@ -1290,3 +1290,42 @@ func TestMoveDirCrossDevice_CrossDeviceModesMatchSameDeviceRename(t *testing.T) 
 	assert.Equal(t, collectTreeDescription(t, renamedDest), collectTreeDescription(t, copiedDest),
 		"the cross-device copy must land the same permissions the same-device rename does")
 }
+
+// TestMoveWorktree_ArchiveRestoreRoundTripPreservesModes drives #2869 through
+// the public primitives rather than the copier underneath them, because the
+// promise that broke is a user-facing one: archive a session, restore it, and
+// get your files back as they were. Both legs take the cross-device fallback,
+// which is what a real user gets whenever $AF_HOME and the repo sit on
+// different filesystems.
+//
+// PRE-FIX both legs tightened the tree by the umask instead of preserving it,
+// and restore never recovered what archive had dropped: an executable 0755 hook
+// reached the archive as 0700 and came back 0700.
+func TestMoveWorktree_ArchiveRestoreRoundTripPreservesModes(t *testing.T) {
+	withUmask(t, 0077)
+	previousFast := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure (simulating EXDEV)")
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousFast })
+	previousRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = previousRename })
+
+	gw, _, srcPath := archiveTestWorktree(t)
+	hook := filepath.Join(srcPath, "hook.sh")
+	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\ntrue\n"), 0600))
+	require.NoError(t, os.Chmod(hook, 0755))
+	require.NoError(t, os.Chmod(filepath.Join(srcPath, "dirty.txt"), 0664))
+	beforeArchive := collectTreeDescription(t, srcPath)
+
+	archived := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	require.NoError(t, gw.MoveWorktree(archived))
+	assert.Equal(t, beforeArchive, collectTreeDescription(t, archived),
+		"the archived copy must be mode-identical to the worktree it took")
+
+	restored := filepath.Join(testguard.CanonicalTempDir(t), "restored", "arch")
+	require.NoError(t, gw.RestoreWorktreeTo(restored))
+	assert.Equal(t, beforeArchive, collectTreeDescription(t, restored),
+		"a restored session must come back with the modes it had, executable hooks included")
+}
