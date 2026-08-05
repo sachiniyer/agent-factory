@@ -21,6 +21,15 @@ func TestScrubRemovesCredentialShapes(t *testing.T) {
 		{"single quoted key=value", `token: '` + sentinel + `'`},
 		{"authorization bearer", "Authorization: Bearer " + sentinel + "abcdef"},
 		{"authorization basic", "Authorization: Basic " + sentinel + "abcdef"},
+		// A scheme behind a key keyValueSecret DOES recognize. That pass takes
+		// `Bearer` as the entire value — its bare class stops at the following
+		// space — so with the scheme pass second the credential was left standing
+		// behind a marker. `Authorization:` survives either order because the key
+		// half never matches it, which is precisely why testing only that
+		// spelling hid the bug.
+		{"bearer behind a matching key", "auth: Bearer " + sentinel + "abcdef"},
+		{"bearer behind a prefixed key", "x-auth-token=Bearer " + sentinel + "abcdef"},
+		{"basic behind a matching key", "token: Basic " + sentinel + "abcdef"},
 		{"git url userinfo", "https://x-access-token:ghp_" + sentinel + "abcdefghij@github.com/o/r"},
 		{"pem private key", "-----BEGIN RSA PRIVATE KEY-----\n" + sentinel + "\n-----END RSA PRIVATE KEY-----"},
 	}
