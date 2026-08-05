@@ -406,8 +406,33 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 			// dev server the origin exists to contain, where any request log keeps it.
 			// pr.Out.Host is already the target's; this makes the header agree with it,
 			// which is also the honest answer (it is the host the app serves itself on).
-			if route.previewOrigin {
+			// Skipped for a SOCKET-backed target, whose "host" is the dummy
+			// vscode.invalid: rewriting to a name that never reaches a wire would tell
+			// code-server its browser-facing host does not exist, and it validates its
+			// WebSocket upgrade against X-Forwarded-Host — the editor would load and
+			// then fail to connect. The exemption is principled: these rewrites keep a
+			// tab's capability label away from UNTRUSTED repo/agent-controlled content,
+			// and a socket target is a code-server the daemon itself spawned, which
+			// would learn only a label authorizing its own tab. Found on #2743's review;
+			// applied here too, since this PR extends the same rewrite to two more
+			// headers and would otherwise reintroduce it through them.
+			if route.previewOrigin && !target.isUnixSocket() {
 				pr.Out.Header.Set("X-Forwarded-Host", targetURL.Host)
+				// X-Forwarded-Host was one INSTANCE of a class, not the whole of it.
+				// ReverseProxy clones the inbound headers, so every header that carries
+				// the BROWSER-facing origin reaches the dev server verbatim — and on this
+				// route that origin is the tab's unguessable capability label. Origin (on
+				// any non-GET fetch the app makes) and Referer (on essentially every
+				// sub-resource) both carry it, so a dev server that logs requests — Vite,
+				// Django, Rails, all of them by default — writes the credential into its
+				// log file.
+				//
+				// Both are rewritten to the target's own address rather than deleted:
+				// that is what the app would have seen served directly, so an
+				// Origin-checking CSRF guard now agrees with its own Host instead of
+				// seeing a name it does not recognize. Referer keeps its path and query,
+				// since only the origin part is the secret.
+				rewriteOriginHeader(pr.Out.Header, targetURL)
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {

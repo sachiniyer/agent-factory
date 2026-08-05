@@ -66,7 +66,11 @@ import (
 // box, and a browser page that did reach the port still cannot read the response
 // (no ACAO). A local process could, but a local process can already reach the
 // control plane, which is tokenless on loopback by default. The dev server itself
-// never sees the label: the proxy sets the upstream Host to the target's own.
+// never sees the label: the proxy rewrites EVERY header that carries the
+// browser-facing origin — Host, X-Forwarded-Host, Origin and Referer — to the
+// target's own address (rewriteOriginHeader). That set is the invariant: any future
+// header quoting the request's origin has to join it, or the credential ends up in
+// an ordinary dev-server request log.
 //
 // REMOTE VIEWERS ARE UNCHANGED. A browser off this machine resolves *.localhost to
 // ITS OWN loopback, so per-tab origins are localhost-only by nature. The web client

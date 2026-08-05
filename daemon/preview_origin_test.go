@@ -340,6 +340,60 @@ func upstreamHost(t *testing.T, raw string) string {
 	return u.Host
 }
 
+// TestPreviewOrigin_NoHeaderCarriesTheLabelUpstream pins the CLASS, not the one
+// header that was found first. The tab's hostname IS its credential, and
+// ReverseProxy clones inbound headers — so every header quoting the browser-facing
+// origin hands that credential to the untrusted dev server, which writes it straight
+// into an ordinary request log (Vite, Django and Rails all log by default).
+//
+// Host and X-Forwarded-Host were the two already covered. Origin (sent on any
+// non-GET fetch the app makes) and Referer (sent on essentially every sub-resource)
+// were not, and were reaching the upstream verbatim. This asserts on the WHOLE
+// header set rather than naming the ones known today, so a future header that quotes
+// the request origin trips it instead of quietly joining the leak.
+func TestPreviewOrigin_NoHeaderCarriesTheLabelUpstream(t *testing.T) {
+	seen := make(chan http.Header, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := r.Header.Clone()
+		h.Set("Host-Pseudo-Header", r.Host)
+		seen <- h
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	m, previewAddr, sessionID, tabIDs := newPreviewOriginFixture(t, upstream.URL)
+	host := previewHostOf(t, m, previewAddr, sessionID, tabIDs[0])
+	label, ok := previewHostLabel(host)
+	require.True(t, ok)
+
+	// A browser framing this origin sends both of these on an app's own fetch.
+	req, err := http.NewRequest(http.MethodPost, "http://"+previewAddr+"/api/save", strings.NewReader("{}"))
+	require.NoError(t, err)
+	req.Host = host
+	req.Header.Set("Origin", "http://"+host)
+	req.Header.Set("Referer", "http://"+host+"/app/page?doc=1")
+	resp, err := previewHTTPClient().Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	got := <-seen
+	for name, values := range got {
+		for _, v := range values {
+			require.NotContains(t, v, label,
+				"header %s carried the tab's capability label to the dev server", name)
+		}
+	}
+
+	// Rewritten to the target's own address, not dropped: an Origin-checking CSRF
+	// guard must see a value that agrees with its own Host, and Referer's path is
+	// ordinary app data worth keeping.
+	targetURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	require.Equal(t, "http://"+targetURL.Host, got.Get("Origin"))
+	require.Equal(t, "http://"+targetURL.Host+"/app/page?doc=1", got.Get("Referer"),
+		"only the ORIGIN part of Referer is secret — its path and query survive")
+}
+
 // TestPreviewOrigin_RewritesSetCookieToItsOwnHost pins the cookie half of the
 // isolation. rewriteSetCookiePaths drops Domain, so a dev server that tries to set
 // Domain=localhost — which every per-tab origin would then send, defeating the

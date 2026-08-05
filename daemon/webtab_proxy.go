@@ -534,6 +534,37 @@ func rewriteRefreshURL(h http.Header, prefix string, target *url.URL) {
 	h.Set("Refresh", strings.TrimSpace(delay)+"; url="+quote+dest+quote)
 }
 
+// rewriteOriginHeader replaces the browser-facing origin in the request headers that
+// carry one — Origin and Referer — with the upstream target's own.
+//
+// It exists because the per-tab preview origin's HOSTNAME is that tab's credential
+// (#1856), and a header quoting it hands that credential to the untrusted dev server,
+// which will write it into an ordinary request log. Host and X-Forwarded-Host are
+// handled at the call site; these two are the rest of the class.
+//
+// Rewritten, not deleted: an app that checks Origin for CSRF should see the same
+// value it would have seen served directly, and Referer's path/query are ordinary
+// app data — only its origin part is secret, so only that part changes. A Referer
+// that does not parse is dropped rather than forwarded, since it cannot be edited
+// safely and no correct app depends on a malformed one.
+func rewriteOriginHeader(h http.Header, target *url.URL) {
+	targetOrigin := target.Scheme + "://" + target.Host
+	if h.Get("Origin") != "" {
+		h.Set("Origin", targetOrigin)
+	}
+	ref := h.Get("Referer")
+	if ref == "" {
+		return
+	}
+	parsed, err := url.Parse(ref)
+	if err != nil {
+		h.Del("Referer")
+		return
+	}
+	parsed.Scheme, parsed.Host, parsed.User = target.Scheme, target.Host, nil
+	h.Set("Referer", parsed.String())
+}
+
 // corsGrantHeaders are the response headers by which a server hands a DIFFERENT
 // origin permission to read it (or to time it). Every one is stripped from an
 // upstream response on a per-tab preview origin: cross-tab isolation there is the
