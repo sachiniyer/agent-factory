@@ -56,6 +56,7 @@ import {
   invertTerminalMouseOverride,
   lineContentColumns,
   terminalCellAtPoint,
+  type TerminalCellPoint,
   terminalMouseOverride,
   terminalMouseOverrideHeld,
   type TerminalMouseOverride,
@@ -64,6 +65,7 @@ import {
   touchPressStillHeld,
   touchScrollClaimsGesture,
   wordRangeAtColumn,
+  wrappedCellPosition,
 } from "./terminal-mouse.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { currentXtermTheme } from "./theme.js";
@@ -145,10 +147,19 @@ export class AttachTerminal {
   private touchOriginX = 0;
   private touchOriginY = 0;
   private touchScrollClaimed = false;
-  // The pending long press, and whether it has already copied on this gesture — a
-  // copy has to swallow the compatibility click the same touch would otherwise fire.
+  // The pending long press, and whether it has already acted on this gesture — a copy
+  // has to swallow the compatibility click the same touch would otherwise fire.
   private touchLongPressTimer: number | null = null;
   private touchCopyFired = false;
+  // The cell the finger went down on, resolved AT TOUCHSTART and in absolute buffer
+  // coordinates. Resolving it when the timer fires would read the viewport half a
+  // second later, and under live output the row the finger is on has scrolled by
+  // then — copying whatever slid beneath it instead of what was pressed.
+  private touchPressCell: TerminalCellPoint | null = null;
+  // Text the press selected, waiting for the finger to lift. The clipboard write has
+  // to happen in the touchend handler: Safari only honours it from a trusted
+  // user-gesture task, and a setTimeout callback is not one.
+  private touchCopyPending: string | null = null;
   // Whether the gesture in flight came from a finger, read off the pointer event that
   // precedes the browser's compatibility mouse events (onPointerDown).
   private lastPointerWasTouch = false;
@@ -232,12 +243,25 @@ export class AttachTerminal {
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
     this.touchCopyFired = false;
+    this.touchCopyPending = null;
     this.cancelTouchLongPress();
-    if (press) {
+    this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
+    if (this.touchPressCell) {
       this.startTouchLongPress();
     }
   };
-  private readonly onTouchEnd = (): void => this.cancelTouchLongPress();
+  private readonly onTouchEnd = (event: TouchEvent): void => {
+    this.cancelTouchLongPress();
+    const pending = this.touchCopyPending;
+    this.touchCopyPending = null;
+    if (pending === null || event.type !== "touchend") {
+      return; // a cancelled gesture copies nothing
+    }
+    // The write runs HERE, inside the trusted lift, not in the timer that selected
+    // the text: Safari grants clipboard access only to a user-gesture task, so a
+    // write from the timeout is refused on the one platform this gesture exists for.
+    this.copyToClipboard(pending);
+  };
   private readonly onTouchMove = (event: TouchEvent): void => {
     this.handleUserScroll("touch");
     const moved = event.touches.length !== 1 ||
@@ -632,7 +656,7 @@ export class AttachTerminal {
   private startTouchLongPress(): void {
     this.touchLongPressTimer = window.setTimeout(() => {
       this.touchLongPressTimer = null;
-      this.copyTouchWord(this.touchOriginX, this.touchOriginY);
+      this.selectTouchWord();
     }, TOUCH_LONG_PRESS_MS);
   }
 
@@ -643,48 +667,74 @@ export class AttachTerminal {
     }
   }
 
-  /** Selects the token under the finger — the whole line when that cell is blank —
-   *  and copies it. Silent only when there is genuinely nothing there to take. */
-  private copyTouchWord(x: number, y: number): void {
+  /** The cell under a viewport point, in ABSOLUTE buffer coordinates so it survives
+   *  everything the terminal does to the viewport afterwards. */
+  private bufferCellAtPoint(x: number, y: number): TerminalCellPoint | null {
     const rowsEl = this.container.querySelector<HTMLElement>(".xterm-rows");
     if (!rowsEl) {
-      return;
+      return null;
     }
     const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), this.term.cols, this.term.rows);
-    if (!cell) {
+    return cell === null ? null : { col: cell.col, row: this.term.buffer.active.viewportY + cell.row };
+  }
+
+  /**
+   * Selects the token the finger is resting on, and holds the text for the lift.
+   *
+   * The selection happens now, so the highlight appears under the finger at the
+   * moment the press is recognised; the clipboard write waits for touchend, where a
+   * user gesture is still in scope. Splitting the two is what makes the gesture work
+   * on Safari as well as Chrome.
+   */
+  private selectTouchWord(): void {
+    const press = this.touchPressCell;
+    if (!press) {
       return;
     }
-    // viewportY is the ABSOLUTE buffer row at the top of the view, and select() takes
-    // absolute rows (SelectionService stores what it is given straight into the
-    // model), so a press while scrolled up copies the line under the finger rather
-    // than the one that happens to be at that offset from the bottom.
     const buffer = this.term.buffer.active;
-    const bufferRow = buffer.viewportY + cell.row;
-    const line = buffer.getLine(bufferRow);
-    if (!line) {
-      return;
+    const cols = this.term.cols;
+    // A soft-wrapped line is SEVERAL buffer rows, and a phone is about forty columns
+    // wide — so the URLs and paths this gesture exists for wrap more often than not.
+    // Scan the whole wrapped block, or the token gets cut at the screen edge and the
+    // user silently copies a fragment of the thing they pressed on.
+    let first = press.row;
+    while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
+      first -= 1;
     }
-    // ONE ENTRY PER COLUMN, so an index is a column. translateToString would collapse
-    // a wide character into a single index and quietly shift every column after it.
+    let last = press.row;
+    while (buffer.getLine(last + 1)?.isWrapped === true) {
+      last += 1;
+    }
+    // ONE ENTRY PER COLUMN, rows joined end to end, so an index is a position in the
+    // block. translateToString would collapse a wide character into a single index
+    // and quietly shift every column after it.
     const cells: string[] = [];
-    for (let col = 0; col < line.length; col += 1) {
-      const buffered = line.getCell(col);
-      cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+    for (let row = first; row <= last; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line) {
+        break;
+      }
+      for (let col = 0; col < cols; col += 1) {
+        const buffered = line.getCell(col);
+        cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+      }
     }
-    const range = wordRangeAtColumn(cells, cell.col) ?? { start: 0, length: lineContentColumns(cells) };
+    const pressed = (press.row - first) * cols + press.col;
+    const range = wordRangeAtColumn(cells, pressed) ?? { start: 0, length: lineContentColumns(cells) };
     if (range.length === 0) {
       return; // a press on genuinely empty screen
     }
-    this.term.select(range.start, bufferRow, range.length);
+    const at = wrappedCellPosition(range.start, cols);
+    this.term.select(at.col, first + at.row, range.length);
     const text = this.term.getSelection();
     if (text.trim() === "") {
       this.term.clearSelection();
       return;
     }
-    // Marked BEFORE the copy: the compatibility click this touch still owes is what
+    // Marked BEFORE the lift: the compatibility click this touch still owes is what
     // would otherwise reach the application and clear the selection just painted.
     this.touchCopyFired = true;
-    this.copyToClipboard(text);
+    this.touchCopyPending = text;
   }
 
   /** The painted height of one terminal row, which turns a pixel-denominated gesture

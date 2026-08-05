@@ -15,6 +15,7 @@ import {
   touchPressStillHeld,
   touchScrollClaimsGesture,
   wordRangeAtColumn,
+  wrappedCellPosition,
 } from "./terminal-mouse.js";
 
 test("application-mouse escape matches xterm's platform selection modifier", () => {
@@ -168,4 +169,23 @@ test("a press and a scroll are decided by ONE threshold (#2849)", () => {
 
   // Long enough to be deliberate, short enough that a thumb does not think it failed.
   assert.ok(TOUCH_LONG_PRESS_MS >= 300 && TOUCH_LONG_PRESS_MS <= 800);
+});
+
+test("a token that soft-wraps is scanned across the rows it wraps onto (#2849)", () => {
+  // Two 8-column rows joined end to end, the way a wrapped line is scanned. The
+  // token starts on the first row and finishes on the second; stopping at the row
+  // boundary would copy "/srv/lo" and call it a path. A phone is ~40 columns wide,
+  // so a URL or a long path wraps far more often than not.
+  const cols = 8;
+  const block = [..."cd /srv/log-2849.txt"];
+  const token = wordRangeAtColumn(block, 12);
+  assert.deepEqual(token, { start: 3, length: 17 });
+
+  // …and the flat index converts back to the row/column select() expects.
+  assert.deepEqual(wrappedCellPosition(token?.start ?? 0, cols), { col: 3, row: 0 });
+  assert.deepEqual(wrappedCellPosition(8, cols), { col: 0, row: 1 });
+  assert.deepEqual(wrappedCellPosition(17, cols), { col: 1, row: 2 });
+  // The axes must not swap: index 7 is the LAST column of row 0, not row 7.
+  assert.deepEqual(wrappedCellPosition(7, cols), { col: 7, row: 0 });
+  assert.deepEqual(wrappedCellPosition(0, 0), { col: 0, row: 0 });
 });

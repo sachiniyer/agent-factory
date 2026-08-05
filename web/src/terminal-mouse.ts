@@ -240,3 +240,19 @@ export function lineContentColumns(cells: readonly string[]): number {
   }
   return end + 1;
 }
+
+/**
+ * Split a flat index over a soft-wrapped block back into the row offset and column
+ * xterm's `select()` takes.
+ *
+ * A wrapped line is several buffer rows, so the token scan runs over the rows joined
+ * end to end and this converts back. Trivial arithmetic with one classic failure —
+ * pairing the wrong operator with the wrong axis — which is silent, since both
+ * results are plausible row/column numbers.
+ */
+export function wrappedCellPosition(index: number, cols: number): TerminalCellPoint {
+  if (cols <= 0) {
+    return { col: 0, row: 0 };
+  }
+  return { col: index % cols, row: Math.floor(index / cols) };
+}
