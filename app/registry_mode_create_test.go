@@ -102,6 +102,12 @@ func TestRegistryModeEmptyWorkspaceDoesNotAdvertiseCreate(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = "" // registry mode: launched outside a repo (#2477)
 	resizeHome(h, 120, 30)
+	// newHome focuses Projects when repoRoot is empty; newTestHome does not
+	// replicate that, and the focus is the whole subject here — which key is live
+	// depends on it. Without this the test measures the tree, where ctrl+p works,
+	// and never reaches the captive section this issue is about.
+	h.focusRegion(layout.RegionProjects)
+	require.True(t, h.projectsFocused(), "precondition: registry mode starts in the captive section")
 	require.Equal(t, 0, h.store.NumInstances(), "precondition: the rail is empty")
 
 	view := flatten(h.View())
