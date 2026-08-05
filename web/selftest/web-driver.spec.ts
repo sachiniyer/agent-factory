@@ -1568,6 +1568,68 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
   }
 });
 
+test("#2811: typing the instant a tab opens loses nothing — type-ahead is held, not dropped", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // Deliberately does NOT use typeableShellTab(): that helper exists to keep the
+  // OTHER tests off this race, and using it here would test the helper instead of
+  // the product. This types the way a user does — immediately, into a tab that has
+  // only just appeared, with the socket very likely still CONNECTING.
+  //
+  // The old failure mode was not a lost keystroke but a MANGLED command: the
+  // dropped prefix left the surviving tail to reach the shell on its own and run
+  // as something else. So the assertion is that the whole line arrives intact.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+
+  try {
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+
+    const host = p.locator(".af-term-host");
+    // No wait for data-term-status here, on purpose: that attribute belongs to the
+    // pane and can still read "open" from the tab we just left while THIS tab's
+    // socket is connecting — which is exactly how the #2796 CI run typed into a
+    // connecting terminal and lost the front of its command.
+    await createTerminalTab(p);
+    await host.click();
+    const marker = "af-2811-typeahead-ok";
+    await p.keyboard.type(`printf '%s\\n' ${marker}`);
+    await p.keyboard.press("Enter");
+
+    // The command must have RUN, which is stronger than the text merely appearing:
+    // its output is a line that contains only the marker, and it can only exist if
+    // every byte of the command line arrived, in order.
+    await expect(host, "type-ahead typed before the socket opened must still reach the shell").toContainText(marker, {
+      timeout: 20_000,
+    });
+    await expect
+      .poll(
+        async () =>
+          (await host.locator(".xterm-rows > div").allInnerTexts()).filter((line) => line.trim() === marker).length,
+        { message: "the command must have executed, not just echoed as a mangled line" },
+      )
+      .toBeGreaterThan(0);
+
+    // …and the shell must be at a fresh prompt rather than parked on a continuation
+    // prompt, which is where a truncated command line strands it.
+    const screen = (await host.locator(".xterm-rows > div").allInnerTexts()).map((l) => l.trimEnd());
+    const lastNonEmpty = [...screen].reverse().find((l) => l.trim() !== "") ?? "";
+    expect(lastNonEmpty.trimStart().startsWith(">"), `shell left at a continuation prompt: ${JSON.stringify(screen.slice(-4))}`).toBe(
+      false,
+    );
+  } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
 test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_FIXTURE, async ({ browser }) => {
   // The defect this pins is invisible to a unit test, which is how it shipped: the
   // old unit test asserted only that our handler declined Cmd+C, under a NAME that

@@ -41,6 +41,7 @@ import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { handleClipboardKeydown } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
+import { PendingInput } from "./pending_input.js";
 import {
   hasVisibleTerminalGeometry,
   shouldRefitVisibleTerminal,
@@ -104,6 +105,9 @@ export class AttachTerminal {
   private readonly term: Terminal;
   private readonly fit: FitAddon;
   private readonly enc = new TextEncoder();
+  // Type-ahead: what was typed while the socket was down, replayed on open
+  // (#2811). Held here rather than dropped in send().
+  private readonly pendingInput = new PendingInput();
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
 
@@ -480,6 +484,7 @@ export class AttachTerminal {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose(): void {
     this.stopped = true;
+    this.pendingInput.clear();
     if (this.mouseCaptureHintTimer !== null) {
       window.clearTimeout(this.mouseCaptureHintTimer);
       this.mouseCaptureHintTimer = null;
@@ -640,6 +645,9 @@ export class AttachTerminal {
       // Push our current size on (re)connect so a server that came up after us, or
       // a resize we did while disconnected, is reflected. The echo reconciles it.
       this.sendResize(this.term.rows, this.term.cols, true);
+      // …then hand over anything typed before this socket existed. After the size
+      // so a full-screen program sizes itself before the keystrokes arrive.
+      this.flushPendingInput();
     };
 
     ws.onmessage = (e) => this.onMessage(e.data);
@@ -716,6 +724,9 @@ export class AttachTerminal {
       this.applyEchoedSize(msg.rows, msg.cols);
     } else if (msg.type === "exit") {
       this.exited = true;
+      // Whatever is still held was typed at a PTY that has now exited; delivering
+      // it to anything later would type into a program the user never saw.
+      this.pendingInput.clear();
       const code = typeof msg.code === "number" ? msg.code : 0;
       this.term.write(`\r\n\x1b[38;5;244m[agent exited (code ${code})]\x1b[0m\r\n`);
       this.cb.onStatus("exited");
@@ -932,20 +943,73 @@ export class AttachTerminal {
     }
   }
 
-  private send(bytes: Uint8Array): void {
+  /** Writes a frame if the socket can carry one right now. Returns whether it
+   *  went out, so the ONE caller whose payload must not be lost — typed input —
+   *  can hold it instead of dropping it (#2811). */
+  private send(bytes: Uint8Array): boolean {
     const ws = this.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(bytes);
+      return true;
     }
+    return false;
   }
 
   // --- input & clipboard -----------------------------------------------------
 
   /** Sends text to the PTY as OpInput — the single input path shared by typed
    *  keys (onData) and the Ctrl+C interrupt (clipboard.ts). UTF-8 encoded so a
-   *  multibyte char reaches the PTY as the same bytes a real terminal would send. */
+   *  multibyte char reaches the PTY as the same bytes a real terminal would send.
+   *
+   *  Anything typed while the socket is not OPEN is HELD, not dropped (#2811).
+   *  That window is open for the whole of every fresh tab — the pane mounts and
+   *  the user can type before the WebSocket finishes connecting — and again for
+   *  every reconnect gap. Dropping there did not merely lose keystrokes: the
+   *  surviving tail of a half-sent command line still reached the shell, so a
+   *  `for i in …; do printf …; done` arrived as `-mode-%s\n' "$i"; done` and left
+   *  the shell at a continuation prompt having run nothing. A real terminal keeps
+   *  type-ahead in the tty queue; this is the same guarantee, one layer up.
+   *
+   *  Resize is deliberately NOT held: onopen re-sends the current size on every
+   *  (re)connect, so a queued resize would be a stale duplicate of a value the
+   *  socket already re-announces. */
   private sendInput(text: string): void {
-    this.send(encode(inputFrame(this.enc.encode(text))));
+    const frame = encode(inputFrame(this.enc.encode(text)));
+    if (this.send(frame)) {
+      return;
+    }
+    if (this.stopped || this.exited) {
+      // No socket is coming: this terminal is disposed or its PTY exited. Holding
+      // would grow for the life of the page and could only ever be delivered to a
+      // program the user never typed at.
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      // Refused by the cap — a socket that is not coming back. Say so rather than
+      // losing it quietly a second time, which is the whole defect this fixes.
+      this.flashNotice("Terminal disconnected — typing was not delivered");
+    }
+  }
+
+  /** Hands the PTY everything typed while the socket was down, in order, then
+   *  empties the queue. Called from onopen, so it covers the first connect and
+   *  every reconnect alike. A frame that cannot go out even now is put back, so a
+   *  socket that dies mid-flush loses nothing. */
+  private flushPendingInput(): void {
+    const frames = this.pendingInput.drain();
+    for (let i = 0; i < frames.length; i++) {
+      if (this.send(frames[i])) {
+        continue;
+      }
+      // The socket died mid-flush. Put this frame back AND everything after it,
+      // in order, so the next open resumes exactly where this stopped — requeuing
+      // only the failed one would drop the rest of the command line, which is the
+      // very corruption being fixed.
+      for (let j = i; j < frames.length; j++) {
+        this.pendingInput.push(frames[j]);
+      }
+      return;
+    }
   }
 
   /** Copies text to the system clipboard, never silently. localhost is a secure
@@ -1007,9 +1071,14 @@ export class AttachTerminal {
    *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
    *  element under the CSP. */
   private flashCopyHint(): void {
+    this.flashNotice("Copy failed — clipboard unavailable");
+  }
+
+  /** The toast itself, for any condition that must not pass silently. */
+  private flashNotice(message: string): void {
     try {
       const hint = document.createElement("div");
-      hint.textContent = "Copy failed — clipboard unavailable";
+      hint.textContent = message;
       hint.setAttribute("role", "alert");
       hint.style.position = "fixed";
       hint.style.bottom = "12px";

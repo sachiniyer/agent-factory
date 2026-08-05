@@ -6866,6 +6866,54 @@ function decode(raw) {
   }
 }
 
+// src/pending_input.ts
+var DEFAULT_MAX_PENDING_INPUT_BYTES = 64 * 1024;
+var PendingInput = class {
+  constructor(maxBytes = DEFAULT_MAX_PENDING_INPUT_BYTES) {
+    this.maxBytes = maxBytes;
+  }
+  frames = [];
+  queued = 0;
+  /** Holds one frame. Returns false when the cap refused it — nothing was stored,
+   *  and everything already queued is untouched. */
+  push(frame) {
+    if (frame.length === 0) {
+      return true;
+    }
+    if (this.queued + frame.length > this.maxBytes) {
+      return false;
+    }
+    this.frames.push(frame);
+    this.queued += frame.length;
+    return true;
+  }
+  /** Hands back every held frame IN THE ORDER IT WAS TYPED and empties the queue.
+   *  Order is the contract: this is a byte stream, so a reordered flush would
+   *  corrupt the command line exactly as a dropped prefix does. */
+  drain() {
+    const out = this.frames;
+    this.frames = [];
+    this.queued = 0;
+    return out;
+  }
+  /** Discards everything held. Used when the PTY this input was meant for is gone
+   *  (exit or dispose), where delivering it later would type into a different
+   *  program than the user was looking at. */
+  clear() {
+    this.frames = [];
+    this.queued = 0;
+  }
+  /** Bytes currently held — the cap's accounting, exposed for tests and callers
+   *  that want to report pressure. */
+  get bytes() {
+    return this.queued;
+  }
+  /** Frames currently held. */
+  get length() {
+    return this.frames.length;
+  }
+};
+
 // src/terminal-geometry.ts
 function hasVisibleTerminalGeometry(host, proposed) {
   return host.width > 0 && host.height > 0 && !!proposed && proposed.rows > 0 && proposed.cols > 0;
@@ -7147,6 +7195,9 @@ var AttachTerminal = class {
   term;
   fit;
   enc = new TextEncoder();
+  // Type-ahead: what was typed while the socket was down, replayed on open
+  // (#2811). Held here rather than dropped in send().
+  pendingInput = new PendingInput();
   ro;
   io;
   ws = null;
@@ -7346,6 +7397,7 @@ var AttachTerminal = class {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose() {
     this.stopped = true;
+    this.pendingInput.clear();
     if (this.mouseCaptureHintTimer !== null) {
       window.clearTimeout(this.mouseCaptureHintTimer);
       this.mouseCaptureHintTimer = null;
@@ -7477,6 +7529,7 @@ var AttachTerminal = class {
       this.exited = false;
       this.cb.onStatus("open");
       this.sendResize(this.term.rows, this.term.cols, true);
+      this.flushPendingInput();
     };
     ws.onmessage = (e) => this.onMessage(e.data);
     ws.onclose = () => this.scheduleReconnect();
@@ -7537,6 +7590,7 @@ var AttachTerminal = class {
       this.applyEchoedSize(msg.rows, msg.cols);
     } else if (msg.type === "exit") {
       this.exited = true;
+      this.pendingInput.clear();
       const code = typeof msg.code === "number" ? msg.code : 0;
       this.term.write(`\r
 \x1B[38;5;244m[agent exited (code ${code})]\x1B[0m\r
@@ -7729,18 +7783,61 @@ var AttachTerminal = class {
       }
     }
   }
+  /** Writes a frame if the socket can carry one right now. Returns whether it
+   *  went out, so the ONE caller whose payload must not be lost — typed input —
+   *  can hold it instead of dropping it (#2811). */
   send(bytes) {
     const ws = this.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(bytes);
+      return true;
     }
+    return false;
   }
   // --- input & clipboard -----------------------------------------------------
   /** Sends text to the PTY as OpInput — the single input path shared by typed
    *  keys (onData) and the Ctrl+C interrupt (clipboard.ts). UTF-8 encoded so a
-   *  multibyte char reaches the PTY as the same bytes a real terminal would send. */
+   *  multibyte char reaches the PTY as the same bytes a real terminal would send.
+   *
+   *  Anything typed while the socket is not OPEN is HELD, not dropped (#2811).
+   *  That window is open for the whole of every fresh tab — the pane mounts and
+   *  the user can type before the WebSocket finishes connecting — and again for
+   *  every reconnect gap. Dropping there did not merely lose keystrokes: the
+   *  surviving tail of a half-sent command line still reached the shell, so a
+   *  `for i in …; do printf …; done` arrived as `-mode-%s\n' "$i"; done` and left
+   *  the shell at a continuation prompt having run nothing. A real terminal keeps
+   *  type-ahead in the tty queue; this is the same guarantee, one layer up.
+   *
+   *  Resize is deliberately NOT held: onopen re-sends the current size on every
+   *  (re)connect, so a queued resize would be a stale duplicate of a value the
+   *  socket already re-announces. */
   sendInput(text) {
-    this.send(encode(inputFrame(this.enc.encode(text))));
+    const frame = encode(inputFrame(this.enc.encode(text)));
+    if (this.send(frame)) {
+      return;
+    }
+    if (this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
+    }
+  }
+  /** Hands the PTY everything typed while the socket was down, in order, then
+   *  empties the queue. Called from onopen, so it covers the first connect and
+   *  every reconnect alike. A frame that cannot go out even now is put back, so a
+   *  socket that dies mid-flush loses nothing. */
+  flushPendingInput() {
+    const frames = this.pendingInput.drain();
+    for (let i = 0; i < frames.length; i++) {
+      if (this.send(frames[i])) {
+        continue;
+      }
+      for (let j = i; j < frames.length; j++) {
+        this.pendingInput.push(frames[j]);
+      }
+      return;
+    }
   }
   /** Copies text to the system clipboard, never silently. localhost is a secure
    *  context, so navigator.clipboard.writeText works; but if it is missing (a
@@ -7796,9 +7893,13 @@ var AttachTerminal = class {
    *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
    *  element under the CSP. */
   flashCopyHint() {
+    this.flashNotice("Copy failed \u2014 clipboard unavailable");
+  }
+  /** The toast itself, for any condition that must not pass silently. */
+  flashNotice(message) {
     try {
       const hint = document.createElement("div");
-      hint.textContent = "Copy failed \u2014 clipboard unavailable";
+      hint.textContent = message;
       hint.setAttribute("role", "alert");
       hint.style.position = "fixed";
       hint.style.bottom = "12px";
