@@ -43,9 +43,9 @@ func TestRestoreArchived_SuccessfulRelocateReportsAFailedPersist(t *testing.T) {
 	require.NoError(t, perr)
 
 	// Fail exactly the restore commit: the write that first carries the RESTORED
-	// location. Everything before it — the archive above, and the relocate's own
-	// git work — is real, so this cannot be confused with a restore that never got
-	// that far.
+	// location, which is the one taken BEFORE the respawn. Everything before it —
+	// the archive above, and the relocate's own git work — is real, so this cannot
+	// be confused with a restore that never got that far.
 	diskFull := errors.New("no space left on device")
 	var mu sync.Mutex
 	fired := false

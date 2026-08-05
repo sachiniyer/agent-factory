@@ -703,6 +703,21 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		return nil
 	}
 
+	// Record the new location NOW, before the respawn — not only after it.
+	// RestoreFromArchive spawns tmux, which can take seconds or time out, and a
+	// daemon that exits anywhere in that window would leave disk naming an archive
+	// path that no longer exists even though every write here succeeded. Moving the
+	// commit ahead of the respawn closes the window to the relocate itself, which
+	// is the shortest it can be.
+	//
+	// It writes a still-Archived row pointing at the restored path, which is
+	// exactly the state the cut-off-relocate branch above persists and is already
+	// covered: a later restore relocates off the occupied path rather than
+	// colliding with itself (RestoreWorktreePath's collision suffix).
+	if perr := commitRestore(); perr != nil {
+		return "", perr
+	}
+
 	// Worktree is back in place. Re-spawn the agent and flip Running. On a
 	// re-spawn failure RestoreFromArchive leaves the instance started + Lost, so
 	// the Lost-restore loop keeps retrying against the now-restored worktree.
