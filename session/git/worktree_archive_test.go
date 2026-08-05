@@ -1260,3 +1260,33 @@ func TestMoveDirCrossDevice_LongLeafFitsPrivateNames(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dest, "tracked.txt"))
 	assert.NoDirExists(t, src)
 }
+
+// TestMoveDirCrossDevice_CrossDeviceModesMatchSameDeviceRename pins the #2869
+// divergence itself. moveDirCrossDevice has two implementations of one promise:
+// rename(2) when src and dest share a device, and a byte copy when they do not.
+// A rename preserves modes for free, so the copy is the only path that can drift
+// — and it did, because mkdirat/openat subtract the umask. Which filesystem the
+// archive root happens to live on must not decide the permissions a session's
+// files come back with, so the two paths are asserted against each other rather
+// than against a hand-written expectation.
+func TestMoveDirCrossDevice_CrossDeviceModesMatchSameDeviceRename(t *testing.T) {
+	withUmask(t, 0077)
+	workspace := t.TempDir()
+	renamedSource := filepath.Join(workspace, "renamed-src")
+	copiedSource := filepath.Join(workspace, "copied-src")
+	writeModeProbeTree(t, renamedSource)
+	writeModeProbeTree(t, copiedSource)
+
+	renamedDest := filepath.Join(workspace, "renamed-dest")
+	require.NoError(t, moveDirCrossDevice(renamedSource, renamedDest),
+		"same-device move must take the rename fast path")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	copiedDest := filepath.Join(workspace, "copied-dest")
+	require.NoError(t, moveDirCrossDevice(copiedSource, copiedDest))
+
+	assert.Equal(t, collectTreeDescription(t, renamedDest), collectTreeDescription(t, copiedDest),
+		"the cross-device copy must land the same permissions the same-device rename does")
+}

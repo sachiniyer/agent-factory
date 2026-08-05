@@ -17,11 +17,13 @@ import (
 
 // copyTree recursively copies the directory rooted at src to dest, preserving
 // regular files (contents + permission bits), subdirectories, and symlinks
-// (copied as links, never followed). Traversal stays anchored to open directory
-// descriptors: a worktree process can replace any pathname after it is
-// inspected, so every source open is nonblocking and no-follow, and every
-// destination node is created exclusively. This is only reached on the
-// cross-device fallback.
+// (copied as links, never followed). Permission bits are restored explicitly
+// after each node is created rather than left to the mode passed at creation,
+// because that mode is subtracted by the process umask — see preserveSourceMode.
+// Traversal stays anchored to open directory descriptors: a worktree process can
+// replace any pathname after it is inspected, so every source open is
+// nonblocking and no-follow, and every destination node is created exclusively.
+// This is only reached on the cross-device fallback.
 func copyTree(src, dest string) error {
 	copied, err := copyTreeWithIdentities(src, dest)
 	if copied != nil {
@@ -198,6 +200,12 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		return nil, errors.Join(err, cleanupErr)
 	}
 	destinationIdentity, err := identityFromFile(destination)
+	if err == nil {
+		// The whole copy is anchored to this descriptor, so it is also where the
+		// root's mode belongs. Every child mode is restored the same way, at the
+		// point its own descriptor is confirmed.
+		err = preserveSourceMode(int(destination.Fd()), sourceInfo.Mode(), dest, "directory")
+	}
 	if err != nil {
 		cleanupErr := removeCreatedDirectory(destParent, destParentPath, destName, createdIdentity)
 		_ = destination.Close()
@@ -369,6 +377,11 @@ func copyDirectoryEntry(
 	if !destinationIdentity.same(openedIdentity) {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination directory %s changed after it was created", destinationPath)
 	}
+	// Only now: the descriptor has just been confirmed to be the node this
+	// process created, which is what makes chmodding it safe.
+	if err := preserveSourceMode(int(destinationChild.Fd()), sourceInfo.Mode(), destinationPath, "directory"); err != nil {
+		return created, err
+	}
 	return created, nil
 }
 
@@ -407,6 +420,36 @@ func copySymlinkEntry(
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while it was copied", destinationPath)
 	}
 	return created, nil
+}
+
+// preserveSourceMode restores a source node's permission bits on the descriptor
+// that owns its copy.
+//
+// mkdirat(2) and openat(2) subtract the process umask from the mode they are
+// handed, so creating a node "with the source's mode" is not the same as giving
+// it the source's mode: under the common umask 0022 a 0777 directory lands 0755,
+// and under 0077 an executable 0755 hook lands 0700. The same-device half of
+// this move is a rename(2), which preserves modes exactly — so every bit the
+// umask removes here is one move behaving two different ways depending on which
+// filesystem the archive root happens to sit on, and an archive that no longer
+// restores what it took (#2869).
+//
+// It chmods a descriptor rather than a name because this copier's entire premise
+// is that a worktree process can replace any pathname mid-copy: fchmodat() would
+// apply the source's mode to whatever node holds the name by the time it runs.
+// Callers pass a descriptor only after confirming it is the node they created.
+//
+// Setuid, setgid and sticky bits sit outside Perm() and are not carried over,
+// which is the behavior this copier has always had. Symlinks are skipped
+// entirely: Linux ignores their mode bits and offers no fchmod for them.
+func preserveSourceMode(destinationFD int, sourceMode os.FileMode, destinationPath, kind string) error {
+	if err := unix.Fchmod(destinationFD, uint32(sourceMode.Perm())); err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to preserve mode %#o on destination %s %s: %w",
+			sourceMode.Perm(), kind, destinationPath, err,
+		)
+	}
+	return nil
 }
 
 func copiedDirectoryHasChildren(directory *copiedDirectory) bool {
@@ -490,6 +533,14 @@ func copyRegularFileAtWithIdentity(
 		return created, err
 	}
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// After the contents, not before: openat() created this file no wider than
+	// the source (a umask only clears bits), so widening it back is the last
+	// step, once there is nothing half-written left to expose. The already-open
+	// descriptor keeps its write access regardless of the new mode.
+	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}

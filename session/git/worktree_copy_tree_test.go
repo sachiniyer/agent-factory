@@ -1,6 +1,8 @@
 package git
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -265,4 +267,109 @@ func assertNamedPipeDestinationFailsPromptly(t *testing.T, fifo string, copyFn f
 			t.Fatalf("HUNG: copy blocked opening destination named pipe %s and did not return after bounded cleanup", fifo)
 		}
 	}
+}
+
+// TestCopyTree_PreservesModesTheUmaskWouldAlter is the #2869 regression. The
+// destination nodes are created with mkdirat(2)/openat(2), and both subtract the
+// process umask from the mode they are handed — so the copier silently tightened
+// exactly the permissions its doc comment promises to preserve, while the
+// same-device rename(2) path kept them verbatim. The existing coverage above
+// missed it because 0755 dirs and 0640 files survive a typical umask 0022
+// untouched; every probe here is a mode a umask does alter.
+func TestCopyTree_PreservesModesTheUmaskWouldAlter(t *testing.T) {
+	withUmask(t, 0077)
+	src := filepath.Join(t.TempDir(), "src")
+	want := writeModeProbeTree(t, src)
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	require.NoError(t, copyTree(src, dest))
+
+	assert.Equal(t, want, collectTreeDescription(t, dest),
+		"the cross-device copy must reproduce the source modes, not the umask's opinion of them")
+}
+
+// withUmask sets the process umask for the duration of one test. The umask is
+// process-wide, so this is only confined to the calling test because nothing in
+// this package calls t.Parallel().
+func withUmask(t *testing.T, mask int) {
+	t.Helper()
+	original := syscall.Umask(mask)
+	t.Cleanup(func() { syscall.Umask(original) })
+}
+
+// writeModeProbeTree builds a fixture whose permission bits a umask does alter,
+// and returns the description collectTreeDescription must produce for a faithful
+// copy of it.
+//
+// Every node is chmod'd explicitly after it is created because os.Mkdir and
+// os.WriteFile subtract the umask themselves: without the chmod the fixture
+// would be born already tightened, the copy would match it, and the assertion
+// would pass vacuously — which is how this bug survived its own test.
+func writeModeProbeTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	directories := map[string]os.FileMode{
+		".":   0750, // a group-shared worktree: umask 0077 drops group access
+		"sub": 0777,
+	}
+	files := map[string]os.FileMode{
+		"run.sh":         0755, // an executable hook: umask 0077 drops group/other +x
+		"shared.txt":     0664,
+		"sub/secret.key": 0600, // control: no umask widens, so this one must not move
+	}
+	require.NoError(t, os.Mkdir(root, 0700))
+	require.NoError(t, os.Mkdir(filepath.Join(root, "sub"), 0700))
+	for relative := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(root, relative), []byte(relative), 0600))
+	}
+	require.NoError(t, os.Symlink("run.sh", filepath.Join(root, "link")))
+
+	want := map[string]string{"link": "symlink -> run.sh"}
+	for relative, mode := range files {
+		require.NoError(t, os.Chmod(filepath.Join(root, relative), mode))
+		want[relative] = fmt.Sprintf("file %04o", mode)
+	}
+	// Directories last: the root drops to 0750 here, and the writes above need
+	// it traversable while they run.
+	for relative, mode := range directories {
+		require.NoError(t, os.Chmod(filepath.Join(root, relative), mode))
+		want[relative] = fmt.Sprintf("dir %04o", mode)
+	}
+	return want
+}
+
+// collectTreeDescription renders a tree as relative path → type and permission
+// bits, so a mismatch reports every node at once instead of the first one.
+// Symlinks are described by their target: their own mode bits are not portable
+// (Linux fixes them at 0777, other kernels apply the umask) and nothing reads
+// them, so asserting on those would pin the platform rather than the copier.
+func collectTreeDescription(t *testing.T, root string) map[string]string {
+	t.Helper()
+	described := map[string]string{}
+	require.NoError(t, filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			described[relative] = "symlink -> " + target
+		case info.IsDir():
+			described[relative] = fmt.Sprintf("dir %04o", info.Mode().Perm())
+		default:
+			described[relative] = fmt.Sprintf("file %04o", info.Mode().Perm())
+		}
+		return nil
+	}))
+	return described
 }
