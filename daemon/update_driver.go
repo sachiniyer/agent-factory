@@ -156,10 +156,18 @@ type updateDriver struct {
 	activate func(ctx context.Context, candidate []byte, toVersion string) error
 	// activationEnabled reports the operator opt-in, re-read every wake.
 	activationEnabled func() bool
-	// executableIdentity fingerprints the binary this daemon is running, so a
-	// staged candidate is never installed over an executable something else
-	// replaced while it was downloading.
+	// executableIdentity fingerprints the executable on disk right now.
 	executableIdentity func() (string, error)
+	// baselineExecutable is that fingerprint taken at daemon start, when the
+	// on-disk binary WAS the one this process is executing. Every activation
+	// compares against it rather than against a reading taken moments earlier,
+	// because the question is not "did this change during the download" but "is
+	// the binary I am about to replace still the one I am running".
+	baselineExecutable string
+	// baselineErr records a baseline that could not be established. Activation
+	// fails closed on it: without a baseline there is nothing to prove the
+	// candidate is an upgrade over what is actually installed.
+	baselineErr error
 	// rejected holds tags whose activation this process already failed to
 	// start. Without it a release that cannot be activated would be retried
 	// every six hours forever — the "bad release re-breaks the box" outcome the
@@ -191,6 +199,10 @@ func startUpdateDriver(manager *Manager, requestExit func(), stopCh <-chan struc
 }
 
 func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
+	// Taken now, at daemon start, while the on-disk binary is still the one this
+	// process exec'd from. Later is too late: an `af upgrade --no-restart` would
+	// make a fresh reading describe a binary this daemon never ran.
+	baseline, baselineErr := runningExecutableIdentity()
 	return &updateDriver{
 		cachePath:          autoupdate.CheckCachePath(),
 		currentVersion:     strings.TrimPrefix(Version(), "v"),
@@ -199,6 +211,8 @@ func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 		now:                func() time.Time { return time.Now().UTC() },
 		download:           stageReleaseCandidate,
 		executableIdentity: runningExecutableIdentity,
+		baselineExecutable: baseline,
+		baselineErr:        baselineErr,
 		activationEnabled:  daemonUpgradeActivationEnabled,
 		activate: func(ctx context.Context, candidate []byte, toVersion string) error {
 			return triggerUpgradeActivation(ctx, manager.lifecycle, requestExit, candidate, toVersion)
@@ -398,16 +412,10 @@ func (d *updateDriver) checkOnce(ctx context.Context) updateCheckOutcome {
 func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel string) updateCheckOutcome {
 	log.InfoLog.Printf("auto-update: %s is available on the %s channel · staging it for a daemon-owned upgrade from %s", latest, channel, d.currentVersion)
 
-	// Fingerprint the executable BEFORE the download. Staging takes minutes, the
-	// shared cache lock was released before it, and an interactive `af` or
-	// `af upgrade` may legitimately install in that window — the interlock does
-	// not stop it, because no transaction exists yet. Handing over afterwards
-	// would install this now-stale candidate over that newer binary and preserve
-	// the newer one as the rollback target.
-	before, identityErr := d.executableIdentity()
-	if identityErr != nil {
-		log.WarningLog.Printf("auto-update: cannot fingerprint the running executable, so %s is not safe to activate: %v", latest, identityErr)
-		return updateCheckFailed
+	// Refuse before spending the bandwidth if the executable has already drifted
+	// from what this daemon is running.
+	if outcome, ok := d.executableStillOurs(latest); !ok {
+		return outcome
 	}
 
 	url := autoupdate.DownloadURL(tag, updateDriverGOOS, updateDriverGOARCH)
@@ -433,19 +441,10 @@ func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel
 		return updateCheckFailed
 	}
 
-	after, identityErr := d.executableIdentity()
-	if identityErr != nil {
-		log.WarningLog.Printf("auto-update: cannot re-check the running executable, so %s is not safe to activate: %v", latest, identityErr)
-		return updateCheckFailed
-	}
-	if after != before {
-		// Something else installed while this was staging. This daemon's idea of
-		// the current version is now stale, so it is not entitled to decide that
-		// its candidate is an upgrade. Leave it to the next window, by which time
-		// this daemon has either been restarted onto the new binary or the check
-		// runs against honest inputs.
-		log.InfoLog.Printf("auto-update: the executable changed while %s was staging, so it is no longer safe to activate; leaving it to the next check", latest)
-		return updateCheckSkipped
+	// And again after it, since staging takes minutes with the shared cache lock
+	// released.
+	if outcome, ok := d.executableStillOurs(latest); !ok {
+		return outcome
 	}
 
 	if err := d.activate(ctx, candidate, latest); err != nil {
@@ -466,6 +465,42 @@ func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel
 // turns on.
 func (d *updateDriver) activationIsEnabled() bool {
 	return d.activationEnabled != nil && d.activationEnabled()
+}
+
+// executableStillOurs reports whether the binary on disk is still the one this
+// daemon is executing. ok=false carries the outcome to return.
+//
+// The comparison is against the START-OF-DAEMON baseline, not a reading taken
+// just before the download, and that distinction is the whole point. A daemon
+// can legitimately be running an OLD binary while a NEW one sits on disk —
+// `af upgrade --no-restart` says so in as many words, and the launch updater
+// reaches the same state when it installs but leaves the daemon alone because
+// the autostart unit could not be made restart-safe. In that state a
+// before/after pair taken around the download agrees with itself perfectly:
+// both describe the already-new binary, nothing changed, and a stable-channel
+// check would happily install an older tag over the newer one on disk — and
+// hand the transaction that newer binary as its rollback target.
+//
+// d.currentVersion is this process's build, so it cannot answer the question
+// either. The baseline can: it was taken when on-disk and running were the same
+// file, so any drift from it means this daemon's idea of what is installed is
+// stale, and a daemon with a stale idea of the current version is not entitled
+// to decide that its candidate is an upgrade.
+func (d *updateDriver) executableStillOurs(latest string) (updateCheckOutcome, bool) {
+	if d.baselineErr != nil {
+		log.WarningLog.Printf("auto-update: no baseline for the running executable, so %s is not safe to activate: %v", latest, d.baselineErr)
+		return updateCheckFailed, false
+	}
+	current, err := d.executableIdentity()
+	if err != nil {
+		log.WarningLog.Printf("auto-update: cannot fingerprint the running executable, so %s is not safe to activate: %v", latest, err)
+		return updateCheckFailed, false
+	}
+	if current != d.baselineExecutable {
+		log.InfoLog.Printf("auto-update: the executable on disk is no longer the one this daemon is running, so %s is not safe to activate; leaving it to the next check or a daemon restart", latest)
+		return updateCheckSkipped, false
+	}
+	return updateCheckSkipped, true
 }
 
 func (d *updateDriver) rejectTag(tag string) {

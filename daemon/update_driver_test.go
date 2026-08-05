@@ -60,6 +60,7 @@ func newDriverHarness(t *testing.T) *driverHarness {
 		config:             func() *config.Config { return h.cfg },
 		now:                func() time.Time { return h.now },
 		executableIdentity: func() (string, error) { return "stable-identity", nil },
+		baselineExecutable: "stable-identity",
 		discover: func(channel string, _ time.Duration) (string, error) {
 			h.mu.Lock()
 			h.channels = append(h.channels, channel)
@@ -842,7 +843,7 @@ func TestUpdateDriver_AbandonsAStaleCandidateWhenTheExecutableChanged(t *testing
 	h := newDriverHarness(t)
 	rec := enableActivation(h, true)
 
-	identity := "before-download"
+	identity := h.driver.baselineExecutable
 	h.driver.executableIdentity = func() (string, error) { return identity, nil }
 	h.driver.download = func(context.Context, string, time.Duration) ([]byte, error) {
 		rec.downloads++
@@ -878,4 +879,58 @@ func TestRunningExecutableIdentity_ChangesWhenTheBinaryIsReplaced(t *testing.T) 
 	again, err := runningExecutableIdentity()
 	require.NoError(t, err)
 	require.Equal(t, first, again, "an unchanged binary must fingerprint the same")
+}
+
+// The case a before/after pair around the download cannot see: the executable
+// was ALREADY replaced before this wake, while this daemon kept running the old
+// binary. `af upgrade --no-restart` says it leaves the daemon alone in as many
+// words, and the launch updater reaches the same state when it installs but
+// cannot make the autostart unit restart-safe.
+//
+// Both readings around the download would agree perfectly — they describe the
+// same already-new binary — so only a baseline taken at daemon start catches it.
+// Without this, a stable-channel check installs an older tag over the newer
+// binary on disk and hands the transaction that newer binary as its rollback
+// target.
+func TestUpdateDriver_AbandonsWhenTheExecutableWasReplacedBeforeThisWake(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+
+	// Stable across the whole check — nothing changes during the download — but
+	// it is not what this daemon started from.
+	h.driver.executableIdentity = func() (string, error) { return "installed-by-af-upgrade-no-restart", nil }
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce(context.Background()))
+	require.Zero(t, rec.downloads, "a drifted executable must be caught before spending the bandwidth")
+	require.Zero(t, rec.activations)
+}
+
+// No baseline means no way to prove the candidate is an upgrade over what is
+// actually installed, so activation fails closed rather than guessing.
+func TestUpdateDriver_NoExecutableBaselineBlocksActivation(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+	h.driver.baselineErr = errors.New("could not resolve the executable at startup")
+
+	require.Equal(t, updateCheckFailed, h.driver.checkOnce(context.Background()))
+	require.Zero(t, rec.downloads)
+	require.Zero(t, rec.activations)
+}
+
+// The baseline is captured at construction, when the on-disk binary is still the
+// one this process exec'd from — later is too late.
+func TestNewUpdateDriver_CapturesTheExecutableBaselineAtStart(t *testing.T) {
+	manager := &Manager{}
+	manager.live.Store(&config.Config{AutoUpdate: true})
+
+	driver := newUpdateDriver(manager, func() {})
+	if driver.baselineErr != nil {
+		t.Skipf("no resolvable executable in this environment: %v", driver.baselineErr)
+	}
+	require.NotEmpty(t, driver.baselineExecutable)
+
+	current, err := driver.executableIdentity()
+	require.NoError(t, err)
+	require.Equal(t, driver.baselineExecutable, current,
+		"an untouched executable must still match the baseline taken at start")
 }
