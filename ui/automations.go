@@ -221,7 +221,11 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	// has never run, so gating this on a timestamp would hide the one thing it
 	// has to report — and an unarmed task is exactly the one that looks healthy
 	// otherwise (#2929).
-	if strings.HasPrefix(tsk.LastRunStatus, "errored:") {
+	//
+	// Not for a watch task: the watch branch above already reported it through
+	// watchTaskStatus, which reads the same "errored:" prefix, and appending here
+	// too renders "watch: … · errored · errored".
+	if !tsk.IsWatch() && strings.HasPrefix(tsk.LastRunStatus, "errored:") {
 		parts = append(parts, "errored")
 	}
 	return strings.Join(parts, " · ")
