@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,16 +47,30 @@ func TestRestoreArchived_SuccessfulRelocateReportsAFailedPersist(t *testing.T) {
 	// git work — is real, so this cannot be confused with a restore that never got
 	// that far.
 	diskFull := errors.New("no space left on device")
+	var mu sync.Mutex
+	fired := false
 	prev := testHookPersistInstanceData
 	t.Cleanup(func() { testHookPersistInstanceData = prev })
 	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
-		if data.Title == "worker" && data.Worktree.WorktreePath == restored {
-			return diskFull
+		if data.Title != "worker" || data.Worktree.WorktreePath != restored {
+			return nil
 		}
-		return nil
+		mu.Lock()
+		fired = true
+		mu.Unlock()
+		return diskFull
 	}
 
 	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+
+	// Without this, the assertion below fails on the unfixed code whether or not
+	// the seam ever matched — so a later change to what gets written (ForStorage,
+	// a different commit point) could make the whole test vacuous once it is green.
+	mu.Lock()
+	injected := fired
+	mu.Unlock()
+	require.True(t, injected,
+		"the restore commit was never attempted with the restored path, so this test exercised nothing")
 
 	require.Error(t, err,
 		"a restore whose new location was never written reported success: disk still says Archived at "+

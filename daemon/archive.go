@@ -678,16 +678,45 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
 	}
 
+	// The relocate SUCCEEDED, so the worktree's new location is now certain — and
+	// it exists only in memory, exactly as on the cut-off branch above.
+	// setWorktreeLocation updated g.worktreePath; this write is the only thing that
+	// carries it across a restart, so it takes the error-returning persist for the
+	// reason that branch already spells out (#2880). A restore nothing recorded is
+	// not a completed restore, however live the session is: disk would still say
+	// Archived at an archive path that no longer exists, the next restore would
+	// fail relocate's source-exists guard, and the user's work would sit at a path
+	// nothing durable points at. No poll repairs it — persistPollChange writes on a
+	// liveness/reset change and this row's liveness is already settled — and the
+	// whole-state shutdown checkpoint is what an unclean exit skips.
+	//
+	// Both arms below persist through it. The re-spawn failure is the same
+	// stranding with a Lost row instead of a Running one: the worktree has moved
+	// either way.
+	restoredPath := instance.GetWorktreePath()
+	commitRestore := func() error {
+		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			return fmt.Errorf("the worktree for %q was moved back to %s but that location could not be written to disk (%v); "+
+				"nothing durable points at it — move it back or re-register it manually before restarting the daemon",
+				req.Title, restoredPath, perr)
+		}
+		return nil
+	}
+
 	// Worktree is back in place. Re-spawn the agent and flip Running. On a
 	// re-spawn failure RestoreFromArchive leaves the instance started + Lost, so
 	// the Lost-restore loop keeps retrying against the now-restored worktree.
 	if err := instance.RestoreFromArchive(); err != nil {
-		m.persistInstance(repoID, instance)
+		if perr := commitRestore(); perr != nil {
+			return "", fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err)
+		}
 		return "", fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err)
 	}
 
 	worktreePath := instance.GetWorktreePath()
-	m.persistInstance(repoID, instance)
+	if perr := commitRestore(); perr != nil {
+		return "", fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr)
+	}
 	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return worktreePath, nil
 }
