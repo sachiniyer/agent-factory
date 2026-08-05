@@ -56,17 +56,20 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// another pass is still inside is skipped rather than checkpointed
 			// half-built.
 			//
-			// BEFORE the two resume passes, not after. A stale obligation on disk
-			// contradicts what memory already decided, and either pass can act on
-			// that memory: a handoff parked at a usage limit has moved its mission
-			// into Prompt and cleared the pending marker in memory while disk still
-			// carries it, so an auto-resume firing first would send that prompt and
-			// leave the marker for the next daemon to deliver a second time — the
-			// #2781 duplicate, re-entered through pass ordering. Retiring the write
-			// first is what keeps memory and disk from disagreeing across a pass that
-			// reads one of them. A settlement that fails during THIS tick simply
-			// waits for the next one; the window that matters is a restart, not a
-			// tick.
+			// BEFORE each pass that can CONSUME the state an owed settlement
+			// contradicts — which is why it is called twice, not once. A handoff
+			// parked at a usage limit has moved its mission into Prompt and cleared
+			// the pending marker in memory while disk still carries it, so a pass
+			// that sends that prompt and then dies leaves the next daemon to deliver
+			// the same mission again: the #2781 duplicate, re-entered through pass
+			// ordering.
+			//
+			// One call cannot cover it. This one retires whatever earlier ticks and
+			// RPCs left owed; the second, below, retires what ResumePendingHandoffs
+			// may have just created — its own limit-park settlement can fail, and
+			// ResumeLimitedSessions runs immediately after and can auto-resume a row
+			// whose reset time has already passed. Both are no-ops when nothing is
+			// owed.
 			manager.FlushOwedSettlements()
 
 			// Complete a handoff mission whose post-swap checkpoint survived a
@@ -82,6 +85,11 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// a limit surface-only. Runs after RestoreLostSessions because a
 			// session must be settled onto its liveness first; it borrows the
 			// same per-session op-lock discipline.
+			// The second flush (see above): ResumePendingHandoffs can have parked a
+			// mission at a usage limit and failed that settlement moments ago, and
+			// the auto-resume below is exactly the pass that would then consume it.
+			manager.FlushOwedSettlements()
+
 			manager.ResumeLimitedSessions()
 
 			// Handle stop before ticker.
