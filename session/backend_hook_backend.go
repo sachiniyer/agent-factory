@@ -662,10 +662,19 @@ func isJSONSpace(c byte) bool {
 }
 
 // hookLineBracketsBalanced reports whether every object/array opened on this line
-// also closes on it, ignoring brackets inside JSON strings. It is the difference
-// between a self-contained line and a record that continues into the next.
+// also closes on it, WITH A MATCHING BRACKET, ignoring brackets inside JSON
+// strings. It is the difference between a self-contained line and a record that
+// continues into the next.
+//
+// Types are tracked, not just a depth count: `{"level":]` closes nothing, and
+// counting it as balanced would treat a record that is still open as
+// self-contained, letting the next line's logged endpoint be promoted.
+//
+// An unterminated string only matters while a bracket is still open. Bracketed
+// prose with a stray quote — `[INFO] opening "config` — has already closed
+// everything it opened, and must not poison the records after it.
 func hookLineBracketsBalanced(line string) bool {
-	depth := 0
+	var open []byte
 	inString := false
 	escaped := false
 	for index := 0; index < len(line); index++ {
@@ -678,15 +687,22 @@ func hookLineBracketsBalanced(line string) bool {
 			inString = !inString
 		case inString:
 		case line[index] == '{' || line[index] == '[':
-			depth++
+			open = append(open, line[index])
 		case line[index] == '}' || line[index] == ']':
-			depth--
-			if depth < 0 {
+			if len(open) == 0 {
 				return false
 			}
+			want := byte('{')
+			if line[index] == ']' {
+				want = '['
+			}
+			if open[len(open)-1] != want {
+				return false
+			}
+			open = open[:len(open)-1]
 		}
 	}
-	return depth == 0 && !inString
+	return len(open) == 0
 }
 
 // nextHookOutputLine returns the offset just past the next line terminator at or

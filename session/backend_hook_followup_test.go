@@ -401,3 +401,37 @@ exit 0
 	require.Error(t, err, "an endpoint-shaped prefix of an open record is not a record")
 	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
 }
+
+// Seventh review round on #2841.
+
+// P1 3717302082: a depth counter called `{"level":]` balanced, so a record that
+// was still open looked self-contained and the next line's logged endpoint was
+// promoted. Bracket TYPES have to match.
+func TestHookLaunchRejectsEndpointAfterMismatchedBracketLine(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{"level":]' '{"url":"http://wrong.invalid","token":"logged-secret"}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	_, err := newHookProvisioner(h, "mismatched bracket line").provisionOrReap()
+
+	require.Error(t, err, "a mismatched closer leaves the record open")
+	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
+}
+
+// P2 3717302086: bracketed prose with a stray quote had already closed its
+// brackets; treating the open string as a continuing record stopped selection
+// and reaped a sandbox that launched correctly.
+func TestHookLaunchIgnoresBracketedProseWithStrayQuote(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '[INFO] opening "config'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "prose stray quote").provisionOrReap()
+
+	require.NoError(t, err, "a stray quote in closed bracketed prose must not stop selection")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.False(t, h.deleteRan(t))
+}
