@@ -5820,9 +5820,14 @@ test("#2933: session churn rebuilds the rail without taking the reader back to t
       }
     });
 
-    // Churn from OUTSIDE the browser, on a session that is not even selected: exactly
-    // the shape of the real complaint, where somebody else's session moves the list.
-    af("sessions", "tab-create", SESSION_B, "--command", "bash", "--name", tabName);
+    // Churn from OUTSIDE the browser, on a session nothing has selected: exactly the
+    // shape of the real complaint, where somebody else's session moves the list.
+    //
+    // SESSION_A, not SESSION_B: this test sits late in the serial file, and by here an
+    // earlier flow has ARCHIVED probe-b — tab-create then fails with "cannot add a tab
+    // to an archived session". The #2347 flow just above does tab-create on A at this
+    // same position, so A is known live here.
+    af("sessions", "tab-create", SESSION_A, "--command", "bash", "--name", tabName);
     created = true;
 
     await expect
@@ -5839,7 +5844,7 @@ test("#2933: session churn rebuilds the rail without taking the reader back to t
   } finally {
     if (created) {
       try {
-        af("sessions", "tab-delete", SESSION_B, "--name", tabName);
+        af("sessions", "tab-delete", SESSION_A, "--name", tabName);
       } catch {
         // best effort: the assertion above is the subject, not the cleanup
       }
