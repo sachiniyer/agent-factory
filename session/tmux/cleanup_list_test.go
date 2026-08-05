@@ -51,9 +51,11 @@ esac
 // assert one thing locally and another in CI.
 func pinTmuxServerProbe(t *testing.T, alive bool) {
 	t.Helper()
-	prev := tmuxServerProcessAlive
-	tmuxServerProcessAlive = func() bool { return alive }
-	t.Cleanup(func() { tmuxServerProcessAlive = prev })
+	var pids []int
+	if alive {
+		pids = []int{4242}
+	}
+	t.Cleanup(PinServerProbeForTest(pids...))
 }
 
 // TestCleanupSessionsListFailureIsNotAnEmptySessionSet is the #2870 regression
@@ -385,5 +387,67 @@ func TestSocketAbsentWithALiveServerIsNotAnEmptySessionSet(t *testing.T) {
 				t.Errorf("the sweep continued to another tmux command after refusing (stat %s = %v)", touched, statErr)
 			}
 		})
+	}
+}
+
+// TestSocketAbsentRefusalNamesAWorkingRecovery locks the recovery hint against
+// the way the obvious one fails (Codex on #2956).
+//
+// The first version said `pkill -USR1 -x -u "$(id -u)" tmux`. tmux renames the
+// server task to "tmux: server", and pkill's -x is an EXACT command-name match,
+// so that command matches nothing at all — verified with pgrep, which shares the
+// matching: `pgrep -x -u $(id -u) tmux` returned nothing on a box with four live
+// servers, while `-x "tmux: server"` matched all four. A hint that silently
+// signals nothing is worse than no hint: the user runs it, believes they acted,
+// and reset keeps refusing.
+//
+// Dropping -x is not the fix. SIGUSR1's default disposition is TERMINATE, so a
+// loose name match would kill any unrelated process merely named like tmux.
+// Naming the PID is exact and cannot spray.
+func TestSocketAbsentRefusalNamesAWorkingRecovery(t *testing.T) {
+	touched := filepath.Join(t.TempDir(), "reached-another-tmux-command")
+	t.Cleanup(PinServerProbeForTest(4242, 4243))
+	listFailureTmuxOnPath(t, touched, "error connecting to /tmp/tmux-1000/default (No such file or directory)", 1)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	err := CleanupSessions(cmd.MakeExecutor())
+	if err == nil {
+		t.Fatal("CleanupSessions returned nil with a live server and an absent socket")
+	}
+	msg := err.Error()
+
+	if !strings.Contains(msg, "kill -USR1 4242 4243") {
+		t.Errorf("error = %q, want a signal aimed at the exact server pids", msg)
+	}
+	if strings.Contains(msg, "pkill") {
+		t.Errorf("error = %q still suggests pkill; -x cannot match `tmux: server`, and without -x "+
+			"SIGUSR1 (default disposition: terminate) sprays onto anything named like tmux", msg)
+	}
+	for _, pid := range []string{"4242", "4243"} {
+		if !strings.Contains(msg, pid) {
+			t.Errorf("error = %q, want it to name server pid %s", msg, pid)
+		}
+	}
+}
+
+// TestSocketAbsentWithUnreadableProcessTableStillRefuses covers the branch that
+// has no pid to offer: an unreadable process table is not evidence of absence,
+// so the sweep must still refuse — and the advice must degrade to "go find it"
+// rather than print a signal aimed at nothing.
+func TestSocketAbsentWithUnreadableProcessTableStillRefuses(t *testing.T) {
+	touched := filepath.Join(t.TempDir(), "reached-another-tmux-command")
+	t.Cleanup(PinServerProbeForTest(0)) // the "could not read the table" sentinel
+	listFailureTmuxOnPath(t, touched, "error connecting to /tmp/tmux-1000/default (No such file or directory)", 1)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	err := CleanupSessions(cmd.MakeExecutor())
+	if err == nil {
+		t.Fatal("an unreadable process table is not proof no server is running; the sweep must refuse")
+	}
+	if strings.Contains(err.Error(), "pid 0") || strings.Contains(err.Error(), "kill -USR1 0") {
+		t.Errorf("error = %q leaked the no-pid sentinel into user-facing copy", err)
+	}
+	if !strings.Contains(err.Error(), "ps -o pid,comm,args") {
+		t.Errorf("error = %q, want it to say how to FIND the server when it cannot name one", err)
 	}
 }

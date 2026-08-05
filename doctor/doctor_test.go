@@ -79,7 +79,7 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 	// test in a private tmux world would classify its empty socket dir by
 	// whether the developer happens to have tmux running. Tests that mean
 	// "a server IS alive" pin it themselves.
-	t.Cleanup(tmux.PinServerProbeForTest(false))
+	t.Cleanup(tmux.PinServerProbeForTest())
 	return Options{
 		Fix:            fix,
 		ConfigDir:      home,

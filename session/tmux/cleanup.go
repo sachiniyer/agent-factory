@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -183,7 +185,7 @@ func NoServerRunning(err error) bool {
 		// It is only definitive when no tmux server is alive to own an
 		// unlinked socket — which is the ordinary case this branch exists for,
 		// a machine where tmux never ran.
-		return !tmuxServerProcessAlive()
+		return len(tmuxServerProcessPIDs()) == 0
 	default:
 		return false
 	}
@@ -207,7 +209,7 @@ const (
 // this uid. A package var so tests can pin the answer: the real probe reads the
 // host's process table, so a developer box with tmux running would otherwise
 // give a different result from a container that has none.
-var tmuxServerProcessAlive = liveTmuxServerProcess
+var tmuxServerProcessPIDs = liveTmuxServerPIDs
 
 // PinServerProbeForTest fixes the "is a tmux server alive for this uid?" answer
 // and returns the restore. It exists for internal/testguard.IsolateTmux, which
@@ -217,10 +219,10 @@ var tmuxServerProcessAlive = liveTmuxServerProcess
 //
 // Test-only by contract, not by build tag: testguard lives in internal/ and is
 // the only caller.
-func PinServerProbeForTest(alive bool) (restore func()) {
-	prev := tmuxServerProcessAlive
-	tmuxServerProcessAlive = func() bool { return alive }
-	return func() { tmuxServerProcessAlive = prev }
+func PinServerProbeForTest(pids ...int) (restore func()) {
+	prev := tmuxServerProcessPIDs
+	tmuxServerProcessPIDs = func() []int { return pids }
+	return func() { tmuxServerProcessPIDs = prev }
 }
 
 // liveTmuxServerProcess looks for a tmux server owned by this uid.
@@ -235,24 +237,29 @@ func PinServerProbeForTest(alive bool) (restore func()) {
 //
 // A process table we cannot read reports TRUE, for the same reason: an
 // unreadable table is not evidence of absence.
-func liveTmuxServerProcess() bool {
+func liveTmuxServerPIDs() []int {
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return true
+		// Not evidence of absence. A sentinel PID would be a lie, so report an
+		// unnamed one: callers only test emptiness, and the message degrades to
+		// "a server is running" without claiming to know which.
+		return []int{0}
 	}
 	uid := os.Getuid()
+	var pids []int
 	for pid, p := range snap {
-		// tmux renames the server task to "tmux: server" (verified on Linux),
-		// and a plain "tmux" covers builds that do not.
+		// tmux renames the server task to "tmux: server" (verified on Linux);
+		// a plain "tmux" covers builds and platforms that do not.
 		if !strings.HasPrefix(p.Comm, "tmux") {
 			continue
 		}
 		if owner, ok := proctree.UID(pid); ok && owner != uid {
 			continue
 		}
-		return true
+		pids = append(pids, pid)
 	}
-	return false
+	sort.Ints(pids)
+	return pids
 }
 
 // ListSessionNames returns the name of every session on the tmux server, or an
@@ -367,6 +374,56 @@ func classifyNoServerDiagnostic(diagnostic string) noServerDiagnosticKind {
 	return notANoServerDiagnostic
 }
 
+// describeLiveTmuxServers and recreateSocketAdvice render the socket-absent
+// refusal. They name the exact PIDs rather than a pattern because the obvious
+// pattern does not work: tmux renames the server task to "tmux: server", and
+// `pkill -x ... tmux` matches NOTHING against that — verified with pgrep, which
+// shares pkill's matching (`pgrep -x -u $(id -u) tmux` returned nothing while
+// `-x "tmux: server"` matched every server). A recovery hint that silently
+// signals nothing is worse than none: the user runs it, believes they acted, and
+// reset keeps refusing (Codex on #2956).
+//
+// Dropping -x is not the fix either. SIGUSR1's default disposition is TERMINATE,
+// so a loose name match would kill any unrelated process whose name merely
+// contains "tmux". Naming the PID is exact, portable, and cannot spray.
+func describeLiveTmuxServers(pids []int) string {
+	named := namedPIDs(pids)
+	if named == "" {
+		return "a tmux server is running for this user"
+	}
+	if len(pids) == 1 {
+		return "a tmux server is running for this user (pid " + named + ")"
+	}
+	return "tmux server(s) are running for this user (pids " + named + ")"
+}
+
+func recreateSocketAdvice(pids []int) string {
+	named := pidArgsForSignal(pids)
+	if len(named) == 0 {
+		return "Find the server (`ps -o pid,comm,args -u \"$(id -u)\"`, look for `tmux: server`), then " +
+			"signal it with `kill -USR1 <pid>` to recreate its socket — or stop it — and re-run"
+	}
+	return "Recreate its socket with " + shellsuggest.Command("kill", append([]string{"-USR1"}, named...)...) +
+		" — or stop that server — then re-run"
+}
+
+// namedPIDs renders the PIDs we can actually name; the 0 sentinel means the
+// process table could not be read, so there is no pid to print.
+func namedPIDs(pids []int) string {
+	return strings.Join(pidArgsForSignal(pids), ", ")
+}
+
+func pidArgsForSignal(pids []int) []string {
+	var out []string
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		out = append(out, strconv.Itoa(pid))
+	}
+	return out
+}
+
 // tmuxDiagnosticSuffix renders CommandDiagnostic as a parenthesized clause for
 // an error message, or "" when there is nothing to render.
 func tmuxDiagnosticSuffix(err error) string {
@@ -452,12 +509,11 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		// reason is not guessable from the diagnostic (#2875).
 		if diagnostic, exitOne := tmuxExitOneDiagnostic(err); exitOne &&
 			classifyNoServerDiagnostic(diagnostic) == socketAbsent {
-			return fmt.Errorf("could not list tmux sessions%s, but a tmux server is running for this "+
-				"user — a server whose socket is removed (a /tmp cleaner will do it) keeps running with "+
-				"its sessions alive, so the missing socket does not prove there are none. Refusing to "+
-				"sweep: no tmux session was killed. Recreate the socket by signalling the server "+
-				"(`pkill -USR1 -x -u \"$(id -u)\" tmux`) or stop the stray server, then re-run: %w",
-				tmuxDiagnosticSuffix(err), err)
+			return fmt.Errorf("could not list tmux sessions%s, but %s. A server whose socket is removed "+
+				"(a /tmp cleaner will do it) keeps running with its sessions alive, so the missing socket "+
+				"does not prove there are none. Refusing to sweep: no tmux session was killed. %s: %w",
+				tmuxDiagnosticSuffix(err), describeLiveTmuxServers(tmuxServerProcessPIDs()),
+				recreateSocketAdvice(tmuxServerProcessPIDs()), err)
 		}
 		return fmt.Errorf("could not list tmux sessions%s; refusing to sweep with the session set "+
 			"unknown — no tmux session was killed: %w", tmuxDiagnosticSuffix(err), err)
