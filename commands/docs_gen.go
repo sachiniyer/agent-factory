@@ -238,7 +238,56 @@ func writeAPIReference(path string) error {
 	}
 	b.WriteString("\n")
 
+	writeNestedRequestPayloads(&b, routes)
+
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// writeNestedRequestPayloads spells out the routes whose body takes a nested
+// object (#2918).
+//
+// The table above lists TOP-LEVEL keys, which for a wrapper route is a single
+// opaque name: `AddTask` read as taking one field called `task`, and the
+// reference offered no way to learn what belongs inside it. That is worse than
+// omitting the route — a caller trusts the page, sends a flat payload, and gets
+// a rejection the documentation cannot explain. Anyone automating against the
+// published API had to read Go source instead, which is the one thing publishing
+// it was meant to avoid.
+//
+// Derived from the same reflected type the table's own column comes from
+// (HTTPRoute.RequestFieldPaths), so this section cannot drift from the wire
+// shape or from the row above it.
+func writeNestedRequestPayloads(b *strings.Builder, routes []daemon.HTTPRoute) {
+	type nested struct {
+		route daemon.HTTPRoute
+		paths []string
+	}
+	var withNested []nested
+	for _, r := range routes {
+		var paths []string
+		for _, p := range r.RequestFieldPaths() {
+			if strings.Contains(p, ".") {
+				paths = append(paths, p)
+			}
+		}
+		if len(paths) > 0 {
+			withNested = append(withNested, nested{route: r, paths: paths})
+		}
+	}
+	if len(withNested) == 0 {
+		return
+	}
+
+	b.WriteString("## Nested request payloads\n\n")
+	b.WriteString("The `Request fields` column above lists each body's TOP-LEVEL keys. " +
+		"Where one of those is an object, its own keys are listed here as dotted paths, " +
+		"so a request can be constructed from this page alone.\n\n")
+	b.WriteString("| Path | Nested fields |\n")
+	b.WriteString("|------|---------------|\n")
+	for _, n := range withNested {
+		b.WriteString(fmt.Sprintf("| `%s` | %s |\n", n.route.Path, strings.Join(backtickAll(n.paths), ", ")))
+	}
+	b.WriteString("\n")
 }
 
 // oneLine collapses internal whitespace/newlines to single spaces so a value
