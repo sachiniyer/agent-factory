@@ -134,6 +134,79 @@ func executableLockPath(executable string) string {
 	)
 }
 
+// acquireExecutableLock is the ONE way this package takes the executable lock.
+// Prepare and the in-place installer both go through it: they contend for the
+// same file, so an acquisition either of them spelled separately could widen on
+// one path and not the other, leaving a lock usable by whichever writer happened
+// to create it.
+//
+// The lock must be openable by every principal the install directory already
+// trusts to replace the binary, or it does not do the job it was added for
+// (#2948). Created 0600, it was openable by its creator alone: on a shared
+// install the first user to upgrade owned a lock nobody else could open, the
+// second user got EACCES, and — because a lock failure must never block an
+// install — writeExecutableInPlace logged it and swapped the binary UNLOCKED.
+// The cross-user interleave the executable key exists to prevent came back
+// silently, for everyone except the user who got there first.
+//
+// So the lock's audience is derived from the directory's: group-writable
+// directory, group-usable lock, carrying the DIRECTORY's group rather than the
+// creator's (a new file takes its creator's primary group, which on a shared box
+// is the wrong one and excludes exactly the users this is meant to admit).
+// nonblocking is threaded through rather than fixed, because #2951 gave the
+// launch path a lock acquisition that must fail fast instead of stalling a
+// start-up. Widening the mode is orthogonal to waiting for the lock and happens
+// on the descriptor either way.
+func acquireExecutableLock(executable string, nonblocking bool) (*os.File, error) {
+	return acquireFileLockPrepared(
+		executableLockPath(executable), syscall.O_NOFOLLOW, nonblocking,
+		func(lock *os.File) { shareLockWithDirectoryWriters(lock, filepath.Dir(executable)) },
+	)
+}
+
+// shareLockWithDirectoryWriters matches the lock's permissions to the install
+// directory's, best-effort.
+//
+// Best-effort is the whole contract: every step here is an accommodation for
+// OTHER writers, and we already hold a working descriptor. When the lock was
+// created by a different user, the fchmod/fchown simply fail with EPERM — that
+// user got it right when they created it, or they did not and their own next
+// acquisition repairs it. Nothing here may turn into an error that stops an
+// upgrade.
+//
+// Two directory shapes are deliberately left at 0600:
+//
+//   - Not group-writable. No other principal can replace the binary, so 0600
+//     already covers every writer and widening would only enlarge the audience
+//     of a file nobody else needs.
+//   - World-writable. The lock BLOCKS rather than failing, so a lock any local
+//     user may open is a lock any local user may hold forever, stalling every
+//     upgrade on the box. #2897 rejected /tmp as the lock location on exactly
+//     this reasoning; it applies to the mode for the same reason. Nothing is
+//     given up by declining — a directory where anyone may swap the binary has
+//     no integrity left for this lock to protect.
+func shareLockWithDirectoryWriters(lock *os.File, dir string) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return
+	}
+	perm := info.Mode().Perm()
+	if perm&0o020 == 0 || perm&0o002 != 0 {
+		return
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return
+	}
+	// fchown/fchmod on the descriptor we already opened O_NOFOLLOW, never a
+	// path-based chmod: a path here could be swapped for a symlink between the
+	// stat and the call, and this directory is by definition writable by someone
+	// else. Group before mode, because chown clears the setuid/setgid bits and
+	// would undo a mode set first.
+	_ = lock.Chown(-1, int(stat.Gid))
+	_ = lock.Chmod(journalFileMode | 0o060)
+}
+
 // withExecutableLock runs fn holding the executable-keyed lock. Callers take it
 // AFTER the per-home preparation lock, always in that order, so two homes racing
 // the same binary cannot deadlock against each other.
@@ -142,7 +215,7 @@ func withExecutableLock(executablePath string, nonblocking bool, fn func() error
 	if err != nil {
 		return fmt.Errorf("validate executable for the upgrade lock: %w", err)
 	}
-	lock, err := acquireFileLockFlags(executableLockPath(executable), syscall.O_NOFOLLOW, nonblocking)
+	lock, err := acquireExecutableLock(executable, nonblocking)
 	if err != nil {
 		if nonblocking && errors.Is(err, ErrRecoveryActive) {
 			return ErrInstallLockBusy

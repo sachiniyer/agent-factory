@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -67,7 +66,7 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	// would still rename over the same binary. Take the executable-keyed lock
 	// too, always after the home lock so two homes racing one binary order their
 	// acquisitions identically and cannot deadlock (#2212).
-	executableLock, err := acquireFileLockFlags(executableLockPath(executable), syscall.O_NOFOLLOW, false)
+	executableLock, err := acquireExecutableLock(executable, false)
 	if err != nil {
 		return nil, fmt.Errorf("lock the executable for upgrade: %w", err)
 	}

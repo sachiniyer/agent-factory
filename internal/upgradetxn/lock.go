@@ -62,9 +62,24 @@ func acquireFileLock(path string, nonblocking bool) (*os.File, error) {
 // symlink planted there would have this create a file somewhere it was never
 // asked to touch.
 func acquireFileLockFlags(path string, extraFlags int, nonblocking bool) (*os.File, error) {
+	return acquireFileLockPrepared(path, extraFlags, nonblocking, nil)
+}
+
+// acquireFileLockPrepared is acquireFileLockFlags with a hook that runs on the
+// open descriptor before the lock is taken. Only the executable lock uses it, to
+// widen a lock it may have just created; every other lock here is private to one
+// AF home and passes nil. The hook cannot fail the acquisition — adjusting a
+// lock we already hold a usable descriptor for is an accommodation for OTHER
+// writers, never a precondition for this one.
+func acquireFileLockPrepared(
+	path string, extraFlags int, nonblocking bool, prepare func(*os.File),
+) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|extraFlags, journalFileMode)
 	if err != nil {
 		return nil, err
+	}
+	if prepare != nil {
+		prepare(file)
 	}
 	operation := syscall.LOCK_EX
 	if nonblocking {
