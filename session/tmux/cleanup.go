@@ -194,6 +194,31 @@ func noTmuxServerDiagnostic(diagnostic string) bool {
 	return absent && strings.TrimSpace(socket) != ""
 }
 
+// ListingFoundNoServer reports whether a failed `tmux ls` is tmux's DEFINITIVE
+// "there is no server" answer — an empty session set — rather than a failure to
+// find out what the session set is.
+//
+// Exported because that difference is load-bearing OUTSIDE this package and was
+// got wrong twice by copying: #2870 (`af reset` wiping worktrees on an
+// unreadable listing) and #2874 (`af doctor --fix` arming a kill of every live
+// session's processes). Both had a comment claiming to mirror the other. The
+// classifier lives here, beside the diagnostics it matches, so there is one
+// place to be right rather than a shape to re-derive per caller.
+//
+// Anything that is not one of tmux's two definitive diagnostics — a timeout, a
+// permission refusal, a wrapper's exit 1, a missing binary, an empty stderr —
+// is UNKNOWN, and a caller that cannot tell must not treat it as empty.
+func ListingFoundNoServer(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		return false
+	}
+	return noTmuxServerDiagnostic(strings.TrimSpace(string(exitErr.Stderr)))
+}
+
 // tmuxDiagnosticSuffix renders tmux's stderr as a parenthesized clause for an
 // error message, or "" when there is nothing to render.
 //

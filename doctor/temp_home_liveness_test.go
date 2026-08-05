@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,10 +57,35 @@ func macLikeTempHomeOptions(t *testing.T, tempRoot string, fix bool) Options {
 	opts.Exec = cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error { return nil },
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			return nil, fmt.Errorf("no tmux")
+			// tmux's DEFINITIVE "there is no server" answer, which is what a box
+			// with no tmux running actually returns. A bare error here would be an
+			// UNREADABLE listing, which the temp-home checks must refuse rather
+			// than treat as "no session references this home" (#2874's class) —
+			// see TestUnreadableTmuxListingSparesTempHome.
+			return nil, noTmuxServerExitError(t)
 		},
 	}
 	return opts
+}
+
+// noTmuxServerExitError builds tmux's real exit-1-with-diagnostic answer for
+// "no server on this socket". Constructed from a genuine failed command so the
+// *exec.ExitError carries a real exit status, with tmux's stderr attached.
+func noTmuxServerExitError(t *testing.T) error {
+	t.Helper()
+	return tmuxExitError(t, "error connecting to /tmp/tmux-1000/default (No such file or directory)")
+}
+
+// tmuxExitError builds an exit-1 *exec.ExitError carrying diagnostic on stderr.
+func tmuxExitError(t *testing.T, diagnostic string) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", "exit 1").Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an *exec.ExitError from a failing command, got %v", err)
+	}
+	exitErr.Stderr = []byte(diagnostic)
+	return exitErr
 }
 
 // holdDaemonLock creates dir's daemon.lock and holds an exclusive flock on it
@@ -234,4 +260,61 @@ func TestStaleTempHomeFixRefusesWhenDaemonAppearsAfterDetection(t *testing.T) {
 	require.Contains(t, findings[0].FixErr.Error(), "cannot prove no daemon owns it")
 	require.DirExists(t, dir, "the newly-claimed home must survive the --fix run")
 	require.GreaterOrEqual(t, probes, 2, "the fix must re-probe the lock rather than trust detection")
+}
+
+// TestUnreadableTmuxListingSparesTempHome pins the #2874 class on the temp-home
+// path.
+//
+// "A live tmux session references this home" is a KEEP-reason. Reading an
+// unreadable listing as an empty one withdraws it silently, and the scan then
+// renders as clean — the operator sees no finding at all for a surface af could
+// not read.
+//
+// Scope, measured rather than assumed: on master the removal is still blocked by
+// the lock probe, so this collapse alone was not shown to reach the rm -rf. What
+// it does reach is the report, which is the fabricated negative in its reporting
+// form. The keep-reason is restored here so the removal never depends on the
+// lock probe being the only surviving guard.
+func TestUnreadableTmuxListingSparesTempHome(t *testing.T) {
+	unreadable := []struct{ name, diagnostic string }{
+		{"permission denied", "error connecting to /tmp/tmux-1000/default (Permission denied)"},
+		{"unsafe permissions", "directory /tmp/tmux-1000 has unsafe permissions"},
+		{"empty diagnostic", ""},
+		{"wrapper refusal", "af: refusing to run tmux"},
+	}
+	for _, test := range unreadable {
+		t.Run(test.name, func(t *testing.T) {
+			tempRoot := t.TempDir()
+			dir := makeOldTempAFHome(t, tempRoot, "tmp.unreadable-tmux")
+			stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+			opts := macLikeTempHomeOptions(t, tempRoot, true) // Fix: true
+			opts.Exec = cmd_test.MockCmdExec{
+				RunFunc:    func(cmd *exec.Cmd) error { return nil },
+				OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return nil, tmuxExitError(t, test.diagnostic) },
+			}
+
+			report, err := Run(opts)
+			require.NoError(t, err)
+			require.DirExists(t, dir,
+				"an unreadable tmux listing must not authorise removing a temp home that may be in use")
+			rows := findCheckRows(report, "stale-temp-home")
+			require.NotEmpty(t, rows, "and the blindness must be reported, not rendered as a clean scan")
+			require.Equal(t, StatusFail, rows[0].Status,
+				"an unreadable surface is a FAIL, not a pass — the scan is UNKNOWN, not clean")
+		})
+	}
+}
+
+// The definitive "no server" answer is still an empty session set, so a genuinely
+// unreferenced home is still removed — the guard must not become a blanket stop.
+func TestDefinitiveNoTmuxServerStillAllowsRemoval(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.definitely-stale")
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+	_, err := Run(macLikeTempHomeOptions(t, tempRoot, true)) // Fix: true
+	require.NoError(t, err)
+	require.NoDirExists(t, dir,
+		"tmux's definitive no-server answer is an empty session set, not an unreadable one")
 }
