@@ -183,9 +183,10 @@ export class ConfigPane {
    *  imply an atomicity across keys that the writer does not offer. */
   private editing: string | null = null;
   private draft = "";
-  // The live input for `editing`, so a rebuild can hand focus and the caret back to
-  // the field the user is typing in (#2933). Null whenever no field is open.
+  // The live controls a rebuild replaces, so focus can be handed back to whichever of
+  // them had it (#2933). Null whenever that control is not currently rendered.
   private editingInput: HTMLInputElement | null = null;
+  private advancedToggle: HTMLElement | null = null;
 
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
@@ -212,35 +213,52 @@ export class ConfigPane {
       this.editing = null;
       this.draft = "";
     }
-    // A rebuild replaces the input the user may be typing in. The typed text already
-    // survives (render reads `draft`), but focus and the caret did not — and losing
-    // focus mid-edit is worse than it sounds: the app's document-level keys are gated
-    // on `isNativeControl(document.activeElement)` (index.ts), so with focus back on
-    // <body> the REST of what the user types stops being a value and starts being
-    // shortcuts — a "[" or "]" in a path would cycle the view out from under them.
-    //
-    // Restored only when the field genuinely HAD focus, so a rebuild never steals it
-    // from wherever the user actually is.
-    const focused = this.editingInput !== null && document.activeElement === this.editingInput;
-    const caret = focused ? this.editingInput?.selectionStart ?? null : null;
+    this.rerenderKeepingUserState();
+  }
+
+  /**
+   * Re-renders the pane without throwing away what the user was in the middle of.
+   *
+   * Every rebuild replaces the controls, which costs three things the render itself
+   * cannot recover: the reader's scroll offset, focus, and the caret. The typed text
+   * already survives (render reads `draft`); focus did not, and that is the one that
+   * bites hardest — the app's document-level keys are gated on
+   * `isNativeControl(document.activeElement)` (index.ts), so once focus falls back to
+   * <body> the REST of what the user types stops being a value and starts being
+   * shortcuts: a "[" or "]" in a path cycles the view out from under them mid-edit.
+   *
+   * Focus is handed back only to a control that genuinely HAD it, so a rebuild can
+   * never steal focus from wherever the user actually is. Both re-render paths go
+   * through here — the data update and the advanced-settings toggle — because a toggle
+   * that drops its own focus cannot be operated twice from the keyboard.
+   */
+  private rerenderKeepingUserState(): void {
+    const active = document.activeElement;
+    const wasEditing = this.editingInput !== null && active === this.editingInput;
+    // Both ends, not just the start: a rebuild landing while text is SELECTED would
+    // otherwise silently collapse the selection the user was about to overwrite.
+    const caretStart = wasEditing ? (this.editingInput?.selectionStart ?? null) : null;
+    const caretEnd = wasEditing ? (this.editingInput?.selectionEnd ?? null) : null;
+    const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
     // The config list is always the same list — one global manifest — so a rebuild
-    // never legitimately starts at the top (#2933). Keeping the place matters most
-    // right after a save, which is exactly when this fires.
+    // never legitimately starts at the top. Keeping the place matters most right after
+    // a save, which is exactly when this fires.
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
-    if (focused && this.editingInput) {
+    if (wasEditing && this.editingInput) {
       this.editingInput.focus();
-      if (caret !== null) {
-        // Put the caret back where it was rather than at the end: a re-render landing
-        // mid-word would otherwise jump the user to the end of their own value.
-        this.editingInput.setSelectionRange(caret, caret);
+      if (caretStart !== null) {
+        this.editingInput.setSelectionRange(caretStart, caretEnd ?? caretStart);
       }
+    } else if (wasToggle && this.advancedToggle) {
+      this.advancedToggle.focus();
     }
   }
 
   private render(): void {
-    // Dropped first: every rebuild replaces the controls, and a handle to the previous
-    // input would name a detached node for the rest of this render.
+    // Dropped first: every rebuild replaces the controls, and a handle to a previous
+    // one would name a detached node for the rest of this render.
     this.editingInput = null;
+    this.advancedToggle = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -280,8 +298,9 @@ export class ConfigPane {
         );
         toggle.addEventListener("click", () => {
           this.showAdvanced = !this.showAdvanced;
-          this.render();
+          this.rerenderKeepingUserState();
         });
+        this.advancedToggle = toggle;
         heading.append(toggle);
       }
       sections.push(heading);
