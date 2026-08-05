@@ -402,6 +402,12 @@ func daemonHomeEnv(pid int) (string, bool) {
 // daemon while the first leaks forever. That is strictly worse than the stale
 // socket this function exists to clear, so "a daemon answered" is a reason to
 // stop, not a race to win.
+// ErrLiveEditorSocket reports that a socket still has a running editor behind it, so
+// it was left in place. It is a sentinel because the CALLER's response has to differ
+// from an ordinary socket error: a live editor is a precondition failure for a
+// destructive wipe, not litter to mention in passing. See the abort in commands/reset.
+var ErrLiveEditorSocket = errors.New("a running editor is still serving this socket; stop it first")
+
 func RemoveRuntimeSockets(dir string) ([]string, error) {
 	if err := pingDaemon(); err == nil {
 		return nil, errors.New("a daemon is still answering on the control socket; " +
@@ -430,16 +436,31 @@ func RemoveRuntimeSockets(dir string) ([]string, error) {
 	// Editor sockets are swept with the daemon's OWN recognizer rather than a
 	// "*.sock" glob: an operator can point AGENT_FACTORY_HOME at a directory
 	// already in use, and reset must not delete a file it did not mint. See
-	// isAbandonedVSCodeSocket for why name AND socket-ness are both checked.
+	// isVSCodeSocketFile for why name AND socket-ness are both checked.
+	//
+	// And each one must be proven DEAD first (#2961). The daemon check above is not
+	// sufficient cover for these: editors are started with Setpgid, so they do not
+	// receive the daemon's SIGHUP and routinely outlive it — "no daemon is answering"
+	// says nothing about whether an editor still is. Unlinking a live editor's socket
+	// is the #767 failure this function already refuses for the daemon's own socket,
+	// one level down: the editor keeps serving an inode with no name, and every pane
+	// on it 502s while the process lingers.
 	sockDir := filepath.Join(dir, vscodeSocketDirName)
 	entries, err := os.ReadDir(sockDir)
 	if err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("read %s: %w", sockDir, err))
 	}
 	for _, e := range entries {
-		if isAbandonedVSCodeSocket(sockDir, e) {
-			remove(filepath.Join(sockDir, e.Name()))
+		if !isVSCodeSocketFile(sockDir, e) {
+			continue
 		}
+		path := filepath.Join(sockDir, e.Name())
+		if !vscodeSocketAbandoned(path, processGroupAlive) {
+			errs = append(errs, fmt.Errorf("%w: %s (removing it would strand the editor and 502 its panes — #2961)",
+				ErrLiveEditorSocket, path))
+			continue
+		}
+		remove(path)
 	}
 
 	sort.Strings(removed)

@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -43,6 +45,12 @@ const vscodeSocketDirName = "vscode"
 // the full minted name and checks the file really is a socket
 // (vscodeSocketNamePattern, isAbandonedVSCodeSocket).
 const vscodeSocketExt = ".sock"
+
+// vscodeSocketProbeTimeout bounds the connect probe that proves a socket dead.
+// A unix connect to a listening peer completes in microseconds, so this is slack
+// for a loaded box rather than a wait anyone should notice; the sweep runs once and
+// over a handful of files. A timeout counts as LIVE, never as proof of death.
+const vscodeSocketProbeTimeout = 500 * time.Millisecond
 
 // vscodeSocketMode is the socket's file mode, passed to code-server's
 // --socket-mode and applied by startOne for flavors that have no mode flag. 0600:
@@ -264,7 +272,74 @@ var vscodeSocketNamePattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{8}\.sock
 //     than followed — the sweep can never delete through a link.
 //
 // A vanished entry (err from Info) is skipped: it is already gone.
-func isAbandonedVSCodeSocket(dir string, e os.DirEntry) bool {
+// socketIsAbandoned reports whether NOTHING is serving path, and requires positive
+// evidence of that before saying yes.
+//
+// Its bias is deliberately the opposite of stopPersistedOwner's, because the two
+// are protecting against opposite mistakes. Signalling a process demands strong
+// proof of identity — signal the wrong one and you kill a stranger's work. Deleting
+// a socket name demands only a hint of life to abstain: keeping a stale file costs
+// one inode, deleting a live one costs the user a running editor with no diagnostic
+// beyond a 502. So anything unreadable, ambiguous, or merely unexpected counts as
+// LIVE here.
+//
+// Two independent signals, either of which spares the file:
+//
+//  1. The owner record. If it names a process group still alive — or the probe
+//     cannot tell — an editor is or may be running. Only a record that is readable
+//     AND definitively dead falls through.
+//  2. The socket itself. This is the direct evidence, and it is what makes the
+//     answer robust where metadata is not: an owner file may be missing (an editor
+//     from an older af), truncated, or describe a recycled pid. Nothing can accept a
+//     connection unless a listener is really there.
+func (v *vscodeSupervisor) socketIsAbandoned(path string) bool {
+	return vscodeSocketAbandoned(path, v.processGroupAlive)
+}
+
+// vscodeSocketAbandoned is socketIsAbandoned without a supervisor, so the same
+// judgement is available to RemoveRuntimeSockets — which unlinks editor sockets
+// during a reset and has no supervisor to ask. groupAlive is the liveness probe
+// (the supervisor passes its test seam; other callers pass processGroupAlive).
+//
+// Shared deliberately rather than reimplemented: "is anything still serving this
+// socket" got a different answer in each place before, and the cheaper answer was
+// the wrong one in both.
+func vscodeSocketAbandoned(path string, groupAlive func(int) (bool, error)) bool {
+	if owner, err := readVSCodeOwner(vscodeOwnerPath(path)); err == nil {
+		alive, probeErr := groupAlive(owner.PID)
+		if probeErr != nil || alive {
+			return false
+		}
+	}
+	return !vscodeSocketAccepting(path)
+}
+
+// vscodeSocketAccepting reports whether a listener answers on path.
+//
+// Only "nothing is listening" proves death, so only ECONNREFUSED (and a path that
+// is already gone) return false. Every other outcome — a timeout, a full backlog,
+// EACCES, anything unclassified — returns TRUE, because none of them establishes
+// that the socket is dead and the cost of guessing wrong is a lost editor.
+//
+// The connection is closed immediately and sends nothing; an editor treats it as a
+// client that hung up before making a request.
+func vscodeSocketAccepting(path string) bool {
+	conn, err := net.DialTimeout("unix", path, vscodeSocketProbeTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return true
+}
+
+// isVSCodeSocketFile reports whether a directory entry has the SHAPE of an editor
+// socket this daemon family creates. It is only the name/type filter — whether the
+// socket is abandoned is socketIsAbandoned's question, and keeping the two apart is
+// what stopped the shape check from being read as a liveness check (#2961).
+func isVSCodeSocketFile(dir string, e os.DirEntry) bool {
 	if !vscodeSocketNamePattern.MatchString(e.Name()) {
 		return false
 	}
@@ -333,15 +408,31 @@ func vscodeSocketKeyPrefix(key string) string {
 // file per session, for the life of the af home. This is the counterpart of that
 // choice, not an extra.
 //
-// It runs once, on the first spawn rather than at construction, and that timing
-// is what makes it safe: a supervisor that has never spawned owns no editors, so
-// every socket in the directory is by definition abandoned. (Waiting for a spawn
-// also means a daemon that never opens an editor neither creates the directory
-// nor touches anything.) The singleton lock guarantees no other daemon owns this
-// af home meanwhile.
+// It runs once, on the first spawn rather than at construction. That timing keeps
+// a daemon which never opens an editor from creating the directory or touching
+// anything, and the singleton lock guarantees no other daemon owns this af home
+// meanwhile.
+//
+// WHAT IT MUST NOT INFER (#2961). This used to reason that "a supervisor that has
+// never spawned owns no editors, so every socket in the directory is by definition
+// abandoned". The first clause is true and the second does not follow: editors are
+// started with Setpgid, so they do NOT get the daemon's SIGHUP and keep running
+// when it dies or is upgraded. Their sockets are therefore not this supervisor's
+// and not abandoned either — they are LIVE editors belonging to a previous daemon.
+// Unlinking a unix socket while a process listens on it does not stop the process;
+// it only removes the name, so the editor keeps running, unreachable, and every
+// pane on it 502s. On a box that restarts its daemon on each upgrade, that is a
+// working editor lost per restart.
+//
+// So abandonment is now PROVEN per socket rather than inferred from the restart
+// (socketIsAbandoned): a live owner record, or anything still accepting on the
+// path, keeps the file. Live orphans are left to the owner-record reap
+// (stopPersistedOwner), which stops the PROCESS with the four identity proofs a
+// signal requires — a sweep that deletes names was never the mechanism for that.
 //
 // Best-effort throughout: a failed sweep costs litter, never correctness, and
-// must not stop an editor from starting.
+// must not stop an editor from starting. That asymmetry sets the bias — every
+// uncertain answer below keeps the socket.
 func (v *vscodeSupervisor) sweepAbandonedSockets() {
 	v.sweepOnce.Do(func() {
 		dir, err := vscodeSocketDir()
@@ -355,10 +446,13 @@ func (v *vscodeSupervisor) sweepAbandonedSockets() {
 			return
 		}
 		for _, e := range entries {
-			if !isAbandonedVSCodeSocket(dir, e) {
+			if !isVSCodeSocketFile(dir, e) {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())
+			if !v.socketIsAbandoned(path) {
+				continue
+			}
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				log.WarningLog.Printf("vscode: removing the abandoned socket %s failed: %v", path, err)
 			}

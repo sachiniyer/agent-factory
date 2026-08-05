@@ -322,6 +322,16 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 	//     unlinking a LIVE daemon's socket is the #767 failure, which the assert
 	//     above has just ruled out.
 	switch removed, sockErr := removeRuntimeSocketFn(plan.configDir); {
+	case errors.Is(sockErr, daemon.ErrLiveEditorSocket):
+		// ABORT, on the same rule step 5 states for an unreadable session set (#2870):
+		// a precondition for a safe wipe is unmet, and a warning is no safeguard once
+		// the worktree is gone. A live editor holds a running process over a worktree
+		// this reset is about to delete, so continuing would destroy the state while
+		// the editor kept running against it — and the message would have said "stop
+		// it first" while the reset did the opposite. Nothing destructive has run yet,
+		// so the abort costs the user one command.
+		err = fmt.Errorf("refusing to reset: %w", sockErr)
+		return err
 	case sockErr != nil:
 		fmt.Fprintf(out, "Could not remove the daemon sockets (%v).\n", sockErr)
 	case len(removed) > 0:
