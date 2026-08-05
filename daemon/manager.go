@@ -238,8 +238,10 @@ type Manager struct {
 	// reuses the title must not inherit them (#2868).
 	lostRestoreStates map[string]*lostRestoreState
 	// limitResumeStates tracks per-session retry state for the usage-limit
-	// auto-resume scheduler (#1146 PR3), keyed by daemon instance key — the
-	// opt-in sibling of lostRestoreStates. Guarded by m.mu.
+	// auto-resume scheduler (#1146 PR3) — the opt-in sibling of lostRestoreStates,
+	// and keyed the same way for the same reason: by stableSessionKey (the stable
+	// instance ID), so a session that merely reuses a title cannot inherit the
+	// backoff gate a discarded predecessor armed (#2876). Guarded by m.mu.
 	limitResumeStates map[string]*limitResumeState
 	// handoffRetryDue throttles recovery of rendered takeover missions
 	// that survived a daemon restart before delivery was confirmed. Keyed by

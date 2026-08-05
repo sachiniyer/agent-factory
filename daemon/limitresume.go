@@ -44,9 +44,21 @@ var (
 	limitResumeBackoffMax  = 5 * time.Minute
 )
 
-// limitResumeState is the per-session auto-resume retry state, keyed by daemon
-// instance key and guarded by Manager.mu (the loop runs on the poll goroutine;
-// tests drive ResumeLimitedSessions directly). parkedAt anchors the
+// limitResumeState is the per-session auto-resume retry state, keyed by
+// stableSessionKey — the stable instance id, NOT the repo/title daemon key
+// (#2876) — and guarded by Manager.mu (the loop runs on the poll goroutine;
+// tests drive ResumeLimitedSessions directly).
+//
+// Every field below describes ONE runtime: when THIS session was first seen
+// parked, how many times IT has been resumed, when ITS next attempt is allowed.
+// A title is a slot that outlives its occupant, so filing the episode under one
+// handed it to the next session to take that name — and here that is worse than
+// an inflated counter, because nextAttempt is a GATE. A successor moving into a
+// title whose predecessor was mid-backoff was not resumed at all until the
+// discarded session's backoff expired, with nothing logged. Same rule and same
+// reason as lostRestoreState (#2868); see stableSessionKey.
+//
+// parkedAt anchors the
 // no-parseable-reset-time fallback interval (the first tick the session was seen
 // parked); nextAttempt is the backoff gate that ALSO survives the brief non-limit
 // window between resumeFromLimit clearing the limit and the next poll re-detecting
@@ -82,9 +94,21 @@ func (m *Manager) ResumeLimitedSessions() {
 	now := nowFunc()
 	m.mu.Lock()
 	entries := make([]entry, 0, len(m.instances))
+	// live is the set of stable identities whose episode still describes a
+	// resumable runtime. Built here rather than indexing m.instances directly
+	// because the state is keyed by stable id, not by the repo/title map key
+	// (#2876) — and because presence in that map is not the same question: an
+	// ARCHIVED or never-started row is still in it under the same id while being
+	// permanently ineligible for resume (resumeLimitedSession requires started +
+	// LiveLimitReached), so its episode describes something that will never run
+	// again. Same rule as RestoreLostSessions and sweepRemoteLossStates.
+	live := make(map[string]struct{}, len(m.instances))
 	for key, inst := range m.instances {
 		repoID, _ := splitDaemonInstanceKey(key)
 		entries = append(entries, entry{key: key, repoID: repoID, instance: inst})
+		if inst.Started() && inst.GetLiveness() != session.LiveArchived {
+			live[stableSessionKey(repoID, inst)] = struct{}{}
+		}
 	}
 	// Drop retry state for sessions that are gone, or that have stayed OUT of
 	// LimitReached past their backoff window (a resume that stuck — the episode
@@ -93,17 +117,25 @@ func (m *Manager) ResumeLimitedSessions() {
 	// resumeFromLimit clearing the limit and the next poll re-detecting the
 	// banner, and keeping the state there is what throttles an immediate
 	// re-limit instead of restarting it at attempt zero.
+	//
+	// That retention is exactly why the identity keying below is load-bearing
+	// rather than tidy (#2876). "Inside its backoff window" is the one state this
+	// sweep will not clear, so a title freed mid-backoff — the common case, since
+	// a user kills a session precisely when its agent is stuck at a wall — handed
+	// the next session to take that name a gate it could not see or clear.
 	for key, inst := range m.instances {
-		st := m.limitResumeStates[key]
+		repoID, _ := splitDaemonInstanceKey(key)
+		stateKey := stableSessionKey(repoID, inst)
+		st := m.limitResumeStates[stateKey]
 		if st == nil {
 			continue
 		}
 		if inst.GetLiveness() != session.LiveLimitReached && !now.Before(st.nextAttempt) {
-			delete(m.limitResumeStates, key)
+			delete(m.limitResumeStates, stateKey)
 		}
 	}
 	for key := range m.limitResumeStates {
-		if _, live := m.instances[key]; !live {
+		if _, ok := live[key]; !ok {
 			delete(m.limitResumeStates, key)
 		}
 	}
@@ -131,7 +163,12 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		return
 	}
 
+	// Two keys, deliberately, exactly as restoreLostSession carries them. `key`
+	// (repo/title) addresses the SLOT — killsInFlight, the per-session op lock, the
+	// m.instances re-read below. stateKey addresses this SESSION's stable identity,
+	// which is what a resume episode is about (#2876).
 	now := nowFunc()
+	stateKey := stableSessionKey(repoID, inst)
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()
@@ -145,10 +182,10 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		m.mu.Unlock()
 		return
 	}
-	st := m.limitResumeStates[key]
+	st := m.limitResumeStates[stateKey]
 	if st == nil {
 		st = &limitResumeState{parkedAt: now}
-		m.limitResumeStates[key] = st
+		m.limitResumeStates[stateKey] = st
 	}
 	// due = when this session first becomes eligible. With a parsed reset time it
 	// is reset + grace (a reset already in the past yields a due in the past →
