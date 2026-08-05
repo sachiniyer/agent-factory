@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -169,14 +171,37 @@ func AssertNoLiveDaemon(configDir string) error {
 	if err != nil {
 		return err
 	}
+	// Both branches carry the command that clears the refusal, not just the PIDs
+	// in the way (#2917). By the time reset reaches this assert it has ALREADY
+	// run StopDaemon and StopOrphanDaemons, so both automated attempts have
+	// failed and "run af reset again" is not the answer — nor is `af daemon
+	// restart`, the closest-sounding subcommand, which would start a fresh
+	// daemon into the home being wiped. Killing these PIDs is the answer, and
+	// the error has everything it needs to say so.
+	//
+	// Through shellsuggest because the suggestion is printed for a human to
+	// paste (#1978), and so both lines stay one spelling of the same advice.
 	if len(ours) > 0 {
-		return fmt.Errorf("af daemon(s) still running for this AF home: %s", formatPIDList(ours))
+		return fmt.Errorf("af daemon(s) still running for this AF home: %s; stop them and re-run — %s",
+			formatPIDList(ours), shellsuggest.Command("kill", pidArgs(ours)...))
 	}
 	if len(unverified) > 0 {
 		return fmt.Errorf("af daemon process(es) whose AF home could not be verified are still running: %s; "+
-			"if one of these serves this AF home, stop it before resetting", formatPIDList(unverified))
+			"if one of these serves this AF home, stop it before resetting — %s",
+			formatPIDList(unverified), shellsuggest.Command("kill", pidArgs(unverified)...))
 	}
 	return nil
+}
+
+// pidArgs renders PIDs as command arguments for a suggested `kill`. Separate
+// from formatPIDList, which renders them as prose ("41234, 41255") — a comma is
+// fine in a sentence and wrong in an argv.
+func pidArgs(pids []int) []string {
+	args := make([]string, len(pids))
+	for i, p := range pids {
+		args[i] = strconv.Itoa(p)
+	}
+	return args
 }
 
 // daemonScope is the outcome of deciding whether a scanned PID is a daemon this

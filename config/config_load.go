@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -192,7 +193,17 @@ func availableBackupPath(base string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("%s and %s.1..999 all exist; refusing to overwrite any backup", base, base)
+	// Name the remedy, not just the obstruction (#2917). This refuses a write the
+	// user asked for, and it keeps refusing every subsequent one, so an error that
+	// only lists the files in the way leaves them stuck. The remedy is safe and
+	// worth stating outright: these are backups of a file that still exists, not
+	// state, so deleting the old ones loses nothing the current config does not
+	// already hold.
+	return "", fmt.Errorf("every backup slot is taken: %s and %s.1..999 all exist, so this write "+
+		"would have to overwrite one; delete or move the old backups in %s and retry — they are "+
+		"backups of %s, which is still present, so removing them loses nothing",
+		filepath.Base(base), filepath.Base(base), filepath.Dir(base),
+		strings.TrimSuffix(filepath.Base(base), ".bak"))
 }
 
 // GlobalConfigPath returns the path of the global config file that LoadConfig
