@@ -250,17 +250,34 @@ export class AttachTerminal {
       this.startTouchLongPress();
     }
   };
-  private readonly onTouchEnd = (event: TouchEvent): void => {
+  private readonly onTouchEnd = (): void => {
     this.cancelTouchLongPress();
     const pending = this.touchCopyPending;
     this.touchCopyPending = null;
-    if (pending === null || event.type !== "touchend") {
-      return; // a cancelled gesture copies nothing
+    if (pending === null) {
+      return;
     }
-    // The write runs HERE, inside the trusted lift, not in the timer that selected
-    // the text: Safari grants clipboard access only to a user-gesture task, so a
-    // write from the timeout is refused on the one platform this gesture exists for.
+    // The write runs HERE, at the end of the touch rather than in the timer that
+    // selected the text: Safari grants clipboard access only to a user-gesture task,
+    // so a write from the timeout is refused on the one platform this gesture exists
+    // for.
+    //
+    // A CANCEL counts as an end. The browser ends the sequence itself the moment it
+    // recognises a long press — it is about to offer its own context menu — so
+    // treating a cancel as "copied nothing" throws the result away at exactly the
+    // moment the gesture succeeded, with the selection already painted under the
+    // finger. Observed: the selection appeared, no failure toast, and the clipboard
+    // stayed untouched, which is that discard and nothing else.
     this.copyToClipboard(pending);
+  };
+  // …and the menu that cancellation was announcing is not wanted either: it would
+  // cover the selection with an OS menu whose Copy acts on a DOM selection xterm
+  // never makes (#2849). Suppressed ONLY for a press af has already acted on, so a
+  // desktop right-click keeps the browser's menu.
+  private readonly onContextMenu = (event: MouseEvent): void => {
+    if (this.touchCopyFired) {
+      event.preventDefault();
+    }
   };
   private readonly onTouchMove = (event: TouchEvent): void => {
     this.handleUserScroll("touch");
@@ -549,6 +566,7 @@ export class AttachTerminal {
     // A finger lifted or a gesture the system took over both end the press.
     container.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
     container.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
+    container.addEventListener("contextmenu", this.onContextMenu);
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
     // Bubbles from xterm's focused helper textarea, so this one listener catches
@@ -587,6 +605,7 @@ export class AttachTerminal {
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("touchend", this.onTouchEnd, true);
     this.container.removeEventListener("touchcancel", this.onTouchEnd, true);
+    this.container.removeEventListener("contextmenu", this.onContextMenu);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);

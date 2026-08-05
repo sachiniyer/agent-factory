@@ -7325,6 +7325,7 @@ var AttachTerminal = class {
     container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
     container.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
     container.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
+    container.addEventListener("contextmenu", this.onContextMenu);
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
     container.addEventListener("copy", this.onCopy);
@@ -7457,14 +7458,23 @@ var AttachTerminal = class {
       this.startTouchLongPress();
     }
   };
-  onTouchEnd = (event) => {
+  onTouchEnd = () => {
     this.cancelTouchLongPress();
     const pending = this.touchCopyPending;
     this.touchCopyPending = null;
-    if (pending === null || event.type !== "touchend") {
+    if (pending === null) {
       return;
     }
     this.copyToClipboard(pending);
+  };
+  // …and the menu that cancellation was announcing is not wanted either: it would
+  // cover the selection with an OS menu whose Copy acts on a DOM selection xterm
+  // never makes (#2849). Suppressed ONLY for a press af has already acted on, so a
+  // desktop right-click keeps the browser's menu.
+  onContextMenu = (event) => {
+    if (this.touchCopyFired) {
+      event.preventDefault();
+    }
   };
   onTouchMove = (event) => {
     this.handleUserScroll("touch");
@@ -7615,6 +7625,7 @@ var AttachTerminal = class {
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("touchend", this.onTouchEnd, true);
     this.container.removeEventListener("touchcancel", this.onTouchEnd, true);
+    this.container.removeEventListener("contextmenu", this.onContextMenu);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
