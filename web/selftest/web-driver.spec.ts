@@ -2402,7 +2402,19 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
 
     await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
     inputPayloads.length = 0;
+    // Record what the browser actually DELIVERS for a long press. Which events arrive,
+    // and in what order, is the whole mechanism here — a copy wired to an event the
+    // browser never sends looks identical from the outside to one that is never wired
+    // at all, and both read as "the clipboard is untouched".
+    await p.evaluate(() => {
+      const w = window as unknown as { __afTouchLog: string[] };
+      w.__afTouchLog = [];
+      for (const type of ["touchstart", "touchmove", "touchend", "touchcancel", "contextmenu", "mousedown", "pointercancel"]) {
+        document.addEventListener(type, () => w.__afTouchLog.push(`${type}@${Math.round(performance.now())}`), true);
+      }
+    });
     await touchLongPress(cdp, x + 2, pressY);
+    const delivered = await p.evaluate(() => (window as unknown as { __afTouchLog: string[] }).__afTouchLog.join(" "));
 
     // Staged, so a red here says WHICH half broke. A selection proves the press was
     // recognised and resolved to a cell; the failure toast proves the copy ran and
@@ -2417,7 +2429,7 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // THE assertion: a finger, no keyboard, and the token is on the system clipboard.
     await expect
       .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
-        message: "a long press must put the token under the finger on the system clipboard",
+        message: `a long press must put the token under the finger on the system clipboard [delivered: ${delivered}]`,
       })
       .toContain(TOKEN);
     // …the TOKEN, not its line. That is the difference between copying what the
