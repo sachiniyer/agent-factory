@@ -154,11 +154,16 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// worktree and recreated the branch, flipping branchCreatedByUs — the flag
 	// that authorizes deleting it later. No poll rewrites it (the row is already
 	// LiveRunning, so persistPollChange sees no change), so a lost write reverts
-	// the flag on the next start and the branch is orphaned for good. This path
-	// HAS a caller, so it reports; the retry set covers the restart window.
-	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-		log.WarningLog.Printf("restored session %q: %v", title, perr)
-	}
+	// the flag on the next start and the branch is orphaned for good.
+	//
+	// Unlike the automatic loop, this path HAS a caller, so the failure is
+	// RETURNED rather than logged. The retry set is a backstop, not a reason to
+	// stay quiet: it only helps if the daemon lives long enough to drain it, and
+	// the user is the one who can free the disk. The session really is restored,
+	// so the message has to say both things — arming the confirm-alive gate below
+	// first, because the runtime is live either way and the restore-state
+	// bookkeeping must not depend on whether the write landed.
+	settleErr := m.persistSettlement(repoID, key, instance)
 	// A manual restore is the same lifecycle event as an automatic one; only the
 	// trigger differs (#1794) — so it must arm the SAME confirm-alive gate #1923 put
 	// on the auto path, NOT clear the retry state on spawn success. The unconditional
@@ -168,5 +173,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// clears the state once a poll observes the runtime alive, and the auto loop charges
 	// an immediate re-loss against the same episode.
 	m.armRestoreConfirmation(repoID, instance)
+	if settleErr != nil {
+		return instance.GetWorktreePath(), fmt.Errorf(
+			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",
+			title, settleErr)
+	}
 	return instance.GetWorktreePath(), nil
 }

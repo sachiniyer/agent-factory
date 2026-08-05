@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -93,8 +94,15 @@ func TestRestoreLostOrDeadSession_SettlementPersistFailureIsRetried(t *testing.T
 	diskFull := errors.New("no space left on device")
 	injected := failRecoverySettlement(t, "manual", diskFull)
 
-	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual", RepoID: repoID}); err != nil {
-		t.Fatalf("RestoreSession: %v", err)
+	// The caller is told, unlike the automatic loop which has nobody to tell: the
+	// retry set only helps if the daemon lives long enough to drain it, and the
+	// user is the one who can free the disk.
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual", RepoID: repoID})
+	if err == nil || !errors.Is(err, diskFull) {
+		t.Fatalf("RestoreSession error = %v, want the settlement write failure surfaced (%v)", err, diskFull)
+	}
+	if !strings.Contains(err.Error(), "agent is running") {
+		t.Fatalf("error must say the session IS restored, not just that a write failed: %v", err)
 	}
 	if !injected() {
 		t.Fatal("no recovery settlement write was ever attempted, so this test exercised nothing")
