@@ -48,8 +48,48 @@ func TestExhaustedBackupSlotsSayWhatToDo(t *testing.T) {
 			"a guard that blocks a write and names no remedy leaves them stuck (#2917)", err)
 	}
 	// The backups are the remedy's target, so the message must say they are
-	// backups and disposable; "config.toml.bak.1..999 all exist" does not.
+	// backups; "config.toml.bak.1..999 all exist" does not.
 	if !strings.Contains(strings.ToLower(err.Error()), "backup") {
 		t.Errorf("error = %q, want it to identify these files as backups", err)
+	}
+
+	// But it must NOT promise they are safe to delete (Codex on #2941). This
+	// helper is SHARED: writeSchemaMigrationBackup passes `<store>.bak.schema-v<N>`,
+	// whose files are the pre-migration rollback copies for that store, and the
+	// helper cannot tell its callers apart. A blanket reassurance here would talk
+	// a user into deleting their only way back from a schema migration.
+	for _, unsafe := range []string{"loses nothing", "safe to remove", "safe to delete"} {
+		if strings.Contains(strings.ToLower(err.Error()), unsafe) {
+			t.Errorf("error = %q claims removal is harmless (%q), but this helper also serves "+
+				"writeSchemaMigrationBackup, whose backups are the only pre-migration rollback data", err, unsafe)
+		}
+	}
+}
+
+// TestSchemaMigrationBackupsAreNotCalledDisposable pins the caller that makes the
+// reassurance dangerous, so the shared helper's wording stays true for BOTH: this
+// base is the shape writeSchemaMigrationBackup passes.
+func TestSchemaMigrationBackupsAreNotCalledDisposable(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "instances.json.bak.schema-v0")
+	if err := os.WriteFile(base, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < 1000; i++ {
+		if err := os.WriteFile(fmt.Sprintf("%s.%d", base, i), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := availableBackupPath(base)
+	if err == nil {
+		t.Fatal("availableBackupPath returned a path with every slot taken")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "loses nothing") {
+		t.Errorf("error = %q tells the user that deleting pre-migration rollback copies loses nothing", err)
+	}
+	// It must still be actionable — the point is accurate advice, not no advice.
+	if !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "delete") {
+		t.Errorf("error = %q, want it to name the directory and an action", err)
 	}
 }

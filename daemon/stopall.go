@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -171,37 +172,62 @@ func AssertNoLiveDaemon(configDir string) error {
 	if err != nil {
 		return err
 	}
-	// Both branches carry the command that clears the refusal, not just the PIDs
-	// in the way (#2917). By the time reset reaches this assert it has ALREADY
-	// run StopDaemon and StopOrphanDaemons, so both automated attempts have
-	// failed and "run af reset again" is not the answer — nor is `af daemon
-	// restart`, the closest-sounding subcommand, which would start a fresh
-	// daemon into the home being wiped. Killing these PIDs is the answer, and
-	// the error has everything it needs to say so.
-	//
-	// Through shellsuggest because the suggestion is printed for a human to
-	// paste (#1978), and so both lines stay one spelling of the same advice.
+	// Both branches name the command that clears the refusal rather than only the
+	// PIDs in the way (#2917) — but they are DIFFERENT commands, and that is the
+	// whole point of splitting them.
 	if len(ours) > 0 {
-		return fmt.Errorf("af daemon(s) still running for this AF home: %s; stop them and re-run — %s",
-			formatPIDList(ours), shellsuggest.Command("kill", pidArgs(ours)...))
+		return ownDaemonRefusal(ours)
 	}
 	if len(unverified) > 0 {
-		return fmt.Errorf("af daemon process(es) whose AF home could not be verified are still running: %s; "+
-			"if one of these serves this AF home, stop it before resetting — %s",
-			formatPIDList(unverified), shellsuggest.Command("kill", pidArgs(unverified)...))
+		return unverifiedDaemonRefusal(unverified)
 	}
 	return nil
 }
 
-// pidArgs renders PIDs as command arguments for a suggested `kill`. Separate
-// from formatPIDList, which renders them as prose ("41234, 41255") — a comma is
-// fine in a sentence and wrong in an argv.
+// pidArgs renders PIDs as command arguments. Separate from formatPIDList, which
+// renders them as prose ("41234, 41255") — a comma is fine in a sentence and
+// wrong in an argv.
 func pidArgs(pids []int) []string {
 	args := make([]string, len(pids))
 	for i, p := range pids {
 		args[i] = strconv.Itoa(p)
 	}
 	return args
+}
+
+// ownDaemonRefusal is the refusal for daemons PROVEN to be ours and serving this
+// home. It suggests a kill, and may, because the ownership question is settled.
+//
+// By the time reset reaches this assert it has ALREADY run StopDaemon and
+// StopOrphanDaemons, so both automated attempts have failed: "run af reset
+// again" is not the answer, and neither is `af daemon restart` — the
+// closest-sounding subcommand, which would start a fresh daemon into the home
+// being wiped. Through shellsuggest because it is printed for a human to paste
+// (#1978).
+func ownDaemonRefusal(pids []int) error {
+	return fmt.Errorf("af daemon(s) still running for this AF home: %s; stop them and re-run — %s",
+		formatPIDList(pids), shellsuggest.Command("kill", pidArgs(pids)...))
+}
+
+// unverifiedDaemonRefusal is the refusal for daemons whose AF home could NOT be
+// established. It suggests an INSPECTION, never a kill.
+//
+// StopOrphanDaemons deliberately refuses to signal these: "I could not tell"
+// must never resolve to "kill it", because the cost of guessing wrong is killing
+// a working daemon that serves another home or another user. A pasteable
+// `kill <every unverified pid>` would hand the user exactly the action reset
+// declined to take, laundering a safety refusal into a printed instruction —
+// the same defect one layer up, and worse for being pasteable (Codex on #2941).
+//
+// So the remedy here is the step that comes BEFORE a decision: show what these
+// processes are, so the user can identify the one serving this home and stop
+// that one. `-p a,b` is the spelling both procps and macOS accept.
+func unverifiedDaemonRefusal(pids []int) error {
+	return fmt.Errorf("af daemon process(es) whose AF home could not be verified are still running: %s; "+
+		"af did not stop them because it could not prove which home they serve, and killing the wrong one "+
+		"takes down another home's daemon — identify them with %s, then stop whichever serves this AF home "+
+		"and re-run", formatPIDList(pids),
+		shellsuggest.Command("ps", "-o", "pid,args", "-p", strings.Join(pidArgs(pids), ",")))
 }
 
 // daemonScope is the outcome of deciding whether a scanned PID is a daemon this

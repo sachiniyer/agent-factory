@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -194,16 +193,21 @@ func availableBackupPath(base string) (string, error) {
 		}
 	}
 	// Name the remedy, not just the obstruction (#2917). This refuses a write the
-	// user asked for, and it keeps refusing every subsequent one, so an error that
-	// only lists the files in the way leaves them stuck. The remedy is safe and
-	// worth stating outright: these are backups of a file that still exists, not
-	// state, so deleting the old ones loses nothing the current config does not
-	// already hold.
-	return "", fmt.Errorf("every backup slot is taken: %s and %s.1..999 all exist, so this write "+
-		"would have to overwrite one; delete or move the old backups in %s and retry — they are "+
-		"backups of %s, which is still present, so removing them loses nothing",
-		filepath.Base(base), filepath.Base(base), filepath.Dir(base),
-		strings.TrimSuffix(filepath.Base(base), ".bak"))
+	// user asked for and keeps refusing every subsequent one, so an error that
+	// only lists the files in the way leaves them stuck: say which directory
+	// holds them and that clearing some unblocks the write.
+	//
+	// What it must NOT say is that removing them is safe. This helper is shared:
+	// config conversion passes `<config>.bak`, but writeSchemaMigrationBackup
+	// passes `<store>.bak.schema-v<N>`, whose files are the PRE-MIGRATION
+	// rollback copies for that store. A blanket "removing them loses nothing"
+	// would talk a user into deleting their only way back from a schema
+	// migration, and the helper cannot tell the two callers apart (Codex on
+	// #2941). Actionable and true beats reassuring and wrong.
+	return "", fmt.Errorf("every backup slot is taken: %s and %s.1..999 all exist in %s, so this write "+
+		"would have to overwrite one; move or delete some of them — oldest first, after checking you do "+
+		"not still need them — and retry",
+		filepath.Base(base), filepath.Base(base), filepath.Dir(base))
 }
 
 // GlobalConfigPath returns the path of the global config file that LoadConfig

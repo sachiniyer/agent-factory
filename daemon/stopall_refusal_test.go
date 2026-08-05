@@ -38,3 +38,42 @@ func TestPIDArgsAreArgvNotProse(t *testing.T) {
 		t.Errorf("suggested command = %q, want %q", got, want)
 	}
 }
+
+// TestUnverifiedDaemonRefusalNeverSuggestsAKill locks the distinction between
+// the two refusals (Codex on #2941).
+//
+// StopOrphanDaemons deliberately does NOT signal a daemon whose AF home it could
+// not establish: "I could not tell" must never resolve to "kill it", because the
+// cost of guessing wrong is killing a working daemon serving another home or
+// another user. Printing a pasteable `kill <every unverified pid>` hands the
+// user exactly the action reset declined to take — laundering a safety refusal
+// into an instruction, and worse for being copy-pasteable.
+//
+// The proven-ours refusal may suggest a kill, because there the ownership
+// question is settled. That asymmetry is the point, so both halves are asserted.
+func TestUnverifiedDaemonRefusalNeverSuggestsAKill(t *testing.T) {
+	pids := []int{41234, 41255}
+
+	unverified := unverifiedDaemonRefusal(pids).Error()
+	if strings.Contains(unverified, "kill") {
+		t.Errorf("the unverified-daemon refusal suggests a kill: %q\n"+
+			"reset refused to signal these precisely because it could not prove whose they are; "+
+			"telling the user to kill them all undoes that safety decision", unverified)
+	}
+	if !strings.Contains(unverified, "ps ") {
+		t.Errorf("refusal = %q, want an inspection command so the user can identify which daemon "+
+			"serves this home before stopping anything", unverified)
+	}
+	for _, pid := range []string{"41234", "41255"} {
+		if !strings.Contains(unverified, pid) {
+			t.Errorf("refusal = %q, want it to name pid %s", unverified, pid)
+		}
+	}
+
+	// The other half: ownership settled, so a kill is the right remedy.
+	own := ownDaemonRefusal(pids).Error()
+	if !strings.Contains(own, "kill 41234 41255") {
+		t.Errorf("refusal for PROVEN-ours daemons = %q, want a pasteable `kill 41234 41255` — "+
+			"reset has already tried and failed to stop them itself", own)
+	}
+}
