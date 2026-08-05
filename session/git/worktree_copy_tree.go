@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 
+	"time"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -261,6 +263,15 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			// is free: a read-only source directory takes its mode now rather
 			// than blocking its own contents (#2872).
 			err = applyCopiedDirectoryMode(
+				sourceDirectory, destinationDirectory, directoryRoutePath(destinationPath, components),
+			)
+		}
+		if err == nil {
+			// The same seam, for the same reason: creating an entry inside a
+			// directory updates that directory's mtime, and this level has just
+			// stopped gaining entries. Descendants are filled through their own
+			// descriptors, which does not touch this one.
+			err = preserveCopiedDirectoryModTime(
 				sourceDirectory, destinationDirectory, directoryRoutePath(destinationPath, components),
 			)
 		}
@@ -543,6 +554,50 @@ func isAllZero(chunk []byte) bool {
 // Setuid, setgid and sticky bits sit outside Perm() and are not carried over,
 // which is the behavior this copier has always had. Symlinks are skipped
 // entirely: Linux ignores their mode bits and offers no fchmod for them.
+// preserveSourceModTime stamps a destination node with its source's mtime.
+//
+// The copy creates every node fresh, so without this a restored tree looks newer
+// than the outputs built from it: the next build redoes everything, and git
+// re-hashes files whose stat data it could otherwise have trusted.
+//
+// Anchored at a directory descriptor plus a name rather than at the node's own
+// descriptor. The descriptor-anchored spelling needs AT_EMPTY_PATH, which is
+// Linux-only and would force a build-tag split; utimensat(dirfd, name) is POSIX
+// and reaches nanosecond precision on both platforms. A directory passes its own
+// descriptor with ".", which names the directory itself.
+//
+// atime is left alone with UTIME_OMIT rather than copied. Reading a file updates
+// it, so it is not a property the two paths could agree on anyway, and asking for
+// the source's value means reaching into Stat_t fields spelled differently per
+// platform — the split this spelling exists to avoid.
+func preserveSourceModTime(dirFD int, name string, modTime time.Time, destinationPath, kind string) error {
+	times := []unix.Timespec{
+		{Nsec: unix.UTIME_OMIT},
+		unix.NsecToTimespec(modTime.UnixNano()),
+	}
+	if err := unix.UtimesNanoAt(dirFD, name, times, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to preserve %s modification time for %s: %w",
+			kind, destinationPath, err,
+		)
+	}
+	return nil
+}
+
+// preserveCopiedDirectoryModTime stamps a finished destination directory with its
+// source's mtime. "." names the directory the descriptor already refers to, so
+// this needs neither the parent nor AT_EMPTY_PATH.
+func preserveCopiedDirectoryModTime(source, destination *os.File, destinationPath string) error {
+	sourceInfo, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to read source modification time for %s: %w",
+			destinationPath, err,
+		)
+	}
+	return preserveSourceModTime(int(destination.Fd()), ".", sourceInfo.ModTime(), destinationPath, "directory")
+}
+
 func preserveSourceMode(destinationFD int, sourceMode os.FileMode, destinationPath, kind string) error {
 	if err := unix.Fchmod(destinationFD, uint32(sourceMode.Perm())); err != nil {
 		return fmt.Errorf(
@@ -642,6 +697,14 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// After the contents too: copyContentsPreservingHoles ftruncates to reproduce
+	// holes, and that write is itself an mtime update.
+	if err := preserveSourceModTime(
+		int(destination.Fd()), name, info.ModTime(), destinationPath, "file",
+	); err != nil {
 		_ = out.Close()
 		return created, err
 	}
