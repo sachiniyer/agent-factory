@@ -217,6 +217,13 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	if tsk.LastRunAt != nil {
 		parts = append(parts, "last "+tsk.LastRunAt.Format("Jan 02 15:04"))
 	}
+	// An errored task says so even with no LastRunAt. A task refused at arming
+	// has never run, so gating this on a timestamp would hide the one thing it
+	// has to report — and an unarmed task is exactly the one that looks healthy
+	// otherwise (#2929).
+	if strings.HasPrefix(tsk.LastRunStatus, "errored:") {
+		parts = append(parts, "errored")
+	}
 	return strings.Join(parts, " · ")
 }
 

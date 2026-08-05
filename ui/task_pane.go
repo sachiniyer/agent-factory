@@ -578,9 +578,13 @@ func (s *TaskPane) renderListMode() string {
 		}
 		b.WriteString("\n")
 
-		// A crash-looped watcher gets its full #797 failure summary on a
-		// detail line — the only always-on detail, and only when errored.
-		if tsk.IsWatch() && strings.HasPrefix(tsk.LastRunStatus, "errored:") {
+		// An errored task gets its full failure summary on a detail line — the
+		// only always-on detail, and only when errored. Originally watch-only for
+		// a crash-looped watcher's #797 summary; a cron task's failure is just as
+		// actionable, and an arming refusal (#2929) may be the ONLY thing a task
+		// ever reports, since a task that never armed never runs to write a
+		// status of its own.
+		if strings.HasPrefix(tsk.LastRunStatus, "errored:") {
 			b.WriteString(erroredStyle.Render(fitLine("      "+tsk.LastRunStatus, s.width)))
 			b.WriteString("\n")
 		}

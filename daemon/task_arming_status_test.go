@@ -139,3 +139,22 @@ func reloadArmingTask(t *testing.T, id string) task.Task {
 	require.NoError(t, err)
 	return *loaded
 }
+
+// The repair of DROPPING target_session turns a refused task into an ordinary
+// cron/watch task, and that path never reaches the target validation — so the
+// clear has to happen for everything that lands in the safe set, not only for
+// tasks that passed validation. Otherwise the fix leaves behind exactly the
+// stale status it exists to eliminate.
+func TestClearStaleNotArmedStatus_ClearsWhenTheTargetIsDropped(t *testing.T) {
+	withArmingTaskFile(t)
+	seeded := seedArmingTask(t, "repaired-task", notArmedStatus(errors.New("target was archived")))
+	require.Empty(t, seeded.TargetSession, "seeded without a target: the dropped-target repair shape")
+
+	m := &Manager{}
+	snapshot, err := m.persistedTasksForArming()
+	require.NoError(t, err)
+	require.Empty(t, snapshot.refused)
+
+	require.Empty(t, reloadArmingTask(t, "repaired-task").LastRunStatus,
+		"a task armed as an ordinary cron task must not keep claiming it is unarmed")
+}

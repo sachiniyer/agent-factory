@@ -33,16 +33,18 @@ func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
 	}
 	for _, candidate := range tasks {
 		target := task.CanonicalTargetSession(candidate.TargetSession)
-		if !candidate.Enabled || target == "" {
-			snapshot.safe = append(snapshot.safe, candidate)
-			continue
+		if candidate.Enabled && target != "" {
+			validation := m.prepareTaskTargetValidation(candidate.RepoID, target, true)
+			if err := m.validateEnabledTaskTarget(candidate, validation); err != nil {
+				snapshot.refused = append(snapshot.refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
+				m.recordArmingStatus(candidate, notArmedStatus(err))
+				continue
+			}
 		}
-		validation := m.prepareTaskTargetValidation(candidate.RepoID, target, true)
-		if err := m.validateEnabledTaskTarget(candidate, validation); err != nil {
-			snapshot.refused = append(snapshot.refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
-			m.recordArmingStatus(candidate, notArmedStatus(err))
-			continue
-		}
+		// Everything reaching here is armed, or deliberately not enabled. Either
+		// way a previous not-armed refusal no longer describes it — including the
+		// repair of DROPPING the target, which turns the task into an ordinary
+		// cron/watch task and never reaches the validation above.
 		m.clearStaleNotArmedStatus(candidate)
 		snapshot.safe = append(snapshot.safe, candidate)
 	}
