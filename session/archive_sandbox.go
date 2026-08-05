@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -166,6 +167,41 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RUnlock()
 	if backend == nil {
 		return fmt.Errorf("cannot re-provision session %q: no backend on record", i.Title)
+	}
+	// REFUSE rather than restore onto whatever the clone happens to check out
+	// (#2925/#2959). Both sandbox runtimes gate the restore fetch on a non-empty
+	// RestoreBranch (sandbox_provision.go, backend_docker.go), so an empty one does
+	// not fail — it silently skips the fetch and leaves the fresh sandbox on the
+	// repo's DEFAULT branch, which the restore then reports as a success. The
+	// session comes back Running, on main, with none of its work.
+	//
+	// A sandbox session's daemon-side Branch is written by exactly one thing: the
+	// archive, from the as.Archive() return. The in-sandbox provision that names the
+	// branch runs INSIDE the sandbox and never mutates this Instance. So a session
+	// that was never archived reaches here with "" — and that is precisely the Lost
+	// session the restore loop is trying to save.
+	//
+	// Refusing is not a lesser fix than deriving the name. The daemon COULD compute
+	// git.BranchForTitle(cfg.BranchPrefix, title) as the create path does for its
+	// held-branch check, but the sandbox derives its own branch through
+	// git.NewGitWorktree → config.LoadConfig(), which reads the SANDBOX's config: a
+	// different branch_prefix there yields a different branch, and restoring onto a
+	// confidently wrong branch is worse than refusing, because it looks like it
+	// worked. Making recovery SUCCEED here needs the sandbox to report its branch
+	// back (provision result or agent-server snapshot); until it does, the honest
+	// answer is that af cannot name the branch.
+	//
+	// Placed before reapRemoteRuntimeForReplacement below, so a refusal destroys
+	// nothing: the row stays Lost, killable, and eligible for a later attempt. The
+	// restore loop treats this as a failed attempt, so its existing exponential
+	// backoff and one-time ERROR escalation (#1108/#1128) carry the message without
+	// logging it every poll tick.
+	if strings.TrimSpace(spec.RestoreBranch) == "" {
+		return fmt.Errorf("cannot re-provision session %q: af has no record of the branch it was working on, "+
+			"so a replacement sandbox would come up on the repository's default branch and report that as a successful restore. "+
+			"A sandbox session's branch is recorded when it is archived, and this one never was. "+
+			"Its work is only on origin if something pushed it — look for a branch named after the session "+
+			"(`git ls-remote --heads origin` in %s) before removing the session", i.Title, i.Path)
 	}
 	kind, err := backendKindForType(backend.Type())
 	if err != nil {
