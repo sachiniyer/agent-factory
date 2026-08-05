@@ -7116,9 +7116,6 @@ function wrappedCellPosition(index, cols) {
   }
   return { col: index % cols, row: Math.floor(index / cols) };
 }
-function touchCancelCompletesPress(heldMs) {
-  return heldMs >= TOUCH_LONG_PRESS_MS * 0.6;
-}
 
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
@@ -7327,7 +7324,8 @@ var AttachTerminal = class {
     container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
     container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
     container.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
-    container.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
+    container.addEventListener("touchcancel", this.onTouchCancel, { capture: true, passive: true });
+    container.addEventListener("pointercancel", this.onTouchCancel, { capture: true, passive: true });
     container.addEventListener("contextmenu", this.onContextMenu);
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
@@ -7385,8 +7383,6 @@ var AttachTerminal = class {
   // what xterm gives you to survive that, and it is the mechanism the viewport
   // anchor above already uses.
   touchPressMarker = null;
-  // When the finger went down, so a cancellation can be told apart from a takeover.
-  touchPressAt = 0;
   // Text the press selected, waiting for the finger to lift. The clipboard write has
   // to happen in the touchend handler: Safari only honours it from a trusted
   // user-gesture task, and a setTimeout callback is not one.
@@ -7464,21 +7460,30 @@ var AttachTerminal = class {
     this.touchCopyPending = null;
     this.cancelTouchLongPress();
     this.disposeTouchPressMarker();
-    this.touchPressAt = Date.now();
     this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
     if (this.touchPressCell) {
       this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
       this.startTouchLongPress();
     }
   };
-  onTouchEnd = (event) => {
-    const awaitingRecognition = this.touchLongPressTimer !== null;
+  onTouchEnd = () => {
     this.cancelTouchLongPress();
-    if (event.type === "touchcancel" && awaitingRecognition && touchCancelCompletesPress(Date.now() - this.touchPressAt)) {
-      this.selectTouchWord();
-    }
     this.disposeTouchPressMarker();
     this.flushTouchCopy();
+  };
+  /**
+   * The browser taking the gesture away — and the ONLY signal it gives when it does.
+   *
+   * A press that turns into a scroll is not delivered as touchmove here: recording a
+   * real one gives `touchstart` then `pointercancel`, with no move in between, so a
+   * discard wired to movement never runs and the staged copy would land on the lift
+   * of a gesture the user finished as a scroll. A cancel is therefore a takeover, and
+   * a takeover drops both the copy and the selection that promised it.
+   */
+  onTouchCancel = () => {
+    this.cancelTouchLongPress();
+    this.disposeTouchPressMarker();
+    this.discardPendingTouchCopy();
   };
   /** Writes the text a recognised press staged, once, from whichever trusted event
    *  the browser actually delivered. */
@@ -7649,7 +7654,8 @@ var AttachTerminal = class {
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("touchend", this.onTouchEnd, true);
-    this.container.removeEventListener("touchcancel", this.onTouchEnd, true);
+    this.container.removeEventListener("touchcancel", this.onTouchCancel, true);
+    this.container.removeEventListener("pointercancel", this.onTouchCancel, true);
     this.container.removeEventListener("contextmenu", this.onContextMenu);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);

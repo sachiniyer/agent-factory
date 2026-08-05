@@ -12,7 +12,6 @@ import {
   TOUCH_LONG_PRESS_MS,
   TOUCH_SCROLL_SLOP_PX,
   touchHistoryScrollPlan,
-  touchCancelCompletesPress,
   touchPressStillHeld,
   touchScrollClaimsGesture,
   wordRangeAtColumn,
@@ -191,12 +190,3 @@ test("a token that soft-wraps is scanned across the rows it wraps onto (#2849)",
   assert.deepEqual(wrappedCellPosition(0, 0), { col: 0, row: 0 });
 });
 
-test("a late browser cancel IS the long press, an early one is not (#2940)", () => {
-  // After a cancel no touchend follows, so a copy deferred to the lift would wait
-  // for an event that never comes. A cancel late in the hold is the browser
-  // recognising the same gesture af is; an early one is a scroll or system takeover.
-  assert.equal(touchCancelCompletesPress(TOUCH_LONG_PRESS_MS), true);
-  assert.equal(touchCancelCompletesPress(TOUCH_LONG_PRESS_MS * 0.6), true);
-  assert.equal(touchCancelCompletesPress(TOUCH_LONG_PRESS_MS * 0.6 - 1), false);
-  assert.equal(touchCancelCompletesPress(0), false);
-});
