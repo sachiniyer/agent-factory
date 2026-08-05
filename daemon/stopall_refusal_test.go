@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -51,14 +52,26 @@ func TestPIDArgsAreArgvNotProse(t *testing.T) {
 //
 // The proven-ours refusal may suggest a kill, because there the ownership
 // question is settled. That asymmetry is the point, so both halves are asserted.
+// killCommand matches a kill aimed at a pid — `kill 41234`, `kill -9 41234` —
+// without matching the word "killing" in prose explaining why that is unsafe.
+var killCommand = regexp.MustCompile(`\bkill\b[^\n]{0,12}?\s\d`)
+
 func TestUnverifiedDaemonRefusalNeverSuggestsAKill(t *testing.T) {
 	pids := []int{41234, 41255}
 
 	unverified := unverifiedDaemonRefusal(pids).Error()
-	if strings.Contains(unverified, "kill") {
-		t.Errorf("the unverified-daemon refusal suggests a kill: %q\n"+
+	// Assert on the pasteable COMMAND, not the word. The message legitimately
+	// says "killing the wrong one takes down another home's daemon" — that
+	// sentence is the point of the refusal, and a bare Contains("kill") check
+	// flagged it. (It did: this test failed in CI on exactly that, which is what
+	// a daemon-package test that cannot be run on the dev host is for.)
+	if unsafe := shellsuggest.Command("kill", pidArgs(pids)...); strings.Contains(unverified, unsafe) {
+		t.Errorf("the unverified-daemon refusal contains the pasteable %q: %q\n"+
 			"reset refused to signal these precisely because it could not prove whose they are; "+
-			"telling the user to kill them all undoes that safety decision", unverified)
+			"handing the user a command to kill them all undoes that safety decision", unsafe, unverified)
+	}
+	if killCommand.MatchString(unverified) {
+		t.Errorf("the unverified-daemon refusal offers a kill aimed at a pid: %q", unverified)
 	}
 	if !strings.Contains(unverified, "ps ") {
 		t.Errorf("refusal = %q, want an inspection command so the user can identify which daemon "+
