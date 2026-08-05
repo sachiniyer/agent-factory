@@ -13265,8 +13265,12 @@ var AppShell = class {
       }
       if (press.held) {
         bar.classList.remove("af-tabbar-dragging");
+        document.body.classList.remove("af-dragging-tab");
         this.hideTabInsert();
         this.actions.clearPaneDropHint();
+      }
+      if (bar.hasPointerCapture(press.id)) {
+        bar.releasePointerCapture(press.id);
       }
       press = null;
     };
@@ -13277,6 +13281,7 @@ var AppShell = class {
       press.held = true;
       press.timer = null;
       bar.classList.add("af-tabbar-dragging");
+      document.body.classList.add("af-dragging-tab");
       this.showTabInsert(bar, press.x);
     };
     bar.addEventListener(
@@ -13303,8 +13308,13 @@ var AppShell = class {
           x: e.clientX,
           y: e.clientY,
           timer: window.setTimeout(pickUp, TAB_PRESS_LIMITS.holdMs),
-          held: false
+          held: false,
+          drag: { id: this.currentTabRealIds[index] ?? "", index, tabs: this.currentTabIds }
         };
+        try {
+          bar.setPointerCapture(e.pointerId);
+        } catch {
+        }
       },
       { passive: true }
     );
@@ -13330,15 +13340,18 @@ var AppShell = class {
         return;
       }
       const held = press.held;
-      const from = press.index;
+      const drag = press.drag;
       const x = e.clientX;
       const y = e.clientY;
       release();
       if (!held) {
         return;
       }
-      const drag = { id: this.currentTabRealIds[from] ?? "", index: from, tabs: this.currentTabIds };
       if (this.actions.dropTabOnPaneAt(x, y, drag)) {
+        return;
+      }
+      const r = bar.getBoundingClientRect();
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) {
         return;
       }
       const source = this.resolveBarDragPayload(drag);
@@ -13354,6 +13367,15 @@ var AppShell = class {
       }
       this.actions.reorderTab(source, to);
     });
+    bar.addEventListener(
+      "touchmove",
+      (e) => {
+        if (press?.held) {
+          e.preventDefault();
+        }
+      },
+      { passive: false }
+    );
     bar.addEventListener("pointercancel", release, { passive: true });
   }
   /** Owns inline rename on the stable bar rather than on an individual button.

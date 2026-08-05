@@ -2003,6 +2003,12 @@ export class AppShell {
       y: number;
       timer: number | null;
       held: boolean;
+      /** The drag payload, built at POINTERDOWN exactly as dragstart builds it. Built
+       *  here rather than at release because another client reordering or closing tabs
+       *  mid-drag moves what sits at the pick-up ordinal: reading the id at release
+       *  would name whichever tab now occupies that index and defeat the very
+       *  resolveDragTab guard the mouse path relies on (Codex P1 on #2901). */
+      drag: DragPayload;
     }
     let press: TabPress | null = null;
 
@@ -2015,8 +2021,12 @@ export class AppShell {
       }
       if (press.held) {
         bar.classList.remove("af-tabbar-dragging");
+        document.body.classList.remove("af-dragging-tab");
         this.hideTabInsert();
         this.actions.clearPaneDropHint();
+      }
+      if (bar.hasPointerCapture(press.id)) {
+        bar.releasePointerCapture(press.id);
       }
       press = null;
     };
@@ -2029,8 +2039,14 @@ export class AppShell {
       press.timer = null;
       // Suspend the bar's own scrolling for the life of the drag ONLY. Set now rather
       // than up front so a finger that turns out to be scrolling never meets a bar
-      // that will not scroll.
+      // that will not scroll. touch-action alone cannot stop a gesture already in
+      // flight, which is what the touchmove guard below is for.
       bar.classList.add("af-tabbar-dragging");
+      // The pane drop overlays are gated on this body flag (styles.css
+      // `.af-dragging-tab .af-drop-overlay.af-drop-show`), which only the MOUSE
+      // dragstart used to set — so a finger dragging onto a pane got no visible split
+      // target at all (Codex on #2901).
+      document.body.classList.add("af-dragging-tab");
       this.showTabInsert(bar, press.x);
     };
 
@@ -2060,7 +2076,17 @@ export class AppShell {
           y: e.clientY,
           timer: window.setTimeout(pickUp, TAB_PRESS_LIMITS.holdMs),
           held: false,
+          drag: { id: this.currentTabRealIds[index] ?? "", index, tabs: this.currentTabIds },
         };
+        // Capture on the STABLE bar, not on the tab button the browser would implicitly
+        // capture. A roster change mid-drag detaches that button, and the delegated
+        // listeners below would then stop receiving the gesture — stranding the drag
+        // and leaving the bar's scroll suppressed (Codex on #2901).
+        try {
+          bar.setPointerCapture(e.pointerId);
+        } catch {
+          // A pointer that has already ended cannot be captured; the press is harmless.
+        }
       },
       { passive: true },
     );
@@ -2091,19 +2117,23 @@ export class AppShell {
         return;
       }
       const held = press.held;
-      const from = press.index;
+      const drag = press.drag;
       const x = e.clientX;
       const y = e.clientY;
       release();
       if (!held) {
         return; // a tap: the button's own click handler owns it
       }
-      // The payload the mouse path stamps into the dataTransfer, built the same way —
-      // stable id plus the identity snapshot, so a tab closed or reordered by another
-      // client mid-drag cancels instead of moving whatever now sits at this index.
-      const drag: DragPayload = { id: this.currentTabRealIds[from] ?? "", index: from, tabs: this.currentTabIds };
       if (this.actions.dropTabOnPaneAt(x, y, drag)) {
         return; // landed in a pane: split or replaced
+      }
+      // Outside the bar is a CANCEL. The mouse path only reorders when the drop lands
+      // on the bar itself; feeding any other release point into the insertion math
+      // would let a release over the header — or empty space — silently move a tab
+      // (Codex on #2901).
+      const r = bar.getBoundingClientRect();
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) {
+        return;
       }
       // Re-resolve the tab by its STABLE id rather than trusting the index captured at
       // pointerdown. The bar rebuilds on every snapshot, so another client reordering
@@ -2124,6 +2154,22 @@ export class AppShell {
       }
       this.actions.reorderTab(source, to);
     });
+
+    // touch-action is latched when the gesture BEGINS, so adding a class at pick-up
+    // cannot stop the browser panning this finger — it would claim the drag for the
+    // bar's horizontal scroll and cancel the pointer, and the tab would never land
+    // (Codex on #2901). preventDefault on touchmove is the mechanism that does work,
+    // and it is safe to apply only while a tab is actually picked up: no scroll has
+    // begun yet, because the pick-up required the finger to stay still.
+    bar.addEventListener(
+      "touchmove",
+      (e: TouchEvent) => {
+        if (press?.held) {
+          e.preventDefault();
+        }
+      },
+      { passive: false },
+    );
 
     // pointercancel only — NOT pointerleave. A touch pointer is implicitly captured by
     // the element that took the pointerdown, so a finger dragging toward a PANE leaves
