@@ -164,6 +164,7 @@ var (
 	taskAddWatchCmdFlag          string
 	taskAddTargetSessionFlag     string
 	taskAddMaxConcurrentRunsFlag int
+	taskAddOnCompleteFlag        string
 	taskAddProgramFlag           string
 )
 
@@ -235,6 +236,7 @@ var tasksAddCmd = &cobra.Command{
 			WatchCmd:          strings.TrimSpace(taskAddWatchCmdFlag),
 			TargetSession:     taskAddTargetSessionFlag,
 			MaxConcurrentRuns: taskAddMaxConcurrentRunsFlag,
+			OnComplete:        taskAddOnCompleteFlag,
 			ProjectPath:       repo.Root,
 			Program:           program,
 			Enabled:           true,
@@ -417,6 +419,7 @@ var (
 	taskUpdateWatchCmdFlag          string
 	taskUpdateTargetSessionFlag     string
 	taskUpdateMaxConcurrentRunsFlag int
+	taskUpdateOnCompleteFlag        string
 	taskUpdateProjectPathFlag       string
 	taskUpdateEnabledFlag           string
 	taskUpdateProgramFlag           string
@@ -545,6 +548,12 @@ var tasksUpdateCmd = &cobra.Command{
 		// control socket because TaskUpdate round-trips through JSON (#1700).
 		if cmd.Flags().Changed("max-concurrent-runs") {
 			patch.MaxConcurrentRuns = intPtr(taskUpdateMaxConcurrentRunsFlag)
+		}
+		// --on-complete keep is a meaningful value (revert to the default), not
+		// "unchanged", so this gates on the flag being passed for the same reason
+		// the two above do (#2595).
+		if cmd.Flags().Changed("on-complete") {
+			patch.OnComplete = strPtr(taskUpdateOnCompleteFlag)
 		}
 		// --repo authorizes the task against its CURRENT project. Keep the new
 		// binding separate so a caller can say `--repo old --project-path new`

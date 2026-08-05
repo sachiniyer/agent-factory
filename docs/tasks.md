@@ -26,6 +26,7 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `watch_cmd` | Event trigger — long-running command; each stdout line fires the task (exactly one of `cron_expr` / `watch_cmd`) |
 | `target_session` | Deliver into this session by title (auto-created if missing). Empty = create a new session per fire |
 | `max_concurrent_runs` | Cap on how many sessions this watch task may have in flight at once. `0` (the default) = unlimited. Excess events are queued in order and delivered as sessions finish, rather than spawning more runs (subject to the durable queue's retention limits). Watch tasks with an empty `target_session` only (see [Limiting concurrent sessions](#limiting-concurrent-sessions)) |
+| `on_complete` | What happens to a session this task spawned once its run finishes: `keep` (the default — leave it in place), `archive`, or `kill`. Rejected on a `target_session` task, whose session exists to be reused (see [What happens to a run's session](#what-happens-to-a-runs-session)) |
 | `project_path` | Repo the task operates on; also the watch script's working directory |
 | `repo_id` | The owning project's id, resolved once when the task is bound and retained. Derived, not editable — it is recomputed only when `project_path` changes. It exists so that deleting the recorded directory cannot strand the task outside its own project; rows created before this field fall back to resolving `project_path` |
 | `program` | Agent to run (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`). Empty = configured `default_program` |
@@ -35,6 +36,8 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 A task with both triggers set is always invalid. An enabled task must have exactly one; a disabled task with neither is tolerated as a draft. An enabled cron task must carry a non-empty prompt — there is no event line to fall back to. Watch tasks are exempt (empty prompt defaults to the emitted line). Disabled drafts are tolerated regardless of prompt.
 
 `max_concurrent_runs` is rejected on a cron task or one with a `target_session` set, rather than stored and ignored: overlapping cron fires already coalesce, and deliveries into a single target session already serialize, so there would be nothing for the cap to bound.
+
+`on_complete` is rejected on a task with a `target_session` for the same class of reason: that session is one long-lived session you named so runs could share it, and archiving or killing it after every run would destroy the thing the target exists to reuse.
 
 An **all-whitespace** `target_session` means the same thing as an empty one — create a session per fire — and is stored as empty. A session title is otherwise kept **exactly** as written, including any leading or trailing spaces: titles are matched byte-for-byte at delivery, so a task targeting `" build "` keeps looking for `" build "` and is never silently re-pointed at `"build"`.
 
@@ -104,6 +107,66 @@ How it behaves:
 
 Pick the cap from what a run actually costs. If each event triggers an expensive post-worktree build, a low cap keeps the machine usable; if runs are cheap, leave it unlimited and let the 10/min rate limit be the only bound.
 
+## What happens to a run's session
+
+A task with no `target_session` creates **a new session per run**. Until `on_complete`
+existed, af had no policy for what became of it: the run finished, the agent went idle,
+and the session then held its tmux session and its git worktree indefinitely. A daily
+cron task leaked one session a day, forever, and the only thing standing between a
+schedule and unbounded growth was a line of prose in the prompt asking the agent to
+archive itself — which nothing enforced and `af tasks list` could not show.
+
+`on_complete` moves that decision onto the task, where it is declared once and visible:
+
+```bash
+af tasks add --name "Docs drift audit" --prompt "Audit the docs" \
+  --cron "17 6 * * *" --on-complete kill
+```
+
+| Value | What happens when the run finishes |
+|---|---|
+| `keep` | Nothing. The session stays live and idle. **The default**, and exactly what every task did before this field existed |
+| `archive` | The session is archived — inert and restorable, and it keeps its full worktree |
+| `kill` | The session is permanently deleted, reclaiming its worktree and pruning the branch it owned |
+
+**Choosing between `archive` and `kill` is the real decision, and af does not make it
+for you.** Archiving is restorable, but an archived worktree is retained whole —
+gitignored build output included — until someone prunes it by hand, so a daily task set
+to `archive` trades a session leak for a disk one. Killing reclaims that space and prunes
+the session's own branch, which is the right trade when the run's output already lives
+somewhere durable: a pushed branch, or a merged PR. A run you might need to read
+afterwards wants `archive`; a run whose result is already in git usually wants `kill`.
+
+That is why the default is `keep` rather than either verb — af will not silently reap a
+session, and an existing task's behavior does not change when you upgrade.
+
+How it behaves:
+
+- **It fires on the run's completion edge**, the same moment `max_concurrent_runs`
+  releases a slot: the agent has gone idle and the session is sitting healthy. It is not
+  a background sweep over old sessions, which matters because "a task session whose run
+  has finished" stays true forever — including for a session you have since adopted and
+  are working in yourself. Once a run's completion has passed, that session is never
+  revisited.
+- **A session you took over is yours.** If you prompt a finished run's session, the work
+  is not the task's, and no policy applies to it.
+- **A session created outside a task is never touched**, whatever the tasks in that
+  project declare.
+- **A failed teardown leaves the session in place** and logs. The run itself already
+  succeeded, so a failure to reap never marks the run failed; finish it by hand with
+  `af sessions archive`/`kill` if you want to.
+- **If the policy cannot be read** — an unreadable task store, or a task deleted since
+  the run started — the session is kept. Removing a task does not retroactively
+  authorize destroying the work its runs produced.
+- **A session the daemon is unsure about is kept.** A create whose startup outcome was
+  never established is deliberately retained so you can inspect the workspace it may have
+  left behind; that is not a completed run and is never reaped.
+
+Not covered here: pruning worktrees that are *already* archived (#2573), and the
+`--keep-runs N` / idle-TTL shapes floated on #2595. Both need a standing sweep over
+sessions whose runs have ended, which is exactly the shape that can reap a session
+someone has adopted; `on_complete` is edge-triggered and cannot.
+
 ### Watch-task status
 
 The TUI Tasks pane shows each watch task's supervision state, derived from the persisted fields:
@@ -138,10 +201,10 @@ Versions before #791 installed one systemd timer / launchd plist **per task** (`
 
 ```bash
 af tasks list [--all]
-af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
-af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>]
+af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--program <agent>]
+af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill]
 af tasks get <id>
-af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--max-concurrent-runs <n>] [--project-path <repo>] [--program <agent>] [--enabled true|false]
+af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
 af tasks restart <id>          # enabled watch tasks only; reloads an edited script
 af tasks trigger <id>          # cron tasks only
 af tasks remove <id>
@@ -149,7 +212,7 @@ af tasks remove <id>
 
 Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. On `tasks update`, `--repo` authorizes the task in its current project while `--project-path` moves it to a new project and working directory. See [Project scoping](cli.md#project-scoping) for the full contract.
 
-On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--max-concurrent-runs 0` explicitly reverts to unlimited; omitting the flag leaves the current cap untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
+On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--max-concurrent-runs 0` explicitly reverts to unlimited; omitting the flag leaves the current cap untouched. `--on-complete keep` explicitly reverts to leaving sessions in place; omitting the flag leaves the current policy untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 
 ## Examples
 

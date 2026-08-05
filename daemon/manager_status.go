@@ -443,6 +443,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	as := instance.AgentServer()
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
+	// The task run's own in-flight marker, captured beside the liveness it will be
+	// compared against. Reading it here rather than deriving it later is what makes
+	// the completion edge observable: taskRunActive flips true→false exactly once,
+	// inside a Transition below, and nothing else in the tick reports it (#2595).
+	taskRunWasActive := instance.TaskRunActive()
 	// Snapshot dismisses a pending trust prompt then reads the pane in one probe
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
@@ -542,6 +547,12 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
 	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
+
+	// The run this session was spawned for may have just finished on the idle edge
+	// above. Apply the owning task's declared lifecycle (#2595) — last, after the
+	// state it reacts to is durable, so a teardown can never outrun the record of
+	// why it happened.
+	m.applyTaskSessionLifecycleOnRunEnd(repoID, instance, taskRunWasActive)
 }
 
 // SaveInstances writes the manager's authoritative in-memory instances to disk

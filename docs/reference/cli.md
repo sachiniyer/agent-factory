@@ -2078,6 +2078,7 @@ af tasks add [flags]
 | `--cron` | `string` | Cron expression (exactly one of --cron / --watch-cmd) |
 | `--max-concurrent-runs` | `int` | Cap how many sessions this watch task may have in flight at once; excess events are queued in order instead of spawning runs, subject to the durable queue's retention limits (0 = unlimited; --watch-cmd tasks without --target-session only) (default `0`) |
 | `--name` | `string` | Task name (required) |
+| `--on-complete` | `string` | What happens to the session a run spawns once it finishes: keep (default, leaves it in place), archive (restorable, but retains its whole worktree), or kill (reclaims the worktree and prunes the session's branch). Not for --target-session tasks, whose session is meant to be reused |
 | `--program` | `string` | Program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
 | `--prompt` | `string` | Prompt to send (required for --cron tasks; --watch-cmd tasks default to the emitted line, with {{line}} substituted when present) |
 | `--target-session` | `string` | Deliver the prompt into this session (auto-created if missing); empty creates a new session per run |
@@ -2227,6 +2228,7 @@ af tasks update <id> [flags]
 | `--enabled` | `string` | Enable or disable the task (true/false) |
 | `--max-concurrent-runs` | `int` | New in-flight session cap for this watch task; pass 0 to revert to unlimited (default `0`) |
 | `--name` | `string` | New task name |
+| `--on-complete` | `string` | New spawned-session lifecycle: keep, archive, or kill; pass keep to revert to leaving sessions in place |
 | `--program` | `string` | New program to run (one of: claude, codex, aider, gemini, amp, opencode, devin; leave unset to keep the current one) |
 | `--project-path` | `string` | Move the task to this git repository (distinct from --repo, which scopes its current project) |
 | `--prompt` | `string` | New prompt |

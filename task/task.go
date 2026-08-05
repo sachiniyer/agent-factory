@@ -71,8 +71,28 @@ type Task struct {
 	// ValidateTrigger): a target_session task delivers into one session, so its
 	// deliveries already serialize, and overlapping cron fires already coalesce on
 	// RunTask's per-task lock. omitempty + additive: no tasks schema bump.
-	MaxConcurrentRuns int    `json:"max_concurrent_runs,omitempty"`
-	ProjectPath       string `json:"project_path"`
+	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	// OnComplete is what happens to a session this task SPAWNED once its run
+	// finishes (#2595). Empty — the default — means OnCompleteKeep, so every task
+	// written before this field existed behaves exactly as it always has.
+	//
+	// The problem it solves is that a per-run session had no lifecycle at all: a
+	// daily cron task produced one session per fire, each finished its work, went
+	// idle, and then held a tmux session and a git worktree forever. The only
+	// thing standing between a schedule and unbounded growth was prose in the
+	// prompt ("finally, run af sessions archive --self"), which nothing enforces
+	// and which `af tasks list` cannot show. This moves the decision onto the
+	// task, where it is declared once and visible.
+	//
+	// Both non-keep verbs are offered because the choice between them is the
+	// actual decision, not an implementation detail: archive keeps the session
+	// restorable but retains its whole worktree — gitignored build output
+	// included — indefinitely, while kill reclaims that disk and prunes the
+	// session's owned branch. A run whose output already landed in a pushed
+	// branch or a PR usually wants kill; a run that might need inspecting wants
+	// archive. af must not pick for the user, so the default does neither.
+	OnComplete  string `json:"on_complete,omitempty"`
+	ProjectPath string `json:"project_path"`
 	// RepoID is the owning project's repo ID, resolved ONCE at bind time and
 	// retained. It is derived, never patchable — AddTask sets it and UpdateTask
 	// recomputes it when ProjectPath changes.
@@ -196,6 +216,19 @@ func (t Task) ValidateTrigger() error {
 		if CanonicalTargetSession(t.TargetSession) != "" {
 			return fmt.Errorf("task %s sets both max_concurrent_runs and target_session; deliveries into one session already serialize, so drop the cap or drop the target session", t.ID)
 		}
+	}
+	// on_complete governs a session this task SPAWNED, so it is meaningful only
+	// where the task spawns one (#2595). Rejecting it elsewhere follows the cap's
+	// precedent above for the same reason: a setting that reads as enforced but
+	// silently does nothing is the gotcha class this repo designs away.
+	switch onComplete := t.SessionLifecycle(); onComplete {
+	case OnCompleteKeep:
+	case OnCompleteArchive, OnCompleteKill:
+		if CanonicalTargetSession(t.TargetSession) != "" {
+			return fmt.Errorf("task %s sets both on_complete=%s and target_session; a target session is one long-lived session you named for reuse, and %sing it after every run would destroy the thing the target exists to reuse — drop on_complete, or drop the target session to get a session per run", t.ID, onComplete, onComplete)
+		}
+	default:
+		return fmt.Errorf("task %s has an unknown on_complete %q; use one of %s", t.ID, t.OnComplete, strings.Join(OnCompleteValues(), ", "))
 	}
 	return nil
 }
@@ -326,6 +359,7 @@ func AddTaskChecked(t Task, validate func(Task) error) (Task, error) {
 	// stored — a whitespace-only target session must not validate as "no target
 	// session" and then behave as one at delivery time (#1892).
 	t.canonicalizeTargetSession()
+	t.canonicalizeOnComplete()
 	if err := t.ValidateTrigger(); err != nil {
 		return Task{}, err
 	}
@@ -602,10 +636,15 @@ type TaskUpdate struct {
 	// because 0 is a meaningful value ("unlimited"), not "unchanged" — the same
 	// nil-vs-zero distinction Enabled and TargetSession rely on, and the reason
 	// this type needs the JSON gob codec below.
-	MaxConcurrentRuns *int    `json:"max_concurrent_runs,omitempty"`
-	ProjectPath       *string `json:"project_path,omitempty"`
-	Program           *string `json:"program,omitempty"`
-	Enabled           *bool   `json:"enabled,omitempty"`
+	MaxConcurrentRuns *int `json:"max_concurrent_runs,omitempty"`
+	// OnComplete patches the spawned-session lifecycle verb (#2595). A pointer for
+	// the same reason as MaxConcurrentRuns: "keep" is a meaningful value to patch
+	// BACK to, and a plain string could not tell "revert to keep" from "leave it
+	// alone".
+	OnComplete  *string `json:"on_complete,omitempty"`
+	ProjectPath *string `json:"project_path,omitempty"`
+	Program     *string `json:"program,omitempty"`
+	Enabled     *bool   `json:"enabled,omitempty"`
 }
 
 // GobEncode/GobDecode route TaskUpdate through JSON on the net/rpc gob control
@@ -632,6 +671,7 @@ func (u *TaskUpdate) GobDecode(data []byte) error {
 func (u TaskUpdate) IsEmpty() bool {
 	return u.Name == nil && u.Prompt == nil && u.CronExpr == nil &&
 		u.WatchCmd == nil && u.TargetSession == nil && u.MaxConcurrentRuns == nil &&
+		u.OnComplete == nil &&
 		u.ProjectPath == nil && u.Program == nil && u.Enabled == nil
 }
 
@@ -657,6 +697,9 @@ func (u TaskUpdate) apply(t Task) Task {
 	if u.MaxConcurrentRuns != nil {
 		t.MaxConcurrentRuns = *u.MaxConcurrentRuns
 	}
+	if u.OnComplete != nil {
+		t.OnComplete = *u.OnComplete
+	}
 	if u.ProjectPath != nil {
 		t.ProjectPath = *u.ProjectPath
 	}
@@ -677,6 +720,7 @@ func (u TaskUpdate) apply(t Task) Task {
 	// write now canonicalizes what it is about to store, so the record cannot
 	// persist a value the two sides would read differently.
 	t.canonicalizeTargetSession()
+	t.canonicalizeOnComplete()
 	// Drop a cap the merged record can no longer carry, unless this patch set it
 	// explicitly (#1892). A partial patch that only moves the trigger or the
 	// delivery mode — which is every non-CLI writer, since DiffTask sends just the
@@ -784,6 +828,13 @@ func DiffTask(old, cur Task) TaskUpdate {
 	}
 	if cur.MaxConcurrentRuns != old.MaxConcurrentRuns {
 		u.MaxConcurrentRuns = &cur.MaxConcurrentRuns
+	}
+	// Included before any editor offers it (#2595). An unchanged field patches
+	// nothing either way, so this is inert today — but a differ that silently
+	// omits a user-editable field is the #1700 clobber waiting to be reintroduced
+	// the moment a surface starts editing it.
+	if cur.OnComplete != old.OnComplete {
+		u.OnComplete = &cur.OnComplete
 	}
 	if cur.ProjectPath != old.ProjectPath {
 		u.ProjectPath = &cur.ProjectPath
