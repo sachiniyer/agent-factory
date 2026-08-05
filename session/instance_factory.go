@@ -137,7 +137,7 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	// with no origin yields "", and each runtime surfaces the actionable
 	// "no origin remote" error at create (the hook runtime hands the URL to
 	// launch_cmd, which does the clone on the user's infra).
-	if kind == BackendDocker || kind == BackendSSH || kind == BackendHook {
+	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
 	}
 	return rt.Provision(spec)

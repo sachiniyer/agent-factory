@@ -134,6 +134,34 @@ var runtimeRegistry = map[BackendKind]func() Runtime{
 	BackendSSH:    func() Runtime { return sshRuntime{} },
 }
 
+// backendProvisionsOffBox declares, per registered kind, whether the runtime
+// establishes the workspace somewhere other than the local filesystem.
+//
+// It is a DECLARATION beside the registry rather than a condition rewritten at
+// each call site. #2778 was exactly that hazard in another form — a guard that
+// enumerated the paths it knew about and silently missed one — and a hand-written
+// `kind == BackendDocker || kind == BackendSSH || kind == BackendHook` is the
+// same enumeration waiting for the next backend to be added.
+//
+// TestEveryRegisteredRuntimeDeclaresOffBox fails if a kind is registered without
+// an entry here, so the next backend cannot be added without answering this. That
+// test is the mechanism; this comment is not.
+var backendProvisionsOffBox = map[BackendKind]bool{
+	BackendLocal:  false,
+	BackendDocker: true,
+	BackendSSH:    true,
+	BackendHook:   true,
+}
+
+// ProvisionsOffBox reports whether kind runs the session's workspace off the
+// local filesystem. It is what decides whether a create resolves the repo's
+// origin URL for the runtime to clone from: an off-box runtime clones from the
+// durable store, a local one uses the worktree in place.
+//
+// An unregistered kind reports false, which is the conservative answer —
+// ParseBackendKind rejects those before they reach a runtime.
+func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
+
 // SetRuntimeForTest replaces the Runtime registered for kind with ctor and
 // returns a restore function. It is the exported form of the registry swap the
 // in-package sandbox tests already do by hand, so tests OUTSIDE this package (the
