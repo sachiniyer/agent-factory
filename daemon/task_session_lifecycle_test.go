@@ -376,7 +376,7 @@ func TestTaskSessionLifecycle_WaitsForPostWorktreeHooks(t *testing.T) {
 	}
 	t.Cleanup(func() { killSessionForLifecycle = prev })
 
-	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, inst.StateEpoch(), hooks)
+	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, inst.StateEpoch(), inst.PromptDeliveries(), hooks)
 
 	select {
 	case <-reaped:
@@ -463,7 +463,7 @@ func TestTaskSessionLifecycle_HookWaitAbandonsAnAdoptedSession(t *testing.T) {
 	}
 	t.Cleanup(func() { killSessionForLifecycle = prev })
 
-	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, inst.StateEpoch(), hooks)
+	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, inst.StateEpoch(), inst.PromptDeliveries(), hooks)
 
 	// The user picks the work back up while the hooks are still running.
 	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))

@@ -305,6 +305,14 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	// is the reliable command path automated deliveries need. This crosses the
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
+	// Mark BEFORE the send. This crossing is exactly the ambiguous one the
+	// comment above describes, and for "has this session been adopted since a
+	// task run finished?" a possible delivery must count as one — otherwise a
+	// send that landed but lost its reply would leave the session eligible for
+	// an on_complete teardown that destroys the user's work (#2948). Marking
+	// first also removes the window where the prompt has landed and the mark has
+	// not.
+	instance.NotePromptDelivery()
 	if err := instance.AgentServer().SendPrompt(req.Prompt); err != nil {
 		return fmt.Errorf("failed to send prompt: %w", err)
 	}

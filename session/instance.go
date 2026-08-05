@@ -160,6 +160,12 @@ type Instance struct {
 	// see state_epoch.go. Mutex-protected, in-memory only: it describes a window
 	// between an observation and its apply, and no such window survives a restart.
 	stateEpoch uint64
+
+	// promptDeliveries counts prompts delivered into this session. It answers
+	// "has anything been sent here since I looked?", which the lifecycle axes
+	// cannot: a delivery does not move them, and a turn that settles leaves them
+	// exactly as they were. See session/prompt_delivery.go.
+	promptDeliveries uint64
 	// agentRuntimeGeneration identifies the concrete agent process currently
 	// owning the Agent tab. Async conversation capture binds to this generation,
 	// so a result from a replaced process cannot write through a later handoff or

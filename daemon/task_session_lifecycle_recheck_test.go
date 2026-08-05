@@ -25,7 +25,7 @@ func TestStillTheFinishedRun(t *testing.T) {
 		inst := &session.Instance{ID: "sess-1", Title: "t"}
 		inst.SetStatusForTest(session.Ready)
 		m := newManager(inst, "repo", "t")
-		require.True(t, m.stillTheFinishedRun("repo", "sess-1", "t", inst.StateEpoch()))
+		require.True(t, m.stillTheFinishedRun("repo", "sess-1", "t", inst.StateEpoch(), inst.PromptDeliveries()))
 	})
 
 	// The case a liveness level check cannot see, and the reason this uses an
@@ -38,13 +38,14 @@ func TestStillTheFinishedRun(t *testing.T) {
 		inst.SetStatusForTest(session.Ready)
 		m := newManager(inst, "repo", "t")
 		atCompletion := inst.StateEpoch()
+		atDeliveries := inst.PromptDeliveries()
 
 		require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
 		require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
 
 		require.Equal(t, session.LiveReady, inst.GetLiveness(), "it looks idle again")
 		require.False(t, inst.TaskRunActive(), "and the task run is long over")
-		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", atCompletion),
+		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", atCompletion, atDeliveries),
 			"a turn that started and finished still moved the epoch, so the verb must not land")
 	})
 
@@ -52,7 +53,7 @@ func TestStillTheFinishedRun(t *testing.T) {
 		inst := &session.Instance{ID: "sess-2", Title: "t"}
 		inst.SetStatusForTest(session.Ready)
 		m := newManager(inst, "repo", "t")
-		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", inst.StateEpoch()),
+		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", inst.StateEpoch(), inst.PromptDeliveries()),
 			"a verb owed to one session must never land on its replacement")
 	})
 
@@ -61,13 +62,36 @@ func TestStillTheFinishedRun(t *testing.T) {
 		inst.SetStatusForTest(session.Ready)
 		m := newManager(inst, "repo", "t")
 		atCompletion := inst.StateEpoch()
+		atDeliveries := inst.PromptDeliveries()
 		require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
-		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", atCompletion),
+		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", atCompletion, atDeliveries),
 			"work adopted during the hook wait is the user's, not the task's")
 	})
 
 	t.Run("a vanished session is not ours", func(t *testing.T) {
 		m := newManager(nil, "repo", "t")
-		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", 0))
+		require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", 0, 0))
 	})
+}
+
+// The case neither the liveness level NOR the epoch can see: a prompt delivered
+// during the hook wait whose liveness edge the poll has not observed yet. The
+// session still reads Ready, TaskRunActive is still false, and the epoch is
+// unchanged — every lifecycle signal says nothing happened, and the work is
+// nonetheless the user's now.
+func TestStillTheFinishedRun_APromptDeliveredDuringTheWaitIsAdoption(t *testing.T) {
+	inst := &session.Instance{ID: "sess-1", Title: "t"}
+	inst.SetStatusForTest(session.Ready)
+	m := &Manager{instances: map[string]*session.Instance{
+		daemonInstanceKey("repo", "t"): inst,
+	}}
+	atEpoch, atDeliveries := inst.StateEpoch(), inst.PromptDeliveries()
+
+	inst.NotePromptDelivery()
+
+	require.Equal(t, session.LiveReady, inst.GetLiveness(), "it still reads idle")
+	require.False(t, inst.TaskRunActive(), "and the task run is still over")
+	require.Equal(t, atEpoch, inst.StateEpoch(), "and the epoch has not moved")
+	require.False(t, m.stillTheFinishedRun("repo", "sess-1", "t", atEpoch, atDeliveries),
+		"a delivered prompt is adoption even before its liveness edge is observed")
 }
