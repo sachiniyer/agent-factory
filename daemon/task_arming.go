@@ -3,9 +3,11 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -38,8 +40,10 @@ func (m *Manager) persistedTasksForArming() (taskArmingSnapshot, error) {
 		validation := m.prepareTaskTargetValidation(candidate.RepoID, target, true)
 		if err := m.validateEnabledTaskTarget(candidate, validation); err != nil {
 			snapshot.refused = append(snapshot.refused, fmt.Errorf("persisted task %q was not armed because its target relationship is unsafe: %w", candidate.ID, err))
+			m.recordArmingStatus(candidate, notArmedStatus(err))
 			continue
 		}
+		m.clearStaleNotArmedStatus(candidate)
 		snapshot.safe = append(snapshot.safe, candidate)
 	}
 	return snapshot, nil
@@ -95,4 +99,58 @@ func taskRepoIDForValidation(projectPath string) string {
 		return ""
 	}
 	return repo.ID
+}
+
+// notArmedPrefix marks a LastRunStatus written by arming rather than by a run.
+// It carries the "errored:" prefix the TUI already keys on to render a task as
+// failed (ui/task_pane.go), so a refusal shows up where people look without a
+// new surface to build or discover.
+const notArmedPrefix = "errored: not armed — "
+
+func notArmedStatus(cause error) string {
+	return notArmedPrefix + cause.Error()
+}
+
+// recordArmingStatus writes a refusal onto the task's own status.
+//
+// Without this a refused task is INDISTINGUISHABLE FROM A HEALTHY ONE: it stays
+// enabled on disk, keeps whatever LastRunStatus its last successful run wrote,
+// and is absent from both cron and watch. The only trace is one joined warning
+// at daemon startup, and armed-ness is exposed on no surface —
+// scheduledTaskIDs/watchingTaskIDs have no production callers. On a box nobody
+// opens the TUI on, which is the case this daemon exists to serve, a nightly
+// task can stop running forever while every surface says it ran fine (#2929).
+//
+// LastRunAt is deliberately left alone (UpdateTaskStatus's nil mode): arming is
+// a supervision decision, not a run, so the timestamp of the last real delivery
+// must survive it.
+//
+// Written only when the status actually changes. Arming runs on every task CRUD
+// as well as at startup, and a persistently refused task must not rewrite
+// tasks.json each time.
+func (m *Manager) recordArmingStatus(t task.Task, status string) {
+	if t.LastRunStatus == status {
+		return
+	}
+	if err := task.UpdateTaskStatus(t.ID, nil, status); err != nil {
+		log.WarningLog.Printf("could not record the arming status for task %q: %v", t.ID, err)
+		return
+	}
+	t.LastRunStatus = status
+	m.publishEvent(agentproto.EventTaskUpdated, t)
+}
+
+// clearStaleNotArmedStatus removes a not-armed status from a task that is armed
+// again, so the refusal does not outlive the condition that caused it. A task
+// whose target came back would otherwise keep claiming it is unarmed until its
+// next run writes a real status — up to a full day for a nightly schedule, and
+// indefinitely for a watch task that has not fired.
+//
+// Only statuses this file wrote are cleared; a genuine "errored:" from a failed
+// run is left exactly as the run recorded it.
+func (m *Manager) clearStaleNotArmedStatus(t task.Task) {
+	if !strings.HasPrefix(t.LastRunStatus, notArmedPrefix) {
+		return
+	}
+	m.recordArmingStatus(t, "")
 }
