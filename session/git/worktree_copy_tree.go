@@ -17,9 +17,11 @@ import (
 
 // copyTree recursively copies the directory rooted at src to dest, preserving
 // regular files (contents + permission bits), subdirectories, and symlinks
-// (copied as links, never followed). Permission bits are restored explicitly
-// after each node is created rather than left to the mode passed at creation,
-// because that mode is subtracted by the process umask — see preserveSourceMode.
+// (copied as links, never followed). Permission bits are applied explicitly
+// rather than left to the mode passed at creation, because that mode is
+// subtracted by the process umask and because a directory has to stay writable
+// until its own contents are in place — see preserveSourceMode and
+// workingDirectoryMode.
 // Traversal stays anchored to open directory descriptors: a worktree process can
 // replace any pathname after it is inspected, so every source open is
 // nonblocking and no-follow, and every destination node is created exclusively.
@@ -176,7 +178,7 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		return nil, err
 	}
 	destName := filepath.Base(dest)
-	if err := unix.Mkdirat(int(destParent.Fd()), destName, uint32(sourceInfo.Mode().Perm())); err != nil {
+	if err := unix.Mkdirat(int(destParent.Fd()), destName, workingDirectoryMode(sourceInfo.Mode())); err != nil {
 		_ = destParent.Close()
 		_ = source.Close()
 		return nil, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", dest, err)
@@ -200,12 +202,6 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		return nil, errors.Join(err, cleanupErr)
 	}
 	destinationIdentity, err := identityFromFile(destination)
-	if err == nil {
-		// The whole copy is anchored to this descriptor, so it is also where the
-		// root's mode belongs. Every child mode is restored the same way, at the
-		// point its own descriptor is confirmed.
-		err = preserveSourceMode(int(destination.Fd()), sourceInfo.Mode(), dest, "directory")
-	}
 	if err != nil {
 		cleanupErr := removeCreatedDirectory(destParent, destParentPath, destName, createdIdentity)
 		_ = destination.Close()
@@ -257,6 +253,17 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			directoryRoutePath(destinationPath, components),
 			job.directory,
 		)
+		if err == nil {
+			// The level is complete, and nothing is ever written directly into
+			// this directory again — descendants are filled through their own
+			// descriptors, which need only the search bit here. So this is the
+			// first moment the real mode can be applied, and the last moment it
+			// is free: a read-only source directory takes its mode now rather
+			// than blocking its own contents (#2872).
+			err = applyCopiedDirectoryMode(
+				sourceDirectory, destinationDirectory, directoryRoutePath(destinationPath, components),
+			)
+		}
 		_ = destinationDirectory.Close()
 		_ = sourceDirectory.Close()
 		if err != nil {
@@ -347,7 +354,7 @@ func copyDirectoryEntry(
 	if !inspected.same(sourceIdentity) {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: source directory %s changed before it was opened", sourcePath)
 	}
-	if err := unix.Mkdirat(int(destination.Fd()), name, uint32(sourceInfo.Mode().Perm())); err != nil {
+	if err := unix.Mkdirat(int(destination.Fd()), name, workingDirectoryMode(sourceInfo.Mode())); err != nil {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination directory %s exclusively: %w", destinationPath, err)
 	}
 	// Identify the node right after creating it: every later step can fail, and
@@ -376,11 +383,6 @@ func copyDirectoryEntry(
 	}
 	if !destinationIdentity.same(openedIdentity) {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination directory %s changed after it was created", destinationPath)
-	}
-	// Only now: the descriptor has just been confirmed to be the node this
-	// process created, which is what makes chmodding it safe.
-	if err := preserveSourceMode(int(destinationChild.Fd()), sourceInfo.Mode(), destinationPath, "directory"); err != nil {
-		return created, err
 	}
 	return created, nil
 }
@@ -422,6 +424,38 @@ func copySymlinkEntry(
 	return created, nil
 }
 
+// workingDirectoryMode is the mode a destination directory is created with while
+// the copy is still filling it.
+//
+// A worktree may legitimately contain a directory its owner cannot write — a
+// vendored or generated tree checked in read-only. rename(2) relocates one
+// without ever looking inside, but a copy has to put the contents back, and
+// creating the directory at its final 0555 makes it impossible to fill: the
+// archive failed outright on a worktree the same-device path moves without
+// complaint (#2872). So the copy runs in a mode that guarantees it can write,
+// and applyCopiedDirectoryMode installs the real one the moment the directory's
+// own level is complete.
+//
+// Only owner bits are added. No other user gains access to the staging tree at
+// any point, whatever the source's mode says.
+func workingDirectoryMode(sourceMode os.FileMode) uint32 {
+	return uint32(sourceMode.Perm()) | 0o700
+}
+
+// applyCopiedDirectoryMode gives a finished destination directory the mode its
+// source carries, reading that mode from the source descriptor the route walk
+// just validated rather than from anything cached earlier.
+func applyCopiedDirectoryMode(source, destination *os.File, destinationPath string) error {
+	info, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to read the source mode for destination directory %s: %w",
+			destinationPath, err,
+		)
+	}
+	return preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory")
+}
+
 // preserveSourceMode restores a source node's permission bits on the descriptor
 // that owns its copy.
 //
@@ -437,7 +471,8 @@ func copySymlinkEntry(
 // It chmods a descriptor rather than a name because this copier's entire premise
 // is that a worktree process can replace any pathname mid-copy: fchmodat() would
 // apply the source's mode to whatever node holds the name by the time it runs.
-// Callers pass a descriptor only after confirming it is the node they created.
+// Callers pass a descriptor only after the route walk or the creation check has
+// confirmed which node it is.
 //
 // Setuid, setgid and sticky bits sit outside Perm() and are not carried over,
 // which is the behavior this copier has always had. Symlinks are skipped

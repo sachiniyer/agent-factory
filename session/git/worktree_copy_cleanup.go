@@ -356,6 +356,10 @@ func removeCopiedTree(root *os.File, path string, manifest copiedDirectory, prot
 			return changedCleanupError(protectUnexpected, "failed to reopen copied source tree: %v", err)
 		}
 		directoryPath := directoryRoutePath(path, components)
+		if err := ensureOwnerWritableDirectory(directory, directoryPath); err != nil {
+			_ = directory.Close()
+			return changedCleanupError(protectUnexpected, "%v", err)
+		}
 		for _, entry := range route.directory.entries {
 			if entry.directory != nil {
 				continue
@@ -385,11 +389,54 @@ func removeCopiedTree(root *os.File, path string, manifest copiedDirectory, prot
 		if err != nil {
 			return changedCleanupError(protectUnexpected, "failed to reopen copied source parent: %v", err)
 		}
-		err = removeCopiedEntry(parent, directoryRoutePath(path, parentComponents), route.entry, protectUnexpected)
+		parentPath := directoryRoutePath(path, parentComponents)
+		// The parent needs the same treatment, and it needs it here rather than
+		// at its own route: this walk is deepest-first, so a child is unlinked
+		// from its parent long before that parent's own turn comes around.
+		if err := ensureOwnerWritableDirectory(parent, parentPath); err != nil {
+			_ = parent.Close()
+			return changedCleanupError(protectUnexpected, "%v", err)
+		}
+		err = removeCopiedEntry(parent, parentPath, route.entry, protectUnexpected)
 		_ = parent.Close()
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ensureOwnerWritableDirectory grants the owner write and search on a directory
+// this process is about to empty.
+//
+// Removing an entry means renaming and unlinking it, and both need write
+// permission on the directory that holds it — so a read-only directory that the
+// copier can now reproduce (see workingDirectoryMode) still could not be cleaned
+// up or deleted afterwards. That is the second half of #2872, and it is not
+// confined to failure paths: a completed cross-device move deletes the original
+// worktree through this same walk, so one read-only directory anywhere in the
+// tree left the source behind and reported the archive as half-done.
+//
+// Only owner bits are added, and only to a tree being deleted — no other user
+// gains access at any point. The descriptor was identity-checked by the route
+// walk that opened it, so this widens a node the manifest already accounts for,
+// never one that merely holds the same name. A directory that already has the
+// bits is left untouched, so an ordinary tree is never chmodded at all.
+//
+// A tree that then fails to be removed is left with those owner bits added.
+// That is deliberate: the alternative is refusing to delete it at all, and the
+// caller reports the leftover either way.
+func ensureOwnerWritableDirectory(directory *os.File, path string) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil {
+		return fmt.Errorf("failed to inspect directory %s before removing its entries: %w", path, err)
+	}
+	mode := uint32(stat.Mode) & 0o7777
+	if mode&0o700 == 0o700 {
+		return nil
+	}
+	if err := unix.Fchmod(int(directory.Fd()), mode|0o700); err != nil {
+		return fmt.Errorf("failed to make directory %s writable so its entries can be removed: %w", path, err)
 	}
 	return nil
 }

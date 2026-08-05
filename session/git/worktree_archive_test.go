@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -1328,4 +1329,99 @@ func TestMoveWorktree_ArchiveRestoreRoundTripPreservesModes(t *testing.T) {
 	require.NoError(t, gw.RestoreWorktreeTo(restored))
 	assert.Equal(t, beforeArchive, collectTreeDescription(t, restored),
 		"a restored session must come back with the modes it had, executable hooks included")
+}
+
+// TestMoveDirCrossDevice_CopiesIntoAReadOnlySourceDirectory is the #2872
+// regression. A worktree may legitimately contain a directory the owner cannot
+// write — a vendored or generated tree checked in read-only. The same-device
+// rename(2) moves it without ever looking inside, but the cross-device copy
+// created each destination directory at its final mode and then tried to
+// populate it, so a 0555 directory could not be filled and the whole archive
+// failed. Which filesystem $AF_HOME sits on decided whether the session could
+// be archived at all.
+func TestMoveDirCrossDevice_CopiesIntoAReadOnlySourceDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory write check, so this scenario needs a non-root uid")
+	}
+	withUmask(t, 0022)
+	src := filepath.Join(t.TempDir(), "src")
+	readOnly := filepath.Join(src, "vendored")
+	require.NoError(t, os.MkdirAll(readOnly, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(readOnly, "pinned.txt"), []byte("pinned"), 0444))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+	// Registered after both TempDirs, so it runs before their RemoveAll: a
+	// leftover read-only directory would otherwise fail the harness cleanup
+	// rather than the assertion under test.
+	t.Cleanup(func() {
+		chmodTreeWritable(t, filepath.Dir(src))
+		chmodTreeWritable(t, destinationParent)
+	})
+	require.NoError(t, os.Chmod(readOnly, 0555))
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	require.NoError(t, moveDirCrossDevice(src, dest),
+		"a read-only source directory must not fail the cross-device move")
+	assert.NoDirExists(t, src, "the source must be gone after a successful move")
+
+	contents, err := os.ReadFile(filepath.Join(dest, "vendored", "pinned.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "pinned", string(contents))
+	info, err := os.Stat(filepath.Join(dest, "vendored"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0555), info.Mode().Perm(),
+		"the read-only directory must arrive read-only, not left writable by the copy")
+}
+
+// TestMoveDirCrossDevice_CleansStagingContainingAReadOnlyDirectory covers the
+// other half of the #2872 removal problem. The copy now reproduces a read-only
+// directory faithfully, which means the private staging tree contains one too —
+// and unlinking anything out of it needs write permission the mode does not
+// grant. A failure between the copy and the commit must still leave the archive
+// root empty rather than stranding a staging tree nothing can delete.
+func TestMoveDirCrossDevice_CleansStagingContainingAReadOnlyDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory write check, so this scenario needs a non-root uid")
+	}
+	src := filepath.Join(t.TempDir(), "src")
+	readOnly := filepath.Join(src, "vendored")
+	require.NoError(t, os.MkdirAll(readOnly, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(readOnly, "pinned.txt"), []byte("pinned"), 0444))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+	t.Cleanup(func() { chmodTreeWritable(t, src) })
+	require.NoError(t, os.Chmod(readOnly, 0555))
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeSourceCommit
+	moveDirBeforeSourceCommit = func(string) error { return errors.New("forced failure after the copy") }
+	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "failed to clean private staging tree",
+		"a read-only directory in the copy must not defeat staging cleanup")
+
+	entries, readErr := os.ReadDir(destinationParent)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "the private staging tree must be gone, read-only directories and all")
+	assert.FileExists(t, filepath.Join(readOnly, "pinned.txt"), "the untouched source must survive")
+}
+
+// chmodTreeWritable restores owner write on every directory under root so the
+// harness can delete a fixture that deliberately contains read-only directories.
+func chmodTreeWritable(t *testing.T, root string) {
+	t.Helper()
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err == nil && entry.IsDir() {
+			_ = os.Chmod(path, 0755)
+		}
+		return nil
+	})
 }
