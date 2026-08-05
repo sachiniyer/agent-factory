@@ -224,6 +224,23 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID string) (string, error) {
 	return task.OnCompleteKeep, nil
 }
 
+// stillTheFinishedRun reports whether the session that owed a teardown is still
+// the same session, still idle, and still not running a task.
+//
+// Any of those changing means the decision the completion edge made no longer
+// describes reality: a same-titled replacement now holds the key, or the user
+// picked the work back up. A verb owed to a finished run must never land on new
+// work.
+func (m *Manager) stillTheFinishedRun(repoID, sessionID, title string) bool {
+	m.mu.Lock()
+	instance := m.instances[daemonInstanceKey(repoID, title)]
+	m.mu.Unlock()
+	if instance == nil || instance.ID != sessionID {
+		return false
+	}
+	return instance.GetLiveness() == session.LiveReady && !instance.TaskRunActive()
+}
+
 // runTaskSessionLifecycle performs the teardown on its own goroutine.
 //
 // It reuses ArchiveSession/KillSession rather than reaching for the primitives
@@ -257,6 +274,21 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 			return
 		}
 	}
+	// The hook wait can last minutes, and the session is visible and Ready
+	// throughout it. A user who prompts it in that window has adopted the work —
+	// it is theirs now, not the task's — so re-ask the same question the
+	// completion edge asked instead of acting on an answer that may be minutes
+	// stale. Without this, on_complete=kill|archive destroys work started after
+	// the run finished.
+	//
+	// This is the rule applyDeferredTaskSessionLifecycle already applies across
+	// the attach deferral; the hook wait is a second place the same staleness
+	// arises, and it deserves the same answer.
+	if !m.stillTheFinishedRun(repoID, sessionID, title) {
+		log.InfoLog.Printf("task %s: session %q changed while its post-worktree hooks finished; leaving it in place rather than applying on_complete=%s", taskID, title, verb)
+		return
+	}
+
 	var err error
 	switch verb {
 	case task.OnCompleteArchive:
