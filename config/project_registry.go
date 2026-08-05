@@ -742,11 +742,42 @@ func projectFromRecord(record projectRecord) Project {
 	}
 }
 
+// projectPathExists answers whether the last-known project root is PRESENT, and
+// only a determinate answer may be a "no" (#2885).
+//
+// A stat that failed for any reason other than ErrNotExist — permission denied,
+// an I/O error, a dead network mount — is evidence of NOTHING. Reporting "gone"
+// there puts a false disappearance on the wire: path_exists is the field
+// `af projects list` and every registry client read as "your checkout is still
+// where you left it", so a user is told to go hunting for a repo that never
+// moved. Present-but-unreadable is present.
+//
+// The same rule is already stated by fileExists (config_load.go) and already
+// followed, in THIS file, by projectRootHasCheckoutID and readCheckoutID — both
+// of which take ErrNotExist as determinate and turn every other stat failure
+// into an error rather than a verdict.
+//
+// It also moves the two registration guards that consult this in the safe
+// direction: an ambiguous re-registration is REFUSED rather than allowed to
+// proceed on the strength of a stat nobody could perform.
 func projectPathExists(path string) bool {
 	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return info.IsDir()
 }
 
+// sameProjectPath reports whether two paths name the same directory.
+//
+// A stat failure here also collapses to "not the same", which would be the same
+// hazard as above were it reachable — but it is MASKED, and deliberately left
+// that way (#2885). Its only caller takes the "path changed" branch on false and
+// immediately calls projectRootHasCheckoutID on that same root, which propagates
+// the identical stat failure as an error. So an unreadable root makes the
+// registration FAIL LOUDLY rather than take a wrong branch, which is the outcome
+// a fail-closed rewrite here would produce anyway. Recorded rather than changed,
+// so the next reader does not have to re-derive it.
 func sameProjectPath(left, right string) bool {
 	if filepath.Clean(left) == filepath.Clean(right) {
 		return true
