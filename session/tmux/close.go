@@ -12,6 +12,11 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+// ErrSessionVanishedBeforeCapture marks a pane-list read that failed because
+// tmux says the session does not exist. Whether that is a determinate EMPTY or a
+// lost ancestry depends on the caller: see captureSessionProcessTrees.
+var ErrSessionVanishedBeforeCapture = errors.New("tmux session was gone before its panes could be listed")
+
 // PaneState is what a bounded teardown could ESTABLISH about a tmux session, and
 // it is returned SEPARATELY from the error on purpose (#1917).
 //
@@ -275,7 +280,12 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		if closeErr == nil {
 			return refuse(fmt.Errorf("tmux did not establish that session %s is gone", t.sanitizedName))
 		}
-		return PaneStateUnknown, closeErr
+		// pidErr is joined, not dropped: when the pane query ALSO timed out, this
+		// branch runs before the timeout case below, and returning closeErr alone
+		// would erase the ErrTmuxTimeout sentinel that #1917 keeps reachable
+		// through errors.Is for callers that classify on it. errors.Join ignores a
+		// nil pidErr, so the ordinary case is unchanged.
+		return PaneStateUnknown, errors.Join(closeErr, pidErr)
 	case errors.Is(pidErr, ErrTmuxTimeout):
 		// A TIMED-OUT panePID is not "nothing to wait on" (#1917). The server never
 		// told us which process to wait for, so even with a successful kill we skip
@@ -286,7 +296,7 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		// to follow across teardown. A successful kill-session is not enough to
 		// prove that process stopped writing.
 		return PaneStateUnknown, errors.Join(closeErr, processErr)
-	case processes.captureErr != nil:
+	case processes.captureErr != nil && !sessionGoneWithNoPaneObserved(processes.captureErr, pidErr):
 		// The full process set was not established. A child may already have
 		// detached/reparented and still be writing after the leader exits; leader
 		// death cannot manufacture proof about descendants we failed to see.
@@ -317,6 +327,23 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 	// process set, which INCLUDES the pane leader. Neither depends on the PID
 	// query, so it has nothing left to tell the caller.
 	return PaneStateKnown, nil
+}
+
+// sessionGoneWithNoPaneObserved reports whether an unreadable pane set is
+// actually a determinate EMPTY.
+//
+// It is one only when BOTH reads agree the session is not there: tmux said so on
+// the pane list, AND the pane PID query never named a pane either. That is the
+// ordinary teardown of an already-exited agent, and refusing it would leave those
+// worktrees uncollectable forever.
+//
+// If a pane PID WAS observed, the same tmux answer means the opposite: the
+// session exited between the two reads, the ancestry list-panes would have
+// returned is lost, and descendants or SID members that outlive the leader are
+// unaccounted for. Leader death cannot prove they stopped writing (#1104/#802),
+// so that stays a blocker (Codex on #2966).
+func sessionGoneWithNoPaneObserved(captureErr, pidErr error) bool {
+	return pidErr != nil && errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity

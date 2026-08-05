@@ -87,19 +87,23 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 		}
-		// tmux ANSWERED that the session is not there, which is a determinate
-		// EMPTY and not a failed read: a session that does not exist has no panes,
-		// so it has no pane processes to capture. Measured — `can't find session:
-		// <name>` on a live server, `no server running on <socket>` when the server
-		// itself is gone, both exit 1.
+		// tmux ANSWERED that the session is not there. Marked with a sentinel
+		// rather than returned as a plain failure, because whether it is a
+		// determinate EMPTY depends on something only the caller knows: whether it
+		// had already observed a pane of this session.
 		//
-		// This distinction is load-bearing for the destructive path (#2962). Its
-		// caller must refuse to touch the worktree when the pane process set could
-		// not be READ; collapsing "the session is gone" into that would refuse
-		// every teardown of an already-exited agent, which is the ordinary case and
-		// would leave those worktrees uncollectable forever.
+		//   - No pane ever observed: the session does not exist, so it has no panes
+		//     and no pane processes. A determinate empty.
+		//   - A pane WAS observed moments ago: the session exited between the two
+		//     reads, so this is a RACE, and the pane ancestry list-panes would have
+		//     returned is lost. Descendants and SID members that outlive the leader
+		//     are then unaccounted for — leader death cannot prove they stopped
+		//     writing (#1104/#802).
+		//
+		// Measured: `can't find session: <name>` on a live server, `no server
+		// running on <socket>` when the server itself is gone, both exit 1.
 		if missingTmuxSession(err, sanitizedName) {
-			return nil, nil
+			return nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
 		}
 		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)
 	}

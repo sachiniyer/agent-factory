@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // These tests pin the contract CloseAndWaitForPaneExit exists to provide, which
@@ -170,4 +171,61 @@ func exitedPID(t *testing.T) string {
 			"definitively-gone pid", pid, err)
 	}
 	return strconv.Itoa(pid)
+}
+
+// TestSessionGoneRaceAfterAPaneWasObservedStaysUnknown is the Codex finding on
+// #2966: the determinate-empty is only sound when NO pane was ever observed.
+//
+// Here panePID names a live pane, and list-panes THEN reports the session gone.
+// That is a race, not an empty session: the ancestry list-panes would have
+// returned is lost, so descendants and SID members that outlive the leader are
+// unaccounted for. Leader death cannot prove they stopped writing (#1104/#802).
+func TestSessionGoneRaceAfterAPaneWasObservedStaysUnknown(t *testing.T) {
+	// The pane leader must be ALREADY GONE, so the pane-exit wait is skipped and
+	// this test isolates the capture gate. With a live pid it passed either way —
+	// the wait caught it — which made it assert the claim while checking something
+	// weaker.
+	deadPID := exitedPID(t)
+	scriptedTmuxOnPath(t, `
+display-message) echo "`+deadPID+`" ;;
+list-panes)      echo "can't find session: af_raced" >&2; exit 1 ;;
+kill-session)    exit 0 ;;
+has-session)     exit 1 ;;`)
+
+	ts := NewTmuxSessionFromSanitizedName("af_raced", "")
+	state, err := ts.CloseAndWaitForPaneExit()
+
+	if state == PaneStateKnown {
+		t.Fatalf("CloseAndWaitForPaneExit = PaneStateKnown with err=%v: a pane WAS observed and the "+
+			"session then vanished before list-panes, so its descendants are unaccounted for — that is "+
+			"a lost ancestry, not an empty session", err)
+	}
+	if err == nil {
+		t.Error("the race must be reported, not silently downgraded")
+	}
+}
+
+// TestPaneQueryTimeoutKeepsTheSentinelThroughACloseFailure is the other Codex
+// finding: when the pane query times out AND close also fails, the combined
+// return must still carry ErrTmuxTimeout. #1917 keeps that sentinel reachable
+// through errors.Is for callers that classify on it, and returning closeErr
+// alone erased it.
+func TestPaneQueryTimeoutKeepsTheSentinelThroughACloseFailure(t *testing.T) {
+	shortTmuxTimeout(t, 200*time.Millisecond)
+	scriptedTmuxOnPath(t, `
+display-message) sleep 300 & wait ;;
+list-panes)      exit 0 ;;
+kill-session)    echo "cannot kill session" >&2; exit 1 ;;
+has-session)     exit 0 ;;`)
+
+	ts := NewTmuxSessionFromSanitizedName("af_timeout_and_survivor", "")
+	state, err := ts.CloseAndWaitForPaneExit()
+
+	if state != PaneStateUnknown {
+		t.Fatalf("state = %v, want PaneStateUnknown", state)
+	}
+	if !errors.Is(err, ErrTmuxTimeout) {
+		t.Errorf("error = %v, want the ErrTmuxTimeout sentinel to survive the combined failure so "+
+			"callers can still classify the tmux command as timed out (#1917)", err)
+	}
 }

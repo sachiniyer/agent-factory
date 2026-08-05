@@ -184,10 +184,21 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// workspace is already gone — tombstoning a row, holding the title and
 		// telling the user a workspace may remain would all be false.
 		killErr := instance.Kill()
+		// ErrSessionNotStarted is POSITIVE evidence, not an absence: the start path
+		// established that tmux never created a session for this instance. So an
+		// unreadable pane set during cleanup — `list-panes` cannot run because tmux
+		// itself is unavailable, say — says nothing about a live pane, because there
+		// was never a pane to be live (Codex on #2966).
+		//
+		// Without this, a create that fails before spawning leaves a permanent
+		// tombstone holding its title on any box where tmux is missing or broken:
+		// exactly the machines where creates fail. The #2962 gate is right to refuse
+		// when a pane MIGHT be writing; here we know one never existed.
+		neverSpawned := errors.Is(serr, tmux.ErrSessionNotStarted)
 		if killErr != nil && !session.TeardownStateUnknown(killErr) {
 			log.WarningLog.Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
 		}
-		if session.TeardownStateUnknown(killErr) {
+		if session.TeardownStateUnknown(killErr) && !neverSpawned {
 			if keepErr := m.keepFailedCreate(repo.ID, title, instance); keepErr != nil {
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
