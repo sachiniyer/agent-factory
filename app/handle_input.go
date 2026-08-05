@@ -420,12 +420,20 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 // user rebinds that action". A user who unbound it entirely gets the section
 // instead of a key that does nothing.
 func noActiveProjectNotice() string {
-	pick := "pick one in the Projects section"
-	if k := keys.GlobalKeyBindings[keys.KeySwitchProject].Help().Key; k != "" {
-		pick = fmt.Sprintf("press %s to pick one", k)
-	}
-	return "select a project first — " + pick +
+	return "select a project first — " + switchProjectPickHint() +
 		"; af is running with no active project, so there is no repo for this session to live in"
+}
+
+// switchProjectPickHint names the action that gives af an active project. It is
+// shared by every surface that has to say so — the create refusal above and the
+// registry-mode empty workspace (#2830) — because a user who reads one and then
+// the other must not be told two different keys. Falls back to naming the
+// section when switch_project is unbound, which is still actionable.
+func switchProjectPickHint() string {
+	if k := keys.GlobalKeyBindings[keys.KeySwitchProject].Help().Key; k != "" {
+		return fmt.Sprintf("press %s to pick one", k)
+	}
+	return "pick one in the Projects section"
 }
 
 // suggestSessionName picks a readable random "adjective-noun" name for the

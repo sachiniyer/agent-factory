@@ -83,3 +83,45 @@ func TestStartNewInstanceWithActiveProjectStillOpensNaming(t *testing.T) {
 	assert.Equal(t, repoDir, h.namingInstance.Path,
 		"the placeholder must target the ACTIVE project's repo root")
 }
+
+// TestRegistryModeEmptyWorkspaceDoesNotAdvertiseCreate is #2830, the other half
+// of the same dead end. #2764 fixed the path where `n` REACHES creation and now
+// refuses with a reason; this covers the path where it never arrives at all.
+//
+// In registry mode newHome lands focus on the Projects section, which is a
+// captive vim-style list that consumes the create verbs on purpose (#1620). So
+// `n` produced no form, no notice, and no repaint — while the workspace beside
+// it read "No sessions yet — press n to create one." The advertised affordance
+// and the live key routing disagreed, and the copy was the half that was wrong.
+//
+// Asserted on the composed frame, not the renderer: the renderer's own behavior
+// is covered in ui, and what regressed here is which renderer the view picks.
+func TestRegistryModeEmptyWorkspaceDoesNotAdvertiseCreate(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "" // registry mode: launched outside a repo (#2477)
+	resizeHome(h, 120, 30)
+	require.Equal(t, 0, h.store.NumInstances(), "precondition: the rail is empty")
+
+	view := flatten(h.View())
+
+	assert.NotContains(t, view, "press n to create one",
+		"no focused region in registry mode can honor that promise (#2830)")
+	assert.Contains(t, view, "No project selected",
+		"the empty state must name the actual blocker")
+	assert.Contains(t, view, switchProjectPickHint(),
+		"and it must name the same action, in the same words, as the create refusal")
+}
+
+// Inside a repo the ordinary onboarding copy is untouched: `n` works there, so
+// advertising it is correct and this fix must not reach that state.
+func TestNonRegistryModeEmptyWorkspaceStillAdvertisesCreate(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = t.TempDir()
+	resizeHome(h, 120, 30)
+	require.Equal(t, 0, h.store.NumInstances())
+
+	view := flatten(h.View())
+
+	assert.Contains(t, view, "No sessions yet — press n to create one.")
+	assert.NotContains(t, view, "No project selected")
+}

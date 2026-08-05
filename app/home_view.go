@@ -171,10 +171,16 @@ func (m *home) View() string {
 	rail := lipgloss.JoinVertical(lipgloss.Left, railParts...)
 	cols := []string{rail}
 	if len(m.visiblePanes) == 0 {
-		if m.store.NumInstances() == 0 {
-			cols = append(cols, ui.FirstRunWorkspace(m.lastLayout.Workspace))
-		} else {
+		switch {
+		case m.store.NumInstances() > 0:
 			cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
+		case m.repoRoot == "":
+			// Registry mode (#2477): no active project, so the blocker is not the
+			// missing sessions but the missing project — and `n` cannot create one
+			// from any focused region here (#2830).
+			cols = append(cols, ui.NoActiveProjectWorkspace(m.lastLayout.Workspace, switchProjectPickHint()))
+		default:
+			cols = append(cols, ui.FirstRunWorkspace(m.lastLayout.Workspace))
 		}
 	}
 	for i, p := range m.visiblePanes {

@@ -25,6 +25,28 @@ func FirstRunWorkspace(r layout.Rect) string {
 	})
 }
 
+// NoActiveProjectWorkspace renders the zero-session state in registry mode
+// (#2477): af launched outside a repo, with no active project yet.
+//
+// It deliberately does NOT advertise `n`, which FirstRunWorkspace does and this
+// state used to (#2830). In registry mode focus lands on the Projects section,
+// and that section is a captive vim-style list that consumes the create verbs by
+// design (#1620) — so the key did nothing at all, no form and no notice. Reached
+// the long way round, by tabbing to the tree, `n` refuses anyway: a session needs
+// a project to live in (#2764/#2815). The copy was promising an action no focused
+// region could perform.
+//
+// pickHint is supplied by the caller rather than derived here so this line and
+// the refusal notice name the same key in the same words; see the app package's
+// switchProjectPickHint.
+func NoActiveProjectWorkspace(r layout.Rect, pickHint string) string {
+	line := "No project selected"
+	if pickHint != "" {
+		line += " — " + pickHint
+	}
+	return emptyWorkspaceContent(r, []string{line + "."})
+}
+
 func emptyWorkspaceContent(r layout.Rect, lines []string) string {
 	if r.Empty() {
 		return ""
