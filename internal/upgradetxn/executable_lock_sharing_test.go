@@ -355,6 +355,44 @@ func TestExecutableLock_NonblockingStaysDeniedWhenTheLockIsAlreadyWidened(t *tes
 	require.ErrorIs(t, err, os.ErrPermission)
 }
 
+// The STALE denial. The nonblocking open can fail while the lock is still 0600
+// and the creator can finish its chmod before the follow-up stat runs — so the
+// lock reads as widened while the error in hand describes a moment that has
+// already passed. Inferring "permanent" from the current state there returns a
+// stale EACCES, and the caller swaps with no lock held, which is the interleave
+// this branch exists to prevent.
+//
+// The window is between two adjacent syscalls, so it is pinned through the seam
+// rather than raced: the probe reports "not transient" (as a completed widening
+// would) and, at that instant, makes the lock openable — exactly the ordering
+// where the first denial is already out of date. The acquisition must re-ask and
+// succeed, not report the error it was holding.
+func TestExecutableLock_NonblockingRetriesAStaleDenialAgainstAWidenedLock(t *testing.T) {
+	requireUnprivileged(t)
+	executable := sharedInstallDir(t, 0o770)
+	lockPath := executableLockPath(executable)
+	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
+	require.NoError(t, os.Chmod(lockPath, 0o000))
+
+	var probes int
+	prev := lockDenialIsTransient
+	lockDenialIsTransient = func(path string, dirGid int) bool {
+		probes++
+		// The creator's chmod lands here — after our open failed, before we decide.
+		require.NoError(t, os.Chmod(path, 0o660))
+		return false
+	}
+	t.Cleanup(func() { lockDenialIsTransient = prev })
+
+	ran := false
+	require.NoError(t, withExecutableLock(executable, true, func() error {
+		ran = true
+		return nil
+	}), "a denial that was already stale must be re-asked, not reported")
+	require.True(t, ran, "the critical section must run once the re-attempt succeeds")
+	require.Equal(t, 1, probes, "the discriminator must be consulted exactly once")
+}
+
 // The same nonblocking call in a PRIVATE directory must stay a permission error.
 // There the denial is permanent and means a genuinely unauthorized caller;
 // reporting BUSY would tell the launch updater to defer forever and silently

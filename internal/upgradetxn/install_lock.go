@@ -213,10 +213,19 @@ func acquireExecutableLock(executable string, nonblocking bool) (*os.File, error
 			//
 			// Returned without sleeping either way: the caller asked not to wait
 			// (#2951), and this reads the lock's state rather than waiting on it.
-			if !executableLockDenialIsTransient(path, gid) {
-				return lock, err
+			if lockDenialIsTransient(path, gid) {
+				return nil, ErrInstallLockBusy
 			}
-			return nil, ErrInstallLockBusy
+			// The lock reads as already widened, which normally means this denial
+			// is about who we are. But the widening may have landed BETWEEN the
+			// failed open above and that stat, in which case the error in hand is
+			// STALE, not permanent — and returning it sends the caller down the
+			// swap-with-no-lock path this whole branch exists to keep it off.
+			//
+			// Re-ask once. No sleep: the answer either changed already or it did
+			// not, and the caller asked not to wait. A second denial against a
+			// lock that is demonstrably widened is the permanent case.
+			return acquireFileLockPrepared(path, syscall.O_NOFOLLOW, nonblocking, prepare)
 		}
 		if attempt >= executableLockOpenRetries {
 			return lock, err
@@ -489,6 +498,11 @@ func lockHasInheritedACL(lock *os.File) bool {
 // stat needs only search permission on the directory, which any caller that got
 // this far already has. An absent lock means we are racing its creation, which
 // is the transient case by definition.
+// lockDenialIsTransient is the seam the nonblocking branch calls through, so a
+// test can pin the stale-denial ordering rather than race it. Production never
+// reassigns it.
+var lockDenialIsTransient = executableLockDenialIsTransient
+
 func executableLockDenialIsTransient(lockPath string, dirGid int) bool {
 	info, err := os.Lstat(lockPath)
 	if err != nil {
