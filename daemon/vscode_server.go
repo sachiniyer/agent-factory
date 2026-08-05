@@ -577,7 +577,13 @@ func (v *vscodeSupervisor) reconcilePersistedBeforeSpawn(key, instanceID string)
 	if server != nil && !hasLiveServer {
 		delete(v.servers, key)
 		if !server.ready {
-			v.failures[key] = vscodeFailure{err: errVSCodeStartExited, at: v.now(), instanceID: instanceID}
+			// Attributed to the SERVER's stable id, never the caller's. The cached
+			// entry sits under a title key, so in a reuse case it can belong to a
+			// session the caller has nothing to do with — and this failure is the death
+			// of THAT editor. Recording it against the caller would hand a fresh
+			// session an error it did not earn on its very first request, which is the
+			// bug this guard exists to prevent, re-entered through the write side.
+			v.failures[key] = vscodeFailure{err: errVSCodeStartExited, at: v.now(), instanceID: server.instanceID}
 		}
 	}
 	v.mu.Unlock()
