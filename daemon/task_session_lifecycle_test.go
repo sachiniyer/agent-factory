@@ -168,10 +168,32 @@ func TestRunEndedIntoIdle(t *testing.T) {
 	assert.True(t, runEndedIntoIdle(inst, true), "ended + Ready is the completion edge")
 	assert.False(t, runEndedIntoIdle(inst, false), "the edge needs the run to have been active")
 
-	// Not Ready: the run marker is clear but the session is not a healthy idle
-	// one, which is the shape an uncertain create leaves behind.
-	inst.SetStatusForTest(session.Loading)
+	// Not idle: the run marker is clear but the agent is working again, so this is
+	// not a finished run sitting quiet.
+	inst.SetStatusForTest(session.Running)
 	assert.False(t, runEndedIntoIdle(inst, true), "only a session that settled idle may be reaped")
+}
+
+// TestRunEndedIntoIdle_ExcludesAnUncertainCreate is the case that caught a wrong
+// claim in review: session.Loading decomposes to LiveReady, and more importantly
+// MarkStartupStateUnknown clears taskRunActive DIRECTLY while leaving liveness
+// alone — so an uncertain create satisfies "run ended" and "is LiveReady" both.
+//
+// The daemon retains that record deliberately so an operator can inspect the
+// workspace the create may have left behind (keepUncertainCreate). The poll's
+// !Started() early return keeps it away from the lifecycle hook today, but the
+// predicate must refuse it on its own rather than resting on a distant line.
+func TestRunEndedIntoIdle_ExcludesAnUncertainCreate(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "uncertain", "task-x")
+
+	inst.MarkStartupStateUnknown()
+	require.False(t, inst.TaskRunActive(), "precondition: the marker clears without a completed run")
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"precondition: liveness is untouched, which is what makes this indistinguishable on the first two conditions")
+
+	assert.False(t, runEndedIntoIdle(inst, true),
+		"a create whose startup outcome was never established is not a finished run")
 }
 
 // TestTaskSessionLifecycle_UnreadableTaskStoreKeepsTheSession: a lookup that

@@ -23,28 +23,37 @@ import (
 // runEndedIntoIdle reports whether this tick is the moment a task run finished
 // with its session sitting idle and healthy.
 //
-// Both halves are load-bearing:
+// Three conditions, each excluding a different way the run marker can clear
+// without a run having completed:
 //
-//   - the run marker went true→false on THIS tick. taskRunActive flips once and
+//   - the marker went true→false on THIS tick. taskRunActive flips once and
 //     permanently, so this can fire at most once per session — a session cannot be
 //     archived twice, and a session a user later adopts and works in is never
 //     revisited. That is the difference between an edge and a standing predicate,
 //     and it is why this is not a sweep: "task session whose run has ended" stays
 //     true forever, including for the session someone is typing into right now.
 //
-//   - the session settled into LiveReady. taskRunActive also clears on paths that
-//     are NOT a completed run: CommitArchive ends it (already archived — nothing to
-//     do), and a startup that settles terminal-unknown ends it without the session
-//     ever having run. That last one matters most: the daemon deliberately RETAINS
-//     an uncertain create's record so an operator can inspect the workspace it may
-//     have left behind (keepUncertainCreate), and reaping it here would destroy
-//     exactly what that retention exists to preserve.
+//   - the session settled into LiveReady. CommitArchive also ends a run, and that
+//     session is already archived with nothing left to do.
 //
-// The idle edge itself is session.runEndsOnIdleEdge — a transition INTO Ready from
-// somewhere else — so pairing "the run ended" with "we are now Ready" identifies it
-// without this package having to re-derive the edge.
+//   - startup did not settle terminal-unknown. This one is checked explicitly
+//     even though the poll cannot currently deliver such a session here, and the
+//     explicitness is the point. MarkStartupStateUnknown clears taskRunActive
+//     DIRECTLY — not through a transition — and leaves liveness untouched, so an
+//     uncertain create sits at LiveReady with its run marker clear and satisfies
+//     both conditions above. What actually keeps it away from this function today
+//     is refreshInstanceStatus's `!instance.Started()` early return, since the
+//     same call also clears started. That is a correct outcome resting on a
+//     distant, unrelated line: the daemon RETAINS an uncertain create's record so
+//     an operator can inspect the workspace it may have left behind
+//     (keepUncertainCreate), and reaping it would destroy exactly what that
+//     retention exists to preserve. Stating the condition here means a future
+//     refactor of the poll's early returns cannot silently authorize that.
 func runEndedIntoIdle(instance *session.Instance, taskRunWasActive bool) bool {
 	if !taskRunWasActive || instance.TaskRunActive() {
+		return false
+	}
+	if instance.StartupStateUnknown() {
 		return false
 	}
 	return instance.GetLiveness() == session.LiveReady
