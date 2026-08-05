@@ -7477,14 +7477,18 @@ var AttachTerminal = class {
     if (event.type === "touchcancel" && awaitingRecognition && touchCancelCompletesPress(Date.now() - this.touchPressAt)) {
       this.selectTouchWord();
     }
+    this.disposeTouchPressMarker();
+    this.flushTouchCopy();
+  };
+  /** Writes the text a recognised press staged, once, from whichever trusted event
+   *  the browser actually delivered. */
+  flushTouchCopy() {
     const pending = this.touchCopyPending;
     this.touchCopyPending = null;
-    this.disposeTouchPressMarker();
-    if (pending === null) {
-      return;
+    if (pending !== null) {
+      this.copyToClipboard(pending);
     }
-    this.copyToClipboard(pending);
-  };
+  }
   // …and the menu that cancellation was announcing is not wanted either: it would
   // cover the selection with an OS menu whose Copy acts on a DOM selection xterm
   // never makes (#2849). Suppressed ONLY for a press af has already acted on, so a
@@ -7572,6 +7576,7 @@ var AttachTerminal = class {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
       event.preventDefault();
       event.stopPropagation();
+      this.flushTouchCopy();
       return;
     }
     if (!this.applicationOwnsMouse() || this.lastPointerWasTouch) {

@@ -276,25 +276,22 @@ export class AttachTerminal {
     ) {
       this.selectTouchWord();
     }
+    this.disposeTouchPressMarker();
+    // Browsers that DO deliver a lift copy here; the ones that answer a held touch
+    // with a compatibility click instead have already copied there. Whichever runs
+    // first consumes the pending text, so the copy happens exactly once.
+    this.flushTouchCopy();
+  };
+
+  /** Writes the text a recognised press staged, once, from whichever trusted event
+   *  the browser actually delivered. */
+  private flushTouchCopy(): void {
     const pending = this.touchCopyPending;
     this.touchCopyPending = null;
-    this.disposeTouchPressMarker();
-    if (pending === null) {
-      return;
+    if (pending !== null) {
+      this.copyToClipboard(pending);
     }
-    // The write runs HERE, at the end of the touch rather than in the timer that
-    // selected the text: Safari grants clipboard access only to a user-gesture task,
-    // so a write from the timeout is refused on the one platform this gesture exists
-    // for.
-    //
-    // A CANCEL counts as an end. The browser ends the sequence itself the moment it
-    // recognises a long press — it is about to offer its own context menu — so
-    // treating a cancel as "copied nothing" throws the result away at exactly the
-    // moment the gesture succeeded, with the selection already painted under the
-    // finger. Observed: the selection appeared, no failure toast, and the clipboard
-    // stayed untouched, which is that discard and nothing else.
-    this.copyToClipboard(pending);
-  };
+  }
   // …and the menu that cancellation was announcing is not wanted either: it would
   // cover the selection with an OS menu whose Copy acts on a DOM selection xterm
   // never makes (#2849). Suppressed ONLY for a press af has already acted on, so a
@@ -413,12 +410,23 @@ export class AttachTerminal {
   // tap staying the click.
   private readonly onMouseDownCapture = (event: MouseEvent): void => {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
-      // A long press already consumed this touch (#2849). Its trailing click would
-      // reach a mouse-aware application as a press the user never aimed at it, and
-      // would clear the selection that says what was copied — so the gesture stops
-      // here, before xterm's own listeners on the descendant see it.
+      // The compatibility click the press still owed. Two things happen here.
+      //
+      // It is SWALLOWED: it would reach a mouse-aware application as a press the user
+      // never aimed at it, and would clear the selection that says what was copied.
+      //
+      // And it is where the COPY happens, because it is the one trusted user-gesture
+      // event the browser reliably delivers at the end of a long press. Recording
+      // what actually arrives for a held touch gives `touchstart` and then this — no
+      // touchend, no touchcancel, no contextmenu — so a copy wired to a lift waits
+      // for an event that never comes, which is exactly what CI reported three times:
+      // selection painted, no failure toast, clipboard untouched. A mousedown is also
+      // a better home than a lift for Safari's rule that the write be made from a
+      // user gesture. A gesture that became a scroll synthesizes no click at all, so
+      // this cannot resurrect a copy the scroll already discarded.
       event.preventDefault();
       event.stopPropagation();
+      this.flushTouchCopy();
       return;
     }
     if (!this.applicationOwnsMouse() || this.lastPointerWasTouch) {
