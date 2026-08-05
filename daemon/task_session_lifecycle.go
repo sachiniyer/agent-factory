@@ -137,5 +137,5 @@ func (m *Manager) runTaskSessionLifecycle(repoID, title, taskID, verb string) {
 		log.WarningLog.Printf("task %s: could not %s session %q after its run finished: %v", taskID, verb, title, err)
 		return
 	}
-	log.InfoLog.Printf("task %s: %sd session %q after its run finished (on_complete=%s)", taskID, verb, title, verb)
+	log.InfoLog.Printf("task %s: applied on_complete=%s to session %q after its run finished", taskID, verb, title)
 }
