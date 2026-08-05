@@ -41,6 +41,21 @@ esac
 	t.Setenv("TOUCHED_MARKER", touched)
 }
 
+// pinTmuxServerProbe fixes the answer to "is a tmux server alive for this uid?"
+// for one test.
+//
+// It has to be pinned, not observed: since #2875 the ENOENT diagnostic is
+// definitive only when NO server could own an unlinked socket, so the real probe
+// reads the host process table and a developer box with tmux running gives a
+// different answer from a container with none. A test that did not pin it would
+// assert one thing locally and another in CI.
+func pinTmuxServerProbe(t *testing.T, alive bool) {
+	t.Helper()
+	prev := tmuxServerProcessAlive
+	tmuxServerProcessAlive = func() bool { return alive }
+	t.Cleanup(func() { tmuxServerProcessAlive = prev })
+}
+
 // TestCleanupSessionsListFailureIsNotAnEmptySessionSet is the #2870 regression
 // lock: `af reset` calls CleanupSessions before it deletes worktrees, branches,
 // and records, so a FAILED listing read as "there are no sessions" licenses the
@@ -140,6 +155,9 @@ func TestCleanupSessionsListFailureIsNotAnEmptySessionSet(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			touched := filepath.Join(t.TempDir(), "reached-another-tmux-command")
+			// No server anywhere: the world in which tmux's diagnostics are the
+			// only evidence. The ENOENT-with-a-live-server case is its own test.
+			pinTmuxServerProbe(t, false)
 			listFailureTmuxOnPath(t, touched, tc.diagnostic, tc.exitCode)
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
@@ -230,6 +248,12 @@ func TestCleanupSessionsAgainstRealTmuxSocket(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
+	// The throwaway TMUX_TMPDIR holds no server, but the HOST may well be
+	// running tmux (this was written on a box with several), and since #2875 a
+	// live server makes ENOENT ambiguous. Pin the answer to the world this test
+	// is describing: nothing else is running.
+	pinTmuxServerProbe(t, false)
+
 	// An ambient $TMUX would hand tmux the REAL server's socket and bypass
 	// TMUX_TMPDIR entirely. Empty is treated as unset by tmux.
 	t.Setenv("TMUX", "")
@@ -295,5 +319,71 @@ func TestListSessionNamesIsBounded(t *testing.T) {
 	}
 	if names != nil {
 		t.Errorf("names = %v, want nil alongside the error", names)
+	}
+}
+
+// TestSocketAbsentWithALiveServerIsNotAnEmptySessionSet is the #2875 regression:
+// the hole left in #2870's own fix.
+//
+// tmux(1) notes that a socket removed by accident can be recreated by signalling
+// the server — which is to say the SERVER SURVIVES ITS SOCKET. Reproduced by
+// hand: a session and its `sleep 300` pane stayed alive after `rm -f` of the
+// socket, and `tmux ls` answered exactly the ENOENT diagnostic that #2870
+// classified as definitive absence. `af reset` would then have deleted worktrees
+// and pruned branches with agents running — the very thing #2870 was for.
+//
+// Not hypothetical: systemd-tmpfiles clears /tmp of files untouched for 10 days
+// by default, and af tmux sessions routinely outlive that.
+//
+// Both directions are pinned, because the naive fix (drop the ENOENT branch)
+// breaks `af reset` on every machine that simply has no tmux server: a server
+// that EXITS leaves its socket behind, so a dead server answers ECONNREFUSED,
+// and ENOENT is the ordinary no-server answer.
+func TestSocketAbsentWithALiveServerIsNotAnEmptySessionSet(t *testing.T) {
+	const enoent = "error connecting to /tmp/tmux-1000/default (No such file or directory)"
+	const refused = "no server running on /tmp/tmux-1000/default"
+
+	for _, tc := range []struct {
+		name        string
+		diagnostic  string
+		serverAlive bool
+		wantAbort   bool
+	}{
+		{"socket absent, no server anywhere", enoent, false, false},
+		{"socket absent while a server is ALIVE", enoent, true, true},
+		// ECONNREFUSED is self-sufficient: the socket exists and refused us, so
+		// nothing is listening on it whatever else is running.
+		{"connection refused, no server", refused, false, false},
+		{"connection refused, another server alive elsewhere", refused, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			touched := filepath.Join(t.TempDir(), "reached-another-tmux-command")
+			pinTmuxServerProbe(t, tc.serverAlive)
+			listFailureTmuxOnPath(t, touched, tc.diagnostic, 1)
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+			err := CleanupSessions(cmd.MakeExecutor())
+
+			if !tc.wantAbort {
+				if err != nil {
+					t.Fatalf("CleanupSessions error = %v, want nil — %q with serverAlive=%v is a real "+
+						"empty session set, and refusing here blocks reset on ordinary machines",
+						err, tc.diagnostic, tc.serverAlive)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("CleanupSessions returned nil for %q while a tmux server is running — the "+
+					"server outlives an unlinked socket, so this is an unreadable session set, not an "+
+					"empty one, and `af reset` would delete worktrees with agents live (#2875)", tc.diagnostic)
+			}
+			if !strings.Contains(err.Error(), "a tmux server is running") {
+				t.Errorf("error = %q, want it to explain why a missing socket is not proof of absence — "+
+					"otherwise the refusal reads as a contradiction of tmux's own diagnostic", err)
+			}
+			if _, statErr := os.Stat(touched); !os.IsNotExist(statErr) {
+				t.Errorf("the sweep continued to another tmux command after refusing (stat %s = %v)", touched, statErr)
+			}
+		})
 	}
 }

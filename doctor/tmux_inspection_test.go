@@ -172,15 +172,13 @@ func TestListedTmuxSessionsPass(t *testing.T) {
 			},
 			wantDetail: "2",
 		},
-		{
-			// The socket was never created: the ordinary answer on a machine
-			// with no tmux server.
-			name: "socket absent",
-			exec: func(t *testing.T) cmd.Executor {
-				return blindTmuxLsExec(t, "error connecting to /tmp/tmux-1000/default (No such file or directory)", 1)
-			},
-			wantDetail: "0",
-		},
+		// The socket-absent (ENOENT) diagnostic is deliberately NOT in this
+		// table. Since #2875 it is definitive only when no tmux server is alive
+		// to own an unlinked socket, so its outcome depends on the host's
+		// process table — which a doctor test cannot pin from outside
+		// session/tmux, and which differs between a dev box running tmux and a
+		// bare CI container. It is covered where the probe is reachable:
+		// session/tmux's TestSocketAbsentWithALiveServerIsNotAnEmptySessionSet.
 		{
 			// A server that exited leaves its socket behind, so the connect is
 			// refused.
