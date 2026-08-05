@@ -61,9 +61,16 @@ Working style:
 - Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
 - Before opening a PR run the **cheap local checks** — `gofmt -l .`,
   `go build ./...`, `golangci-lint run --timeout=3m --fast`,
-  `deadcode -test ./...`, `scripts/lint-file-length.sh` — plus `go test` on
-  **only the non-daemon package you changed**. Then push and let CI run the
-  rest, and fix what CI reports on your PR head.
+  `scripts/lint-file-length.sh` — plus `go test` on **only the non-daemon
+  package you changed**. Then push and let CI run the rest, and fix what CI
+  reports on your PR head.
+- **`deadcode -test ./...` is NOT one of them — never run it locally.** It is
+  whole-program analysis, ~375% of one core per run, and with ~15 sessions
+  doing it at once this 16-core box hit a load average of 36. It reads as cheap
+  because it prints nothing; it is not. CI runs it on every push and reports
+  unreachable code there, so a local run buys nothing CI does not already give
+  and costs the maintainer his machine. Same failure shape as the containerized
+  suites below — individually reasonable, collectively ruinous on a shared box.
 - **Do not run containerized suites as a routine pre-PR gate.** Not
   `make test-container`, not `make remote-roundtrip-container`, not
   `make playtest-container`. Each spins a container that rebuilds the whole Go
@@ -126,11 +133,16 @@ gofmt -w .
 # Must pass before opening a PR
 golangci-lint run --timeout=3m --fast
 gofmt -l .   # should produce no output
-deadcode -test ./...   # should produce no output
 scripts/lint-file-length.sh   # or: make lint-file-length
 ```
 
-Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
+**Deadcode runs in CI, not here.** `deadcode -test ./...` is whole-program
+analysis — see the rule above — so read its result from CI's `Lint` job on your
+PR head instead of running it on the shared box. CI pins
+`golang.org/x/tools/cmd/deadcode@v0.48.0`. That pin matters because this
+project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the
+CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25), and
+deadcode must be ≥ v0.45.0 to analyze go1.25 source — older x/tools cannot.
 
 **File-length lint (#1145):** `scripts/lint-file-length.sh` fails if any Go
 file exceeds its line limit — 1000 lines for production code, 1500 for
