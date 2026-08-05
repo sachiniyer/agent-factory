@@ -187,6 +187,14 @@ func TestRunEndedIntoIdle_ExcludesAnUncertainCreate(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "uncertain", "task-x")
 
+	// The production shape, which the shared fixture deliberately is not: a create
+	// whose session was born LiveReady and whose agent never ran. The fixture opens
+	// mid-run (LiveRunning) so the idle EDGE is drivable, so put it back to the
+	// state MarkStartupStateUnknown actually finds. SetStatusForTest writes the
+	// axes directly rather than transitioning, so this does not end the run itself.
+	inst.SetStatusForTest(session.Ready)
+	require.True(t, inst.TaskRunActive(), "precondition: the run is still marked in flight")
+
 	inst.MarkStartupStateUnknown()
 	require.False(t, inst.TaskRunActive(), "precondition: the marker clears without a completed run")
 	require.Equal(t, session.LiveReady, inst.GetLiveness(),
