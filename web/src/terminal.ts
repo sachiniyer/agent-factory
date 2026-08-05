@@ -943,7 +943,10 @@ export class AttachTerminal {
       if (range === null) {
         return null;
       }
-      if (range.start === 0 && (first === 0 ? buffer.getLine(0)?.isWrapped === true : true)) {
+      // Refuse only when the token runs off the top of what was taken INTO a wrapped
+      // predecessor — i.e. more of it exists above and did not fit. A token that
+      // simply begins at column 0 of a line that nothing wraps into is complete.
+      if (range.start === 0 && first > 0 && buffer.getLine(first)?.isWrapped === true) {
         return null;
       }
       if (range.start + range.length === (cells as string[]).length && last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {

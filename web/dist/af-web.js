@@ -7873,7 +7873,7 @@ var AttachTerminal = class {
       if (range === null) {
         return null;
       }
-      if (range.start === 0 && (first === 0 ? buffer.getLine(0)?.isWrapped === true : true)) {
+      if (range.start === 0 && first > 0 && buffer.getLine(first)?.isWrapped === true) {
         return null;
       }
       if (range.start + range.length === cells.length && last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
