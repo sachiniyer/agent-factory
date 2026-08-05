@@ -29,16 +29,21 @@ import (
 // HAND-REGISTERED routes, which are the ones a person adds by hand and the ones
 // that assertion never saw.
 
-// muxRegistration matches a `mux.HandleFunc(<arg>, …)` call and captures the
-// pattern argument, literal or not.
-var muxRegistration = regexp.MustCompile(`mux\.HandleFunc\(\s*([^,]+),`)
+// muxRegistration matches a `mux.HandleFunc(<arg>, …)` OR `mux.Handle(<arg>, …)`
+// call and captures the pattern argument, literal or not.
+//
+// Both forms, because they are interchangeable: a route wrapped as an
+// http.Handler (a WS upgrade, a proxy, anything with state) is registered with
+// Handle, and a scan that knew only HandleFunc would report a clean surface
+// while such a route sat outside /v1/ (#2934 review).
+var muxRegistration = regexp.MustCompile(`mux\.(?:HandleFunc|Handle)\(\s*([^,]+),`)
 
 // nonLiteralPatterns are registration arguments that are not string literals,
 // each with WHY it is already covered. An unlisted non-literal fails the test:
 // an argument this scanner cannot resolve is a path it cannot check, and
 // reporting a clean surface it did not read is the failure mode this guards.
 var nonLiteralPatterns = map[string]string{
-	"rt.Path":          "the catalog's own paths, asserted /v1/-prefixed by TestHTTPRoutes_HealthShape",
+	"rt.Path":          "every servedHTTPRoutes() path, asserted /v1/-prefixed by this test below",
 	"webtabPathPrefix": "a const equal to \"/v1/webtab/\", asserted below",
 }
 
@@ -46,6 +51,20 @@ func TestEveryMuxPatternIsUnderV1(t *testing.T) {
 	// Pin the const the allowlist vouches for, so the vouching cannot go stale.
 	require.Equal(t, "/v1/webtab/", webtabPathPrefix,
 		"the allowlist entry for webtabPathPrefix asserts this value; if it changed, the invariant changed with it")
+
+	// Make good on the OTHER allowlist entry rather than pointing at a test that
+	// does not cover it. newHTTPMux registers `rt.Path` for every entry of
+	// servedHTTPRoutes() — public catalog PLUS internalHTTPRoutes — while
+	// TestHTTPRoutes_HealthShape iterates only HTTPRoutes(), so an internal route
+	// added outside /v1/ was guarded by nothing (#2934 review). Assert the served
+	// union here, where the allowlist entry can honestly cite it.
+	served := servedHTTPRoutes()
+	require.NotEmpty(t, served)
+	for _, rt := range served {
+		assert.Truef(t, strings.HasPrefix(rt.Path, "/v1/"),
+			"served route %s %s is not under /v1/, so the TCP listener's shell shadows it before the gate",
+			rt.Method, rt.Path)
+	}
 
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
@@ -73,13 +92,19 @@ func TestEveryMuxPatternIsUnderV1(t *testing.T) {
 				continue
 			}
 			pattern := strings.Trim(arg, `"`)
+			// The bare "/" is the catch-all every mux ends with: the 404 fallback,
+			// not a served surface. Checked BEFORE the method is stripped, because
+			// `GET /` is a real method-specific root route that can answer non-/v1
+			// paths — stripping first would have exempted it as if it were the
+			// fallback (#2934 review).
+			if pattern == "/" {
+				continue
+			}
 			// Strip an optional leading METHOD ("GET /v1/health" -> "/v1/health").
 			if i := strings.LastIndex(pattern, " "); i >= 0 {
 				pattern = pattern[i+1:]
 			}
-			// "/" is the catch-all every mux ends with: it is the 404 fallback, not
-			// a served surface.
-			if pattern == "/" || strings.HasPrefix(pattern, "/v1/") {
+			if strings.HasPrefix(pattern, "/v1/") {
 				continue
 			}
 			offenders = append(offenders, name+": "+pattern)
