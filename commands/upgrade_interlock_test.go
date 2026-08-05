@@ -406,3 +406,155 @@ func TestWriteExecutableInPlace_HoldsThePreparationLockAgainstPrepare(t *testing
 	require.NoError(t, err)
 	require.Equal(t, "new binary", string(on), "and the swap completes once the lock is free")
 }
+
+// Broken lock storage must never block an install. <home>/upgrade left as a file
+// says nothing about whether a transaction exists, and refusing here would make
+// `af upgrade` fail on every invocation with --ignore-active-upgrade powerless,
+// because the override lives inside the swap that never runs.
+func TestWriteExecutableInPlace_BrokenLockStorageStillInstalls(t *testing.T) {
+	home := upgradeHome(t)
+	// Not a directory: WithInstallLock cannot take a lock under it.
+	require.NoError(t, os.WriteFile(filepath.Join(home, "upgrade"), []byte("not a directory"), 0o644))
+
+	target := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+
+	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag),
+		"broken lock storage must not stand between a user and their upgrade")
+
+	on, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "new binary", string(on))
+}
+
+// ...but the journal check still applies on that unlocked path. Failing to take
+// the lock is not a bypass of the guard, only of the serialisation.
+func TestWriteExecutableInPlace_BrokenLockStorageStillRefusesALiveTransaction(t *testing.T) {
+	home := upgradeHome(t)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "upgrade"), []byte("not a directory"), 0o644))
+	stubUpgradeJournal(t, journalAt(t, upgradetxn.PhaseCandidateValidating), nil)
+
+	target := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+
+	err := writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	var blocked *blockedInPlaceInstallError
+	require.ErrorAs(t, err, &blocked, "an unlockable install must still honour the journal")
+
+	on, readErr := os.ReadFile(target)
+	require.NoError(t, readErr)
+	require.Equal(t, "old binary", string(on))
+}
+
+// The override has to work on the unlocked path too, or the escape hatch is
+// exactly as unreachable as the bug this fixes.
+func TestWriteExecutableInPlace_BrokenLockStorageHonoursTheOverride(t *testing.T) {
+	home := upgradeHome(t)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "upgrade"), []byte("not a directory"), 0o644))
+	stubUpgradeJournal(t, journalAt(t, upgradetxn.PhaseCandidateValidating), nil)
+
+	target := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+
+	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag))
+
+	on, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "new binary", string(on))
+}
+
+// Taking the lock must not restyle a directory the installer did not create. An
+// AF home pointed at a broad user directory would otherwise have a routine
+// `af upgrade` change the mode of an unrelated upgrade/ folder.
+func TestWriteExecutableInPlace_LeavesAnExistingUpgradeDirectoryUntouched(t *testing.T) {
+	home := upgradeHome(t)
+	existing := filepath.Join(home, "upgrade")
+	require.NoError(t, os.Mkdir(existing, 0o755))
+	keep := filepath.Join(existing, "user-file")
+	require.NoError(t, os.WriteFile(keep, []byte("mine"), 0o644))
+
+	target := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag))
+
+	info, err := os.Stat(existing)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(),
+		"an in-place upgrade must not chmod a directory it did not create")
+
+	contents, err := os.ReadFile(keep)
+	require.NoError(t, err)
+	require.Equal(t, "mine", string(contents))
+}
+
+// One `af` binary can serve many AF homes, but a transaction is home-scoped
+// while the executable is not. An upgrade run under a DIFFERENT home would find
+// no journal of its own and rename over the very binary another home's
+// transaction is preserving. upgradetxn stages its artifacts next to the
+// executable, so the executable's own directory is where every home's
+// transaction is visible.
+func TestWriteExecutableInPlace_RefusesAnotherHomesStagedUpgrade(t *testing.T) {
+	upgradeHome(t) // this home has no transaction at all
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+	// What upgradetxn.binaryArtifactPaths stages beside the executable.
+	staged := filepath.Join(dir, ".af.af-upgrade-upgrade-otherhome.previous")
+	require.NoError(t, os.WriteFile(staged, []byte("preserved by another home"), 0o755))
+
+	err := writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	var blocked *blockedInPlaceInstallError
+	require.ErrorAs(t, err, &blocked,
+		"a transaction staged over this executable by another home must still block the swap")
+	require.Contains(t, err.Error(), "upgrade-otherhome")
+	require.Contains(t, err.Error(), staged, "the message must name the artifact so a leftover can be cleared")
+
+	on, readErr := os.ReadFile(target)
+	require.NoError(t, readErr)
+	require.Equal(t, "old binary", string(on))
+}
+
+// The override still applies to the cross-home case — including for a leftover
+// artifact from an interrupted cleanup, which is the realistic way a user meets
+// this block.
+func TestWriteExecutableInPlace_OverrideBeatsAnotherHomesStagedUpgrade(t *testing.T) {
+	upgradeHome(t)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-leftover.previous"), []byte("x"), 0o755))
+
+	require.NoError(t, writeExecutableInPlace(target, []byte("new binary"), true, "--"+ignoreActiveUpgradeFlag))
+
+	on, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "new binary", string(on))
+}
+
+// Only artifacts belonging to THIS executable count. A sibling binary's upgrade,
+// or an unrelated dotfile, must not block.
+func TestForeignUpgradeStagingOver_OnlyMatchesThisExecutable(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("binary"), 0o755))
+
+	for _, name := range []string{
+		".other.af-upgrade-upgrade-abc.previous", // a different executable
+		".af.af-upgrade-upgrade-abc.candidate",   // the candidate, not the rollback input
+		".af.af-upgrade-.previous",               // no transaction id
+		"af.af-upgrade-upgrade-abc.previous",     // not the dotted prefix
+		"unrelated",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
+	}
+
+	require.Nil(t, foreignUpgradeStagingOver(target),
+		"only a preserved-previous artifact for THIS executable may block it")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-real.previous"), []byte("x"), 0o755))
+	found := foreignUpgradeStagingOver(target)
+	require.NotNil(t, found)
+	require.Equal(t, "upgrade-real", found.ID)
+}

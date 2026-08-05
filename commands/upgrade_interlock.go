@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
@@ -67,6 +69,11 @@ type activeUpgrade struct {
 	ID        string
 	ToVersion string
 	Phase     string
+	// artifact is set only for a transaction discovered beside the executable
+	// rather than through this home's journal: its home, version, and phase are
+	// unknown, but the staged binary proves it exists and names it for a user
+	// who needs to clear a leftover.
+	artifact string
 }
 
 // blockedInPlaceInstallError is returned when an in-place swap is refused. It
@@ -84,6 +91,12 @@ func (e *blockedInPlaceInstallError) Error() string {
 		"a daemon upgrade to %s is in progress (transaction %s, phase %s); installing over it would destroy the rollback that upgrade depends on",
 		e.active.ToVersion, e.active.ID, e.active.Phase,
 	)
+	if e.active.artifact != "" {
+		msg = fmt.Sprintf(
+			"a daemon upgrade is staging over this executable (transaction %s, preserved binary %s); it belongs to another agent-factory home, and installing over it would destroy the rollback that upgrade depends on",
+			e.active.ID, e.active.artifact,
+		)
+	}
 	if e.flag == "" {
 		return msg
 	}
@@ -165,6 +178,44 @@ func isTerminalUpgradePhase(phase upgradetxn.Phase) bool {
 	}
 }
 
+// foreignUpgradeStagingOver reports a transaction staging over this exact
+// executable regardless of which AF home owns it, or nil when none is.
+//
+// One `af` binary can serve many AF homes (AGENT_FACTORY_HOME), but a
+// transaction is home-scoped while the executable is not. So
+// `AGENT_FACTORY_HOME=/tmp/other af upgrade` would look in /tmp/other, find no
+// journal, and happily rename over the very binary the default home's
+// transaction is preserving — destroying a rollback it never knew existed.
+// There is no registry of AF homes to consult, but there does not need to be:
+// upgradetxn stages its preserved and candidate binaries NEXT TO the executable
+// (binaryArtifactPaths), so the executable's own directory is the one place
+// every home's transaction is visible.
+//
+// Read with ReadDir and a literal prefix rather than filepath.Glob: an
+// executable whose name contains a glob metacharacter would otherwise silently
+// match the wrong set, and this decides whether to overwrite a binary.
+func foreignUpgradeStagingOver(resolvedPath string) *activeUpgrade {
+	dir := filepath.Dir(resolvedPath)
+	prefix := "." + filepath.Base(resolvedPath) + ".af-upgrade-"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// Cannot enumerate: inconclusive, and inconclusive never blocks.
+		return nil
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".previous") {
+			continue
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".previous")
+		if id == "" {
+			continue
+		}
+		return &activeUpgrade{ID: id, artifact: filepath.Join(dir, name)}
+	}
+	return nil
+}
+
 // writeExecutableInPlace is the ONE guarded in-place binary swap. Both installers
 // go through it, so the interlock cannot be bypassed by adding a call site — the
 // entrypoint checks elsewhere exist to give a better message and to skip a
@@ -174,7 +225,13 @@ func isTerminalUpgradePhase(phase upgradetxn.Phase) bool {
 // because an unoverridable auto-upgrade safeguard is its own hazard.
 func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, flag string) error {
 	swap := func() error {
-		if active := activeUpgradeOwningExecutable(); active != nil {
+		active := activeUpgradeOwningExecutable()
+		if active == nil {
+			// Nothing in THIS home. The executable is shared across homes, so
+			// ask the executable itself before overwriting it.
+			active = foreignUpgradeStagingOver(resolvedPath)
+		}
+		if active != nil {
 			if !override {
 				return &blockedInPlaceInstallError{active: active, flag: flag}
 			}
@@ -201,8 +258,33 @@ func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, f
 		log.WarningLog.Printf("upgrade interlock: cannot resolve the agent-factory home to take the upgrade lock; installing unlocked: %v", err)
 		return swap()
 	}
-	if err := upgradetxn.WithInstallLock(home, swap); err != nil {
-		return err
+
+	// A FAILURE TO TAKE THE LOCK MUST NEVER BLOCK THE INSTALL. Broken lock
+	// storage — <home>/upgrade left as a file or symlink, or a directory that
+	// cannot be read — says nothing about whether a transaction exists, and
+	// returning that error here would be worse than the hazard this guard exists
+	// to prevent: `af upgrade` permanently refusing, on every invocation, with
+	// --ignore-active-upgrade powerless because the override lives inside the
+	// swap that never runs. The journal check inside swap still applies, so the
+	// unlocked path is today's behaviour plus a real guard, not a bypass.
+	//
+	// swapRan is what separates "the lock could not be taken" from "the swap
+	// itself failed" — WithInstallLock returns fn's error too, so the error alone
+	// cannot tell them apart, and mistaking a refusal for a lock failure would
+	// install exactly what the guard just declined.
+	swapRan := false
+	var swapErr error
+	lockErr := upgradetxn.WithInstallLock(home, func() error {
+		swapRan = true
+		swapErr = swap()
+		return swapErr
+	})
+	if swapRan {
+		if lockErr != nil && swapErr == nil {
+			log.WarningLog.Printf("upgrade interlock: installed, but releasing the upgrade lock failed: %v", lockErr)
+		}
+		return swapErr
 	}
-	return nil
+	log.WarningLog.Printf("upgrade interlock: cannot take the upgrade lock, so this install is not serialised against a daemon upgrade: %v", lockErr)
+	return swap()
 }

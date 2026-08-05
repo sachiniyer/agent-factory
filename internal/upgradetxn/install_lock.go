@@ -3,6 +3,7 @@ package upgradetxn
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -43,8 +44,8 @@ func WithInstallLock(homeDir string, fn func() error) (retErr error) {
 		return fmt.Errorf("validate upgrade home: %w", err)
 	}
 	root := upgradeRoot(home)
-	if err := ensureDurableDirectory(home, root, transactionDirMode); err != nil {
-		return fmt.Errorf("prepare upgrade root: %w", err)
+	if err := ensureLockRoot(root); err != nil {
+		return err
 	}
 	lock, err := acquireFileLock(filepath.Join(root, preparationLockName), false)
 	if err != nil {
@@ -54,4 +55,34 @@ func WithInstallLock(homeDir string, fn func() error) (retErr error) {
 		retErr = errors.Join(retErr, releaseFileLock(lock))
 	}()
 	return fn()
+}
+
+// ensureLockRoot makes the upgrade root usable as a lock location WITHOUT
+// restyling it. Prepare hardens the directory it creates for a transaction; an
+// in-place installer only needs somewhere to take the lock, and it must not
+// chmod a directory it did not create. That distinction matters because this now
+// runs on every in-place upgrade: an AF home pointed at a broad user directory
+// would otherwise have a routine `af upgrade` silently change the mode of an
+// unrelated `upgrade/` folder.
+//
+// An existing directory is used exactly as it is. Only a directory this call
+// creates is secured. Anything that is not a directory — a file, a symlink — is
+// an error, and the caller's contract is to log it and install unlocked rather
+// than let broken lock storage stand between a user and their upgrade.
+func ensureLockRoot(path string) error {
+	err := validateDirectoryNoSymlink(path)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if mkErr := os.Mkdir(path, transactionDirMode); mkErr != nil {
+		if !errors.Is(mkErr, os.ErrExist) {
+			return fmt.Errorf("create upgrade lock root %s: %w", path, mkErr)
+		}
+	} else if chErr := os.Chmod(path, transactionDirMode); chErr != nil {
+		return fmt.Errorf("secure new upgrade lock root %s: %w", path, chErr)
+	}
+	return validateDirectoryNoSymlink(path)
 }
