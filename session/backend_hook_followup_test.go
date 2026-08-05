@@ -3,6 +3,7 @@ package session
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,14 +19,16 @@ echo '{"level":INVALID,"endpoint":{"url":"http://wrong.invalid","token":"logged-
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, "")
-	p := newHookProvisioner(h, "malformed stdout log")
+	_, err := newHookProvisioner(h, "malformed stdout log").provisionOrReap()
 
-	res, err := p.provisionOrReap()
-	require.NoError(t, err, "a malformed stdout log must not hide the launch record")
-	require.NotNil(t, res.Endpoint)
-	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
-	assert.Equal(t, "secret", res.Endpoint.Token)
-	assert.False(t, h.deleteRan(t), "the working sandbox must not be reaped")
+	// Past a malformed record the stream structure is unknown, so nothing after it is promoted.
+	require.Error(t, err, "a malformed JSON record on stdout must not be salvaged past")
+	// The logged URL may appear in the echoed output — that IS the diagnostic.
+	// What must not happen is selecting it, so assert the provision reported no
+	// endpoint rather than a failure to reach one, and that the token is redacted.
+	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
+		"selection must stop at the malformed record, not dial a logged endpoint")
+	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
 }
 
 // A malformed wrapper with no real endpoint after it must fail the provision
@@ -112,11 +115,16 @@ echo '{"level":],"endpoint":{"url":"http://wrong.invalid","token":"logged-secret
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, "")
-	res, err := newHookProvisioner(h, "mismatched closer").provisionOrReap()
-	require.NoError(t, err)
-	require.NotNil(t, res.Endpoint)
-	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
-	assert.Equal(t, "secret", res.Endpoint.Token)
+	_, err := newHookProvisioner(h, "mismatched closer").provisionOrReap()
+
+	// encoding/json rejects the record; selection stops rather than re-framing its child.
+	require.Error(t, err, "a malformed JSON record on stdout must not be salvaged past")
+	// The logged URL may appear in the echoed output — that IS the diagnostic.
+	// What must not happen is selecting it, so assert the provision reported no
+	// endpoint rather than a failure to reach one, and that the token is redacted.
+	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
+		"selection must stop at the malformed record, not dial a logged endpoint")
+	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
 }
 
 // P2 3716726113: an unterminated JSON-ish log on stdout left openers on the
@@ -179,20 +187,25 @@ func TestHookOutputSuffixRedactsDepthThreeUnicodeTokenKey(t *testing.T) {
 
 // Third review round on #2841.
 
-// P1 3716996280: a log that breaks before its endpoint value hands that value
-// its own line, so a line-start rule alone read it as a record. Column 0 is the
-// discriminator — a logger indents a continued value; echo does not.
+// P1 3716996280 / 3717054748: a log that breaks before its endpoint value hands
+// that value its own line, indented or not. No positional rule separates it from
+// a record, so selection stops at the malformed record instead of guessing.
 func TestHookLaunchRejectsIndentedNestedEndpoint(t *testing.T) {
 	h := newHookState(t, `
 printf '%s\n' '{"level":INVALID,"endpoint":' '  {"url":"http://wrong.invalid","token":"logged-secret"}'
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, "")
-	res, err := newHookProvisioner(h, "multiline nested log").provisionOrReap()
-	require.NoError(t, err)
-	require.NotNil(t, res.Endpoint)
-	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
-	assert.Equal(t, "secret", res.Endpoint.Token)
+	_, err := newHookProvisioner(h, "multiline nested log").provisionOrReap()
+
+	// Indented or not, a continuation of a malformed record is never promoted.
+	require.Error(t, err, "a malformed JSON record on stdout must not be salvaged past")
+	// The logged URL may appear in the echoed output — that IS the diagnostic.
+	// What must not happen is selecting it, so assert the provision reported no
+	// endpoint rather than a failure to reach one, and that the token is redacted.
+	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
+		"selection must stop at the malformed record, not dial a logged endpoint")
+	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
 }
 
 // P1 3716996283: after skipping a non-endpoint value the scan resumed at the
@@ -220,4 +233,77 @@ func TestHookOutputSuffixKeepsTextAfterCompleteEscapedToken(t *testing.T) {
 	assert.NotContains(t, suffix, "secret")
 	assert.Contains(t, suffix, "[REDACTED]")
 	assert.Contains(t, suffix, "error=quota-exceeded", "a complete value must not swallow the diagnostic after it")
+}
+
+// Fourth review round on #2841.
+
+// P1 3717054748: the continuation of a malformed record need not be indented, so
+// column position cannot separate it from a record. Selection stops at the
+// malformed record; the unindented variant must not dial the logged URL either.
+func TestHookLaunchRejectsUnindentedNestedEndpoint(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{"level":INVALID,"endpoint":' '{"url":"http://wrong.invalid","token":"logged-secret"}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	_, err := newHookProvisioner(h, "unindented nested").provisionOrReap()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
+		"selection must stop at the malformed record, not dial a logged endpoint")
+	assert.NotContains(t, err.Error(), "logged-secret")
+}
+
+// Prose on stdout is SUPPORTED: docs/remote-hooks.md lets a background tunnel
+// inherit the stream and keep logging. It must not disturb selection — this is
+// the case a fail-at-first-syntax-error rule broke.
+func TestHookLaunchIgnoresTunnelProseOnStdout(t *testing.T) {
+	h := newHookState(t, `
+echo 'tunnel forwarding'
+echo 'tunnel forwarding'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+echo 'tunnel still forwarding'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "tunnel prose").provisionOrReap()
+	require.NoError(t, err, "tunnel chatter on stdout must not fail the provision")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.False(t, h.deleteRan(t))
+}
+
+// P2 3717054757: a wrapped value whose continuation is indented.
+func TestHookOutputSuffixRedactsIndentedWrappedToken(t *testing.T) {
+	suffix := hookOutputSuffix([]byte("{\"token\":\"prefix-\n  secret-tail\"}"))
+	assert.NotContains(t, suffix, "secret-tail")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
+// P2 3717054755: a complete escaped field must keep its end even when the output
+// has other lines, which is what put it through the joined pass.
+func TestHookOutputSuffixKeepsTextAfterCompleteTokenWithOtherLines(t *testing.T) {
+	suffix := hookOutputSuffix([]byte(`INFO endpoint=\"token\":\"secret\"error=quota-exceeded` + "\nnext line"))
+	assert.NotContains(t, suffix, "secret")
+	assert.Contains(t, suffix, "error=quota-exceeded")
+	assert.Contains(t, suffix, "next line")
+}
+
+// P2 3717054761: 20k column-0 JSON-prefix lines made the old scan build a
+// decoder over the whole remaining suffix per line, ~4s of a launch budget spent
+// selecting an endpoint. Selection stops at the first malformed record now, so
+// the work is bounded by where that record begins.
+func TestHookEndpointSelectionBoundedOnJSONPrefixFlood(t *testing.T) {
+	flood := strings.Repeat("[\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
+	started := time.Now()
+	endpoint, _ := selectHookEndpoint(flood)
+	assert.Less(t, time.Since(started), time.Second, "endpoint selection must not rescan the suffix per line")
+	assert.Nil(t, endpoint, "an unterminated record stops selection rather than promoting past it")
+
+	// The same flood as PROSE (not JSON openers) must still find the endpoint fast.
+	prose := strings.Repeat("tunnel forwarding\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
+	started = time.Now()
+	endpoint, _ = selectHookEndpoint(prose)
+	assert.Less(t, time.Since(started), time.Second)
+	require.NotNil(t, endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", endpoint.URL)
 }

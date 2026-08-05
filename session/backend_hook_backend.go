@@ -569,36 +569,70 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 // endpoint schema, and whether stdout held any JSON at all (which separates
 // "printed nothing usable" from "printed the wrong shape" in the error).
 //
-// Only complete, top-level values are considered — topLevelJSONAt, never the
-// diagnostic extractor. A value nested inside malformed output is never
-// promoted: recovering one would mean deciding, from text that is by definition
-// unparseable, whether it was an independent record or a field of someone's log
-// line — a question with no sound answer. stdout carrying a bare endpoint object
-// is the documented contract, so refusing to guess costs a well-behaved script
-// nothing.
+// stdout is not exclusively the endpoint's. docs/remote-hooks.md has launch_cmd
+// echo its endpoint there, and ALSO lets a background tunnel inherit the stream
+// and keep logging — so plain prose between records is normal and must not
+// disturb selection. What must never happen is promoting a value that belongs to
+// a malformed JSON record: the daemon would dial a logged service with a logged
+// credential and reap the real sandbox when that failed.
+//
+// Deciding which of those a value is, once the surrounding JSON is malformed, is
+// not possible from the bytes — a log can break before its endpoint value and
+// leave it at column 0 of the next line, identical to a record the script
+// echoed. Earlier rules (shape, wrapper provenance, line start, column) each
+// bought one counterexample. So this does not rank candidates; it tracks whether
+// the stream is still trustworthy:
+//
+//   - A line that is not a JSON opener is prose — tunnel chatter. Skipped, and
+//     it changes nothing.
+//   - A line that opens a JSON value and decodes completely is a record. It is a
+//     candidate, and scanning continues after it.
+//   - A line that opens a JSON value and does NOT decode leaves the structure
+//     unknown. From there no further value is promoted, because any of them may
+//     be that record's contents. Provision fails with the output attached rather
+//     than dialing something a log named.
 func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 	sawJSON := false
 	for cursor := 0; cursor < len(stdout); {
-		candidate, next := topLevelJSONAt(stdout, cursor)
-		if candidate == "" {
-			break
-		}
-		cursor = next
-		sawJSON = true
-
-		// The documented endpoint schema itself is the discriminator. Reject
-		// unknown fields so a structured log that merely includes url and token
-		// cannot win. First match is deliberate: logs may also follow the endpoint,
-		// so choosing by last position would only reverse the ambiguity.
-		ej, ok := decodeHookEndpointJSON(candidate)
-		if !ok {
+		if stdout[cursor] != '{' && stdout[cursor] != '[' {
+			// Prose: a tunnel logging into the inherited stream.
+			cursor = nextHookOutputLine(stdout, cursor)
 			continue
 		}
-		// ej.TLSFingerprint is intentionally not read — TLS was removed; an old
-		// script that still echoes it parses fine and the value is dropped.
-		return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true
+		decoder := json.NewDecoder(strings.NewReader(stdout[cursor:]))
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			// A malformed record: everything after it may be its contents.
+			return nil, sawJSON
+		}
+		sawJSON = true
+		if ej, ok := decodeHookEndpointJSON(string(raw)); ok {
+			// ej.TLSFingerprint is intentionally not read — TLS was removed; an old
+			// script that still echoes it parses fine and the value is dropped.
+			return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true
+		}
+		// Resume at the next LINE, so an object sharing this record's last physical
+		// line is a log beside it, not a record of its own.
+		cursor = nextHookOutputLine(stdout, cursor+int(decoder.InputOffset()))
 	}
 	return nil, sawJSON
+}
+
+// nextHookOutputLine returns the offset just past the next line terminator at or
+// after from, treating CRLF as one terminator.
+func nextHookOutputLine(output string, from int) int {
+	if from >= len(output) {
+		return len(output)
+	}
+	breakAt := strings.IndexAny(output[from:], "\r\n")
+	if breakAt < 0 {
+		return len(output)
+	}
+	next := from + breakAt + 1
+	if output[from+breakAt] == '\r' && next < len(output) && output[next] == '\n' {
+		next++
+	}
+	return next
 }
 
 // reap runs delete_cmd to tear down whatever launch_cmd provisioned, idempotently

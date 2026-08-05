@@ -112,67 +112,6 @@ func extractJSONAt(output string, start int) (string, int) {
 	return findJSONAt(output, start, true)
 }
 
-// topLevelJSONAt returns the first value that stands on its own: a complete JSON
-// value that BEGINS A PHYSICAL LINE AT COLUMN 0, decoded by encoding/json rather
-// than by matching delimiters here. start must itself be a line start.
-//
-// Endpoint selection needs this and the diagnostic extractor cannot give it.
-// Recovering a value nested in a malformed wrapper is right for redaction, where
-// finding more JSON only means sanitizing more, and wrong for the endpoint,
-// where it promotes the inner object of `{"level":INVALID,"endpoint":{…}}` to a
-// launch record and makes the daemon dial the logged URL.
-//
-// Three properties do the work, and each closes a way a log record was promoted:
-//
-//   - The real parser decides. A hand-rolled delimiter scan pops on any closer,
-//     so `{"level":],…}` ended the record early and re-framed its nested
-//     endpoint as top level. encoding/json rejects it outright.
-//   - Candidates start at COLUMN 0. A structured logger indents a value it
-//     continues onto the next line; `echo '{"url":…}'` does not. Without this a
-//     log that breaks before its endpoint value hands that value its own line
-//     and it reads as a record. This is also what lets an unterminated prose
-//     prefix like `progress {{` be skipped without stranding a real endpoint:
-//     the endpoint is still at column 0, the log's nested value is not.
-//   - Scanning resumes at the next LINE, never at the caller's cursor. Two
-//     objects on one physical line are one line: the second is a log beside the
-//     first, not a record of its own.
-//
-// docs/remote-hooks.md has launch_cmd echo one JSON object on stdout, so none of
-// this costs a well-behaved script anything. Pretty-printed endpoints still
-// parse — the rule is where a value BEGINS, not that it fits on one line.
-func topLevelJSONAt(output string, start int) (string, int) {
-	for cursor := start; cursor < len(output); cursor = nextLineStart(output, cursor) {
-		if output[cursor] != '{' && output[cursor] != '[' {
-			continue
-		}
-		decoder := json.NewDecoder(strings.NewReader(output[cursor:]))
-		var raw json.RawMessage
-		if err := decoder.Decode(&raw); err != nil {
-			continue
-		}
-		// Resume at the next line start after the value, so anything sharing its
-		// last physical line is not treated as a record.
-		return string(raw), nextLineStart(output, cursor+int(decoder.InputOffset()))
-	}
-	return "", len(output)
-}
-
-// nextLineStart returns the offset just past the next line terminator at or
-// after from, or len(output) when none remains.
-func nextLineStart(output string, from int) int {
-	if from >= len(output) {
-		return len(output)
-	}
-	if breakAt := strings.IndexAny(output[from:], "\r\n"); breakAt >= 0 {
-		next := from + breakAt + 1
-		if output[from+breakAt] == '\r' && next < len(output) && output[next] == '\n' {
-			next++
-		}
-		return next
-	}
-	return len(output)
-}
-
 func findJSONAt(output string, start int, recover bool) (string, int) {
 	if value, next := scanJSONAt(output, start, recover); value != "" {
 		return value, next

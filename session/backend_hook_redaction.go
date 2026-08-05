@@ -198,12 +198,24 @@ func hookTokenRedactionRanges(output string) []hookOutputRange {
 		}
 		ranges[index].end = extendHookTokenValue(output, ranges[index])
 	}
+	// The joined pass exists only to find fields the raw pass could not see —
+	// ones whose KEY or colon a line break split. Where the raw pass already
+	// matched, its result is authoritative: the joined view has no line breaks, so
+	// every match in it looks continuable and would run through the diagnostic
+	// behind a complete value.
+	rawStarts := make(map[int]struct{}, len(ranges))
+	for _, raw := range ranges {
+		rawStarts[raw.start] = struct{}{}
+	}
 	if stripped, offsets := stripRawLineBreaks(output); len(offsets) > 0 {
 		for _, joined := range scanHookTokenRanges(stripped) {
 			if joined.start >= len(offsets) || joined.end <= joined.start {
 				continue
 			}
 			start := offsets[joined.start]
+			if _, seen := rawStarts[start]; seen {
+				continue
+			}
 			ranges = append(ranges, hookOutputRange{
 				start: start,
 				end:   extendHookTokenValue(output, hookOutputRange{start: start, end: start}),
@@ -230,13 +242,16 @@ func extendHookTokenValue(output string, value hookOutputRange) int {
 	for end < len(output) {
 		switch output[end] {
 		case '\n', '\r':
-			// Only cross a break if the value actually continues after it.
+			// Cross the break, and the INDENT behind it: a logger that hard-wraps a
+			// long value commonly indents the continuation, and that tail is still
+			// the secret. Whitespace inside a line still terminates the value, so a
+			// truncated token cannot run on through prose.
 			next := end
-			for next < len(output) && (output[next] == '\n' || output[next] == '\r') {
+			for next < len(output) && (output[next] == '\n' || output[next] == '\r' ||
+				output[next] == ' ' || output[next] == '\t') {
 				next++
 			}
-			if next >= len(output) || output[next] == ' ' || output[next] == '\t' ||
-				output[next] == '"' {
+			if next >= len(output) || output[next] == '"' {
 				return end
 			}
 			end = next
