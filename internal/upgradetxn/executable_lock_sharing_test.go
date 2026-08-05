@@ -27,9 +27,29 @@ func sharedInstallDir(t *testing.T, perm os.FileMode) string {
 	require.NoError(t, err)
 	require.Equal(t, perm, info.Mode().Perm(), "the test fixture must actually have the mode it is testing")
 
+	// Same umask trap as the directory above, and it bites harder here because it
+	// is silent: under umask 077 the write lands on 0700, and the hard-link test
+	// then asserts a 0755 that was never there. chmod explicitly, then prove it.
 	executable := filepath.Join(dir, "af")
 	require.NoError(t, os.WriteFile(executable, []byte("af binary"), 0o755))
+	require.NoError(t, os.Chmod(executable, 0o755))
+	execInfo, err := os.Stat(executable)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), execInfo.Mode().Perm(),
+		"the fixture binary must actually be 0755 whatever the umask, or a test asserting its mode survived proves nothing")
 	return executable
+}
+
+// requireUnprivileged skips a test whose mechanism is a permission DENIAL. Root
+// bypasses the mode bits entirely: it opens a 0000 file happily, so the EACCES
+// these tests are built on never occurs. That does not merely make them fail —
+// the retry test would PASS vacuously, reporting that a retry works when no
+// retry ever ran — so skipping honestly beats either outcome.
+func requireUnprivileged(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a 0000 lock is still openable, so the permission denial this test is built on cannot be produced")
+	}
 }
 
 func lockFileStat(t *testing.T, executable string) (os.FileMode, uint32) {
@@ -140,6 +160,38 @@ func TestExecutableLock_NotWidenedInAWorldWritableDirectory(t *testing.T) {
 		"a world-writable directory must not get a world-usable lock: any local user could then hold it and stall every upgrade")
 }
 
+// On a DIRECTORY, the write bit alone confers nothing — creating, removing or
+// renaming an entry needs search permission too. So the classification has to
+// test write AND execute per class, and getting it wrong breaks BOTH ways.
+//
+// 0772: group rwx, plus a stray other-write bit that grants no traversal. Those
+// group members really can replace the binary, so reading the mode as
+// world-writable and declining leaves them with EACCES and an unlocked install —
+// the original bug, reintroduced through the predicate.
+func TestExecutableLock_SharedWhenAStrayOtherWriteBitGrantsNoTraversal(t *testing.T) {
+	executable := sharedInstallDir(t, 0o772)
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	perm, _ := lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(0o660), perm,
+		"other-write without other-execute cannot traverse the directory, so this is a group-shared install and its group writers still need the lock")
+}
+
+// The inverse. 0720: group write, no group execute. Those members cannot
+// traverse the directory and so cannot replace the binary — widening the lock to
+// them would hand a blocking handle to principals who are not writers at all,
+// which is the same over-admission the world-writable case declines.
+func TestExecutableLock_NotWidenedWhenTheGroupCannotTraverse(t *testing.T) {
+	executable := sharedInstallDir(t, 0o720)
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	perm, _ := lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(journalFileMode), perm,
+		"group write without group execute is not write access to a directory, so there is no second writer to admit")
+}
+
 // A HARD LINK at the lock path aims the mode change at somebody else's inode.
 // O_NOFOLLOW rejects a symlink; it says nothing about a hard link, which is not
 // a separate object at all but a second name for an existing one. Anyone who can
@@ -195,6 +247,7 @@ func TestExecutableLock_NarrowsAgainWhenTheDirectoryIsTightened(t *testing.T) {
 // the same EACCES the racing writer sees. Widening it from another goroutine
 // stands in for the first writer finishing its chmod.
 func TestExecutableLock_RetriesWhileAnotherWriterIsStillWideningIt(t *testing.T) {
+	requireUnprivileged(t)
 	executable := sharedInstallDir(t, 0o770)
 	lockPath := executableLockPath(executable)
 	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
@@ -221,6 +274,7 @@ func TestExecutableLock_RetriesWhileAnotherWriterIsStillWideningIt(t *testing.T)
 // genuinely unauthorized caller, waiting cannot change the answer, and a retry
 // budget would only delay every such attempt.
 func TestExecutableLock_DoesNotRetryInAPrivateDirectory(t *testing.T) {
+	requireUnprivileged(t)
 	executable := sharedInstallDir(t, 0o700)
 	lockPath := executableLockPath(executable)
 	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))

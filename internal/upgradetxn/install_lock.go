@@ -208,8 +208,21 @@ func directoryWriterGroup(dir string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
+	// Write AND execute, for both classes. On a DIRECTORY the write bit alone
+	// confers nothing: creating, removing, or renaming an entry needs search
+	// permission too, so a class with w and no x cannot replace the binary and
+	// cannot plant the lock. Testing write alone gets both directions wrong — a
+	// 0720 directory would widen the lock to a group that cannot install
+	// anything, and a 0772 directory (group rwx, a stray other-write bit that
+	// grants no traversal) would be misread as world-writable and left private,
+	// so the group writers who really can install still get EACCES and still swap
+	// unlocked.
+	const (
+		groupMayWrite = 0o030 // group write + group search
+		otherMayWrite = 0o003 // other write + other search
+	)
 	perm := info.Mode().Perm()
-	if perm&0o020 == 0 || perm&0o002 != 0 {
+	if perm&groupMayWrite != groupMayWrite || perm&otherMayWrite == otherMayWrite {
 		return 0, false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
