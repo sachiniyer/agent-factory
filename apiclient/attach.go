@@ -243,9 +243,18 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 	// a PANIC did not, so it closed the fd straight out from under a blocked
 	// reader. That is the path #2784 added, so it is the path this has to cover.
 	//
-	// closeConn is in here for the same reason it is on the drained path: a pump
-	// parked in a WS write to a dead peer unblocks when the socket goes, so the
-	// join cannot outlast the write timeout.
+	// The socket is torn down here for the same reason it is on the drained path:
+	// a pump parked in a WS write to a dead peer unblocks when the socket goes, so
+	// the join cannot outlast the write timeout.
+	//
+	// CloseNow, NOT the graceful closeConn. A graceful close performs the close
+	// HANDSHAKE — 5s to write the frame plus 5s waiting for the peer's — and this
+	// runs BEFORE the terminal hand-back. On a panic, with the reader still parked
+	// in ReadMessage, that is up to ten seconds of the user staring at a raw
+	// terminal before the panic even surfaces: the exact cost #2784 exists to
+	// prevent, reintroduced by the fix for it. The unwind has no protocol left to
+	// be polite about; the detach path below still closes gracefully, because
+	// there the handshake is the point.
 	//
 	// pumpRunning gates the join on the goroutine below actually having been
 	// started — a panic before that leaves nothing to wait for, and waiting anyway
@@ -253,7 +262,7 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 	pumpRunning := false
 	defer func() {
 		_ = in.Cancel()
-		closeConn()
+		_ = conn.CloseNow()
 		if pumpRunning {
 			<-stdinDone
 		}
