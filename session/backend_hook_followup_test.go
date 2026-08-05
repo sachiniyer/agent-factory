@@ -367,3 +367,37 @@ func TestHookOutputSuffixStopsWrappedTokenAtEscapedQuote(t *testing.T) {
 	assert.NotContains(t, suffix, "cret\\\"error", "the wrapped token tail must be redacted")
 	assert.Contains(t, suffix, "error=quota-exceeded", "the failure detail must survive")
 }
+
+// Sixth review round on #2841.
+
+// P1 3717248242: a multi-line log record was decoded whole but the cursor
+// advanced only one line, so the lines INSIDE it were rescanned and its
+// endpoint-shaped child promoted as a record of its own.
+func TestHookLaunchRejectsChildOfMultilineStdoutLog(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{' '  "level": "info",' '  "endpoint":' '  {"url":"http://wrong.invalid","token":"logged-secret"}' '}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "multiline log wrapper").provisionOrReap()
+
+	require.NoError(t, err, "a complete multi-line log must be skipped whole, not rescanned")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
+	assert.False(t, h.deleteRan(t))
+}
+
+// P1 3717248248: an endpoint-shaped prefix followed by a continuation on the
+// same line was accepted before the trailing-byte check could reject it.
+func TestHookLaunchRejectsEndpointShapedPrefixWithContinuation(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{"url":"http://wrong.invalid","token":"logged-secret"},"endpoint":'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	_, err := newHookProvisioner(h, "endpoint prefix continuation").provisionOrReap()
+
+	require.Error(t, err, "an endpoint-shaped prefix of an open record is not a record")
+	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
+}

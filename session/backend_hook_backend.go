@@ -621,31 +621,38 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 			continue
 		}
 		sawJSON = true
-		if ej, ok := decodeHookEndpointJSON(string(raw)); ok {
-			// ej.TLSFingerprint is intentionally not read — TLS was removed; an old
-			// script that still echoes it parses fine and the value is dropped.
-			return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true
-		}
-		// A value decoded — but what follows it ON THIS LINE decides whether the
-		// record really ended there.
-		rest := open + int(decoder.InputOffset())
-		for rest < lineEnd && isJSONSpace(stdout[rest]) {
+
+		// The value may span several lines, so trailing content is judged on ITS
+		// last physical line — and judged BEFORE the record is accepted, since an
+		// endpoint-shaped prefix followed by a continuation is not a record either.
+		valueEnd := open + int(decoder.InputOffset())
+		valueLineEnd := nextHookOutputLine(stdout, valueEnd)
+		rest := valueEnd
+		for rest < valueLineEnd && isJSONSpace(stdout[rest]) {
 			rest++
 		}
 		switch {
-		case rest >= lineEnd:
-			// Clean record, nothing trailing.
+		case rest >= valueLineEnd:
+			// A clean record, and the only shape that may be the endpoint.
+			if ej, ok := decodeHookEndpointJSON(string(raw)); ok {
+				// ej.TLSFingerprint is intentionally not read — TLS was removed; an
+				// old script that still echoes it parses fine and the value is
+				// dropped.
+				return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true
+			}
 		case stdout[rest] == '{' || stdout[rest] == '[':
 			// Another value beside it: a log line carrying several. None of them is
-			// a record of its own, so skip the line — but later lines stay
-			// trustworthy, since this one closed.
+			// a record, so skip them all — later lines stay trustworthy because
+			// this line closed.
 		default:
-			// `{"level":"info"},"endpoint":` — a separator or bare text means the
-			// record continues onto the next line, so its structure is unknown and
-			// nothing after it can be promoted.
+			// `{…},"endpoint":` — a separator or bare text means the record is still
+			// open, so its structure is unknown and nothing after it is promoted.
 			return nil, sawJSON
 		}
-		cursor = lineEnd
+		// Advance past the WHOLE decoded value, not just its first line, or the
+		// lines inside a multi-line log would be rescanned and its nested
+		// endpoint-shaped child promoted as a record of its own.
+		cursor = valueLineEnd
 	}
 	return nil, sawJSON
 }
