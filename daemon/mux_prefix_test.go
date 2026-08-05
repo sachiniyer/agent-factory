@@ -46,6 +46,12 @@ import (
 // must reach the catch-all and nothing else. Names, not exotic strings: the
 // failure being guarded is someone adding an ordinary-looking operational route.
 var nonV1Probes = []string{
+	// The BOUNDARY. The shells forward on HasPrefix(path, "/v1/"), so the version
+	// root itself — no trailing slash — is shadowed exactly like /metrics, and is
+	// the likeliest of these to be added by someone reaching for a version index
+	// (#2934 review).
+	"/v1",
+	"/v1x",
 	"/metrics",
 	"/healthz",
 	"/health",
@@ -75,16 +81,44 @@ func TestNoNonV1PathIsServedByTheDaemonMux(t *testing.T) {
 	// The hand-registered routes, by asking the mux. mux.Handler returns the
 	// PATTERN that matched, so "the catch-all answered" is directly observable
 	// rather than inferred from source.
-	mux := newHTTPMux(&controlServer{})
-	for _, probe := range nonV1Probes {
-		for _, method := range []string{http.MethodGet, http.MethodPost} {
-			_, pattern := mux.Handler(mustRequest(t, method, probe))
-			assert.Equalf(t, "/", pattern,
-				"%s %s is served by pattern %q, but every non-/v1 path must fall through to the catch-all: "+
-					"the web listener's shell routes only /v1/… into this mux, so that route is unreachable "+
-					"there and answers index.html with a 200. Register it under /v1/.",
-				method, probe, pattern)
+	//
+	// BOTH muxes behind a /v1-forwarding shell, not just the daemon's: the headless
+	// agent-server passes hs.newMux() to startTCPListener with withoutWebShell,
+	// i.e. noWebShellHandler, which forwards on the same prefix (#2934 review).
+	muxes := map[string]*http.ServeMux{
+		"newHTTPMux":            newHTTPMux(&controlServer{}),
+		"headlessServer.newMux": (&headlessServer{}).newMux(),
+	}
+	for name, mux := range muxes {
+		for _, probe := range nonV1Probes {
+			// EVERY served verb, not just GET/POST: newHTTPMux already hand-registers a
+			// DELETE, so a `DELETE /metrics` would be shadowed in production while a
+			// two-verb probe set reported clean (#2934 review).
+			for _, method := range []string{
+				http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+				http.MethodPatch, http.MethodDelete, http.MethodOptions,
+			} {
+				_, pattern := mux.Handler(mustRequest(t, method, probe))
+				assert.Equalf(t, "/", pattern,
+					"%s: %s %s is served by pattern %q, but every non-/v1 path must fall through to the "+
+						"catch-all: the listener's shell routes only /v1/… into this mux, so that route is "+
+						"unreachable there. Register it under /v1/.",
+					name, method, probe, pattern)
+			}
 		}
+	}
+	mux := muxes["newHTTPMux"]
+
+	// Registration must not DEPEND on controlServer state, or a mux built here from
+	// a zero value would be missing routes production serves (#2934 review). Every
+	// served route resolving to its own pattern on this zero-value mux is what
+	// proves the registration is unconditional.
+	for _, rt := range served {
+		_, pattern := mux.Handler(mustRequest(t, rt.Method, rt.Path))
+		assert.Equalf(t, rt.Path, pattern,
+			"route %s %s does not resolve on a mux built from a zero-value controlServer, so registration "+
+				"depends on daemon state and this guard is probing a mux production does not have",
+			rt.Method, rt.Path)
 	}
 
 	// …and the catch-all really is the 404 fallback, not some real handler that
