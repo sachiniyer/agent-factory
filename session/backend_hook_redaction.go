@@ -190,6 +190,12 @@ type hookOutputRange struct {
 func hookTokenRedactionRanges(output string) []hookOutputRange {
 	ranges := scanHookTokenRanges(output)
 	for index := range ranges {
+		// Only a value the scan could not finish continues onto another line. A
+		// complete one already has its closing quote, and extending past it would
+		// eat the diagnostic that follows.
+		if ranges[index].complete {
+			continue
+		}
 		ranges[index].end = extendHookTokenValue(output, ranges[index])
 	}
 	if stripped, offsets := stripRawLineBreaks(output); len(offsets) > 0 {

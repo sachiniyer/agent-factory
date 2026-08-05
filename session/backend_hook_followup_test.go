@@ -176,3 +176,48 @@ func TestHookOutputSuffixRedactsDepthThreeUnicodeTokenKey(t *testing.T) {
 	assert.NotContains(t, suffix, "depth3-secret")
 	assert.Contains(t, suffix, "[REDACTED]")
 }
+
+// Third review round on #2841.
+
+// P1 3716996280: a log that breaks before its endpoint value hands that value
+// its own line, so a line-start rule alone read it as a record. Column 0 is the
+// discriminator — a logger indents a continued value; echo does not.
+func TestHookLaunchRejectsIndentedNestedEndpoint(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{"level":INVALID,"endpoint":' '  {"url":"http://wrong.invalid","token":"logged-secret"}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "multiline nested log").provisionOrReap()
+	require.NoError(t, err)
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
+}
+
+// P1 3716996283: after skipping a non-endpoint value the scan resumed at the
+// caller's cursor, so a second object on the SAME physical line looked like a
+// fresh record.
+func TestHookLaunchRejectsSecondObjectOnSameLine(t *testing.T) {
+	h := newHookState(t, `
+echo '{"level":"info"} {"url":"http://wrong.invalid","token":"logged-secret"}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "same line pair").provisionOrReap()
+	require.NoError(t, err)
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
+}
+
+// P2 3716996290: the wrap continuation ran past a value that was already
+// complete, eating the diagnostic that followed it.
+func TestHookOutputSuffixKeepsTextAfterCompleteEscapedToken(t *testing.T) {
+	output := `INFO endpoint=\"token\":\"secret\"error=quota-exceeded`
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, "secret")
+	assert.Contains(t, suffix, "[REDACTED]")
+	assert.Contains(t, suffix, "error=quota-exceeded", "a complete value must not swallow the diagnostic after it")
+}
