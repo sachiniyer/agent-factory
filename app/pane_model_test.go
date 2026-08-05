@@ -93,6 +93,11 @@ func setPreviewText(inst *session.Instance, text string) {
 
 func TestFirstRunWorkspaceEmptyState(t *testing.T) {
 	h := newTestHome(t)
+	// An ACTIVE project, stated explicitly: newTestHome leaves repoRoot empty,
+	// which since #2830 is registry mode — a different empty state with different
+	// copy, because `n` cannot create anything there. This test is about the
+	// in-repo first run, where advertising `n` is correct.
+	h.repoRoot = t.TempDir()
 	resizeHome(h, 120, 30)
 
 	view := h.View()
