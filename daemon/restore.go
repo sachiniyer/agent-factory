@@ -134,8 +134,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		return instance.GetWorktreePath(), nil
 	case probeUnknown:
 		// Unreachable is not gone. Refuse, and NAME the release — a guard that blocks
-		// without saying how to get past it is #2917.
-		return "", refuseIndeterminateReap(title)
+		// without saying how to get past it is #2917. Which means honoring that
+		// release HERE: a refusal whose advertised retry lands on the same branch and
+		// refuses again is the same defect wearing a helpful message.
+		if !force {
+			return "", refuseIndeterminateReap(title)
+		}
+		log.WarningLog.Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
 		// unconditional. The only arm that licenses that.
@@ -143,12 +148,25 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// It ANSWERED: the agent is gone, the sandbox is not. Push its work to origin
 		// before anything replaces it, and refuse outright if that push does not
 		// land — the same order and the same refusal ArchiveSandbox uses.
-		if !force {
-			if err := m.preserveSandboxBeforeReap(repoID, instance); err != nil {
+		//
+		// --force-reap still ATTEMPTS the push. The flag means "a failed push must
+		// not stop you", not "do not try": the push is also the only thing that
+		// learns this session's branch from the sandbox, and skipping it would make
+		// the replacement clone the default branch and strand work the operator had
+		// already pushed — which the flag never offered to discard.
+		if err := m.preserveSandboxBeforeReap(repoID, key, instance); err != nil {
+			if !force {
 				return "", err
 			}
-		} else {
-			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox WITHOUT pushing; anything it has not pushed is discarded", title)
+			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox anyway (%v); anything it has not pushed is discarded", title, err)
+		}
+	}
+
+	// Never provision with an empty RestoreBranch, whichever arm got here, and
+	// regardless of --force-reap: see requireKnownSandboxBranch.
+	if isRemoteWorkspace(instance) {
+		if err := requireKnownSandboxBranch(instance); err != nil {
+			return "", err
 		}
 	}
 

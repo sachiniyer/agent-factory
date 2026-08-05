@@ -155,11 +155,15 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 // The escape hatch. Without it the refusal above is a dead end for a sandbox the
 // operator knows is gone, which is the #2917 shape. It is per-session and
 // per-command: this flag, this title, this invocation.
-func TestRestoreSession_ForceReapReplacesAReachableSandboxWithoutPushing(t *testing.T) {
+func TestRestoreSession_ForceReapProceedsPastAFailedPush(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
-	srv.archiveFails.Store(true) // even with the push broken, the override proceeds
 	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "forced", srv.url, session.Lost)
+	// A branch is already on record (an earlier archive), so the replacement has
+	// somewhere correct to land even though this push will fail.
+	inst := manager.instances[daemonInstanceKey(repoID, "forced")]
+	inst.SetSandboxBranch("af/known-branch")
+	srv.archiveFails.Store(true)
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
 		Title: "forced", RepoID: repoID, ForceReap: true,
@@ -170,7 +174,57 @@ func TestRestoreSession_ForceReapReplacesAReachableSandboxWithoutPushing(t *test
 	if got := backend.recoverCalls(); got != 1 {
 		t.Fatalf("recover calls = %d, want 1: --force-reap is the operator overriding the refusal", got)
 	}
-	if got := srv.archiveCalls.Load(); got != 0 {
-		t.Fatalf("archive calls = %d, want 0: the override is explicitly the no-push path", got)
+	if got := srv.archiveCalls.Load(); got != 1 {
+		t.Fatalf("archive calls = %d, want 1: --force-reap means a FAILED push must not stop the "+
+			"replacement, not that the push is skipped — it is also the only thing that learns the "+
+			"session's branch from the sandbox", got)
+	}
+}
+
+// The advertised escape hatch has to actually release the guard that names it.
+// The indeterminate refusal tells the operator to retry with --force-reap; if
+// that retry takes the same branch and refuses again, the message is a dead end
+// and the guard is the #2917 defect wearing a helpful sentence.
+func TestRestoreSession_ForceReapReleasesTheIndeterminateRefusal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.unreachable.Store(true)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "forced-unknown", srv.url, session.Lost)
+	inst := manager.instances[daemonInstanceKey(repoID, "forced-unknown")]
+	inst.SetSandboxBranch("af/known-branch")
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: "forced-unknown", RepoID: repoID, ForceReap: true,
+	}); err != nil {
+		t.Fatalf("the refusal names --force-reap as its release, so that retry must work: %v", err)
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1", got)
+	}
+}
+
+// --force-reap does NOT override the branch requirement, and that boundary is
+// the flag's promise: it discards what the sandbox never pushed, which is the
+// operator's call. Landing on the default branch discards work they had already
+// pushed, which they never agreed to.
+func TestRestoreSession_ForceReapStillRefusesWhenTheBranchIsUnknown(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "")
+	srv.unreachable.Store(true)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "no-branch", srv.url, session.Lost)
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: "no-branch", RepoID: repoID, ForceReap: true,
+	})
+
+	if err == nil {
+		t.Fatal("forced a replacement with no branch on record: it clones the repository's default " +
+			"branch, stranding even work the session had already pushed")
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("recover calls = %d, want 0", got)
+	}
+	if !strings.Contains(err.Error(), "af sessions kill") {
+		t.Fatalf("a refusal that force cannot release must name the alternative that ends it, got: %v", err)
 	}
 }

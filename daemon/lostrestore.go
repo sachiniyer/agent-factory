@@ -401,7 +401,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// never pushed is still there — and recovery re-clones from origin, which
 		// would destroy it. Push first, and refuse to replace anything if that push
 		// does not land, exactly as ArchiveSandbox refuses via AbortArchiveToLost.
-		if err := m.preserveSandboxBeforeReap(repoID, inst); err != nil {
+		if err := m.preserveSandboxBeforeReap(repoID, key, inst); err != nil {
 			m.mu.Lock()
 			logIt := !st.remoteUnknownLogged
 			st.remoteUnknownLogged = true
@@ -417,6 +417,23 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		st.remoteUnknownAttempts = 0
 		st.nextAttempt = time.Time{}
 		m.mu.Unlock()
+	}
+
+	// Never provision with an empty RestoreBranch, whichever arm got here: that is
+	// the default-branch clone this cluster is about (#2925/#2959).
+	if isRemoteWorkspace(inst) {
+		if err := requireKnownSandboxBranch(inst); err != nil {
+			m.mu.Lock()
+			logIt := !st.remoteUnknownLogged
+			st.remoteUnknownLogged = true
+			st.remoteUnknownAttempts++
+			st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
+			m.mu.Unlock()
+			if logIt {
+				log.WarningLog.Printf("%v", err)
+			}
+			return
+		}
 	}
 
 	if err := inst.Recover(); err != nil {

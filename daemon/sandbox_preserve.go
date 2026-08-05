@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -22,8 +23,12 @@ const sandboxPushTimeout = 2 * time.Minute
 // Per-session and explicit by construction: it names one title, and there is no
 // global switch that restores the reaping-without-a-push behaviour for
 // everything at once.
+// Rendered through shellsuggest, never %q: %q is GO quoting, and a title
+// containing $HOME, $(...) or a backtick still expands inside the double quotes
+// it produces (#1978). A command advertised for copy-paste has to be one the
+// shell reads as a single literal argument.
 func forceReapCommandFor(title string) string {
-	return fmt.Sprintf("af sessions restore %q --force-reap", title)
+	return shellsuggest.Command("af", "sessions", "restore", title, "--force-reap")
 }
 
 // preserveSandboxBeforeReap runs the push that makes a reachable sandbox's work
@@ -47,7 +52,7 @@ func forceReapCommandFor(title string) string {
 // Returns nil when the caller may proceed to reap. A non-nil error means REFUSE:
 // leave the session Lost and recoverable, because the alternative is destroying
 // work that nothing else has a copy of.
-func (m *Manager) preserveSandboxBeforeReap(repoID string, instance *session.Instance) error {
+func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance) error {
 	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
@@ -73,10 +78,52 @@ func (m *Manager) preserveSandboxBeforeReap(repoID string, instance *session.Ins
 	// Record it the INSTANT it is durable, for the reason ArchiveSandbox records it
 	// there: from here the branch is the only handle on the user's work, so it
 	// belongs on the record whatever happens to the sandbox next.
+	//
+	// And record it DURABLY before authorizing the reap. A best-effort write that
+	// is lost leaves the record with an empty branch while the sandbox that knew it
+	// is being destroyed — so the next recovery clones the default branch and
+	// strands the work this push just made durable, which is the whole bug. This is
+	// a settlement in the #2781/#2883 sense: durable, retried, and refused rather
+	// than logged.
 	instance.SetSandboxBranch(branch)
-	m.persistInstance(repoID, instance)
+	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+		return fmt.Errorf(
+			"refusing to replace the sandbox for %q: its work was pushed to %s, but that branch could not "+
+				"be recorded (%w). Replacing it now would clone the repository's default branch and strand "+
+				"the very work the push just saved. The push already succeeded, so nothing is lost — retry once "+
+				"the record is writable",
+			instance.Title, branch, perr)
+	}
 	log.InfoLog.Printf("recovery of %q: pushed its sandbox's work to %s before replacing it", instance.Title, branch)
 	return nil
+}
+
+// requireKnownSandboxBranch refuses a replacement that would provision with an
+// empty RestoreBranch.
+//
+// That is the reported bug stated as an invariant (#2925/#2959): both sandbox
+// runtimes SKIP the restore fetch when the branch is empty, so the replacement
+// comes up on the repository's default branch and everything the session did —
+// including work it had already PUSHED — is stranded under a branch nothing
+// points at.
+//
+// --force-reap does not override this, and the distinction is the flag's whole
+// promise: it discards what the sandbox never pushed, which is the operator's
+// call to make. Landing on the default branch discards pushed work too, which
+// they never agreed to. When the branch cannot be learned there is no correct
+// replacement to perform, so the honest answer is to say so and name the
+// alternative.
+func requireKnownSandboxBranch(instance *session.Instance) error {
+	if instance.GetBranch() != "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"cannot replace the sandbox for %q: af never learned which branch it was working on, so a "+
+			"replacement would clone the repository's default branch and strand everything the session did, "+
+			"including work it had already pushed. The branch is recorded when a sandbox is archived or when "+
+			"recovery pushes a reachable one, and neither has happened here. If its work is expendable, remove "+
+			"it and create a replacement: %s",
+		instance.Title, shellsuggest.Command("af", "sessions", "kill", instance.Title))
 }
 
 // refuseIndeterminateReap is the message for a sandbox whose reachability could
