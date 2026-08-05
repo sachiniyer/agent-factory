@@ -57,7 +57,18 @@ const (
 )
 
 // listTmuxSessions returns every session name on the current tmux server.
-// A missing server (exit 1) is an empty list, mirroring CleanupSessions.
+//
+// It collapses EVERY failure into an empty list, which is wrong and is tracked
+// as #2874: `tmux ls` exits 1 both for "there is no server" and for "I could not
+// reach the server", so an unreachable socket reads here as "no sessions are
+// live" — and checkOrphanedProcesses turns that into an armed `kill pid N` for
+// every live session's processes. Do not build anything new on this list until
+// it is three-valued.
+//
+// The comment this replaces cited CleanupSessions as the model. That stopped
+// being true in #2870, which made the reset-side listing distinguish tmux's
+// definitive no-server diagnostics from an unreadable one and fail closed;
+// session/tmux has the classifier this needs.
 func listTmuxSessions(ctx *scanContext) []string {
 	out, err := ctx.opts.Exec.Output(exec.Command("tmux", "ls", "-F", "#{session_name}"))
 	if err != nil {

@@ -329,8 +329,17 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 	}
 
 	// 5. Clean up tmux sessions before deleting the records that name them.
-	if err := cleanupTmuxSessionsFn(); err != nil {
-		return fmt.Errorf("failed to cleanup tmux sessions: %w", err)
+	//    A sweep that could not READ the session set aborts the whole reset
+	//    (#2870), rather than warning and continuing: the listing is what tells
+	//    reset which sessions are live, so proceeding without it deletes
+	//    worktrees and prunes branches with their fate unknown, and a warning is
+	//    no safeguard once the worktree is gone. Same rule as 4b/4d for the
+	//    daemon and planFactoryReset for unreadable records — and nothing
+	//    destructive has run yet, so the abort costs the user one command.
+	if cleanupErr := cleanupTmuxSessionsFn(); cleanupErr != nil {
+		err = fmt.Errorf("failed to cleanup tmux sessions: %w", cleanupErr)
+		fmt.Fprintln(out, "\nNothing was removed: no worktree, branch, session record, or task was touched.")
+		return err
 	}
 	fmt.Fprintln(out, "Tmux sessions have been cleaned up")
 
@@ -554,11 +563,6 @@ func planFactoryReset() (*resetPlan, error) {
 		}
 	}
 
-	// Cross-check the instances/ dir: any repoID directory GetAllInstances did
-	// NOT surface (e.g. an unsupported newer schema version it skipped upstream)
-	// is a record we cannot read. Treat it like a corrupt one — leave it and its
-	// branches intact rather than erasing it wholesale — so an unreadable record
-	// never has its branch orphaned or deleted by guessing.
 	seen := make(map[string]struct{}, len(plan.processedRepoIDs)+len(plan.corruptRepoIDs))
 	for _, id := range plan.processedRepoIDs {
 		seen[id] = struct{}{}
@@ -566,17 +570,11 @@ func planFactoryReset() (*resetPlan, error) {
 	for _, id := range plan.corruptRepoIDs {
 		seen[id] = struct{}{}
 	}
-	if entries, derr := os.ReadDir(filepath.Join(dir, "instances")); derr == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			if _, ok := seen[e.Name()]; !ok {
-				log.WarningLog.Printf("reset: leaving repo %s intact: unreadable session records", e.Name())
-				plan.corruptRepoIDs = append(plan.corruptRepoIDs, e.Name())
-			}
-		}
+	unsurfaced, err := unreadableRepoIDs(filepath.Join(dir, "instances"), seen)
+	if err != nil {
+		return nil, err
 	}
+	plan.corruptRepoIDs = append(plan.corruptRepoIDs, unsurfaced...)
 
 	// NOTE: there is deliberately NO current-repo fallback. The pre-#1736 reset
 	// forced the cwd's repo into a bulk worktree cleanup even when it had no AF

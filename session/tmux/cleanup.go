@@ -135,18 +135,82 @@ func probeSessionStrict(cmdExec cmd.Executor, name string) (exists bool, known b
 // missingTmuxSession recognizes tmux's explicit exact-target absence answer.
 // Exit status 1 alone is ambiguous: wrapper, policy, and unclassified connection
 // failures can return the same status while the named session remains unknown.
-// An explicit no-server diagnostic is also definitive: no session can remain.
+// A definitive no-server answer counts too: no session can remain on a socket
+// that holds no server.
 func missingTmuxSession(err error, name string) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+	diagnostic, ok := tmuxExitOneDiagnostic(err)
+	if !ok {
 		return false
 	}
-	diagnostic := strings.TrimSpace(string(exitErr.Stderr))
-	if diagnostic == "can't find session: "+name {
-		return true
+	return diagnostic == "can't find session: "+name || noTmuxServerDiagnostic(diagnostic)
+}
+
+// tmuxExitOneDiagnostic returns the trimmed stderr of a tmux command that
+// exited with status 1, and whether it did. Only status 1 qualifies: tmux
+// reports both "the thing you asked about is absent" and "I could not reach the
+// server" with it, so the diagnostic is the ONLY thing that separates them, and
+// any other status is a failure mode tmux does not document a diagnostic for.
+func tmuxExitOneDiagnostic(err error) (string, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		return "", false
 	}
-	serverSocket, noServer := strings.CutPrefix(diagnostic, "no server running on ")
-	return noServer && strings.TrimSpace(serverSocket) != ""
+	return strings.TrimSpace(string(exitErr.Stderr)), true
+}
+
+// noTmuxServerDiagnostic reports whether a tmux exit-1 diagnostic is tmux's
+// DEFINITIVE "there is no server on this socket" answer — which, for a listing,
+// is the difference between "there are no sessions" and "I could not find out".
+//
+// tmux's client prints the ECONNREFUSED case by name and routes every other
+// connect(2) failure through strerror, so exactly two diagnostics are definitive
+// (both measured against tmux 3.4):
+//
+//   - "no server running on <socket>" — the socket exists and refused us, so
+//     nothing is listening on it. A server that exits leaves its socket file
+//     behind, so this is what a server that has DIED says.
+//   - "error connecting to <socket> (No such file or directory)" — ENOENT: the
+//     socket does not exist, so no server ever created one there. This is the
+//     ordinary answer on a machine with no tmux server, and it is why the set
+//     cannot be narrowed to the line above: doing so would make `af reset`
+//     refuse to run for most users (#2870).
+//
+// Everything else leaves the session set unknown — (Permission denied) and other
+// connect failures, tmux's own socket-directory refusals, a wrapper's exit 1,
+// and an empty diagnostic. A "no server" line that names no socket is not tmux's
+// answer either, so it is not accepted.
+//
+// The strings are matched in tmux's own C locale: tmux calls setlocale only for
+// LC_CTYPE, so strerror stays untranslated regardless of the user's LANG.
+func noTmuxServerDiagnostic(diagnostic string) bool {
+	if socket, refused := strings.CutPrefix(diagnostic, "no server running on "); refused {
+		return strings.TrimSpace(socket) != ""
+	}
+	rest, connectFailure := strings.CutPrefix(diagnostic, "error connecting to ")
+	if !connectFailure {
+		return false
+	}
+	socket, absent := strings.CutSuffix(rest, " (No such file or directory)")
+	return absent && strings.TrimSpace(socket) != ""
+}
+
+// tmuxDiagnosticSuffix renders tmux's stderr as a parenthesized clause for an
+// error message, or "" when there is nothing to render.
+//
+// It exists because an (*exec.ExitError).Error() is only "exit status N": tmux's
+// actual reason — the socket it could not reach and why — lives in Stderr, and
+// an error that omits it tells the user of a REFUSED reset nothing about what to
+// fix. Whitespace is collapsed so a multi-line diagnostic stays one line.
+func tmuxDiagnosticSuffix(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return ""
+	}
+	diagnostic := strings.Join(strings.Fields(string(exitErr.Stderr)), " ")
+	if diagnostic == "" {
+		return ""
+	}
+	return " (" + diagnostic + ")"
 }
 
 // exactTarget builds an exact-match `-t` target spec for the named session.
@@ -186,8 +250,23 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	listTimedOut := listCtx.Err() != nil
 	listCancel()
 
-	// If there's an error and it's because no server is running, that's fine
-	// Exit code 1 typically means no sessions exist
+	// The listing has THREE outcomes and they must never collapse into two
+	// (#2870). `af reset` calls this before it deletes worktrees, prunes
+	// branches, and erases records, so "there are no sessions" is a licence to
+	// destroy — and it may only be issued when tmux actually ANSWERED:
+	//
+	//   listed, and here they are  -> err == nil, fall through and sweep them.
+	//   listed, and there are none -> a definitive no-server diagnostic (or an
+	//                                 empty successful listing); return nil.
+	//   could not list             -> abort. Fail CLOSED, with the underlying
+	//                                 error: a warning here is not a safeguard,
+	//                                 because by the time it is read the
+	//                                 worktree is gone.
+	//
+	// This is the same rule the storage half of the reset already follows — an
+	// unreadable instances.json is preserved rather than treated as an empty
+	// repo (#868/#869) — applied to the one read that was still collapsing
+	// "I could not tell" into "nothing is there".
 	if err != nil {
 		if listTimedOut {
 			// A wedged server has told us NOTHING about what is running, so the
@@ -196,10 +275,14 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// success for a reset that swept nothing.
 			return fmt.Errorf("%w: tmux ls after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return nil // No sessions to clean up
+		if diagnostic, exitOne := tmuxExitOneDiagnostic(err); exitOne && noTmuxServerDiagnostic(diagnostic) {
+			return nil // tmux answered: no server on this socket, so no sessions
 		}
-		return fmt.Errorf("failed to list tmux sessions: %v", err)
+		// Name what was unreadable AND what was therefore not done. tmux writes
+		// its reason to stderr, which the bare error swallows — `exit status 1`
+		// on its own gives the user nothing to act on.
+		return fmt.Errorf("could not list tmux sessions%s; refusing to sweep with the session set "+
+			"unknown — no tmux session was killed: %w", tmuxDiagnosticSuffix(err), err)
 	}
 
 	// Anchor to start-of-line so `af_` embedded in a non-agent session name
