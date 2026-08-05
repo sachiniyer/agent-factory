@@ -214,7 +214,26 @@ jobs:
       - name: Test abrupt daemon failure ownership
         env:
           AF_SYSTEMD_LIFECYCLE_TEST: "1"
-        run: go test -v -count=1 ./integration -run '^TestAbruptDaemonFailureReapsOwnedChildrenAndPreservesTmux$'
+        run: |
+          set -euo pipefail
+          pin='^TestAbruptDaemonFailureReapsOwnedChildrenAndPreservesTmux$'
+          # `go test -run` EXITS 0 when the pattern matches nothing — it prints
+          # "ok … [no tests to run]" and the job goes green having tested nothing.
+          # So a rename of this test silently retires the gate, on the merge path,
+          # and nobody reads the log of a green job (#2916).
+          #
+          # `-list` does not discriminate either: it also exits 0 with no match.
+          # The printed NAME COUNT is the only signal, so resolve the pin first and
+          # require exactly one match before running it.
+          matched="$(go test ./integration -list "$pin" | grep -c '^Test' || true)"
+          if [ "$matched" != "1" ]; then
+            echo "::error::the pinned test does not resolve — $matched matches for $pin"
+            echo "This gate would have run NOTHING and gone green. The test was renamed,"
+            echo "moved out of ./integration, or deleted; update the pin to match."
+            go test ./integration -list '.*' | grep '^TestAbrupt' || echo "(no TestAbrupt* in ./integration)"
+            exit 1
+          fi
+          go test -v -count=1 ./integration -run "$pin"
 
   # The web client's deterministic gates (#2069). Until this landed, NOTHING in
   # GitHub Actions ran them: the schedule/frame/icons parity tests, the typecheck,
