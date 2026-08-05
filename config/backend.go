@@ -78,13 +78,20 @@ type SSHConfig struct {
 	// Host is the ssh target (`host` or `host:port`) the session is provisioned
 	// on. Required when the ssh runtime is selected; enforced by the runtime.
 	Host string `json:"host,omitempty" toml:"host,omitempty"`
-	// User is the ssh login user. Optional — empty defers to the ssh client's
-	// default (the current user or an ssh_config Match).
+	// User is the ssh login user. Optional — empty means the daemon's own user
+	// (os/user.Current, else $USER).
+	//
+	// NOT an ssh_config lookup: the runtime connects with the Go
+	// golang.org/x/crypto/ssh client rather than the ssh binary, and never reads
+	// ~/.ssh/config — so no Match block, Host alias, or per-host User applies
+	// here. Every connection parameter af uses is a field of this struct.
 	User string `json:"user,omitempty" toml:"user,omitempty"`
 	// Port is the ssh port. Optional — 0 means the default (22).
 	Port int `json:"port,omitempty" toml:"port,omitempty"`
 	// IdentityFile is the path to the private key used for auth. Optional —
-	// empty defers to the agent/default keys.
+	// empty falls back to ~/.ssh/id_ed25519, ~/.ssh/id_ecdsa, ~/.ssh/id_rsa and
+	// any keys a running ssh-agent holds. Also not an ssh_config IdentityFile
+	// directive, for the reason above.
 	IdentityFile string `json:"identity_file,omitempty" toml:"identity_file,omitempty"`
 	// KnownHosts is the path to the OpenSSH known_hosts file the runtime verifies
 	// the remote's host key against (#1592 Phase 4 PR5). Optional — empty defers
