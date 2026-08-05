@@ -88,6 +88,9 @@ const BACKOFF_MAX_MS = 10_000;
 // Debounce the fit→OpResize send so dragging a window edge sends one resize on
 // settle, not one per animation frame. The server echoes the winning size back.
 const RESIZE_DEBOUNCE_MS = 120;
+// How many wrapped rows either side of the pressed one a long press will read. It
+// bounds work done synchronously in touchstart for EVERY touch; see snapshotPress.
+const TOUCH_PRESS_MAX_ROWS = 32;
 
 /** A long press resolved at touchstart: the flattened wrapped block, the index the
  *  finger landed on, and the grid it was all read against. */
@@ -449,6 +452,10 @@ export class AttachTerminal {
       // this cannot resurrect a copy the scroll already discarded.
       event.preventDefault();
       event.stopPropagation();
+      // Disarmed HERE as well as on a lift: this browser sends neither touchend nor
+      // touchcancel for a held touch, so the places that used to clear it are never
+      // reached and the one-shot would stay armed for the next keyboard menu.
+      this.suppressNextContextMenu = false;
       this.flushTouchCopy();
       return;
     }
@@ -817,7 +824,15 @@ export class AttachTerminal {
       const at = wrappedCellPosition(range.start, press.cols);
       if (this.liveTextAt(markedFirstRow, range, press.cols) === text) {
         this.term.select(at.col, markedFirstRow + at.row, range.length);
+      } else {
+        // Declining to paint is not enough when something is ALREADY painted: a
+        // selection made earlier (a modifier drag in a mouse-aware TUI, which xterm
+        // does not clear for a touch) would survive and be read as naming what was
+        // just copied.
+        this.term.clearSelection();
       }
+    } else {
+      this.term.clearSelection();
     }
     // Marked BEFORE the lift: the compatibility click this touch still owes is what
     // would otherwise reach the application and clear the selection just painted.
@@ -829,19 +844,15 @@ export class AttachTerminal {
   /** The text the live buffer currently holds where a snapshot's range sits, or null
    *  if that no longer resolves. Used to check the highlight before painting it. */
   private liveTextAt(firstRow: number, range: TerminalWordRange, cols: number): string | null {
-    const buffer = this.term.buffer.active;
-    const cells: string[] = [];
     const firstNeeded = Math.floor(range.start / cols);
     const lastNeeded = Math.floor((range.start + range.length - 1) / cols);
-    for (let offset = firstNeeded; offset <= lastNeeded; offset += 1) {
-      const line = buffer.getLine(firstRow + offset);
-      if (!line) {
-        return null;
-      }
-      for (let col = 0; col < cols; col += 1) {
-        const buffered = line.getCell(col);
-        cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
-      }
+    // The SAME flatten the snapshot used, wrap padding included. Reconstructing it by
+    // hand here once left the live text unable to equal the snapshot across a padded
+    // wrap, which silently withheld the highlight in exactly the CJK case the padding
+    // rule exists for.
+    const cells = this.flattenRows(firstRow + firstNeeded, firstRow + lastNeeded, cols);
+    if (cells === null) {
+      return null;
     }
     return textFromCells(cells, { start: range.start - firstNeeded * cols, length: range.length });
   }
@@ -875,24 +886,70 @@ export class AttachTerminal {
     }
     // A soft-wrapped line is SEVERAL buffer rows, and a phone is about forty columns
     // wide, so the URLs and paths this gesture exists for wrap more often than not.
-    // Both walks are bounded by the buffer: xterm's store is circular, so a read past
-    // the end can answer with the first retained row rather than nothing.
+    //
+    // The walk is BOUNDED, and that bound is not decoration: this runs synchronously
+    // in touchstart for every touch — taps and scrolls included — and one very long
+    // wrapped logical line (minified JSON, base64, a stack trace) can be the entire
+    // 5000-row scrollback. Materialising that would be ~200k cell reads on a phone
+    // before the handler returns, i.e. a visible stall on every touch. Rows are
+    // therefore taken only while the token is still running at the edge, and only up
+    // to the cap.
     let first = pressedRow;
-    while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
+    while (
+      first > 0 &&
+      pressedRow - first < TOUCH_PRESS_MAX_ROWS &&
+      buffer.getLine(first)?.isWrapped === true &&
+      this.rowEdgeContinues(first, 0, cols)
+    ) {
       first -= 1;
     }
-    // A block still marked wrapped at row 0 has had its earlier rows trimmed away, so
-    // what remains is a SUFFIX of the logical line. Copying it whole would return a
-    // fragment presented as the token.
-    if (buffer.getLine(first)?.isWrapped === true) {
+    // A block still marked wrapped at its first row has had earlier rows trimmed away
+    // — what remains is a SUFFIX of the logical line, and copying it whole would
+    // present a fragment as the token. Hitting the cap mid-token is refused for the
+    // same reason rather than returning the part that happened to fit.
+    if (buffer.getLine(first)?.isWrapped === true && this.rowEdgeContinues(first, 0, cols)) {
       return null;
     }
     let last = pressedRow;
-    while (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
+    while (
+      last + 1 < buffer.length &&
+      last - pressedRow < TOUCH_PRESS_MAX_ROWS &&
+      buffer.getLine(last + 1)?.isWrapped === true &&
+      this.rowEdgeContinues(last, cols - 1, cols)
+    ) {
       last += 1;
     }
+    if (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true && this.rowEdgeContinues(last, cols - 1, cols)) {
+      return null;
+    }
+    const cells = this.flattenRows(first, last, cols);
+    if (cells === null) {
+      return null;
+    }
+    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
+  }
+
+  /** Whether the token at one edge of a row runs on — the only reason to pull another
+   *  wrapped row into the snapshot. A blank there ends the token and the walk. */
+  private rowEdgeContinues(row: number, col: number, cols: number): boolean {
+    const cells = this.flattenRows(row, row, cols);
+    const edge = cells?.[col];
+    return edge !== undefined && (edge === "" || edge.trim() !== "");
+  }
+
+  /**
+   * Flattens buffer rows to ONE ENTRY PER COLUMN, so an index is a column.
+   * translateToString would collapse a wide character into a single index and quietly
+   * shift every column after it.
+   *
+   * Shared by the snapshot and by the live check that guards the highlight: two
+   * copies of this drifted apart once already, and a difference between them reads as
+   * "the text changed" — which silently withholds the only feedback this gesture has.
+   */
+  private flattenRows(firstRow: number, lastRow: number, cols: number): string[] | null {
+    const buffer = this.term.buffer.active;
     const cells: string[] = [];
-    for (let row = first; row <= last; row += 1) {
+    for (let row = firstRow; row <= lastRow; row += 1) {
       const line = buffer.getLine(row);
       if (!line) {
         return null;
@@ -902,16 +959,15 @@ export class AttachTerminal {
         cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
       }
       // A wide glyph that will not fit the last cell is pushed to the next row, and
-      // the cell it vacated is left NULL — code 0, which is not a space anybody typed.
-      // Flattened to " " it splits an unbroken CJK or emoji token exactly at the wrap;
-      // read as the structure xterm's own reflow treats it as, the token survives. The
-      // code is what separates it from a real trailing space (code 32), which must
-      // keep separating words.
-      if (row < last && line.getCell(cols - 1)?.getCode() === 0) {
+      // the cell it vacated is left NULL — code 0, which is not a space anybody typed
+      // (code 32). Flattened to " " it splits an unbroken CJK or emoji token exactly
+      // at the wrap; read as structure, the token survives and a real trailing space
+      // still separates words.
+      if (buffer.getLine(row + 1)?.isWrapped === true && line.getCell(cols - 1)?.getCode() === 0) {
         cells[cells.length - 1] = "";
       }
     }
-    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
+    return cells;
   }
 
   /** The painted height of one terminal row, which turns a pixel-denominated gesture

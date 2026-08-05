@@ -7243,6 +7243,7 @@ function currentXtermTheme() {
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
+var TOUCH_PRESS_MAX_ROWS = 32;
 var AttachTerminal = class {
   constructor(container, token2, endpoint, cb) {
     this.container = container;
@@ -7595,6 +7596,7 @@ var AttachTerminal = class {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
       event.preventDefault();
       event.stopPropagation();
+      this.suppressNextContextMenu = false;
       this.flushTouchCopy();
       return;
     }
@@ -7790,7 +7792,11 @@ var AttachTerminal = class {
       const at = wrappedCellPosition(range.start, press.cols);
       if (this.liveTextAt(markedFirstRow, range, press.cols) === text) {
         this.term.select(at.col, markedFirstRow + at.row, range.length);
+      } else {
+        this.term.clearSelection();
       }
+    } else {
+      this.term.clearSelection();
     }
     this.touchCopyFired = true;
     this.suppressNextContextMenu = true;
@@ -7799,19 +7805,11 @@ var AttachTerminal = class {
   /** The text the live buffer currently holds where a snapshot's range sits, or null
    *  if that no longer resolves. Used to check the highlight before painting it. */
   liveTextAt(firstRow, range, cols) {
-    const buffer = this.term.buffer.active;
-    const cells = [];
     const firstNeeded = Math.floor(range.start / cols);
     const lastNeeded = Math.floor((range.start + range.length - 1) / cols);
-    for (let offset = firstNeeded; offset <= lastNeeded; offset += 1) {
-      const line = buffer.getLine(firstRow + offset);
-      if (!line) {
-        return null;
-      }
-      for (let col = 0; col < cols; col += 1) {
-        const buffered = line.getCell(col);
-        cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
-      }
+    const cells = this.flattenRows(firstRow + firstNeeded, firstRow + lastNeeded, cols);
+    if (cells === null) {
+      return null;
     }
     return textFromCells(cells, { start: range.start - firstNeeded * cols, length: range.length });
   }
@@ -7843,18 +7841,45 @@ var AttachTerminal = class {
       return null;
     }
     let first = pressedRow;
-    while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
+    while (first > 0 && pressedRow - first < TOUCH_PRESS_MAX_ROWS && buffer.getLine(first)?.isWrapped === true && this.rowEdgeContinues(first, 0, cols)) {
       first -= 1;
     }
-    if (buffer.getLine(first)?.isWrapped === true) {
+    if (buffer.getLine(first)?.isWrapped === true && this.rowEdgeContinues(first, 0, cols)) {
       return null;
     }
     let last = pressedRow;
-    while (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
+    while (last + 1 < buffer.length && last - pressedRow < TOUCH_PRESS_MAX_ROWS && buffer.getLine(last + 1)?.isWrapped === true && this.rowEdgeContinues(last, cols - 1, cols)) {
       last += 1;
     }
+    if (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true && this.rowEdgeContinues(last, cols - 1, cols)) {
+      return null;
+    }
+    const cells = this.flattenRows(first, last, cols);
+    if (cells === null) {
+      return null;
+    }
+    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
+  }
+  /** Whether the token at one edge of a row runs on — the only reason to pull another
+   *  wrapped row into the snapshot. A blank there ends the token and the walk. */
+  rowEdgeContinues(row, col, cols) {
+    const cells = this.flattenRows(row, row, cols);
+    const edge = cells?.[col];
+    return edge !== void 0 && (edge === "" || edge.trim() !== "");
+  }
+  /**
+   * Flattens buffer rows to ONE ENTRY PER COLUMN, so an index is a column.
+   * translateToString would collapse a wide character into a single index and quietly
+   * shift every column after it.
+   *
+   * Shared by the snapshot and by the live check that guards the highlight: two
+   * copies of this drifted apart once already, and a difference between them reads as
+   * "the text changed" — which silently withholds the only feedback this gesture has.
+   */
+  flattenRows(firstRow, lastRow, cols) {
+    const buffer = this.term.buffer.active;
     const cells = [];
-    for (let row = first; row <= last; row += 1) {
+    for (let row = firstRow; row <= lastRow; row += 1) {
       const line = buffer.getLine(row);
       if (!line) {
         return null;
@@ -7863,11 +7888,11 @@ var AttachTerminal = class {
         const buffered = line.getCell(col);
         cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
       }
-      if (row < last && line.getCell(cols - 1)?.getCode() === 0) {
+      if (buffer.getLine(row + 1)?.isWrapped === true && line.getCell(cols - 1)?.getCode() === 0) {
         cells[cells.length - 1] = "";
       }
     }
-    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
+    return cells;
   }
   /** The painted height of one terminal row, which turns a pixel-denominated gesture
    *  into rows. Falls back to a font-size estimate before the first row exists. */
