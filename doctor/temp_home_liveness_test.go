@@ -55,15 +55,15 @@ func macLikeTempHomeOptions(t *testing.T, tempRoot string, fix bool) Options {
 	}
 	opts.Exec = cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error { return nil },
-		// "no tmux" means the BINARY is absent, and the shape matters now that
-		// doctor classifies tmux failures (#2874): exec.ErrNotFound is a
-		// determinate empty — af drives tmux through PATH, so a tmux it cannot
-		// execute holds none of its sessions — whereas an unclassifiable failure
-		// means the session set is UNKNOWN and blocks every removal below.
-		// TestUnreadableTmuxSessionListRefusesTempHomeRemoval covers that half;
-		// these tests are about the lock gate, so they state the case they mean.
+		// tmux ANSWERED and has no sessions. The shape matters now that doctor
+		// classifies tmux failures (#2874): only a determinate empty lets the
+		// removal below be reached at all, and every failure — including a tmux
+		// the process cannot execute — leaves the session set UNKNOWN and blocks
+		// it. These tests are about the LOCK gate, so they state the tmux case
+		// they mean rather than leaning on an error whose classification is the
+		// subject of other tests (TestUnreadableTmuxSessionList*).
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			return nil, &exec.Error{Name: "tmux", Err: exec.ErrNotFound}
+			return []byte(""), nil
 		},
 	}
 	return opts

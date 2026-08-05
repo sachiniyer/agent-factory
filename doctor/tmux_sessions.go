@@ -40,13 +40,16 @@ import (
 // (#2874). Do not restore a "mirrors X" comment in either direction. State the
 // property, so a copy of this code cannot inherit a bug by inheriting a claim.
 //
-// A missing tmux binary is a determinate empty, not blindness: af drives tmux
-// through PATH, so a tmux it cannot execute is a tmux that holds none of its
-// sessions.
+// A tmux binary missing from THIS process's PATH is blindness too, not a
+// determinate empty. It proves only that doctor could not invoke the client —
+// and doctor's PATH is not the sessions' PATH: a scan run from a cron job or a
+// systemd unit with a minimal PATH, or run across a package upgrade, can fail to
+// find a tmux whose server is up with live sessions. "I could not ask" is the
+// very thing this function exists to keep separate from "there is nothing there".
 func listTmuxSessions(ctx *scanContext) ([]string, error) {
 	out, err := ctx.opts.Exec.Output(exec.Command("tmux", "ls", "-F", "#{session_name}"))
 	if err != nil {
-		if tmux.NoServerRunning(err) || errors.Is(err, exec.ErrNotFound) {
+		if tmux.NoServerRunning(err) {
 			return nil, nil
 		}
 		diagnostic := tmux.CommandDiagnostic(err)
@@ -296,6 +299,26 @@ func liveTmuxHomes(ctx *scanContext) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
+	return tmuxHomesFor(ctx, names)
+}
+
+// liveTmuxHomesNow is liveTmuxHomes against a FRESH listing rather than the
+// run's memo, for the fix-time recheck.
+//
+// The memo is right for detection — one run, one view. It is wrong for the
+// recheck, and the difference is the whole point of rechecking: findings are
+// applied after detection, so the session that must veto an rm -rf is precisely
+// the one that STARTED in that window, and it cannot appear in a listing taken
+// before the window opened. Re-reading markers for the old list would miss it.
+func liveTmuxHomesNow(ctx *scanContext) (map[string]bool, error) {
+	names, err := listTmuxSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tmuxHomesFor(ctx, names)
+}
+
+func tmuxHomesFor(ctx *scanContext, names []string) (map[string]bool, error) {
 	homes := map[string]bool{}
 	var unreadable []string
 	for _, name := range names {
