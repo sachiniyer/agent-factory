@@ -373,3 +373,70 @@ func collectTreeDescription(t *testing.T, root string) map[string]string {
 	}))
 	return described
 }
+
+// TestCopyTree_PreservesSparseFilesInsteadOfExpandingThem is the #2920
+// regression. io.Copy reads a hole as zeros and writes them out, so the
+// cross-device fallback allocated a real block for every hole while the
+// same-device rename(2) left the extent layout untouched. The archive root is
+// shared by every session on the box, so one session archiving a sparsely
+// allocated database or image file could consume the space all of them need.
+//
+// The fixture has a leading hole, data in the middle, and a trailing hole — the
+// trailing one is what catches a copy that skips the final zero chunk and then
+// forgets to size the file.
+func TestCopyTree_PreservesSparseFilesInsteadOfExpandingThem(t *testing.T) {
+	const size = 32 << 20
+	const payload = "sparse payload marker"
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	sparse, err := os.Create(filepath.Join(src, "database.bin"))
+	require.NoError(t, err)
+	require.NoError(t, sparse.Truncate(size))
+	_, err = sparse.WriteAt([]byte(payload), size/2)
+	require.NoError(t, err)
+	require.NoError(t, sparse.Close())
+	// A dense file alongside it: the zero-skipping must not disturb ordinary
+	// content, including embedded NUL bytes.
+	dense := []byte("head\x00\x00\x00tail")
+	require.NoError(t, os.WriteFile(filepath.Join(src, "dense.bin"), dense, 0644))
+
+	sourceBlocks := allocatedBlocks(t, filepath.Join(src, "database.bin"))
+	require.Less(t, sourceBlocks, int64(4096),
+		"fixture is not sparse on this filesystem, so the assertion below would prove nothing")
+
+	dest := filepath.Join(t.TempDir(), "dest")
+	require.NoError(t, copyTree(src, dest))
+
+	copiedPath := filepath.Join(dest, "database.bin")
+	info, err := os.Stat(copiedPath)
+	require.NoError(t, err)
+	assert.Equal(t, int64(size), info.Size(),
+		"the trailing hole must still count toward the file's length")
+
+	copiedBlocks := allocatedBlocks(t, copiedPath)
+	assert.Less(t, copiedBlocks, sourceBlocks+4096,
+		"the copy allocated the holes instead of reproducing them: %d KiB on disk vs the source's %d KiB",
+		copiedBlocks/2, sourceBlocks/2)
+
+	// Sparseness is worthless if the bytes changed: every reader must still see
+	// zeros for the holes and the payload where it was written.
+	copiedContents, err := os.ReadFile(copiedPath)
+	require.NoError(t, err)
+	require.Len(t, copiedContents, size)
+	assert.Equal(t, payload, string(copiedContents[size/2:size/2+len(payload)]))
+	assert.True(t, isAllZero(copiedContents[:size/2]), "the leading hole must read back as zeros")
+	assert.True(t, isAllZero(copiedContents[size/2+len(payload):]), "the trailing hole must read back as zeros")
+
+	copiedDense, err := os.ReadFile(filepath.Join(dest, "dense.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, dense, copiedDense, "embedded NUL bytes must survive the zero-run skipping")
+}
+
+// allocatedBlocks reports a file's on-disk allocation in 512-byte units, which
+// is what distinguishes a hole from a written run of zeros — st_size cannot.
+func allocatedBlocks(t *testing.T, path string) int64 {
+	t.Helper()
+	var stat syscall.Stat_t
+	require.NoError(t, syscall.Stat(path, &stat))
+	return stat.Blocks
+}

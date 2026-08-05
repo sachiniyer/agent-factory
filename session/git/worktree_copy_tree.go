@@ -456,6 +456,72 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 	return preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory")
 }
 
+// holeCopyChunk is the read granularity of the hole-preserving copy. It is a
+// multiple of every common filesystem block size, so a skipped chunk lands on
+// block boundaries and actually leaves a hole rather than a partly-allocated
+// extent.
+const holeCopyChunk = 256 << 10
+
+// copyContentsPreservingHoles copies in to out without writing runs of zeros, so
+// a sparse file arrives sparse instead of fully allocated.
+//
+// io.Copy reads a hole as zeros and faithfully writes them out, which allocates
+// a real block for every hole: a 4 KiB-on-disk, 64 MiB-long file arrived in the
+// archive as 64 MiB of blocks, a 16384x amplification (#2920). rename(2) never
+// reads the file, so the same-device path keeps the extent layout untouched and
+// only the cross-device path pays this. The archive root is shared by every
+// session on the box, so one session archiving a sparsely-allocated database or
+// image file can consume the space all of them depend on.
+//
+// A hole and a run of zeros are indistinguishable to every reader, so skipping
+// the write cannot change what anyone sees — it changes only what is allocated.
+// This is cp --sparse=always semantics: holes are reproduced at write
+// granularity rather than exactly, and a run of explicit zeros may become a
+// hole.
+//
+// Deliberately not SEEK_DATA/SEEK_HOLE extent iteration. That reproduces the
+// layout more exactly, but it replaces the read loop in the one function that
+// must never lose worktree bytes, and it degrades differently per filesystem.
+// This keeps the read-to-EOF loop and its behavior on a concurrently written
+// file, and changes only whether a zero-filled buffer is written or skipped.
+func copyContentsPreservingHoles(out, in *os.File) error {
+	buffer := make([]byte, holeCopyChunk)
+	var copied int64
+	for {
+		// ReadFull, not Read: a short read mid-file would push every later chunk
+		// off its block boundary, and a misaligned skip allocates instead of
+		// leaving a hole. Only the final chunk is allowed to be short.
+		n, err := io.ReadFull(in, buffer)
+		if n > 0 {
+			if !isAllZero(buffer[:n]) {
+				if _, writeErr := out.WriteAt(buffer[:n], copied); writeErr != nil {
+					return writeErr
+				}
+			}
+			copied += int64(n)
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// Load-bearing, not tidiness: a file whose final chunk was skipped has had
+	// nothing written at that offset, so without this the copy is short by the
+	// whole trailing hole.
+	return out.Truncate(copied)
+}
+
+func isAllZero(chunk []byte) bool {
+	for _, b := range chunk {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // preserveSourceMode restores a source node's permission bits on the descriptor
 // that owns its copy.
 //
@@ -567,7 +633,7 @@ func copyRegularFileAtWithIdentity(
 		_ = out.Close()
 		return created, err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if err := copyContentsPreservingHoles(out, in); err != nil {
 		_ = out.Close()
 		return created, err
 	}
