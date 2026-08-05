@@ -81,7 +81,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	}
 	g.branchCreatedByUs = branchCreatedByUs
 
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
+	g.restartHooks()
 	return nil
 }
 
@@ -121,8 +121,39 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 
 	g.baseCommitSHA = baseCommit
 	g.branchCreatedByUs = true
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
+	g.restartHooks()
 	return nil
+}
+
+// restartHooks retires the previous post-worktree hook run before launching one
+// for the rebuilt tree.
+//
+// A rebuild is the ONLY place a second run can begin on a worktree that already
+// has one, and both halves of this matter (#2770):
+//
+//   - Cancelling first. Recovery reuses the live GitWorktree — respawn calls
+//     Rebuild* on i.gitWorktree with no Cleanup() in between — so a hook still
+//     running from before the session was Lost keeps running. Starting another
+//     one then executes the operator's post_worktree_commands TWICE over the same
+//     path. These are provisioning commands (installs, migrations, seeding, a
+//     provisioning call out to something else), and the survivor's relative I/O
+//     fails against the deleted directory while its ABSOLUTE-path work lands in
+//     the tree the rebuild just recreated. It is also invisible: hooksDone is
+//     overwritten by the new run, so the readiness wait stops tracking the old one.
+//
+//   - A FRESH context, not the existing one. hooksCancel is permanent — the
+//     cancelled context cannot host the new run, and Cleanup() cancels it too. So
+//     the rebuild would either inherit the cancellation it just issued and start
+//     hooks that return at their first ctx check (a silently unprovisioned tree),
+//     or, after a Cleanup, never provision at all.
+func (g *GitWorktree) restartHooks() {
+	if g.hooksCancel != nil {
+		g.hooksCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	g.hooksCtx = ctx
+	g.hooksCancel = cancel
+	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
 }
 
 func (g *GitWorktree) rebuildBaseCommit() (string, error) {
