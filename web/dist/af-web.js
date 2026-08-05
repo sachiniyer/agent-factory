@@ -7116,6 +7116,9 @@ function wrappedCellPosition(index, cols) {
   }
   return { col: index % cols, row: Math.floor(index / cols) };
 }
+function touchCancelCompletesPress(heldMs) {
+  return heldMs >= TOUCH_LONG_PRESS_MS * 0.6;
+}
 
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
@@ -7382,6 +7385,8 @@ var AttachTerminal = class {
   // what xterm gives you to survive that, and it is the mechanism the viewport
   // anchor above already uses.
   touchPressMarker = null;
+  // When the finger went down, so a cancellation can be told apart from a takeover.
+  touchPressAt = 0;
   // Text the press selected, waiting for the finger to lift. The clipboard write has
   // to happen in the touchend handler: Safari only honours it from a trusted
   // user-gesture task, and a setTimeout callback is not one.
@@ -7459,17 +7464,22 @@ var AttachTerminal = class {
     this.touchCopyPending = null;
     this.cancelTouchLongPress();
     this.disposeTouchPressMarker();
+    this.touchPressAt = Date.now();
     this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
     if (this.touchPressCell) {
       this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
       this.startTouchLongPress();
     }
   };
-  onTouchEnd = () => {
+  onTouchEnd = (event) => {
+    const awaitingRecognition = this.touchLongPressTimer !== null;
     this.cancelTouchLongPress();
-    this.disposeTouchPressMarker();
+    if (event.type === "touchcancel" && awaitingRecognition && touchCancelCompletesPress(Date.now() - this.touchPressAt)) {
+      this.selectTouchWord();
+    }
     const pending = this.touchCopyPending;
     this.touchCopyPending = null;
+    this.disposeTouchPressMarker();
     if (pending === null) {
       return;
     }

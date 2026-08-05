@@ -61,6 +61,7 @@ import {
   terminalMouseOverrideHeld,
   type TerminalMouseOverride,
   TOUCH_LONG_PRESS_MS,
+  touchCancelCompletesPress,
   touchHistoryScrollPlan,
   touchPressStillHeld,
   touchScrollClaimsGesture,
@@ -161,6 +162,8 @@ export class AttachTerminal {
   // what xterm gives you to survive that, and it is the mechanism the viewport
   // anchor above already uses.
   private touchPressMarker: IMarker | null = null;
+  // When the finger went down, so a cancellation can be told apart from a takeover.
+  private touchPressAt = 0;
   // Text the press selected, waiting for the finger to lift. The clipboard write has
   // to happen in the touchend handler: Safari only honours it from a trusted
   // user-gesture task, and a setTimeout callback is not one.
@@ -251,17 +254,31 @@ export class AttachTerminal {
     this.touchCopyPending = null;
     this.cancelTouchLongPress();
     this.disposeTouchPressMarker();
+    this.touchPressAt = Date.now();
     this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
     if (this.touchPressCell) {
       this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
       this.startTouchLongPress();
     }
   };
-  private readonly onTouchEnd = (): void => {
+  private readonly onTouchEnd = (event: TouchEvent): void => {
+    const awaitingRecognition = this.touchLongPressTimer !== null;
     this.cancelTouchLongPress();
-    this.disposeTouchPressMarker();
+    // A cancel late in the hold IS the press. The browser ends the sequence itself
+    // once it recognises a long press of its own, and after a cancel no touchend
+    // follows — so if that lands before af's timer, waiting for a lift waits forever.
+    // Recognising it here makes the gesture independent of which side names it first,
+    // rather than racing the platform for a threshold nobody publishes.
+    if (
+      event.type === "touchcancel" &&
+      awaitingRecognition &&
+      touchCancelCompletesPress(Date.now() - this.touchPressAt)
+    ) {
+      this.selectTouchWord();
+    }
     const pending = this.touchCopyPending;
     this.touchCopyPending = null;
+    this.disposeTouchPressMarker();
     if (pending === null) {
       return;
     }

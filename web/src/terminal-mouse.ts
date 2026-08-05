@@ -256,3 +256,21 @@ export function wrappedCellPosition(index: number, cols: number): TerminalCellPo
   }
   return { col: index % cols, row: Math.floor(index / cols) };
 }
+
+/**
+ * Whether a touch the BROWSER has just cancelled had been held long enough that the
+ * cancellation is its own long-press recognition rather than a scroll takeover.
+ *
+ * The browser ends the touch sequence when it recognises a long press — it is about
+ * to offer a context menu — and after a cancel NO touchend follows. If that lands
+ * before af's own timer, deferring the copy to a lift waits for an event that will
+ * never arrive: the selection appears and nothing is ever copied. So a cancel that
+ * arrives late enough IS the recognition, and af acts on it there.
+ *
+ * The fraction keeps a cancel that comes from something else — a scroll takeover, a
+ * system gesture, an incoming call — from copying anything, without racing the
+ * platform for an exact threshold nobody has published.
+ */
+export function touchCancelCompletesPress(heldMs: number): boolean {
+  return heldMs >= TOUCH_LONG_PRESS_MS * 0.6;
+}
