@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -9,31 +10,47 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// failRecoverySettlement fails the FIRST write for title that records a live row
-// — the settlement a recovery owes once its respawn succeeded. Every write before
-// it (the Lost row going in) and every write after it (the retry) is real, so a
-// test can tell "the settlement never became durable" apart from "nothing was
-// written at all". Returns a func reporting whether the injection actually fired.
-func failRecoverySettlement(t *testing.T, title string, failure error) func() bool {
+// failRecoverySettlement fails the first write for title that carries a
+// POST-recovery row — the settlement a recovery owes once its respawn succeeded.
+// Keying on "no longer the pre-recovery Lost state" rather than on one exact
+// liveness keeps it from silently matching nothing if a path settles through a
+// different live state; a seam that never fires would make every assertion
+// downstream of it vacuous.
+//
+// It records every write it sees so a failure can say what actually happened
+// instead of only that the expectation did not.
+func failRecoverySettlement(t *testing.T, title string, failure error) (fired func() bool, seen func() string) {
 	t.Helper()
 	var mu sync.Mutex
-	fired := false
+	hit := false
+	var writes []string
 	prev := testHookPersistInstanceData
 	t.Cleanup(func() { testHookPersistInstanceData = prev })
 	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
 		mu.Lock()
 		defer mu.Unlock()
-		if fired || data.Title != title || data.Liveness != session.LiveRunning {
+		if data.Title != title {
 			return nil
 		}
-		fired = true
+		writes = append(writes, fmt.Sprintf("liveness=%v op=%v started-row", data.Liveness, data.InFlightOp))
+		if hit || data.Liveness == session.LiveLost {
+			return nil
+		}
+		hit = true
 		return failure
 	}
 	return func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return fired
-	}
+			mu.Lock()
+			defer mu.Unlock()
+			return hit
+		}, func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			if len(writes) == 0 {
+				return "no writes at all for this session"
+			}
+			return strings.Join(writes, " | ")
+		}
 }
 
 // A recovery's settlement write must survive a failure (#2883).
@@ -55,12 +72,12 @@ func TestRestoreLostSessions_SettlementPersistFailureIsRetried(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "stranded", backend, true, session.Lost)
 
 	diskFull := errors.New("no space left on device")
-	injected := failRecoverySettlement(t, "stranded", diskFull)
+	injected, seen := failRecoverySettlement(t, "stranded", diskFull)
 
 	manager.RestoreLostSessions()
 
 	if !injected() {
-		t.Fatal("no recovery settlement write was ever attempted, so this test exercised nothing")
+		t.Fatalf("no recovery settlement write was ever failed, so this test exercised nothing; writes seen: %s", seen())
 	}
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running: the recovery itself must still have succeeded", got)
@@ -92,20 +109,21 @@ func TestRestoreLostOrDeadSession_SettlementPersistFailureIsRetried(t *testing.T
 	inst := registerStarted(t, manager, repoID, repoPath, "manual", backend, true, session.Lost)
 
 	diskFull := errors.New("no space left on device")
-	injected := failRecoverySettlement(t, "manual", diskFull)
+	injected, seen := failRecoverySettlement(t, "manual", diskFull)
 
 	// The caller is told, unlike the automatic loop which has nobody to tell: the
 	// retry set only helps if the daemon lives long enough to drain it, and the
 	// user is the one who can free the disk.
 	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual", RepoID: repoID})
 	if err == nil || !errors.Is(err, diskFull) {
-		t.Fatalf("RestoreSession error = %v, want the settlement write failure surfaced (%v)", err, diskFull)
+		t.Fatalf("RestoreSession error = %v, want the settlement write failure surfaced (%v); writes seen: %s",
+			err, diskFull, seen())
 	}
 	if !strings.Contains(err.Error(), "agent is running") {
 		t.Fatalf("error must say the session IS restored, not just that a write failed: %v", err)
 	}
 	if !injected() {
-		t.Fatal("no recovery settlement write was ever attempted, so this test exercised nothing")
+		t.Fatalf("no recovery settlement write was ever failed, so this test exercised nothing; writes seen: %s", seen())
 	}
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running", got)
