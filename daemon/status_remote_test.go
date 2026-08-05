@@ -124,6 +124,12 @@ func confirmedDeadThenUnknownRemote(t *testing.T) (string, func()) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
+		case "/v1/agent/archive":
+			// Recovery pushes a REACHABLE sandbox before replacing it (#2923), so a
+			// fixture that answers alive=false has to be able to serve that push —
+			// otherwise these tests would be asserting the refusal, not the recovery
+			// they are about.
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"branch": "af/fixture-branch"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -200,6 +206,12 @@ func TestRefreshStatuses_StaleRemoteDeadConfirmationDoesNotCrossEpoch(t *testing
 			once.Do(func() { close(aliveStarted) })
 			<-releaseAlive
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
+		case "/v1/agent/archive":
+			// Recovery pushes a REACHABLE sandbox before replacing it (#2923), so a
+			// fixture that answers alive=false has to be able to serve that push —
+			// otherwise these tests would be asserting the refusal, not the recovery
+			// they are about.
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"branch": "af/fixture-branch"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -484,6 +496,12 @@ func TestRefreshStatuses_ReachableRemoteWithDeadAgentGoesLostImmediately(t *test
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{"alive": false},
 			})
+		case "/v1/agent/archive":
+			// Recovery pushes a REACHABLE sandbox before replacing it (#2923), so a
+			// fixture that answers alive=false has to be able to serve that push —
+			// otherwise these tests would be asserting the refusal, not the recovery
+			// they are about.
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"branch": "af/fixture-branch"}})
 		default:
 			http.NotFound(w, r)
 		}
