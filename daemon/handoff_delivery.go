@@ -52,10 +52,10 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		//
 		// It is also durable rather than best-effort: it is what retires the on-disk
 		// delivery obligation, and a lost one makes the next daemon send this mission
-		// again (#2781, see persistHandoffSettlement). Conversation capture still runs
+		// again (#2781, see persistSettlement). Conversation capture still runs
 		// — it describes the incoming runtime, which the failed write does not put in
 		// doubt — and the persist failure is what settle reports.
-		perr := m.persistHandoffSettlement(delivery.repoID, delivery.key, delivery.instance)
+		perr := m.persistSettlement(delivery.repoID, delivery.key, delivery.instance)
 		m.captureAgentConversationAsync(delivery.repoID, delivery.key, delivery.instance, delivery.conversationCapture)
 		return perr
 	}

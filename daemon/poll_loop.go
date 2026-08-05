@@ -65,6 +65,14 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// same per-session op-lock discipline.
 			manager.ResumeLimitedSessions()
 
+			// Retry any SETTLEMENT write that did not land — the writes that
+			// record the outcome of an irreversible step (#2781, #2883). It runs
+			// LAST so it sees the settled state of everything this tick produced,
+			// and it holds each row's op-lock, so a session another pass is still
+			// inside is skipped rather than checkpointed half-built. A no-op
+			// unless a write actually failed.
+			manager.FlushOwedSettlements()
+
 			// Handle stop before ticker.
 			select {
 			case <-stopCh:

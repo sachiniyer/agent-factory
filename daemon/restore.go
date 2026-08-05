@@ -150,7 +150,15 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// dead sandbox's count. A manual restore is the same lifecycle event as an
 	// automatic one; only the trigger differs (#1794).
 	m.noteRuntimeReplaced(repoID, instance)
-	m.persistInstance(repoID, instance)
+	// A SETTLEMENT, not a checkpoint (#2883). Recover can have rebuilt the
+	// worktree and recreated the branch, flipping branchCreatedByUs — the flag
+	// that authorizes deleting it later. No poll rewrites it (the row is already
+	// LiveRunning, so persistPollChange sees no change), so a lost write reverts
+	// the flag on the next start and the branch is orphaned for good. This path
+	// HAS a caller, so it reports; the retry set covers the restart window.
+	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+		log.WarningLog.Printf("restored session %q: %v", title, perr)
+	}
 	// A manual restore is the same lifecycle event as an automatic one; only the
 	// trigger differs (#1794) — so it must arm the SAME confirm-alive gate #1923 put
 	// on the auto path, NOT clear the retry state on spawn success. The unconditional

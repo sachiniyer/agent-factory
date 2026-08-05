@@ -38,12 +38,6 @@ type pendingHandoffEntry struct {
 // the publish, a row this loop finishes stays "working" on every open rail until
 // something unrelated republishes it.
 func (m *Manager) ResumePendingHandoffs() {
-	// Repair any settlement write that did not land before scanning for missions
-	// to deliver. A stale obligation on disk is exactly what this pass would
-	// replay after a restart, so retiring it is the same job as finishing one
-	// (#2781).
-	m.flushHandoffSettlements()
-
 	m.mu.Lock()
 	entries := make([]pendingHandoffEntry, 0, len(m.instances))
 	for key, instance := range m.instances {
@@ -100,7 +94,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 		if !entry.instance.ClearPendingHandoffMission(mission) {
 			return fmt.Errorf("pending mission changed while transferring it to limit retry")
 		}
-		perr := m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance)
+		perr := m.persistSettlement(entry.repoID, entry.key, entry.instance)
 		m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 		return perr
 	case session.LiveReady:
@@ -131,7 +125,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 			if !entry.instance.ClearPendingHandoffMission(mission) {
 				return fmt.Errorf("pending mission changed while parking its usage limit")
 			}
-			perr := m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance)
+			perr := m.persistSettlement(entry.repoID, entry.key, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 			if perr != nil {
 				return errors.Join(err, perr)
@@ -156,7 +150,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 	if !entry.instance.ClearPendingHandoffMission(mission) {
 		return fmt.Errorf("pending mission changed after delivery")
 	}
-	perr := m.persistHandoffSettlement(entry.repoID, entry.key, entry.instance)
+	perr := m.persistSettlement(entry.repoID, entry.key, entry.instance)
 	m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 	if perr != nil {
 		return perr

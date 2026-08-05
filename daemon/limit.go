@@ -490,7 +490,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// statement — a disk write above all — out of the window between the runtime
 		// swap and the debounce reset, so a blip there is not judged against the dead
 		// runtime. restore.go resolves the same ordering the same way.
-		m.persistInstance(repoID, instance)
+		//
+		// A SETTLEMENT, not a checkpoint (#2883): the paragraph above says the poll
+		// does not cover this write, which is precisely what made best-effort the
+		// wrong contract — a failed write silently reverted branchCreatedByUs and
+		// orphaned the branch the rebuild had just created. Durable, and enrolled
+		// for retry when it fails.
+		if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, perr)
+		}
 	}
 
 	prompt := strings.TrimSpace(instance.GetPrompt())

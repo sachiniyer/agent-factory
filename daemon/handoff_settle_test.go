@@ -136,10 +136,10 @@ func TestHandoffSession_SettlementPersistFailureCannotRedeliverTheMission(t *tes
 		t.Fatalf("delivered %d prompts during the handoff, want 1", len(prompts))
 	}
 
-	// The daemon's next poll. Its handoff pass owns this obligation, and a
-	// settlement that did not land is the same job as a mission that did not:
+	// The daemon's next poll. The settlement retry pass owns a write that did not
+	// land, exactly as the handoff pass owns a mission that was not delivered:
 	// finish it before anything can replay it.
-	manager.ResumePendingHandoffs()
+	manager.FlushOwedSettlements()
 
 	rec := recordFor(t, repoID, "settle-once")
 	if rec == nil || rec.PendingHandoffMission != "" {
@@ -197,7 +197,7 @@ func TestResumePendingHandoffs_SettlementPersistFailureCannotRedeliverTheMission
 	}
 
 	// The next poll has to finish what the failed write left open.
-	manager.ResumePendingHandoffs()
+	manager.FlushOwedSettlements()
 
 	rec := recordFor(t, repoID, "settle-once-on-retry")
 	if rec == nil || rec.PendingHandoffMission != "" {
@@ -291,7 +291,7 @@ func TestFlushHandoffSettlements_HoldsOffWhileTheRowIsInsideAnotherHandoff(t *te
 	<-backend.entered
 
 	// The poll fires in that window.
-	manager.ResumePendingHandoffs()
+	manager.FlushOwedSettlements()
 
 	mid := recordFor(t, repoID, "settle-race")
 	if mid == nil || mid.Program != owed.Program || mid.PendingHandoffMission != owed.PendingHandoffMission {
@@ -307,7 +307,7 @@ func TestFlushHandoffSettlements_HoldsOffWhileTheRowIsInsideAnotherHandoff(t *te
 
 	// Once the row is free again the obligation is discharged — by this handoff's
 	// own settlement, or by the next poll's retry if that one also failed.
-	manager.ResumePendingHandoffs()
+	manager.FlushOwedSettlements()
 	final := recordFor(t, repoID, "settle-race")
 	if final == nil || final.PendingHandoffMission != "" || final.Program != tmux.ProgramCodex {
 		t.Fatalf("record after the transaction finished = %+v, want a settled codex row with no pending mission", final)

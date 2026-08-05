@@ -433,7 +433,15 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// the write for as long as the agent stays busy. Ordering is load-bearing —
 	// this write goes AFTER noteRuntimeReplaced, never before, since a disk write
 	// is exactly the kind of statement the rule above keeps out of that window.
-	m.persistInstance(repoID, inst)
+	// A SETTLEMENT, not a checkpoint (#2883): durable, and enrolled for retry when
+	// the write fails. The paragraph above is exactly why — nothing else repairs
+	// it, so best-effort meant a full disk silently reverted branchCreatedByUs and
+	// orphaned the branch af had just created. This loop has no caller to report
+	// to, which is what makes the retry the whole mitigation rather than a backup
+	// for one.
+	if perr := m.persistSettlement(repoID, key, inst); perr != nil {
+		log.WarningLog.Printf("restored lost session %q: %v", inst.Title, perr)
+	}
 	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
 	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
 	// window rather than clearing the retry state; see armRestoreConfirmation.
