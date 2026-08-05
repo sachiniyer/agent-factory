@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -446,10 +447,22 @@ func foreignTransactionOver(executable, selfID string) (string, error) {
 // "assume ambiguity", and a probe that cannot tell simply reports false and
 // leaves the mode-bit reading in charge, which is where it was before.
 //
-// The xattr name is the Linux one. On other unixes the call fails and this
-// reports false: their ACL models differ, and inventing a cross-platform answer
-// here would be guessing rather than probing.
+// The probe below is Linux's ACL representation. Everywhere else this reports
+// AMBIGUOUS rather than absent, which is the whole point: the Linux names always
+// fail on Darwin, so reporting "no ACL" there would silently hand a Darwin
+// install exactly the defect this probe removes on Linux — a 0660 lock published
+// to an owning group an ACL may deny, and the ACL-authorized writer still shut
+// out. Determining Darwin ACL state needs the platform ACL API, and shipping an
+// implementation of it that cannot be exercised here would be guessing; refusing
+// to widen is the answer that is right without being verified.
+//
+// The effect is that the widening is Linux-only. Every other platform keeps the
+// private lock it had before this change, which costs the widening and nothing
+// else.
 func hasExtendedACL(path string) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
 	// BOTH ACLs, and the default one is not optional. A directory can carry only
 	// a system.posix_acl_default named-user entry and no access ACL of its own, so
 	// probing the access ACL alone reports "unambiguous" for a directory whose
@@ -476,6 +489,9 @@ func hasExtendedACL(path string) bool {
 // Checking the descriptor closes that regardless of how the ACL arrived, and
 // costs no extra TOCTOU: it is the same object about to be chmod'ed.
 func lockHasInheritedACL(lock *os.File) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
 	_, err := unix.Fgetxattr(int(lock.Fd()), "system.posix_acl_access", nil)
 	return err == nil
 }

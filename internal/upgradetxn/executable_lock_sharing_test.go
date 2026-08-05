@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -54,6 +55,21 @@ func requireUnprivileged(t *testing.T) {
 	}
 }
 
+// requireACLAwarePlatform skips a test that depends on the lock actually being
+// WIDENED. The widening is Linux-only by design: on other platforms ACL state
+// cannot be determined without the platform ACL API, and "cannot determine"
+// reads as ambiguous, so the classifier declines and the lock stays private.
+//
+// These tests would therefore fail everywhere else for the right reason, which
+// is worse than not running: a red macOS job that is reporting correct
+// behaviour teaches the next reader to ignore it.
+func requireACLAwarePlatform(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("the lock widening is Linux-only: elsewhere ACL state cannot be determined, so the classifier declines and the lock stays private")
+	}
+}
+
 func lockFileStat(t *testing.T, executable string) (os.FileMode, uint32) {
 	t.Helper()
 	info, err := os.Stat(executableLockPath(executable))
@@ -77,6 +93,7 @@ func lockFileStat(t *testing.T, executable string) (os.FileMode, uint32) {
 // So: where the directory says other principals may replace the binary, the lock
 // must say they may take it.
 func TestExecutableLock_SharedWithTheDirectorysWriters(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 
 	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
@@ -96,6 +113,7 @@ func TestExecutableLock_SharedWithTheDirectorysWriters(t *testing.T) {
 // against completely unfixed code. Retarget the directory to a SECONDARY group
 // first, which makes the two differ and gives the assertion teeth.
 func TestExecutableLock_TakesTheDirectorysGroup(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 	dir := filepath.Dir(executable)
 
@@ -134,6 +152,7 @@ func secondaryGroup(t *testing.T) (int, bool) {
 // acquisition by its owner, or the very first upgrade on a shared box would
 // poison the lock for every other user permanently.
 func TestExecutableLock_WidensAnExistingPrivateLock(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 	lockPath := executableLockPath(executable)
 	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
@@ -171,6 +190,7 @@ func TestExecutableLock_NotWidenedInAWorldWritableDirectory(t *testing.T) {
 // world-writable and declining leaves them with EACCES and an unlocked install —
 // the original bug, reintroduced through the predicate.
 func TestExecutableLock_SharedWhenAStrayOtherWriteBitGrantsNoTraversal(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o772)
 
 	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
@@ -205,6 +225,7 @@ func TestExecutableLock_NotWidenedWhenTheGroupCannotTraverse(t *testing.T) {
 // os.FileMode.Perm() drops the sticky bit, so a classifier reading Perm() alone
 // cannot see this at all.
 func TestExecutableLock_NotWidenedInAStickyDirectory(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 	dir := filepath.Dir(executable)
 	require.NoError(t, os.Chmod(dir, 0o770|os.ModeSticky))
@@ -230,6 +251,7 @@ func TestExecutableLock_NotWidenedInAStickyDirectory(t *testing.T) {
 // drives setfacl rather than hand-encoding an ACL blob, and skips honestly where
 // the tool or the filesystem cannot provide one.
 func TestExecutableLock_NotWidenedWhenAnACLMakesTheModeBitsAmbiguous(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 	dir := filepath.Dir(executable)
 
@@ -269,6 +291,7 @@ func TestExecutableLock_NotWidenedWhenAnACLMakesTheModeBitsAmbiguous(t *testing.
 // named user who can traverse but not write the directory can then open a lock
 // that BLOCKS, without ever being able to replace the binary.
 func TestExecutableLock_NotWidenedWhenTheLockInheritsADefaultACL(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 	dir := filepath.Dir(executable)
 
@@ -308,6 +331,7 @@ func TestExecutableLock_NotWidenedWhenTheLockInheritsADefaultACL(t *testing.T) {
 // A 0000 lock stands in for the window: unopenable even by its owner, which is
 // the same EACCES the racing writer sees.
 func TestExecutableLock_NonblockingReportsBusyInsteadOfDeniedWhenShared(t *testing.T) {
+	requireACLAwarePlatform(t)
 	requireUnprivileged(t)
 	executable := sharedInstallDir(t, 0o770)
 	lockPath := executableLockPath(executable)
@@ -337,6 +361,7 @@ func TestExecutableLock_NonblockingReportsBusyInsteadOfDeniedWhenShared(t *testi
 // The lock is left group-usable but owner-inaccessible, which is what an
 // already-completed widening looks like to someone outside its group.
 func TestExecutableLock_NonblockingStaysDeniedWhenTheLockIsAlreadyWidened(t *testing.T) {
+	requireACLAwarePlatform(t)
 	requireUnprivileged(t)
 	executable := sharedInstallDir(t, 0o770)
 	lockPath := executableLockPath(executable)
@@ -368,6 +393,7 @@ func TestExecutableLock_NonblockingStaysDeniedWhenTheLockIsAlreadyWidened(t *tes
 // where the first denial is already out of date. The acquisition must re-ask and
 // succeed, not report the error it was holding.
 func TestExecutableLock_NonblockingRetriesAStaleDenialAgainstAWidenedLock(t *testing.T) {
+	requireACLAwarePlatform(t)
 	requireUnprivileged(t)
 	executable := sharedInstallDir(t, 0o770)
 	lockPath := executableLockPath(executable)
@@ -414,6 +440,28 @@ func TestExecutableLock_NonblockingStaysDeniedInAPrivateDirectory(t *testing.T) 
 	require.ErrorIs(t, err, os.ErrPermission)
 }
 
+// The other side of the Linux-only decision, and the one that actually runs on
+// the macOS job: where ACL state cannot be determined, a group-writable
+// directory must NOT get a widened lock.
+//
+// Reporting "no ACL" on a platform whose ACLs this cannot see would hand that
+// platform exactly the defect the probe removes on Linux — a 0660 lock published
+// to an owning group an ACL may deny, while the ACL-authorized writer stays shut
+// out and installs unlocked. Declining costs the widening and nothing else: the
+// lock stays private, as it was before any of this.
+func TestExecutableLock_NotWidenedWherePlatformACLStateIsUnknowable(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("Linux can read POSIX ACLs directly, so it decides on the actual ACL rather than on not knowing")
+	}
+	executable := sharedInstallDir(t, 0o770)
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	perm, _ := lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(journalFileMode), perm,
+		"ACL state is undeterminable here, so the mode bits cannot be trusted to name the writers and the lock must stay private")
+}
+
 // A HARD LINK at the lock path aims the mode change at somebody else's inode.
 // O_NOFOLLOW rejects a symlink; it says nothing about a hard link, which is not
 // a separate object at all but a second name for an existing one. Anyone who can
@@ -444,6 +492,7 @@ func TestExecutableLock_DoesNotRestyleAHardLinkedTarget(t *testing.T) {
 // because this lock blocks, that hangs every future upgrade by the owner. So the
 // audience has to track the directory in BOTH directions, not ratchet open.
 func TestExecutableLock_NarrowsAgainWhenTheDirectoryIsTightened(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 	dir := filepath.Dir(executable)
 
@@ -469,6 +518,7 @@ func TestExecutableLock_NarrowsAgainWhenTheDirectoryIsTightened(t *testing.T) {
 // the same EACCES the racing writer sees. Widening it from another goroutine
 // stands in for the first writer finishing its chmod.
 func TestExecutableLock_RetriesWhileAnotherWriterIsStillWideningIt(t *testing.T) {
+	requireACLAwarePlatform(t)
 	requireUnprivileged(t)
 	executable := sharedInstallDir(t, 0o770)
 	lockPath := executableLockPath(executable)
@@ -534,6 +584,7 @@ func restoreRetryBudget(retries int, delay time.Duration) {
 // HARDER failure: it returns the open error, so on a shared box the second
 // user's transactional upgrade does not merely go unlocked, it fails outright.
 func TestPrepare_SharesTheExecutableLockToo(t *testing.T) {
+	requireACLAwarePlatform(t)
 	executable := sharedInstallDir(t, 0o770)
 
 	_, err := Prepare(Plan{
