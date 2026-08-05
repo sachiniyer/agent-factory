@@ -254,7 +254,8 @@ func (s *remoteAgentServer) Kill() error {
 // branch is durable, so archive is push-then-teardown.
 func (s *remoteAgentServer) Archive() (string, error) {
 	var resp agentArchiveResp
-	if err := s.rc.call("/v1/agent/archive", struct{}{}, &resp); err != nil {
+	// Its own budget, not the shared control one: this call pushes a branch.
+	if err := s.rc.callWithin("/v1/agent/archive", struct{}{}, &resp, agentArchiveCallTimeout); err != nil {
 		return "", err
 	}
 	return resp.Branch, nil
@@ -565,12 +566,27 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 // ⇒ success/failure only). It is the client-side twin of the agent-server's
 // rpcHandler dispatch — the same envelope the daemon's own httpserver speaks —
 // with the bearer token on every call.
+// agentArchiveCallTimeout is the archive route's own budget. Archive is not a
+// control round-trip like the others: the in-sandbox side commits any
+// uncommitted work and pushes a branch to origin, which legitimately takes tens
+// of seconds on a large tree or a slow link. Under the shared 30s ceiling a
+// perfectly healthy push was reported as a failure, and recovery refuses on a
+// failed push — so a slow sandbox became repeatedly unrestorable while its push
+// was still progressing server-side (Codex on #2923).
+const agentArchiveCallTimeout = 3 * time.Minute
+
 func (c *remoteAgentClient) call(path string, req, resp any) error {
+	return c.callWithin(path, req, resp, remoteAgentCallTimeout)
+}
+
+// callWithin is call with an explicit budget, for the one route whose work is
+// not a health check.
+func (c *remoteAgentClient) callWithin(path string, req, resp any, timeout time.Duration) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("remote agent-server: marshal request: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), remoteAgentCallTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.httpBase+path, bytes.NewReader(body))
 	if err != nil {

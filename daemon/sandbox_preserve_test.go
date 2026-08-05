@@ -155,15 +155,14 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 // The escape hatch. Without it the refusal above is a dead end for a sandbox the
 // operator knows is gone, which is the #2917 shape. It is per-session and
 // per-command: this flag, this title, this invocation.
-func TestRestoreSession_ForceReapProceedsPastAFailedPush(t *testing.T) {
+func TestRestoreSession_ForceReapDoesNotPushWhatItIsDiscarding(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "forced", srv.url, session.Lost)
 	// A branch is already on record (an earlier archive), so the replacement has
-	// somewhere correct to land even though this push will fail.
+	// somewhere correct to land without needing the push to discover one.
 	inst := manager.instances[daemonInstanceKey(repoID, "forced")]
 	inst.SetSandboxBranch("af/known-branch")
-	srv.archiveFails.Store(true)
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
 		Title: "forced", RepoID: repoID, ForceReap: true,
@@ -174,10 +173,10 @@ func TestRestoreSession_ForceReapProceedsPastAFailedPush(t *testing.T) {
 	if got := backend.recoverCalls(); got != 1 {
 		t.Fatalf("recover calls = %d, want 1: --force-reap is the operator overriding the refusal", got)
 	}
-	if got := srv.archiveCalls.Load(); got != 1 {
-		t.Fatalf("archive calls = %d, want 1: --force-reap means a FAILED push must not stop the "+
-			"replacement, not that the push is skipped — it is also the only thing that learns the "+
-			"session's branch from the sandbox", got)
+	if got := srv.archiveCalls.Load(); got != 0 {
+		t.Fatalf("archive calls = %d, want 0: --force-reap promises to replace the sandbox WITHOUT "+
+			"pushing, and archive snapshots uncommitted files into a commit before pushing — so a push "+
+			"here uploads exactly the material the operator chose to discard", got)
 	}
 }
 

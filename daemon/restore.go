@@ -161,14 +161,23 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// learns this session's branch from the sandbox, and skipping it would make
 		// the replacement clone the default branch and strand work the operator had
 		// already pushed — which the flag never offered to discard.
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance); err != nil {
-			if !force {
+		if force {
+			// Do NOT push. The flag's promise is that the sandbox is replaced without
+			// publishing what it holds, and archive does not merely push commits — it
+			// snapshots uncommitted files into one first. Pushing here would upload
+			// exactly the material the operator chose to discard, which is worse than
+			// the data loss the default path prevents.
+			//
+			// The branch therefore has to be known already, and the guard below is what
+			// makes that a refusal rather than a default-branch clone.
+			if err := requireKnownSandboxBranch(instance); err != nil {
 				return "", err
 			}
-			if berr := requireKnownSandboxBranch(instance); berr != nil {
-				return "", berr
-			}
-			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox anyway (%v); anything it has not pushed is discarded", title, err)
+			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
+			break
+		}
+		if err := m.preserveSandboxBeforeReap(repoID, key, instance); err != nil {
+			return "", err
 		}
 	}
 

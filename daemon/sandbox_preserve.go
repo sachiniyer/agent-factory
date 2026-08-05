@@ -14,6 +14,11 @@ import (
 // health check, but it is BOUNDED for the same reason: recovery runs on the
 // daemon poll, and a wedged sandbox must not stall it. A push that does not
 // finish in time is treated exactly like one that failed — nothing is reaped.
+// It is deliberately below the transport's own ceiling rather than above it:
+// remoteAgentClient.call bounds every control round-trip at remoteAgentCallTimeout,
+// so a budget larger than that would advertise time the client never gives. The
+// push route is granted its own, longer client budget (agentArchiveCallTimeout)
+// precisely so a legitimate 30-60s snapshot+push is not reported as a failure.
 const sandboxPushTimeout = 2 * time.Minute
 
 // forceReapCommandFor renders the per-session escape hatch the refusals below
@@ -28,7 +33,11 @@ const sandboxPushTimeout = 2 * time.Minute
 // it produces (#1978). A command advertised for copy-paste has to be one the
 // shell reads as a single literal argument.
 func forceReapCommandFor(title string) string {
-	return shellsuggest.Command("af", "sessions", "restore", title, "--force-reap")
+	// `--` before the title, and the flag before it: shellsuggest quotes an argument
+	// but deliberately leaves option termination to the call site, so a title
+	// beginning with "-" would otherwise be parsed as a flag and the advertised
+	// command would exit "unknown flag" instead of releasing the refusal.
+	return shellsuggest.Command("af", "sessions", "restore", "--force-reap", "--", title)
 }
 
 // preserveSandboxBeforeReap runs the push that makes a reachable sandbox's work
@@ -130,7 +139,7 @@ func requireKnownSandboxBranch(instance *session.Instance) error {
 			"including work it had already pushed. The branch is recorded when a sandbox is archived or when "+
 			"recovery pushes a reachable one, and neither has happened here. If its work is expendable, remove "+
 			"it and create a replacement: %s",
-		instance.Title, shellsuggest.Command("af", "sessions", "kill", instance.Title))
+		instance.Title, shellsuggest.Command("af", "sessions", "kill", "--", instance.Title))
 }
 
 // refuseIndeterminateReap is the message for a sandbox whose reachability could
