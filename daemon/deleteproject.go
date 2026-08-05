@@ -224,6 +224,15 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			m.projectDeletes = make(map[string]struct{})
 		}
 		m.projectDeletes[repoID] = struct{}{}
+		// Bump on INSTALL, not on removal, and under the same lock that installs
+		// the fence. A create that sampled the generation before this line and
+		// reads it again after taking m.mu sees the change whether or not the
+		// delete has finished by then, so the two checks together cover the whole
+		// interval rather than only its trailing edge.
+		if m.projectDeleteGen == nil {
+			m.projectDeleteGen = make(map[string]uint64)
+		}
+		m.projectDeleteGen[repoID]++
 	}
 	m.mu.Unlock()
 	if len(starting) > 0 {

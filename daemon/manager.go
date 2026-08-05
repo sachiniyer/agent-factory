@@ -108,6 +108,18 @@ type Manager struct {
 	// reuse or reservation mutation. This closes the preflight-to-first-mutation
 	// gap without holding m.mu across config, task, or archive I/O.
 	projectDeletes map[string]struct{}
+	// projectDeleteGen counts completed delete ATTEMPTS per repo so a create can
+	// detect a delete that both started and finished while the create was outside
+	// m.mu. The fence above only answers "is a delete running right now", which is
+	// not the same question: reserveCreate resolves the repo and the backend kind
+	// before it can take m.mu at all (those resolvers shell out to git, and holding
+	// m.mu across them wedges the whole daemon — #2931), so a delete has room to
+	// install the fence, run, and remove it inside that gap. Sampled per repo
+	// rather than globally: a delete of some OTHER project must not refuse this
+	// create. Entries are never removed — one uint64 per repo ever deleted in this
+	// daemon's lifetime — because a reset would read equal to an old sample and
+	// silently stop fencing.
+	projectDeleteGen map[string]uint64
 	// reservedTmuxNames closes the second namespace a local create claims. Titles
 	// such as "a/b" and "a_b" can derive distinct git branches but the same
 	// positive-policy tmux name; reserving only the raw title leaves that collision
@@ -401,6 +413,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		pendingCreates:         make(map[string]session.InstanceData),
 		reservedTitles:         make(map[string]struct{}),
 		projectDeletes:         make(map[string]struct{}),
+		projectDeleteGen:       make(map[string]uint64),
 		reservedTmuxNames:      make(map[string]string),
 		reservedRemoteNames:    make(map[string]struct{}),
 		reservedTaskRuns:       make(map[string]int),

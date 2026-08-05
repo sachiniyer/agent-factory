@@ -258,6 +258,22 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 // Production never reassigns it.
 var backendKindForCreate = session.BackendKindFor
 
+// projectDeleteGenLocked reads the repo's completed-delete-attempt counter. The
+// caller MUST already hold m.mu; a missing entry means no delete has ever been
+// attempted for this repo and reads as 0, which is also what a first sample sees.
+func (m *Manager) projectDeleteGenLocked(repoID string) uint64 {
+	return m.projectDeleteGen[repoID]
+}
+
+// projectDeleteGenFor is the same read for a caller that does NOT hold m.mu; it
+// takes the lock itself. Both spellings exist because reserveCreate needs the
+// value on each side of a region it deliberately runs unlocked.
+func (m *Manager) projectDeleteGenFor(repoID string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.projectDeleteGenLocked(repoID)
+}
+
 func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
 	if req.RepoPath == "" {
 		return nil, "", nil, nil, fmt.Errorf("repo path is required")
@@ -286,6 +302,14 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// damage to the one create that asked. The sibling git call this function makes
 	// under the lock (branch holds) is already bounded with its own deadline (#856);
 	// this was the path that was not.
+	// Sample the repo's delete generation first. The resolvers below run outside
+	// m.mu, which leaves room for a DeleteProject to install its fence, complete,
+	// and remove the fence entirely within this gap — so the post-lock fence check
+	// alone would see a clear field and admit a create into a project the user just
+	// deleted. Comparing the generation across the gap turns that invisible
+	// completed delete back into the same refusal the fence gives.
+	deleteGen := m.projectDeleteGenFor(repo.ID)
+
 	runtimeKind := session.BackendLocal
 	if req.ForceRemote {
 		runtimeKind = session.BackendHook
@@ -310,8 +334,15 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, deleting := m.projectDeletes[repo.ID]; deleting {
+	_, deleting := m.projectDeletes[repo.ID]
+	// Either arm is the same refusal: a delete owns this project's state and this
+	// create has reserved nothing. The generation arm catches the delete that
+	// already finished, which the fence by construction cannot report.
+	if deleting || m.projectDeleteGenLocked(repo.ID) != deleteGen {
 		err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repo.ID)
+		if !deleting {
+			err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repo.ID)
+		}
 		// TaskOrigin is daemon-only provenance independent of retained identity or
 		// concurrency ownership. Legacy targeted rows can have neither TaskID nor
 		// TaskRepoID, but admission still knows this create came from automation.
