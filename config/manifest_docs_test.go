@@ -47,6 +47,28 @@ func repoRootForDocs(t *testing.T) string {
 	}
 }
 
+// operatorOnlyKeyCell returns the FIELD cell of the configuration.md table row
+// that enumerates the keys rejected in in-repo config — the enumeration itself,
+// not the prose beside it.
+//
+// Reading the whole row would make this gate weaker than it looks: the Scope
+// cell repeats several keys while explaining WHY they are operator-only
+// (`listen_addr`, `on_archive_command`, `vscode_server_binary`,
+// `session_env_passthrough` are all named there), so a key deleted from the
+// actual list would still be "found" in the prose and the gate would pass over
+// exactly the drift it exists to catch. The list is the cell; check the cell.
+func operatorOnlyKeyCell(t *testing.T) string {
+	t.Helper()
+	row := operatorOnlyDocRow(t)
+	// A Markdown row is "| fields | scope |", so splitting yields
+	// ["", fields, scope, ""].
+	cells := strings.Split(row, "|")
+	if len(cells) < 3 {
+		t.Fatalf("the operator-only row is not a Markdown table row with at least two cells:\n%s", row)
+	}
+	return cells[1]
+}
+
 // operatorOnlyDocRow returns the configuration.md table row that enumerates the
 // keys rejected in in-repo config. It is found by its own promise text rather
 // than by line number, so ordinary edits above it cannot break the gate — and a
@@ -75,7 +97,7 @@ func operatorOnlyDocRow(t *testing.T) string {
 // the manifest refuses from a checked-in in-repo config must be named in the
 // doc row that claims to list them.
 func TestOperatorOnlyDocRowListsEveryRepoRejectedKey(t *testing.T) {
-	row := operatorOnlyDocRow(t)
+	row := operatorOnlyKeyCell(t)
 
 	var missing []string
 	rejected := 0
@@ -107,7 +129,7 @@ func TestOperatorOnlyDocRowListsEveryRepoRejectedKey(t *testing.T) {
 // ACCEPTS would be a doc promising protection that does not exist — the #2780
 // shape. Nothing is in that state today; this keeps it that way.
 func TestOperatorOnlyDocRowClaimsNothingTheCodeAllows(t *testing.T) {
-	row := operatorOnlyDocRow(t)
+	row := operatorOnlyKeyCell(t)
 
 	var falsePromises []string
 	for _, entry := range AllManifest() {
@@ -133,4 +155,62 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return fmt.Sprintf("%s (%d keys)", many, n)
+}
+
+// TestPersonalLayerDocListsEveryPersonalKey closes the same drift on the other
+// axis. configuration.md enumerates which keys may live in a project's PERSONAL
+// per-project file — the answer to "where else may I legitimately set this?" —
+// and adding `root_agent` to the operator-only row above immediately made that
+// sentence wrong, because `root_agent` admits the personal layer too. One edit
+// to a hand-maintained list falsifying another is the whole finding (#2894), so
+// this list gets a gate as well.
+//
+// The gate asks whether the key is NAMED, not how it is punctuated, because
+// prose legitimately spells a key three ways: bare (`branch_prefix`), as the
+// TOML table it is (`[root_agent]`), and by the sub-key you actually set
+// (`program_overrides.<agent>`, which is exactly how `af config set` takes it).
+// All three count — insisting on the bare form would report accurate
+// documentation as drift, which is how a gate teaches people to delete it.
+func TestPersonalLayerDocListsEveryPersonalKey(t *testing.T) {
+	path := filepath.Join(repoRootForDocs(t), "docs", "configuration.md")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	const marker = "Only preference/operator keys admit this layer:"
+	var sentence string
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.Contains(line, marker) {
+			sentence = line
+			break
+		}
+	}
+	if sentence == "" {
+		t.Fatalf("docs/configuration.md no longer has a line containing %q.\n\n"+
+			"That sentence is the documented list of keys a project's personal config may set. "+
+			"If it moved or was reworded, point this gate at its new form (#2894).", marker)
+	}
+
+	var missing []string
+	personal := 0
+	for _, entry := range AllManifest() {
+		if !entry.Sources.Has(SourceProjectPersonal) {
+			continue
+		}
+		personal++
+		named := strings.Contains(sentence, "`"+entry.Key+"`") ||
+			strings.Contains(sentence, "`["+entry.Key+"]`") ||
+			strings.Contains(sentence, "`"+entry.Key+".")
+		if !named {
+			missing = append(missing, entry.Key)
+		}
+	}
+	if personal == 0 {
+		t.Fatal("no manifest key admits the personal layer — the gate would pass vacuously")
+	}
+	if len(missing) > 0 {
+		t.Errorf("docs/configuration.md's personal-layer sentence omits %d key(s) the code accepts there: %s\n\n"+
+			"A user reading it is told where a key may legitimately live; an omission sends them to the wrong file (#2894).",
+			len(missing), strings.Join(missing, ", "))
+	}
 }
