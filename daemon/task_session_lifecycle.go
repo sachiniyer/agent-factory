@@ -185,6 +185,11 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	// the last time a lifecycle op keyed on a title reached the wrong worktree.
 	sessionID := instance.ID
 	title := instance.Title
+	// Captured HERE, at the completion edge, alongside the id — not read later.
+	// It is the proof that nothing has happened to this session since the run
+	// this verb is owed to ended; see stillTheFinishedRun for why a level check
+	// on liveness cannot answer that.
+	completedAtEpoch := instance.StateEpoch()
 	hooksDone := instance.PostWorktreeHooksDone()
 	verb, err := m.taskSessionLifecycle(repoID, taskID)
 	if err != nil {
@@ -199,7 +204,7 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	if verb == task.OnCompleteKeep {
 		return
 	}
-	go m.runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb, hooksDone)
+	go m.runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb, completedAtEpoch, hooksDone)
 }
 
 // taskSessionLifecycle resolves the on_complete verb for one task in a repo.
@@ -231,14 +236,25 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID string) (string, error) {
 // describes reality: a same-titled replacement now holds the key, or the user
 // picked the work back up. A verb owed to a finished run must never land on new
 // work.
-func (m *Manager) stillTheFinishedRun(repoID, sessionID, title string) bool {
+func (m *Manager) stillTheFinishedRun(repoID, sessionID, title string, completedAtEpoch uint64) bool {
 	m.mu.Lock()
 	instance := m.instances[daemonInstanceKey(repoID, title)]
 	m.mu.Unlock()
 	if instance == nil || instance.ID != sessionID {
 		return false
 	}
-	return instance.GetLiveness() == session.LiveReady && !instance.TaskRunActive()
+	// The epoch, not the current liveness, is what answers this. Liveness is a
+	// LEVEL: a user who prompts the finished session during the hook wait drives
+	// it Ready→Running→Ready, so by the time the hooks finish it reads Ready
+	// again and a level check waves the teardown through onto their work.
+	// TaskRunActive cannot help either — it is permanently false once the task's
+	// own run ends, so it cannot distinguish the task's idle from the user's.
+	//
+	// StateEpoch is an EDGE: it is bumped by every real change to the lifecycle
+	// axes, so a turn that starts and finishes still moves it. Unchanged epoch
+	// therefore means nothing at all has happened since the completion this verb
+	// was owed to, which is the only condition under which acting on it is safe.
+	return instance.StateEpoch() == completedAtEpoch
 }
 
 // runTaskSessionLifecycle performs the teardown on its own goroutine.
@@ -254,7 +270,7 @@ func (m *Manager) stillTheFinishedRun(repoID, sessionID, title string) bool {
 // same title between the completion edge and this call cannot be reaped in the
 // original's place — the resolver only falls back to {Title, RepoID} when ID is
 // empty.
-func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb string, hooksDone <-chan struct{}) {
+func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb string, completedAtEpoch uint64, hooksDone <-chan struct{}) {
 	// post_worktree_commands can still be running: the agent's readiness and the
 	// hook run are deliberately concurrent (task.WaitForReady does not charge a
 	// slow build hook against the startup budget), so a short task can finish while
@@ -284,7 +300,7 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 	// This is the rule applyDeferredTaskSessionLifecycle already applies across
 	// the attach deferral; the hook wait is a second place the same staleness
 	// arises, and it deserves the same answer.
-	if !m.stillTheFinishedRun(repoID, sessionID, title) {
+	if !m.stillTheFinishedRun(repoID, sessionID, title, completedAtEpoch) {
 		log.InfoLog.Printf("task %s: session %q changed while its post-worktree hooks finished; leaving it in place rather than applying on_complete=%s", taskID, title, verb)
 		return
 	}
