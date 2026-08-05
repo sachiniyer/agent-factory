@@ -58,8 +58,34 @@ var shapePatterns = []*regexp.Regexp{
 // characters are covered by the quoted alternatives, which consume their own
 // delimiters. Dropping `]` also errs toward MORE redaction (a `]` adjacent to a
 // bare value is absorbed rather than left behind), which is the safe direction.
+// credentialKeyPattern is the key half shared by keyValueSecret and
+// strandedAfterMarker, so the two cannot recognize different key sets.
+const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?\s*[:=]\s*`
+
 var keyValueSecret = regexp.MustCompile(
-	`(?i)(["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
+	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
+
+// strandedAfterMarker removes a credential left stranded BEHIND a marker.
+//
+// keyValueSecret consumes only the first whitespace-delimited word of a value,
+// so `auth: <scheme> <token>` redacts the scheme and leaves the token in the
+// clear — behind a marker that makes the line read as though it were scrubbed.
+// authScheme handles the two schemes worth naming, but this shape arrives two
+// other ways it cannot cover:
+//
+//   - ANY other scheme word regenerates it (`auth: CustomScheme <token>`), and
+//     enumerating scheme names is the losing game this file keeps re-learning.
+//   - Lines ALREADY on disk carry it. The log is written scrubbed and the bug
+//     report re-bundles that tail, so a line persisted before the ordering fix
+//     still reads `auth: [redacted-secret] <token>` — and by then the scheme
+//     word is gone, so no amount of scheme matching can recover it.
+//
+// Keyed on the marker, so it fires only where a credential assignment was
+// already redacted and opaque token text follows. Length 16+ over a token
+// charset keeps it off ordinary prose; over-redaction here is the safe
+// direction, per the policy above.
+var strandedAfterMarker = regexp.MustCompile(
+	`(?i)(` + credentialKeyPattern + regexp.QuoteMeta(SecretMarker) + `)\s+[A-Za-z0-9._~+/=-]{16,}`)
 
 // authScheme matches an HTTP auth scheme together with its credential, as one
 // unit. It MUST run before keyValueSecret, which otherwise consumes only the
@@ -88,6 +114,9 @@ func Scrub(s string) string {
 	// Before keyValueSecret: see authScheme for why the other order leaks.
 	s = authScheme.ReplaceAllString(s, SecretMarker)
 	s = keyValueSecret.ReplaceAllStringFunc(s, redactKeyValueSecret)
+	// After keyValueSecret: it catches both the marker this run just wrote for an
+	// unknown scheme and one a previous binary persisted to the log.
+	s = strandedAfterMarker.ReplaceAllString(s, "$1")
 	for _, re := range shapePatterns {
 		s = re.ReplaceAllString(s, SecretMarker)
 	}

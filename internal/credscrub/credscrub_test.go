@@ -30,6 +30,14 @@ func TestScrubRemovesCredentialShapes(t *testing.T) {
 		{"bearer behind a matching key", "auth: Bearer " + sentinel + "abcdef"},
 		{"bearer behind a prefixed key", "x-auth-token=Bearer " + sentinel + "abcdef"},
 		{"basic behind a matching key", "token: Basic " + sentinel + "abcdef"},
+		// A scheme word authScheme does not know regenerates the stranded shape,
+		// and enumerating scheme names is the losing game. Caught by the marker.
+		{"unknown scheme behind a key", "auth: CustomScheme " + sentinel + "abcdefghij"},
+		// The same shape as ALREADY PERSISTED to agent-factory.log by a binary
+		// with the old ordering. The bug report re-bundles that tail, and by then
+		// the scheme word is gone, so only the marker can key on it.
+		{"already-stranded on disk", "auth: " + SecretMarker + " " + sentinel + "abcdefghij"},
+		{"already-stranded, prefixed key", "x-auth-token=" + SecretMarker + " " + sentinel + "abcdefghij"},
 		{"git url userinfo", "https://x-access-token:ghp_" + sentinel + "abcdefghij@github.com/o/r"},
 		{"pem private key", "-----BEGIN RSA PRIVATE KEY-----\n" + sentinel + "\n-----END RSA PRIVATE KEY-----"},
 	}
@@ -53,6 +61,7 @@ func TestScrubIsIdempotent(t *testing.T) {
 		`api_key = "` + sentinel + `"`,
 		"token ghp_" + sentinel + "abcdefghij",
 		"Authorization: Bearer " + sentinel + "abcdef",
+		"auth: " + SecretMarker + " " + sentinel + "abcdefghij",
 		"nothing sensitive here, commit 4f2a9c1 on af_0f8fc14c_fix-login",
 	}
 	for _, in := range inputs {
@@ -77,6 +86,11 @@ func TestScrubRedactsValueThatMerelyBeginsWithAMarker(t *testing.T) {
 // TestScrubKeepsTriageContext guards the other direction. These patterns are
 // deliberately narrow because a broad rule would destroy what a triager reads.
 func TestScrubKeepsTriageContext(t *testing.T) {
+	// A marker followed by short ordinary words must not be eaten by
+	// strandedAfterMarker: it requires 16+ token-charset characters.
+	if got := Scrub("token=" + SecretMarker + " and then it failed"); got != "token="+SecretMarker+" and then it failed" {
+		t.Fatalf("stranded pass ate ordinary prose after a marker: %q", got)
+	}
 	in := "worktree af_0f8fc14c_fix-login at 4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a removed; session id 01J8Z9"
 	if got := Scrub(in); got != in {
 		t.Fatalf("Scrub destroyed benign triage context:\n in: %q\nout: %q", in, got)
