@@ -2201,8 +2201,19 @@ test("#2899 mobile: a finger long-presses a tab and drags it to REORDER — and 
 
     // A SCROLL must stay a scroll — the bar is horizontally scrollable when tabs
     // overflow, and a pick-up suspends that, so a false pick-up would strand it.
-    await touchDrag(cdp, lastCx, lastCy, lastCy + 6, 6);
-    await p.waitForTimeout(900);
+    // Driven as the real rule it has to obey: travel PAST slop, and then hold well
+    // past the pick-up threshold. If movement did not disqualify the press for good,
+    // this is the gesture that would wrongly pick a tab up mid-scroll.
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: lastCx, y: lastCy }] });
+    for (let step = 1; step <= 6; step++) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x: lastCx - step * 8, y: lastCy }],
+      });
+    }
+    await p.waitForTimeout(900); // outlast holdMs while still down
+    await expect(p.locator(".af-tab-insert"), "a scrolling finger must never pick a tab up").toBeHidden();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
     expect(await labels(), "scrolling the bar must not reorder").toEqual(before);
 
     // …and a settled long press picks the tab up, so dragging it left over the middle
