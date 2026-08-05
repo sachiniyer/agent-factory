@@ -6745,6 +6745,13 @@ var import_addon_fit = __toESM(require_addon_fit(), 1);
 var import_xterm = __toESM(require_xterm(), 1);
 
 // src/clipboard.ts
+function chordIsLetter(ev, letter, code) {
+  const typed = ev.key.toLowerCase();
+  if (typed.length === 1 && typed >= "a" && typed <= "z") {
+    return typed === letter;
+  }
+  return ev.code === code;
+}
 var ETX = "";
 var LF = "\n";
 function handleClipboardKeydown(ev, deps) {
@@ -6756,7 +6763,7 @@ function handleClipboardKeydown(ev, deps) {
     deps.sendUserInput(LF);
     return false;
   }
-  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "c") {
+  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && chordIsLetter(ev, "c", "KeyC")) {
     if (!deps.hasSelection()) {
       return true;
     }
@@ -6767,17 +6774,12 @@ function handleClipboardKeydown(ev, deps) {
   if (ev.metaKey || ev.altKey || !ev.ctrlKey) {
     return true;
   }
-  const key = ev.key.toLowerCase();
-  if (key === "v") {
+  if (chordIsLetter(ev, "v", "KeyV")) {
     return false;
   }
-  if (key === "c") {
+  if (chordIsLetter(ev, "c", "KeyC")) {
     if (ev.shiftKey) {
-      ev.preventDefault();
-      if (deps.hasSelection()) {
-        deps.copy(deps.getSelection());
-      }
-      return false;
+      return true;
     }
     if (deps.hasSelection()) {
       ev.preventDefault();
@@ -6789,6 +6791,22 @@ function handleClipboardKeydown(ev, deps) {
     deps.sendInput(ETX);
     return false;
   }
+  return true;
+}
+function handleTerminalCopy(ev, deps) {
+  if (!deps.hasSelection()) {
+    return false;
+  }
+  const text = deps.getSelection();
+  if (text === "") {
+    return false;
+  }
+  ev.preventDefault();
+  if (ev.clipboardData) {
+    ev.clipboardData.setData("text/plain", text);
+    return true;
+  }
+  deps.copy(text);
   return true;
 }
 
@@ -7190,6 +7208,7 @@ var AttachTerminal = class {
     container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
+    container.addEventListener("copy", this.onCopy);
     this.scheduleVisibleFit();
   }
   term;
@@ -7322,6 +7341,16 @@ var AttachTerminal = class {
     }
     event.preventDefault();
   };
+  /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
+   *  Edit → Copy, right-click → Copy, assistive tech. The decision is in
+   *  clipboard.ts; this only supplies xterm's selection and the fallback ladder. */
+  onCopy = (event) => {
+    handleTerminalCopy(event, {
+      hasSelection: () => this.term.hasSelection(),
+      getSelection: () => this.term.getSelection(),
+      copy: (text) => this.copyToClipboard(text)
+    });
+  };
   onPointerDown = (event) => {
     this.lastPointerWasTouch = event.pointerType === "touch";
     const viewport = this.container.querySelector(".xterm-viewport");
@@ -7423,6 +7452,7 @@ var AttachTerminal = class {
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
+    this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
     this.closeSocket();
     this.term.dispose();

@@ -11,7 +11,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type ClipboardDeps, type ClipboardKeyEvent, handleClipboardKeydown } from "./clipboard.js";
+import {
+  type ClipboardDeps,
+  type ClipboardKeyEvent,
+  handleClipboardKeydown,
+  handleTerminalCopy,
+  type TerminalCopyDeps,
+  type TerminalCopyEvent,
+} from "./clipboard.js";
 import { decode, inputFrame, Op, encode } from "./frame.js";
 
 const ETX = "\x03";
@@ -172,33 +179,29 @@ test("Ctrl+C with NO selection sends \\x03 on the wire and copies nothing", () =
 
 // --- Ctrl+Shift+C: explicit always-copy, never interrupts ---------------------
 
-test("Ctrl+Shift+C copies the selection and never sends \\x03", () => {
-  const r = rig({ selection: "abc" });
-  const ret = handleClipboardKeydown(
-    keyEvent({ key: "C", ctrlKey: true, shiftKey: true }, r.markPrevented),
-    r.deps,
-  );
+test("Ctrl+Shift+C is left entirely to the browser's devtools (#2831)", () => {
+  // It used to be an explicit always-copy with a preventDefault. But Ctrl+Shift+C is
+  // inspect-element on Linux and Windows, exactly as Cmd+Shift+C is on macOS — which
+  // the Cmd branch already refused to claim for that reason. Claiming one and sparing
+  // the other protected devtools for macOS users only.
+  //
+  // `true` is safe here, and that was measured rather than assumed: against real
+  // xterm in Chromium, Ctrl+Shift+C emits nothing on onData (the ctrl+letter mapping
+  // does not apply with shift held) and xterm leaves the event uncancelled. So there
+  // is no keymap to suppress and the browser still gets its shortcut.
+  for (const selection of ["sel", ""]) {
+    const r = rig({ selection });
+    const ret = handleClipboardKeydown(
+      keyEvent({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }, r.markPrevented),
+      r.deps,
+    );
 
-  assert.equal(ret, false);
-  assert.deepEqual(r.clipboard, ["abc"]);
-  assert.equal(wireInput(r.wire), "", "an explicit copy must never interrupt");
-  assert.equal(r.prevented(), 1);
-  assert.equal(r.cleared(), 0, "Ctrl+Shift+C keeps the selection — it is the 'keep selecting' gesture");
+    assert.equal(ret, true, `selection=${JSON.stringify(selection)}`);
+    assert.equal(r.prevented(), 0, "the browser must still see the event to open devtools");
+    assert.equal(wireInput(r.wire), "", "nothing may reach the PTY on a devtools keypress");
+    assert.deepEqual(r.clipboard, [], "copying belongs to Ctrl+C, Cmd+C and the copy event now");
+  }
 });
-
-test("Ctrl+Shift+C with NO selection is a no-op (no copy, no interrupt)", () => {
-  const r = rig({ selection: "" });
-  const ret = handleClipboardKeydown(
-    keyEvent({ key: "C", ctrlKey: true, shiftKey: true }, r.markPrevented),
-    r.deps,
-  );
-
-  assert.equal(ret, false, "still claims the key so it never falls through to \\x03");
-  assert.deepEqual(r.clipboard, []);
-  assert.equal(wireInput(r.wire), "", "explicit copy is never an interrupt, even with nothing selected");
-});
-
-// --- Paste: defer to xterm's native (browser-trusted) paste -------------------
 
 test("Ctrl+V defers to native paste: suppresses xterm's \\x16, sends nothing itself, no preventDefault", () => {
   const r = rig({ selection: "" });
@@ -224,14 +227,12 @@ test("Ctrl+Shift+V also defers to native paste without preventDefault", () => {
 
 // --- macOS Cmd+C: copy a selection, otherwise stay out of the way -------------
 //
-// The previous version of this block was named "Cmd+C is NOT claimed (macOS browser
-// copies before xterm)" and asserted only that the handler returned true — trivially
-// true of ANY unclaimed key. The name asserted an ENVIRONMENT fact nothing checked,
-// and it was false: xterm paints its own selection overlay instead of making a DOM
-// selection, so the browser's native copy wrote nothing (#2787). Each test below now
-// asserts exactly what its name claims, and the browser half — that a real Cmd+C
-// really does land in the system clipboard — is pinned by the Playwright case in
-// web/selftest/web-driver.spec.ts, because no unit test can see it.
+// #2831 asked whether the copy EVENT could replace this chord. Measured in Chromium:
+// it cannot. The event fires for the PLATFORM copy chord only, so on Linux
+// `Control+c` dispatches one and `Meta+c` does not — dropping this branch would
+// regress Cmd+C wherever Meta is not the copy modifier, and leave the remaining path
+// untested on the platform CI runs. handleTerminalCopy is an addition, not a
+// replacement, and these stay.
 
 test("Cmd+C WITH a selection copies it through the same never-silent ladder as Ctrl+C", () => {
   const r = rig({ selection: "sel" });
@@ -244,6 +245,17 @@ test("Cmd+C WITH a selection copies it through the same never-silent ladder as C
   assert.equal(r.cleared(), 0, "Cmd+C keeps the selection — it has no interrupt to fall through to");
 });
 
+test("Cmd+C copies on a non-Latin layout too (#2831)", () => {
+  const r = rig({ selection: "sel" });
+  const ret = handleClipboardKeydown(
+    keyEvent({ key: "с", code: "KeyC", metaKey: true }, r.markPrevented),
+    r.deps,
+  );
+
+  assert.equal(ret, false);
+  assert.deepEqual(r.clipboard, ["sel"], "a Cyrillic layout must copy on Cmd+C as well as Ctrl+C");
+});
+
 test("Cmd+C with NO selection is left untouched and NEVER interrupts", () => {
   const r = rig({ selection: "" });
   const ret = handleClipboardKeydown(keyEvent({ key: "c", metaKey: true }, r.markPrevented), r.deps);
@@ -254,26 +266,20 @@ test("Cmd+C with NO selection is left untouched and NEVER interrupts", () => {
   assert.equal(r.prevented(), 0);
 });
 
-test("Cmd+Shift+C and Cmd+Alt+C stay with the browser (its devtools shortcuts)", () => {
-  for (const modifiers of [{ shiftKey: true }, { altKey: true }]) {
+test("Cmd+Shift+C, Cmd+Alt+C and Cmd+V stay with the browser", () => {
+  for (const init of [
+    { key: "c", shiftKey: true },
+    { key: "c", altKey: true },
+    { key: "v" },
+  ]) {
     const r = rig({ selection: "sel" });
-    const ret = handleClipboardKeydown(
-      keyEvent({ key: "c", metaKey: true, ...modifiers }, r.markPrevented),
-      r.deps,
-    );
+    const ret = handleClipboardKeydown(keyEvent({ ...init, metaKey: true }, r.markPrevented), r.deps);
 
-    assert.equal(ret, true, JSON.stringify(modifiers));
-    assert.deepEqual(r.clipboard, [], `only the BARE Cmd+C is ours: ${JSON.stringify(modifiers)}`);
-    assert.equal(wireInput(r.wire), "", JSON.stringify(modifiers));
-    assert.equal(r.prevented(), 0, JSON.stringify(modifiers));
+    assert.equal(ret, true, JSON.stringify(init));
+    assert.deepEqual(r.clipboard, [], `only the BARE Cmd+C is ours: ${JSON.stringify(init)}`);
+    assert.equal(wireInput(r.wire), "", JSON.stringify(init));
+    assert.equal(r.prevented(), 0, JSON.stringify(init));
   }
-});
-
-test("Cmd+V is NOT claimed (native paste path untouched)", () => {
-  const r = rig({});
-  const ret = handleClipboardKeydown(keyEvent({ key: "v", metaKey: true }, r.markPrevented), r.deps);
-  assert.equal(ret, true);
-  assert.equal(r.prevented(), 0);
 });
 
 // --- The keydown-only guard: a gesture is handled once, not per key phase ------
@@ -304,4 +310,140 @@ test("a plain key and other Ctrl combos fall through untouched", () => {
     assert.equal(wireInput(r.wire), "");
     assert.equal(r.prevented(), 0);
   }
+});
+
+// --- Layout independence (#2831) ----------------------------------------------
+//
+// `ev.key` is the layout-mapped character, `ev.code` the physical key. Matching on
+// `key` alone reproduced the original silent failure for anyone on a non-Latin
+// layout; matching on `code` alone would break Dvorak, where the physical C
+// position types "j" and Ctrl+J is a real control code. So: `key` when it is a
+// Latin letter, `code` only when it cannot be.
+
+test("Ctrl+C copies on a Cyrillic layout, where key is 'с' (U+0441) not 'c'", () => {
+  const r = rig({ selection: "sel" });
+  const ret = handleClipboardKeydown(
+    keyEvent({ key: "с", code: "KeyC", ctrlKey: true }, r.markPrevented),
+    r.deps,
+  );
+
+  assert.equal(ret, false);
+  assert.deepEqual(r.clipboard, ["sel"], "a Cyrillic layout must copy, not fall through silently");
+  assert.equal(wireInput(r.wire), "");
+});
+
+test("Ctrl+C still INTERRUPTS on a non-Latin layout when nothing is selected", () => {
+  const r = rig({ selection: "" });
+  const ret = handleClipboardKeydown(
+    keyEvent({ key: "ψ", code: "KeyC", ctrlKey: true }, r.markPrevented),
+    r.deps,
+  );
+
+  assert.equal(ret, false);
+  assert.equal(wireInput(r.wire), ETX, "the runaway-agent reflex must survive the layout too");
+});
+
+test("Ctrl+V defers to native paste on a non-Latin layout", () => {
+  const r = rig({});
+  const ret = handleClipboardKeydown(
+    keyEvent({ key: "м", code: "KeyV", ctrlKey: true }, r.markPrevented),
+    r.deps,
+  );
+  assert.equal(ret, false, "xterm's \\x16 must still be suppressed");
+  assert.equal(r.prevented(), 0, "and the browser's trusted paste must still fire");
+});
+
+test("a Latin layout is matched by the TYPED letter, so Dvorak's Ctrl+J stays Ctrl+J", () => {
+  // On Dvorak the key at the physical C position types "j". Ctrl+J is LF — a real
+  // terminal control code — so `code === "KeyC"` must NOT win over a Latin `key`.
+  const r = rig({ selection: "sel" });
+  const ret = handleClipboardKeydown(
+    keyEvent({ key: "j", code: "KeyC", ctrlKey: true }, r.markPrevented),
+    r.deps,
+  );
+
+  assert.equal(ret, true, "Ctrl+J is the application's, not ours");
+  assert.deepEqual(r.clipboard, [], "typing J must never copy");
+  assert.equal(r.prevented(), 0);
+});
+
+test("the letter the user TYPED wins: Dvorak Ctrl+C copies though its code is KeyI", () => {
+  const r = rig({ selection: "sel" });
+  const ret = handleClipboardKeydown(
+    keyEvent({ key: "c", code: "KeyI", ctrlKey: true }, r.markPrevented),
+    r.deps,
+  );
+
+  assert.equal(ret, false);
+  assert.deepEqual(r.clipboard, ["sel"]);
+});
+
+test("an event with no code at all still works on a Latin layout", () => {
+  // `code` is optional: a synthetic event may omit it entirely.
+  const r = rig({ selection: "sel" });
+  const ret = handleClipboardKeydown(keyEvent({ key: "c", ctrlKey: true }, r.markPrevented), r.deps);
+  assert.equal(ret, false);
+  assert.deepEqual(r.clipboard, ["sel"]);
+});
+
+// --- The copy EVENT: every route, not just the chord (#2831) ------------------
+
+/** A copy-event rig: records what would be written into the system clipboard via
+ *  clipboardData, and what fell back to the never-silent ladder. */
+function copyRig(opts: { selection?: string; withClipboardData?: boolean }) {
+  const written: Array<[string, string]> = [];
+  const ladder: string[] = [];
+  let prevented = 0;
+  const selection = opts.selection ?? "";
+  const deps: TerminalCopyDeps = {
+    hasSelection: () => selection !== "",
+    getSelection: () => selection,
+    copy: (t) => ladder.push(t),
+  };
+  const ev: TerminalCopyEvent = {
+    clipboardData:
+      opts.withClipboardData === false
+        ? null
+        : {
+            setData: (format, data) => {
+              written.push([format, data]);
+            },
+          },
+    preventDefault: () => {
+      prevented++;
+    },
+  };
+  return { ev, deps, written, ladder, prevented: () => prevented };
+}
+
+test("a copy over a terminal selection writes it into clipboardData", () => {
+  // This is the whole point of #2831: the browser fires `copy` for the chord AND
+  // for macOS Edit -> Copy, right-click -> Copy and assistive tech, so one handler
+  // covers routes no key chord ever saw.
+  const r = copyRig({ selection: "hello world" });
+  const handled = handleTerminalCopy(r.ev, r.deps);
+
+  assert.equal(handled, true);
+  assert.deepEqual(r.written, [["text/plain", "hello world"]]);
+  assert.equal(r.prevented(), 1, "without preventDefault the browser overwrites us with its empty selection");
+  assert.deepEqual(r.ladder, [], "clipboardData is the permission-free path; no ladder needed");
+});
+
+test("a copy with NO terminal selection is left entirely alone", () => {
+  // Ordinary page text (an error message, a session title) must still copy.
+  const r = copyRig({ selection: "" });
+  const handled = handleTerminalCopy(r.ev, r.deps);
+
+  assert.equal(handled, false);
+  assert.deepEqual(r.written, []);
+  assert.equal(r.prevented(), 0, "preventDefault here would break copying the rest of the page");
+});
+
+test("a copy event with no clipboardData falls back to the never-silent ladder", () => {
+  const r = copyRig({ selection: "sel", withClipboardData: false });
+  const handled = handleTerminalCopy(r.ev, r.deps);
+
+  assert.equal(handled, true);
+  assert.deepEqual(r.ladder, ["sel"], "the copy must not be silently dropped");
+  assert.equal(r.prevented(), 1);
 });

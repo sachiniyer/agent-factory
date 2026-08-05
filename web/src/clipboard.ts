@@ -31,11 +31,40 @@ export interface ClipboardKeyEvent {
    *  on "keydown" so a gesture is handled once, not three times. */
   type: string;
   key: string;
+  /** The PHYSICAL key, layout-independent by definition ("KeyC" wherever the C key
+   *  sits). Optional because a synthetic event may omit it; see chordIsLetter. */
+  code?: string;
   ctrlKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
   altKey: boolean;
   preventDefault(): void;
+}
+
+/**
+ * Does this event carry the given Latin letter as a CHORD key, on any layout?
+ *
+ * `ev.key` is the layout-mapped character and `ev.code` is the physical key, and
+ * neither alone is right (#2831):
+ *
+ *   - `key` alone breaks every non-Latin layout. On Cyrillic the C key reports
+ *     `key: "с"` (U+0441) and on Greek `"ψ"`; neither equals "c", so the gesture
+ *     went unclaimed and the user got the original silent failure.
+ *   - `code` alone breaks re-arranged Latin layouts. On Dvorak the key at the
+ *     physical C position types "j", and Ctrl+J is a real terminal control code
+ *     (LF) — claiming it as copy would break input to fix a layout nobody was on.
+ *
+ * So: trust `key` whenever it IS a Latin letter (every Latin layout, including
+ * Dvorak and Colemak, where the letter the user typed is the letter they meant),
+ * and fall back to the physical `code` only when it is not (the non-Latin layouts,
+ * where `key` cannot express the chord at all).
+ */
+function chordIsLetter(ev: ClipboardKeyEvent, letter: string, code: string): boolean {
+  const typed = ev.key.toLowerCase();
+  if (typed.length === 1 && typed >= "a" && typed <= "z") {
+    return typed === letter;
+  }
+  return ev.code === code;
 }
 
 /** The side-effecting capabilities the decision drives. terminal.ts supplies real
@@ -126,6 +155,15 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
   //   - no selection → untouched. Cmd+C is not an interrupt on macOS, so this path
   //     must never emit \x03.
   //
+  // #2831 asked whether handleTerminalCopy below could REPLACE this chord, since the
+  // browser fires `copy` for the chord as well as for the menu routes. Measured in
+  // Chromium, it cannot: the copy event fires for the PLATFORM copy chord only, so on
+  // Linux `Control+c` dispatches one and `Meta+c` does not. Dropping this branch would
+  // therefore trade a path verified on every platform for one that is unverifiable on
+  // the platform CI runs, and would regress Cmd+C wherever Meta is not the copy
+  // modifier. handleTerminalCopy is an ADDITION that covers the routes no chord
+  // reaches; the chords below stay.
+  //
   // The selection is deliberately KEPT. Clearing exists on Ctrl+C so a second press
   // falls through to the interrupt; Cmd+C has no interrupt to fall through to, so
   // clearing would just be a surprising selection loss.
@@ -133,7 +171,13 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
   // Bare only: Cmd+Shift+C is the browser's inspect-element toggle, and Cmd+Alt+C
   // devtools too — claiming those would trade one broken shortcut for another.
   // Cmd+V stays untouched; its trusted-paste path already works.
-  if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === "c") {
+  if (
+    ev.metaKey &&
+    !ev.ctrlKey &&
+    !ev.altKey &&
+    !ev.shiftKey &&
+    chordIsLetter(ev, "c", "KeyC")
+  ) {
     if (!deps.hasSelection()) {
       return true;
     }
@@ -146,25 +190,35 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
     return true;
   }
 
-  const key = ev.key.toLowerCase();
-
-  if (key === "v") {
+  if (chordIsLetter(ev, "v", "KeyV")) {
     // Defer to xterm's native (browser-trusted) paste for both Ctrl+V and
     // Ctrl+Shift+V. Returning false suppresses xterm's Ctrl+V→\x16 keymap; NOT
     // calling preventDefault lets the browser's `paste` event flow to xterm.
     return false;
   }
 
-  if (key === "c") {
+  if (chordIsLetter(ev, "c", "KeyC")) {
     if (ev.shiftKey) {
-      // Ctrl+Shift+C — explicit, unambiguous copy. Copies a selection if present,
-      // a no-op otherwise; never interrupts. The selection is deliberately LEFT
-      // intact: this is the "just copy, I want to keep selecting" gesture.
-      ev.preventDefault();
-      if (deps.hasSelection()) {
-        deps.copy(deps.getSelection());
-      }
-      return false;
+      // Ctrl+Shift+C is the INSPECT-ELEMENT shortcut on Linux and Windows, exactly
+      // as Cmd+Shift+C is on macOS — and the Cmd branch above already refuses to
+      // claim it, on the grounds that doing so "would trade one broken shortcut for
+      // another". This branch used to claim it anyway with a preventDefault, so the
+      // #2787 fix protected devtools for macOS users while keeping it broken for
+      // everyone else (#2831). The two branches now agree, and this returns `true`
+      // exactly as that one does.
+      //
+      // `true` (not the `false` Ctrl+V uses) because xterm needs no suppressing
+      // here. Measured against real xterm in Chromium: Ctrl+Shift+C emits NOTHING
+      // on onData — the ctrl+letter→control-byte mapping does not apply with shift
+      // held, unlike bare Ctrl+C which emits \x03 — and xterm leaves the event
+      // uncancelled, so the browser still gets its shortcut. There is nothing to
+      // suppress and nothing to preventDefault; the honest answer is "not our
+      // gesture".
+      //
+      // Copy is not lost with it: Ctrl+C over a selection still copies, Cmd+C still
+      // copies on macOS, and handleTerminalCopy covers the routes that reach the
+      // terminal as a `copy` event instead of a chord.
+      return true;
     }
     // Ctrl+C — a present selection means "copy it" (the terminal convention), so
     // copy and do NOT interrupt.
@@ -188,4 +242,63 @@ export function handleClipboardKeydown(ev: ClipboardKeyEvent, deps: ClipboardDep
   }
 
   return true; // not our gesture
+}
+
+/** The subset of a DOM ClipboardEvent the copy decision reads. A real
+ *  ClipboardEvent satisfies it structurally; tests construct plain objects. */
+export interface TerminalCopyEvent {
+  /** null when the platform gives no synchronous write surface — see the fallback. */
+  clipboardData: { setData(format: string, data: string): void } | null;
+  preventDefault(): void;
+}
+
+/** What the copy decision needs from the terminal. A strict subset of ClipboardDeps
+ *  — no wire access at all, because copying can never send input. */
+export interface TerminalCopyDeps {
+  hasSelection(): boolean;
+  getSelection(): string;
+  /** The never-silent ladder in terminal.ts, used only when the event carries no
+   *  clipboardData to write into. */
+  copy(text: string): void;
+}
+
+/**
+ * Put xterm's selection on the clipboard for ANY copy the browser initiates (#2831).
+ *
+ * This is the single copy path, and it is deliberately event-shaped rather than
+ * chord-shaped. The browser fires `copy` for Cmd+C, for Ctrl+C on Linux/Windows,
+ * for macOS Edit → Copy, for right-click → Copy, and for assistive technology that
+ * copies without synthesizing a keydown. Before this, only the chords worked, so
+ * every menu route failed the same silent way the original bug did: the browser
+ * copied `document.getSelection()`, xterm had no DOM selection, nothing landed on
+ * the clipboard, and no handler of ours ran to say so.
+ *
+ * Writing into `event.clipboardData` is what makes this work without a permission
+ * prompt: inside a trusted `copy` event the write is synchronous and always allowed,
+ * unlike navigator.clipboard.writeText.
+ *
+ * Returns whether the selection was written, so a caller (and a test) can tell the
+ * handled case from the deliberate pass-through.
+ */
+export function handleTerminalCopy(ev: TerminalCopyEvent, deps: TerminalCopyDeps): boolean {
+  // No terminal selection ⇒ not ours. Leave the event completely alone so a copy
+  // aimed at ordinary page text (an error message, a session title) still works.
+  if (!deps.hasSelection()) {
+    return false;
+  }
+  const text = deps.getSelection();
+  if (text === "") {
+    return false;
+  }
+  // Ours either way: preventDefault stops the browser writing its own EMPTY document
+  // selection over what we are about to put there.
+  ev.preventDefault();
+  if (ev.clipboardData) {
+    ev.clipboardData.setData("text/plain", text);
+    return true;
+  }
+  // No clipboardData (older/unusual embedders): fall back to the never-silent ladder
+  // rather than dropping the copy, so a failure still surfaces a visible hint.
+  deps.copy(text);
+  return true;
 }

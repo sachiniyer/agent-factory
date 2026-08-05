@@ -39,7 +39,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { handleClipboardKeydown } from "./clipboard.js";
+import { handleClipboardKeydown, handleTerminalCopy } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
 import { PendingInput } from "./pending_input.js";
 import {
@@ -257,6 +257,16 @@ export class AttachTerminal {
     // an uncancelled drag can still synthesize the compatibility mouse events the
     // application would read as a drag it never got the button press for.
     event.preventDefault();
+  };
+  /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
+   *  Edit → Copy, right-click → Copy, assistive tech. The decision is in
+   *  clipboard.ts; this only supplies xterm's selection and the fallback ladder. */
+  private readonly onCopy = (event: ClipboardEvent): void => {
+    handleTerminalCopy(event, {
+      hasSelection: () => this.term.hasSelection(),
+      getSelection: () => this.term.getSelection(),
+      copy: (text) => this.copyToClipboard(text),
+    });
   };
   private readonly onPointerDown = (event: PointerEvent): void => {
     // A pointer event always precedes its compatibility mouse counterpart — for a tap
@@ -477,6 +487,9 @@ export class AttachTerminal {
     container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
+    // Bubbles from xterm's focused helper textarea, so this one listener catches
+    // the copy chord AND every menu/context-menu copy aimed at the terminal (#2831).
+    container.addEventListener("copy", this.onCopy);
     this.scheduleVisibleFit();
   }
 
@@ -510,6 +523,7 @@ export class AttachTerminal {
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
+    this.container.removeEventListener("copy", this.onCopy);
     this.endHandedOffDrag();
     this.closeSocket();
     this.term.dispose();
