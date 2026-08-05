@@ -2493,17 +2493,22 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // would overwrite the clipboard with a token the user has since scrolled away
     // from — a slow-starting scroll that silently steals the clipboard.
     await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
+    await p.evaluate(() => ((window as unknown as { __afTouchLog: string[] }).__afTouchLog = []));
     await touchPressAndHold(cdp, x + 2, pressY);
     await expect(selection, "the press is recognised before the finger moves").not.toHaveCount(0);
     for (const step of [10, 40, 90]) {
       await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x + 2, y: pressY + step }] });
     }
     await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    const scrolledAway = await p.evaluate(() => (window as unknown as { __afTouchLog: string[] }).__afTouchLog.join(" "));
     expect(
       await p.evaluate(() => navigator.clipboard.readText()),
-      "a press that turns into a scroll must not copy on lift",
+      `a press that turns into a scroll must not copy on lift [delivered: ${scrolledAway}]`,
     ).toContain("untouched");
-    await expect(selection, "…and must not leave a selection promising it did").toHaveCount(0);
+    await expect(
+      selection,
+      `…and must not leave a selection promising it did [delivered: ${scrolledAway}]`,
+    ).toHaveCount(0);
 
     // …and the gesture that is NOT a press still is not one. A drag from the same
     // spot scrolls (#2682) and copies nothing, so the two cannot be confused.
