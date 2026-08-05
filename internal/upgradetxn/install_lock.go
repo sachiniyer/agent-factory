@@ -517,6 +517,12 @@ func lockHasInheritedACL(lock *os.File) bool {
 // lockDenialIsTransient is the seam the nonblocking branch calls through, so a
 // test can pin the stale-denial ordering rather than race it. Production never
 // reassigns it.
+// executableLockFreshWindow is how recently a still-private lock must have been
+// created for its denial to read as the creation race rather than as a legacy
+// private lock. Generous against the microseconds the real window takes, and far
+// below any age a leftover lock would have.
+const executableLockFreshWindow = 5 * time.Second
+
 var lockDenialIsTransient = executableLockDenialIsTransient
 
 func executableLockDenialIsTransient(lockPath string, dirGid int) bool {
@@ -532,6 +538,23 @@ func executableLockDenialIsTransient(lockPath string, dirGid int) bool {
 		return false
 	}
 	const groupUsable = 0o060
-	widened := info.Mode().Perm()&groupUsable == groupUsable && int(stat.Gid) == dirGid
-	return !widened
+	if info.Mode().Perm()&groupUsable == groupUsable && int(stat.Gid) == dirGid {
+		// Widened already, so a denial is about who we are. The caller re-asks
+		// once before trusting this, since the widening may have landed between
+		// its failed open and this stat.
+		return false
+	}
+	// Still private. That is the creation window only if the lock is NEW. A 0600
+	// lock left by a pre-change version under another user is permanently private
+	// from here — nobody but its owner can widen it — and calling that transient
+	// would defer the launch updater on every single launch, reporting success
+	// and never installing. Auto-update would be silently dead for that writer,
+	// with no error anywhere to say so.
+	//
+	// The window this is separating them by is microseconds wide in practice: a
+	// create followed immediately by an fchmod. Anything older is not a race that
+	// is about to resolve, so it falls through to the permission error and the
+	// documented unlocked-swap fallback — which is exactly what such a lock does
+	// today, before this change.
+	return time.Since(info.ModTime()) < executableLockFreshWindow
 }

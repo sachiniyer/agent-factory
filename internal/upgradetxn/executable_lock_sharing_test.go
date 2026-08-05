@@ -419,6 +419,42 @@ func TestExecutableLock_NonblockingRetriesAStaleDenialAgainstAWidenedLock(t *tes
 	require.Equal(t, 1, probes, "the discriminator must be consulted exactly once")
 }
 
+// A LEGACY private lock is not a creation race, however much it looks like one.
+//
+// A 0600 lock left in a shared directory by a pre-change version, owned by
+// another user, denies an authorized group writer permanently — nobody but its
+// owner can ever widen it. Its missing group bits are indistinguishable from the
+// create-then-chmod window by mode alone, so classifying on mode would return
+// busy on every launch: `commands/autoupdate.go` treats that as a successful
+// deferral, and auto-update goes silently dead for that writer with no error
+// anywhere to say so.
+//
+// Age separates them. The real window is a create followed immediately by an
+// fchmod; anything older is a leftover, and falls through to the permission
+// error and the documented unlocked-swap fallback — which is what such a lock
+// already does today.
+func TestExecutableLock_NonblockingStaysDeniedForALegacyPrivateLock(t *testing.T) {
+	requireACLAwarePlatform(t)
+	requireUnprivileged(t)
+	executable := sharedInstallDir(t, 0o770)
+	lockPath := executableLockPath(executable)
+	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
+	require.NoError(t, os.Chmod(lockPath, 0o000))
+	// Older than any create-then-chmod window, which is what "left by a previous
+	// version" means in the only terms the filesystem records.
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(lockPath, old, old))
+
+	err := withExecutableLock(executable, true, func() error {
+		t.Fatal("the critical section must not run when the lock cannot be opened")
+		return nil
+	})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrInstallLockBusy,
+		"a leftover private lock never clears, so reporting busy defers the updater on every launch and silently retires auto-update")
+	require.ErrorIs(t, err, os.ErrPermission)
+}
+
 // The same nonblocking call in a PRIVATE directory must stay a permission error.
 // There the denial is permanent and means a genuinely unauthorized caller;
 // reporting BUSY would tell the launch updater to defer forever and silently
