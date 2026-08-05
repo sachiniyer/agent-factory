@@ -54,11 +54,16 @@ import {
 import {
   historyWheelPlan,
   invertTerminalMouseOverride,
+  lineContentColumns,
+  terminalCellAtPoint,
   terminalMouseOverride,
   terminalMouseOverrideHeld,
   type TerminalMouseOverride,
+  TOUCH_LONG_PRESS_MS,
   touchHistoryScrollPlan,
+  touchPressStillHeld,
   touchScrollClaimsGesture,
+  wordRangeAtColumn,
 } from "./terminal-mouse.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { currentXtermTheme } from "./theme.js";
@@ -134,9 +139,16 @@ export class AttachTerminal {
   private touchScrollY: number | null = null;
   private touchScrollRemainder = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
-  // scroll rather than a tap. Until it has, the touch is left entirely alone.
-  private touchScrollOriginY = 0;
+  // scroll rather than a tap. Until it has, the touch is left entirely alone. The
+  // origin serves the long press too (#2849): both gestures are decided against the
+  // point the finger went down on, by the same threshold.
+  private touchOriginX = 0;
+  private touchOriginY = 0;
   private touchScrollClaimed = false;
+  // The pending long press, and whether it has already copied on this gesture — a
+  // copy has to swallow the compatibility click the same touch would otherwise fire.
+  private touchLongPressTimer: number | null = null;
+  private touchCopyFired = false;
   // Whether the gesture in flight came from a finger, read off the pointer event that
   // precedes the browser's compatibility mouse events (onPointerDown).
   private lastPointerWasTouch = false;
@@ -213,13 +225,28 @@ export class AttachTerminal {
     // same discriminator onPointerDown reads below, and taking it over would scroll
     // BACKWARDS, since a thumb follows the finger while the content opposes it.
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
-    this.touchScrollY = event.touches.length === 1 && !onScrollbar ? event.touches[0].clientY : null;
-    this.touchScrollOriginY = this.touchScrollY ?? 0;
+    const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
+    this.touchScrollY = press?.clientY ?? null;
+    this.touchOriginX = press?.clientX ?? 0;
+    this.touchOriginY = press?.clientY ?? 0;
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
+    this.touchCopyFired = false;
+    this.cancelTouchLongPress();
+    if (press) {
+      this.startTouchLongPress();
+    }
   };
+  private readonly onTouchEnd = (): void => this.cancelTouchLongPress();
   private readonly onTouchMove = (event: TouchEvent): void => {
     this.handleUserScroll("touch");
+    const moved = event.touches.length !== 1 ||
+      !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
+    if (moved) {
+      // The finger left the spot it pressed on, so this gesture is a scroll (or a
+      // pinch) rather than a press. Both readings cannot be live at once.
+      this.cancelTouchLongPress();
+    }
     if (this.touchScrollY === null) {
       return;
     }
@@ -238,7 +265,7 @@ export class AttachTerminal {
       return;
     }
     if (!this.touchScrollClaimed) {
-      if (!touchScrollClaimsGesture(this.touchScrollOriginY, y)) {
+      if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         // Still within a tap's wobble. Leaving the event ALONE is the point: claiming
         // it would cancel the touch, and a cancelled touch fires no compatibility
         // mouse events — so an unsteady tap would stop reaching the application while
@@ -310,6 +337,15 @@ export class AttachTerminal {
   // gestures already separate without one, the drag scrolling history (#2682) and the
   // tap staying the click.
   private readonly onMouseDownCapture = (event: MouseEvent): void => {
+    if (this.lastPointerWasTouch && this.touchCopyFired) {
+      // A long press already consumed this touch (#2849). Its trailing click would
+      // reach a mouse-aware application as a press the user never aimed at it, and
+      // would clear the selection that says what was copied — so the gesture stops
+      // here, before xterm's own listeners on the descendant see it.
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (!this.applicationOwnsMouse() || this.lastPointerWasTouch) {
       // Outside application mouse mode a plain drag already selects, and the
       // modifier keeps its xterm meaning (Shift extends an existing selection). A
@@ -351,7 +387,8 @@ export class AttachTerminal {
     }
     const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
     if (plan.cancelScheduledVisibleFit) {
-      this.cancelVisibleFitFrame();
+      this.cancelTouchLongPress();
+    this.cancelVisibleFitFrame();
     }
     this.fitVisibleHost();
     // fitVisibleHost schedules from the pre-input revision. xterm consumes the
@@ -485,6 +522,9 @@ export class AttachTerminal {
     // on a descendant) see it, and NON-passive, because claiming the pan means
     // calling preventDefault — a passive listener's is ignored outright.
     container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
+    // A finger lifted or a gesture the system took over both end the press.
+    container.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
+    container.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
     // Bubbles from xterm's focused helper textarea, so this one listener catches
@@ -521,6 +561,8 @@ export class AttachTerminal {
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
+    this.container.removeEventListener("touchend", this.onTouchEnd, true);
+    this.container.removeEventListener("touchcancel", this.onTouchEnd, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
@@ -573,6 +615,76 @@ export class AttachTerminal {
       this.mouseCaptureHint.setAttribute("aria-hidden", "true");
       this.mouseCaptureHintTimer = null;
     }, 4_000);
+  }
+
+  /**
+   * The long press — the ONLY way to copy anything out of this terminal on a touch
+   * device (#2849), where all three of the usual routes are closed: xterm's rows are
+   * `user-select: none` so the browser can never build a DOM selection to long-press
+   * on, xterm's own selection is driven from mouse events a finger never sends, and
+   * every branch of clipboard.ts needs a Ctrl or Cmd that no phone has.
+   *
+   * So af makes the selection itself and copies it through the same never-silent
+   * ladder the keyboard path uses. The selection xterm then paints IS the feedback:
+   * it names exactly what landed on the clipboard, which is the one thing #2787's
+   * silent failure could not do.
+   */
+  private startTouchLongPress(): void {
+    this.touchLongPressTimer = window.setTimeout(() => {
+      this.touchLongPressTimer = null;
+      this.copyTouchWord(this.touchOriginX, this.touchOriginY);
+    }, TOUCH_LONG_PRESS_MS);
+  }
+
+  private cancelTouchLongPress(): void {
+    if (this.touchLongPressTimer !== null) {
+      window.clearTimeout(this.touchLongPressTimer);
+      this.touchLongPressTimer = null;
+    }
+  }
+
+  /** Selects the token under the finger — the whole line when that cell is blank —
+   *  and copies it. Silent only when there is genuinely nothing there to take. */
+  private copyTouchWord(x: number, y: number): void {
+    const rowsEl = this.container.querySelector<HTMLElement>(".xterm-rows");
+    if (!rowsEl) {
+      return;
+    }
+    const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), this.term.cols, this.term.rows);
+    if (!cell) {
+      return;
+    }
+    // viewportY is the ABSOLUTE buffer row at the top of the view, and select() takes
+    // absolute rows (SelectionService stores what it is given straight into the
+    // model), so a press while scrolled up copies the line under the finger rather
+    // than the one that happens to be at that offset from the bottom.
+    const buffer = this.term.buffer.active;
+    const bufferRow = buffer.viewportY + cell.row;
+    const line = buffer.getLine(bufferRow);
+    if (!line) {
+      return;
+    }
+    // ONE ENTRY PER COLUMN, so an index is a column. translateToString would collapse
+    // a wide character into a single index and quietly shift every column after it.
+    const cells: string[] = [];
+    for (let col = 0; col < line.length; col += 1) {
+      const buffered = line.getCell(col);
+      cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+    }
+    const range = wordRangeAtColumn(cells, cell.col) ?? { start: 0, length: lineContentColumns(cells) };
+    if (range.length === 0) {
+      return; // a press on genuinely empty screen
+    }
+    this.term.select(range.start, bufferRow, range.length);
+    const text = this.term.getSelection();
+    if (text.trim() === "") {
+      this.term.clearSelection();
+      return;
+    }
+    // Marked BEFORE the copy: the compatibility click this touch still owes is what
+    // would otherwise reach the application and clear the selection just painted.
+    this.touchCopyFired = true;
+    this.copyToClipboard(text);
   }
 
   /** The painted height of one terminal row, which turns a pixel-denominated gesture

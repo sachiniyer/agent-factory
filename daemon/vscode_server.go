@@ -494,6 +494,14 @@ type vscodeSupervisor struct {
 type vscodeFailure struct {
 	err error
 	at  time.Time
+	// instanceID scopes the cooldown to the session that earned it. The map is
+	// keyed by daemonInstanceKey, which addresses a title slot rather than a
+	// session, so without this a successor reusing that title inside the cooldown
+	// gets its predecessor's spawn error replayed instead of a spawn attempt
+	// (#2868/#2876, the same class one map over). Short-lived and self-healing —
+	// unlike the restore and limit backoffs — but the guard costs one comparison,
+	// and "the window is small" is how a class survives an audit.
+	instanceID string
 }
 
 func newVSCodeSupervisor() *vscodeSupervisor {
@@ -569,7 +577,7 @@ func (v *vscodeSupervisor) reconcilePersistedBeforeSpawn(key, instanceID string)
 	if server != nil && !hasLiveServer {
 		delete(v.servers, key)
 		if !server.ready {
-			v.failures[key] = vscodeFailure{err: errVSCodeStartExited, at: v.now()}
+			v.failures[key] = vscodeFailure{err: errVSCodeStartExited, at: v.now(), instanceID: instanceID}
 		}
 	}
 	v.mu.Unlock()
@@ -654,15 +662,16 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 			// and must still respawn at once, so it is deliberately not recorded.
 			if neverReady {
 				v.failures[key] = vscodeFailure{
-					err: errVSCodeStartExited,
-					at:  v.now(),
+					err:        errVSCodeStartExited,
+					at:         v.now(),
+					instanceID: s.instanceID,
 				}
 			}
 		}
 	}
 	// Replay a recent failure instead of respawning, so the notice page's refresh
 	// can't drive a spawn loop against a broken editor.
-	if f, ok := v.failures[key]; ok && v.now().Sub(f.at) < v.cooldown {
+	if f, ok := v.failures[key]; ok && f.instanceID == instanceID && v.now().Sub(f.at) < v.cooldown {
 		return vscodeEndpoint{}, f.err
 	}
 
@@ -675,7 +684,7 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 
 	server, err := v.spawnLocked(key, instanceID, binary, worktree)
 	if err != nil {
-		v.failures[key] = vscodeFailure{err: err, at: v.now()}
+		v.failures[key] = vscodeFailure{err: err, at: v.now(), instanceID: instanceID}
 		return vscodeEndpoint{}, err
 	}
 	delete(v.failures, key)

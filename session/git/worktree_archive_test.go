@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -1259,4 +1260,184 @@ func TestMoveDirCrossDevice_LongLeafFitsPrivateNames(t *testing.T) {
 	require.NoError(t, moveDirCrossDevice(src, dest))
 	assert.FileExists(t, filepath.Join(dest, "tracked.txt"))
 	assert.NoDirExists(t, src)
+}
+
+// TestMoveDirCrossDevice_CrossDeviceModesMatchSameDeviceRename pins the #2869
+// divergence itself. moveDirCrossDevice has two implementations of one promise:
+// rename(2) when src and dest share a device, and a byte copy when they do not.
+// A rename preserves modes for free, so the copy is the only path that can drift
+// — and it did, because mkdirat/openat subtract the umask. Which filesystem the
+// archive root happens to live on must not decide the permissions a session's
+// files come back with, so the two paths are asserted against each other rather
+// than against a hand-written expectation.
+func TestMoveDirCrossDevice_CrossDeviceModesMatchSameDeviceRename(t *testing.T) {
+	withUmask(t, 0077)
+	workspace := t.TempDir()
+	renamedSource := filepath.Join(workspace, "renamed-src")
+	copiedSource := filepath.Join(workspace, "copied-src")
+	writeModeProbeTree(t, renamedSource)
+	writeModeProbeTree(t, copiedSource)
+
+	renamedDest := filepath.Join(workspace, "renamed-dest")
+	require.NoError(t, moveDirCrossDevice(renamedSource, renamedDest),
+		"same-device move must take the rename fast path")
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	copiedDest := filepath.Join(workspace, "copied-dest")
+	require.NoError(t, moveDirCrossDevice(copiedSource, copiedDest))
+
+	assert.Equal(t, collectTreeDescription(t, renamedDest), collectTreeDescription(t, copiedDest),
+		"the cross-device copy must land the same permissions the same-device rename does")
+}
+
+// TestMoveWorktree_ArchiveRestoreRoundTripPreservesModes drives #2869 through
+// the public primitives rather than the copier underneath them, because the
+// promise that broke is a user-facing one: archive a session, restore it, and
+// get your files back as they were. Both legs take the cross-device fallback,
+// which is what a real user gets whenever $AF_HOME and the repo sit on
+// different filesystems.
+//
+// PRE-FIX both legs tightened the tree by the umask instead of preserving it,
+// and restore never recovered what archive had dropped: an executable 0755 hook
+// reached the archive as 0700 and came back 0700.
+func TestMoveWorktree_ArchiveRestoreRoundTripPreservesModes(t *testing.T) {
+	withUmask(t, 0077)
+	previousFast := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("forced fast-path failure (simulating EXDEV)")
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousFast })
+	previousRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = previousRename })
+
+	gw, _, srcPath := archiveTestWorktree(t)
+	hook := filepath.Join(srcPath, "hook.sh")
+	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\ntrue\n"), 0600))
+	require.NoError(t, os.Chmod(hook, 0755))
+	require.NoError(t, os.Chmod(filepath.Join(srcPath, "dirty.txt"), 0664))
+	// A group-readable directory and a read-only one, so this covers both the
+	// mode the umask would have eaten (#2869) and the mode the copier could not
+	// write into (#2872) through the same round trip.
+	shared := filepath.Join(srcPath, "shared")
+	require.NoError(t, os.Mkdir(shared, 0700))
+	require.NoError(t, os.Chmod(shared, 0750))
+	vendored := filepath.Join(srcPath, "vendored")
+	require.NoError(t, os.Mkdir(vendored, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(vendored, "pinned.txt"), []byte("pinned"), 0444))
+	t.Cleanup(func() { chmodTreeWritable(t, filepath.Dir(srcPath)) })
+	require.NoError(t, os.Chmod(vendored, 0555))
+	beforeArchive := collectTreeDescription(t, srcPath)
+
+	// Each CanonicalTempDir call makes its own t.TempDir, and a faithfully
+	// preserved 0555 directory defeats that TempDir's RemoveAll. Registering
+	// after each one puts these ahead of it in the LIFO cleanup order.
+	archived := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	t.Cleanup(func() { chmodTreeWritable(t, archived) })
+	require.NoError(t, gw.MoveWorktree(archived))
+	assert.Equal(t, beforeArchive, collectTreeDescription(t, archived),
+		"the archived copy must be mode-identical to the worktree it took")
+
+	restored := filepath.Join(testguard.CanonicalTempDir(t), "restored", "arch")
+	t.Cleanup(func() { chmodTreeWritable(t, restored) })
+	require.NoError(t, gw.RestoreWorktreeTo(restored))
+	assert.Equal(t, beforeArchive, collectTreeDescription(t, restored),
+		"a restored session must come back with the modes it had, executable hooks included")
+}
+
+// TestMoveDirCrossDevice_CopiesIntoAReadOnlySourceDirectory is the #2872
+// regression. A worktree may legitimately contain a directory the owner cannot
+// write — a vendored or generated tree checked in read-only. The same-device
+// rename(2) moves it without ever looking inside, but the cross-device copy
+// created each destination directory at its final mode and then tried to
+// populate it, so a 0555 directory could not be filled and the whole archive
+// failed. Which filesystem $AF_HOME sits on decided whether the session could
+// be archived at all.
+func TestMoveDirCrossDevice_CopiesIntoAReadOnlySourceDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory write check, so this scenario needs a non-root uid")
+	}
+	withUmask(t, 0022)
+	src := filepath.Join(t.TempDir(), "src")
+	readOnly := filepath.Join(src, "vendored")
+	require.NoError(t, os.MkdirAll(readOnly, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(readOnly, "pinned.txt"), []byte("pinned"), 0444))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "tracked.txt"), []byte("tracked"), 0644))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+	// Registered after both TempDirs, so it runs before their RemoveAll: a
+	// leftover read-only directory would otherwise fail the harness cleanup
+	// rather than the assertion under test.
+	t.Cleanup(func() {
+		chmodTreeWritable(t, filepath.Dir(src))
+		chmodTreeWritable(t, destinationParent)
+	})
+	require.NoError(t, os.Chmod(readOnly, 0555))
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	require.NoError(t, moveDirCrossDevice(src, dest),
+		"a read-only source directory must not fail the cross-device move")
+	assert.NoDirExists(t, src, "the source must be gone after a successful move")
+
+	contents, err := os.ReadFile(filepath.Join(dest, "vendored", "pinned.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "pinned", string(contents))
+	info, err := os.Stat(filepath.Join(dest, "vendored"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0555), info.Mode().Perm(),
+		"the read-only directory must arrive read-only, not left writable by the copy")
+}
+
+// TestMoveDirCrossDevice_CleansStagingContainingAReadOnlyDirectory covers the
+// other half of the #2872 removal problem. The copy now reproduces a read-only
+// directory faithfully, which means the private staging tree contains one too —
+// and unlinking anything out of it needs write permission the mode does not
+// grant. A failure between the copy and the commit must still leave the archive
+// root empty rather than stranding a staging tree nothing can delete.
+func TestMoveDirCrossDevice_CleansStagingContainingAReadOnlyDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory write check, so this scenario needs a non-root uid")
+	}
+	src := filepath.Join(t.TempDir(), "src")
+	readOnly := filepath.Join(src, "vendored")
+	require.NoError(t, os.MkdirAll(readOnly, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(readOnly, "pinned.txt"), []byte("pinned"), 0444))
+	destinationParent := t.TempDir()
+	dest := filepath.Join(destinationParent, "dest")
+	t.Cleanup(func() { chmodTreeWritable(t, src) })
+	require.NoError(t, os.Chmod(readOnly, 0555))
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+	originalHook := moveDirBeforeSourceCommit
+	moveDirBeforeSourceCommit = func(string) error { return errors.New("forced failure after the copy") }
+	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
+
+	err := moveDirCrossDevice(src, dest)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "failed to clean private staging tree",
+		"a read-only directory in the copy must not defeat staging cleanup")
+
+	entries, readErr := os.ReadDir(destinationParent)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "the private staging tree must be gone, read-only directories and all")
+	assert.FileExists(t, filepath.Join(readOnly, "pinned.txt"), "the untouched source must survive")
+}
+
+// chmodTreeWritable restores owner write on every directory under root so the
+// harness can delete a fixture that deliberately contains read-only directories.
+func chmodTreeWritable(t *testing.T, root string) {
+	t.Helper()
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err == nil && entry.IsDir() {
+			_ = os.Chmod(path, 0755)
+		}
+		return nil
+	})
 }

@@ -156,7 +156,7 @@ type Manager struct {
 	ghostTaskRuns  map[string]int
 	repoStartLocks map[string]*sync.Mutex
 	// aliveObservations counts POSITIVE liveness observations per session (keyed by
-	// remoteLossKey, so a same-title successor never inherits its predecessor's).
+	// stableSessionKey, so a same-title successor never inherits its predecessor's).
 	// Incremented only where the poll actually gets an answer OUT of a runtime; read
 	// by the Lost-restore loop, which may only clear a session's failure history when
 	// this has advanced past the spawn. Guarded by mu.
@@ -232,12 +232,16 @@ type Manager struct {
 	// ordinary kill/archive operations already in progress.
 	restoresInFlight map[string]struct{}
 	// lostRestoreStates tracks per-session retry state for the Lost-session
-	// restore loop (#1108 PR 2), keyed by daemon instance key — the general
-	// sibling of rootEnsureStates.
+	// restore loop (#1108 PR 2) — the general sibling of rootEnsureStates. Keyed
+	// by stableSessionKey (the stable instance ID), NOT by daemon instance key:
+	// an episode describes one runtime's failures, so a later session that merely
+	// reuses the title must not inherit them (#2868).
 	lostRestoreStates map[string]*lostRestoreState
 	// limitResumeStates tracks per-session retry state for the usage-limit
-	// auto-resume scheduler (#1146 PR3), keyed by daemon instance key — the
-	// opt-in sibling of lostRestoreStates. Guarded by m.mu.
+	// auto-resume scheduler (#1146 PR3) — the opt-in sibling of lostRestoreStates,
+	// and keyed the same way for the same reason: by stableSessionKey (the stable
+	// instance ID), so a session that merely reuses a title cannot inherit the
+	// backoff gate a discarded predecessor armed (#2876). Guarded by m.mu.
 	limitResumeStates map[string]*limitResumeState
 	// handoffRetryDue throttles recovery of rendered takeover missions
 	// that survived a daemon restart before delivery was confirmed. Keyed by
@@ -253,10 +257,16 @@ type Manager struct {
 	// poll pass as mission recovery. Guarded by m.mu.
 	handoffSettleOwed map[string]pendingHandoffEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
-	// daemon instance key. A remote probe failure is transport-shaped — one
-	// blip fails identically to a dead sandbox — so the poll accumulates
-	// consecutive failures here and only settles Lost once they are durable.
-	// Guarded by m.mu; entries are dropped the moment a probe succeeds.
+	// stableSessionKey — the stable instance ID, which is what every writer and
+	// every clearRemoteLoss call site actually passes. This said "daemon instance
+	// key" until #2868, and being wrong here is not cosmetic: it is the comment a
+	// reader consults when deciding how to key the NEXT per-session map, and
+	// lostRestoreStates is what came of consulting it.
+	//
+	// A remote probe failure is transport-shaped — one blip fails identically to a
+	// dead sandbox — so the poll accumulates consecutive failures here and only
+	// settles Lost once they are durable. Guarded by m.mu; entries are dropped the
+	// moment a probe succeeds.
 	remoteLossStates map[string]*remoteLossState
 	// instanceOpLocks serializes the mutually-exclusive per-session
 	// operations — kill teardown and Lost-recovery — by daemon instance key.
@@ -292,7 +302,7 @@ type Manager struct {
 	pausedPolls map[string]time.Time
 	// taskRunProbeDue schedules the backstop observation for a PAUSED session whose
 	// task run is still in flight (#1892). Guarded by pausedMu (the same lock as
-	// pausedPolls) but keyed by remoteLossKey — the stable instance ID — rather
+	// pausedPolls) but keyed by stableSessionKey — the stable instance ID — rather
 	// than the legacy daemon-instance-key lease fallback. An attach suppresses the
 	// liveness probe, and the cap's slot is released
 	// by observing the agent go idle — so without a bounded backstop a user watching

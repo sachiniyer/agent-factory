@@ -71,6 +71,17 @@ var errRestoreDiedBeforeConfirm = errors.New("the re-spawned agent exited before
 // lostRestoreState is the per-session retry state. Guarded by Manager.mu (the
 // loop runs on the daemon poll goroutine; tests drive RestoreLostSessions
 // directly).
+//
+// It is filed under stableSessionKey — the session's stable ID — and NOT under
+// the repo/title daemon key (#2868). Everything below describes ONE runtime: how
+// many times THIS agent failed to come back, which worktree of ITS went missing,
+// how far ITS observation counter had advanced when it was last respawned. A
+// title is a slot that outlives its occupant, so filing an episode under one
+// hands the next occupant its predecessor's history: kill or archive a session
+// that failed four restores, create another with the same title, and the new
+// session's very first hiccup is charged as failure five and waits minutes for a
+// retry it should have gotten in ten seconds. Same rule and same reason as
+// remoteLossState; see stableSessionKey.
 type lostRestoreState struct {
 	consecutiveFailures int
 	nextAttempt         time.Time
@@ -123,9 +134,21 @@ func (m *Manager) RestoreLostSessions() {
 	}
 	m.mu.Lock()
 	entries := make([]entry, 0, len(m.instances))
+	// live is the set of stable identities whose retry episode still describes a
+	// restorable runtime. Built here rather than reusing m.instances directly
+	// because the state is keyed by stable ID, not by the repo/title map key
+	// (#2868) — and because presence in that map is not the same question:
+	// an ARCHIVED or never-started row is still in it under the same ID, but its
+	// runtime was deliberately torn down, so its failure history describes
+	// something that no longer exists and no poll will ever confirm it alive. Same
+	// rule, same reason, as sweepRemoteLossStates.
+	live := make(map[string]struct{}, len(m.instances))
 	for key, inst := range m.instances {
 		repoID, _ := splitDaemonInstanceKey(key)
 		entries = append(entries, entry{key: key, repoID: repoID, instance: inst})
+		if inst.Started() && inst.GetLiveness() != session.LiveArchived {
+			live[stableSessionKey(repoID, inst)] = struct{}{}
+		}
 	}
 	// Drop retry state for sessions that are gone or no longer Lost (healed,
 	// killed, or replaced) so the map never grows unbounded.
@@ -139,11 +162,13 @@ func (m *Manager) RestoreLostSessions() {
 	// confirmation, the state is kept until confirmBy passes, so a death inside
 	// that window still lands on the attempt that caused it.
 	for key, inst := range m.instances {
-		st := m.lostRestoreStates[key]
+		repoID, _ := splitDaemonInstanceKey(key)
+		stateKey := stableSessionKey(repoID, inst)
+		st := m.lostRestoreStates[stateKey]
 		if st == nil || inst.GetStatus() == session.Lost {
 			continue
 		}
-		if st.awaitingConfirm && !m.observedAliveSinceSpawnLocked(key, inst, st) {
+		if st.awaitingConfirm && !m.observedAliveSinceSpawnLocked(repoID, inst, st) {
 			// Not Lost, but nothing has ANSWERED yet either. A row can read non-Lost
 			// for reasons that are not proof of life — a poll that has not run at this
 			// interval, or a remote inside its 60s loss grace — so keep the history
@@ -154,10 +179,10 @@ func (m *Manager) RestoreLostSessions() {
 		// now stayed non-Lost past the settle interval: CONFIRMED ALIVE. Only here
 		// is the backoff history provably about a runtime that no longer exists,
 		// which is the one condition under which forgetting it is safe.
-		delete(m.lostRestoreStates, key)
+		delete(m.lostRestoreStates, stateKey)
 	}
 	for key := range m.lostRestoreStates {
-		if _, live := m.instances[key]; !live {
+		if _, ok := live[key]; !ok {
 			delete(m.lostRestoreStates, key)
 		}
 	}
@@ -244,15 +269,23 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		return
 	}
 
+	// Two keys, deliberately. `key` is the repo/title daemon key: it addresses the
+	// SLOT, which is what the exclusive-operation gates (killsInFlight, the
+	// per-session op lock, the m.instances re-read) are about. stateKey addresses
+	// this SESSION's stable identity, which is what a failure episode is about
+	// (#2868) — a successor that merely reuses the title is a different runtime and
+	// must not be charged for its predecessor's failures.
+	stateKey := stableSessionKey(repoID, inst)
+
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()
 		return
 	}
-	st := m.lostRestoreStates[key]
+	st := m.lostRestoreStates[stateKey]
 	if st == nil {
 		st = &lostRestoreState{}
-		m.lostRestoreStates[key] = st
+		m.lostRestoreStates[stateKey] = st
 	}
 	// Reaching here means the session is Lost. If a restore was still awaiting
 	// confirmation AND its settle window has not elapsed, its replacement runtime
@@ -267,9 +300,9 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// the observation, not a deadline: "confirmBy has passed" merely meant time
 	// elapsed, which a long poll interval or the 60s remote grace can outlast while
 	// the runtime was dead the whole time (#1917 round 6).
-	if st.awaitingConfirm && m.observedAliveSinceSpawnLocked(key, inst, st) {
+	if st.awaitingConfirm && m.observedAliveSinceSpawnLocked(repoID, inst, st) {
 		st = &lostRestoreState{}
-		m.lostRestoreStates[key] = st
+		m.lostRestoreStates[stateKey] = st
 	}
 	diedBeforeConfirm := st.awaitingConfirm
 	if diedBeforeConfirm {
@@ -280,7 +313,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	skip := !diedBeforeConfirm && time.Now().Before(st.nextAttempt)
 	m.mu.Unlock()
 	if diedBeforeConfirm {
-		m.lostRestoreFailed(key, st, inst.Title, errRestoreDiedBeforeConfirm)
+		m.lostRestoreFailed(st, inst.Title, errRestoreDiedBeforeConfirm)
 		return
 	}
 	if skip {
@@ -337,10 +370,10 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// the answered probe already ended the loss episode, and leaving the stale
 		// count in place across a disk write lets a blip in that window re-mark the
 		// very session we just proved alive.
-		m.clearRemoteLoss(remoteLossKey(repoID, inst))
+		m.clearRemoteLoss(stableSessionKey(repoID, inst))
 		m.persistInstance(repoID, inst)
 		m.mu.Lock()
-		delete(m.lostRestoreStates, key)
+		delete(m.lostRestoreStates, stateKey)
 		m.mu.Unlock()
 		return
 	case probeUnknown:
@@ -404,7 +437,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
 	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
 	// window rather than clearing the retry state; see armRestoreConfirmation.
-	m.armRestoreConfirmation(key, repoID, inst)
+	m.armRestoreConfirmation(repoID, inst)
 }
 
 // armRestoreConfirmation marks a session whose recovery spawn just RETURNED SUCCESS
@@ -425,24 +458,31 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 //
 // The entry is created if absent: the manual path may run with no prior automatic
 // attempts on record. Takes m.mu itself; the caller must not already hold it.
-func (m *Manager) armRestoreConfirmation(key, repoID string, inst *session.Instance) {
+//
+// The entry and the observation counter it snapshots are keyed the SAME way — by
+// stable identity — which is the invariant #2868 broke: observedAtSpawn was read
+// from an ID-keyed counter while the state holding it was filed under the title,
+// so a successor's zeroed counter could never advance past a value its
+// predecessor had earned, and the sweep kept a state that belonged to a session
+// the user had already discarded.
+func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	key := stableSessionKey(repoID, inst)
 	st := m.lostRestoreStates[key]
 	if st == nil {
 		st = &lostRestoreState{}
 		m.lostRestoreStates[key] = st
 	}
 	st.awaitingConfirm = true
-	st.observedAtSpawn = m.aliveObservations[remoteLossKey(repoID, inst)]
+	st.observedAtSpawn = m.aliveObservations[key]
 }
 
 // observedAliveSinceSpawnLocked reports whether a poll has gotten an ANSWER out of
 // this session's runtime since its last respawn — the definition of "confirmed
 // alive" (#1917 round 6). Caller holds m.mu.
-func (m *Manager) observedAliveSinceSpawnLocked(key string, inst *session.Instance, st *lostRestoreState) bool {
-	repoID, _ := splitDaemonInstanceKey(key)
-	return m.aliveObservations[remoteLossKey(repoID, inst)] > st.observedAtSpawn
+func (m *Manager) observedAliveSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) bool {
+	return m.aliveObservations[stableSessionKey(repoID, inst)] > st.observedAtSpawn
 }
 
 // lostRestoreFailed records a failed restore attempt: exponential backoff to
@@ -450,7 +490,7 @@ func (m *Manager) observedAliveSinceSpawnLocked(key string, inst *session.Instan
 // persists — never a permanent give-up (#1128: an outage is indistinguishable
 // from a broken worktree while it lasts; only a later retry can tell). One
 // ERROR at the escalation threshold makes a persistent cause visible.
-func (m *Manager) lostRestoreFailed(key string, st *lostRestoreState, title string, err error) {
+func (m *Manager) lostRestoreFailed(st *lostRestoreState, title string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st.consecutiveFailures++
@@ -489,19 +529,24 @@ func lostRestoreBackoff(attempt int) time.Duration {
 // per-session operation gate despite its historical name; treating the manual
 // restore's marker as kill intent would label a vanished worktree
 // "expected_teardown" in the diagnostic emitted for that very restore.
+//
+// `key` is the repo/title daemon key and is used ONLY to ask whether an exclusive
+// operation holds the slot; the episode itself is filed under the session's stable
+// identity, so a title reused by a later session starts from zero (#2868).
 func (m *Manager) recordLostRestoreFailure(key, repoID string, inst *session.Instance, restoreErr error, trigger lostRestoreTrigger) {
+	stateKey := stableSessionKey(repoID, inst)
 	m.mu.Lock()
-	st := m.lostRestoreStates[key]
+	st := m.lostRestoreStates[stateKey]
 	if st == nil {
 		st = &lostRestoreState{}
-		m.lostRestoreStates[key] = st
+		m.lostRestoreStates[stateKey] = st
 	}
 	_, operationInFlight := m.killsInFlight[key]
 	m.mu.Unlock()
 
 	teardownInFlight := operationInFlight && trigger != lostRestoreManual
 	m.logVanishedWorktreeOnce(repoID, st, inst, restoreErr, teardownInFlight)
-	m.lostRestoreFailed(key, st, inst.Title, restoreErr)
+	m.lostRestoreFailed(st, inst.Title, restoreErr)
 }
 
 func (m *Manager) logVanishedWorktreeOnce(repoID string, st *lostRestoreState, inst *session.Instance, restoreErr error, teardownInFlight bool) {

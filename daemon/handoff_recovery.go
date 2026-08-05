@@ -166,7 +166,7 @@ func (m *Manager) resumePendingHandoff(entry pendingHandoffEntry, mission string
 }
 
 func (m *Manager) pendingHandoffRetryAllowed(repoID string, instance *session.Instance) bool {
-	key := remoteLossKey(repoID, instance)
+	key := stableSessionKey(repoID, instance)
 	now := nowFunc()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -179,6 +179,6 @@ func (m *Manager) pendingHandoffRetryAllowed(repoID string, instance *session.In
 
 func (m *Manager) clearPendingHandoffRetry(repoID string, instance *session.Instance) {
 	m.mu.Lock()
-	delete(m.handoffRetryDue, remoteLossKey(repoID, instance))
+	delete(m.handoffRetryDue, stableSessionKey(repoID, instance))
 	m.mu.Unlock()
 }

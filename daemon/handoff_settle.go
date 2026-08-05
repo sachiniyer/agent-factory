@@ -33,7 +33,7 @@ func (m *Manager) persistHandoffSettlement(repoID, key string, instance *session
 	// persistAndPublishInstanceErr goes through startLockForRepo, which takes m.mu
 	// — the #2106 lock contract, so the bookkeeping below happens after it returns.
 	err := m.persistAndPublishInstanceErr(repoID, instance)
-	owedKey := remoteLossKey(repoID, instance)
+	owedKey := stableSessionKey(repoID, instance)
 	m.mu.Lock()
 	if err != nil {
 		m.handoffSettleOwed[owedKey] = pendingHandoffEntry{repoID: repoID, key: key, instance: instance}
@@ -67,7 +67,7 @@ func (m *Manager) flushHandoffSettlements() {
 		m.mu.Lock()
 		registered := m.instances[entry.key] == entry.instance
 		if !registered {
-			delete(m.handoffSettleOwed, remoteLossKey(entry.repoID, entry.instance))
+			delete(m.handoffSettleOwed, stableSessionKey(entry.repoID, entry.instance))
 		}
 		m.mu.Unlock()
 		// The row is gone (killed) or a successor took its key. Its record is being

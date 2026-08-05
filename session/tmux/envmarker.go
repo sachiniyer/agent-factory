@@ -53,6 +53,21 @@ func sessionEnvFlags(sanitizedName string) []string {
 	return flags
 }
 
+// SessionHomeMarker reads a tmux session's AF_HOME ownership marker with the
+// three-valued contract the answer actually has: (home, true, nil) when tmux
+// answered and the session carries one, ("", false, nil) when tmux answered and
+// it carries NONE, and a non-nil error when tmux did not answer at all — which
+// leaves ownership UNKNOWN and must never be read as "belongs to nobody".
+//
+// Exported for `af doctor` (#2874), which had grown its own one-line version
+// that collapsed the last two cases into "no marker". That is the difference
+// between "this session claims no home" and "I could not ask", and doctor spends
+// the answer on whether a temp home may be rm -rf'd. Two implementations of a
+// distinction this sharp is how the first one drifts; there is now one.
+func SessionHomeMarker(cmdExec cmd.Executor, sanitizedName string) (home string, present bool, err error) {
+	return sessionHomeMarker(cmdExec, sanitizedName)
+}
+
 // sessionHomeMarker reads the AF_HOME ancestry marker from a tmux session's
 // environment (stamped via `new-session -e` at creation). A false present value
 // means tmux answered and the session carries no marker — created by a pre-marker

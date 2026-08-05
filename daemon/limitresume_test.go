@@ -142,7 +142,7 @@ func TestResumeLimitedSessions_ArchivedClearsTimer(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
 	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "archived work", base.Add(time.Hour))
-	key := daemonInstanceKey(repoID, "limited")
+	key := stableSessionKey(repoID, inst)
 
 	// First pass (before due) creates the retry state.
 	manager.ResumeLimitedSessions()
@@ -196,8 +196,8 @@ func TestResumeLimitedSessions_NoResetTimeFallback(t *testing.T) {
 // surface-only — never auto-resumed no matter how much time passes.
 func TestResumeLimitedSessions_NoResetNoIntervalNeverResumes(t *testing.T) {
 	advance := withFrozenClock(t)
-	manager, repoID, _, backend := newAutoResumeManager(t, "", true, "orphan work", time.Time{}) // zero reset, no interval
-	key := daemonInstanceKey(repoID, "limited")
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "orphan work", time.Time{}) // zero reset, no interval
+	key := stableSessionKey(repoID, inst)
 
 	for i := 0; i < 5; i++ {
 		advance(24 * time.Hour)

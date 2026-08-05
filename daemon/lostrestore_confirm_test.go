@@ -22,7 +22,7 @@ import (
 // probe got an ANSWER out of the runtime. Tests drive it explicitly because that,
 // not elapsed time, is what confirms a restore (#1917 round 6).
 func observeAlive(m *Manager, repoID string, inst *session.Instance) {
-	m.noteAliveObservation(remoteLossKey(repoID, inst))
+	m.noteAliveObservation(stableSessionKey(repoID, inst))
 }
 
 // diesOnSpawnBackend models the reported agent: its Recover SUCCEEDS — the spawn
@@ -99,10 +99,10 @@ func TestRestoreLostSessions_SpawnSucceedsButRuntimeDies_BacksOff(t *testing.T) 
 func TestRestoreLostSessions_RepeatedImmediateExits_EscalateExponentially(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &diesOnSpawnBackend{FakeBackend: session.NewFakeBackend()}
-	registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
+	inst := registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
 	zeroRestoreBackoff(t) // every pass is due, so the loop is free to hot-loop if it can
 
-	key := daemonInstanceKey(repoID, "flapper")
+	key := stableSessionKey(repoID, inst)
 	// spawn, observe-death, spawn, observe-death, ...
 	for i := 0; i < 6; i++ {
 		manager.RestoreLostSessions()
@@ -137,7 +137,7 @@ func TestRestoreLostSessions_ConfirmedAliveClearsRetryState(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "healthy", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	key := daemonInstanceKey(repoID, "healthy")
+	key := stableSessionKey(repoID, inst)
 	manager.RestoreLostSessions() // recovers; arms the confirmation window
 
 	manager.mu.Lock()
@@ -189,10 +189,10 @@ func TestRestoreLostSessions_ConfirmedAliveClearsRetryState(t *testing.T) {
 func TestRestoreLostSessions_NeverObservedAlive_BacksOffRegardlessOfElapsedTime(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &diesOnSpawnBackend{FakeBackend: session.NewFakeBackend()}
-	registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
+	inst := registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	key := daemonInstanceKey(repoID, "flapper")
+	key := stableSessionKey(repoID, inst)
 	// Many passes, and NOT ONE observation — exactly what a poll interval longer
 	// than any window, or a remote inside its 60s grace, produces. No clock is
 	// advanced: the point is that time is irrelevant without an answer.
@@ -226,7 +226,7 @@ func TestRestoreLostSessions_ObservationConfirms_NotElapsedTime(t *testing.T) {
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "healthy", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
-	key := daemonInstanceKey(repoID, "healthy")
+	key := stableSessionKey(repoID, inst)
 
 	manager.RestoreLostSessions() // spawn; awaiting confirmation
 
@@ -282,7 +282,7 @@ func TestRefreshInstanceStatus_SnapshotNilErrorOnDeadSession_IsNotAnObservation(
 	backend := &deadPaneBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "corpse", backend, true, session.Running)
 
-	obsKey := remoteLossKey(repoID, inst)
+	obsKey := stableSessionKey(repoID, inst)
 	manager.refreshInstanceStatus(repoID, inst)
 
 	manager.mu.Lock()
@@ -309,7 +309,7 @@ func TestRefreshInstanceStatus_LiveSessionIsObserved(t *testing.T) {
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "busy", backend, true, session.Running)
 
-	obsKey := remoteLossKey(repoID, inst)
+	obsKey := stableSessionKey(repoID, inst)
 	manager.refreshInstanceStatus(repoID, inst)
 
 	manager.mu.Lock()
@@ -361,7 +361,7 @@ func TestRefreshInstanceStatus_WedgedProbe_IsNotAnObservation(t *testing.T) {
 	backend := &wedgedProbeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "wedged", backend, true, session.Running)
 
-	obsKey := remoteLossKey(repoID, inst)
+	obsKey := stableSessionKey(repoID, inst)
 	manager.refreshInstanceStatus(repoID, inst)
 
 	manager.mu.Lock()

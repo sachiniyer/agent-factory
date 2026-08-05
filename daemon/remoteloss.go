@@ -78,22 +78,53 @@ type remoteLossState struct {
 	firstFailureAt      time.Time
 }
 
-// remoteLossKey identifies the debounce entry for an instance.
+// stableSessionKey is the daemon's key for any state that describes ONE
+// session's runtime rather than one repo/title slot: the remote-loss debounce
+// below, aliveObservations, the Lost-restore retry episode, handoff retry/settle
+// bookkeeping, the paused task-run backstop.
 //
 // It keys on the STABLE INSTANCE ID (#1195), not the repo/title daemon key, so
 // failure state can never outlive the session that earned it. Titles are reused:
-// kill or archive a remote session and create another with the same title, and a
+// kill or archive a session and create another with the same title, and a
 // title-keyed entry would hand the NEW session the OLD one's accumulated
-// failures — one blip would then satisfy the threshold instantly and re-provision
-// a sandbox that had never failed a probe in its life. That is the
-// key-by-title-instead-of-identity class from #1723/#1678/#1738, and the ID is
-// exactly the field #1195 minted to tell "same session" from "title reused".
+// failures. For the debounce that means one blip satisfying the threshold
+// instantly and re-provisioning a sandbox that had never failed a probe in its
+// life; for the Lost-restore episode it means a brand-new session waiting
+// minutes for its first restore because a session the user already discarded
+// failed four times (#2868). That is the key-by-title-instead-of-identity class
+// from #1723/#1678/#1738, and the ID is exactly the field #1195 minted to tell
+// "same session" from "title reused".
+//
+// The ID is what makes a title reuse a DIFFERENT key while a re-provision of the
+// same session keeps the SAME one — which is the distinction every caller here
+// wants, and why the sites that replace a runtime under one identity must retire
+// their own state explicitly (see noteRuntimeReplaced).
+//
+// THE RULE, because this keeps being got wrong one map at a time (#1723, #1678,
+// #1738, #1794, #2868, #2876). Before adding any per-session map to Manager, ask
+// what the entry DESCRIBES:
+//
+//   - A RUNTIME — failures it accumulated, observations of it, work owed to it,
+//     a process it owns: key it here. A title is a slot that outlives its
+//     occupant, so a title-keyed entry is inherited by the next session to take
+//     that name, which is a bug every single time.
+//   - A SLOT — "an exclusive operation is running against this name", "this name
+//     is reserved", the lock that serializes ops on it: key it by
+//     daemonInstanceKey. Being shared with a successor is the entire point, and
+//     these are point-in-time within one operation anyway.
+//
+// If a map is genuinely slot-shaped but its VALUE describes a runtime, the third
+// option is to store the stable id alongside and compare before acting —
+// deferredTaskLifecycle and vscodeSupervisor.servers both do this deliberately,
+// and killRetries instead drops its entry at the very events that free the title.
+// What is never safe is a title key, a runtime-shaped value, and no guard.
 //
 // Legacy records persisted before #1195 carry no ID; they fall back to the
-// daemon key. No remote session can be one of those — the remote runtime landed
-// in #1592, long after — so the fallback only ever serves local sessions, which
-// never enter the debounce at all.
-func remoteLossKey(repoID string, instance *session.Instance) string {
+// daemon key. Nothing materializes an ID-less Instance — FromInstanceData
+// backfills one in memory for exactly this reason, and the daemon load path
+// backfills it durably — so the fallback is a belt-and-braces path, not a live
+// one.
+func stableSessionKey(repoID string, instance *session.Instance) string {
 	if instance.ID != "" {
 		return instance.ID
 	}
@@ -204,7 +235,7 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	// predecessor-owned facts together rather than making each caller remember a
 	// second reset site.
 	instance.ClearAgentModelChange()
-	m.clearRemoteLoss(remoteLossKey(repoID, instance))
+	m.clearRemoteLoss(stableSessionKey(repoID, instance))
 }
 
 // sweepRemoteLossStates drops debounce entries that no longer describe anything
@@ -237,7 +268,7 @@ func (m *Manager) sweepRemoteLossStates() {
 			continue // nothing to probe: its entry can never be cleared by an answer
 		}
 		repoID, _ := splitDaemonInstanceKey(key)
-		live[remoteLossKey(repoID, inst)] = struct{}{}
+		live[stableSessionKey(repoID, inst)] = struct{}{}
 	}
 	for key := range m.remoteLossStates {
 		if _, ok := live[key]; !ok {

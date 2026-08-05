@@ -584,6 +584,15 @@ async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number,
  * compatibility mouse events, so a tap held slightly unsteady would silently stop
  * reaching the application while a perfectly still one kept working.
  */
+/** Holds one finger still at a point for long enough to be a long press, then lifts
+ *  it. No touchmove at all: a press that wobbles past the threshold is a scroll, and
+ *  that boundary is asserted separately. */
+async function touchLongPress(cdp: CDPSession, x: number, y: number, holdMs = 700): Promise<void> {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  await new Promise((resolve) => setTimeout(resolve, holdMs));
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
 async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
   // Several small steps rather than one, because they are what a wobble really looks
@@ -2143,6 +2152,114 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     // The shell holding mouse mode dies with its tab, so nothing has to unwind the
     // mode itself — and the mouse-report bytes the tap left on its command line go
     // with it rather than into a later `type()`.
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+  }
+});
+
+test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTURE, async ({ browser }) => {
+  // The same phone-shaped, really-touch-emulated context as #2682 — and the same
+  // reason for it. Nothing here can be proved from a desktop window: what is being
+  // asserted is that a gesture with NO modifier key reaches the system clipboard.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  const inputPayloads: number[][] = [];
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+    await expect(p.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal", { timeout: 30_000 });
+    const host = await typeableShellTab(p);
+    const selection = host.locator(".xterm-selection > div");
+
+    // A token carrying the punctuation that makes a terminal word worth copying
+    // whole — a path, a dash, a dot — printed FIRST on its line, with a second word
+    // after it. Starting at column 0 means the press needs no cell arithmetic (the
+    // row's own left edge is that cell), and the trailing word is what makes the
+    // word-vs-line assertions below actually discriminate.
+    const TOKEN = "/srv/af-2849.log";
+    const TRAILER = "ready";
+    await p.keyboard.type(`printf '%s %s\\n' ${TOKEN} ${TRAILER}`);
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText(`${TOKEN} ${TRAILER}`, { timeout: 20_000 });
+
+    // The LAST row showing it is the printf output; the row above is the echoed
+    // command line, which would copy the same token from the wrong place.
+    const tokenRow = host.locator(".xterm-rows > div", { hasText: TOKEN }).last();
+    await expect(tokenRow).toBeVisible();
+    const rowBox = await tokenRow.boundingBox();
+    expect(rowBox, "the token's row must have geometry to press on").toBeTruthy();
+    const { x, y, width, height } = rowBox as ElementBox;
+    const pressY = y + height / 2;
+
+    await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
+    inputPayloads.length = 0;
+    await touchLongPress(cdp, x + 2, pressY);
+
+    // THE assertion: a finger, no keyboard, and the token is on the system clipboard.
+    await expect
+      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+        message: "a long press must put the token under the finger on the system clipboard",
+      })
+      .toContain(TOKEN);
+    // …the TOKEN, not its line. That is the difference between copying what the
+    // finger was on and copying everything near it.
+    expect(
+      await p.evaluate(() => navigator.clipboard.readText()),
+      "the press copies the token under the finger, not the whole line",
+    ).not.toContain(TRAILER);
+    // The selection xterm paints is the only feedback this gesture has, so it must
+    // survive the press rather than being cleared by the click that follows it.
+    await expect(selection, "the copied token must stay visibly selected").not.toHaveCount(0);
+    expect(inputPayloads, "a long press is not input — nothing may reach the PTY").toHaveLength(0);
+
+    // A press on blank space past the end of a line falls back to the line itself,
+    // which is how a whole command or error message gets copied.
+    await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
+    await touchLongPress(cdp, x + width - 2, pressY);
+    await expect
+      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+        message: "a press past the end of a line must copy the line",
+      })
+      .toContain(TRAILER);
+
+    // …and the gesture that is NOT a press still is not one. A drag from the same
+    // spot scrolls (#2682) and copies nothing, so the two cannot be confused.
+    await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
+    const screenBox = await host.locator(".xterm-screen").boundingBox();
+    const box = screenBox as ElementBox;
+    await touchDrag(cdp, box.x + box.width / 2, box.y + box.height * 0.3, box.y + box.height * 0.8);
+    expect(
+      await p.evaluate(() => navigator.clipboard.readText()),
+      "a drag is a scroll, not a copy — it must leave the clipboard alone",
+    ).toContain("untouched");
+  } finally {
     try {
       await resetToAgentTab(p);
     } finally {

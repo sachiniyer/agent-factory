@@ -966,7 +966,7 @@ func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 
 	h := hookState{dir: dir, launch: filepath.Join(dir, "launch.sh"), delete: filepath.Join(dir, "delete.sh")}
 	writeHookScript(t, h.launch, fmt.Sprintf(`
-( for i in $(seq 1 100); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
+( for i in $(seq 1 400); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, shellsuggest.Arg(hb)))
@@ -989,16 +989,23 @@ exit 0
 	_, err := p.provisionOrReap()
 	require.NoError(t, err)
 
-	// Let the script itself exit so what follows measures only the BACKGROUNDED
-	// child, then require the heartbeat to keep advancing. Asserting SUSTAINED
-	// ticking — several distinct advances at this later checkpoint, not a single
-	// early write — is deliberate: a capture-path kill lands at or just after Run()
-	// returns and freezes the mtime, so a first-advance-wins probe could observe one
-	// stale write and miss the regression. A brief scheduling stall is tolerated by
-	// the generous deadline; a killed child can never reach the required count.
-	time.Sleep(250 * time.Millisecond)
-	_, err = os.Stat(hb)
-	require.NoError(t, err, "the backgrounded child never ran")
+	// provisionOrReap has returned, so launch_cmd itself is already gone and what
+	// follows measures only the BACKGROUNDED child. Wait for its first heartbeat
+	// on the CONDITION rather than on a fixed nap: that write is gated on a
+	// process spawn, which has no upper bound on a loaded box, and a nap long
+	// enough on an idle one turns a busy machine into a failed assertion (#2879).
+	// The ceiling here is a failure deadline, not an expectation.
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(hb)
+		return statErr == nil
+	}, 30*time.Second, 10*time.Millisecond, "the backgrounded child never ran")
+
+	// Then require the heartbeat to keep advancing. Asserting SUSTAINED ticking —
+	// several distinct advances at this later checkpoint, not a single early write
+	// — is deliberate: a capture-path kill lands at or just after Run() returns and
+	// freezes the mtime, so a first-advance-wins probe could observe one stale
+	// write and miss the regression. A brief scheduling stall is tolerated by the
+	// generous deadline; a killed child can never reach the required count.
 
 	const wantAdvances = 3
 	var last time.Time

@@ -1,11 +1,9 @@
 package doctor
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -16,7 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
-	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -55,33 +52,6 @@ const (
 	runawayCPUFraction = 0.8
 	runawayMinAge      = 30 * time.Minute
 )
-
-// listTmuxSessions returns every session name on the current tmux server.
-//
-// It collapses EVERY failure into an empty list, which is wrong and is tracked
-// as #2874: `tmux ls` exits 1 both for "there is no server" and for "I could not
-// reach the server", so an unreachable socket reads here as "no sessions are
-// live" — and checkOrphanedProcesses turns that into an armed `kill pid N` for
-// every live session's processes. Do not build anything new on this list until
-// it is three-valued.
-//
-// The comment this replaces cited CleanupSessions as the model. That stopped
-// being true in #2870, which made the reset-side listing distinguish tmux's
-// definitive no-server diagnostics from an unreadable one and fail closed;
-// session/tmux has the classifier this needs.
-func listTmuxSessions(ctx *scanContext) []string {
-	out, err := ctx.opts.Exec.Output(exec.Command("tmux", "ls", "-F", "#{session_name}"))
-	if err != nil {
-		return nil
-	}
-	var names []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			names = append(names, line)
-		}
-	}
-	return names
-}
 
 // describeProc renders "pid 123 (yes, 99% CPU over 15d2h): yes" for findings.
 func describeProc(p proctree.Process) string {
@@ -317,8 +287,17 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 	if ctx.snap == nil {
 		return
 	}
+	// A name missing from `live` is what arms the kill below, so an
+	// unavailable listing cannot be allowed to empty this map: every live
+	// session would read as dead and every one of its processes as a verified
+	// orphan. Silent for the same reason as the branch above — checkTmuxInspection
+	// already reported the blindness as a FAIL (#2874).
+	names, listErr := ctx.tmuxSessions()
+	if listErr != nil {
+		return
+	}
 	live := map[string]bool{}
-	for _, name := range listTmuxSessions(ctx) {
+	for _, name := range names {
 		live[name] = true
 	}
 
@@ -518,141 +497,6 @@ func tmuxServerDead(ctx *scanContext, tmuxEnv string) bool {
 	return true
 }
 
-// checkRunawayChildren reports (never kills) descendants of live af_
-// sessions that have averaged a pegged core for an extended period.
-func checkRunawayChildren(ctx *scanContext, report *Report) {
-	// See checkOrphanedProcesses: blindness is reported once, by
-	// checkProcessInspection, rather than swallowed here.
-	if ctx.snap == nil {
-		return
-	}
-	unmeasurable := 0
-	for _, name := range listTmuxSessions(ctx) {
-		if !strings.HasPrefix(name, tmux.TmuxPrefix) {
-			continue
-		}
-		procs := tmux.SessionProcessTrees(ctx.opts.Exec, name)
-		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
-		for _, p := range procs {
-			if ctx.selfAncestors[p.PID] {
-				continue
-			}
-			frac, age, err := proctree.CPUFraction(p)
-			if errors.Is(err, proctree.ErrCPUUnknown) {
-				// Counted, not swallowed. A check that cannot answer must say
-				// so: silently skipping every process would render "no runaway
-				// processes" — the exact shape of the report this package
-				// exists to stop printing. Reported once below rather than per
-				// process, since the cause is usually systemic (a subset=pid
-				// procfs hides /proc/uptime, so NO process has an age).
-				unmeasurable++
-				continue
-			}
-			if err != nil || frac < runawayCPUFraction || age < runawayMinAge.Seconds() {
-				continue
-			}
-			report.addAdvisoryFinding(Finding{
-				Check: "runaway-cpu",
-				Detail: fmt.Sprintf("%s in live session %s has averaged a pegged core — "+
-					"check the session; doctor never kills children of live sessions", describeProc(p), name),
-			})
-		}
-	}
-	if unmeasurable > 0 {
-		report.Warn(sectionProcesses, "runaway-cpu",
-			fmt.Sprintf("could not measure CPU for %s in live sessions, so this check reports nothing "+
-				"about them", plural(unmeasurable, "process", "processes")),
-			"a process pegging a core would not be spotted here; inspect the sessions yourself", false)
-	}
-}
-
-// checkLeakedTmuxSessions reports af_ tmux sessions with no backing record
-// in this home's storage. Report-only even under --fix: a session with no
-// record here may be owned by another agent-factory home on the same tmux
-// server, and killing someone else's live session is worse than a leak.
-func checkLeakedTmuxSessions(ctx *scanContext, report *Report) {
-	recorded := recordedTmuxNames(ctx.opts.ConfigDir)
-	var leaked []string
-	for _, name := range listTmuxSessions(ctx) {
-		if strings.HasPrefix(name, tmux.TmuxPrefix) && !recorded[name] {
-			leaked = append(leaked, name)
-		}
-	}
-	sort.Strings(leaked)
-	for _, name := range leaked {
-		origin := "no ancestry marker"
-		ownedByActiveHome := false
-		if home, ok := tmuxSessionHomeMarker(ctx, name); ok && home != "" {
-			if filepath.Clean(home) == filepath.Clean(ctx.opts.ConfigDir) {
-				origin = "created by this install"
-				ownedByActiveHome = true
-			} else {
-				origin = "created by another agent-factory home: " + home
-			}
-		}
-		finding := Finding{
-			Check: "leaked-tmux-session",
-			Detail: fmt.Sprintf("tmux session %s has no backing record in %s (%s); "+
-				"kill it with: %s", name, ctx.opts.ConfigDir, origin,
-				// "=name:" is tmux's exact-match target syntax — one argument, so
-				// it is one piece the seam quotes as a whole.
-				shellsuggest.Command("tmux", "kill-session", "-t", "="+name+":")),
-		}
-		if ownedByActiveHome {
-			// This install's marker plus no record is a proven leak with an
-			// exact manual remedy. --fix support is not required for a row to
-			// be actionable.
-			report.addActionableFinding(finding)
-		} else {
-			// A shared tmux server can expose another install's healthy session,
-			// and a pre-marker session has unknown ownership.
-			report.addAdvisoryFinding(finding)
-		}
-	}
-}
-
-// recordedTmuxNames loads every persisted tmux session name (agent + tabs)
-// from this home's storage, read-only. Legacy records without an explicit
-// TmuxName fall back to the derived repo-scoped name.
-func recordedTmuxNames(configDir string) map[string]bool {
-	names := map[string]bool{}
-	// Doctor may be pointed at a ConfigDir other than the ambient one only
-	// in tests, which also set AGENT_FACTORY_HOME — LoadAllRepoInstances
-	// always reads the ambient home.
-	all, err := config.LoadAllRepoInstances()
-	if err != nil {
-		return names
-	}
-	type tabRec struct {
-		TmuxName string `json:"tmux_name"`
-	}
-	type instRec struct {
-		Title    string   `json:"title"`
-		Path     string   `json:"path"`
-		TmuxName string   `json:"tmux_name"`
-		Tabs     []tabRec `json:"tabs"`
-	}
-	for _, raw := range all {
-		var instances []instRec
-		if err := json.Unmarshal(raw, &instances); err != nil {
-			continue
-		}
-		for _, inst := range instances {
-			if inst.TmuxName != "" {
-				names[inst.TmuxName] = true
-			} else if inst.Title != "" {
-				names[tmux.NewTmuxSessionForRepo(inst.Title, inst.Path, "").SanitizedName()] = true
-			}
-			for _, tab := range inst.Tabs {
-				if tab.TmuxName != "" {
-					names[tab.TmuxName] = true
-				}
-			}
-		}
-	}
-	return names
-}
-
 // afHomeMarkers are the files/dirs whose presence identifies a directory as
 // an agent-factory home. Two or more must match before doctor will even
 // report a directory, let alone remove it.
@@ -670,7 +514,28 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 	tempDir := filepath.Clean(ctx.opts.TempDir)
 	activeHome := filepath.Clean(ctx.opts.ConfigDir)
 	processHomes := processReferencedHomes(ctx.snap)
-	tmuxHomes := liveTmuxHomes(ctx)
+	// An unavailable tmux claim set is not an empty one. A temp home with live
+	// tmux sessions and a dead daemon holds no lock, so this set is the only
+	// thing that can spare it — derived from a read that failed, it would spare
+	// nothing and the rm -rf would go ahead (#2874). Detection stops here; the
+	// blindness is already a FAIL row from checkTmuxInspection (or, for an
+	// unreadable ownership marker, reported below).
+	tmuxHomes, tmuxHomesErr := liveTmuxHomes(ctx)
+	if tmuxHomesErr != nil {
+		// Advisory, not FAIL: an unreadable session LIST is already a FAIL row
+		// from checkTmuxInspection, and the narrower case left here — one live
+		// session that would not answer, often one that vanished mid-scan — is
+		// an ordinary unknown, not a broken machine. Either way nothing is
+		// assessed and nothing is removed, which is the part that matters.
+		report.addAdvisoryFinding(Finding{
+			Check: "stale-temp-home",
+			Detail: fmt.Sprintf("no temp home could be assessed: cannot establish which AF homes live tmux "+
+				"sessions claim (%v), and a home a live session claims must never be removed", tmuxHomesErr),
+			Severity:    StatusWarn,
+			Remediation: "re-run `af doctor` once every live session answers, or inspect the temp dir yourself",
+		})
+		return
+	}
 
 	for _, dir := range candidateTempHomes(tempDir) {
 		dir = filepath.Clean(dir)
@@ -820,28 +685,6 @@ func processReferencedHomes(snap map[int]proctree.Process) map[string]bool {
 	return homes
 }
 
-func liveTmuxHomes(ctx *scanContext) map[string]bool {
-	homes := map[string]bool{}
-	for _, name := range listTmuxSessions(ctx) {
-		if !strings.HasPrefix(name, tmux.TmuxPrefix) {
-			continue
-		}
-		if home, ok := tmuxSessionHomeMarker(ctx, name); ok && home != "" {
-			homes[filepath.Clean(home)] = true
-		}
-	}
-	return homes
-}
-
-func tmuxSessionHomeMarker(ctx *scanContext, name string) (string, bool) {
-	out, err := ctx.opts.Exec.Output(exec.Command("tmux", "show-environment", "-t",
-		fmt.Sprintf("=%s:", name), tmux.EnvMarkerHome))
-	if err != nil {
-		return "", false
-	}
-	return strings.CutPrefix(strings.TrimSpace(string(out)), tmux.EnvMarkerHome+"=")
-}
-
 // staleTempHomeRemoveFix rm -rf's an abandoned temp home — the teeth #1969 took
 // out, restored on a predicate the kernel guarantees rather than an inference we
 // assemble (#1989).
@@ -876,8 +719,17 @@ func staleTempHomeRemoveFix(ctx *scanContext, dir, tempDir, activeHome string) f
 		}
 		// A live tmux session naming the home is the second, sound signal the
 		// lock cannot see (a home with live tmux sessions but a dead daemon holds
-		// no lock). Re-check it fresh.
-		if liveTmuxHomes(ctx)[dir] {
+		// no lock). Re-check it fresh — and refuse if the recheck cannot be
+		// PERFORMED, because a guard that cannot run has not passed.
+		//
+		// Fresh: ctx.tmuxSessions memoizes the listing for the run, so a listing
+		// that succeeded at detection is reused here rather than re-shelled. The
+		// marker lookups behind it are not memoized and do re-run.
+		claimed, err := liveTmuxHomes(ctx)
+		if err != nil {
+			return fmt.Errorf("refusing to remove %s: cannot check whether a live tmux session references it: %w", dir, err)
+		}
+		if claimed[dir] {
 			return fmt.Errorf("refusing to remove %s: a live tmux session now references it", dir)
 		}
 		// The authoritative gate: delete ONLY on a proven "no live daemon owns

@@ -145,6 +145,38 @@ func missingTmuxSession(err error, name string) bool {
 	return diagnostic == "can't find session: "+name || noTmuxServerDiagnostic(diagnostic)
 }
 
+// NoServerRunning reports whether a failed tmux command's error is tmux's
+// DEFINITIVE "there is no server on this socket" answer, and therefore a
+// determinate EMPTY rather than a read that did not happen.
+//
+// The invariant, stated here rather than delegated to a "mirrors X" comment
+// somewhere else: A FAILED READ IS NOT AN EMPTY RESULT. Anything that turns a
+// tmux error into "there are no sessions" has to come through this function or
+// it is guessing — and both callers so far reached that guess on a path that
+// then destroys something (#2870 deletes worktrees, #2874 kills processes).
+//
+// Exported for `af doctor`, which shells out to tmux itself rather than through
+// this package. A second implementation is exactly how the first one spread.
+func NoServerRunning(err error) bool {
+	diagnostic, exitOne := tmuxExitOneDiagnostic(err)
+	return exitOne && noTmuxServerDiagnostic(diagnostic)
+}
+
+// CommandDiagnostic returns what tmux wrote to stderr for a failed command,
+// whitespace-collapsed onto one line, or "" when there is nothing to report.
+//
+// It exists because an (*exec.ExitError).Error() is only "exit status N": tmux's
+// actual reason — the socket it could not reach and why — lives in Stderr, and
+// an error that omits it tells the user of a refused operation nothing about
+// what to fix.
+func CommandDiagnostic(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return ""
+	}
+	return strings.Join(strings.Fields(string(exitErr.Stderr)), " ")
+}
+
 // tmuxExitOneDiagnostic returns the trimmed stderr of a tmux command that
 // exited with status 1, and whether it did. Only status 1 qualifies: tmux
 // reports both "the thing you asked about is absent" and "I could not reach the
@@ -194,19 +226,10 @@ func noTmuxServerDiagnostic(diagnostic string) bool {
 	return absent && strings.TrimSpace(socket) != ""
 }
 
-// tmuxDiagnosticSuffix renders tmux's stderr as a parenthesized clause for an
-// error message, or "" when there is nothing to render.
-//
-// It exists because an (*exec.ExitError).Error() is only "exit status N": tmux's
-// actual reason — the socket it could not reach and why — lives in Stderr, and
-// an error that omits it tells the user of a REFUSED reset nothing about what to
-// fix. Whitespace is collapsed so a multi-line diagnostic stays one line.
+// tmuxDiagnosticSuffix renders CommandDiagnostic as a parenthesized clause for
+// an error message, or "" when there is nothing to render.
 func tmuxDiagnosticSuffix(err error) string {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return ""
-	}
-	diagnostic := strings.Join(strings.Fields(string(exitErr.Stderr)), " ")
+	diagnostic := CommandDiagnostic(err)
 	if diagnostic == "" {
 		return ""
 	}
@@ -275,7 +298,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// success for a reset that swept nothing.
 			return fmt.Errorf("%w: tmux ls after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		if diagnostic, exitOne := tmuxExitOneDiagnostic(err); exitOne && noTmuxServerDiagnostic(diagnostic) {
+		if NoServerRunning(err) {
 			return nil // tmux answered: no server on this socket, so no sessions
 		}
 		// Name what was unreadable AND what was therefore not done. tmux writes
