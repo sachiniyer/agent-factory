@@ -1524,15 +1524,21 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await p.keyboard.down("Shift");
     await p.mouse.wheel(0, -900);
     await p.keyboard.up("Shift");
-    // Here the viewport is deliberately NOT at the bottom (the plain wheel above
-    // scrolled it up), so the bottom-distance form does not apply. The property af
-    // could break is "the modifier wheel introduced a scroll path", and any such
-    // scroll moves us UP — i.e. scrollTop DOWN. Assert that direction rather than
-    // exact equality, which also trips on unrelated buffer growth (#2816).
+    // Exact equality is KEPT here, unlike the two bottom-pinned assertions in this
+    // test, because the race that forced those does not exist at this point and a
+    // one-sided bound would stop covering a real bug. Nothing writes to the PTY in
+    // this window — the X10 plain wheel above sends zero bytes, as the assertion two
+    // lines up requires, and nothing is typed — so the buffer cannot grow underneath
+    // it. xterm holds ydisp steady while scrolled up short of scrollback eviction
+    // (80 lines against a 1000-line default), so scrollTop is stable.
+    //
+    // Relaxing this to "did not scroll further up" would have let an INVERTED delta
+    // through: a handler that acted on the wheel with the wrong sign scrolls DOWN,
+    // and a one-sided bound calls that a pass.
     expect(
       await viewport.evaluate((el) => el.scrollTop),
-      "X10 modifier wheel keeps xterm behavior: it must not scroll further into history",
-    ).toBeGreaterThanOrEqual(x10Scrolled);
+      "X10 modifier wheel keeps xterm behavior: the viewport must not move at all",
+    ).toBe(x10Scrolled);
     const mouseHint = host.locator(".af-mouse-capture-hint");
     await expect(mouseHint, "X10 wheel never advertises an unnecessary escape").not.toHaveClass(/af-visible/);
     await p.keyboard.type("printf '\\033[?9l'");
