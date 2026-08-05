@@ -149,3 +149,104 @@ func TestReserveCreate_RefusesWhenAProjectDeleteCompletedDuringResolution(t *tes
 	require.ErrorContains(t, got.err, "while this session create resolved its backend")
 	require.Nil(t, got.release, "a refused create must not hand back a reservation to release")
 }
+
+// TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample is the
+// INVERSE ordering, and the delete generation alone does not catch it.
+//
+// The generation answers "did a delete BEGIN after my sample". A delete that was
+// ALREADY running when the create sampled bumped the counter before that sample
+// and removes its fence before the re-check — so both readings match, the fence
+// reads clear, and the create is admitted even though the delete ran to
+// completion across the entire unlocked region. Reported on the #2937 review with
+// a working repro; this is that repro.
+//
+// The delete is parked inside deregisterRootAgents, which runs after the fence is
+// installed, so a create that starts while it is parked necessarily samples with
+// the fence up — which is the state the test needs and cannot otherwise pin down.
+func TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	inDelete := make(chan struct{})
+	releaseDelete := make(chan struct{})
+	prevDeregister := deregisterRootAgents
+	deregisterRootAgents = func(id string) ([]string, error) {
+		close(inDelete)
+		<-releaseDelete
+		return prevDeregister(id)
+	}
+	t.Cleanup(func() { deregisterRootAgents = prevDeregister })
+
+	deleted := make(chan error, 1)
+	go func() {
+		_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+		deleted <- err
+	}()
+	select {
+	case <-inDelete:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the delete never reached its root-agent deregistration")
+	}
+	// The fence is up and the generation is already bumped. Anything the create
+	// samples from here carries the delete's post-bump value.
+	manager.mu.Lock()
+	_, fenceUp := manager.projectDeletes[repoID]
+	manager.mu.Unlock()
+	require.True(t, fenceUp, "precondition: the delete must hold its fence while parked")
+
+	inResolver := make(chan struct{})
+	releaseResolver := make(chan struct{})
+	prevResolver := backendKindForCreate
+	backendKindForCreate = func(opts session.InstanceOptions, root string) (session.BackendKind, error) {
+		close(inResolver)
+		<-releaseResolver
+		return prevResolver(opts, root)
+	}
+	t.Cleanup(func() { backendKindForCreate = prevResolver })
+
+	type createResult struct {
+		release func()
+		err     error
+	}
+	results := make(chan createResult, 1)
+	go func() {
+		_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+			RepoPath: repoPath, TitleBase: "sampled-mid-delete", Program: "claude",
+		})
+		results <- createResult{release: release, err: err}
+	}()
+	// Reaching the resolver is what proves the sample already happened, and it
+	// happened while the fence above was up.
+	select {
+	case <-inResolver:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the create never reached backend resolution")
+	}
+
+	// Now let the delete finish and drop its fence, so the create's re-check sees
+	// a clear field and an unchanged generation.
+	close(releaseDelete)
+	select {
+	case err := <-deleted:
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the delete never completed")
+	}
+	manager.mu.Lock()
+	_, fenceStillUp := manager.projectDeletes[repoID]
+	manager.mu.Unlock()
+	require.False(t, fenceStillUp, "precondition: the fence must be down before the create resumes")
+
+	close(releaseResolver)
+	var got createResult
+	select {
+	case got = <-results:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the create never finished after the resolver was released")
+	}
+	if got.release != nil {
+		got.release()
+	}
+	require.Error(t, got.err, "a create that sampled DURING an active delete must be refused, not admitted once that delete finishes")
+	require.ErrorContains(t, got.err, "while this session create resolved its backend")
+	require.Nil(t, got.release, "a refused create must not hand back a reservation to release")
+}

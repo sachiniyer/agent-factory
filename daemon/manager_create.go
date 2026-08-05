@@ -265,13 +265,19 @@ func (m *Manager) projectDeleteGenLocked(repoID string) uint64 {
 	return m.projectDeleteGen[repoID]
 }
 
-// projectDeleteGenFor is the same read for a caller that does NOT hold m.mu; it
-// takes the lock itself. Both spellings exist because reserveCreate needs the
-// value on each side of a region it deliberately runs unlocked.
-func (m *Manager) projectDeleteGenFor(repoID string) uint64 {
+// projectDeleteStateFor samples BOTH halves of the repo's delete state for a
+// caller that does not hold m.mu; it takes the lock itself.
+//
+// The two must be read together, in one acquisition. The generation alone
+// answers "did a delete BEGIN after this point" — it cannot answer "was a delete
+// already running AT this point", because such a delete bumped the counter
+// before the sample and removes its fence before the re-check, leaving both
+// readings identical while the delete ran to completion across the entire gap.
+func (m *Manager) projectDeleteStateFor(repoID string) (active bool, generation uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.projectDeleteGenLocked(repoID)
+	_, active = m.projectDeletes[repoID]
+	return active, m.projectDeleteGenLocked(repoID)
 }
 
 func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
@@ -302,13 +308,28 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// damage to the one create that asked. The sibling git call this function makes
 	// under the lock (branch holds) is already bounded with its own deadline (#856);
 	// this was the path that was not.
-	// Sample the repo's delete generation first. The resolvers below run outside
-	// m.mu, which leaves room for a DeleteProject to install its fence, complete,
-	// and remove the fence entirely within this gap — so the post-lock fence check
-	// alone would see a clear field and admit a create into a project the user just
-	// deleted. Comparing the generation across the gap turns that invisible
-	// completed delete back into the same refusal the fence gives.
-	deleteGen := m.projectDeleteGenFor(repo.ID)
+	// Sample the repo's delete state first. The resolvers below run outside m.mu,
+	// which leaves room for a DeleteProject to install its fence, complete, and
+	// remove the fence entirely within this gap — so the post-lock fence check
+	// alone would see a clear field and admit a create into a project the user
+	// just deleted.
+	//
+	// Sampled state plus the post-lock check cover EVERY delete that overlaps the
+	// unlocked region, and it takes both halves to do it. Writing the delete's
+	// fence interval as [install, remove] and this region as [sample, check]:
+	//
+	//   - install before sample, remove after sample -> deleteActive here
+	//   - install within the region                  -> the generation moved
+	//   - remove after check                         -> the fence is still up
+	//   - install after check                        -> the create has reserved by
+	//     then, so DeleteProject's own fail-closed preflight refuses instead
+	//
+	// The first case is why the fence is sampled and not just the counter: such a
+	// delete bumped the generation BEFORE the sample and drops its fence BEFORE
+	// the check, so both readings match while it ran across the whole gap (#2937
+	// review). A delete that finished entirely before the sample is not an overlap
+	// at all — that is an ordinary create after a completed delete.
+	deleteActive, deleteGen := m.projectDeleteStateFor(repo.ID)
 
 	runtimeKind := session.BackendLocal
 	if req.ForceRemote {
@@ -335,10 +356,11 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, deleting := m.projectDeletes[repo.ID]
-	// Either arm is the same refusal: a delete owns this project's state and this
-	// create has reserved nothing. The generation arm catches the delete that
-	// already finished, which the fence by construction cannot report.
-	if deleting || m.projectDeleteGenLocked(repo.ID) != deleteGen {
+	// Every arm is the same refusal: a delete owns this project's state and this
+	// create has reserved nothing. The two sampled arms catch the deletes the
+	// fence cannot report here — one that finished during the gap, and one that
+	// was already running when the gap opened.
+	if deleting || deleteActive || m.projectDeleteGenLocked(repo.ID) != deleteGen {
 		err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repo.ID)
 		if !deleting {
 			err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repo.ID)
