@@ -1318,14 +1318,30 @@ func TestMoveWorktree_ArchiveRestoreRoundTripPreservesModes(t *testing.T) {
 	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\ntrue\n"), 0600))
 	require.NoError(t, os.Chmod(hook, 0755))
 	require.NoError(t, os.Chmod(filepath.Join(srcPath, "dirty.txt"), 0664))
+	// A group-readable directory and a read-only one, so this covers both the
+	// mode the umask would have eaten (#2869) and the mode the copier could not
+	// write into (#2872) through the same round trip.
+	shared := filepath.Join(srcPath, "shared")
+	require.NoError(t, os.Mkdir(shared, 0700))
+	require.NoError(t, os.Chmod(shared, 0750))
+	vendored := filepath.Join(srcPath, "vendored")
+	require.NoError(t, os.Mkdir(vendored, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(vendored, "pinned.txt"), []byte("pinned"), 0444))
+	t.Cleanup(func() { chmodTreeWritable(t, filepath.Dir(srcPath)) })
+	require.NoError(t, os.Chmod(vendored, 0555))
 	beforeArchive := collectTreeDescription(t, srcPath)
 
+	// Each CanonicalTempDir call makes its own t.TempDir, and a faithfully
+	// preserved 0555 directory defeats that TempDir's RemoveAll. Registering
+	// after each one puts these ahead of it in the LIFO cleanup order.
 	archived := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	t.Cleanup(func() { chmodTreeWritable(t, archived) })
 	require.NoError(t, gw.MoveWorktree(archived))
 	assert.Equal(t, beforeArchive, collectTreeDescription(t, archived),
 		"the archived copy must be mode-identical to the worktree it took")
 
 	restored := filepath.Join(testguard.CanonicalTempDir(t), "restored", "arch")
+	t.Cleanup(func() { chmodTreeWritable(t, restored) })
 	require.NoError(t, gw.RestoreWorktreeTo(restored))
 	assert.Equal(t, beforeArchive, collectTreeDescription(t, restored),
 		"a restored session must come back with the modes it had, executable hooks included")
