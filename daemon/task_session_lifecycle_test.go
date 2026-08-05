@@ -172,7 +172,6 @@ func TestRunEndedIntoIdle(t *testing.T) {
 	// one, which is the shape an uncertain create leaves behind.
 	inst.SetStatusForTest(session.Loading)
 	assert.False(t, runEndedIntoIdle(inst, true), "only a session that settled idle may be reaped")
-	_ = repoID
 }
 
 // TestTaskSessionLifecycle_UnreadableTaskStoreKeepsTheSession: a lookup that
