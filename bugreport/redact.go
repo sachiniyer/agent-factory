@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/sachiniyer/agent-factory/internal/credscrub"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -21,52 +22,10 @@ import (
 // `secretMarker` replaces a substring a best-effort pattern flagged as a
 // credential inside otherwise-kept text (log lines, config values).
 const (
-	redactedMarker = "[redacted]"
-	secretMarker   = "[redacted-secret]"
+	redactedMarker = credscrub.RedactedMarker
+	secretMarker   = credscrub.SecretMarker
 	userMarker     = "[user]"
 )
-
-// secretPatterns are targeted, high-confidence credential shapes scrubbed
-// wherever they appear (log tail, config, instance/task text). They are
-// deliberately specific — a broad "any long hex string" rule would also nuke
-// the git SHAs and IDs a triager needs, so those are left intact. Best-effort
-// by construction; the bundle always warns the user to review before sharing.
-var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`),                                     // OpenAI / Anthropic-style keys (incl. sk-ant-…)
-	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`),                                // GitHub PAT / OAuth / server / refresh tokens
-	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),                              // GitHub fine-grained PAT
-	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),                              // Slack tokens
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                          // AWS access key id
-	regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`),                                     // Google API key
-	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+`), // JWT (header.payload.signature)
-}
-
-// keyValueSecret matches a `<credential-key> = <value>` / `<key>: <value>`
-// assignment and redacts only the value, preserving the key so triage can see
-// *that* a credential is configured without leaking it. The key half tolerates
-// a prefix (github_token, x-api-key, client_secret) and optional quotes. The
-// value half recognizes TOML/JSON-style double-quoted strings, TOML literal
-// single-quoted strings, and bare token-like values.
-//
-// THE BARE CLASS MUST NOT EXCLUDE `]`. It used to, which meant a bare value
-// stopped BEFORE a `]` instead of at a real terminator — so the captured text
-// was not the value, only a prefix of it. Everything downstream inherited that
-// lie: `api_key=[redacted-secret]actualcredential` captured just
-// `[redacted-secret`, which looks exactly like a marker this redactor wrote, and
-// the credential rode out untouched behind it. The bug was never in the
-// comparison, so no guard on top of the capture could fix it.
-//
-// The value now ends only at a genuine terminator — whitespace, a quote, `,`,
-// `}`, or end of text — so what the regex hands back IS the whole bare value,
-// and comparing it to a marker is a real comparison. Values carrying structural
-// characters are covered by the quoted alternatives, which consume their own
-// delimiters. Dropping `]` also errs toward MORE redaction (a `]` adjacent to a
-// bare value is absorbed rather than left behind), which is the safe direction.
-var keyValueSecret = regexp.MustCompile(
-	`(?i)(["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
-
-// privateKeyBlock matches a PEM private-key block in its entirety.
-var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 
 // afTmuxSessionName matches a repo-scoped af tmux session name
 // (af_<8 hex>_<title>, incl. any __tab / _paste suffix). The <title> segment is
@@ -163,11 +122,7 @@ func addUserVariant(users []string, name string) []string {
 // field-redacted content, so it is defense-in-depth, not the only line of
 // defense.
 func (r *redactor) scrub(s string) string {
-	s = privateKeyBlock.ReplaceAllString(s, secretMarker)
-	s = keyValueSecret.ReplaceAllStringFunc(s, redactKeyValueSecret)
-	for _, re := range secretPatterns {
-		s = re.ReplaceAllString(s, secretMarker)
-	}
+	s = credscrub.Scrub(s)
 	if r.home != "" && r.home != "/" {
 		s = strings.ReplaceAll(s, r.home, "~")
 	}
@@ -467,75 +422,6 @@ func (r *redactor) noteUnknownJSON(v any) {
 			r.noteUnknownJSON(e)
 		}
 	}
-}
-
-func redactKeyValueSecret(match string) string {
-	idx := keyValueSecret.FindStringSubmatchIndex(match)
-	if len(idx) < 4 || idx[2] < 0 {
-		return secretMarker
-	}
-	prefix := match[idx[2]:idx[3]]
-	value := match[idx[3]:]
-	// A value an earlier pass already redacted must survive untouched. scrub is
-	// applied more than once to the same text by design — per section, again over
-	// the assembled text/JSON, and again on each component the issue draft inlines
-	// — so it has to be idempotent. It was not: re-scrubbing a marker re-wrapped
-	// it and grew a bracket per pass, and a real bundle shipped 28
-	// `[redacted-secret]]`.
-	//
-	// This skip is only safe because `value` is the COMPLETE value; see
-	// redactionMarkerValues for why, and keyValueSecret for the boundary that
-	// makes it true.
-	if isRedactionMarker(value) {
-		return match
-	}
-	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-		return prefix + `"` + secretMarker + `"`
-	}
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		return prefix + `'` + secretMarker + `'`
-	}
-	return prefix + secretMarker
-}
-
-// redactionMarkerValues are the EXACT, COMPLETE value forms this redactor emits,
-// and nothing else. isRedactionMarker is a fast-path AROUND the scrub, and a
-// fast-path around a redactor is sound only if it recognizes precisely what that
-// redactor produces — anything looser is a way for a real credential to reach a
-// public bundle unscrubbed.
-//
-// Every entry is a whole value, which is what makes the comparison sound. That
-// is a property of keyValueSecret, not of this map: each alternative in its value
-// half now ends at a genuine terminator (see the regex comment), so the captured
-// text is the entire value —
-//
-//	bare      `[redacted-secret]`   ends at whitespace/quote/`,`/`}`/EOS
-//	bare      `[redacted]`          ditto
-//	quoted    `"[redacted-secret]"` the alternative consumes both quotes
-//	quoted    `'[redacted-secret]'` ditto
-//	quoted    `"[redacted]"`        ditto
-//	quoted    `'[redacted]'`        ditto
-//
-// — so a value that merely BEGINS with a marker (`[redacted-secret]hunter2`,
-// `"[redacted-secret]hunter2"`) is captured in full, matches no entry here, and
-// takes the normal redacting path. It cannot reach the unchanged path.
-//
-// Derived from the marker constants so they cannot drift if a marker is reworded.
-var redactionMarkerValues = map[string]bool{
-	secretMarker:               true,
-	redactedMarker:             true,
-	`"` + secretMarker + `"`:   true,
-	`'` + secretMarker + `'`:   true,
-	`"` + redactedMarker + `"`: true,
-	`'` + redactedMarker + `'`: true,
-}
-
-// isRedactionMarker reports whether value is EXACTLY a marker an earlier scrub
-// pass wrote, so re-scrubbing it would only re-wrap it. Exact match against a
-// COMPLETE value — never a prefix, never a substring, and never a truncated
-// capture: a value this redactor did not write must take the normal path.
-func isRedactionMarker(value string) bool {
-	return redactionMarkerValues[value]
 }
 
 // unparsedInstancesNote is emitted (as a JSON string) when instances.json is
