@@ -258,6 +258,8 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 // Production never reassigns it.
 var backendKindForCreate = session.BackendKindFor
 
+var repoFromPathForCreate = config.RepoFromPath
+
 // projectDeleteGenLocked reads the repo's completed-delete-attempt counter. The
 // caller MUST already hold m.mu; a missing entry means no delete has ever been
 // attempted for this repo and reads as 0, which is also what a first sample sees.
@@ -321,7 +323,7 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	if req.RepoPath == "" {
 		return nil, "", nil, nil, fmt.Errorf("repo path is required")
 	}
-	repo, err := config.RepoFromPath(req.RepoPath)
+	repo, err := repoFromPathForCreate(req.RepoPath)
 	if err != nil {
 		return nil, "", nil, nil, err
 	}
