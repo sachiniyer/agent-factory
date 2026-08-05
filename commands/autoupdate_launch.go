@@ -77,6 +77,17 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 		log.InfoLog.Printf("auto-update: stdout is not a terminal; skipping")
 		return
 	}
+	// Stand down while a daemon upgrade transaction owns the executable
+	// (#2212). Checked here, before the throttle cache is even opened, so a
+	// launch during an upgrade neither consumes the shared 6h window nor spends
+	// a download on a swap the interlock would refuse. Silent by design: like
+	// every other skip on this path, it must not print at, block, or fail a
+	// launch the user asked for.
+	if active := activeUpgradeOwningExecutable(); active != nil {
+		log.InfoLog.Printf("auto-update: daemon upgrade to %s in progress (transaction %s, phase %s); skipping the launch-time install",
+			active.ToVersion, active.ID, active.Phase)
+		return
+	}
 
 	channel := config.UpdateChannelStable
 	if cfg != nil && cfg.UpdateChannel != "" {

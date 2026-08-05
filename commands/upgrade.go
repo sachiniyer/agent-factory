@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/log"
@@ -87,6 +86,8 @@ func init() {
 		"Install the channel's latest release even if it is older than the current binary (e.g. switching from preview back to stable)")
 	upgradeCmd.Flags().BoolVar(&upgradeNoRestart, "no-restart", false,
 		"Leave the running daemon alone (af upgrade restarts it by default so the new binary takes effect)")
+	upgradeCmd.Flags().BoolVar(&upgradeIgnoreActiveUpgrade, ignoreActiveUpgradeFlag, false,
+		"Install even while a daemon upgrade transaction is in progress (this can leave that upgrade unable to roll back)")
 }
 
 var upgradeCmd = &cobra.Command{
@@ -203,6 +204,15 @@ func shouldUpgrade(latestTag, current, channel string, allowDowngrade bool) (pro
 // Cobra. out carries the result; errOut carries anything that means the user
 // is not running the version they just installed.
 func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error {
+	// Refuse before spending a download on a swap we are not going to perform.
+	// writeExecutableInPlace below is the actual guard; this only buys the user a
+	// faster, cheaper refusal (#2212).
+	if !upgradeIgnoreActiveUpgrade {
+		if active := activeUpgradeOwningExecutable(); active != nil {
+			return &blockedInPlaceInstallError{active: active, flag: "--" + ignoreActiveUpgradeFlag}
+		}
+	}
+
 	binary, err := downloadBinaryFn(downloadURL, downloadTimeout)
 	if err != nil {
 		return err
@@ -219,7 +229,11 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 		return fmt.Errorf("failed to resolve executable path: %w", err)
 	}
 
-	if err := config.AtomicWriteFile(resolvedPath, binary, 0755); err != nil {
+	if err := writeExecutableInPlace(resolvedPath, binary, upgradeIgnoreActiveUpgrade, "--"+ignoreActiveUpgradeFlag); err != nil {
+		var blocked *blockedInPlaceInstallError
+		if errors.As(err, &blocked) {
+			return err
+		}
 		return fmt.Errorf("failed to write new binary: %w", err)
 	}
 

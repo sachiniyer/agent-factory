@@ -2359,6 +2359,7 @@ af upgrade [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--allow-downgrade` |  | Install the channel's latest release even if it is older than the current binary (e.g. switching from preview back to stable) |
+| `--ignore-active-upgrade` |  | Install even while a daemon upgrade transaction is in progress (this can leave that upgrade unable to roll back) |
 | `--no-restart` |  | Leave the running daemon alone (af upgrade restarts it by default so the new binary takes effect) |
 
 **Global flags**

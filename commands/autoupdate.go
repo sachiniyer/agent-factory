@@ -154,7 +154,13 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 			return fmt.Errorf("failed to resolve executable path: %w", err)
 		}
 
-		if err := config.AtomicWriteFile(resolvedPath, binary, 0755); err != nil {
+		// The guarded swap (#2212). The launch path has no override: an
+		// unattended installer must never be the thing that clobbers a live
+		// upgrade transaction, and there is no human here to weigh it. In
+		// practice autoUpdateOnLaunch has already stood down before we get this
+		// far; this is the backstop that makes the interlock a property of the
+		// write rather than of remembering to check.
+		if err := writeExecutableInPlace(resolvedPath, binary, false, ""); err != nil {
 			throttleFailure(latestTag)
 			return fmt.Errorf("failed to write new binary: %w", err)
 		}
