@@ -344,7 +344,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// separate slice. Started after markReady so it can never compete with the
 	// restore or delay readiness, and registered on the same stopCh/wg as the
 	// other loops so shutdown stops it.
-	startUpdateDriver(manager, stopCh, wg)
+	// The upgrade hand-off needs to end this daemon, and it must not race the
+	// Shutdown RPC's own close of shutdownCh — two independent closers of one
+	// channel is a panic. So the driver gets its own channel and the main select
+	// below treats it as one more way to stop, which also keeps the graceful
+	// path intact: the same teardown, the same final SaveInstances.
+	upgradeExitCh := make(chan struct{})
+	var upgradeExitOnce sync.Once
+	startUpdateDriver(manager, func() { upgradeExitOnce.Do(func() { close(upgradeExitCh) }) }, stopCh, wg)
 
 	// Block until a signal, a Shutdown RPC, or the home-deleted self-check
 	// ends the daemon (sigChan and shutdownCh were armed before the restore
@@ -357,6 +364,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("received shutdown request via control socket")
 	case <-homeGoneCh:
 		homeGone = true
+	case <-upgradeExitCh:
+		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
 	}
 
 	// Stop the goroutines so we don't race.

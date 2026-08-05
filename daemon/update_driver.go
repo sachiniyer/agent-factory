@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -60,7 +61,53 @@ var (
 	updateDriverStartupBackoff = autoupdate.CheckInterval
 	// updateDriverGOOS is the platform gate, a var so tests can exercise it.
 	updateDriverGOOS = runtime.GOOS
+	// updateDriverGOARCH selects the release asset for this machine.
+	updateDriverGOARCH = runtime.GOARCH
+	// updateDriverDownloadBudget bounds staging the release archive. Nobody is
+	// waiting on it, but it must not hang a daemon goroutine forever.
+	updateDriverDownloadBudget = 5 * time.Minute
 )
+
+// DaemonUpgradeEnvironmentVariable opts a daemon in to replacing its own binary
+// through the transactional upgrade path (#2212).
+//
+// It defaults to OFF, and that default is the conservative half of this change,
+// not an oversight. Everything the hand-off needs is built and tested — journal,
+// preserved previous binary, probation, validated activation, guarded rollback,
+// and the interlock that stops an in-place `af upgrade` from clobbering any of
+// it — but the destructive end-to-end integration that drives a real
+// forward-then-rollback with real stamped binaries does not exist yet. Until it
+// does, no box replaces its own binary unattended unless an operator asks for
+// it. An env var rather than a config key keeps it where a daemon unit's
+// environment already lives, beside AGENT_FACTORY_AUTO_UPDATE, without adding to
+// the config surface for a switch that is meant to become the default.
+const DaemonUpgradeEnvironmentVariable = "AGENT_FACTORY_DAEMON_UPGRADE"
+
+// daemonUpgradeActivationEnabled reports the opt-in. It accepts the same
+// vocabulary as AGENT_FACTORY_AUTO_UPDATE so an operator does not have to
+// remember two spellings, and it is re-read on every wake: turning it off must
+// take effect without restarting a daemon, exactly like the master switch.
+//
+// Anything unrecognised is OFF, with one warning. This is the opposite polarity
+// to autoupdate.Enabled, which keeps its configured value on a bad input —
+// there, an unreadable setting must not silently disable updates; here, an
+// unreadable setting must not silently authorise a daemon to replace its own
+// binary.
+func daemonUpgradeActivationEnabled() bool {
+	raw, ok := os.LookupEnv(DaemonUpgradeEnvironmentVariable)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "", "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		log.WarningLog.Printf("auto-update: ignoring invalid %s=%q (expected true/false, 1/0, yes/no, on/off); daemon-owned activation stays off", DaemonUpgradeEnvironmentVariable, raw)
+		return false
+	}
+}
 
 // updateCheckOutcome is what one wake decided. Returned so tests can assert the
 // branch taken rather than inferring it from a log line.
@@ -76,6 +123,9 @@ const (
 	updateCheckFailed
 	// updateCheckAvailable: a newer release exists. Reported, not installed.
 	updateCheckAvailable
+	// updateCheckActivated: a newer release was staged and the transactional
+	// activation was triggered. The daemon is quiescing to hand over.
+	updateCheckActivated
 )
 
 // updateDriver is the daemon's release-check loop. Every collaborator is a field
@@ -95,6 +145,23 @@ type updateDriver struct {
 	// discover resolves the newest release tag on a channel.
 	discover func(channel string, timeout time.Duration) (string, error)
 	now      func() time.Time
+	// download fetches and verifies a release archive, returning the candidate
+	// binary. Only called once activation is enabled — a driver that cannot
+	// install has no business spending a user's bandwidth.
+	download func(url string, timeout time.Duration) ([]byte, error)
+	// activate hands the candidate to the transactional upgrade path. It
+	// quiesces and exits this daemon on success, so it does not return normally
+	// in the happy case.
+	activate func(candidate []byte, toVersion string) error
+	// activationEnabled reports the operator opt-in, re-read every wake.
+	activationEnabled func() bool
+	// rejected holds tags whose activation this process already failed to
+	// start. Without it a release that cannot be activated would be retried
+	// every six hours forever — the "bad release re-breaks the box" outcome the
+	// design rules out. Process-scoped on purpose: a restart may have fixed the
+	// cause, and the durable rejected-tag ledger belongs with rollback
+	// bookkeeping in the supervisor, not here.
+	rejected map[string]bool
 
 	// nextCheckNotBefore suppresses this driver's OWN checks for one
 	// CheckInterval after each one. Because the driver never records into the
@@ -109,8 +176,8 @@ type updateDriver struct {
 // startUpdateDriver runs the release check for the lifetime of the daemon. Called
 // once the daemon is fully ready, so a check can never compete with restore or
 // delay the readiness barrier.
-func startUpdateDriver(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
-	driver := newUpdateDriver(manager)
+func startUpdateDriver(manager *Manager, requestExit func(), stopCh <-chan struct{}, wg *sync.WaitGroup) {
+	driver := newUpdateDriver(manager, requestExit)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -118,14 +185,26 @@ func startUpdateDriver(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGr
 	}()
 }
 
-func newUpdateDriver(manager *Manager) *updateDriver {
+func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 	return &updateDriver{
-		cachePath:      autoupdate.CheckCachePath(),
-		currentVersion: strings.TrimPrefix(Version(), "v"),
-		config:         manager.Config,
-		discover:       discoverLatestReleaseTag,
-		now:            func() time.Time { return time.Now().UTC() },
+		cachePath:         autoupdate.CheckCachePath(),
+		currentVersion:    strings.TrimPrefix(Version(), "v"),
+		config:            manager.Config,
+		discover:          discoverLatestReleaseTag,
+		now:               func() time.Time { return time.Now().UTC() },
+		download:          stageReleaseCandidate,
+		activationEnabled: daemonUpgradeActivationEnabled,
+		activate: func(candidate []byte, toVersion string) error {
+			return triggerUpgradeActivation(context.Background(), manager.lifecycle, requestExit, candidate, toVersion)
+		},
 	}
+}
+
+// stageReleaseCandidate downloads and verifies a release archive through the
+// same shared stager the in-place installers use, so the daemon and an
+// interactive af cannot diverge on release integrity.
+func stageReleaseCandidate(url string, timeout time.Duration) ([]byte, error) {
+	return autoupdate.DefaultCandidateStager().Download(url, timeout)
 }
 
 // discoverLatestReleaseTag resolves the newest release on channel through the
@@ -252,8 +331,68 @@ func (d *updateDriver) checkOnce() updateCheckOutcome {
 		log.InfoLog.Printf("auto-update: daemon release check found nothing newer than %s on the %s channel", d.currentVersion, channel)
 		return updateCheckUpToDate
 	}
-	log.InfoLog.Printf("auto-update: %s is available on the %s channel · this daemon is running %s · the daemon does not install updates yet, so an interactive af launch or af upgrade applies it", latest, channel, d.currentVersion)
-	return updateCheckAvailable
+	if !d.activationIsEnabled() {
+		log.InfoLog.Printf("auto-update: %s is available on the %s channel · this daemon is running %s · daemon-owned activation is off, so an interactive af launch or af upgrade applies it", latest, channel, d.currentVersion)
+		return updateCheckAvailable
+	}
+	if d.rejected[tag] {
+		log.InfoLog.Printf("auto-update: %s is available but this daemon already failed to activate it; not retrying that release until the daemon restarts", latest)
+		return updateCheckAvailable
+	}
+	return d.activateRelease(tag, latest, channel)
+}
+
+// activateRelease stages the candidate and hands it to the transactional upgrade
+// path. On success the daemon quiesces and exits, so this does not return
+// normally in the happy case — the previous-binary supervisor owns everything
+// after the hand-off.
+//
+// It deliberately does NOT record the shared throttle window, keeping the
+// read-only invariant this driver was built on. The reason is stronger here than
+// before: this process cannot observe whether the install succeeded. It exits at
+// the hand-off, and the supervisor decides afterwards whether to commit or roll
+// back. Recording "installed" would therefore be a claim it is not entitled to
+// make — and if the candidate rolls back, it would have suppressed the launch
+// path that still works. If activation succeeds, an af launch finds the new
+// version already current and installs nothing anyway.
+func (d *updateDriver) activateRelease(tag, latest, channel string) updateCheckOutcome {
+	log.InfoLog.Printf("auto-update: %s is available on the %s channel · staging it for a daemon-owned upgrade from %s", latest, channel, d.currentVersion)
+
+	url := autoupdate.DownloadURL(tag, updateDriverGOOS, updateDriverGOARCH)
+	candidate, err := d.download(url, updateDriverDownloadBudget)
+	if err != nil {
+		// A download failure is transient — a flaky link, a half-published
+		// release — so it is not grounds to reject the tag for this daemon's
+		// lifetime. The six-hour window is the retry bound.
+		log.WarningLog.Printf("auto-update: daemon could not stage %s: %v", latest, err)
+		return updateCheckFailed
+	}
+
+	if err := d.activate(candidate, latest); err != nil {
+		// The hand-off did not happen and this daemon is still serving. Reject
+		// the tag so the next window does not walk into the same failure, and
+		// say so loudly: an unattended box has nobody watching the logs, so the
+		// line has to carry what went wrong and what is still true.
+		d.rejectTag(tag)
+		log.ErrorLog.Printf("auto-update: daemon-owned upgrade to %s did not start; this daemon keeps serving %s and will not retry that release: %v", latest, d.currentVersion, err)
+		return updateCheckFailed
+	}
+	return updateCheckActivated
+}
+
+// activationIsEnabled requires an explicit enabler. A driver without one is off,
+// which is the same answer the operator switch gives by default — activation is
+// something that has to be asked for, never something a missing collaborator
+// turns on.
+func (d *updateDriver) activationIsEnabled() bool {
+	return d.activationEnabled != nil && d.activationEnabled()
+}
+
+func (d *updateDriver) rejectTag(tag string) {
+	if d.rejected == nil {
+		d.rejected = map[string]bool{}
+	}
+	d.rejected[tag] = true
 }
 
 // windowOpen reports whether the SHARED six-hour window is open for channel, and

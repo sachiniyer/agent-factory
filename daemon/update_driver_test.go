@@ -541,7 +541,7 @@ func TestStartUpdateDriver_JoinsAndReleasesTheDaemonWaitGroup(t *testing.T) {
 
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
-	startUpdateDriver(manager, stopCh, wg)
+	startUpdateDriver(manager, func() {}, stopCh, wg)
 
 	waited := make(chan struct{})
 	go func() {
@@ -568,7 +568,7 @@ func TestNewUpdateDriverReadsTheLiveConfig(t *testing.T) {
 	manager := &Manager{}
 	manager.live.Store(&config.Config{AutoUpdate: false, UpdateChannel: config.UpdateChannelPreview})
 
-	driver := newUpdateDriver(manager)
+	driver := newUpdateDriver(manager, func() {})
 	require.False(t, driver.config().AutoUpdate)
 
 	manager.live.Store(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelPreview})
@@ -582,7 +582,7 @@ func TestUpdateDriverReadsTheSharedCacheFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	driver := newUpdateDriver(&Manager{})
+	driver := newUpdateDriver(&Manager{}, func() {})
 	require.Equal(t, autoupdate.CheckCachePath(), driver.cachePath)
 	require.Equal(t, filepath.Join(home, autoupdate.CheckCacheFileName), driver.cachePath)
 
@@ -598,4 +598,178 @@ func driverCacheBytes(t *testing.T, path string) string {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	return string(data)
+}
+
+// enableActivation opts the harness in to daemon-owned activation and gives it
+// stub staging/hand-off collaborators, returning what they recorded.
+type activationRecord struct {
+	downloadedURL string
+	candidate     []byte
+	toVersion     string
+	activateErr   error
+	downloadErr   error
+	downloads     int
+	activations   int
+}
+
+func enableActivation(h *driverHarness, enabled bool) *activationRecord {
+	rec := &activationRecord{}
+	h.driver.activationEnabled = func() bool { return enabled }
+	h.driver.download = func(url string, _ time.Duration) ([]byte, error) {
+		rec.downloads++
+		rec.downloadedURL = url
+		if rec.downloadErr != nil {
+			return nil, rec.downloadErr
+		}
+		return []byte("candidate-af-binary"), nil
+	}
+	h.driver.activate = func(candidate []byte, toVersion string) error {
+		rec.activations++
+		rec.candidate = candidate
+		rec.toVersion = toVersion
+		return rec.activateErr
+	}
+	return rec
+}
+
+// The conservative default, and the whole reason this slice can land before the
+// destructive integration exists: without the operator opt-in the driver reports
+// and installs nothing, exactly as it did before.
+func TestUpdateDriver_ActivationIsOffByDefault(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, false)
+
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+	require.Zero(t, rec.downloads, "a driver that cannot install must not spend bandwidth staging")
+	require.Zero(t, rec.activations)
+}
+
+// A driver with no enabler at all is off too — activation must be asked for, not
+// arrived at by a missing collaborator.
+func TestUpdateDriver_ActivationRequiresAnExplicitEnabler(t *testing.T) {
+	h := newDriverHarness(t)
+	h.driver.activationEnabled = nil
+
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+}
+
+// Opted in: stage the release for this platform and hand it to the transactional
+// path with the version stripped of its leading v.
+func TestUpdateDriver_ActivatesWhenOptedIn(t *testing.T) {
+	h := newDriverHarness(t)
+	h.tag = "v1.0.300"
+	rec := enableActivation(h, true)
+
+	require.Equal(t, updateCheckActivated, h.driver.checkOnce())
+	require.Equal(t, 1, rec.downloads)
+	require.Equal(t, 1, rec.activations)
+	require.Equal(t, "1.0.300", rec.toVersion, "the trigger takes a version, not a tag")
+	require.Equal(t, []byte("candidate-af-binary"), rec.candidate)
+	require.Equal(t, autoupdate.DownloadURL("v1.0.300", updateDriverGOOS, updateDriverGOARCH), rec.downloadedURL)
+}
+
+// Activation must never close the shared throttle window. This process exits at
+// the hand-off and the supervisor decides afterwards whether to commit or roll
+// back, so "installed" is a claim the daemon is not entitled to make — and if
+// the candidate rolls back, recording would have suppressed the launch path that
+// still works.
+func TestUpdateDriver_ActivationStillNeverWritesTheThrottleCache(t *testing.T) {
+	h := newDriverHarness(t)
+	enableActivation(h, true)
+	h.seedCache(t, config.UpdateChannelStable, h.now.Add(-7*time.Hour))
+	before := h.readCacheFile(t)
+	require.NotEmpty(t, before)
+
+	require.Equal(t, updateCheckActivated, h.driver.checkOnce())
+	require.Equal(t, before, h.readCacheFile(t),
+		"the daemon cannot observe whether its own upgrade committed, so it must not record one")
+}
+
+// A release whose hand-off failed must not be retried every six hours forever —
+// that is the "bad release re-breaks the box" outcome the design rules out. The
+// daemon keeps serving the old version.
+func TestUpdateDriver_RejectsATagWhoseActivationFailed(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+	rec.activateErr = errors.New("recovery actor never reached supervisor_ready")
+
+	base := h.now
+	require.Equal(t, updateCheckFailed, h.driver.checkOnce())
+	require.Equal(t, 1, rec.activations)
+
+	// Next window, same tag: reported, never retried.
+	h.now = base.Add(autoupdate.CheckInterval)
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+	require.Equal(t, 1, rec.activations, "the same failed release must not be activated again")
+	require.Equal(t, 1, rec.downloads, "nor staged again")
+
+	// A different, newer release is still eligible — the quarantine is per tag,
+	// not a circuit breaker on the whole feature.
+	h.tag = "v1.0.400"
+	h.now = base.Add(2 * autoupdate.CheckInterval)
+	rec.activateErr = nil
+	require.Equal(t, updateCheckActivated, h.driver.checkOnce())
+	require.Equal(t, 2, rec.activations)
+}
+
+// A download failure is transient — a flaky link, a half-published release — so
+// it must NOT reject the tag. The six-hour window is the retry bound.
+func TestUpdateDriver_ADownloadFailureDoesNotRejectTheTag(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+	rec.downloadErr = errors.New("connection reset")
+
+	base := h.now
+	require.Equal(t, updateCheckFailed, h.driver.checkOnce())
+	require.Zero(t, rec.activations)
+
+	rec.downloadErr = nil
+	h.now = base.Add(autoupdate.CheckInterval)
+	require.Equal(t, updateCheckActivated, h.driver.checkOnce(),
+		"a transient staging failure must not disqualify the release")
+	require.Equal(t, 1, rec.activations)
+}
+
+// The opt-in is re-read every wake, so an operator who turns it off is honoured
+// without restarting the daemon — the same contract as the master switch.
+func TestUpdateDriver_ActivationOptInIsRereadEveryWake(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+	enabled := true
+	h.driver.activationEnabled = func() bool { return enabled }
+
+	base := h.now
+	require.Equal(t, updateCheckActivated, h.driver.checkOnce())
+	require.Equal(t, 1, rec.activations)
+
+	enabled = false
+	h.tag = "v1.0.400"
+	h.now = base.Add(autoupdate.CheckInterval)
+	require.Equal(t, updateCheckAvailable, h.driver.checkOnce())
+	require.Equal(t, 1, rec.activations, "turning the opt-in off must take effect without a restart")
+}
+
+// The env switch itself: default off, the documented vocabulary honoured, and
+// anything unrecognised OFF rather than authorising a self-replacing daemon.
+func TestDaemonUpgradeActivationEnabled(t *testing.T) {
+	t.Run("unset is off", func(t *testing.T) {
+		// t.Setenv first so its cleanup restores whatever the process had;
+		// os.Unsetenv alone would leak the change into later tests.
+		t.Setenv(DaemonUpgradeEnvironmentVariable, "placeholder")
+		require.NoError(t, os.Unsetenv(DaemonUpgradeEnvironmentVariable))
+		require.False(t, daemonUpgradeActivationEnabled())
+	})
+	for _, on := range []string{"1", "true", "T", "yes", "Y", "on", " On "} {
+		t.Run("on:"+on, func(t *testing.T) {
+			t.Setenv(DaemonUpgradeEnvironmentVariable, on)
+			require.True(t, daemonUpgradeActivationEnabled())
+		})
+	}
+	for _, off := range []string{"", "0", "false", "no", "off", "maybe", "2", "yes please"} {
+		t.Run("off:"+off, func(t *testing.T) {
+			t.Setenv(DaemonUpgradeEnvironmentVariable, off)
+			require.False(t, daemonUpgradeActivationEnabled(),
+				"an unreadable value must not authorise a daemon to replace its own binary")
+		})
+	}
 }

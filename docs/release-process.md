@@ -72,6 +72,13 @@ channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
   it finds a newer release it logs it; it does not swap the binary. Setting
   `auto_update = false` (or `AGENT_FACTORY_AUTO_UPDATE=0` in the daemon's
   environment) stops the daemon check entirely.
+- **A daemon can be opted in to installing what it finds**, with
+  `AGENT_FACTORY_DAEMON_UPGRADE=1` in its environment. That routes the upgrade
+  through the transactional path rather than an in-place swap: the previous
+  binary is preserved, the new one starts in probation, and it is rolled back
+  automatically unless it reaches a version-matched, fully ready state. It is
+  off by default while the end-to-end forward-then-rollback integration is
+  still being built, and `auto_update = false` overrides it either way.
 - **Preview tracking is opt-in** via the global config key
   `update_channel: "preview"` (see
   [configuration.md](configuration.md)) — the updater then lists releases
