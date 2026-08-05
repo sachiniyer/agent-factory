@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -219,15 +219,37 @@ func ownDaemonRefusal(pids []int) error {
 // declined to take, laundering a safety refusal into a printed instruction —
 // the same defect one layer up, and worse for being pasteable (Codex on #2941).
 //
-// So the remedy here is the step that comes BEFORE a decision: show what these
-// processes are, so the user can identify the one serving this home and stop
-// that one. `-p a,b` is the spelling both procps and macOS accept.
+// The inspection has to be one that can actually ANSWER the question, which
+// `ps -o pid,args` cannot: the autostart unit is `ExecStart=%s --daemon` with
+// AGENT_FACTORY_HOME in the unit ENVIRONMENT, so every daemon's argv is
+// identical and argv-based output distinguishes nothing (Codex on #2941, second
+// round). The environment is where the answer lives, so that is what the hint
+// reads — verified against a live process, including the multi-pid form, which
+// prefixes each match with its /proc path so the user can attribute it.
 func unverifiedDaemonRefusal(pids []int) error {
 	return fmt.Errorf("af daemon process(es) whose AF home could not be verified are still running: %s; "+
-		"af did not stop them because it could not prove which home they serve, and killing the wrong one "+
-		"takes down another home's daemon — identify them with %s, then stop whichever serves this AF home "+
-		"and re-run", formatPIDList(pids),
-		shellsuggest.Command("ps", "-o", "pid,args", "-p", strings.Join(pidArgs(pids), ",")))
+		"af did not stop them because it could not prove which home they serve, and stopping the wrong "+
+		"one takes down another home's daemon — %s, then stop whichever serves this AF home and re-run",
+		formatPIDList(pids), inspectDaemonHomeAdvice(pids))
+}
+
+// inspectDaemonHomeAdvice names a way to see which AF home each daemon serves.
+//
+// Linux gets a verified command. Other platforms get prose, deliberately: a
+// hint that looks runnable and is not is worse than none — the user runs it,
+// believes they acted, and is no further forward. Two such hints were caught by
+// review tonight (`pkill -x tmux`, which matches no `tmux: server`, and the
+// argv-based ps above), and macOS is not a platform this was verified on.
+func inspectDaemonHomeAdvice(pids []int) string {
+	if runtime.GOOS != "linux" {
+		return "read each one's AGENT_FACTORY_HOME from its environment (af could not, which is why " +
+			"they are unverified; your shell may have more luck)"
+	}
+	args := []string{"-ao", "AGENT_FACTORY_HOME=[^[:cntrl:]]*"}
+	for _, pid := range pids {
+		args = append(args, filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	}
+	return "read the home each one serves with " + shellsuggest.Command("grep", args...)
 }
 
 // daemonScope is the outcome of deciding whether a scanned PID is a daemon this

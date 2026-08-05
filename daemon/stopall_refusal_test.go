@@ -73,9 +73,17 @@ func TestUnverifiedDaemonRefusalNeverSuggestsAKill(t *testing.T) {
 	if killCommand.MatchString(unverified) {
 		t.Errorf("the unverified-daemon refusal offers a kill aimed at a pid: %q", unverified)
 	}
-	if !strings.Contains(unverified, "ps ") {
-		t.Errorf("refusal = %q, want an inspection command so the user can identify which daemon "+
-			"serves this home before stopping anything", unverified)
+	// The inspection must be able to ANSWER the question. `ps -o pid,args` cannot:
+	// the autostart unit is `ExecStart=<binary> --daemon` with AGENT_FACTORY_HOME
+	// in the unit environment, so every daemon's argv is identical and argv-based
+	// output distinguishes nothing (Codex on #2941, second round).
+	if strings.Contains(unverified, "ps -o pid,args") {
+		t.Errorf("refusal = %q suggests an argv-based inspection, but every af daemon's argv is "+
+			"`<binary> --daemon` — it cannot reveal which AF home any of them serves", unverified)
+	}
+	if !strings.Contains(unverified, "AGENT_FACTORY_HOME") {
+		t.Errorf("refusal = %q, want the inspection to read the value that actually identifies the "+
+			"home, since that is the question the user has to answer", unverified)
 	}
 	for _, pid := range []string{"41234", "41255"} {
 		if !strings.Contains(unverified, pid) {

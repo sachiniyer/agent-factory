@@ -47,6 +47,15 @@ func TestExhaustedBackupSlotsSayWhatToDo(t *testing.T) {
 		t.Errorf("error = %q, want it to tell the user to remove or delete the old backups — "+
 			"a guard that blocks a write and names no remedy leaves them stuck (#2917)", err)
 	}
+	// And it must not tell them to clear the OLDEST first. The unsuffixed base
+	// is the first backup ever written, so on a repeated convert/downgrade it
+	// holds the original real settings — the one file this helper never
+	// overwrites. "Oldest first" points straight at it (Codex on #2941).
+	if strings.Contains(strings.ToLower(err.Error()), "oldest first") {
+		t.Errorf("error = %q tells the user to clear the oldest backup first, which is the one most "+
+			"likely to hold their original settings and the one availableBackupPath never overwrites", err)
+	}
+
 	// The backups are the remedy's target, so the message must say they are
 	// backups; "config.toml.bak.1..999 all exist" does not.
 	if !strings.Contains(strings.ToLower(err.Error()), "backup") {

@@ -204,10 +204,16 @@ func availableBackupPath(base string) (string, error) {
 	// would talk a user into deleting their only way back from a schema
 	// migration, and the helper cannot tell the two callers apart (Codex on
 	// #2941). Actionable and true beats reassuring and wrong.
+	// No ordering advice. "Oldest first" is the natural thing to say and is
+	// exactly backwards here: the unsuffixed base is the FIRST backup ever
+	// written, so on a repeated convert/downgrade it holds the user's original
+	// real settings — which is why this helper never overwrites it. Telling them
+	// to clear the oldest points at the one file the code works hardest to keep
+	// (Codex on #2941).
 	return "", fmt.Errorf("every backup slot is taken: %s and %s.1..999 all exist in %s, so this write "+
-		"would have to overwrite one; move or delete some of them — oldest first, after checking you do "+
-		"not still need them — and retry",
-		filepath.Base(base), filepath.Base(base), filepath.Dir(base))
+		"would have to overwrite one; move or delete backups you have checked you no longer need, then "+
+		"retry (%s, with no number, is the earliest one and most likely to hold your original settings)",
+		filepath.Base(base), filepath.Base(base), filepath.Dir(base), filepath.Base(base))
 }
 
 // GlobalConfigPath returns the path of the global config file that LoadConfig
