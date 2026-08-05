@@ -278,6 +278,71 @@ test("Codex verdict parsing requires a real verdict and matches its short SHA", 
   assert.equal(__test.reviewedCommitMatchesHead(OTHER_SHA.slice(0, 10), HEAD_SHA), false);
 });
 
+test("RESOLVED does not clear a finding when no commit followed it", async () => {
+  // The #2799 race: finding filed at 01:15 on a head committed at 01:00, author
+  // replies RESOLVED, no push. The claimed fix cannot be in the head.
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — fixed it." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /RESOLVED.*no commit pushed after/);
+});
+
+test("RESOLVED clears a finding once a commit lands after it", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:18:00Z",
+    issueComments: [codexVerdict(HEAD_SHA, "2026-07-09T01:20:00Z")],
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — fixed it." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("ACCEPTED needs no commit — it claims no code change is owed", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "ACCEPTED — does not apply here." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("gate-ack needs no commit either", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "Root accepts this [gate-ack]." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("a later ACCEPTED exempts a finding an earlier RESOLVED claimed to fix", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    reviewComments: [
+      codexFinding({ id: 10, line: 32, createdAt: "2026-07-09T01:15:00Z" }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — fixed it." }),
+      findingReply({ id: 12, inReplyToId: 10, body: "ACCEPTED — on reflection it does not apply." }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
 test("gate-ack remains an explicit finding resolution marker", () => {
   assert.equal(__test.hasResolutionMarker("Root accepts this [gate-ack]."), true);
   assert.equal(__test.hasResolutionMarker("accepted in discussion, not marked"), false);
@@ -295,6 +360,7 @@ async function evaluateGate(options = {}) {
 
 function fakeGateGithub({
   headSha = HEAD_SHA,
+  headCommittedDate = "2026-07-09T01:00:00Z",
   isDraft = false,
   state = "OPEN",
   merged = false,
@@ -355,7 +421,7 @@ function fakeGateGithub({
           author: { login: "sachiniyer" },
           labels: { nodes: [] },
           commits: {
-            nodes: [{ commit: { committedDate: "2026-07-09T01:00:00Z" } }],
+            nodes: [{ commit: { committedDate: headCommittedDate } }],
           },
         },
       },
@@ -464,12 +530,12 @@ function codexReview(sha, summary = "Here are some suggestions.", timestamp = "2
   };
 }
 
-function codexFinding({ id, line }) {
+function codexFinding({ id, line, createdAt = "2026-07-09T01:15:00Z" }) {
   return {
     id,
     user: { login: "chatgpt-codex-connector[bot]" },
     body: "P1: this needs attention",
-    created_at: "2026-07-09T01:15:00Z",
+    created_at: createdAt,
     line,
   };
 }

@@ -9,6 +9,11 @@ const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
+// RESOLVED claims a code change was made; ACCEPTED and [gate-ack] claim none is
+// owed. The distinction is load-bearing: only the first implies a commit must
+// exist, so only the first is checked against the head (#2878).
+const FIX_CLAIM_RE = /\bRESOLVED\b/;
+const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
   try {
@@ -521,23 +526,58 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
       })
       .map((comment) => comment.in_reply_to_id),
   );
-  const unresolvedFindings = reviewComments.filter((comment) => {
-    if (comment.user?.login !== CODEX_REVIEWER) {
-      return false;
-    }
-    if (comment.in_reply_to_id) {
-      return false;
-    }
-    if (comment.line == null) {
-      return false;
-    }
-    return !resolvedByAllowedReply.has(comment.id);
-  });
+  const isLiveFinding = (comment) =>
+    comment.user?.login === CODEX_REVIEWER && !comment.in_reply_to_id && comment.line != null;
+  const unresolvedFindings = reviewComments.filter(
+    (comment) => isLiveFinding(comment) && !resolvedByAllowedReply.has(comment.id),
+  );
 
   if (unresolvedFindings.length > 0) {
     reasons.push(`${unresolvedFindings.length} unresolved live Codex inline finding(s)`);
   } else {
     notes.push("No unresolved live Codex inline findings");
+  }
+
+  // A RESOLVED reply is a CLAIM; the commit is the evidence. Clearing a finding
+  // fires pull_request_review_comment, which re-runs this gate — so without this
+  // check the merge happens the instant the reply lands, on a head that predates
+  // the fix. That is how #2799, #2718, #2829 and #2839 all merged with real
+  // findings live, the fix commits arriving minutes after the squash (#2878).
+  //
+  // A fix for a finding filed at T cannot exist in a commit made before T. That
+  // is the whole test — necessary, not sufficient, and deliberately not "newer
+  // than the reply": the normal order is fix, push, reply, which leaves the head
+  // older than the reply and would block a correctly fixed PR.
+  const allowedReplies = reviewComments.filter(
+    (comment) => comment.in_reply_to_id && ALLOWED_AUTHORS.has(comment.user?.login || ""),
+  );
+  const claimedFixed = new Set(
+    allowedReplies.filter((c) => FIX_CLAIM_RE.test(c.body || "")).map((c) => c.in_reply_to_id),
+  );
+  const claimedNoChange = new Set(
+    allowedReplies
+      .filter((c) => NO_CHANGE_CLAIM_RE.test(c.body || "") || (c.body || "").includes("[gate-ack]"))
+      .map((c) => c.in_reply_to_id),
+  );
+  const unpushedFixClaims = reviewComments.filter((comment) => {
+    if (!isLiveFinding(comment)) {
+      return false;
+    }
+    // An explicit "no code change is owed" wins: the author asserted the finding
+    // does not apply, and no commit can be demanded for that.
+    if (!claimedFixed.has(comment.id) || claimedNoChange.has(comment.id)) {
+      return false;
+    }
+    const filedAt = parseTimestamp(comment.created_at);
+    // Unparseable timestamps fail closed — an unknown order is not a proven one.
+    return filedAt == null || lastPushTime == null || lastPushTime <= filedAt;
+  });
+
+  if (unpushedFixClaims.length > 0) {
+    reasons.push(
+      `${unpushedFixClaims.length} finding(s) marked RESOLVED with no commit pushed after them; ` +
+        "the head predates the fix they claim",
+    );
   }
 
   return { ok: reasons.length === 0, reasons, notes };
