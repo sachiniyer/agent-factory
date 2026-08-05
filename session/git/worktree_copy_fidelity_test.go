@@ -41,8 +41,7 @@ var knownCrossDeviceDivergence = map[string]string{
 	"hardlink.sameInode": "#2919: same cause — the link structure is not reproduced",
 	"xattr.file":         "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
 	"xattr.dir":          "#2919: same cause, on directories",
-	"mtime.file":         "#2919: the copy writes new files, so mtime becomes the copy time",
-	"mtime.dir":          "#2919: same cause, on directories",
+	"mtime.symlink":      "#2919: a symlink's mtime needs an lstat through the parent descriptor, whose timespec field is spelled differently on Linux and Darwin — the one place this property does need the platform split, so it is tracked rather than half-done",
 }
 
 // TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded is the class
@@ -190,9 +189,13 @@ func describeFidelity(t *testing.T, root string) map[string]string {
 		}
 	}
 
+	// The symlink is described too, even though it is a recorded gap: an
+	// undescribed property is not a tracked gap, it is an invisible one, and this
+	// test exists because the copier's fidelity used to be exactly that.
 	for property, path := range map[string]string{
-		"mtime.file": filepath.Join(root, "plain.txt"),
-		"mtime.dir":  filepath.Join(root, "dir"),
+		"mtime.file":    filepath.Join(root, "plain.txt"),
+		"mtime.dir":     filepath.Join(root, "dir"),
+		"mtime.symlink": filepath.Join(root, "link"),
 	} {
 		info, err := os.Lstat(path)
 		require.NoError(t, err)

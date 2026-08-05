@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -263,6 +264,15 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			err = applyCopiedDirectoryMode(
 				sourceDirectory, destinationDirectory, directoryRoutePath(destinationPath, components),
 			)
+			if err == nil {
+				// Same moment, same reason as the mode above: this level is complete,
+				// so nothing will write into this directory again and move its mtime.
+				// Descendants are filled through their own descriptors, which changes
+				// THEIR mtimes, not this one's (#2919).
+				err = applyCopiedDirectoryModTime(
+					sourceDirectory, destinationDirectory, directoryRoutePath(destinationPath, components),
+				)
+			}
 		}
 		_ = destinationDirectory.Close()
 		_ = sourceDirectory.Close()
@@ -438,6 +448,18 @@ func copySymlinkEntry(
 //
 // Only owner bits are added. No other user gains access to the staging tree at
 // any point, whatever the source's mode says.
+// applyCopiedDirectoryModTime stamps a finished directory with its source's
+// modification time. It names the directory as "." against its own descriptor,
+// which is how a directory addresses itself without a path and without
+// AT_EMPTY_PATH — see preserveSourceModTime.
+func applyCopiedDirectoryModTime(source, destination *os.File, destinationPath string) error {
+	info, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf("cannot move worktree across filesystems: failed to read source directory times for %s: %w", destinationPath, err)
+	}
+	return preserveSourceModTime(int(destination.Fd()), ".", info.ModTime(), destinationPath, "directory")
+}
+
 func workingDirectoryMode(sourceMode os.FileMode) uint32 {
 	return uint32(sourceMode.Perm()) | 0o700
 }
@@ -543,6 +565,32 @@ func isAllZero(chunk []byte) bool {
 // Setuid, setgid and sticky bits sit outside Perm() and are not carried over,
 // which is the behavior this copier has always had. Symlinks are skipped
 // entirely: Linux ignores their mode bits and offers no fchmod for them.
+// preserveSourceModTime carries the source's modification time onto a node the
+// copy just created, so a restored worktree does not look newer than the build
+// outputs it produced (#2919). rename(2) carries it for free; the copy has to be
+// told, and every property the copy is not told about is one it silently drops.
+//
+// Anchored on the PARENT descriptor plus a name, never on the node's own fd.
+// That is what keeps it both descriptor-anchored and portable: setting times
+// through a file's own descriptor wants utimensat(fd, "", …, AT_EMPTY_PATH),
+// which is Linux-only, so #2919 expected this to need a Linux/Darwin split. It
+// does not — utimensat against the parent is POSIX, and a directory passes "."
+// against its own descriptor to name itself.
+//
+// atime is left alone (UTIME_OMIT) rather than set to the source's. An archive
+// has no business claiming a read that never happened, and restoring it would
+// need the platform-split stat field this spelling exists to avoid.
+func preserveSourceModTime(parentFD int, name string, modTime time.Time, destinationPath, kind string) error {
+	times := []unix.Timespec{
+		{Sec: 0, Nsec: unix.UTIME_OMIT},
+		unix.NsecToTimespec(modTime.UnixNano()),
+	}
+	if err := unix.UtimesNanoAt(parentFD, name, times, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("cannot move worktree across filesystems: failed to preserve %s modification time on %s: %w", kind, destinationPath, err)
+	}
+	return nil
+}
+
 func preserveSourceMode(destinationFD int, sourceMode os.FileMode, destinationPath, kind string) error {
 	if err := unix.Fchmod(destinationFD, uint32(sourceMode.Perm())); err != nil {
 		return fmt.Errorf(
@@ -642,6 +690,12 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// After the contents too, and for the same reason: writing them is what moves
+	// the mtime, so stamping it earlier would just be overwritten.
+	if err := preserveSourceModTime(int(destination.Fd()), name, info.ModTime(), destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}
