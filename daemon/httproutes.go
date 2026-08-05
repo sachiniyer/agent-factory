@@ -359,13 +359,24 @@ func servedHTTPRoutes() []HTTPRoute {
 	out := make([]HTTPRoute, 0, len(httpRoutes)+len(internalHTTPRoutes))
 	out = append(out, httpRoutes...)
 	out = append(out, internalHTTPRoutes...)
-	fillRequestFields(out)
 	return out
 }
 
-// fillRequestFields derives each route's published top-level field names from its
-// requestType. Computed here rather than written into the table so the two cannot
-// drift: there is one statement of a route's request shape, and it is the type.
+// init derives every route's published top-level field names from its
+// requestType, IN PLACE in the authoritative tables.
+//
+// In place, not in the copies the accessors hand out (#2968 review): httpRoutes
+// is documented as the single source of truth and is read directly — by
+// TestHTTPRoutes_RequestFieldsMatchWireStruct among others — so populating only
+// the copies would leave the authoritative table saying something different from
+// what every consumer sees. Deriving here rather than writing the list into each
+// entry keeps ONE statement of a route's request shape, which is its type, so
+// the published names cannot drift from the wire struct.
+func init() {
+	fillRequestFields(httpRoutes)
+	fillRequestFields(internalHTTPRoutes)
+}
+
 func fillRequestFields(routes []HTTPRoute) {
 	for i := range routes {
 		routes[i].RequestFields = jsonFields(routes[i].requestType)
@@ -380,7 +391,6 @@ func fillRequestFields(routes []HTTPRoute) {
 func HTTPRoutes() []HTTPRoute {
 	out := make([]HTTPRoute, len(httpRoutes))
 	copy(out, httpRoutes)
-	fillRequestFields(out)
 	return out
 }
 
