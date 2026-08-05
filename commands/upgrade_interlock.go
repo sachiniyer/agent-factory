@@ -130,6 +130,21 @@ func activeUpgradeOwningExecutable() *activeUpgrade {
 	if isTerminalUpgradePhase(journal.Phase) {
 		return nil
 	}
+	// A valid journal is not proof there is still a rollback to protect.
+	// upgradetxn.Load validates the recorded paths, digests, and lock metadata —
+	// not the artifact contents — so a half-cleaned or failed transaction can
+	// leave a loadable journal whose preserved previous binary is gone. Blocking
+	// then protects nothing and only stands between the user and a working
+	// `af upgrade`, which is the one thing they have left. Downgrade to "proceed"
+	// only on a POSITIVE observation that the artifact is absent; an inconclusive
+	// stat keeps the block, which is overridable.
+	if _, err := os.Stat(journal.PreviousBinaryPath); errors.Is(err, os.ErrNotExist) {
+		log.WarningLog.Printf(
+			"upgrade interlock: daemon upgrade transaction %s (phase %s) has no preserved previous binary at %s; its rollback is already impossible, so the in-place install proceeds",
+			journal.ID, journal.Phase, journal.PreviousBinaryPath,
+		)
+		return nil
+	}
 	return &activeUpgrade{
 		ID:        journal.ID,
 		ToVersion: journal.ToVersion,
@@ -158,14 +173,36 @@ func isTerminalUpgradePhase(phase upgradetxn.Phase) bool {
 // override is the caller's explicit "install anyway"; it is honoured, and logged,
 // because an unoverridable auto-upgrade safeguard is its own hazard.
 func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, flag string) error {
-	if active := activeUpgradeOwningExecutable(); active != nil {
-		if !override {
-			return &blockedInPlaceInstallError{active: active, flag: flag}
+	swap := func() error {
+		if active := activeUpgradeOwningExecutable(); active != nil {
+			if !override {
+				return &blockedInPlaceInstallError{active: active, flag: flag}
+			}
+			log.WarningLog.Printf(
+				"upgrade interlock: overridden — installing in place while daemon upgrade transaction %s (phase %s) is active; its rollback may no longer be usable",
+				active.ID, active.Phase,
+			)
 		}
-		log.WarningLog.Printf(
-			"upgrade interlock: overridden — installing in place while daemon upgrade transaction %s (phase %s) is active; its rollback may no longer be usable",
-			active.ID, active.Phase,
-		)
+		return config.AtomicWriteFile(resolvedPath, binary, 0755)
 	}
-	return config.AtomicWriteFile(resolvedPath, binary, 0755)
+
+	// Check and write under the transaction preparation lock, so the two cannot
+	// interleave. Checking and then writing is a time-of-check-to-time-of-use
+	// window on its own: a transaction published in between is invisible to a
+	// check that already passed, and the swap lands underneath it. upgradetxn's
+	// Prepare takes this same lock and snapshots the running executable inside
+	// it, so holding it here is what makes the interlock airtight rather than
+	// merely likely.
+	home, err := config.GetConfigDir()
+	if err != nil {
+		// No home to lock against. Proceeding matches the rest of this file's
+		// polarity — an install must not be blocked by evidence we cannot read —
+		// and an unresolvable home means there is no journal to race anyway.
+		log.WarningLog.Printf("upgrade interlock: cannot resolve the agent-factory home to take the upgrade lock; installing unlocked: %v", err)
+		return swap()
+	}
+	if err := upgradetxn.WithInstallLock(home, swap); err != nil {
+		return err
+	}
+	return nil
 }

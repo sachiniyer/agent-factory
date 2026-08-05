@@ -301,6 +301,21 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	}
 	recoveryNonce := hex.EncodeToString(nonceBytes)
 
+	root := upgradeRoot(home)
+	if err := ensureDurableDirectory(home, root, transactionDirMode); err != nil {
+		return nil, fmt.Errorf("prepare upgrade root: %w", err)
+	}
+
+	preparationLock, err := acquireFileLock(filepath.Join(root, preparationLockName), false)
+	if err != nil {
+		return nil, fmt.Errorf("lock upgrade preparation: %w", err)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, releaseFileLock(preparationLock))
+	}()
+
+	// Snapshot the running executable under the preparation lock, never before
+	// it — see WithInstallLock for why that ordering is load-bearing (#2212).
 	executable, err := canonicalExistingFile(stablePlan.ExecutablePath)
 	if err != nil {
 		return nil, fmt.Errorf("validate running executable: %w", err)
@@ -319,19 +334,6 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	if digest(previousBinary) == digest(stablePlan.Candidate) {
 		return nil, errors.New("candidate binary is byte-identical to the previous binary")
 	}
-
-	root := upgradeRoot(home)
-	if err := ensureDurableDirectory(home, root, transactionDirMode); err != nil {
-		return nil, fmt.Errorf("prepare upgrade root: %w", err)
-	}
-
-	preparationLock, err := acquireFileLock(filepath.Join(root, "prepare.lock"), false)
-	if err != nil {
-		return nil, fmt.Errorf("lock upgrade preparation: %w", err)
-	}
-	defer func() {
-		retErr = errors.Join(retErr, releaseFileLock(preparationLock))
-	}()
 
 	activePath := activeJournalPath(home)
 	if _, err := os.Lstat(activePath); err == nil {

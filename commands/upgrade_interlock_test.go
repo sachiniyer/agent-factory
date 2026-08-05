@@ -29,8 +29,20 @@ func stubUpgradeJournal(t *testing.T, journal upgradetxn.Journal, err error) {
 	t.Cleanup(func() { loadUpgradeJournal = original })
 }
 
-func journalAt(phase upgradetxn.Phase) upgradetxn.Journal {
-	return upgradetxn.Journal{ID: "upgrade-abc123", ToVersion: "1.0.300", Phase: phase}
+// journalAt builds a journal whose preserved previous binary really exists —
+// that artifact is what the interlock protects, and a journal without it is a
+// transaction with no rollback left (see
+// TestActiveUpgrade_MissingRollbackArtifactAllowsTheInstall).
+func journalAt(t *testing.T, phase upgradetxn.Phase) upgradetxn.Journal {
+	t.Helper()
+	previous := filepath.Join(t.TempDir(), ".af-upgrade-previous")
+	require.NoError(t, os.WriteFile(previous, []byte("preserved previous binary"), 0o755))
+	return upgradetxn.Journal{
+		ID:                 "upgrade-abc123",
+		ToVersion:          "1.0.300",
+		Phase:              phase,
+		PreviousBinaryPath: previous,
+	}
 }
 
 func upgradeHome(t *testing.T) string {
@@ -104,7 +116,7 @@ func TestActiveUpgrade_InFlightPhasesBlockTheInstall(t *testing.T) {
 	} {
 		t.Run(string(phase), func(t *testing.T) {
 			upgradeHome(t)
-			stubUpgradeJournal(t, journalAt(phase), nil)
+			stubUpgradeJournal(t, journalAt(t, phase), nil)
 
 			active := activeUpgradeOwningExecutable()
 			require.NotNil(t, active, "phase %s is in flight and must block an install", phase)
@@ -125,7 +137,7 @@ func TestActiveUpgrade_TerminalPhasesAllowTheInstall(t *testing.T) {
 	} {
 		t.Run(string(phase), func(t *testing.T) {
 			upgradeHome(t)
-			stubUpgradeJournal(t, journalAt(phase), nil)
+			stubUpgradeJournal(t, journalAt(t, phase), nil)
 			require.Nil(t, activeUpgradeOwningExecutable(),
 				"phase %s is cleanup only and must not block an install", phase)
 		})
@@ -155,6 +167,36 @@ func TestActiveUpgrade_UnreadableJournalAllowsTheInstall(t *testing.T) {
 	})
 }
 
+// A loadable journal is not proof there is still a rollback to protect.
+// upgradetxn.Load validates recorded paths, digests, and lock metadata — not the
+// artifact contents — so a half-cleaned or failed transaction can leave a journal
+// that loads while its preserved previous binary is gone. Blocking then protects
+// nothing and only stands between the user and a working `af upgrade`.
+func TestActiveUpgrade_MissingRollbackArtifactAllowsTheInstall(t *testing.T) {
+	upgradeHome(t)
+	journal := journalAt(t, upgradetxn.PhaseCandidateValidating)
+	require.NoError(t, os.Remove(journal.PreviousBinaryPath))
+	stubUpgradeJournal(t, journal, nil)
+
+	require.Nil(t, activeUpgradeOwningExecutable(),
+		"with the preserved previous binary gone the rollback is already impossible; blocking protects nothing")
+}
+
+// But only a POSITIVE absence downgrades the block. An inconclusive stat is not
+// evidence the artifact is gone, and the block it keeps is overridable anyway.
+func TestActiveUpgrade_InconclusiveArtifactStatKeepsTheBlock(t *testing.T) {
+	upgradeHome(t)
+	journal := journalAt(t, upgradetxn.PhaseCandidateValidating)
+	// A path whose parent is a regular file: stat fails ENOTDIR, not ErrNotExist.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(blocked, []byte("x"), 0o644))
+	journal.PreviousBinaryPath = filepath.Join(blocked, "previous")
+	stubUpgradeJournal(t, journal, nil)
+
+	require.NotNil(t, activeUpgradeOwningExecutable(),
+		"an inconclusive stat must not be read as a missing rollback artifact")
+}
+
 // A missing home is not a live transaction.
 func TestActiveUpgrade_MissingHomeAllowsTheInstall(t *testing.T) {
 	home := upgradeHome(t)
@@ -166,7 +208,7 @@ func TestActiveUpgrade_MissingHomeAllowsTheInstall(t *testing.T) {
 // it must refuse rather than write when a transaction is live.
 func TestWriteExecutableInPlace_RefusesDuringALiveTransaction(t *testing.T) {
 	upgradeHome(t)
-	stubUpgradeJournal(t, journalAt(upgradetxn.PhaseCandidateStarting), nil)
+	stubUpgradeJournal(t, journalAt(t, upgradetxn.PhaseCandidateStarting), nil)
 
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
@@ -209,7 +251,7 @@ func TestWriteExecutableInPlace_WritesWhenNoTransactionIsActive(t *testing.T) {
 // binary.
 func TestWriteExecutableInPlace_OverrideInstallsAnyway(t *testing.T) {
 	upgradeHome(t)
-	stubUpgradeJournal(t, journalAt(upgradetxn.PhaseCandidateValidating), nil)
+	stubUpgradeJournal(t, journalAt(t, upgradetxn.PhaseCandidateValidating), nil)
 
 	target := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
@@ -227,7 +269,7 @@ func TestWriteExecutableInPlace_OverrideInstallsAnyway(t *testing.T) {
 // untouched.
 func TestRunUpgrade_RefusesDuringALiveTransaction(t *testing.T) {
 	upgradeHome(t)
-	stubUpgradeJournal(t, journalAt(upgradetxn.PhaseDaemonStopped), nil)
+	stubUpgradeJournal(t, journalAt(t, upgradetxn.PhaseDaemonStopped), nil)
 
 	installed := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(installed, []byte("the binary in use"), 0o755))
@@ -293,7 +335,7 @@ func TestRunUpgrade_InstallsNormallyWithNoTransaction(t *testing.T) {
 // spending a download — and never blocks or errors at the launch.
 func TestAutoUpdateOnLaunch_StandsDownDuringALiveTransaction(t *testing.T) {
 	home := upgradeHome(t)
-	stubUpgradeJournal(t, journalAt(upgradetxn.PhaseCandidateStarting), nil)
+	stubUpgradeJournal(t, journalAt(t, upgradetxn.PhaseCandidateStarting), nil)
 
 	checked := false
 	originalFetch := fetchLatestReleaseTagFn
@@ -313,4 +355,54 @@ func TestAutoUpdateOnLaunch_StandsDownDuringALiveTransaction(t *testing.T) {
 	_, err := os.Stat(filepath.Join(home, "last_update_check"))
 	require.True(t, os.IsNotExist(err),
 		"standing down must not consume the shared 6h window; the next launch re-evaluates")
+}
+
+// The interlock's check and write must be atomic against a transaction publish.
+// Checking and then writing is a time-of-check-to-time-of-use window on its own:
+// a transaction published in between is invisible to a check that already
+// passed. Both sides take upgradetxn's preparation lock, so this proves the
+// installer actually holds it — a Prepare racing the swap blocks until the swap
+// is done, rather than interleaving with it.
+func TestWriteExecutableInPlace_HoldsThePreparationLockAgainstPrepare(t *testing.T) {
+	home := upgradeHome(t)
+
+	target := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+
+	// Hold the same lock a Prepare would, then prove the swap cannot proceed
+	// while it is held.
+	holding := make(chan struct{})
+	release := make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- upgradetxn.WithInstallLock(home, func() error {
+			close(holding)
+			<-release
+			return nil
+		})
+	}()
+	<-holding
+
+	done := make(chan error, 1)
+	go func() {
+		done <- writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("the in-place swap proceeded while the preparation lock was held; check and write are not serialised against Prepare")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	on, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "old binary", string(on), "nothing may be written while the lock is held")
+
+	close(release)
+	require.NoError(t, <-held)
+	require.NoError(t, <-done)
+
+	on, err = os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "new binary", string(on), "and the swap completes once the lock is free")
 }
