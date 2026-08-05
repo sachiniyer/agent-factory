@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -137,6 +138,119 @@ func TestExecutableLock_NotWidenedInAWorldWritableDirectory(t *testing.T) {
 	perm, _ := lockFileStat(t, executable)
 	require.Equal(t, os.FileMode(journalFileMode), perm,
 		"a world-writable directory must not get a world-usable lock: any local user could then hold it and stall every upgrade")
+}
+
+// A HARD LINK at the lock path aims the mode change at somebody else's inode.
+// O_NOFOLLOW rejects a symlink; it says nothing about a hard link, which is not
+// a separate object at all but a second name for an existing one. Anyone who can
+// write a shared install directory can leave `.af.af-upgrade.lock` pointing at
+// `af` itself — and an fchmod through that name strips the executable bit off
+// the binary before the swap even starts, bricking the install from a routine
+// upgrade.
+//
+// This hazard is created by adjusting the mode at all, so it ships with the fix
+// that introduced it.
+func TestExecutableLock_DoesNotRestyleAHardLinkedTarget(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	require.NoError(t, os.Link(executable, executableLockPath(executable)),
+		"the hazard is a second NAME for the binary's inode, planted at the lock path")
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }),
+		"a suspicious lock path must not block the upgrade, only decline to restyle")
+
+	info, err := os.Stat(executable)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(),
+		"the executable bit must survive: an fchmod through a hard-linked lock path would leave af non-executable")
+}
+
+// The narrowing direction. A directory later tightened from group-writable to
+// private leaves a previously widened lock at 0660: the old group can no longer
+// replace the binary, but can still OPEN the known lock path and hold it — and
+// because this lock blocks, that hangs every future upgrade by the owner. So the
+// audience has to track the directory in BOTH directions, not ratchet open.
+func TestExecutableLock_NarrowsAgainWhenTheDirectoryIsTightened(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	dir := filepath.Dir(executable)
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+	perm, _ := lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(0o660), perm, "precondition: the shared directory widened the lock")
+
+	require.NoError(t, os.Chmod(dir, 0o750))
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	perm, _ = lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(journalFileMode), perm,
+		"a tightened directory must narrow the lock back, or its former group keeps a blocking handle on every future upgrade")
+}
+
+// The creation window. The file must exist before its mode can be adjusted, so
+// it is briefly 0600 even in a shared directory, and a second authorized writer
+// arriving in that gap gets EACCES — which the in-place installer turns into an
+// UNLOCKED swap, the exact outcome being closed.
+//
+// A real two-user race is not reproducible in a unit test, so this drives the
+// mechanism directly: a lock at 0000 is unopenable even by its owner, which is
+// the same EACCES the racing writer sees. Widening it from another goroutine
+// stands in for the first writer finishing its chmod.
+func TestExecutableLock_RetriesWhileAnotherWriterIsStillWideningIt(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	lockPath := executableLockPath(executable)
+	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
+	require.NoError(t, os.Chmod(lockPath, 0o000))
+
+	// A budget long enough that a loaded machine cannot lose the race for real
+	// reasons; the acquisition returns as soon as the open succeeds, so a passing
+	// run does not actually wait this long.
+	defer restoreRetryBudget(setRetryBudget(200, 5*time.Millisecond))
+
+	widened := make(chan struct{})
+	go func() {
+		defer close(widened)
+		time.Sleep(20 * time.Millisecond)
+		_ = os.Chmod(lockPath, 0o660)
+	}()
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }),
+		"the acquisition must wait out the brief private window instead of falling back to an unlocked install")
+	<-widened
+}
+
+// The retry must NOT apply to an ordinary private install. There EACCES means a
+// genuinely unauthorized caller, waiting cannot change the answer, and a retry
+// budget would only delay every such attempt.
+func TestExecutableLock_DoesNotRetryInAPrivateDirectory(t *testing.T) {
+	executable := sharedInstallDir(t, 0o700)
+	lockPath := executableLockPath(executable)
+	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
+	require.NoError(t, os.Chmod(lockPath, 0o000))
+
+	// Budget long enough that spending it would be unmistakable in the elapsed
+	// time below.
+	defer restoreRetryBudget(setRetryBudget(50, 100*time.Millisecond))
+
+	started := time.Now()
+	err := withExecutableLock(executable, false, func() error {
+		t.Fatal("the critical section must not run when the lock cannot be opened")
+		return nil
+	})
+	elapsed := time.Since(started)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, os.ErrPermission)
+	require.Less(t, elapsed, time.Second,
+		"a private directory must fail fast: the full 5s budget here would mean the shared-directory retry is running where it cannot help")
+}
+
+func setRetryBudget(retries int, delay time.Duration) (int, time.Duration) {
+	prevRetries, prevDelay := executableLockOpenRetries, executableLockOpenRetryDelay
+	executableLockOpenRetries, executableLockOpenRetryDelay = retries, delay
+	return prevRetries, prevDelay
+}
+
+func restoreRetryBudget(retries int, delay time.Duration) {
+	executableLockOpenRetries, executableLockOpenRetryDelay = retries, delay
 }
 
 // Prepare takes the executable lock through its own acquisition rather than

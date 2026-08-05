@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // preparationLockName is the single lock that serialises publishing a
@@ -153,57 +154,137 @@ func executableLockPath(executable string) string {
 // directory, group-usable lock, carrying the DIRECTORY's group rather than the
 // creator's (a new file takes its creator's primary group, which on a shared box
 // is the wrong one and excludes exactly the users this is meant to admit).
-// nonblocking is threaded through rather than fixed, because #2951 gave the
-// launch path a lock acquisition that must fail fast instead of stalling a
-// start-up. Widening the mode is orthogonal to waiting for the lock and happens
-// on the descriptor either way.
+
+// A first acquisition in a shared directory has an unavoidable moment of private
+// state: the file must exist before its mode can be adjusted, so it is briefly
+// 0600 between the create and the fchmod. A second authorized writer landing in
+// that gap gets EACCES, and the in-place installer would swap the binary
+// unlocked — the very outcome this is closing. Retry rather than accept it.
+//
+// Retries are gated twice. On the directory actually being shared, so they never
+// delay the ordinary private-install case, where EACCES means a genuinely
+// unauthorized caller and no amount of waiting changes the answer. And on the
+// caller being willing to wait at all: #2951 gave the launch path a nonblocking
+// acquisition precisely so an unattended update cannot stall a start-up, and a
+// caller that refused to queue for the lock has not agreed to wait out someone
+// else's chmod either.
+//
+// Vars, not constants, so a test can widen the budget instead of racing a real one.
+var (
+	executableLockOpenRetries    = 4
+	executableLockOpenRetryDelay = 10 * time.Millisecond
+)
+
 func acquireExecutableLock(executable string, nonblocking bool) (*os.File, error) {
-	return acquireFileLockPrepared(
-		executableLockPath(executable), syscall.O_NOFOLLOW, nonblocking,
-		func(lock *os.File) { shareLockWithDirectoryWriters(lock, filepath.Dir(executable)) },
-	)
+	path := executableLockPath(executable)
+	dir := filepath.Dir(executable)
+	prepare := func(lock *os.File) { alignLockWithDirectoryWriters(lock, dir) }
+	for attempt := 0; ; attempt++ {
+		lock, err := acquireFileLockPrepared(path, syscall.O_NOFOLLOW, nonblocking, prepare)
+		if err == nil || nonblocking || attempt >= executableLockOpenRetries ||
+			!errors.Is(err, os.ErrPermission) {
+			return lock, err
+		}
+		if _, shared := directoryWriterGroup(dir); !shared {
+			return lock, err
+		}
+		time.Sleep(executableLockOpenRetryDelay)
+	}
 }
 
-// shareLockWithDirectoryWriters matches the lock's permissions to the install
-// directory's, best-effort.
+// directoryWriterGroup reports the group the install directory shares write
+// access with, and whether it shares at all. It is the single definition of
+// "this binary has more than one authorized writer", so the lock's mode and the
+// retry above cannot disagree about which directories are shared.
 //
-// Best-effort is the whole contract: every step here is an accommodation for
-// OTHER writers, and we already hold a working descriptor. When the lock was
-// created by a different user, the fchmod/fchown simply fail with EPERM — that
-// user got it right when they created it, or they did not and their own next
-// acquisition repairs it. Nothing here may turn into an error that stops an
-// upgrade.
-//
-// Two directory shapes are deliberately left at 0600:
-//
-//   - Not group-writable. No other principal can replace the binary, so 0600
-//     already covers every writer and widening would only enlarge the audience
-//     of a file nobody else needs.
-//   - World-writable. The lock BLOCKS rather than failing, so a lock any local
-//     user may open is a lock any local user may hold forever, stalling every
-//     upgrade on the box. #2897 rejected /tmp as the lock location on exactly
-//     this reasoning; it applies to the mode for the same reason. Nothing is
-//     given up by declining — a directory where anyone may swap the binary has
-//     no integrity left for this lock to protect.
-func shareLockWithDirectoryWriters(lock *os.File, dir string) {
+// A world-writable directory reports NOT shared. The lock BLOCKS rather than
+// failing, so a lock any local user may open is a lock any local user may hold
+// forever, stalling every upgrade on the box. #2897 rejected /tmp as the lock
+// location on exactly this reasoning; it applies to the mode for the same
+// reason. Nothing is given up by declining — a directory where anyone may swap
+// the binary has no integrity left for this lock to protect.
+func directoryWriterGroup(dir string) (int, bool) {
 	info, err := os.Stat(dir)
 	if err != nil {
-		return
+		return 0, false
 	}
 	perm := info.Mode().Perm()
 	if perm&0o020 == 0 || perm&0o002 != 0 {
+		return 0, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(stat.Gid), true
+}
+
+// alignLockWithDirectoryWriters keeps the lock's audience equal to the set of
+// principals the install directory trusts to replace the binary. Both
+// directions: a shared directory widens the lock, an unshared one narrows it
+// back. A one-way widen would leave a directory later tightened from 0770 to
+// 0750 with a 0660 lock its old group can still OPEN and hold — and because
+// this lock blocks, that group could then hang every future upgrade by the
+// owner without being able to install anything themselves.
+//
+// Best-effort is the whole contract: every step accommodates OTHER writers and
+// we already hold a working descriptor. When the lock belongs to a different
+// user the fchmod/fchown fail EPERM — that user either got it right or their
+// own next acquisition repairs it. Nothing here may become an error that stops
+// an upgrade.
+//
+// All of it operates on the descriptor already opened O_NOFOLLOW, never on the
+// path: this directory is by definition writable by someone else, so a
+// path-based chmod could be aimed at a symlink swapped in after the stat.
+func alignLockWithDirectoryWriters(lock *os.File, dir string) {
+	info, err := lock.Stat()
+	if err != nil || !info.Mode().IsRegular() {
 		return
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return
 	}
-	// fchown/fchmod on the descriptor we already opened O_NOFOLLOW, never a
-	// path-based chmod: a path here could be swapped for a symlink between the
-	// stat and the call, and this directory is by definition writable by someone
-	// else. Group before mode, because chown clears the setuid/setgid bits and
-	// would undo a mode set first.
-	_ = lock.Chown(-1, int(stat.Gid))
+	// O_NOFOLLOW rejects a SYMLINK at the lock path; it says nothing about a HARD
+	// LINK, which is not a distinct object at all but a second name for an inode
+	// that already exists. Anyone who can write this directory can leave
+	// `.af.af-upgrade.lock` pointing at the `af` binary itself, and an fchmod
+	// through that name would strip the executable bit off `af` before the swap
+	// ever started — bricking the install from a routine upgrade. Nlink is the
+	// direct test, and it guards the narrowing branch too: shrinking a linked
+	// inode to 0600 destroys it just as thoroughly.
+	//
+	// Declining to restyle is the safe answer rather than refusing the lock: it
+	// falls back to the pre-existing behaviour instead of standing between a user
+	// and their upgrade.
+	if stat.Nlink != 1 {
+		return
+	}
+
+	gid, shared := directoryWriterGroup(dir)
+	if !shared {
+		if info.Mode().Perm() != journalFileMode {
+			_ = lock.Chmod(journalFileMode)
+		}
+		return
+	}
+
+	// The group must MATCH the directory's, and the mode must not widen without
+	// it. A directory can be owned by one user and group-writable for a group
+	// that user does not belong to — they may replace the binary as its owner,
+	// but their chown to the directory's group is refused. Widening anyway would
+	// publish the lock to the CREATOR's primary group: the authorized writers
+	// still get EACCES and still install unlocked, while an unrelated group gains
+	// the ability to hold a blocking lock. Strictly worse than leaving it private,
+	// so the mode change is gated on the group being right.
+	//
+	// Group before mode, because chown clears the setuid/setgid bits and would
+	// undo a mode set first.
+	if int(stat.Gid) != gid {
+		if err := lock.Chown(-1, gid); err != nil {
+			return
+		}
+	}
 	_ = lock.Chmod(journalFileMode | 0o060)
 }
 
