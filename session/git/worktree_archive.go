@@ -382,8 +382,16 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // moveDirCrossDevice moves src to dest, falling back to a copy+remove when the
 // two paths straddle a filesystem boundary (os.Rename returns EXDEV) — the
 // common case when the archive root lives on a different device than the repo.
-// The copy preserves file contents, modes, and symlinks, so uncommitted changes
-// survive verbatim.
+// The copy preserves file contents (holes included), modes, modification times,
+// and symlinks, so uncommitted changes survive with the properties a build or a
+// diff reads.
+//
+// It is an ENUMERATION, not a guarantee of equivalence: rename(2) carries every
+// filesystem property for free and this reproduces only what it is written to
+// reproduce. Hardlink structure and extended attributes are still dropped —
+// worktree_copy_fidelity_test.go holds the measured inventory of what diverges,
+// and "survive verbatim" was the claim that let #2869, #2872 and #2919 each be
+// found one property at a time (#2919).
 func moveDirCrossDevice(src, dest string) (returnErr error) {
 	renameErr := renamePath(src, dest)
 	if renameErr == nil {

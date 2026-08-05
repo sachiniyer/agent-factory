@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -453,7 +454,15 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 			destinationPath, err,
 		)
 	}
-	return preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory")
+	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
+		return err
+	}
+	// Same moment, same reason as the mode: this level is complete, so no further
+	// entry is created here to push mtime forward again. Descendants are filled
+	// through their own descriptors, which touches THEIR mtime, not this one.
+	// "." resolves against the directory's own descriptor, so this needs no
+	// parent handle (#2919).
+	return preserveSourceTimes(int(destination.Fd()), ".", info.ModTime(), 0, destinationPath, "directory")
 }
 
 // holeCopyChunk is the read granularity of the hole-preserving copy. It is a
@@ -553,6 +562,36 @@ func preserveSourceMode(destinationFD int, sourceMode os.FileMode, destinationPa
 	return nil
 }
 
+// preserveSourceTimes carries the source's modification time onto the copy.
+//
+// rename(2) keeps mtime for free, so the same-device archive always has. The
+// cross-device copy reproduces only what it is written to reproduce, and a fresh
+// mtime is not a cosmetic difference: every incremental build system, and
+// anything that compares a file against a stamp, reads a rebuilt-everything tree
+// out of an archive restore (#2919).
+//
+// Only mtime is set. atime is left with UTIME_OMIT because it is not a property
+// worth reproducing — reading the source to copy it already changed it, so there
+// is no faithful value to carry.
+//
+// UtimesNanoAt takes a parent descriptor and a name rather than a file
+// descriptor, which is what lets one helper serve files, directories (name ".")
+// and symlinks (AT_SYMLINK_NOFOLLOW) — and keeps it portable, since the Stat_t
+// timespec fields are spelled differently on linux and darwin.
+func preserveSourceTimes(parentFD int, name string, modTime time.Time, flags int, destinationPath, kind string) error {
+	times := []unix.Timespec{
+		{Sec: 0, Nsec: unix.UTIME_OMIT},
+		unix.NsecToTimespec(modTime.UnixNano()),
+	}
+	if err := unix.UtimesNanoAt(parentFD, name, times, flags); err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to preserve modification time on destination %s %s: %w",
+			kind, destinationPath, err,
+		)
+	}
+	return nil
+}
+
 func copiedDirectoryHasChildren(directory *copiedDirectory) bool {
 	for _, entry := range directory.entries {
 		if entry.directory != nil {
@@ -642,6 +681,14 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// Last, after every write: each write to this file would push mtime forward
+	// again, so stamping it before the contents were done would be undone.
+	if err := preserveSourceTimes(
+		int(destination.Fd()), filepath.Base(destinationPath), info.ModTime(), 0, destinationPath, "file",
+	); err != nil {
 		_ = out.Close()
 		return created, err
 	}

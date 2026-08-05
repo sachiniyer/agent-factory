@@ -41,8 +41,6 @@ var knownCrossDeviceDivergence = map[string]string{
 	"hardlink.sameInode": "#2919: same cause — the link structure is not reproduced",
 	"xattr.file":         "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
 	"xattr.dir":          "#2919: same cause, on directories",
-	"mtime.file":         "#2919: the copy writes new files, so mtime becomes the copy time",
-	"mtime.dir":          "#2919: same cause, on directories",
 }
 
 // TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded is the class
