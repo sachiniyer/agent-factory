@@ -59,6 +59,11 @@ const (
 	// as the rest arrives, and it cannot be confused with a local terminal echo of
 	// those same bytes.
 	attachHelperSawPrefix = "AF-ATTACH-STREAM-SAW:"
+	// attachHelperEndedOnItsOwn is the helper giving up because the attach ended
+	// before anything exercised the exit under test. The parent checks for it: a
+	// child that never reached its case can still leave the parent's assertions
+	// satisfied, which is a vacuous pass rather than a failure.
+	attachHelperEndedOnItsOwn = "the attach ended on its own; nothing exercised the exit under test"
 )
 
 // TestAttachStream_PanicHandsTheTerminalBack is #2784. The attach driver panics
@@ -291,7 +296,16 @@ func TestAttachTerminalHandbackHelper(t *testing.T) {
 	}
 	fmt.Println(attachHelperReady)
 	<-done
-	t.Fatalf("helper: the attach ended on its own; nothing exercised the exit under test")
+	if mode == "panic" {
+		// done closes as the driver goroutine UNWINDS, so in this mode it fires
+		// while the runtime is already on its way out from the injected panic.
+		// Reporting "the attach ended on its own" here would be a lie about a case
+		// that did run, and it races the process exit — which is exactly how it
+		// showed up: intermittently, in the child, invisible to the parent. Let the
+		// panic be the only way out.
+		select {}
+	}
+	t.Fatalf("helper: %s", attachHelperEndedOnItsOwn)
 }
 
 // reportInputToStdout prints everything typed so far, each time an INPUT frame
@@ -424,8 +438,41 @@ func startAttachInPTY(t *testing.T, mode string) *ptyAttach {
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill() // ErrProcessDone once it has been reaped
 		<-h.exited
+		h.requireCleanChildRun(t)
 	})
 	return h
+}
+
+// requireCleanChildRun fails the test for problems the CHILD reported, which the
+// parent would otherwise never see: its output goes to the pty, so a child that
+// died of a data race or gave up without reaching its case can still leave every
+// parent assertion satisfied. That is how the #2810 attach teardown race reached
+// master — the race was in the child, the parent was green, and it surfaced only
+// once it started failing unrelated PRs.
+func (h *ptyAttach) requireCleanChildRun(t *testing.T) {
+	t.Helper()
+	out := h.settledOutput()
+	require.NotContains(t, out, "DATA RACE",
+		"the helper process reported a data race; the pty output is the only place it appears")
+	require.NotContains(t, out, attachHelperEndedOnItsOwn,
+		"the helper never reached the exit it was started for, so whatever the parent asserted was vacuous")
+}
+
+// settledOutput waits for the drain to stop growing before reading it, so a
+// check for something the child printed just before exiting is not racing the
+// copy out of the pty. Bounded, and quiet-based rather than a fixed nap.
+func (h *ptyAttach) settledOutput() string {
+	deadline := time.Now().Add(5 * time.Second)
+	last := -1
+	for time.Now().Before(deadline) {
+		got := len(h.output())
+		if got == last {
+			break
+		}
+		last = got
+		time.Sleep(100 * time.Millisecond)
+	}
+	return h.output()
 }
 
 // shellTrapFor returns the shell trap that gives a mode its inherited-ignored

@@ -137,7 +137,6 @@ var attachWriteTimeout = 10 * time.Second
 // locals up front so no goroutine re-reads package-level vars a test swaps back
 // in Cleanup.
 func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in cancelreader.CancelReader) {
-	defer in.Close()
 	// Give the terminal back on every exit from here — the drained detach at the
 	// bottom, a server disconnect, a signal, and the ones nobody wrote a handler
 	// for. A tail-called restore covers only the anticipated exits; #2784 is what
@@ -145,11 +144,11 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 	// the terminal back — and still crashes the process with its stack trace,
 	// because a recovered panic is a bug nobody ever sees. See terminalHandback.
 	//
-	// On the normal path the terminal still goes back exactly where it used to.
-	// Defers unwind last-registered-first, so this runs after the body has waited
-	// out copyDone (every byte the pane program wrote is on the terminal) and
-	// stdinDone (the input pump has proven it is gone, #2671), and still ahead of
-	// the in.Close registered above it.
+	// Registered FIRST so it unwinds LAST: the stdin pump has to be gone before
+	// the terminal goes back, or the stale reader eats the first post-attach
+	// keystroke (#2671). The reader teardown below is registered after this one
+	// and therefore runs before it, which is what keeps that ordering true on
+	// every exit rather than only on the drained one at the bottom.
 	defer handback.release()
 	// Snapshot EVERY package-level seam/tunable once, here, before any goroutine
 	// spawns. The goroutines then read only these locals — never the package vars
@@ -233,6 +232,33 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 	// terminal report ctrl+<key> as an escape sequence, and matching 0x17 alone
 	// left the user unable to detach at all (#1832). See detachkey.go.
 	stdinDone := make(chan struct{})
+	// The pump owns `in` for as long as it is running, so the descriptor must not
+	// be closed until the pump is STOPPED and JOINED. Closing a file out from
+	// under an in-flight Read is a data race — the reader is inside the fd while
+	// Close tears it down — and cancelreader exposes Cancel precisely so a caller
+	// never has to make Close do that job.
+	//
+	// Deferred, and in ONE place, because the ordering has to hold on the exits
+	// nobody writes by hand: the drained detach below reached it explicitly, and
+	// a PANIC did not, so it closed the fd straight out from under a blocked
+	// reader. That is the path #2784 added, so it is the path this has to cover.
+	//
+	// closeConn is in here for the same reason it is on the drained path: a pump
+	// parked in a WS write to a dead peer unblocks when the socket goes, so the
+	// join cannot outlast the write timeout.
+	//
+	// pumpRunning gates the join on the goroutine below actually having been
+	// started — a panic before that leaves nothing to wait for, and waiting anyway
+	// would hang the unwind forever.
+	pumpRunning := false
+	defer func() {
+		_ = in.Cancel()
+		closeConn()
+		if pumpRunning {
+			<-stdinDone
+		}
+		_ = in.Close()
+	}()
 	go func() {
 		defer close(stdinDone)
 		buf := make([]byte, 32)
@@ -255,6 +281,7 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 			}
 		}
 	}()
+	pumpRunning = true
 
 	// SIGWINCH → RESIZE, plus an initial RESIZE on connect so the pane matches the
 	// terminal immediately (the job the retired monitorWindowSize's forced initial
@@ -282,13 +309,9 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 	}()
 
 	<-copyDone
-	// A server close/MsgExit can end copyDone while stdin is still blocked. Cancel
-	// that read and wait for the pump to prove it has exited before restoring the
-	// terminal; requesting cancellation alone is not proof the reader is gone.
-	_ = in.Cancel()
-	closeConn()
-	<-stdinDone
-	// The terminal goes back from here via the deferred handback.release() above:
-	// the stream is fully drained (copyDone) and the stdin pump is gone, so the
-	// hand-back still lands strictly after any modes the pane program set.
+	// Everything after this is the deferred teardown above: a server close/MsgExit
+	// can end copyDone while stdin is still blocked, so the reader is cancelled and
+	// JOINED (requesting cancellation alone is not proof it is gone, #2671) before
+	// the descriptor closes, and the terminal goes back after that — still strictly
+	// after any modes the pane program set, because the stream is fully drained.
 }
