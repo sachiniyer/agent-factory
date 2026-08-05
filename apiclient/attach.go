@@ -233,6 +233,22 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 	// terminal report ctrl+<key> as an escape sequence, and matching 0x17 alone
 	// left the user unable to detach at all (#1832). See detachkey.go.
 	stdinDone := make(chan struct{})
+	// Unblock and JOIN the stdin pump BEFORE the deferred in.Close() above runs.
+	//
+	// Defers unwind last-registered-first, so registering this after that Close
+	// is what orders them: the descriptor is closed only once nothing is inside
+	// it. The drained exit at the bottom already did this on the normal path —
+	// but a PANIC skips the bottom entirely and runs only defers, so Close landed
+	// while this goroutine was still blocked in Read. That is a genuine data race
+	// (#2913/#2914), and because -race runs on every lane it reddened unrelated
+	// PRs whose diffs contain no attach code at all.
+	//
+	// Cancel is idempotent and a receive from a closed channel returns
+	// immediately, so this is a no-op on the path that already drained.
+	defer func() {
+		_ = in.Cancel()
+		<-stdinDone
+	}()
 	go func() {
 		defer close(stdinDone)
 		buf := make([]byte, 32)
