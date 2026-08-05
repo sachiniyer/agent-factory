@@ -24,6 +24,22 @@
   stream makes the endpoint a parse, and there is deliberately no opt-out: an
   escape hatch would restore exactly the ambiguity this removes.
 
+## Copying out of the web terminal on a phone
+
+- **Long-press the terminal to copy.** Touch had no copy gesture at all — not a
+  hard one, none: the rendered rows are `user-select: none` so the browser could
+  never build a selection to long-press on, xterm's own selection is driven from
+  mouse events a finger never sends, and every clipboard shortcut needs a Ctrl or
+  Cmd a phone does not have. Pressing and holding now selects the token under your
+  finger and copies it.
+- It takes the **whole whitespace-delimited token** — a path, a URL, a branch name,
+  a container id — rather than stopping at punctuation, because half of a URL is
+  not what anyone reached for. Pressing past the end of a line copies that line
+  instead, which is how you take a whole command or error message.
+- The selection stays highlighted, so you can see exactly what was copied. Scrolling
+  and tapping are unchanged: a drag still scrolls history and a tap still reaches a
+  mouse-aware TUI, since a press that moves is a scroll and never a copy.
+
 ## Absolute-path assets load in a web-tab preview
 
 - Setting `preview_listen_addr` (for example `127.0.0.1:8444`) now opens a second

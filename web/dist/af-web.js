@@ -6999,6 +6999,57 @@ function touchScrollClaimsGesture(originY, y) {
 function touchHistoryScrollPlan(lastY, y, rows, rowHeight, remainder) {
   return historyWheelPlan({ deltaMode: 0, deltaY: lastY - y }, rows, rowHeight, remainder);
 }
+var TOUCH_LONG_PRESS_MS = 500;
+function touchPressStillHeld(originX, originY, x, y) {
+  return Math.abs(x - originX) < TOUCH_SCROLL_SLOP_PX && Math.abs(y - originY) < TOUCH_SCROLL_SLOP_PX;
+}
+function terminalCellAtPoint(x, y, rect, cols, rows) {
+  if (rect.width <= 0 || rect.height <= 0 || cols <= 0 || rows <= 0) {
+    return null;
+  }
+  const col = Math.floor((x - rect.left) / rect.width * cols);
+  const row = Math.floor((y - rect.top) / rect.height * rows);
+  if (col < 0 || col >= cols || row < 0 || row >= rows) {
+    return null;
+  }
+  return { col, row };
+}
+function wordRangeAtColumn(cells, col) {
+  const partOfWord = (index) => {
+    const cell = cells[index];
+    return cell !== void 0 && (cell === "" || cell.trim() !== "");
+  };
+  if (!partOfWord(col)) {
+    return null;
+  }
+  let start = col;
+  while (start > 0 && partOfWord(start - 1)) {
+    start -= 1;
+  }
+  let end = col;
+  while (end + 1 < cells.length && partOfWord(end + 1)) {
+    end += 1;
+  }
+  return { start, length: end - start + 1 };
+}
+function lineContentColumns(cells) {
+  let last = -1;
+  for (let col = cells.length - 1; col >= 0; col -= 1) {
+    const cell = cells[col];
+    if (cell !== void 0 && cell !== "" && cell.trim() !== "") {
+      last = col;
+      break;
+    }
+  }
+  if (last < 0) {
+    return 0;
+  }
+  let end = last;
+  while (end + 1 < cells.length && cells[end + 1] === "") {
+    end += 1;
+  }
+  return end + 1;
+}
 
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
@@ -7206,6 +7257,8 @@ var AttachTerminal = class {
     container.addEventListener("wheel", this.onWheel, { capture: true, passive: true });
     container.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
     container.addEventListener("touchmove", this.onTouchMove, { capture: true, passive: false });
+    container.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
+    container.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
     container.addEventListener("pointerdown", this.onPointerDown, true);
     container.addEventListener("mousedown", this.onMouseDownCapture, true);
     container.addEventListener("copy", this.onCopy);
@@ -7242,9 +7295,16 @@ var AttachTerminal = class {
   touchScrollY = null;
   touchScrollRemainder = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
-  // scroll rather than a tap. Until it has, the touch is left entirely alone.
-  touchScrollOriginY = 0;
+  // scroll rather than a tap. Until it has, the touch is left entirely alone. The
+  // origin serves the long press too (#2849): both gestures are decided against the
+  // point the finger went down on, by the same threshold.
+  touchOriginX = 0;
+  touchOriginY = 0;
   touchScrollClaimed = false;
+  // The pending long press, and whether it has already copied on this gesture — a
+  // copy has to swallow the compatibility click the same touch would otherwise fire.
+  touchLongPressTimer = null;
+  touchCopyFired = false;
   // Whether the gesture in flight came from a finger, read off the pointer event that
   // precedes the browser's compatibility mouse events (onPointerDown).
   lastPointerWasTouch = false;
@@ -7308,13 +7368,25 @@ var AttachTerminal = class {
   // touchstart that a tap's compatibility mouse events depend on.
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
-    this.touchScrollY = event.touches.length === 1 && !onScrollbar ? event.touches[0].clientY : null;
-    this.touchScrollOriginY = this.touchScrollY ?? 0;
+    const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
+    this.touchScrollY = press?.clientY ?? null;
+    this.touchOriginX = press?.clientX ?? 0;
+    this.touchOriginY = press?.clientY ?? 0;
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
+    this.touchCopyFired = false;
+    this.cancelTouchLongPress();
+    if (press) {
+      this.startTouchLongPress();
+    }
   };
+  onTouchEnd = () => this.cancelTouchLongPress();
   onTouchMove = (event) => {
     this.handleUserScroll("touch");
+    const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
+    if (moved) {
+      this.cancelTouchLongPress();
+    }
     if (this.touchScrollY === null) {
       return;
     }
@@ -7329,7 +7401,7 @@ var AttachTerminal = class {
       return;
     }
     if (!this.touchScrollClaimed) {
-      if (!touchScrollClaimsGesture(this.touchScrollOriginY, y)) {
+      if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         return;
       }
       this.touchScrollClaimed = true;
@@ -7383,6 +7455,11 @@ var AttachTerminal = class {
   // gestures already separate without one, the drag scrolling history (#2682) and the
   // tap staying the click.
   onMouseDownCapture = (event) => {
+    if (this.lastPointerWasTouch && this.touchCopyFired) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (!this.applicationOwnsMouse() || this.lastPointerWasTouch) {
       return;
     }
@@ -7417,6 +7494,7 @@ var AttachTerminal = class {
     }
     const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
     if (plan.cancelScheduledVisibleFit) {
+      this.cancelTouchLongPress();
       this.cancelVisibleFitFrame();
     }
     this.fitVisibleHost();
@@ -7450,6 +7528,8 @@ var AttachTerminal = class {
     this.container.removeEventListener("wheel", this.onWheel, true);
     this.container.removeEventListener("touchstart", this.onTouchStart, true);
     this.container.removeEventListener("touchmove", this.onTouchMove, true);
+    this.container.removeEventListener("touchend", this.onTouchEnd, true);
+    this.container.removeEventListener("touchcancel", this.onTouchEnd, true);
     this.container.removeEventListener("pointerdown", this.onPointerDown, true);
     this.container.removeEventListener("mousedown", this.onMouseDownCapture, true);
     this.container.removeEventListener("copy", this.onCopy);
@@ -7495,6 +7575,65 @@ var AttachTerminal = class {
       this.mouseCaptureHint.setAttribute("aria-hidden", "true");
       this.mouseCaptureHintTimer = null;
     }, 4e3);
+  }
+  /**
+   * The long press — the ONLY way to copy anything out of this terminal on a touch
+   * device (#2849), where all three of the usual routes are closed: xterm's rows are
+   * `user-select: none` so the browser can never build a DOM selection to long-press
+   * on, xterm's own selection is driven from mouse events a finger never sends, and
+   * every branch of clipboard.ts needs a Ctrl or Cmd that no phone has.
+   *
+   * So af makes the selection itself and copies it through the same never-silent
+   * ladder the keyboard path uses. The selection xterm then paints IS the feedback:
+   * it names exactly what landed on the clipboard, which is the one thing #2787's
+   * silent failure could not do.
+   */
+  startTouchLongPress() {
+    this.touchLongPressTimer = window.setTimeout(() => {
+      this.touchLongPressTimer = null;
+      this.copyTouchWord(this.touchOriginX, this.touchOriginY);
+    }, TOUCH_LONG_PRESS_MS);
+  }
+  cancelTouchLongPress() {
+    if (this.touchLongPressTimer !== null) {
+      window.clearTimeout(this.touchLongPressTimer);
+      this.touchLongPressTimer = null;
+    }
+  }
+  /** Selects the token under the finger — the whole line when that cell is blank —
+   *  and copies it. Silent only when there is genuinely nothing there to take. */
+  copyTouchWord(x, y) {
+    const rowsEl = this.container.querySelector(".xterm-rows");
+    if (!rowsEl) {
+      return;
+    }
+    const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), this.term.cols, this.term.rows);
+    if (!cell) {
+      return;
+    }
+    const buffer = this.term.buffer.active;
+    const bufferRow = buffer.viewportY + cell.row;
+    const line = buffer.getLine(bufferRow);
+    if (!line) {
+      return;
+    }
+    const cells = [];
+    for (let col = 0; col < line.length; col += 1) {
+      const buffered = line.getCell(col);
+      cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+    }
+    const range = wordRangeAtColumn(cells, cell.col) ?? { start: 0, length: lineContentColumns(cells) };
+    if (range.length === 0) {
+      return;
+    }
+    this.term.select(range.start, bufferRow, range.length);
+    const text = this.term.getSelection();
+    if (text.trim() === "") {
+      this.term.clearSelection();
+      return;
+    }
+    this.touchCopyFired = true;
+    this.copyToClipboard(text);
   }
   /** The painted height of one terminal row, which turns a pixel-denominated gesture
    *  into rows. Falls back to a font-size estimate before the first row exists. */

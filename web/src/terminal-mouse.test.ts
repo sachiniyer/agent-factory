@@ -7,9 +7,14 @@ import {
   terminalMouseOverride,
   terminalMouseOverrideFlag,
   terminalMouseOverrideHeld,
+  lineContentColumns,
+  terminalCellAtPoint,
+  TOUCH_LONG_PRESS_MS,
   TOUCH_SCROLL_SLOP_PX,
   touchHistoryScrollPlan,
+  touchPressStillHeld,
   touchScrollClaimsGesture,
+  wordRangeAtColumn,
 } from "./terminal-mouse.js";
 
 test("application-mouse escape matches xterm's platform selection modifier", () => {
@@ -100,4 +105,67 @@ test("a tap's wobble is not a scroll, in either direction (#2682)", () => {
 
   // Under one terminal row, or a real scroll would visibly lag the finger.
   assert.ok(TOUCH_SCROLL_SLOP_PX < 13 * 1.2);
+});
+
+test("a point resolves to the cell under it, and nothing outside the grid (#2849)", () => {
+  const rect = { left: 100, top: 50, width: 800, height: 400 }; // 80x20 grid → 10x20 cells
+  assert.deepEqual(terminalCellAtPoint(100, 50, rect, 80, 20), { col: 0, row: 0 });
+  assert.deepEqual(terminalCellAtPoint(105, 55, rect, 80, 20), { col: 0, row: 0 });
+  assert.deepEqual(terminalCellAtPoint(115, 71, rect, 80, 20), { col: 1, row: 1 });
+  // The last cell is inside; one pixel past the box is not — an off-by-one here
+  // would copy from a row the finger never touched.
+  assert.deepEqual(terminalCellAtPoint(899, 449, rect, 80, 20), { col: 79, row: 19 });
+  assert.equal(terminalCellAtPoint(900, 449, rect, 80, 20), null);
+  assert.equal(terminalCellAtPoint(899, 450, rect, 80, 20), null);
+  assert.equal(terminalCellAtPoint(99, 60, rect, 80, 20), null);
+
+  // A pane that has not been laid out yet must not resolve to cell 0,0.
+  assert.equal(terminalCellAtPoint(0, 0, { left: 0, top: 0, width: 0, height: 0 }, 80, 20), null);
+});
+
+test("long-press selects the whitespace-delimited token under the finger (#2849)", () => {
+  const cells = [..."cd /srv/app-2 && go test"];
+
+  // The token, not xterm's double-click word: a path keeps its slashes and a branch
+  // its dashes, because a fragment of either is not what anyone meant to copy.
+  assert.deepEqual(wordRangeAtColumn(cells, 5), { start: 3, length: 10 });
+  assert.deepEqual(wordRangeAtColumn(cells, 3), { start: 3, length: 10 });
+  assert.deepEqual(wordRangeAtColumn(cells, 12), { start: 3, length: 10 });
+  assert.deepEqual(wordRangeAtColumn(cells, 0), { start: 0, length: 2 });
+
+  // A blank cell has no word — the caller falls back to the whole line.
+  assert.equal(wordRangeAtColumn(cells, 2), null);
+  assert.equal(wordRangeAtColumn(cells, 999), null);
+  assert.equal(wordRangeAtColumn([], 0), null);
+
+  // A wide character spans two columns and reports "" in the second. It has to join
+  // the token it continues, or every CJK word would be cut at its first glyph.
+  const wide = ["ls", "", " ", "近", "", "藤", "", " "];
+  assert.deepEqual(wordRangeAtColumn(wide, 3), { start: 3, length: 4 });
+  assert.deepEqual(wordRangeAtColumn(wide, 4), { start: 3, length: 4 });
+  assert.deepEqual(wordRangeAtColumn(wide, 0), { start: 0, length: 2 });
+});
+
+test("the line fallback stops at the content, not the blank tail (#2849)", () => {
+  assert.equal(lineContentColumns([..."echo hi", " ", " ", " "]), 7);
+  assert.equal(lineContentColumns([..."x"]), 1);
+  assert.equal(lineContentColumns([" ", " "]), 0);
+  assert.equal(lineContentColumns([]), 0);
+  // A trailing wide-char continuation is content, not tail.
+  assert.equal(lineContentColumns(["近", "", " "]), 2);
+});
+
+test("a press and a scroll are decided by ONE threshold (#2849)", () => {
+  // Same number in both directions, so no gesture can be a press and a scroll at
+  // once, and none can be neither.
+  assert.equal(touchPressStillHeld(100, 200, 100, 200), true);
+  assert.equal(touchPressStillHeld(100, 200, 100 + TOUCH_SCROLL_SLOP_PX - 1, 200), true);
+  assert.equal(touchPressStillHeld(100, 200, 100, 200 - (TOUCH_SCROLL_SLOP_PX - 1)), true);
+  assert.equal(touchPressStillHeld(100, 200, 100 + TOUCH_SCROLL_SLOP_PX, 200), false);
+  assert.equal(touchPressStillHeld(100, 200, 100, 200 + TOUCH_SCROLL_SLOP_PX), false);
+  // The press gives up exactly where the scroll takes over.
+  assert.equal(touchPressStillHeld(0, 0, 0, TOUCH_SCROLL_SLOP_PX), !touchScrollClaimsGesture(0, TOUCH_SCROLL_SLOP_PX));
+
+  // Long enough to be deliberate, short enough that a thumb does not think it failed.
+  assert.ok(TOUCH_LONG_PRESS_MS >= 300 && TOUCH_LONG_PRESS_MS <= 800);
 });
