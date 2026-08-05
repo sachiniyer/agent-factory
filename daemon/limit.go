@@ -539,6 +539,14 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	repoStartLock.Unlock()
 	if persistErr != nil {
 		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+	} else if settleErr != nil {
+		// That write persisted the WHOLE row — the provenance the earlier settlement
+		// was carrying AND the resume that just landed — so the durability gap it
+		// described is closed. Retire the owed retry and the error with it: reporting
+		// a completed, fully durable resume as a failure would make a caller treat it
+		// as one.
+		m.clearOwedSettlement(repoID, instance)
+		settleErr = nil
 	}
 	if settleErr != nil {
 		// The resume itself landed — the prompt was delivered and the limit lifted —
