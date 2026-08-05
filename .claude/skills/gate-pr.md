@@ -172,11 +172,12 @@ jq -s -r --slurpfile ru "$G/rules.json" --slurpfile st "$G/statuses.json" '
 echo "all checks passed, all required contexts reported"
 ```
 
-Wait for **every** signal, not just required ones. Some workflows (for example
-`web-selftest`) are deliberately not required, so "no pending required check"
-will happily let you merge while a real suite is still running or already red.
-CodeQL reports mid-run non-success states; only a completed conclusion is real —
-which is why an incomplete `CheckRun` counts as pending rather than passing.
+Wait for **every** signal, not just required ones. Some workflows run as
+non-required checks (or as required checks only on a path filter, so a skip
+reads as "passed"), so "no pending required check" will happily let you merge
+while a real suite is still running or already red. CodeQL reports mid-run
+non-success states; only a completed conclusion is real — which is why an
+incomplete `CheckRun` counts as pending rather than passing.
 
 **A skipped required check is not a passed one.** `.github/workflows/pr.yml`
 documents the trap directly: a failed dependency leaves `Build` SKIPPED, and a
