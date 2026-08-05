@@ -518,7 +518,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		prompt = "continue"
 	}
 	if serr := as.SendPrompt(prompt); serr != nil {
-		return resumeNotPerformed, fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
+		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
+		if settleErr != nil {
+			// This return skips the whole-row checkpoint below, so unlike the success
+			// path there is nothing to make the settlement moot — the gap is still
+			// open and the caller has to hear about it alongside the prompt failure.
+			// Joined, not wrapped, so errors.Is still finds either one.
+			return resumeNotPerformed, errors.Join(resumeErr, settleErr)
+		}
+		return resumeNotPerformed, resumeErr
 	}
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.
