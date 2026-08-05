@@ -162,6 +162,48 @@ func NoServerRunning(err error) bool {
 	return exitOne && noTmuxServerDiagnostic(diagnostic)
 }
 
+// ListSessionNames returns the name of every session on the tmux server, or an
+// error when tmux could not tell us — the same three-valued contract
+// CleanupSessions applies to its own listing, and for the same reason: a caller
+// that reads a missing name as proof the session is DEAD will act on it.
+//
+// Exported for `af doctor` (#2874/#2910). Doctor shelled out to `tmux ls`
+// itself, which put its listing outside two invariants this package maintains
+// and states as obligations:
+//
+//   - the classification of tmux's ambiguous exit 1 (see NoServerRunning), and
+//   - the BOUND. Every tmux command here runs under tmuxCommandTimeout through
+//     boundedTmuxCommand, because a wedged server parks the client forever and a
+//     bare context is not a bound — it has to carry the process-group kill and
+//     WaitDelay too (#1787/#2099). Doctor's copy had neither, so `af doctor
+//     --fix` could hang in the cleanup phase against a server that wedged
+//     mid-run, instead of refusing the removal it could no longer justify.
+//
+// A tripped deadline is an error, never an empty list: a server that did not
+// answer has told us nothing about what is running on it.
+func ListSessionNames(cmdExec cmd.Executor) ([]string, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, "ls", "-F", "#{session_name}")
+	timedOut := ctx.Err() != nil
+	cancel()
+	if err != nil {
+		if timedOut {
+			return nil, fmt.Errorf("%w: tmux ls after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		if NoServerRunning(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("could not list tmux sessions%s: %w", tmuxDiagnosticSuffix(err), err)
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
 // CommandDiagnostic returns what tmux wrote to stderr for a failed command,
 // whitespace-collapsed onto one line, or "" when there is nothing to report.
 //

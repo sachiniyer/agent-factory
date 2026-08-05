@@ -1,12 +1,14 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 )
@@ -253,5 +255,45 @@ func TestCleanupSessionsAgainstRealTmuxSocket(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "could not list tmux sessions") {
 		t.Errorf("error = %q, want it to name the read that failed", err)
+	}
+}
+
+// TestListSessionNamesIsBounded is the #2910 regression. `af doctor --fix`
+// re-lists tmux sessions before it removes a stale AF home, so an unbounded
+// listing against a server that wedged mid-run hangs the cleanup phase instead
+// of refusing a removal it can no longer justify — a hang with no way out but
+// ^C, at the moment the user is already cleaning up.
+//
+// The stalling tmux sleeps in a CHILD, so passing requires the process-group
+// kill and WaitDelay, not just a context: a deadline alone leaves Output()
+// blocked on the inherited pipe.
+func TestListSessionNamesIsBounded(t *testing.T) {
+	stallingTmuxOnPath(t)
+	shortTmuxTimeout(t, 200*time.Millisecond)
+
+	done := make(chan struct{})
+	var names []string
+	var err error
+	go func() {
+		defer close(done)
+		names, err = ListSessionNames(cmd.MakeExecutor())
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ListSessionNames never returned against a wedged tmux — an unbounded listing hangs " +
+			"`af doctor --fix` in its cleanup phase (#2910)")
+	}
+
+	if err == nil {
+		t.Fatalf("ListSessionNames returned (%v, nil) on a tripped deadline — a server that did not "+
+			"answer has told us nothing about what is running, and must never read as an empty list", names)
+	}
+	if !errors.Is(err, ErrTmuxTimeout) {
+		t.Errorf("error = %v, want ErrTmuxTimeout so callers can tell a wedge from a refusal", err)
+	}
+	if names != nil {
+		t.Errorf("names = %v, want nil alongside the error", names)
 	}
 }
