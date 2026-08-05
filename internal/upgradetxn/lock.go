@@ -52,7 +52,17 @@ func fileIdentity(info os.FileInfo) (FileIdentity, error) {
 }
 
 func acquireFileLock(path string, nonblocking bool) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, journalFileMode)
+	return acquireFileLockFlags(path, 0, nonblocking)
+}
+
+// acquireFileLockFlags is acquireFileLock with extra open flags. The executable
+// lock passes O_NOFOLLOW: unlike every other lock here it lives outside the
+// 0700 AF home, in whatever directory the binary is installed to, and that
+// directory can be group-writable (a shared /usr/local/bin). Following a
+// symlink planted there would have this create a file somewhere it was never
+// asked to touch.
+func acquireFileLockFlags(path string, extraFlags int, nonblocking bool) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|extraFlags, journalFileMode)
 	if err != nil {
 		return nil, err
 	}

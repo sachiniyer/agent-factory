@@ -274,7 +274,7 @@ func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, f
 	// install exactly what the guard just declined.
 	swapRan := false
 	var swapErr error
-	lockErr := upgradetxn.WithInstallLock(home, func() error {
+	lockErr := upgradetxn.WithInstallLock(home, resolvedPath, func() error {
 		swapRan = true
 		swapErr = swap()
 		return swapErr

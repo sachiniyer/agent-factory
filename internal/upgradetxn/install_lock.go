@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // preparationLockName is the single lock that serialises publishing a
@@ -21,14 +22,11 @@ const preparationLockName = "prepare.lock"
 // for an active transaction and then writing the binary is a
 // time-of-check-to-time-of-use window on its own — a transaction published in
 // between is invisible to a check that already passed, and the swap lands
-// underneath it. Serialising both through one lock is what closes that window,
-// and it is why Prepare snapshots the running executable inside the lock rather
-// than before it.
+// underneath it.
 //
-// It is also why Prepare snapshots the running executable INSIDE this lock. An
-// in-place installer takes the same lock around its swap, so reading the
-// executable outside it would let a transaction preserve pre-swap bytes as its
-// "previous" binary while newer bytes sit on disk — and a later rollback would
+// It is also why Prepare snapshots the running executable INSIDE these locks:
+// reading it outside would let a transaction preserve pre-swap bytes as its
+// "previous" binary while newer bytes sit on disk, and a later rollback would
 // then silently undo that install.
 //
 // The lock blocks rather than failing: an installer that arrives mid-preparation
@@ -38,7 +36,7 @@ const preparationLockName = "prepare.lock"
 // Like Prepare, this materialises the upgrade root if it is absent — taking a
 // lock requires a file to take it on. That is a write, so this belongs on paths
 // that are already mutating (an install), never on a read-only probe.
-func WithInstallLock(homeDir string, fn func() error) (retErr error) {
+func WithInstallLock(homeDir, executablePath string, fn func() error) (retErr error) {
 	home, err := canonicalExistingDir(homeDir)
 	if err != nil {
 		return fmt.Errorf("validate upgrade home: %w", err)
@@ -54,7 +52,7 @@ func WithInstallLock(homeDir string, fn func() error) (retErr error) {
 	defer func() {
 		retErr = errors.Join(retErr, releaseFileLock(lock))
 	}()
-	return fn()
+	return withExecutableLock(executablePath, fn)
 }
 
 // ensureLockRoot makes the upgrade root usable as a lock location WITHOUT
@@ -85,4 +83,47 @@ func ensureLockRoot(path string) error {
 		return fmt.Errorf("secure new upgrade lock root %s: %w", path, chErr)
 	}
 	return validateDirectoryNoSymlink(path)
+}
+
+// executableLockPath returns the lock that serialises every writer of one
+// executable, whatever AF home they belong to.
+//
+// The home lock cannot do this job. One `af` binary can serve many AF homes
+// (AGENT_FACTORY_HOME), but a transaction is home-scoped while the executable is
+// not — so two homes take two different `prepare.lock`s and exclude nothing over
+// the binary they share. This lock is keyed to the executable instead, which is
+// the thing actually being contended.
+//
+// It lives beside the executable because that is the only location derivable
+// from the executable alone, and every writer already needs write access to that
+// directory: an in-place swap renames a temp file into it, and upgradetxn stages
+// its preserved and candidate binaries there. A world-writable location such as
+// /tmp would be derivable too, and is rejected — a local user could hold the lock
+// and stall every upgrade on the box, or pre-plant the path.
+//
+// The file is left behind on purpose. Removing a lock another process may be
+// holding is a race, and an empty 0600 dotfile beside the binary costs nothing.
+func executableLockPath(executable string) string {
+	return filepath.Join(
+		filepath.Dir(executable),
+		"."+filepath.Base(executable)+".af-upgrade.lock",
+	)
+}
+
+// withExecutableLock runs fn holding the executable-keyed lock. Callers take it
+// AFTER the per-home preparation lock, always in that order, so two homes racing
+// the same binary cannot deadlock against each other.
+func withExecutableLock(executablePath string, fn func() error) (retErr error) {
+	executable, err := canonicalExistingFile(executablePath)
+	if err != nil {
+		return fmt.Errorf("validate executable for the upgrade lock: %w", err)
+	}
+	lock, err := acquireFileLockFlags(executableLockPath(executable), syscall.O_NOFOLLOW, false)
+	if err != nil {
+		return fmt.Errorf("lock the executable for upgrade: %w", err)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, releaseFileLock(lock))
+	}()
+	return fn()
 }

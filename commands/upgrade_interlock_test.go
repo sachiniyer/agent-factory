@@ -375,7 +375,7 @@ func TestWriteExecutableInPlace_HoldsThePreparationLockAgainstPrepare(t *testing
 	release := make(chan struct{})
 	held := make(chan error, 1)
 	go func() {
-		held <- upgradetxn.WithInstallLock(home, func() error {
+		held <- upgradetxn.WithInstallLock(home, target, func() error {
 			close(holding)
 			<-release
 			return nil
@@ -557,4 +557,47 @@ func TestForeignUpgradeStagingOver_OnlyMatchesThisExecutable(t *testing.T) {
 	found := foreignUpgradeStagingOver(target)
 	require.NotNil(t, found)
 	require.Equal(t, "upgrade-real", found.ID)
+}
+
+// The in-place swap is serialised against a DIFFERENT AF home's transaction, not
+// just its own home's. One `af` binary serves many homes, so a per-home lock
+// excludes nothing over the binary they share; the interlock passes the resolved
+// executable so the lock is keyed to the thing actually contended.
+func TestWriteExecutableInPlace_SerialisesAgainstAnotherHomesLock(t *testing.T) {
+	upgradeHome(t) // this installer's home
+
+	target := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+
+	// Another AF home entirely, holding the lock over the same executable.
+	otherHome := t.TempDir()
+	held := make(chan struct{})
+	release := make(chan struct{})
+	otherDone := make(chan error, 1)
+	go func() {
+		otherDone <- upgradetxn.WithInstallLock(otherHome, target, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	done := make(chan error, 1)
+	go func() {
+		done <- writeExecutableInPlace(target, []byte("new binary"), false, "--"+ignoreActiveUpgradeFlag)
+	}()
+	select {
+	case <-done:
+		t.Fatal("the swap proceeded while another AF home held the executable lock")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	on, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "old binary", string(on))
+
+	close(release)
+	require.NoError(t, <-otherDone)
+	require.NoError(t, <-done)
 }
