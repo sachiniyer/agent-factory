@@ -83,7 +83,7 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 	// a download on a swap the interlock would refuse. Silent by design: like
 	// every other skip on this path, it must not print at, block, or fail a
 	// launch the user asked for.
-	if active := activeUpgradeOwningExecutable(); active != nil {
+	if active := upgradeOwningThisExecutable(); active != nil {
 		log.InfoLog.Printf("auto-update: daemon upgrade to %s in progress (transaction %s, phase %s); skipping the launch-time install",
 			active.ToVersion, active.ID, active.Phase)
 		return

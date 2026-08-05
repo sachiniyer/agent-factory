@@ -550,11 +550,11 @@ func TestForeignUpgradeStagingOver_OnlyMatchesThisExecutable(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
 	}
 
-	require.Nil(t, foreignUpgradeStagingOver(target),
+	require.Nil(t, foreignUpgradeStagingOver(target, ""),
 		"only a preserved-previous artifact for THIS executable may block it")
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-real.previous"), []byte("x"), 0o755))
-	found := foreignUpgradeStagingOver(target)
+	found := foreignUpgradeStagingOver(target, "")
 	require.NotNil(t, found)
 	require.Equal(t, "upgrade-real", found.ID)
 }
@@ -600,4 +600,50 @@ func TestWriteExecutableInPlace_SerialisesAgainstAnotherHomesLock(t *testing.T) 
 	close(release)
 	require.NoError(t, <-otherDone)
 	require.NoError(t, <-done)
+}
+
+// The interlock must not contradict its own journal policy. A committed
+// transaction keeps its preserved binary beside the executable until Cleanup
+// removes it, and the journal policy deliberately lets that state through — so
+// the artifact scan must not turn around and block on the very transaction the
+// policy just allowed.
+func TestForeignUpgradeStagingOver_SkipsThisHomesOwnTransaction(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("binary"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-ours.previous"), []byte("x"), 0o755))
+
+	require.Nil(t, foreignUpgradeStagingOver(target, "upgrade-ours"),
+		"our own transaction's artifact must not block the install its journal policy allowed")
+	require.NotNil(t, foreignUpgradeStagingOver(target, "upgrade-someone-else"),
+		"another home's artifact must still block")
+}
+
+// The launch path must not spend a download and burn its six-hour window
+// discovering, inside the writer, that another home owns the executable.
+func TestUpgradeOwningThisExecutable_SeesAnotherHomesStaging(t *testing.T) {
+	upgradeHome(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("binary"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".af.af-upgrade-upgrade-other.previous"), []byte("x"), 0o755))
+
+	originalExec := osExecutableFn
+	osExecutableFn = func() (string, error) { return target, nil }
+	t.Cleanup(func() { osExecutableFn = originalExec })
+
+	active := upgradeOwningThisExecutable()
+	require.NotNil(t, active, "the pre-throttle gate must see a foreign staging over the shared executable")
+	require.Equal(t, "upgrade-other", active.ID)
+}
+
+// An executable that cannot be resolved is inconclusive, and this gate only ever
+// suppresses an update — it must not do so on a read it could not make.
+func TestUpgradeOwningThisExecutable_InconclusiveExecutableDoesNotBlock(t *testing.T) {
+	upgradeHome(t)
+	originalExec := osExecutableFn
+	osExecutableFn = func() (string, error) { return "", errors.New("cannot resolve") }
+	t.Cleanup(func() { osExecutableFn = originalExec })
+
+	require.Nil(t, upgradeOwningThisExecutable())
 }

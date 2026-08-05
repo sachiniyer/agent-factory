@@ -37,6 +37,26 @@ const preparationLockName = "prepare.lock"
 // lock requires a file to take it on. That is a write, so this belongs on paths
 // that are already mutating (an install), never on a read-only probe.
 func WithInstallLock(homeDir, executablePath string, fn func() error) (retErr error) {
+	return withInstallLock(homeDir, executablePath, false, fn)
+}
+
+// TryWithInstallLock is WithInstallLock for a caller that must not wait. It
+// returns ErrInstallLockBusy rather than queueing when either lock is held.
+//
+// The launch-time updater needs this: it runs in front of a TUI that has not
+// opened yet, and a daemon publishing a transaction holds the preparation lock
+// for as long as it takes to copy and fsync a preserved binary. Blocking there
+// would make an unattended update stall the launch the user actually asked for,
+// which is the one thing that path may never do. `af upgrade` was asked for
+// explicitly and keeps the waiting form.
+func TryWithInstallLock(homeDir, executablePath string, fn func() error) (retErr error) {
+	return withInstallLock(homeDir, executablePath, true, fn)
+}
+
+// ErrInstallLockBusy reports that another writer holds the upgrade locks.
+var ErrInstallLockBusy = errors.New("another upgrade holds the install lock")
+
+func withInstallLock(homeDir, executablePath string, nonblocking bool, fn func() error) (retErr error) {
 	home, err := canonicalExistingDir(homeDir)
 	if err != nil {
 		return fmt.Errorf("validate upgrade home: %w", err)
@@ -45,14 +65,17 @@ func WithInstallLock(homeDir, executablePath string, fn func() error) (retErr er
 	if err := ensureLockRoot(root); err != nil {
 		return err
 	}
-	lock, err := acquireFileLock(filepath.Join(root, preparationLockName), false)
+	lock, err := acquireFileLock(filepath.Join(root, preparationLockName), nonblocking)
 	if err != nil {
+		if nonblocking && errors.Is(err, ErrRecoveryActive) {
+			return ErrInstallLockBusy
+		}
 		return fmt.Errorf("lock upgrade preparation: %w", err)
 	}
 	defer func() {
 		retErr = errors.Join(retErr, releaseFileLock(lock))
 	}()
-	return withExecutableLock(executablePath, fn)
+	return withExecutableLock(executablePath, nonblocking, fn)
 }
 
 // ensureLockRoot makes the upgrade root usable as a lock location WITHOUT
@@ -113,13 +136,16 @@ func executableLockPath(executable string) string {
 // withExecutableLock runs fn holding the executable-keyed lock. Callers take it
 // AFTER the per-home preparation lock, always in that order, so two homes racing
 // the same binary cannot deadlock against each other.
-func withExecutableLock(executablePath string, fn func() error) (retErr error) {
+func withExecutableLock(executablePath string, nonblocking bool, fn func() error) (retErr error) {
 	executable, err := canonicalExistingFile(executablePath)
 	if err != nil {
 		return fmt.Errorf("validate executable for the upgrade lock: %w", err)
 	}
-	lock, err := acquireFileLockFlags(executableLockPath(executable), syscall.O_NOFOLLOW, false)
+	lock, err := acquireFileLockFlags(executableLockPath(executable), syscall.O_NOFOLLOW, nonblocking)
 	if err != nil {
+		if nonblocking && errors.Is(err, ErrRecoveryActive) {
+			return ErrInstallLockBusy
+		}
 		return fmt.Errorf("lock the executable for upgrade: %w", err)
 	}
 	defer func() {

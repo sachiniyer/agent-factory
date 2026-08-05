@@ -210,7 +210,7 @@ func TestWithExecutableLock_RefusesToFollowASymlink(t *testing.T) {
 	elsewhere := filepath.Join(t.TempDir(), "victim")
 	require.NoError(t, os.Symlink(elsewhere, executableLockPath(executable)))
 
-	err := withExecutableLock(executable, func() error {
+	err := withExecutableLock(executable, false, func() error {
 		t.Fatal("the critical section must not run when the lock path is a symlink")
 		return nil
 	})
@@ -225,7 +225,7 @@ func TestWithExecutableLock_RefusesToFollowASymlink(t *testing.T) {
 // hold is a race — and it must be private.
 func TestWithExecutableLock_LeavesAPrivateLockFile(t *testing.T) {
 	executable := lockTestExecutable(t)
-	require.NoError(t, withExecutableLock(executable, func() error { return nil }))
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
 
 	info, err := os.Stat(executableLockPath(executable))
 	require.NoError(t, err)
