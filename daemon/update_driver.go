@@ -457,6 +457,17 @@ func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel
 		return outcome
 	}
 
+	// Once more, immediately before the hand-off. The fingerprint above hashes
+	// the whole binary, so shutdown can land between the last check and this
+	// line — and triggerUpgradeActivation enters Prepare before it ever looks at
+	// the context, while the detached recovery-job start takes no context at
+	// all. Past this point an operator's stop would publish a transaction and
+	// start an actor rather than exiting.
+	if ctx.Err() != nil {
+		log.InfoLog.Printf("auto-update: daemon is shutting down; abandoning the staged upgrade to %s", latest)
+		return updateCheckSkipped
+	}
+
 	if err := d.activate(ctx, candidate, latest); err != nil {
 		// The hand-off did not happen and this daemon is still serving. Reject
 		// the tag so the next window does not walk into the same failure, and

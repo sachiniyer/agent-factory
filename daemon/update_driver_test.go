@@ -934,3 +934,27 @@ func TestNewUpdateDriver_CapturesTheExecutableBaselineAtStart(t *testing.T) {
 	require.Equal(t, driver.baselineExecutable, current,
 		"an untouched executable must still match the baseline taken at start")
 }
+
+// The fingerprint hashes the whole binary, so shutdown can land between the
+// post-download check and the hand-off. triggerUpgradeActivation enters Prepare
+// before it looks at the context, and the detached recovery-job start takes no
+// context at all — so past that point an operator's stop publishes a transaction
+// instead of exiting.
+func TestUpdateDriver_ShutdownDuringTheFingerprintAbandonsTheUpgrade(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	h.driver.executableIdentity = func() (string, error) {
+		calls++
+		if calls == 2 {
+			cancel() // shutdown lands while the post-download fingerprint runs
+		}
+		return h.driver.baselineExecutable, nil
+	}
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce(ctx))
+	require.Equal(t, 1, rec.downloads)
+	require.Zero(t, rec.activations, "a stopping daemon must not publish a transaction")
+}
