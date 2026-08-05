@@ -229,3 +229,31 @@ has-session)     exit 0 ;;`)
 			"callers can still classify the tmux command as timed out (#1917)", err)
 	}
 }
+
+// TestCaptureTimeoutKeepsTheSentinelThroughACloseFailure is the second sentinel
+// leak (Codex on #2966, round 2). The first fix joined pidErr into the
+// survived-kill branch; list-panes can time out too, and its ErrTmuxTimeout
+// lives in processes.captureErr, which the same branch was still dropping.
+//
+// Here the pane query SUCCEEDS (so pidErr is nil and cannot carry the sentinel),
+// list-panes times out, and the kill then fails with the session still alive.
+func TestCaptureTimeoutKeepsTheSentinelThroughACloseFailure(t *testing.T) {
+	shortTmuxTimeout(t, 200*time.Millisecond)
+	livePID := strconv.Itoa(os.Getpid())
+	scriptedTmuxOnPath(t, `
+display-message) echo "`+livePID+`" ;;
+list-panes)      sleep 300 & wait ;;
+kill-session)    echo "cannot kill session" >&2; exit 1 ;;
+has-session)     exit 0 ;;`)
+
+	ts := NewTmuxSessionFromSanitizedName("af_capture_timeout", "")
+	state, err := ts.CloseAndWaitForPaneExit()
+
+	if state != PaneStateUnknown {
+		t.Fatalf("state = %v, want PaneStateUnknown", state)
+	}
+	if !errors.Is(err, ErrTmuxTimeout) {
+		t.Errorf("error = %v, want the ErrTmuxTimeout from the timed-out list-panes to survive the "+
+			"combined failure — pidErr is nil here, so the capture error is the only carrier (#1917)", err)
+	}
+}

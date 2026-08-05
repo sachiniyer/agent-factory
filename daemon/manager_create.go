@@ -198,7 +198,15 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		if killErr != nil && !session.TeardownStateUnknown(killErr) {
 			log.WarningLog.Printf("create of session %q: cleanup reported an error that does not leave its workspace state unknown; discarding the session as normal: %v", title, killErr)
 		}
-		if session.TeardownStateUnknown(killErr) && !neverSpawned {
+		// The exemption covers ONLY the pane half of "unknown". TeardownStateUnknown
+		// is true for ErrPaneMayBeLive OR ErrWorkspaceStateUnknown, and the second
+		// has nothing to do with whether a pane spawned: a worktree removal cut off
+		// mid-delete leaves a partially removed tree, and this record is the only
+		// handle on it (#2110/#2531). Suppressing retention there would release the
+		// title over a half-deleted workspace nobody can address (Codex on #2966).
+		paneOnlyUnknown := errors.Is(killErr, session.ErrPaneMayBeLive) &&
+			!errors.Is(killErr, session.ErrWorkspaceStateUnknown)
+		if session.TeardownStateUnknown(killErr) && !(neverSpawned && paneOnlyUnknown) {
 			if keepErr := m.keepFailedCreate(repo.ID, title, instance); keepErr != nil {
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely — its workspace may still be on disk at %s and could not be recorded, so it must be cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))

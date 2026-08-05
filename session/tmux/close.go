@@ -280,12 +280,13 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		if closeErr == nil {
 			return refuse(fmt.Errorf("tmux did not establish that session %s is gone", t.sanitizedName))
 		}
-		// pidErr is joined, not dropped: when the pane query ALSO timed out, this
-		// branch runs before the timeout case below, and returning closeErr alone
-		// would erase the ErrTmuxTimeout sentinel that #1917 keeps reachable
-		// through errors.Is for callers that classify on it. errors.Join ignores a
-		// nil pidErr, so the ordinary case is unchanged.
-		return PaneStateUnknown, errors.Join(closeErr, pidErr)
+		// pidErr AND captureErr are joined, not dropped. This branch runs before
+		// the cases that would otherwise report them, so returning closeErr alone
+		// erases whichever ErrTmuxTimeout they carry — the sentinel #1917 keeps
+		// reachable through errors.Is for callers that classify on it. Both are
+		// reachable here: the pane query can time out, and so can list-panes.
+		// errors.Join ignores nils, so the ordinary case is unchanged.
+		return PaneStateUnknown, errors.Join(closeErr, pidErr, processes.captureErr)
 	case errors.Is(pidErr, ErrTmuxTimeout):
 		// A TIMED-OUT panePID is not "nothing to wait on" (#1917). The server never
 		// told us which process to wait for, so even with a successful kill we skip
