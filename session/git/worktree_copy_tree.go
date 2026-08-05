@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -421,6 +422,12 @@ func copySymlinkEntry(
 	if err != nil || !destinationIdentity.same(confirmedIdentity) || destinationLink != link {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while it was copied", destinationPath)
 	}
+	// Symlink mtime is deliberately NOT restored here; see #2919. Reading the
+	// link's own timestamp needs Fstatat plus the Mtim/Mtimespec split this
+	// helper exists to avoid, and no probe measures it, so preserving it would
+	// mean unverified code in the one function that must never lose bytes. The
+	// fidelity guard is a denylist: add a symlink-mtime probe and it fails,
+	// pointing here.
 	return created, nil
 }
 
@@ -453,7 +460,14 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 			destinationPath, err,
 		)
 	}
-	return preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory")
+	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
+		return err
+	}
+	// Timestamps last, and only here: every child creation bumps this
+	// directory's mtime, so setting it before the level is complete would be
+	// overwritten by the next entry. "." resolves to the directory itself
+	// through its own descriptor.
+	return preserveSourceTimes(int(destination.Fd()), ".", info.ModTime(), destinationPath, "directory")
 }
 
 // holeCopyChunk is the read granularity of the hole-preserving copy. It is a
@@ -520,6 +534,47 @@ func isAllZero(chunk []byte) bool {
 		}
 	}
 	return true
+}
+
+// preserveSourceTimes gives a copied node the source's access and modification
+// times. rename(2) carries them for free, so only the cross-device leg pays
+// (#2919): a restored worktree whose every file looked newer than its build
+// outputs rebuilt from scratch, and git re-hashed files whose stat data it could
+// otherwise have trusted.
+//
+// Anchored on a directory descriptor plus a name, NOT on the node's own
+// descriptor. The descriptor-anchored spelling needs AT_EMPTY_PATH, which is
+// Linux-only, and this package builds for darwin too. A directory names itself
+// as "." relative to its own fd, which is portable and cannot be a symlink.
+//
+// nofollow is required for symlinks and harmless elsewhere: every other caller
+// has already proven what the name points at, and a copy must never reach
+// through a link it is reproducing.
+func preserveSourceTimes(dirFD int, name string, modTime time.Time, destinationPath, kind string) error {
+	// Read through os.FileInfo.ModTime rather than syscall.Stat_t: the timespec
+	// fields are spelled Mtim on linux and Mtimespec on darwin, and this package
+	// builds for both.
+	//
+	// Both fields are set from mtime, which APPROXIMATES atime rather than
+	// preserving it. Preserving it exactly means reading the source atime out of
+	// syscall.Stat_t, which is the same Mtim/Mtimespec split above; UTIME_OMIT
+	// would avoid that but its value differs between linux and darwin, so it
+	// needs the split too (caught by GOOS=darwin, not by review).
+	//
+	// That trade is deliberate and does not regress anything: today the copy
+	// leaves atime at the copy time, which diverges from rename just as much,
+	// and no probe measures atime because relatime makes it approximate for
+	// every reader. mtime is the field that matters — build systems and git's
+	// index-stat shortcut read it — and it becomes exactly right.
+	spec := unix.NsecToTimespec(modTime.UnixNano())
+	times := []unix.Timespec{spec, spec}
+	if err := unix.UtimesNanoAt(dirFD, name, times, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to restore the source timestamps on destination %s %s: %w",
+			kind, destinationPath, err,
+		)
+	}
+	return nil
 }
 
 // preserveSourceMode restores a source node's permission bits on the descriptor
@@ -642,6 +697,11 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// After the contents too: every write moves mtime forward again.
+	if err := preserveSourceTimes(int(destination.Fd()), filepath.Base(destinationPath), info.ModTime(), destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}
