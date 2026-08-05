@@ -541,6 +541,96 @@ func TestSubmitDeletesBufferWhenPasteFails(t *testing.T) {
 		"a failed paste must delete-buffer the same buffer it loaded, not leak it (#1536)")
 }
 
+// TestSubmitDeletesBufferWhenLoadFails is the other half of the #1536 leak,
+// filed as #2958. `load-buffer -` consumes stdin incrementally, so tmux can have
+// CREATED the named buffer before it fails — a read error part-way through, or a
+// timeout that kills the command mid-write. Buffers are server-scoped, so that
+// one outlives the session and every failed submit strands another.
+//
+// The paste-failure path was given a best-effort delete; this one returned
+// straight out. Same two-step paste, same buffer, same unbounded leak.
+func TestSubmitDeletesBufferWhenLoadFails(t *testing.T) {
+	var loadBuf, deletedBuf string
+	var loadErr = fmt.Errorf("boom: short write to stdin")
+	pasted := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(joined, "load-buffer"):
+				// tmux named (and partially filled) the buffer, THEN failed.
+				loadBuf = bufferOf(c.Args)
+				return loadErr
+			case strings.Contains(joined, "paste-buffer"):
+				pasted = true
+				return nil
+			case strings.Contains(joined, "delete-buffer"):
+				deletedBuf = bufferOf(c.Args)
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte("content"), nil },
+	}
+
+	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+	const existingProvenance = "previously-accepted-completion"
+	session.lastPastedTail = existingProvenance
+
+	err := session.SendKeysCommand("a prompt whose load fails")
+	require.Error(t, err, "a failed load-buffer must surface as an error")
+	require.ErrorIs(t, err, loadErr, "the load error must be wrapped and returned")
+
+	require.NotEmpty(t, loadBuf, "load-buffer must have named a buffer")
+	require.Equal(t, loadBuf, deletedBuf,
+		"a failed load must delete-buffer the same buffer it named, not leak it: tmux buffers are "+
+			"server-scoped, so one is stranded per failed submit for the life of the server (#2958)")
+
+	// The two properties a load failure must preserve, so the cleanup cannot be
+	// mistaken for "just retry the whole delivery": nothing was pasted into the
+	// pane, and provenance from the last ACCEPTED payload is untouched.
+	require.False(t, pasted, "a failed load must not go on to paste")
+	require.Equal(t, existingProvenance, session.lastPastedTail,
+		"a failed load must not replace provenance from the last accepted payload")
+}
+
+// TestSubmitDeleteAfterFailedLoadIsBounded pins the reason the cleanup takes a
+// bounded context rather than running unbounded: a load that failed because the
+// SERVER is wedged would otherwise have its cleanup wedge on that same server,
+// undoing the bound the load itself was given. The delete must be issued and must
+// carry a deadline.
+func TestSubmitDeleteAfterFailedLoadIsBounded(t *testing.T) {
+	var sawDelete bool
+	var deleteHadDeadline bool
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(joined, "load-buffer"):
+				return fmt.Errorf("server wedged")
+			case strings.Contains(joined, "delete-buffer"):
+				sawDelete = true
+				// Both are set by boundedTmuxCommand and by nothing else in this
+				// package — a hand-rolled exec.Command("tmux", …), which the package
+				// does still contain for server scoping, carries neither.
+				if c.Cancel != nil && c.WaitDelay != 0 {
+					deleteHadDeadline = true
+				}
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte("content"), nil },
+	}
+
+	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
+	require.Error(t, session.SendKeysCommand("prompt"))
+	require.True(t, sawDelete, "a failed load must attempt the cleanup delete")
+	require.True(t, deleteHadDeadline,
+		"the cleanup delete must be bounded, or a wedged server that failed the load would wedge "+
+			"its cleanup too and defeat the load's own timeout")
+}
+
 // TestPasteBufferNameProcessTokenPreventsCrossProcessCollision is the #1536
 // Greptile guard: tmux buffers are server-scoped and the seq counter is
 // process-local, so two af processes sharing a tmux server and a session name

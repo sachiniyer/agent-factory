@@ -152,8 +152,16 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	// session must not share a buffer, or one call's load-buffer could overwrite
 	// the other's content between its load and paste and corrupt the submit. The
 	// process token additionally keeps two af processes on a shared tmux server
-	// from colliding on the same server-scoped buffer name. `-d` clears the buffer
-	// after pasting so buffers never accumulate.
+	// from colliding on the same server-scoped buffer name.
+	//
+	// The invariant is that EVERY exit path below disposes of this buffer, because
+	// buffers are server-scoped and outlive the session: `paste-buffer -d` on the
+	// success path, and an explicit best-effort `delete-buffer` on each of the two
+	// failure paths. This comment used to say only that `-d` meant "buffers never
+	// accumulate" — true of a successful paste and false of both failures, which is
+	// how the load-side leak (#2958) stayed invisible after the paste-side one
+	// (#1536) was fixed. State the property that has to hold on every path, not the
+	// one mechanism that delivers it on one of them.
 	buf := pasteBufferName(pasteBufferProcessToken, t.sanitizedName, pasteBufferSeq.Add(1))
 
 	probe := newDeliveryProbe(text)
@@ -167,6 +175,32 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 	loadTimedOut := loadCtx.Err() != nil
 	loadCancel()
 	if err != nil {
+		// A failed load can still have CREATED the buffer. `load-buffer -` consumes
+		// stdin incrementally, so a read error part-way through — or a timeout that
+		// kills the command mid-write — leaves a partially-filled buffer behind. Since
+		// buffers are server-scoped they outlive the session, so every failed submit
+		// strands another one: the same unbounded leak #1536 closed on the paste side,
+		// reached through the other half of the two-step paste (#2958).
+		//
+		// Bounded, for the paste path's reason: the cleanup for a load that failed
+		// against a WEDGED server must not itself wedge on that server and undo the
+		// bound above.
+		//
+		// Deleting here is unconditionally safe. pasteBufferName mints a name unique to
+		// this call (per-process token + atomic seq), so this can only ever remove the
+		// buffer THIS call loaded — never a concurrent delivery's pending one.
+		delCtx, delCancel := tmuxTimeoutContext()
+		derr := t.runTmuxBounded(delCtx, "delete-buffer", "-b", buf)
+		delCancel()
+		if derr != nil {
+			// WARNING, not the ERROR its paste-side twin uses, and the difference is
+			// deliberate. After a SUCCESSFUL load the buffer certainly exists, so
+			// failing to delete it is surprising. Here the load failed, so the buffer
+			// may never have been created at all — tmux answers `no buffer <name>` and
+			// exits non-zero — and that is the expected outcome, not a fault. Logging it
+			// at ERROR would cry wolf on the common case of this very path.
+			log.WarningLog.Printf("could not delete paste buffer %q after a failed load (it may never have been created): %v", buf, derr)
+		}
 		if loadTimedOut {
 			return fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
