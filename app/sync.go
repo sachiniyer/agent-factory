@@ -311,7 +311,26 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 		log.WarningLog.Printf("failed to fetch daemon snapshot: %v", msg.err)
 		return false
 	}
-	changed := m.reconcileSnapshot(msg.data)
+	changed := false
+	// An empty active scope owns no sessions, so there is nothing to reconcile
+	// (#2864). The daemon reads an empty repoID as "every repo" — the same
+	// all-repos answer the cold start deliberately refuses in registry mode
+	// (#2477) — and those rows are not merely irrelevant, they are INERT: every
+	// per-session verb keys on m.repoID, and resolveSessionActionTarget requires
+	// target.repoID == m.repoID, so each one silently no-ops. Reconciling them
+	// filled the rail with sessions whose `s` and `enter` do nothing, undoing
+	// newHome's refusal one poll later.
+	//
+	// The alarms below are deliberately NOT gated. deliveryAlarms reads an empty
+	// repoID as every repo too, but an alarm is a notification, not a target: it
+	// needs no active scope to be worth showing, and suppressing it would hide a
+	// real delivery failure from the one mode a user is most likely to be idling
+	// in. The Projects section keeps its own counts from msg.allRepos, which this
+	// does not touch, so the cross-repo view a registry-mode user actually needs
+	// stays live.
+	if m.repoID != "" {
+		changed = m.reconcileSnapshot(msg.data)
+	}
 	if m.applyDeliveryAlarms(msg.alarms) {
 		changed = true
 	}
