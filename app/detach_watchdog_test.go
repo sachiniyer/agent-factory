@@ -94,13 +94,18 @@ func TestWatchdog_NoSpuriousDumpAfterHeaderDetach(t *testing.T) {
 	// --- Control: an un-canceled watchdog DOES write a dump after the
 	// threshold. This guards against the regression assertion silently passing
 	// because the dump path was misconfigured.
+	// Timed from BEFORE the watchdog is armed. Taking it after would start the
+	// clock partway through the threshold whenever this goroutine is descheduled
+	// in between, under-measuring controlTook and shrinking the absence window
+	// below — which is the window that has to outlast a real dump for the
+	// regression check to mean anything.
+	control := time.Now()
 	beginDetachWatchdog("control-uncanceled")
 	// Wait for the dump on the CONDITION, not on a fixed nap. Writing it means a
 	// goroutine has to be scheduled and a full goroutine dump has to reach disk,
 	// neither of which has an upper bound on a loaded box; a nap sized for an idle
 	// one turns a busy machine into a failed assertion (#2879). The ceiling is a
 	// failure deadline, not an expectation.
-	control := time.Now()
 	dumpExists := func() bool {
 		_, statErr := os.Stat(dumpPath)
 		return statErr == nil
@@ -131,6 +136,12 @@ func TestWatchdog_NoSpuriousDumpAfterHeaderDetach(t *testing.T) {
 	// merely-slow watchdog cannot be mistaken for a silent one. Sized from that
 	// measurement rather than from a constant, which is what keeps it honest under
 	// the load that made the constant wrong in the first place (#2879).
-	require.Never(t, dumpExists, controlTook+300*time.Millisecond, 10*time.Millisecond,
+	// Floored at the threshold: the window must cover the point a spurious dump
+	// would land even if controlTook came back implausibly small.
+	silence := controlTook + 300*time.Millisecond
+	if floor := slowDetachThreshold + 300*time.Millisecond; silence < floor {
+		silence = floor
+	}
+	require.Never(t, dumpExists, silence, 10*time.Millisecond,
 		"watchdog wrote a spurious goroutine dump for a header-selection detach (#683)")
 }

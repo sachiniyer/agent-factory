@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -169,14 +172,84 @@ func AssertNoLiveDaemon(configDir string) error {
 	if err != nil {
 		return err
 	}
+	// Both branches name the command that clears the refusal rather than only the
+	// PIDs in the way (#2917) — but they are DIFFERENT commands, and that is the
+	// whole point of splitting them.
 	if len(ours) > 0 {
-		return fmt.Errorf("af daemon(s) still running for this AF home: %s", formatPIDList(ours))
+		return ownDaemonRefusal(ours)
 	}
 	if len(unverified) > 0 {
-		return fmt.Errorf("af daemon process(es) whose AF home could not be verified are still running: %s; "+
-			"if one of these serves this AF home, stop it before resetting", formatPIDList(unverified))
+		return unverifiedDaemonRefusal(unverified)
 	}
 	return nil
+}
+
+// pidArgs renders PIDs as command arguments. Separate from formatPIDList, which
+// renders them as prose ("41234, 41255") — a comma is fine in a sentence and
+// wrong in an argv.
+func pidArgs(pids []int) []string {
+	args := make([]string, len(pids))
+	for i, p := range pids {
+		args[i] = strconv.Itoa(p)
+	}
+	return args
+}
+
+// ownDaemonRefusal is the refusal for daemons PROVEN to be ours and serving this
+// home. It suggests a kill, and may, because the ownership question is settled.
+//
+// By the time reset reaches this assert it has ALREADY run StopDaemon and
+// StopOrphanDaemons, so both automated attempts have failed: "run af reset
+// again" is not the answer, and neither is `af daemon restart` — the
+// closest-sounding subcommand, which would start a fresh daemon into the home
+// being wiped. Through shellsuggest because it is printed for a human to paste
+// (#1978).
+func ownDaemonRefusal(pids []int) error {
+	return fmt.Errorf("af daemon(s) still running for this AF home: %s; stop them and re-run — %s",
+		formatPIDList(pids), shellsuggest.Command("kill", pidArgs(pids)...))
+}
+
+// unverifiedDaemonRefusal is the refusal for daemons whose AF home could NOT be
+// established. It suggests an INSPECTION, never a kill.
+//
+// StopOrphanDaemons deliberately refuses to signal these: "I could not tell"
+// must never resolve to "kill it", because the cost of guessing wrong is killing
+// a working daemon that serves another home or another user. A pasteable
+// `kill <every unverified pid>` would hand the user exactly the action reset
+// declined to take, laundering a safety refusal into a printed instruction —
+// the same defect one layer up, and worse for being pasteable (Codex on #2941).
+//
+// The inspection has to be one that can actually ANSWER the question, which
+// `ps -o pid,args` cannot: the autostart unit is `ExecStart=%s --daemon` with
+// AGENT_FACTORY_HOME in the unit ENVIRONMENT, so every daemon's argv is
+// identical and argv-based output distinguishes nothing (Codex on #2941, second
+// round). The environment is where the answer lives, so that is what the hint
+// reads — verified against a live process, including the multi-pid form, which
+// prefixes each match with its /proc path so the user can attribute it.
+func unverifiedDaemonRefusal(pids []int) error {
+	return fmt.Errorf("af daemon process(es) whose AF home could not be verified are still running: %s; "+
+		"af did not stop them because it could not prove which home they serve, and stopping the wrong "+
+		"one takes down another home's daemon — %s, then stop whichever serves this AF home and re-run",
+		formatPIDList(pids), inspectDaemonHomeAdvice(pids))
+}
+
+// inspectDaemonHomeAdvice names a way to see which AF home each daemon serves.
+//
+// Linux gets a verified command. Other platforms get prose, deliberately: a
+// hint that looks runnable and is not is worse than none — the user runs it,
+// believes they acted, and is no further forward. Two such hints were caught by
+// review tonight (`pkill -x tmux`, which matches no `tmux: server`, and the
+// argv-based ps above), and macOS is not a platform this was verified on.
+func inspectDaemonHomeAdvice(pids []int) string {
+	if runtime.GOOS != "linux" {
+		return "read each one's AGENT_FACTORY_HOME from its environment (af could not, which is why " +
+			"they are unverified; your shell may have more luck)"
+	}
+	args := []string{"-ao", "AGENT_FACTORY_HOME=[^[:cntrl:]]*"}
+	for _, pid := range pids {
+		args = append(args, filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	}
+	return "read the home each one serves with " + shellsuggest.Command("grep", args...)
 }
 
 // daemonScope is the outcome of deciding whether a scanned PID is a daemon this

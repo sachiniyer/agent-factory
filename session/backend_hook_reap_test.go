@@ -385,8 +385,20 @@ func TestHookReapTimeoutIsUnknownState(t *testing.T) {
 // leak as master, one tick delayed. A second reap while delete_cmd is still wedged
 // must (i) ACTUALLY re-run delete_cmd and (ii) keep returning the unknown sentinel.
 //
-// (i) is asserted on how long the reap BLOCKED, not on what the script logged,
-// and that is the whole point of #2821. The script's log line was the old proof,
+// (i) is asserted two ways, neither of which is what the script logged, and that
+// is the point of #2821 and of the #2879 review that followed it.
+//
+// The DETERMINISTIC half is p.reaped: the latch flag is what the next poll
+// consults, so a timed-out reap leaving it false IS the property, observable
+// with no clock and no script in the way. #2529 was precisely that flag being
+// set on the timeout path, so this catches the regression outright.
+//
+// The duration is the behavioural half — it says delete_cmd was actually
+// spawned and waited on, which the flag alone does not. It cannot be the only
+// proof: a latch returns in nanoseconds, but a runner that deschedules this
+// goroutine for longer than the bound between the call and the measurement
+// would let that latch through. So the two are asserted together, and the
+// deterministic one carries the guard. The script's log line was the old proof,
 // and it is not kill-proof: delete_cmd is SIGKILLed at the bound, so on a loaded
 // box the spawn can miss the budget and be killed before its first instruction —
 // leaving no line, and no way for the count to tell "the product latched" from
@@ -408,6 +420,8 @@ func TestHookReapTimeoutIsReRunnable(t *testing.T) {
 
 	first, firstTook := timeReap(p)
 	require.True(t, errors.Is(first, ErrWorkspaceStateUnknown), "first timed-out reap must be unknown-state")
+	require.False(t, p.reaped,
+		"a timed-out reap must not memoize: reaped is what the next poll consults, and a latch here is #2529 exactly")
 	require.GreaterOrEqual(t, firstTook, bound,
 		"the first reap must run the wedged delete_cmd into its bound")
 
@@ -416,6 +430,8 @@ func TestHookReapTimeoutIsReRunnable(t *testing.T) {
 		"a second reap while delete_cmd is still wedged must not return nil — a nil would let deleteSessionRecord delete the record and orphan the workspace one poll later")
 	require.True(t, errors.Is(second, ErrWorkspaceStateUnknown),
 		"a re-run timed-out reap must keep returning ErrWorkspaceStateUnknown")
+	require.False(t, p.reaped,
+		"a re-run timed-out reap must still not memoize, or the poll after this one gets a cached error and no delete_cmd at all")
 	require.GreaterOrEqual(t, secondTook, bound,
 		"the second reap must ACTUALLY re-invoke delete_cmd, not skip it via a latch: it has to block on the still-wedged script for the full bound, where a latch would return the cached error immediately")
 }
@@ -966,7 +982,7 @@ func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 
 	h := hookState{dir: dir, launch: filepath.Join(dir, "launch.sh"), delete: filepath.Join(dir, "delete.sh")}
 	writeHookScript(t, h.launch, fmt.Sprintf(`
-( for i in $(seq 1 400); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
+( for i in $(seq 1 1000); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, shellsuggest.Arg(hb)))
@@ -995,10 +1011,15 @@ exit 0
 	// process spawn, which has no upper bound on a loaded box, and a nap long
 	// enough on an idle one turns a busy machine into a failed assertion (#2879).
 	// The ceiling here is a failure deadline, not an expectation.
+	// The ceiling is deliberately well inside the writer's own lifetime: it ticks
+	// for ~50s, and this wait plus the advance loop below can consume at most ~23s,
+	// so observing the first heartbeat late still leaves ticks to measure. A
+	// ceiling past the writer's lifetime would turn a slow start into a failure of
+	// the NEXT assertion, which is the same bug wearing a different hat.
 	require.Eventually(t, func() bool {
 		_, statErr := os.Stat(hb)
 		return statErr == nil
-	}, 30*time.Second, 10*time.Millisecond, "the backgrounded child never ran")
+	}, 20*time.Second, 10*time.Millisecond, "the backgrounded child never ran")
 
 	// Then require the heartbeat to keep advancing. Asserting SUSTAINED ticking —
 	// several distinct advances at this later checkpoint, not a single early write

@@ -103,9 +103,16 @@ func exitedProcess(t *testing.T) proctree.Process {
 // absolute ceiling like 250ms is a statement about the scheduler, not about the
 // code under test (#2879). A regression that really does burn the budget takes
 // the whole of it and still fails.
-const (
+var (
+	// The budget these calls are GIVEN. Large, so an implementation that polls to
+	// its deadline is unmistakable and no honest run can reach it under load.
 	exitWaitBudget = 30 * time.Second
-	exitWaitPrompt = exitWaitBudget / 4
+	// The bound that "did not burn its budget" is measured against. It has to sit
+	// BELOW the production wait: an implementation that always waited paneExitWait
+	// before answering is exactly the slow teardown this guards, so any bound above
+	// that would wave it through. Derived from it so the relationship survives a
+	// change to either, and still ~1000x the detection this measures in practice.
+	exitWaitPrompt = paneExitWait * 2 / 3
 )
 
 func TestWaitForProcessExit_ExitedProcess(t *testing.T) {

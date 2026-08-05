@@ -124,24 +124,36 @@ func (e *blockedInPlaceInstallError) Error() string {
 //     a valid fsynced journal, so a corrupt one much more often means a broken
 //     install that needs `af upgrade` to work than a live actor to protect.
 func activeUpgradeOwningExecutable() *activeUpgrade {
+	active, _ := activeUpgradeOwningExecutableWithID()
+	return active
+}
+
+// activeUpgradeOwningExecutableWithID also reports THIS home's transaction id
+// when one is readable, even in the cases the policy above deliberately lets
+// through. The foreign-artifact scan needs it: a transaction of ours that has
+// committed but not yet cleaned still has its preserved binary on disk, and
+// blocking on that would contradict the decision this function just made.
+func activeUpgradeOwningExecutableWithID() (*activeUpgrade, string) {
 	home, err := config.GetConfigDir()
 	if err != nil {
 		log.WarningLog.Printf("upgrade interlock: cannot resolve the agent-factory home; proceeding: %v", err)
-		return nil
+		return nil, ""
 	}
 	if _, err := os.Stat(home); errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, ""
 	}
 	journal, err := loadUpgradeJournal(home)
 	if errors.Is(err, upgradetxn.ErrNoActiveTransaction) {
-		return nil
+		return nil, ""
 	}
 	if err != nil {
 		log.WarningLog.Printf("upgrade interlock: cannot read the daemon upgrade journal; proceeding with the in-place install: %v", err)
-		return nil
+		return nil, ""
 	}
 	if isTerminalUpgradePhase(journal.Phase) {
-		return nil
+		// Decided, cleanup pending. The id is reported so the artifact scan does
+		// not re-block on this same transaction's not-yet-removed binary.
+		return nil, journal.ID
 	}
 	// A valid journal is not proof there is still a rollback to protect.
 	// upgradetxn.Load validates the recorded paths, digests, and lock metadata —
@@ -156,13 +168,13 @@ func activeUpgradeOwningExecutable() *activeUpgrade {
 			"upgrade interlock: daemon upgrade transaction %s (phase %s) has no preserved previous binary at %s; its rollback is already impossible, so the in-place install proceeds",
 			journal.ID, journal.Phase, journal.PreviousBinaryPath,
 		)
-		return nil
+		return nil, journal.ID
 	}
 	return &activeUpgrade{
 		ID:        journal.ID,
 		ToVersion: journal.ToVersion,
 		Phase:     string(journal.Phase),
-	}
+	}, journal.ID
 }
 
 // isTerminalUpgradePhase reports whether the transaction has already decided its
@@ -194,7 +206,7 @@ func isTerminalUpgradePhase(phase upgradetxn.Phase) bool {
 // Read with ReadDir and a literal prefix rather than filepath.Glob: an
 // executable whose name contains a glob metacharacter would otherwise silently
 // match the wrong set, and this decides whether to overwrite a binary.
-func foreignUpgradeStagingOver(resolvedPath string) *activeUpgrade {
+func foreignUpgradeStagingOver(resolvedPath, ownID string) *activeUpgrade {
 	dir := filepath.Dir(resolvedPath)
 	prefix := "." + filepath.Base(resolvedPath) + ".af-upgrade-"
 	entries, err := os.ReadDir(dir)
@@ -208,7 +220,10 @@ func foreignUpgradeStagingOver(resolvedPath string) *activeUpgrade {
 			continue
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".previous")
-		if id == "" {
+		if id == "" || id == ownID {
+			// Ours, and the journal policy above already decided this home may
+			// proceed — a committed transaction whose Cleanup has not yet removed
+			// the preserved binary must not re-block the install it just allowed.
 			continue
 		}
 		return &activeUpgrade{ID: id, artifact: filepath.Join(dir, name)}
@@ -224,12 +239,23 @@ func foreignUpgradeStagingOver(resolvedPath string) *activeUpgrade {
 // override is the caller's explicit "install anyway"; it is honoured, and logged,
 // because an unoverridable auto-upgrade safeguard is its own hazard.
 func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, flag string) error {
+	return writeExecutableInPlaceWaiting(resolvedPath, binary, override, flag, true)
+}
+
+// writeExecutableInPlaceWaiting is the guarded swap with the lock-wait policy
+// made explicit. mayWait is false for the unattended launch updater, which runs
+// in front of a TUI that has not opened yet: a daemon publishing a transaction
+// holds the preparation lock for as long as it takes to copy and fsync a
+// preserved binary, and stalling a launch behind that is the one thing this path
+// may never do. `af upgrade` was asked for explicitly and waits.
+func writeExecutableInPlaceWaiting(resolvedPath string, binary []byte, override bool, flag string, mayWait bool) error {
 	swap := func() error {
-		active := activeUpgradeOwningExecutable()
+		active, ownID := activeUpgradeOwningExecutableWithID()
 		if active == nil {
-			// Nothing in THIS home. The executable is shared across homes, so
-			// ask the executable itself before overwriting it.
-			active = foreignUpgradeStagingOver(resolvedPath)
+			// Nothing blocking in THIS home. The executable is shared across
+			// homes, so ask the executable itself — skipping our own artifacts,
+			// which the decision above already accounted for.
+			active = foreignUpgradeStagingOver(resolvedPath, ownID)
 		}
 		if active != nil {
 			if !override {
@@ -274,11 +300,24 @@ func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, f
 	// install exactly what the guard just declined.
 	swapRan := false
 	var swapErr error
-	lockErr := upgradetxn.WithInstallLock(home, resolvedPath, func() error {
+	take := upgradetxn.WithInstallLock
+	if !mayWait {
+		take = upgradetxn.TryWithInstallLock
+	}
+	lockErr := take(home, resolvedPath, func() error {
 		swapRan = true
 		swapErr = swap()
 		return swapErr
 	})
+	if !swapRan && errors.Is(lockErr, upgradetxn.ErrInstallLockBusy) {
+		// Another writer holds the locks and this caller must not wait. Nothing
+		// was attempted, so the sentinel travels back for the caller to treat as
+		// a deferral rather than a failed check — burning the six-hour window on
+		// a swap that was never tried would suppress the next five hours of
+		// legitimate ones.
+		log.InfoLog.Printf("upgrade interlock: another upgrade holds the install lock; not waiting for it on this path")
+		return lockErr
+	}
 	if swapRan {
 		if lockErr != nil && swapErr == nil {
 			log.WarningLog.Printf("upgrade interlock: installed, but releasing the upgrade lock failed: %v", lockErr)
@@ -287,4 +326,34 @@ func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, f
 	}
 	log.WarningLog.Printf("upgrade interlock: cannot take the upgrade lock, so this install is not serialised against a daemon upgrade: %v", lockErr)
 	return swap()
+}
+
+// upgradeOwningThisExecutable is the launch path's pre-throttle gate: a
+// transaction in THIS home, or one staging beside the shared executable from any
+// other home.
+//
+// The home journal alone is not enough here. Another AGENT_FACTORY_HOME can be
+// mid-upgrade over the same binary, and that was previously discovered only
+// inside the guarded writer — after the throttle cache was open and the archive
+// downloaded, where the refusal recorded a failed check and suppressed
+// launch-time updates for the next six hours over a transaction that takes
+// seconds. Asking before the window opens costs one directory read and keeps
+// both the bandwidth and the window.
+//
+// An executable that cannot be resolved is not treated as blocked: this gate
+// only ever suppresses an update, and it must not do so on an inconclusive read.
+func upgradeOwningThisExecutable() *activeUpgrade {
+	active, ownID := activeUpgradeOwningExecutableWithID()
+	if active != nil {
+		return active
+	}
+	execPath, err := osExecutableFn()
+	if err != nil {
+		return nil
+	}
+	resolved, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return nil
+	}
+	return foreignUpgradeStagingOver(resolved, ownID)
 }

@@ -613,7 +613,12 @@ func storedProjectMarkerPath(root string) (string, bool, error) {
 		return binding.checkoutMarkerPath, true, nil
 	}
 	info, statErr := os.Stat(root)
-	if errors.Is(statErr, os.ErrNotExist) {
+	// determinatelyAbsent, not ErrNotExist alone: a root replaced by a symlink
+	// cycle or a regular-file ancestor resolves to nothing, so it holds no marker
+	// — and erroring there would leave the record neither usable nor repairable
+	// while ListProjects already reports it absent (#2949 review). An ambiguous
+	// failure (EACCES, EIO) still errors: we cannot tell, so we do not guess.
+	if determinatelyAbsent(statErr) {
 		return "", false, nil
 	}
 	if statErr != nil {
@@ -632,7 +637,10 @@ func storedProjectMarkerPath(root string) (string, bool, error) {
 
 func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
 	info, statErr := os.Stat(root)
-	if errors.Is(statErr, os.ErrNotExist) {
+	// Same rule as storedProjectMarkerPath above: a root that resolves to nothing
+	// carries no marker, and saying so is what lets a moved checkout re-register
+	// against a dead old path (#2949 review). Ambiguous failures still error.
+	if determinatelyAbsent(statErr) {
 		return false, nil
 	}
 	if statErr != nil {
@@ -758,11 +766,10 @@ func projectFromRecord(record projectRecord) Project {
 // of which take ErrNotExist as determinate and turn every other stat failure
 // into an error rather than a verdict.
 //
-// ENOTDIR is determinate too, and belongs with ErrNotExist rather than in the
-// fail-closed arm: an ancestor that is a regular file means nothing can exist
-// below it. Go does not map ENOTDIR to ErrNotExist, so special-casing only
-// ErrNotExist would report that path as PRESENT — a fabricated positive, the
-// exact mirror of the bug this function was fixed for (#2889 review).
+// Which failures count as absence is decided by determinatelyAbsent below, not
+// by ErrNotExist alone: Go maps neither ENOTDIR nor ELOOP to ErrNotExist, so
+// special-casing ErrNotExist would report an unresolvable path as PRESENT — a
+// fabricated positive, the exact mirror of the bug this function was fixed for.
 //
 // It also moves the two registration guards that consult this in the safe
 // direction: an ambiguous re-registration is REFUSED rather than allowed to
@@ -770,10 +777,37 @@ func projectFromRecord(record projectRecord) Project {
 func projectPathExists(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		determinatelyAbsent := errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
-		return !determinatelyAbsent
+		return !determinatelyAbsent(err)
 	}
 	return info.IsDir()
+}
+
+// determinatelyAbsent reports whether a stat failure PROVES that nothing is
+// resolvable at that path (#2948).
+//
+// The question to ask of an errno is whose fact it is. These four are properties
+// of the PATH — no process, holding any credentials, resolves an object there:
+//
+//	ENOENT        a component does not exist
+//	ENOTDIR       a component is not a directory, so nothing can lie below it
+//	ELOOP         resolution never terminates: a symlink cycle, or a chain past
+//	              the kernel's limit
+//	ENAMETOOLONG  the path cannot name anything on this filesystem
+//
+// Everything else is a property of US or of the storage, and is evidence of
+// NOTHING about whether the checkout is there: EACCES/EPERM say only that this
+// process cannot look, and EIO/ESTALE say the storage misbehaved, often
+// transiently. Those must fail closed to "present", which is the #2889 fix.
+//
+// Enumerated with the rule written down rather than extended one errno at a
+// time: the first version of this handled only ENOENT and was corrected twice —
+// ENOTDIR, then ELOOP — because each was argued case by case. The rule decides
+// the next one.
+func determinatelyAbsent(err error) bool {
+	return errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, syscall.ENOTDIR) ||
+		errors.Is(err, syscall.ELOOP) ||
+		errors.Is(err, syscall.ENAMETOOLONG)
 }
 
 // sameProjectPath reports whether two paths name the same directory.

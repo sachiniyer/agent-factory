@@ -73,6 +73,13 @@ func testOptions(t *testing.T, fix bool, pids ...int) Options {
 func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Options {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	// Hermetic like every other fake here. Since #2875 a missing tmux socket is
+	// definitive only when no tmux server is alive to own an unlinked one, and
+	// that probe reads the HOST process table — so without pinning it, a doctor
+	// test in a private tmux world would classify its empty socket dir by
+	// whether the developer happens to have tmux running. Tests that mean
+	// "a server IS alive" pin it themselves.
+	t.Cleanup(tmux.PinServerProbeForTest())
 	return Options{
 		Fix:            fix,
 		ConfigDir:      home,

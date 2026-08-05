@@ -440,7 +440,36 @@ func forwardAppCookies(r *http.Request) {
 // /v1/webtab/ token cookie. Domain is dropped so the cookie defaults to the proxy
 // (daemon) host rather than the dev server's own host. Unparseable Set-Cookie
 // lines are passed through untouched.
-func rewriteSetCookiePaths(h http.Header, prefix string) {
+// repartitionPreviewCookie makes an upstream app cookie usable inside a per-tab
+// preview frame, which is a CROSS-SITE context.
+//
+// This is the dev app's cookies, not af's, and it is a regression the origin split
+// causes rather than one it inherits. On the mirrored route the frame is same-origin
+// with the SPA, so an ordinary session cookie — no SameSite attribute, therefore Lax
+// by default — is sent and login flows work. On a per-tab origin the frame's site
+// differs from the top-level's ("localhost" is an effective TLD), so its
+// site-for-cookies is null and EVERY Lax or Strict cookie is withheld, including
+// same-origin ones. A cookie-backed app (Django, Rails, Laravel, anything with
+// sessions) would look permanently logged out the moment an operator enabled
+// preview_listen_addr.
+//
+// SameSite=None is therefore not a relaxation here: in this context Lax and Strict
+// mean "never sent at all", so the cookie is inert either way and rewriting it is the
+// only spelling under which it functions. Secure rides along because None requires
+// it, and *.localhost is a potentially-trustworthy origin so the browser accepts it
+// over plain HTTP. Partitioned (CHIPS) keeps the cookie in a jar keyed to this
+// top-level site, so the rewrite does not quietly create an ambient third-party
+// cookie and it survives third-party-cookie blocking.
+//
+// Applied ONLY on a preview origin: the mirror keeps the app's own semantics
+// untouched, so nothing changes for the deployment that has them working today.
+func repartitionPreviewCookie(c *http.Cookie) {
+	c.SameSite = http.SameSiteNoneMode
+	c.Secure = true
+	c.Partitioned = true
+}
+
+func rewriteSetCookiePaths(h http.Header, prefix string, previewOrigin bool) {
 	values := h.Values("Set-Cookie")
 	if len(values) == 0 {
 		return
@@ -464,6 +493,9 @@ func rewriteSetCookiePaths(h http.Header, prefix string) {
 		orig = "/" + strings.TrimLeft(orig, "/")
 		c.Path = joinURLPath(prefix, orig)
 		c.Domain = "" // default to the proxy host
+		if previewOrigin {
+			repartitionPreviewCookie(c)
+		}
 		if s := c.String(); s != "" {
 			rewritten = append(rewritten, s)
 		}
@@ -544,12 +576,24 @@ func rewriteRefreshURL(h http.Header, prefix string, target *url.URL) {
 //
 // Rewritten, not deleted: an app that checks Origin for CSRF should see the same
 // value it would have seen served directly, and Referer's path/query are ordinary
-// app data — only its origin part is secret, so only that part changes. A Referer
-// that does not parse is dropped rather than forwarded, since it cannot be edited
-// safely and no correct app depends on a malformed one.
-func rewriteOriginHeader(h http.Header, target *url.URL) {
+// app data — only its origin part is secret, so only that part changes.
+//
+// ONLY the tab's OWN origin is rewritten, and that restriction is the whole safety of
+// this function rather than a refinement of it. Rewriting every non-empty Origin
+// LAUNDERS a hostile one: a form POST from http://evil.example (or an `Origin: null`
+// from a sandboxed frame) to a known — or leaked — af<label>.localhost URL would be
+// delivered to the dev server looking same-origin, defeating the one signal an
+// upstream CSRF guard has. Since this rewrite exists precisely because labels can
+// escape into logs, "the attacker knows the label" is the case it must survive, not
+// the case it can assume away.
+//
+// A foreign or opaque Origin is therefore passed through UNTOUCHED, so the upstream
+// sees it for what it is and can refuse. It carries no secret of ours: it is the
+// attacker's own origin, not the tab's label.
+func rewriteOriginHeader(h http.Header, target *url.URL, ownOrigin string) {
 	targetOrigin := target.Scheme + "://" + target.Host
-	if h.Get("Origin") != "" {
+	// Only OUR origin is laundered into the target's; anything else stays as it is.
+	if h.Get("Origin") == ownOrigin {
 		h.Set("Origin", targetOrigin)
 	}
 	ref := h.Get("Referer")
@@ -558,8 +602,13 @@ func rewriteOriginHeader(h http.Header, target *url.URL) {
 	}
 	parsed, err := url.Parse(ref)
 	if err != nil {
+		// Unparseable: it cannot be edited safely, and no correct app depends on a
+		// malformed Referer. Dropping leaks nothing and asserts nothing.
 		h.Del("Referer")
 		return
+	}
+	if parsed.Scheme+"://"+parsed.Host != ownOrigin {
+		return // a Referer from somewhere else is the sender's own, and the upstream's business
 	}
 	parsed.Scheme, parsed.Host, parsed.User = target.Scheme, target.Host, nil
 	h.Set("Referer", parsed.String())

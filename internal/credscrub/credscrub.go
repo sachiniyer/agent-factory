@@ -35,13 +35,6 @@ var shapePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                          // AWS access key id
 	regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`),                                     // Google API key
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+`), // JWT (header.payload.signature)
-	// An echoed Authorization header. keyValueSecret cannot reach this: its key
-	// half requires the key to END at `auth`, so "Authorization" never matches,
-	// and even where a key does match, its bare-value class stops at the space
-	// after the scheme — capturing "Bearer" and leaving the credential behind it
-	// standing. Match the scheme AND its value as one unit instead. Only the two
-	// real HTTP schemes, not a bare "token", which would eat ordinary log prose.
-	regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`), // Authorization header value
 }
 
 // keyValueSecret matches a `<credential-key> = <value>` / `<key>: <value>`
@@ -65,8 +58,60 @@ var shapePatterns = []*regexp.Regexp{
 // characters are covered by the quoted alternatives, which consume their own
 // delimiters. Dropping `]` also errs toward MORE redaction (a `]` adjacent to a
 // bare value is absorbed rather than left behind), which is the safe direction.
+// credentialKeyPattern is the key half shared by keyValueSecret and
+// strandedAfterMarker, so the two cannot recognize different key sets.
+const credentialKeyPattern = `["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?\s*[:=]\s*`
+
 var keyValueSecret = regexp.MustCompile(
-	`(?i)(["']?[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|pwd|auth|access[_-]?token|refresh[_-]?token|client[_-]?secret|bearer|credential|private[_-]?key)s?["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
+	`(?i)(` + credentialKeyPattern + `)(?:"(?:\\.|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s"',}]{6,})`)
+
+// strandedAfterMarker removes a credential left stranded BEHIND a marker.
+//
+// keyValueSecret consumes only the first whitespace-delimited word of a value,
+// so `auth: <scheme> <token>` redacts the scheme and leaves the token in the
+// clear — behind a marker that makes the line read as though it were scrubbed.
+// authScheme handles the two schemes worth naming, but this shape arrives two
+// other ways it cannot cover:
+//
+//   - ANY other scheme word regenerates it (`auth: CustomScheme <token>`), and
+//     enumerating scheme names is the losing game this file keeps re-learning.
+//   - Lines ALREADY on disk carry it. The log is written scrubbed and the bug
+//     report re-bundles that tail, so a line persisted before the ordering fix
+//     still reads `auth: [redacted-secret] <token>` — and by then the scheme
+//     word is gone, so no amount of scheme matching can recover it.
+//
+// Keyed on the marker, so it fires only where a credential assignment was
+// already redacted and opaque token text follows.
+//
+// The length floor is 8, matching authScheme rather than being chosen
+// independently: authScheme treats `Bearer <8 chars>` as sensitive, so a token
+// the old writer persisted as `auth: [redacted-secret] <8 chars>` has to be
+// recoverable too. A recovery pass stricter than the pass it recovers for leaves
+// exactly the tokens the other one would have caught.
+//
+// The separator is `[ \t]+`, NOT `\s+`: this runs over multi-line log and config
+// blobs, and `\s` matches newlines, so a marker ending one line would consume the
+// start of the next unrelated line and silently delete it.
+//
+// Over-redaction within a line is the safe direction, per the policy above — a
+// long path following a redacted value is absorbed rather than left behind.
+var strandedAfterMarker = regexp.MustCompile(
+	`(?i)(` + credentialKeyPattern + regexp.QuoteMeta(SecretMarker) + `)[ \t]+[A-Za-z0-9._~+/=-]{8,}`)
+
+// authScheme matches an HTTP auth scheme together with its credential, as one
+// unit. It MUST run before keyValueSecret, which otherwise consumes only the
+// scheme word: on `auth: Bearer <token>` that pass sees key `auth`, takes
+// `Bearer` as the whole value because its bare class stops at the following
+// space, and leaves the credential standing in the clear behind a marker
+// (`auth: [redacted-secret] <token>`). Measured, not theorised.
+//
+// `Authorization: Bearer <token>` happens to survive either order, because the
+// key half requires the key to END at `auth` and so never matches
+// "Authorization" — which is exactly why testing only that spelling hid the bug.
+//
+// Only the two real HTTP schemes, not a bare "token", which would eat ordinary
+// log prose.
+var authScheme = regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
 
 // privateKeyBlock matches a PEM private-key block in its entirety.
 var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
@@ -77,7 +122,12 @@ var privateKeyBlock = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY--
 // once by design, and now also scrubs a log that was scrubbed on the way to disk.
 func Scrub(s string) string {
 	s = privateKeyBlock.ReplaceAllString(s, SecretMarker)
+	// Before keyValueSecret: see authScheme for why the other order leaks.
+	s = authScheme.ReplaceAllString(s, SecretMarker)
 	s = keyValueSecret.ReplaceAllStringFunc(s, redactKeyValueSecret)
+	// After keyValueSecret: it catches both the marker this run just wrote for an
+	// unknown scheme and one a previous binary persisted to the log.
+	s = strandedAfterMarker.ReplaceAllString(s, "$1")
 	for _, re := range shapePatterns {
 		s = re.ReplaceAllString(s, SecretMarker)
 	}

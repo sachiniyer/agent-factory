@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -160,7 +161,14 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		// practice autoUpdateOnLaunch has already stood down before we get this
 		// far; this is the backstop that makes the interlock a property of the
 		// write rather than of remembering to check.
-		if err := writeExecutableInPlace(resolvedPath, binary, false, ""); err != nil {
+		if err := writeExecutableInPlaceWaiting(resolvedPath, binary, false, "", false); err != nil {
+			// A busy install lock is a deferral, not a failure: nothing was
+			// attempted, so leaving the window open lets the next launch install
+			// once the other writer is done. Recording it would suppress the next
+			// six hours over a transaction that takes seconds.
+			if errors.Is(err, upgradetxn.ErrInstallLockBusy) {
+				return nil
+			}
 			throttleFailure(latestTag)
 			return fmt.Errorf("failed to write new binary: %w", err)
 		}

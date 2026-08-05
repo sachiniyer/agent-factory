@@ -405,6 +405,22 @@ func authoritativeStreamTarget(idOrTitle, repoID string) streamTarget {
 // trackedStreamSessionLocked resolves only facts already materialized in
 // m.instances. The caller holds m.mu. The streamTarget, rather than this helper,
 // decides the namespace so the hot path and post-refresh path cannot drift.
+// trackedStreamSession resolves idOrTitle against the ALREADY-RESTORED instance map
+// and nothing else — no disk read, no refresh, no fallback. It is for callers that
+// must not let a lookup miss turn into I/O, because the lookup is reachable by an
+// untrusted peer: /v1/preview-auth's mint guard is a GET that a cross-origin page can
+// drive under the tokenless-loopback default, so a refreshing miss path there is an
+// amplifier rather than a convenience (#2833 review).
+//
+// Callers that legitimately need a session the daemon has not tracked yet keep using
+// resolveStreamSession; this is deliberately the weaker, cheaper question.
+func (m *Manager) trackedStreamSession(idOrTitle string) *session.Instance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	instance, _, _ := m.trackedStreamSessionLocked(authoritativeStreamTarget(idOrTitle, ""))
+	return instance
+}
+
 func (m *Manager) trackedStreamSessionLocked(target streamTarget) (*session.Instance, string, string) {
 	if target.repoID != "" {
 		if instance := m.instances[daemonInstanceKey(target.repoID, target.title)]; instance != nil {

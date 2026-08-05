@@ -3,9 +3,12 @@ package tmux
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -136,13 +139,17 @@ func probeSessionStrict(cmdExec cmd.Executor, name string) (exists bool, known b
 // Exit status 1 alone is ambiguous: wrapper, policy, and unclassified connection
 // failures can return the same status while the named session remains unknown.
 // A definitive no-server answer counts too: no session can remain on a socket
-// that holds no server.
+// that holds no server — routed through NoServerRunning so the has-session
+// re-probes get the same ENOENT treatment as the listing. The finding on #2875
+// named this path explicitly: `tmux ls` may find AF sessions, the socket may then
+// be removed by a /tmp cleaner, and this fallback probe would answer ENOENT while
+// the server and its panes are still running.
 func missingTmuxSession(err error, name string) bool {
 	diagnostic, ok := tmuxExitOneDiagnostic(err)
 	if !ok {
 		return false
 	}
-	return diagnostic == "can't find session: "+name || noTmuxServerDiagnostic(diagnostic)
+	return diagnostic == "can't find session: "+name || NoServerRunning(err)
 }
 
 // NoServerRunning reports whether a failed tmux command's error is tmux's
@@ -159,7 +166,98 @@ func missingTmuxSession(err error, name string) bool {
 // this package. A second implementation is exactly how the first one spread.
 func NoServerRunning(err error) bool {
 	diagnostic, exitOne := tmuxExitOneDiagnostic(err)
-	return exitOne && noTmuxServerDiagnostic(diagnostic)
+	if !exitOne {
+		return false
+	}
+	switch classifyNoServerDiagnostic(diagnostic) {
+	case serverRefusedConnection:
+		// The socket EXISTS and refused us. Nothing is listening on it, which
+		// is self-sufficient proof: no server, so no sessions.
+		return true
+	case socketAbsent:
+		// ENOENT is NOT self-sufficient. tmux(1) documents that a socket
+		// removed by accident can be recreated by signalling the server, so a
+		// server whose socket a /tmp cleaner unlinked is still running, with
+		// live sessions and live panes, while every client gets ENOENT.
+		// Reproduced: a session and its `sleep 300` pane survived `rm -f` of
+		// the socket, and `tmux ls` answered exactly this diagnostic (#2875).
+		//
+		// It is only definitive when no tmux server is alive to own an
+		// unlinked socket — which is the ordinary case this branch exists for,
+		// a machine where tmux never ran.
+		return len(tmuxServerProcessPIDs()) == 0
+	default:
+		return false
+	}
+}
+
+// noServerDiagnosticKind is why tmux says there is no server, because the two
+// reasons carry different weight and collapsing them is what #2875 caught.
+type noServerDiagnosticKind int
+
+const (
+	notANoServerDiagnostic noServerDiagnosticKind = iota
+	// serverRefusedConnection: ECONNREFUSED. The socket is there; nobody is
+	// behind it. Definitive on its own.
+	serverRefusedConnection
+	// socketAbsent: ENOENT. Either no server ever created one — or one did and
+	// the socket was removed out from under it.
+	socketAbsent
+)
+
+// tmuxServerProcessAlive reports whether any tmux SERVER process is running for
+// this uid. A package var so tests can pin the answer: the real probe reads the
+// host's process table, so a developer box with tmux running would otherwise
+// give a different result from a container that has none.
+var tmuxServerProcessPIDs = liveTmuxServerPIDs
+
+// PinServerProbeForTest fixes the "is a tmux server alive for this uid?" answer
+// and returns the restore. It exists for internal/testguard.IsolateTmux, which
+// declares a private-socket world for a test; without it that isolation is
+// incomplete, because the probe reads the HOST process table and would see the
+// developer's own tmux servers inside a world that is supposed to have none.
+//
+// Test-only by contract, not by build tag: testguard lives in internal/ and is
+// the only caller.
+func PinServerProbeForTest(pids ...int) (restore func()) {
+	prev := tmuxServerProcessPIDs
+	tmuxServerProcessPIDs = func() []int { return pids }
+	return func() { tmuxServerProcessPIDs = prev }
+}
+
+// liveTmuxServerProcess looks for a tmux server owned by this uid.
+//
+// It answers a deliberately BROAD question — "could any live server own an
+// unlinked socket?" — rather than "is the server for THIS socket alive?", which
+// would need the server's own socket path and is not worth the machinery. The
+// asymmetry is chosen: a false "yes" costs a refused sweep the user can retry
+// after checking; a false "no" lets reset delete worktrees out from under a live
+// agent. Over-refusal is also rare in practice, because a server on the DEFAULT
+// socket has a socket file, so it answers ECONNREFUSED rather than ENOENT.
+//
+// A process table we cannot read reports TRUE, for the same reason: an
+// unreadable table is not evidence of absence.
+func liveTmuxServerPIDs() []int {
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		// Not evidence of absence. A sentinel PID would be a lie, so report an
+		// unnamed one: callers only test emptiness, and the message degrades to
+		// "a server is running" without claiming to know which.
+		return []int{0}
+	}
+	uid := os.Getuid()
+	var pids []int
+	for pid, p := range snap {
+		if !isTmuxServerComm(p.Comm) {
+			continue
+		}
+		if owner, ok := proctree.UID(pid); ok && owner != uid {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	return pids
 }
 
 // ListSessionNames returns the name of every session on the tmux server, or an
@@ -256,16 +354,88 @@ func tmuxExitOneDiagnostic(err error) (string, bool) {
 //
 // The strings are matched in tmux's own C locale: tmux calls setlocale only for
 // LC_CTYPE, so strerror stays untranslated regardless of the user's LANG.
-func noTmuxServerDiagnostic(diagnostic string) bool {
+func classifyNoServerDiagnostic(diagnostic string) noServerDiagnosticKind {
 	if socket, refused := strings.CutPrefix(diagnostic, "no server running on "); refused {
-		return strings.TrimSpace(socket) != ""
+		if strings.TrimSpace(socket) != "" {
+			return serverRefusedConnection
+		}
+		return notANoServerDiagnostic
 	}
 	rest, connectFailure := strings.CutPrefix(diagnostic, "error connecting to ")
 	if !connectFailure {
-		return false
+		return notANoServerDiagnostic
 	}
-	socket, absent := strings.CutSuffix(rest, " (No such file or directory)")
-	return absent && strings.TrimSpace(socket) != ""
+	if socket, absent := strings.CutSuffix(rest, " (No such file or directory)"); absent &&
+		strings.TrimSpace(socket) != "" {
+		return socketAbsent
+	}
+	return notANoServerDiagnostic
+}
+
+// describeLiveTmuxServers and recreateSocketAdvice render the socket-absent
+// refusal. They name the exact PIDs rather than a pattern because the obvious
+// pattern does not work: tmux renames the server task to "tmux: server", and
+// `pkill -x ... tmux` matches NOTHING against that — verified with pgrep, which
+// shares pkill's matching (`pgrep -x -u $(id -u) tmux` returned nothing while
+// `-x "tmux: server"` matched every server). A recovery hint that silently
+// signals nothing is worse than none: the user runs it, believes they acted, and
+// reset keeps refusing (Codex on #2956).
+//
+// Dropping -x is not the fix either. SIGUSR1's default disposition is TERMINATE,
+// so a loose name match would kill any unrelated process whose name merely
+// contains "tmux". Naming the PID is exact, portable, and cannot spray.
+func describeLiveTmuxServers(pids []int) string {
+	named := namedPIDs(pids)
+	if named == "" {
+		return "a tmux server is running for this user"
+	}
+	if len(pids) == 1 {
+		return "a tmux server is running for this user (pid " + named + ")"
+	}
+	return "tmux server(s) are running for this user (pids " + named + ")"
+}
+
+func recreateSocketAdvice(pids []int) string {
+	named := pidArgsForSignal(pids)
+	if len(named) == 0 {
+		return "Find the server (`ps -o pid,comm,args -u \"$(id -u)\"`, look for `tmux: server`), then " +
+			"signal it with `kill -USR1 <pid>` to recreate its socket — or stop it — and re-run"
+	}
+	return "Recreate its socket with " + shellsuggest.Command("kill", append([]string{"-USR1"}, named...)...) +
+		" — or stop that server — then re-run"
+}
+
+// isTmuxServerComm reports whether a kernel task name is a tmux SERVER.
+//
+// Measured on Linux: tmux retitles its processes, and the server and a client
+// are "tmux: server" and "tmux: client" respectively. A HasPrefix(comm, "tmux")
+// test therefore counts CLIENTS as servers — and a client exists whenever
+// anyone is actually using tmux, so that mistake turns an ordinary ENOENT into
+// "a server is running", refuses the reset, and points `kill -USR1` at a process
+// that cannot recreate a server socket (Codex on #2956).
+//
+// The bare "tmux" fallback is for builds and platforms that do not retitle. It
+// is EXACT, never a prefix, for the reason above: a prefix is what swallowed
+// the client.
+func isTmuxServerComm(comm string) bool {
+	return comm == "tmux: server" || comm == "tmux"
+}
+
+// namedPIDs renders the PIDs we can actually name; the 0 sentinel means the
+// process table could not be read, so there is no pid to print.
+func namedPIDs(pids []int) string {
+	return strings.Join(pidArgsForSignal(pids), ", ")
+}
+
+func pidArgsForSignal(pids []int) []string {
+	var out []string
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		out = append(out, strconv.Itoa(pid))
+	}
+	return out
 }
 
 // tmuxDiagnosticSuffix renders CommandDiagnostic as a parenthesized clause for
@@ -346,6 +516,19 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		// Name what was unreadable AND what was therefore not done. tmux writes
 		// its reason to stderr, which the bare error swallows — `exit status 1`
 		// on its own gives the user nothing to act on.
+		//
+		// The socket-absent case gets its own sentence, because otherwise the
+		// message reads like a contradiction: tmux said the socket is missing,
+		// yet af refuses as if the state were unknown. It IS unknown, and the
+		// reason is not guessable from the diagnostic (#2875).
+		if diagnostic, exitOne := tmuxExitOneDiagnostic(err); exitOne &&
+			classifyNoServerDiagnostic(diagnostic) == socketAbsent {
+			return fmt.Errorf("could not list tmux sessions%s, but %s. A server whose socket is removed "+
+				"(a /tmp cleaner will do it) keeps running with its sessions alive, so the missing socket "+
+				"does not prove there are none. Refusing to sweep: no tmux session was killed. %s: %w",
+				tmuxDiagnosticSuffix(err), describeLiveTmuxServers(tmuxServerProcessPIDs()),
+				recreateSocketAdvice(tmuxServerProcessPIDs()), err)
+		}
 		return fmt.Errorf("could not list tmux sessions%s; refusing to sweep with the session set "+
 			"unknown — no tmux session was killed: %w", tmuxDiagnosticSuffix(err), err)
 	}

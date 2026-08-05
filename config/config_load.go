@@ -192,7 +192,28 @@ func availableBackupPath(base string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("%s and %s.1..999 all exist; refusing to overwrite any backup", base, base)
+	// Name the remedy, not just the obstruction (#2917). This refuses a write the
+	// user asked for and keeps refusing every subsequent one, so an error that
+	// only lists the files in the way leaves them stuck: say which directory
+	// holds them and that clearing some unblocks the write.
+	//
+	// What it must NOT say is that removing them is safe. This helper is shared:
+	// config conversion passes `<config>.bak`, but writeSchemaMigrationBackup
+	// passes `<store>.bak.schema-v<N>`, whose files are the PRE-MIGRATION
+	// rollback copies for that store. A blanket "removing them loses nothing"
+	// would talk a user into deleting their only way back from a schema
+	// migration, and the helper cannot tell the two callers apart (Codex on
+	// #2941). Actionable and true beats reassuring and wrong.
+	// No ordering advice. "Oldest first" is the natural thing to say and is
+	// exactly backwards here: the unsuffixed base is the FIRST backup ever
+	// written, so on a repeated convert/downgrade it holds the user's original
+	// real settings — which is why this helper never overwrites it. Telling them
+	// to clear the oldest points at the one file the code works hardest to keep
+	// (Codex on #2941).
+	return "", fmt.Errorf("every backup slot is taken: %s and %s.1..999 all exist in %s, so this write "+
+		"would have to overwrite one; move or delete backups you have checked you no longer need, then "+
+		"retry (%s, with no number, is the earliest one and most likely to hold your original settings)",
+		filepath.Base(base), filepath.Base(base), filepath.Dir(base), filepath.Base(base))
 }
 
 // GlobalConfigPath returns the path of the global config file that LoadConfig

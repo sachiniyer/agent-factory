@@ -125,6 +125,154 @@ function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
 }
 
+/** The rail row a keyboard walk is currently on. */
+function selectedRailRow(page: Page): Locator {
+  return page.locator(".af-rail-list .af-row.af-row-selected");
+}
+
+/** How long a rail-nav press gets to move the selection before the walk concludes it
+ *  has CLAMPED at the end. Generous for a re-render, and — this is the point — a wrong
+ *  guess cannot pass silently: the callers assert the walk moved across more than one
+ *  row, so a truncated walk fails loudly instead of quietly asserting less (#2893). */
+const RAIL_STEP_SETTLE_MS = 5_000;
+
+/** Where the rail selection is, as a walk sees it.
+ *
+ *  `index` is the row's POSITION in the rail, and that choice is load-bearing (#2893).
+ *  Two earlier attempts were both wrong:
+ *
+ *    * the TITLE churns — rowTitle (web/src/status.ts) prepends `[lost] `,
+ *      `[deleting] `, `[model changed] `, so a repaint under the Lost -> Ready churn of
+ *      #2813 looks like a step with the selection never moving;
+ *    * the BRANCH collides — sessionRow renders `s.branch || "—"`, so every row without
+ *      a branch shares one identity, and a real move between two of them looks like no
+ *      move at all, which this helper would then report as the end of the list.
+ *
+ *  Position cannot do either. It is also exactly what nav means by moving: nextSelection
+ *  (web/src/nav.ts) walks positions in `orderedIds`.
+ *
+ *  `title` is carried alongside for assertions, which match session names as substrings
+ *  and so are unaffected by a prefix appearing. */
+interface RailStop {
+  index: number;
+  title: string;
+}
+
+/** The selected rail row's position and title, or null when the rail does not show
+ *  exactly one selected row. Read in ONE evaluate so position and title cannot come
+ *  from two different renders. */
+async function readRailStop(page: Page): Promise<RailStop | null> {
+  return page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll(".af-rail-list .af-row"));
+    const selected = rows.filter((r) => r.classList.contains("af-row-selected"));
+    if (selected.length !== 1) {
+      return null;
+    }
+    const el = selected[0] as Element;
+    return {
+      index: rows.indexOf(el),
+      title: (el.querySelector(".af-row-title")?.textContent ?? "").trim(),
+    };
+  });
+}
+
+/**
+ * Presses a rail-nav key and returns the row it landed on, or `null` if the selection
+ * did not move — which at a clamped end is the correct answer (`nextSelection` in
+ * web/src/nav.ts clamps rather than wraps).
+ *
+ * It WAITS for the move rather than sampling for it. A keypress schedules a re-render,
+ * and a `count()`/`getAttribute()` issued straight afterwards does not wait: under load
+ * it reads the pre-press DOM. Two walks in this file did exactly that, and because both
+ * accumulate into an assertion that a bad row was NEVER selected, every early read
+ * pushed them towards PASSING.
+ *
+ * A timeout is treated as a clamp ONLY when the rail still shows exactly one selected
+ * row and it is the one we started on. Anything else — no selected row, or several — is
+ * a real defect and throws: a nav regression that parks the selection on a row the rail
+ * does not render (the hidden archived session this suite's filter test guards against)
+ * would otherwise look exactly like the end of the list, and the walk would stop early
+ * and pass. That is the vacuity this whole change exists to remove, so it must not be
+ * reintroduced by the helper doing the removing.
+ */
+async function stepRailSelection(page: Page, key: string, from: RailStop): Promise<RailStop | null> {
+  await page.keyboard.press(key);
+  // Reports `from.index` — not null — while the rail is unsettled, so the poll keeps
+  // waiting instead of satisfying `.not.toBe(...)` on the first tick.
+  const readIndex = async (): Promise<number> => (await readRailStop(page))?.index ?? from.index;
+  try {
+    await expect.poll(readIndex, { timeout: RAIL_STEP_SETTLE_MS }).not.toBe(from.index);
+  } catch {
+    const settled = await readRailStop(page);
+    if (settled === null) {
+      throw new Error(
+        `${key} left the rail with no single selected row (the selection may have moved to a row the rail ` +
+          `does not render). That is a nav defect, not the end of the list.`,
+      );
+    }
+    // A render slower than the poll window is a LATE move, not a clamp. Returning null
+    // here would end the walk early and let the anti-vacuity checks cover a prefix.
+    return settled.index === from.index ? null : settled;
+  }
+  return readRailStop(page);
+}
+
+/**
+ * Walks the rail with `key` until the selection clamps, returning every row it settled
+ * on in order. Bounded by `maxSteps` so a nav regression that cycles forever fails as a
+ * test error rather than hanging the suite.
+ */
+async function walkRailSelection(page: Page, key: string, from: RailStop, maxSteps: number): Promise<RailStop[]> {
+  const visited: RailStop[] = [];
+  let current = from;
+  for (let i = 0; i < maxSteps; i += 1) {
+    const next = await stepRailSelection(page, key, current);
+    if (next === null) {
+      return visited; // clamped
+    }
+    visited.push(next);
+    current = next;
+  }
+  throw new Error(`${key} never clamped after ${maxSteps} steps — rail navigation is cycling`);
+}
+
+/**
+ * Parks the rail selection at the end `key` walks towards, and returns the row it
+ * settled on (#2893).
+ *
+ * Deliberately does NOT assert which row that is. Nav walks the ENTERABLE rows, and a
+ * rail can render rows keyboard nav skips (a creating row, an id-less one), so "the
+ * clamped end" and "the first rendered row" are not the same thing. Pressing until the
+ * selection stops moving asks the product where its end is instead of assuming.
+ */
+async function parkRailSelection(page: Page, key: string, maxSteps: number): Promise<RailStop> {
+  // A freshly loaded rail has NO selection, and that is a legal starting state rather
+  // than a precondition to assert: connect reconciles with pickSelection(..., null),
+  // which deliberately does not auto-select, and nextSelection (web/src/nav.ts) maps a
+  // null selection to the end the key walks from. Requiring a selection up front would
+  // fail every walk that runs straight after a page load.
+  let current = await readRailStop(page);
+  if (current === null) {
+    await page.keyboard.press(key);
+    await expect(selectedRailRow(page), "a rail-nav key must select a row even from no selection").toHaveCount(
+      1,
+      { timeout: 10_000 },
+    );
+    current = await readRailStop(page);
+  }
+  if (current === null) {
+    throw new Error("the rail never settled on a single selected row");
+  }
+  for (let i = 0; i < maxSteps; i += 1) {
+    const next = await stepRailSelection(page, key, current);
+    if (next === null) {
+      return current; // clamped
+    }
+    current = next;
+  }
+  throw new Error(`${key} never clamped after ${maxSteps} steps — rail navigation is cycling`);
+}
+
 /** Waits for a rail row to leave the TRANSIENT Lost state (#2813).
  *
  *  A freshly restored fixture session passes through Lost on its way to Ready
@@ -1351,15 +1499,36 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   // Keyboard navigation must apply the same runtime-entry fence as row clicks.
   // Walk the entire visible rail in both directions: a kill-only retained row may
   // own its explicit Kill button, but j/k must never make it the terminal target.
-  const visibleRows = await p.locator(".af-rail .af-row").count();
-  let uncertainSelected = false;
-  for (const key of ["j", "k"]) {
-    for (let i = 0; i <= visibleRows; i += 1) {
-      await p.keyboard.press(key);
-      uncertainSelected ||= (await uncertain.getAttribute("aria-selected")) === "true";
-    }
-  }
-  expect(uncertainSelected).toBe(false);
+  // The walk WAITS for each press to land instead of sampling for it (#2893). The old
+  // shape read aria-selected with a non-waiting getAttribute straight after the press
+  // and OR-ed it into a `toBe(false)` assertion, so every read that arrived before the
+  // re-render pushed the test towards passing — a loaded box passed it whether or not
+  // this fence existed, and nothing asserted the keys had moved anything at all.
+  const railRows = p.locator(".af-rail-list .af-row");
+  await expect(railRows.first()).toBeVisible();
+  const rowsAtStart = await railRows.count();
+  const maxSteps = rowsAtStart + 2;
+
+  const top = await parkRailSelection(p, "k", maxSteps);
+  const down = [top, ...(await walkRailSelection(p, "j", top, maxSteps))];
+  const bottom = down[down.length - 1]!;
+  const up = [bottom, ...(await walkRailSelection(p, "k", bottom, maxSteps))];
+  const positions = (stops: RailStop[]) => [...new Set(stops.map((r) => r.index))].sort();
+
+  // Anti-vacuity, and the reason a truncated walk cannot pass quietly. Two invariants
+  // that hold regardless of WHICH rows this fixture makes enterable, so they stay true
+  // as it grows: the walk moved, and walking back covers the same rows. A run whose
+  // reads all arrived early would visit fewer and fail here, where the old shape
+  // asserted less and reported success. Symmetry is safe in THIS test because its
+  // snapshot is intercepted and static; the shared-page filter test uses the weaker
+  // form, since its live events plane may legitimately change the roster mid-walk.
+  expect(positions(down).length, "j must walk more than one row, or the walk proves nothing").toBeGreaterThan(1);
+  expect(positions(up), "k must walk back over exactly the rows j walked").toEqual(positions(down));
+  expect(
+    [...down, ...up].map((r) => r.title),
+    "j/k must never make the runtime-uncertain row the terminal target",
+  ).not.toContainEqual(expect.stringContaining("probe-startup-unknown"));
+  await expect(uncertain).not.toHaveAttribute("aria-selected", "true");
 
   // The same server-owned value selects Archive vs Restore, and every accessible
   // name carries its target now that unselected rows can own controls.
@@ -1454,8 +1623,15 @@ test("click-to-attach opens the xterm terminal and shows live output", REAL_FIXT
 
   // Every actionable instance reserves the quiet action slot, but only the selected
   // row shows it at rest. Kill remains muted; af-danger is reserved for confirmation.
-  const visibleRows = page.locator(".af-rail-list .af-row");
-  await expect(page.locator(".af-row-actions")).toHaveCount(await visibleRows.count());
+  // Every row reserves the slot — asserted WITHOUT sampling a count (#2893). The old
+  // shape passed `await rows.count()` as the EXPECTED value: one non-waiting sample,
+  // frozen, while Playwright retried the left side against it. Any roster change in
+  // that window — including the transient Lost -> Ready churn of #2813 — made it
+  // unsatisfiable. Counting the rows that LACK a slot needs no such sample.
+  await expect(
+    page.locator(".af-rail-list .af-row:not(:has(.af-row-actions))"),
+    "every rail row must reserve the quiet action slot",
+  ).toHaveCount(0);
   await expect(row(page, SESSION_A).locator(".af-row-actions")).toHaveCSS("opacity", "1");
   await page.mouse.move(0, 0);
   await expect(row(page, SESSION_B).locator(".af-row-actions")).toHaveCSS("opacity", "0");
@@ -2437,7 +2613,10 @@ test("the #1694 keyboard model: j/k navigate, Enter attaches, ctrl+] returns to 
   const movedTo = page.locator(".af-rail-list .af-row.af-row-selected");
   await expect(movedTo).toHaveCount(1);
   await expect(movedTo.locator(".af-row-actions")).toHaveCSS("opacity", "1");
-  await expect(page.locator(".af-row-actions")).toHaveCount(await page.locator(".af-rail-list .af-row").count());
+  await expect(
+    page.locator(".af-rail-list .af-row:not(:has(.af-row-actions))"),
+    "every rail row must reserve the quiet action slot (#2893: no sampled count)",
+  ).toHaveCount(0);
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
 
   // k moves back up to A — j/k are symmetric rail navigation.
@@ -3657,7 +3836,19 @@ test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard 
 
   // Proof the keyboard really is the rail's: a bare j navigates instead of reaching the
   // agent we cycled away from.
+  //
+  // Assert the invariant the chord actually depends on, not just the CSS class (#2893).
+  // index.ts's document-level handler returns early when a native control holds focus
+  // (isNativeControl), so `.af-kb-rail` being visible does NOT mean `j` will be
+  // delivered — that gap is what #2857 found under ensureRailOnSessions, and this test
+  // presses a chord without that helper.
   await expect(row(page, SESSION_WEB)).toHaveClass(/af-row-selected/);
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.tagName ?? ""), {
+      message: "no native control may hold focus, or the document-level key handler never sees the j",
+      timeout: 5_000,
+    })
+    .toBe("BODY");
   await page.keyboard.press("j");
   await expect(
     row(page, SESSION_WEB),
@@ -4997,22 +5188,42 @@ test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a 
   await row(page, SESSION_A).click();
   await page.keyboard.press("Control+]"); // hand the keyboard back to the rail (#2517)
 
-  const visited: string[] = [];
-  const rows = await page.locator(".af-rail-list .af-row").count();
-  for (let i = 0; i < rows + 2; i++) {
-    await page.keyboard.press("j");
-    const sel = page.locator(".af-row-selected");
-    if ((await sel.count()) === 1) {
-      visited.push((await sel.locator(".af-row-title").innerText()).trim());
-    }
-  }
+  // Each step WAITS for the selection to move rather than sampling right after the
+  // press (#2893). The old shape did `if ((await sel.count()) === 1)` immediately after
+  // `j` — a non-waiting read — and SKIPPED the iteration when it arrived early, so
+  // under load rows went unrecorded and the `not.toContain` below quietly asserted
+  // less. It also queried `.af-row-selected` page-wide rather than inside the rail.
+  const rowsAtStart = await page.locator(".af-rail-list .af-row").count();
+  const maxSteps = rowsAtStart + 2;
+  const top = await parkRailSelection(page, "k", maxSteps);
+  const down = [top, ...(await walkRailSelection(page, "j", top, maxSteps))];
+  const bottom = down[down.length - 1]!;
+  const up = [bottom, ...(await walkRailSelection(page, "k", bottom, maxSteps))];
+  const visited = [...down, ...up];
+
   // j walked the rail and never selected the archived session hidden from it.
-  expect(visited.length, "j must move the selection").toBeGreaterThan(0);
-  expect(visited, "j must never select a row the filter hides").not.toContain(SESSION_B);
-  // Every row it did land on is one the rail is actually drawing.
-  for (const title of new Set(visited)) {
-    await expect(row(page, title), `${title} must be a visible row`).toBeVisible();
-  }
+  //
+  // Anti-vacuity here is "both directions moved across more than one row" rather than
+  // the stricter down/up symmetry the #2234 fence test uses. That test drives an
+  // INTERCEPTED static snapshot; this one runs on the shared page against the live
+  // events plane, where a session.updated landing mid-walk legitimately changes the
+  // roster. Demanding symmetry here would turn ordinary daemon churn into a red —
+  // inventing exactly the kind of flake this change exists to remove.
+  expect(new Set(down.map((r) => r.index)).size, "j must move the selection across more than one row").toBeGreaterThan(
+    1,
+  );
+  expect(new Set(up.map((r) => r.index)).size, "k must walk back across more than one row").toBeGreaterThan(1);
+  expect(
+    visited.map((r) => r.title),
+    "j must never select a row the filter hides",
+  ).not.toContainEqual(expect.stringContaining(SESSION_B));
+  // The old trailing loop re-found each visited row with row(page, title) to assert it
+  // was visible. That is now BOTH redundant and wrong (#2893): redundant because
+  // readRailStop only ever reports a row matched inside `.af-rail-list` that carries
+  // `.af-row-selected`, so every recorded stop was a drawn rail row at the moment it
+  // was recorded; and wrong because the rendered title carries mutable prefixes, so
+  // re-finding by that text fails when the churn this walk was changed to tolerate
+  // drops a `[lost] ` between the walk and the check.
 });
 
 test("add + delete a registered empty project (#2456): appears while another is selected, then deletes", REAL_FIXTURE, async () => {
@@ -6447,8 +6658,35 @@ test("#1815: a resize must not re-arm the rewind on the next out-of-band resync"
       timeout: 10_000,
     })
     .toBeGreaterThan(0);
-  await page.waitForTimeout(500);
-  const parked = await viewport.evaluate((el) => el.scrollTop);
+  // Wait for the DEBOUNCED fit to stop moving, rather than sleeping 500ms and hoping
+  // (#2893). A fixed sleep is a guess about machine speed: under load the sample below
+  // lands mid-flight and every later comparison is against a moving baseline. Poll for
+  // the real condition instead — two consecutive reads that agree.
+  //
+  // The sampling interval is explicit and must exceed terminal.ts's RESIZE_DEBOUNCE_MS
+  // (120ms): scheduleFit waits out that debounce after the last ResizeObserver event
+  // before it calls fitVisibleHost, so two samples taken at the poller's default
+  // cadence can BOTH land before the fit has even fired and read as "stable". Three
+  // agreeing samples 250ms apart span 500ms, well past the debounce, so the value
+  // captured is the settled one rather than the pre-fit one.
+  let previous = -1;
+  let agreements = 0;
+  await expect
+    .poll(
+      async () => {
+        const now = await viewport.evaluate((el) => el.scrollTop);
+        agreements = now === previous ? agreements + 1 : 0;
+        previous = now;
+        return agreements;
+      },
+      {
+        message: "the resized pane's scroll position must stop moving before it is sampled",
+        intervals: [250, 250, 250, 250, 250, 250, 250, 250],
+        timeout: 15_000,
+      },
+    )
+    .toBeGreaterThanOrEqual(2);
+  const parked = previous;
   const reading = await shellPane.textContent();
 
   // The resync that used to rewind it: someone else adds a tab.

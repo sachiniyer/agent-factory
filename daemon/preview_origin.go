@@ -265,8 +265,20 @@ func (m *Manager) hasIframeTab(sessionID, tabID string) bool {
 	if !m.Ready() {
 		return false
 	}
-	instance, _, _, err := m.resolveStreamSession(sessionID, "")
-	if err != nil || instance == nil {
+	// The ALREADY-RESTORED map, never resolveStreamSession. That resolver's miss path
+	// runs findSessionByStableID + refreshLocked, i.e. it reads session state off disk
+	// — and this validation sits on a GET that, under the default tokenless posture,
+	// any cross-origin page can drive without being able to read the reply. Resolving
+	// through the refreshing path would let a page force repeated disk work simply by
+	// embedding preview-auth URLs with random session ids: the guard added to stop the
+	// registry being filled would have handed over a cheaper amplifier instead.
+	//
+	// A miss here means "not in the restored map", which is exactly the right answer
+	// for minting: an origin is only ever vended for a session the daemon already
+	// holds. Nothing legitimate depends on the refresh — the web client asks about a
+	// tab it is currently rendering.
+	instance := m.trackedStreamSession(sessionID)
+	if instance == nil {
 		return false
 	}
 	kind, _, ok := instance.TabTargetByID(tabID)
