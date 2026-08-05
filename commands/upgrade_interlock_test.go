@@ -221,11 +221,19 @@ func TestWriteExecutableInPlace_OverrideInstallsAnyway(t *testing.T) {
 	require.Equal(t, "new binary", string(on), "an explicit override must install")
 }
 
-// `af upgrade` refuses before spending a download, and the refusal names the
-// override.
+// The path a maintainer actually runs: `af upgrade` on a box where a daemon is
+// serving. It must refuse before spending a download, name the override, and —
+// the thing that actually matters — leave the executable it is running on
+// untouched.
 func TestRunUpgrade_RefusesDuringALiveTransaction(t *testing.T) {
 	upgradeHome(t)
 	stubUpgradeJournal(t, journalAt(upgradetxn.PhaseDaemonStopped), nil)
+
+	installed := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(installed, []byte("the binary in use"), 0o755))
+	originalExec := osExecutableFn
+	osExecutableFn = func() (string, error) { return installed, nil }
+	t.Cleanup(func() { osExecutableFn = originalExec })
 
 	downloaded := false
 	originalDownload := downloadBinaryFn
@@ -244,6 +252,41 @@ func TestRunUpgrade_RefusesDuringALiveTransaction(t *testing.T) {
 	require.Contains(t, err.Error(), "upgrade-abc123")
 	require.Contains(t, err.Error(), "--"+ignoreActiveUpgradeFlag)
 	require.False(t, downloaded, "the refusal must come before the download, not after it")
+
+	on, readErr := os.ReadFile(installed)
+	require.NoError(t, readErr)
+	require.Equal(t, "the binary in use", string(on),
+		"af upgrade must not clobber the executable while a transaction owns it")
+}
+
+// The other half, and the more important one for a box where `af upgrade` is run
+// often: with no transaction in flight, `af upgrade` installs exactly as it
+// always has. The interlock must be invisible on the path people actually use.
+func TestRunUpgrade_InstallsNormallyWithNoTransaction(t *testing.T) {
+	upgradeHome(t)
+
+	installed := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(installed, []byte("old binary"), 0o755))
+	originalExec := osExecutableFn
+	osExecutableFn = func() (string, error) { return installed, nil }
+	t.Cleanup(func() { osExecutableFn = originalExec })
+
+	originalDownload := downloadBinaryFn
+	downloadBinaryFn = func(string, time.Duration) ([]byte, error) {
+		return []byte("new binary"), nil
+	}
+	t.Cleanup(func() { downloadBinaryFn = originalDownload })
+
+	originalIgnore := upgradeIgnoreActiveUpgrade
+	upgradeIgnoreActiveUpgrade = false
+	t.Cleanup(func() { upgradeIgnoreActiveUpgrade = originalIgnore })
+
+	require.NoError(t, runUpgrade(io.Discard, io.Discard, "http://example.invalid/af.tar.gz", true))
+
+	on, err := os.ReadFile(installed)
+	require.NoError(t, err)
+	require.Equal(t, "new binary", string(on),
+		"with no transaction the in-place upgrade must behave exactly as before")
 }
 
 // The launch path stands down without touching the shared throttle window or
