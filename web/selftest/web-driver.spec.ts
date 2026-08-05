@@ -588,9 +588,15 @@ async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number,
  *  it. No touchmove at all: a press that wobbles past the threshold is a scroll, and
  *  that boundary is asserted separately. */
 async function touchLongPress(cdp: CDPSession, x: number, y: number, holdMs = 700): Promise<void> {
+  await touchPressAndHold(cdp, x, y, holdMs);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+/** The first half of a long press: down, and held past the threshold, WITHOUT the
+ *  lift — so a test can look at the world while the finger is still on the glass. */
+async function touchPressAndHold(cdp: CDPSession, x: number, y: number, holdMs = 700): Promise<void> {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
   await new Promise((resolve) => setTimeout(resolve, holdMs));
-  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
 async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
@@ -2248,6 +2254,41 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
         message: "a press past the end of a line must copy the line",
       })
       .toContain(TRAILER);
+
+    // A token WIDER THAN THE SCREEN, which on a ~40-column phone is the normal shape
+    // of the URLs and paths this gesture exists for. It soft-wraps onto a second
+    // buffer row, and a scan that stopped at the row edge would copy a fragment and
+    // look like it had worked.
+    const LONG = `/srv/af-2849/${"wrapped-".repeat(6)}end`;
+    await p.keyboard.type(`printf '%s\\n' ${LONG}`);
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("wrapped-end", { timeout: 20_000 });
+    const wrappedRow = host.locator(".xterm-rows > div", { hasText: "/srv/af-2849/wrapped-" }).last();
+    await expect(wrappedRow).toBeVisible();
+    const wrappedBox = (await wrappedRow.boundingBox()) as ElementBox;
+    await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
+    await touchLongPress(cdp, wrappedBox.x + 2, wrappedBox.y + wrappedBox.height / 2);
+    await expect
+      .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
+        message: "a token that wraps must be copied whole, not cut at the screen edge",
+      })
+      .toContain(LONG);
+
+    // The write must land on the LIFT, not in the timer that selects: Safari grants
+    // clipboard access only to a user-gesture task, so a copy from the timeout is
+    // refused on the one platform this gesture exists for. Holding without lifting is
+    // what tells those two apart.
+    await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
+    await touchPressAndHold(cdp, x + 2, pressY);
+    await expect(selection, "the selection appears while the finger is still down").not.toHaveCount(0);
+    expect(
+      await p.evaluate(() => navigator.clipboard.readText()),
+      "nothing may reach the clipboard from the timer — the write belongs to the lift",
+    ).toContain("untouched");
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect
+      .poll(() => p.evaluate(() => navigator.clipboard.readText()), { message: "the lift completes the copy" })
+      .toContain(TOKEN);
 
     // …and the gesture that is NOT a press still is not one. A drag from the same
     // spot scrolls (#2682) and copies nothing, so the two cannot be confused.

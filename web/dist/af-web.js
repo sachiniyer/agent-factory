@@ -7050,6 +7050,12 @@ function lineContentColumns(cells) {
   }
   return end + 1;
 }
+function wrappedCellPosition(index, cols) {
+  if (cols <= 0) {
+    return { col: 0, row: 0 };
+  }
+  return { col: index % cols, row: Math.floor(index / cols) };
+}
 
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
@@ -7301,10 +7307,19 @@ var AttachTerminal = class {
   touchOriginX = 0;
   touchOriginY = 0;
   touchScrollClaimed = false;
-  // The pending long press, and whether it has already copied on this gesture — a
-  // copy has to swallow the compatibility click the same touch would otherwise fire.
+  // The pending long press, and whether it has already acted on this gesture — a copy
+  // has to swallow the compatibility click the same touch would otherwise fire.
   touchLongPressTimer = null;
   touchCopyFired = false;
+  // The cell the finger went down on, resolved AT TOUCHSTART and in absolute buffer
+  // coordinates. Resolving it when the timer fires would read the viewport half a
+  // second later, and under live output the row the finger is on has scrolled by
+  // then — copying whatever slid beneath it instead of what was pressed.
+  touchPressCell = null;
+  // Text the press selected, waiting for the finger to lift. The clipboard write has
+  // to happen in the touchend handler: Safari only honours it from a trusted
+  // user-gesture task, and a setTimeout callback is not one.
+  touchCopyPending = null;
   // Whether the gesture in flight came from a finger, read off the pointer event that
   // precedes the browser's compatibility mouse events (onPointerDown).
   lastPointerWasTouch = false;
@@ -7375,12 +7390,22 @@ var AttachTerminal = class {
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
     this.touchCopyFired = false;
+    this.touchCopyPending = null;
     this.cancelTouchLongPress();
-    if (press) {
+    this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
+    if (this.touchPressCell) {
       this.startTouchLongPress();
     }
   };
-  onTouchEnd = () => this.cancelTouchLongPress();
+  onTouchEnd = (event) => {
+    this.cancelTouchLongPress();
+    const pending = this.touchCopyPending;
+    this.touchCopyPending = null;
+    if (pending === null || event.type !== "touchend") {
+      return;
+    }
+    this.copyToClipboard(pending);
+  };
   onTouchMove = (event) => {
     this.handleUserScroll("touch");
     const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
@@ -7591,7 +7616,7 @@ var AttachTerminal = class {
   startTouchLongPress() {
     this.touchLongPressTimer = window.setTimeout(() => {
       this.touchLongPressTimer = null;
-      this.copyTouchWord(this.touchOriginX, this.touchOriginY);
+      this.selectTouchWord();
     }, TOUCH_LONG_PRESS_MS);
   }
   cancelTouchLongPress() {
@@ -7600,40 +7625,64 @@ var AttachTerminal = class {
       this.touchLongPressTimer = null;
     }
   }
-  /** Selects the token under the finger — the whole line when that cell is blank —
-   *  and copies it. Silent only when there is genuinely nothing there to take. */
-  copyTouchWord(x, y) {
+  /** The cell under a viewport point, in ABSOLUTE buffer coordinates so it survives
+   *  everything the terminal does to the viewport afterwards. */
+  bufferCellAtPoint(x, y) {
     const rowsEl = this.container.querySelector(".xterm-rows");
     if (!rowsEl) {
-      return;
+      return null;
     }
     const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), this.term.cols, this.term.rows);
-    if (!cell) {
+    return cell === null ? null : { col: cell.col, row: this.term.buffer.active.viewportY + cell.row };
+  }
+  /**
+   * Selects the token the finger is resting on, and holds the text for the lift.
+   *
+   * The selection happens now, so the highlight appears under the finger at the
+   * moment the press is recognised; the clipboard write waits for touchend, where a
+   * user gesture is still in scope. Splitting the two is what makes the gesture work
+   * on Safari as well as Chrome.
+   */
+  selectTouchWord() {
+    const press = this.touchPressCell;
+    if (!press) {
       return;
     }
     const buffer = this.term.buffer.active;
-    const bufferRow = buffer.viewportY + cell.row;
-    const line = buffer.getLine(bufferRow);
-    if (!line) {
-      return;
+    const cols = this.term.cols;
+    let first = press.row;
+    while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
+      first -= 1;
+    }
+    let last = press.row;
+    while (buffer.getLine(last + 1)?.isWrapped === true) {
+      last += 1;
     }
     const cells = [];
-    for (let col = 0; col < line.length; col += 1) {
-      const buffered = line.getCell(col);
-      cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+    for (let row = first; row <= last; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line) {
+        break;
+      }
+      for (let col = 0; col < cols; col += 1) {
+        const buffered = line.getCell(col);
+        cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+      }
     }
-    const range = wordRangeAtColumn(cells, cell.col) ?? { start: 0, length: lineContentColumns(cells) };
+    const pressed = (press.row - first) * cols + press.col;
+    const range = wordRangeAtColumn(cells, pressed) ?? { start: 0, length: lineContentColumns(cells) };
     if (range.length === 0) {
       return;
     }
-    this.term.select(range.start, bufferRow, range.length);
+    const at = wrappedCellPosition(range.start, cols);
+    this.term.select(at.col, first + at.row, range.length);
     const text = this.term.getSelection();
     if (text.trim() === "") {
       this.term.clearSelection();
       return;
     }
     this.touchCopyFired = true;
-    this.copyToClipboard(text);
+    this.touchCopyPending = text;
   }
   /** The painted height of one terminal row, which turns a pixel-denominated gesture
    *  into rows. Falls back to a font-size estimate before the first row exists. */
