@@ -243,3 +243,79 @@ func TestSetupLaunchesHooksBeforeTheyFinish(t *testing.T) {
 		"a gated hook reported done while still blocked; the gate is not holding")
 	require.False(t, strings.Contains(gw.GetWorktreePath(), " "), "unexpected path shape")
 }
+
+// The recreated tree must be untouched by the run that preceded it (#2770,
+// post-review finding on the first fix).
+//
+// Cancelling is not enough on its own if it happens AFTER the rebuild: the
+// survivor's relative I/O fails against the deleted directory, but its
+// ABSOLUTE-path work keeps landing wherever it points, so a hook cancelled after
+// `worktree add` has already written provisioning output into the tree the
+// rebuild just created. The window is however long the git surgery takes.
+//
+// The hook here writes its pid into the worktree by absolute path, continuously,
+// exactly as a provisioning command's output would land. The rebuilt tree must
+// carry the NEW run's pid and only that.
+func TestRebuildFromExistingBranch_RecreatedTreeIsUntouchedByThePriorRun(t *testing.T) {
+	sandboxHome(t)
+	repoRoot := createGitRepo(t)
+	commitInitial(t, repoRoot)
+
+	// $$ is the hook shell's pid; the worktree path is resolved by the hook at
+	// run time via $PWD's absolute value captured before any deletion.
+	repoID := config.RepoIDFromRoot(repoRoot)
+	require.NoError(t, config.SaveRepoConfig(repoID, &config.RepoConfig{
+		PostWorktreeCommands: []string{
+			`d="$PWD"; while true; do echo "$$" >> "$d/hook-touched"; sleep 0.01; done`,
+		},
+	}))
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = "test/"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	gw, _, err := NewGitWorktree(repoRoot, "tree-untouched")
+	require.NoError(t, err)
+	require.NoError(t, gw.Setup())
+	t.Cleanup(func() { _, _ = gw.Cleanup() })
+
+	worktreePath := gw.GetWorktreePath()
+	touched := filepath.Join(worktreePath, "hook-touched")
+	require.True(t, waitForFile(t, touched, 10*time.Second), "the first hook never wrote into the worktree")
+	oldPID := strings.TrimSpace(strings.Split(strings.TrimSpace(readFile(t, touched)), "\n")[0])
+	require.NotEmpty(t, oldPID)
+
+	// The worktree vanishes — the Lost-recovery trigger. The old hook keeps
+	// running, still pointed at this absolute path.
+	require.NoError(t, os.RemoveAll(worktreePath))
+
+	require.NoError(t, gw.RebuildFromExistingBranch())
+	require.True(t, waitForFile(t, touched, 10*time.Second), "the rebuilt worktree's hook never ran")
+
+	// Let the new run write for a while, then check WHOSE pids are in the tree.
+	time.Sleep(500 * time.Millisecond)
+	for _, line := range strings.Split(strings.TrimSpace(readFile(t, touched)), "\n") {
+		require.NotEqual(t, oldPID, strings.TrimSpace(line),
+			"the hook run from before the rebuild wrote into the RECREATED worktree: it was still "+
+				"alive while the tree was being rebuilt, so the operator's provisioning output landed "+
+				"in the new checkout on top of the run that owns it")
+	}
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
+}

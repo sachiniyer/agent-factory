@@ -74,6 +74,9 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 		return fmt.Errorf("cannot rebuild worktree %s: branch %s is unavailable: %w", g.worktreePath, g.branchName, err)
 	}
 
+	// Before the checkout is touched, not after: see stopHooks.
+	g.stopHooks()
+
 	branchCreatedByUs := g.branchCreatedByUs
 	if err := g.setupFromExistingBranch(); err != nil {
 		g.branchCreatedByUs = branchCreatedByUs
@@ -81,7 +84,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	}
 	g.branchCreatedByUs = branchCreatedByUs
 
-	g.restartHooks()
+	g.startHooks()
 	return nil
 }
 
@@ -108,6 +111,9 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 		return fmt.Errorf("cannot fresh rebuild worktree %s: branch %s already exists", g.worktreePath, g.branchName)
 	}
 
+	// Before the remove/add, not after: see stopHooks.
+	g.stopHooks()
+
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
 
@@ -121,38 +127,65 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 
 	g.baseCommitSHA = baseCommit
 	g.branchCreatedByUs = true
-	g.restartHooks()
+	g.startHooks()
 	return nil
 }
 
-// restartHooks retires the previous post-worktree hook run before launching one
-// for the rebuilt tree.
+// hookStopTimeout bounds how long a rebuild waits for the previous hook run to
+// actually be gone after cancelling it. Cancellation SIGKILLs the hook's process
+// group, but cmd.Wait can still take up to hookWaitDelay to return when a
+// backgrounded grandchild holds the capture pipe — so this has to exceed that
+// bound to mean anything. It is a bound, not a promise: a rebuild that waited
+// forever would wedge Lost recovery, which is strictly worse than the residual
+// risk of proceeding.
+const hookStopTimeout = 10 * time.Second
+
+// stopHooks retires the previous post-worktree hook run. It MUST be called
+// before the rebuild touches the checkout, and startHooks only after the tree
+// exists again (#2770).
 //
-// A rebuild is the ONLY place a second run can begin on a worktree that already
-// has one, and both halves of this matter (#2770):
+// Recovery reuses the live GitWorktree — respawn calls Rebuild* on
+// i.gitWorktree with no Cleanup() in between — so a hook still running from
+// before the session was Lost is never cancelled by anything else. Starting
+// another one then executes the operator's post_worktree_commands TWICE over the
+// same path. These are provisioning commands (installs, migrations, seeding, a
+// call out to something else), and the duplicate is invisible: hooksDone is
+// overwritten by the new run, so the readiness wait stops tracking the old one.
 //
-//   - Cancelling first. Recovery reuses the live GitWorktree — respawn calls
-//     Rebuild* on i.gitWorktree with no Cleanup() in between — so a hook still
-//     running from before the session was Lost keeps running. Starting another
-//     one then executes the operator's post_worktree_commands TWICE over the same
-//     path. These are provisioning commands (installs, migrations, seeding, a
-//     provisioning call out to something else), and the survivor's relative I/O
-//     fails against the deleted directory while its ABSOLUTE-path work lands in
-//     the tree the rebuild just recreated. It is also invisible: hooksDone is
-//     overwritten by the new run, so the readiness wait stops tracking the old one.
+// The ORDER is the load-bearing part, not just the cancellation. The survivor's
+// relative I/O fails against the deleted directory, but its ABSOLUTE-path work
+// keeps landing wherever it points — so cancelling after the remove/add leaves it
+// writing into the tree the rebuild has already recreated, for however long
+// `worktree add` takes. Cancelling first, and waiting for the run to be gone,
+// is what makes the recreated tree provably untouched by the old run.
 //
-//   - A FRESH context, not the existing one. hooksCancel is permanent — the
-//     cancelled context cannot host the new run, and Cleanup() cancels it too. So
-//     the rebuild would either inherit the cancellation it just issued and start
-//     hooks that return at their first ctx check (a silently unprovisioned tree),
-//     or, after a Cleanup, never provision at all.
-func (g *GitWorktree) restartHooks() {
+// It also installs a FRESH context rather than leaving the cancelled one in
+// place. hooksCancel is permanent, so reusing it would make the new run return
+// at its first context check and leave the tree silently unprovisioned — and
+// Cleanup() cancels the same context, so a rebuild after one would never
+// provision at all.
+func (g *GitWorktree) stopHooks() {
 	if g.hooksCancel != nil {
 		g.hooksCancel()
+	}
+	if g.hooksDone != nil {
+		select {
+		case <-g.hooksDone:
+		case <-time.After(hookStopTimeout):
+			log.WarningLog.Printf("post-worktree hooks for %s did not exit within %s of cancellation; rebuilding anyway",
+				g.worktreePath, hookStopTimeout)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	g.hooksCtx = ctx
 	g.hooksCancel = cancel
+}
+
+// startHooks launches the post-worktree hook run for a freshly rebuilt tree, on
+// the context stopHooks installed. Only ever called after a rebuild succeeded:
+// a failed one leaves the previous run's closed channel in place, which readers
+// correctly see as "nothing in flight".
+func (g *GitWorktree) startHooks() {
 	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
 }
 
