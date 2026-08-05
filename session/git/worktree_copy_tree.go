@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -424,6 +425,36 @@ func copySymlinkEntry(
 	return created, nil
 }
 
+// preserveSourceModTime gives a freshly created destination node the modification
+// time its source carries. rename(2) keeps mtime for free; the copy writes new
+// nodes, so without this every restored file and directory dates from the archive
+// rather than from when the work was done (#2919). A worktree carrying a build
+// tree then looks entirely newer than its outputs, so the next build redoes all of
+// it, and git — which stores stat data in the index — re-hashes files it could
+// otherwise have trusted.
+//
+// Anchored to a directory descriptor plus a name, like every other mutation here,
+// and AT_SYMLINK_NOFOLLOW so a name swapped for a symlink between creation and
+// this call cannot redirect the timestamp onto another file. A directory passes
+// its OWN descriptor with "." — that addresses the directory itself without
+// AT_EMPTY_PATH, which is Linux-only.
+//
+// Both slots are set to the source mtime because there is no portable way to set
+// one and leave the other: UTIME_OMIT is not defined on darwin. atime is
+// therefore NOT preserved, deliberately — it is rewritten by any read, most
+// filesystems mount relatime so it is already approximate, and nothing in a
+// worktree depends on it. mtime is the property tools actually read.
+func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, destinationPath, kind string) error {
+	stamp := unix.NsecToTimespec(sourceModTime.UnixNano())
+	if err := unix.UtimesNanoAt(dirFD, name, []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to preserve the source modification time on destination %s %s: %w",
+			kind, destinationPath, err,
+		)
+	}
+	return nil
+}
+
 // workingDirectoryMode is the mode a destination directory is created with while
 // the copy is still filling it.
 //
@@ -453,7 +484,15 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 			destinationPath, err,
 		)
 	}
-	return preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory")
+	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
+		return err
+	}
+	// Same moment as the mode, and for the same reason: this level is complete, so
+	// nothing further will be created directly in this directory to move its mtime
+	// again. Descendants are filled through their own descriptors, which changes
+	// THEIR mtimes, not this one. "." names this directory through its own
+	// descriptor, so the root of the copy needs no parent to address it.
+	return preserveSourceModTime(int(destination.Fd()), ".", info.ModTime(), destinationPath, "directory")
 }
 
 // holeCopyChunk is the read granularity of the hole-preserving copy. It is a
@@ -642,6 +681,14 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// Last, after every write: the contents are what move mtime, so stamping it
+	// before the copy would simply be overwritten.
+	if err := preserveSourceModTime(
+		int(destination.Fd()), filepath.Base(destinationPath), info.ModTime(), destinationPath, "file",
+	); err != nil {
 		_ = out.Close()
 		return created, err
 	}

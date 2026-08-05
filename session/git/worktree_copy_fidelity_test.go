@@ -41,8 +41,7 @@ var knownCrossDeviceDivergence = map[string]string{
 	"hardlink.sameInode": "#2919: same cause — the link structure is not reproduced",
 	"xattr.file":         "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
 	"xattr.dir":          "#2919: same cause, on directories",
-	"mtime.file":         "#2919: the copy writes new files, so mtime becomes the copy time",
-	"mtime.dir":          "#2919: same cause, on directories",
+	"mtime.symlink":      "#2919: the link's own mtime is not set — no portable dirfd-relative lstat, and the target's mtime is what tools read",
 }
 
 // TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded is the class
@@ -148,6 +147,15 @@ func writeFidelityProbeTree(t *testing.T, root string) {
 	old := time.Unix(1_000_000_000, 0)
 	require.NoError(t, os.Chtimes(filepath.Join(root, "plain.txt"), old, old))
 	require.NoError(t, os.Chtimes(filepath.Join(root, "dir"), old, old))
+	// The LINK's own mtime, not its target's — os.Chtimes follows symlinks, so it
+	// would stamp plain.txt a second time and leave the link reading "now". Without
+	// this the mtime.symlink probe would still show a divergence, but only because
+	// the two fixtures are created at different moments; stamping it means the probe
+	// fails for the reason it claims.
+	stamp := unix.NsecToTimespec(old.UnixNano())
+	require.NoError(t, unix.UtimesNanoAt(
+		unix.AT_FDCWD, filepath.Join(root, "link"), []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW,
+	))
 }
 
 // describeFidelity renders one tree as property → observed value. A property the
@@ -193,6 +201,10 @@ func describeFidelity(t *testing.T, root string) map[string]string {
 	for property, path := range map[string]string{
 		"mtime.file": filepath.Join(root, "plain.txt"),
 		"mtime.dir":  filepath.Join(root, "dir"),
+		// The link's OWN mtime, via Lstat rather than Stat. Measured even though it
+		// is not yet preserved: an unmeasured gap is exactly how this class kept
+		// recurring — a property nobody listed could not fail anything.
+		"mtime.symlink": filepath.Join(root, "link"),
 	} {
 		info, err := os.Lstat(path)
 		require.NoError(t, err)
