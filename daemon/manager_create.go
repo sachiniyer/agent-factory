@@ -251,6 +251,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	return data, nil
 }
 
+// backendKindForCreate is the runtime resolution reserveCreate performs before
+// taking the manager lock. A package var so a test can block inside it and prove
+// m.mu is genuinely not held across it — the property is invisible otherwise,
+// since the call succeeds either way and only its LOCK CONTEXT is the bug (#2931).
+// Production never reassigns it.
+var backendKindForCreate = session.BackendKindFor
+
 func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
 	if req.RepoPath == "" {
 		return nil, "", nil, nil, fmt.Errorf("repo path is required")
@@ -262,6 +269,44 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	if req.TaskRepoID != "" && req.TaskRepoID != repo.ID {
 		return nil, "", nil, nil, fmt.Errorf("task is bound to repo %s, but project path %q now resolves to repo %s; session was not created and prompt not delivered — rebind the task to use this project", req.TaskRepoID, req.RepoPath, repo.ID)
 	}
+
+	// Resolve the runtime BEFORE taking the manager lock (#2931).
+	//
+	// Both resolvers below reach session.resolveBackendKind -> resolveRepoConfig ->
+	// config.RepoFromPath, which shells out to `git rev-parse` with no context, no
+	// timeout, and no WaitDelay. Under m.mu that turned one unreachable repo — a
+	// stalled NFS/FUSE mount, a spun-down disk — into a daemon-wide outage: the
+	// exec never returns, the deferred unlock never runs, and every operation that
+	// needs m.mu blocks behind it. Snapshot (so every TUI and web client), the
+	// liveness poll, kill, archive, delete-project, task delivery: all of them, in
+	// every project, not just the broken one.
+	//
+	// Neither resolver reads any manager state — they are pure functions of the
+	// request and the repo root — so hoisting them costs nothing and bounds the
+	// damage to the one create that asked. The sibling git call this function makes
+	// under the lock (branch holds) is already bounded with its own deadline (#856);
+	// this was the path that was not.
+	runtimeKind := session.BackendLocal
+	if req.ForceRemote {
+		runtimeKind = session.BackendHook
+	}
+	backendOpts := session.InstanceOptions{
+		Backend:     session.BackendKind(req.Backend),
+		ForceRemote: req.ForceRemote,
+		InPlace:     req.InPlace,
+	}
+	if kind, kerr := backendKindForCreate(backendOpts, repo.Root); kerr == nil {
+		runtimeKind = kind
+	}
+	// A kerr means an invalid backend value. Leave the conservative default above
+	// and let NewInstance surface the canonical error rather than duplicating it.
+	//
+	// The in-place/off-box contradiction is resolved here too but REPORTED below,
+	// inside the lock, at the point it was refused before. Hoisting the resolution
+	// must not hoist the refusal: reserveCreate's admission order is load-bearing
+	// (#2778/#2415), and this check has to stay ahead of the archived-name-reuse
+	// rename and behind the project-delete fence, exactly where it was.
+	inPlaceConflict := session.InPlaceBackendConflict(backendOpts, repo.Root)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -303,22 +348,6 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 		return nil, "", nil, nil, err
 	}
 
-	// Resolve the runtime once for every namespace decision below. Hook creates
-	// claim a global external slug; local creates claim a repo-scoped tmux name;
-	// docker/ssh claim neither on this host. ForceRemote is only one way to select
-	// hook, so ask the same resolver NewInstance uses.
-	runtimeKind := session.BackendLocal
-	if req.ForceRemote {
-		runtimeKind = session.BackendHook
-	}
-	if kind, kerr := session.BackendKindFor(session.InstanceOptions{
-		Backend:     session.BackendKind(req.Backend),
-		ForceRemote: req.ForceRemote,
-	}, repo.Root); kerr == nil {
-		runtimeKind = kind
-	}
-	// A kerr means an invalid backend value. Leave the conservative default above
-	// and let NewInstance surface the canonical error rather than duplicating it.
 	nameNamespace := runtimeNamespaceForKind(runtimeKind)
 
 	// An in-place session and an off-box runtime are contradictory, and
@@ -338,12 +367,8 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// against runtimeKind, so the daemon's answer and NewInstance's cannot drift
 	// — including on the deliberate non-firing for a backend value that will not
 	// resolve, which belongs to the factory's canonical error.
-	if err := session.InPlaceBackendConflict(session.InstanceOptions{
-		Backend:     session.BackendKind(req.Backend),
-		ForceRemote: req.ForceRemote,
-		InPlace:     req.InPlace,
-	}, repo.Root); err != nil {
-		return nil, "", nil, nil, err
+	if inPlaceConflict != nil {
+		return nil, "", nil, nil, inPlaceConflict
 	}
 
 	var renamedArchived *session.InstanceData
