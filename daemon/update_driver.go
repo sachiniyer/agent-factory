@@ -412,21 +412,25 @@ func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel
 
 	url := autoupdate.DownloadURL(tag, updateDriverGOOS, updateDriverGOARCH)
 	candidate, err := d.download(ctx, url, updateDriverDownloadBudget)
+
+	// Shutdown beats an upgrade, and it is checked BEFORE the download error is
+	// classified. Cancelling the context is how a stopping daemon aborts the
+	// transfer, so the resulting error is the shutdown itself — reporting it as a
+	// staging failure would put a warning in the log for every stop that happened
+	// to catch a download, and describe an operator's own request as a fault.
+	// This is also the only place the minutes go, so it is where cancellation
+	// actually arrives.
+	if ctx.Err() != nil {
+		log.InfoLog.Printf("auto-update: daemon is shutting down; abandoning the staged upgrade to %s", latest)
+		return updateCheckSkipped
+	}
+
 	if err != nil {
 		// A download failure is transient — a flaky link, a half-published
 		// release — so it is not grounds to reject the tag for this daemon's
 		// lifetime. The six-hour window is the retry bound.
 		log.WarningLog.Printf("auto-update: daemon could not stage %s: %v", latest, err)
 		return updateCheckFailed
-	}
-
-	// Shutdown beats an upgrade. An operator who asked this daemon to stop must
-	// not get a published transaction and a started candidate instead — and
-	// RunDaemon is waiting on this goroutine, so continuing would also hold that
-	// stop open. Checked after the download because that is where the minutes go.
-	if err := ctx.Err(); err != nil {
-		log.InfoLog.Printf("auto-update: daemon is shutting down; abandoning the staged upgrade to %s", latest)
-		return updateCheckSkipped
 	}
 
 	after, identityErr := d.executableIdentity()

@@ -828,7 +828,9 @@ func TestUpdateDriver_StagingIsCancellable(t *testing.T) {
 	}
 
 	go func() { <-observed; cancel() }()
-	require.Equal(t, updateCheckFailed, h.driver.checkOnce(ctx))
+	// Skipped, not failed: a cancelled transfer IS the shutdown, and calling the
+	// operator's own stop a staging failure would be the wrong report.
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce(ctx))
 }
 
 // Staging takes minutes with the shared cache lock released, so an interactive
