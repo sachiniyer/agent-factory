@@ -316,7 +316,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// is not even a project. Ahead of that check, this one names the actual
 	// blocker, which is also why nothing below needs a repo-less path anymore.
 	if m.repoRoot == "" {
-		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.projectsFocused())))
+		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.enterPicksAProject(), m.projectsFocused())))
 	}
 	m.pendingProgram = m.program
 	// Every create starts with an empty prompt field and an unchosen backend. The
@@ -420,8 +420,8 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 // KeySetPrompt calls out that hardcoding ctrl+p "would silently drift the day a
 // user rebinds that action". A user who unbound it entirely gets the section
 // instead of a key that does nothing.
-func noActiveProjectNotice(projectsFocused bool) string {
-	return "select a project first — " + switchProjectPickHint(projectsFocused) +
+func noActiveProjectNotice(enterPicks, projectsFocused bool) string {
+	return "select a project first — " + switchProjectPickHint(enterPicks, projectsFocused) +
 		"; af is running with no active project, so there is no repo for this session to live in"
 }
 
@@ -441,17 +441,31 @@ func noActiveProjectNotice(projectsFocused bool) string {
 // the registry-mode empty workspace — so the two cannot drift on wording. What
 // they must NOT share is a single hardcoded key, which is the mistake this
 // signature exists to prevent.
-func switchProjectPickHint(projectsFocused bool) string {
-	if projectsFocused {
+func switchProjectPickHint(enterPicks, projectsFocused bool) string {
+	switch {
+	case enterPicks:
 		// A fixed binding with no configKey: Enter cannot be rebound away from
 		// this, so the word is literal — and it matches the Projects header's own
 		// "· enter switch" rather than the ↵ glyph the help column renders.
 		return "press enter to pick one"
+	case projectsFocused:
+		// Focused on a captive section with no rows: Enter is a no-op
+		// (SelectedProject reports false) and ctrl+p is suppressed, so the only
+		// honest instruction is to leave the section first. Startup no longer
+		// lands here, but a user can still tab in.
+		return "press esc, then " + switchProjectKeyPhrase() + " to add one"
+	default:
+		return switchProjectKeyPhrase() + " to pick one"
 	}
+}
+
+// switchProjectKeyPhrase names the project-switch key, or the section when the
+// action is unbound — still actionable, unlike a key that does nothing.
+func switchProjectKeyPhrase() string {
 	if k := keys.GlobalKeyBindings[keys.KeySwitchProject].Help().Key; k != "" {
-		return fmt.Sprintf("press %s to pick one", k)
+		return fmt.Sprintf("press %s", k)
 	}
-	return "pick one in the Projects section"
+	return "use the Projects section"
 }
 
 // suggestSessionName picks a readable random "adjective-noun" name for the
@@ -494,4 +508,12 @@ func (m *home) clearNamingPlaceholder() {
 // key has to ask.
 func (m *home) projectsFocused() bool {
 	return m.ring.Active() == layout.RegionProjects
+}
+
+// enterPicksAProject reports whether Enter would actually switch projects right
+// now: the captive section must hold the keyboard AND have a row under the
+// cursor. With no rows SelectedProject reports false and handleProjectsFocus
+// consumes Enter as a no-op, so advertising it there is another dead key.
+func (m *home) enterPicksAProject() bool {
+	return m.projectsFocused() && m.projects.HasProjects()
 }

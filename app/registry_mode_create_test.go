@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 
 	"github.com/stretchr/testify/assert"
@@ -93,60 +94,76 @@ func TestStartNewInstanceWithActiveProjectStillOpensNaming(t *testing.T) {
 // In registry mode newHome lands focus on the Projects section, which is a
 // captive vim-style list that consumes the create verbs on purpose (#1620). So
 // `n` produced no form, no notice, and no repaint — while the workspace beside
-// it read "No sessions yet — press n to create one." The advertised affordance
-// and the live key routing disagreed, and the copy was the half that was wrong.
+// it read "No sessions yet — press n to create one."
 //
-// Asserted on the composed frame, not the renderer: the renderer's own behavior
-// is covered in ui, and what regressed here is which renderer the view picks.
-func TestRegistryModeEmptyWorkspaceDoesNotAdvertiseCreate(t *testing.T) {
-	h := newTestHome(t)
-	h.repoRoot = "" // registry mode: launched outside a repo (#2477)
-	resizeHome(h, 120, 30)
-	// newHome focuses Projects when repoRoot is empty; newTestHome does not
-	// replicate that, and the focus is the whole subject here — which key is live
-	// depends on it. Without this the test measures the tree, where ctrl+p works,
-	// and never reaches the captive section this issue is about.
-	h.focusRegion(layout.RegionProjects)
-	require.True(t, h.projectsFocused(), "precondition: registry mode starts in the captive section")
-	require.Equal(t, 0, h.store.NumInstances(), "precondition: the rail is empty")
+// The table is the point: WHICH key is live depends on the focused region and on
+// whether the section has a row, so a single hardcoded hint is a dead key in one
+// of these states whichever key it names. Two review rounds on this PR were
+// exactly that mistake, twice.
+func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		focus      string
+		hasProject bool
+		want       string
+		absent     string
+	}{
+		{
+			// The startup state once a project is registered.
+			name: "projects focused with a row", focus: layout.RegionProjects, hasProject: true,
+			want: "press enter to pick one", absent: "ctrl+p",
+		},
+		{
+			// Enter is a no-op with nothing under the cursor, and ctrl+p is
+			// suppressed here, so the only way forward is out of the section.
+			name: "projects focused with no rows", focus: layout.RegionProjects,
+			want: "press esc, then press ctrl+p to add one", absent: "press enter",
+		},
+		{
+			// From the tree ctrl+p reaches the picker and Enter means something else.
+			name: "tree focused", focus: layout.RegionTree, hasProject: true,
+			want: "press ctrl+p to pick one", absent: "press enter",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.repoRoot = "" // registry mode: launched outside a repo (#2477)
+			if tc.hasProject {
+				h.projects.SetProjects([]ui.SidebarProject{{Name: "elsewhere", Root: "/repos/elsewhere"}})
+			}
+			resizeHome(h, 120, 30)
+			h.focusRegion(tc.focus)
+			require.Equal(t, 0, h.store.NumInstances(), "precondition: the rail is empty")
 
-	view := flatten(h.View())
+			view := flatten(h.View())
 
-	assert.NotContains(t, view, "press n to create one",
-		"no focused region in registry mode can honor that promise (#2830)")
-	assert.Contains(t, view, "No project selected",
-		"the empty state must name the actual blocker")
-	assert.Contains(t, view, "press enter to pick one",
-		"registry mode focuses the captive Projects section, where Enter on the cursor row "+
-			"IS the pick — and where ctrl+p is suppressed by name (#1620)")
-	assert.NotContains(t, view, "ctrl+p",
-		"advertising the project-switch key from the one section that swallows it would "+
-			"reproduce #2830 with a different dead key")
+			assert.NotContains(t, view, "press n to create one",
+				"no focused region in registry mode can honor that promise (#2830)")
+			assert.Contains(t, view, "No project selected", "the empty state must name the actual blocker")
+			assert.Contains(t, view, tc.want, "the hint must name a key that is live from here")
+			assert.NotContains(t, view, tc.absent, "and must not name one that is not")
+		})
+	}
 }
 
-// The same copy from a region where ctrl+p actually works must name ctrl+p.
-// Which key is live depends on focus, so a single hardcoded hint is wrong on one
-// of the two screens whichever key it picks.
-func TestRegistryModeEmptyWorkspaceNamesTheKeyThatWorksWhereFocusIs(t *testing.T) {
+// The no-project state outranks the session count. The refresh tick fetches with
+// an empty repoID, which the daemon answers with the cross-repo snapshot, so rows
+// from other repos reach the store even though the launch path skips exactly that
+// for registry mode — and none of them can be acted on under an empty active
+// scope. Ordered the other way, the first poll replaced this hint with
+// "s opens the selected tab" for anyone who has sessions elsewhere.
+func TestRegistryModeEmptyWorkspaceSurvivesForeignSessionsInTheStore(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = ""
+	h.store.AddInstance(instanceWithFakeBackend(t, "from-another-repo"))
 	resizeHome(h, 120, 30)
-	h.focusRegion(layout.RegionTree)
-	require.False(t, h.projectsFocused(), "precondition: the captive section does not hold the keyboard")
+	require.Positive(t, h.store.NumInstances(), "precondition: a cross-repo row reached the projection")
 
 	view := flatten(h.View())
 
-	assert.Contains(t, view, "press ctrl+p to pick one",
-		"from the tree, ctrl+p reaches the project picker and Enter does not")
-	assert.NotContains(t, view, "press enter to pick one")
-}
-
-// The create refusal is reached by pressing `n`, which only arrives from a
-// region that is NOT the captive Projects section — so it names ctrl+p. Pinned
-// because the two surfaces share a helper and must still be allowed to differ.
-func TestNoActiveProjectNoticeNamesTheKeyForItsFocus(t *testing.T) {
-	assert.Contains(t, noActiveProjectNotice(false), "press ctrl+p to pick one")
-	assert.Contains(t, noActiveProjectNotice(true), "press enter to pick one")
+	assert.Contains(t, view, "No project selected",
+		"a session that cannot be acted on must not displace the one hint that unblocks the user")
+	assert.NotContains(t, view, "s opens the selected tab")
 }
 
 // Inside a repo the ordinary onboarding copy is untouched: `n` works there, so
@@ -161,4 +178,13 @@ func TestNonRegistryModeEmptyWorkspaceStillAdvertisesCreate(t *testing.T) {
 
 	assert.Contains(t, view, "No sessions yet — press n to create one.")
 	assert.NotContains(t, view, "No project selected")
+}
+
+// The create refusal is reached by pressing `n`, which cannot arrive from the
+// captive section — so it names ctrl+p. Pinned because the two surfaces share a
+// helper and must still be allowed to name different keys.
+func TestNoActiveProjectNoticeNamesTheKeyForItsFocus(t *testing.T) {
+	assert.Contains(t, noActiveProjectNotice(false, false), "press ctrl+p to pick one")
+	assert.Contains(t, noActiveProjectNotice(true, true), "press enter to pick one")
+	assert.Contains(t, noActiveProjectNotice(false, true), "press esc, then press ctrl+p to add one")
 }

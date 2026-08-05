@@ -185,6 +185,11 @@ func (p *ProjectsPane) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return 
 
 // SelectedProject returns the row under the cursor, or false when the section
 // holds no projects — the row Enter switches to.
+// HasProjects reports whether the section has any row to put a cursor on. With
+// none, Enter is consumed as a no-op (SelectedProject reports false), so nothing
+// may advertise Enter here and nothing should hand the section focus (#2830).
+func (p *ProjectsPane) HasProjects() bool { return len(p.projects) > 0 }
+
 func (p *ProjectsPane) SelectedProject() (SidebarProject, bool) {
 	if len(p.projects) == 0 {
 		return SidebarProject{}, false

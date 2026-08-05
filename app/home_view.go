@@ -172,13 +172,20 @@ func (m *home) View() string {
 	cols := []string{rail}
 	if len(m.visiblePanes) == 0 {
 		switch {
-		case m.store.NumInstances() > 0:
-			cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
+		// The no-project state outranks the session count. The refresh tick fetches
+		// with an empty repoID, which the daemon answers with the CROSS-REPO
+		// snapshot, so rows from other repos land in the store even though the
+		// launch path skipped exactly that for registry mode — and none of them can
+		// be acted on under an empty active scope. Checked second, the first poll
+		// would replace this hint with "s opens the selected tab" for anyone who
+		// has sessions elsewhere.
 		case m.repoRoot == "":
 			// Registry mode (#2477): no active project, so the blocker is not the
 			// missing sessions but the missing project — and `n` cannot create one
 			// from any focused region here (#2830).
-			cols = append(cols, ui.NoActiveProjectWorkspace(m.lastLayout.Workspace, switchProjectPickHint(m.projectsFocused())))
+			cols = append(cols, ui.NoActiveProjectWorkspace(m.lastLayout.Workspace, switchProjectPickHint(m.enterPicksAProject(), m.projectsFocused())))
+		case m.store.NumInstances() > 0:
+			cols = append(cols, ui.EmptyWorkspace(m.lastLayout.Workspace))
 		default:
 			cols = append(cols, ui.FirstRunWorkspace(m.lastLayout.Workspace))
 		}

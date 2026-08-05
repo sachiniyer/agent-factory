@@ -541,9 +541,10 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	// surface the user picks a project from, rather than the empty tree. The ring
 	// position survives the first relayout (RegionProjects stays visible), and
 	// there is no saved view state to restore over it (repoID is empty).
-	if repoRoot == "" {
-		h.ring.Focus(layout.RegionProjects)
-	}
+	// Deferred until after refreshSidebarProjects below: focusing this section is
+	// only useful when it HAS a row to pick. With none, it is a captive list where
+	// Enter is a no-op and ctrl+p is suppressed (#1620), so landing there gives a
+	// first-time user a section with no live key at all (#2830).
 	h.syncFocus()
 
 	// Cold-start the projection from the daemon's authoritative Snapshot (#960 PR 6).
@@ -570,6 +571,15 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	// Populate the sidebar's Projects section from the cross-repo discovery so it
 	// renders (collapsed) at launch with the active project marked.
 	h.refreshSidebarProjects()
+	// In registry mode (launched outside a repo, #2477) the session tree is empty
+	// — there is no active project — so land focus on the Projects section, the
+	// surface the user picks one from. Only when it has rows: see above. The ring
+	// position survives the first relayout (RegionProjects stays visible), and
+	// there is no saved view state to restore over it (repoID is empty).
+	if repoRoot == "" && h.projects.HasProjects() {
+		h.ring.Focus(layout.RegionProjects)
+		h.syncFocus()
+	}
 
 	// Load tasks for sidebar display. Skipped in registry mode (#2477): tasks are
 	// per-project and LoadTasksForCurrentRepo needs a cwd repo, so with no active
