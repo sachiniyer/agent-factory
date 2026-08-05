@@ -7,31 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
-
-// #2737: a pre-#2704 SSH tombstone recorded no host-key posture, so it restores
-// as strict. When the host was only ever learned in the af-owned accept-new
-// store, the reconnect can never verify it — and the daemon retried that once a
-// second forever. The failure must say it cannot be fixed by retrying so the
-// record is retired instead.
-func TestSSHReapMarksLegacyTombstoneUnusable(t *testing.T) {
-	p := &sshProvisioner{
-		spec:       ProvisionSpec{Title: "legacy-tombstone"},
-		cfg:        configSSHForReapTest(),
-		sessionDir: "/home/remote/.af-sessions/legacy.1234",
-		// hostKeyVerification is EMPTY: the field #2704 added, absent here.
-	}
-	p.reapDial = func() error { return errors.New("ssh: handshake failed: knownhosts: key is unknown") }
-
-	err := p.reap()
-	require.Error(t, err)
-	assert.True(t, CleanupHandleUnusable(err),
-		"a legacy tombstone that cannot verify its host can never be completed by retrying")
-	assert.True(t, TeardownStateUnknown(err),
-		"but the workspace state is still unknown, so the record must still be RETAINED")
-	assert.Contains(t, err.Error(), "known_hosts", "the error must tell the operator what would fix it")
-	assert.Contains(t, err.Error(), "#2704")
-}
 
 // A tombstone that DID record its posture is an ordinary retryable failure: the
 // host may simply be down, and an outage that ends must heal on the next attempt.
@@ -62,4 +39,69 @@ func TestUnusableHandleStillRetainsTheRecord(t *testing.T) {
 	assert.True(t, CleanupHandleUnusable(err))
 	assert.True(t, TeardownStateUnknown(err),
 		"deleteSessionRecord must still refuse, so nothing is silently orphaned")
+}
+
+// Review finding on #2855: a legacy tombstone whose reconnect fails for a
+// TRANSIENT reason must not be retired. Retiring on any dial error turns a host
+// outage into a permanent stop, which is the failure #1122 is about — only the
+// unknown-host-key signal proves the missing posture is what blocks the cleanup.
+func TestSSHReapKeepsRetryingLegacyTombstoneOnTransientDialFailure(t *testing.T) {
+	transient := []struct {
+		name string
+		err  error
+	}{
+		{"connection refused", errors.New("dial tcp 10.0.0.9:22: connect: connection refused")},
+		{"timeout", errors.New("dial tcp 10.0.0.9:22: i/o timeout")},
+		{"dns failure", errors.New("dial tcp: lookup remote.invalid: no such host")},
+		{"auth failure", errors.New("ssh: unable to authenticate")},
+	}
+	for _, test := range transient {
+		t.Run(test.name, func(t *testing.T) {
+			p := &sshProvisioner{
+				spec:       ProvisionSpec{Title: "legacy-transient"},
+				cfg:        configSSHForReapTest(),
+				sessionDir: "/home/remote/.af-sessions/legacy.1234",
+			}
+			p.reapDial = func() error { return test.err }
+
+			err := p.reap()
+			require.Error(t, err)
+			assert.False(t, CleanupHandleUnusable(err),
+				"a transient reconnect failure may heal, so a legacy record must keep being retried")
+			assert.True(t, TeardownStateUnknown(err))
+		})
+	}
+}
+
+// The permanent case is specifically knownhosts' "host not present" signal.
+func TestSSHReapRetiresLegacyTombstoneOnUnknownHostKey(t *testing.T) {
+	p := &sshProvisioner{
+		spec:       ProvisionSpec{Title: "legacy-unknown-host"},
+		cfg:        configSSHForReapTest(),
+		sessionDir: "/home/remote/.af-sessions/legacy.1234",
+	}
+	p.reapDial = func() error { return &knownhosts.KeyError{} }
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.True(t, CleanupHandleUnusable(err),
+		"an unrecorded posture plus an unverifiable host can never be completed by retrying")
+	assert.True(t, TeardownStateUnknown(err), "and the record is still retained")
+	assert.Contains(t, err.Error(), "known_hosts", "the error must tell the operator what would fix it")
+	assert.Contains(t, err.Error(), "#2704")
+}
+
+// A key MISMATCH is not the same claim: the host is present and its key changed,
+// which is a security event to surface, not a missing-field record to retire.
+func TestSSHReapDoesNotRetireLegacyTombstoneOnKeyMismatch(t *testing.T) {
+	p := &sshProvisioner{
+		spec:       ProvisionSpec{Title: "legacy-mismatch"},
+		cfg:        configSSHForReapTest(),
+		sessionDir: "/home/remote/.af-sessions/legacy.1234",
+	}
+	p.reapDial = func() error { return &knownhosts.KeyError{Want: []knownhosts.KnownKey{{}}} }
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.False(t, CleanupHandleUnusable(err), "a changed host key is not a missing-posture record")
 }

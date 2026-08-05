@@ -45,6 +45,7 @@ type CleanupRetry struct {
 	nextAttempt         time.Time
 	escalated           bool
 	retired             bool
+	retirementReported  bool
 }
 
 // Due reports whether another attempt is allowed now. A retired entry never is.
@@ -73,9 +74,13 @@ func (r *CleanupRetry) RecordFailure(now time.Time, err error) bool {
 		// Nothing about a later attempt differs, so there is no cadence to settle
 		// into — this one is done.
 		r.retired = true
-		if r.escalated {
+		// Report the RETIREMENT even if a backoff escalation already fired: those
+		// say opposite things. "retrying every 5m" told the operator af was still
+		// working on it; this says it has stopped and needs them.
+		if r.retirementReported {
 			return false
 		}
+		r.retirementReported = true
 		r.escalated = true
 		return true
 	}
