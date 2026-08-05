@@ -613,7 +613,12 @@ func storedProjectMarkerPath(root string) (string, bool, error) {
 		return binding.checkoutMarkerPath, true, nil
 	}
 	info, statErr := os.Stat(root)
-	if errors.Is(statErr, os.ErrNotExist) {
+	// determinatelyAbsent, not ErrNotExist alone: a root replaced by a symlink
+	// cycle or a regular-file ancestor resolves to nothing, so it holds no marker
+	// — and erroring there would leave the record neither usable nor repairable
+	// while ListProjects already reports it absent (#2949 review). An ambiguous
+	// failure (EACCES, EIO) still errors: we cannot tell, so we do not guess.
+	if determinatelyAbsent(statErr) {
 		return "", false, nil
 	}
 	if statErr != nil {
@@ -632,7 +637,10 @@ func storedProjectMarkerPath(root string) (string, bool, error) {
 
 func projectRootHasCheckoutID(root, checkoutID string) (bool, error) {
 	info, statErr := os.Stat(root)
-	if errors.Is(statErr, os.ErrNotExist) {
+	// Same rule as storedProjectMarkerPath above: a root that resolves to nothing
+	// carries no marker, and saying so is what lets a moved checkout re-register
+	// against a dead old path (#2949 review). Ambiguous failures still error.
+	if determinatelyAbsent(statErr) {
 		return false, nil
 	}
 	if statErr != nil {
