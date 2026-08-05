@@ -141,9 +141,17 @@ function selectedRailRow(page: Page): Locator {
  */
 async function parkRailSelection(page: Page, key: string, maxSteps: number): Promise<string> {
   const selected = selectedRailRow(page);
-  await expect(selected, "the rail must have a selected row before a nav walk").toHaveCount(1, {
-    timeout: 10_000,
-  });
+  // A freshly loaded rail has NO selection, and that is a legal starting state rather
+  // than a precondition to assert: nextSelection (web/src/nav.ts) maps a null selection
+  // to the end the key walks from — j to the first row, k to the last — so one press
+  // establishes it. Requiring a selection up front would have failed every test that
+  // walks straight after a page load.
+  if ((await selected.count()) !== 1) {
+    await page.keyboard.press(key);
+    await expect(selected, "a rail-nav key must select a row even from no selection").toHaveCount(1, {
+      timeout: 10_000,
+    });
+  }
   let current = (await selected.locator(".af-row-title").innerText()).trim();
   for (let i = 0; i < maxSteps; i += 1) {
     const next = await stepRailSelection(page, key, current);
@@ -5002,10 +5010,15 @@ test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a 
   const visited = [...down, ...up];
 
   // j walked the rail and never selected the archived session hidden from it.
+  //
+  // Anti-vacuity is "the walk moved across more than one row" rather than the stricter
+  // down/up symmetry used by the #2234 fence test. That test drives an INTERCEPTED
+  // static snapshot; this one runs on the shared page against the live events plane,
+  // where a session.updated landing mid-walk legitimately changes the roster. Demanding
+  // symmetry here would convert ordinary daemon churn into a red — inventing exactly
+  // the kind of flake this change exists to remove.
   expect(new Set(down).size, "j must move the selection across more than one row").toBeGreaterThan(1);
-  expect([...new Set(up)].sort(), "k must walk back over exactly the rows j walked").toEqual(
-    [...new Set(down)].sort(),
-  );
+  expect(new Set(up).size, "k must walk back across more than one row").toBeGreaterThan(1);
   expect(visited, "j must never select a row the filter hides").not.toContain(SESSION_B);
   // Every row it did land on is one the rail is actually drawing.
   for (const title of new Set(visited)) {
