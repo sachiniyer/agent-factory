@@ -117,8 +117,20 @@ type Plan struct {
 	FromVersion    string
 	ToVersion      string
 	Candidate      []byte
-	Daemon         DaemonSnapshot
-	RecoveryJob    RecoveryJob
+	// ExpectedPreviousSHA256, when set, is the digest the caller last observed
+	// for the executable it means to replace. Prepare verifies it INSIDE the
+	// locks, against the same bytes it snapshots as the rollback binary, and
+	// refuses on a mismatch.
+	//
+	// A caller cannot do this for itself. Any check it makes happens before
+	// Prepare takes the locks, so an in-place installer can land in the gap —
+	// and then Prepare preserves the newer bytes as "previous" while installing
+	// the caller's older candidate over them. Empty means no expectation, which
+	// is what a caller with no prior observation (a test, a manual trigger)
+	// passes.
+	ExpectedPreviousSHA256 string
+	Daemon                 DaemonSnapshot
+	RecoveryJob            RecoveryJob
 	// MetadataPaths are paths relative to HomeDir. Existing regular files are
 	// snapshotted; absence is recorded so rollback removes files created by a
 	// candidate.

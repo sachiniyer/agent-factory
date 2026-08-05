@@ -41,7 +41,7 @@ func TestCaptureUpgradePlan_PopulatesMetadataManifest(t *testing.T) {
 	writeState(betaRel)
 	writeState(tasksRel)
 
-	plan, err := captureUpgradePlan(lifecycle, candidate, "1.0.200")
+	plan, err := captureUpgradePlan(lifecycle, candidate, "1.0.200", "")
 	require.NoError(t, err)
 
 	expected := []string{alphaRel, betaRel, tasksRel}
@@ -170,7 +170,7 @@ func TestTriggerUpgradeActivation_AuthorizesThenQuiescesAndExits(t *testing.T) {
 		events = append(events, "exit")
 	}
 
-	require.NoError(t, triggerUpgradeActivation(context.Background(), lifecycle, requestExit, candidate, "1.0.200"))
+	require.NoError(t, triggerUpgradeActivation(context.Background(), lifecycle, requestExit, candidate, "1.0.200", ""))
 	require.Equal(t, []string{"await-ready", "authorize", "exit"}, events)
 	require.Equal(t, DaemonPhaseQuiescing, lifecycle.snapshot().phase)
 	require.Error(t, lifecycle.mutationAdmissionError(), "a quiescing daemon must refuse mutations")
@@ -195,7 +195,7 @@ func TestTriggerUpgradeActivation_NotReadyKeepsServing(t *testing.T) {
 	exited := false
 	requestExit := func() { exited = true }
 
-	err := triggerUpgradeActivation(context.Background(), lifecycle, requestExit, candidate, "1.0.200")
+	err := triggerUpgradeActivation(context.Background(), lifecycle, requestExit, candidate, "1.0.200", "")
 	require.Error(t, err)
 	require.False(t, authorized, "must not authorize activation when the actor is not ready")
 	require.False(t, exited, "must not exit when the actor is not ready")
@@ -219,7 +219,7 @@ func TestTriggerUpgradeActivation_AbortsPreparedOnInstallFailure(t *testing.T) {
 		}
 	}
 	exited := false
-	err := triggerUpgradeActivation(context.Background(), lifecycle, func() { exited = true }, candidate, "1.0.200")
+	err := triggerUpgradeActivation(context.Background(), lifecycle, func() { exited = true }, candidate, "1.0.200", "")
 	require.Error(t, err)
 	require.False(t, exited, "a failed install must not exit the daemon")
 	require.Equal(t, DaemonPhaseReady, lifecycle.snapshot().phase, "the daemon keeps serving")
@@ -337,7 +337,7 @@ func TestUpgradeTrigger_CapturedJournalDrivesForwardCommitAndRollback(t *testing
 			lifecycle := readyLifecycle(t)
 			ctx := context.Background()
 
-			plan, err := captureUpgradePlan(lifecycle, candidate, tc.toVersion)
+			plan, err := captureUpgradePlan(lifecycle, candidate, tc.toVersion, "")
 			require.NoError(t, err)
 			require.Equal(t, upgradetxn.SupervisionAdHoc, plan.Daemon.Owner.Kind)
 			require.Equal(t, upgradetxn.RecoveryJobDetached, plan.RecoveryJob.Kind)
@@ -385,7 +385,7 @@ func TestUpgradeTrigger_CapturedJournalRollsBack(t *testing.T) {
 	lifecycle := readyLifecycle(t)
 	ctx := context.Background()
 
-	plan, err := captureUpgradePlan(lifecycle, candidate, "1.0.200")
+	plan, err := captureUpgradePlan(lifecycle, candidate, "1.0.200", "")
 	require.NoError(t, err)
 	txn, err := upgradetxn.Prepare(plan)
 	require.NoError(t, err)

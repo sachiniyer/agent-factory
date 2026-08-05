@@ -91,6 +91,31 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	if digest(previousBinary) == digest(stablePlan.Candidate) {
 		return nil, errors.New("candidate binary is byte-identical to the previous binary")
 	}
+	// The caller's expectation, checked against the bytes actually about to be
+	// preserved, under the locks. This is the only place the check means
+	// anything: everywhere else it is a time-of-check-to-time-of-use window an
+	// in-place install can land in, after which this transaction would preserve
+	// the newer binary as its rollback target and install an older candidate
+	// over it (#2212).
+	if expected := stablePlan.ExpectedPreviousSHA256; expected != "" {
+		if actual := digest(previousBinary); actual != expected {
+			return nil, fmt.Errorf(
+				"the executable changed since the caller last observed it (expected %s, found %s); refusing to replace a binary this upgrade was not planned against",
+				expected, actual)
+		}
+	}
+	// A transaction in ANOTHER af home can be staging over this same executable:
+	// transactions are home-scoped, the binary is not, and the executable lock
+	// serialises publishing rather than the transaction's lifetime. Two active
+	// transactions over one binary would race their recovery actors, and one
+	// home's commit or rollback would overwrite the other's. Detected the way
+	// every home's transaction is visible — by its artifacts, which are staged
+	// beside the executable.
+	if foreign, err := foreignTransactionOver(executable, stablePlan.ID); err != nil {
+		return nil, err
+	} else if foreign != "" {
+		return nil, fmt.Errorf("another upgrade transaction (%s) is already staging over %s; refusing to start a second one", foreign, executable)
+	}
 
 	activePath := activeJournalPath(home)
 	if _, err := os.Lstat(activePath); err == nil {

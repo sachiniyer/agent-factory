@@ -2,7 +2,8 @@ package daemon
 
 import (
 	"context"
-	"fmt"
+	"crypto/sha256"
+	"encoding/hex"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -215,7 +216,9 @@ func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 		baselineErr:        baselineErr,
 		activationEnabled:  daemonUpgradeActivationEnabled,
 		activate: func(ctx context.Context, candidate []byte, toVersion string) error {
-			return triggerUpgradeActivation(ctx, manager.lifecycle, requestExit, candidate, toVersion)
+			// The baseline goes with it: Prepare re-verifies it under the locks,
+			// which is the only place the comparison cannot be raced.
+			return triggerUpgradeActivation(ctx, manager.lifecycle, requestExit, candidate, toVersion, baseline)
 		},
 	}
 }
@@ -227,11 +230,17 @@ func stageReleaseCandidate(ctx context.Context, url string, timeout time.Duratio
 	return autoupdate.DefaultCandidateStager().DownloadWithContext(ctx, url, timeout)
 }
 
-// runningExecutableIdentity fingerprints the binary this daemon is running.
-// Size and modification time, not a hash: the question is only "did something
-// replace this file", an in-place install is always a rename over the path so
-// both move, and hashing tens of megabytes on a path that must stay cheap buys
-// nothing here.
+// runningExecutableIdentity fingerprints the executable by CONTENT.
+//
+// A content digest, not size and mtime, because this value is handed to
+// upgradetxn.Prepare as the pre-image it verifies under its locks against the
+// bytes it is about to preserve — and that comparison has to be exact. It is
+// also what makes the check meaningful across a rebuild that happens to produce
+// the same size and timestamp.
+//
+// The cost is one hash of the binary, at daemon start and at most twice more per
+// activation attempt, which is bounded to one per six hours. That is a fair
+// price for an exact answer on the only path that replaces the binary.
 func runningExecutableIdentity() (string, error) {
 	path, err := os.Executable()
 	if err != nil {
@@ -241,11 +250,12 @@ func runningExecutableIdentity() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(resolved)
+	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s:%d:%d", resolved, info.Size(), info.ModTime().UnixNano()), nil
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // discoverLatestReleaseTag resolves the newest release on channel through the

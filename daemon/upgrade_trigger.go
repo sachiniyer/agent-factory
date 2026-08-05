@@ -55,8 +55,8 @@ var (
 // daemon serving — never an assumed success. Only after authorizing does the daemon
 // quiesce (stop admitting, report DaemonPhaseQuiescing so a stuck hand-off is
 // visible) and exit; the actor's StopPrevious then confirms it is gone.
-func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, requestExit func(), candidate []byte, toVersion string) error {
-	plan, err := captureUpgradePlan(lifecycle, candidate, toVersion)
+func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, requestExit func(), candidate []byte, toVersion, expectedPreviousSHA256 string) error {
+	plan, err := captureUpgradePlan(lifecycle, candidate, toVersion, expectedPreviousSHA256)
 	if err != nil {
 		return fmt.Errorf("capture upgrade plan: %w", err)
 	}
@@ -105,7 +105,7 @@ func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, r
 // bytes and ToVersion are inputs (R3 supplies them from the release; the test a
 // stamped fake); everything else is read from this running daemon so the actor
 // validates and, on failure, restores exactly what was serving.
-func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion string) (upgradetxn.Plan, error) {
+func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion, expectedPreviousSHA256 string) (upgradetxn.Plan, error) {
 	home, err := config.GetConfigDir()
 	if err != nil {
 		return upgradetxn.Plan{}, err
@@ -138,6 +138,10 @@ func captureUpgradePlan(lifecycle *daemonLifecycle, candidate []byte, toVersion 
 		FromVersion:    upgradeTriggerVersionFn(),
 		ToVersion:      toVersion,
 		Candidate:      candidate,
+		// Verified by Prepare under its locks, against the bytes it preserves as
+		// the rollback binary. Every check this daemon makes before calling
+		// Prepare is a window an in-place install can land in (#2212).
+		ExpectedPreviousSHA256: expectedPreviousSHA256,
 		Daemon: upgradetxn.DaemonSnapshot{
 			WasRunning: true,
 			BootID:     snap.bootID,
