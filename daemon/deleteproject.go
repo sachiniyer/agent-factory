@@ -224,15 +224,7 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			m.projectDeletes = make(map[string]struct{})
 		}
 		m.projectDeletes[repoID] = struct{}{}
-		// Bump on INSTALL, not on removal, and under the same lock that installs
-		// the fence. A create that sampled the generation before this line and
-		// reads it again after taking m.mu sees the change whether or not the
-		// delete has finished by then, so the two checks together cover the whole
-		// interval rather than only its trailing edge.
-		if m.projectDeleteGen == nil {
-			m.projectDeleteGen = make(map[string]uint64)
-		}
-		m.projectDeleteGen[repoID]++
+		m.stampProjectDeleteLocked(repoID)
 	}
 	m.mu.Unlock()
 	if len(starting) > 0 {
@@ -242,6 +234,14 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	defer func() {
 		m.mu.Lock()
 		delete(m.projectDeletes, repoID)
+		// Stamp the REMOVE too, not only the install above. A create that began
+		// before this delete did samples a counter value below the install's stamp,
+		// so the install alone already covers it — but a create that began while
+		// this delete was ALREADY running samples above the install and would see
+		// nothing move. Stamping here puts the transition after that sample, which
+		// is what makes an in-progress delete visible to a create that could not
+		// have seen its start (#2947).
+		m.stampProjectDeleteLocked(repoID)
 		m.mu.Unlock()
 	}()
 

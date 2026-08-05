@@ -124,18 +124,31 @@ type Manager struct {
 	// reuse or reservation mutation. This closes the preflight-to-first-mutation
 	// gap without holding m.mu across config, task, or archive I/O.
 	projectDeletes map[string]struct{}
-	// projectDeleteGen counts completed delete ATTEMPTS per repo so a create can
-	// detect a delete that both started and finished while the create was outside
-	// m.mu. The fence above only answers "is a delete running right now", which is
-	// not the same question: reserveCreate resolves the repo and the backend kind
-	// before it can take m.mu at all (those resolvers shell out to git, and holding
-	// m.mu across them wedges the whole daemon — #2931), so a delete has room to
-	// install the fence, run, and remove it inside that gap. Sampled per repo
-	// rather than globally: a delete of some OTHER project must not refuse this
-	// create. Entries are never removed — one uint64 per repo ever deleted in this
-	// daemon's lifetime — because a reset would read equal to an old sample and
-	// silently stop fencing.
-	projectDeleteGen map[string]uint64
+	// projectDeleteSeq counts every project-delete fence TRANSITION — install and
+	// remove alike — across all repos, and projectDeleteLastSeq records the value
+	// each repo's most recent transition was stamped with. A create samples the
+	// counter and later asks whether its own repo's stamp has passed that sample.
+	//
+	// Two properties this shape has and a per-repo counter does not:
+	//
+	// It is samplable BEFORE the repo is known. reserveCreate's first act is
+	// config.RepoFromPath, itself an unbounded `git rev-parse`, and a delete can
+	// run to completion while it is stalled. Anything repo-keyed is unsamplable
+	// there by construction — the key is what that call returns (#2947). A counter
+	// needs no key, while the per-repo stamp keeps the comparison precise, so an
+	// unrelated project's delete never refuses this create.
+	//
+	// Stamping the REMOVE as well as the install is what covers a delete that was
+	// already running when the create began: its install predates the sample, but
+	// its removal does not, so the stamp still passes the sample. Deletes that
+	// finished entirely beforehand leave a stamp at or below it and are correctly
+	// ignored — that is ordinary history, not a race.
+	//
+	// Entries are never removed. A reset would read at or below an old sample and
+	// silently stop fencing; the cost is one uint64 per repo ever deleted in this
+	// daemon's lifetime.
+	projectDeleteSeq     uint64
+	projectDeleteLastSeq map[string]uint64
 	// reservedTmuxNames closes the second namespace a local create claims. Titles
 	// such as "a/b" and "a_b" can derive distinct git branches but the same
 	// positive-policy tmux name; reserving only the raw title leaves that collision
@@ -441,7 +454,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		pendingCreates:         make(map[string]session.InstanceData),
 		reservedTitles:         make(map[string]struct{}),
 		projectDeletes:         make(map[string]struct{}),
-		projectDeleteGen:       make(map[string]uint64),
+		projectDeleteLastSeq:   make(map[string]uint64),
 		reservedTmuxNames:      make(map[string]string),
 		reservedRemoteNames:    make(map[string]struct{}),
 		reservedTaskRuns:       make(map[string]int),

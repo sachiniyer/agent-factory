@@ -258,13 +258,37 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 // Production never reassigns it.
 var backendKindForCreate = session.BackendKindFor
 
-var repoFromPathForCreate = config.RepoFromPath
+// stampProjectDeleteLocked records that this repo's delete fence just changed
+// state. The caller MUST already hold m.mu — the stamp has to be atomic with the
+// fence mutation it describes, or a create could observe one without the other.
+func (m *Manager) stampProjectDeleteLocked(repoID string) {
+	if m.projectDeleteLastSeq == nil {
+		m.projectDeleteLastSeq = make(map[string]uint64)
+	}
+	m.projectDeleteSeq++
+	m.projectDeleteLastSeq[repoID] = m.projectDeleteSeq
+}
 
-// projectDeleteGenLocked reads the repo's completed-delete-attempt counter. The
-// caller MUST already hold m.mu; a missing entry means no delete has ever been
-// attempted for this repo and reads as 0, which is also what a first sample sees.
-func (m *Manager) projectDeleteGenLocked(repoID string) uint64 {
-	return m.projectDeleteGen[repoID]
+// projectDeleteSeqNow samples the fence-transition counter for a caller that
+// does not hold m.mu.
+//
+// It takes NO repo id, which is the entire point: reserveCreate must sample
+// before config.RepoFromPath, and that call is what produces the id (#2947).
+func (m *Manager) projectDeleteSeqNow() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.projectDeleteSeq
+}
+
+// projectDeleteMovedLocked reports whether this repo's fence has changed state
+// since the given sample. The caller MUST already hold m.mu.
+//
+// Strictly greater, deliberately. A delete whose last transition is EQUAL to the
+// sample completed before the sample was taken, which is ordinary history rather
+// than a race — treating it as one would strand every project that is ever
+// deleted and re-created.
+func (m *Manager) projectDeleteMovedLocked(repoID string, since uint64) bool {
+	return m.projectDeleteLastSeq[repoID] > since
 }
 
 // projectDeleteRefusal builds the refusal every delete-fence arm returns, so the
@@ -304,25 +328,43 @@ func (m *Manager) admitTaskRunFast(repoID, taskID string, limit int) error {
 	return m.admitTaskRunLocked(repoID, taskID, limit)
 }
 
-// projectDeleteStateFor samples BOTH halves of the repo's delete state for a
-// caller that does not hold m.mu; it takes the lock itself.
-//
-// The two must be read together, in one acquisition. The generation alone
-// answers "did a delete BEGIN after this point" — it cannot answer "was a delete
-// already running AT this point", because such a delete bumped the counter
-// before the sample and removes its fence before the re-check, leaving both
-// readings identical while the delete ran to completion across the entire gap.
-func (m *Manager) projectDeleteStateFor(repoID string) (active bool, generation uint64) {
+// projectDeleteStateFor answers, in ONE acquisition, whether this repo has a
+// delete running now or has had one transition since the given sample. Both
+// readings must come from the same acquisition: taken separately they could
+// describe different instants and a delete could slip between them.
+func (m *Manager) projectDeleteStateFor(repoID string, since uint64) (active, moved bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, active = m.projectDeletes[repoID]
-	return active, m.projectDeleteGenLocked(repoID)
+	return active, m.projectDeleteMovedLocked(repoID, since)
 }
+
+// repoFromPathForCreate resolves the request's path to a repo identity. A
+// package var so a test can block inside it and drive a delete through the
+// window where reserveCreate does not yet know which repo it is talking about —
+// a window nothing repo-keyed can be sampled in, which is what #2947 is about.
+// Production never reassigns it.
+var repoFromPathForCreate = config.RepoFromPath
 
 func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, string, func(), *session.InstanceData, error) {
 	if req.RepoPath == "" {
 		return nil, "", nil, nil, fmt.Errorf("repo path is required")
 	}
+
+	// Sample the fence-transition counter BEFORE resolving the repo, because
+	// resolving the repo is itself part of the window (#2947).
+	//
+	// config.RepoFromPath shells out to `git rev-parse` with no context and no
+	// deadline — the same unbounded call #2931 moved the manager lock off, and it
+	// sits outside that lock here. A DeleteProject can install its fence, run to
+	// completion, and remove it while this is stalled on an unreachable mount.
+	//
+	// Nothing repo-keyed can be sampled at this point: the key is what the call
+	// below returns. That is why the counter is global and only the STAMP is per
+	// repo — the sample needs no identity, while the later comparison still has
+	// one, so another project's delete never refuses this create.
+	deleteSeq := m.projectDeleteSeqNow()
+
 	repo, err := repoFromPathForCreate(req.RepoPath)
 	if err != nil {
 		return nil, "", nil, nil, err
@@ -347,35 +389,35 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// damage to the one create that asked. The sibling git call this function makes
 	// under the lock (branch holds) is already bounded with its own deadline (#856);
 	// this was the path that was not.
-	// Sample the repo's delete state first, and refuse an ALREADY-RUNNING delete
-	// right here — ahead of the resolvers, not after them.
+	// Now that the identity exists, ask the two questions the sample enables, and
+	// refuse HERE — ahead of the resolvers below, not after them.
 	//
-	// Deferring this refusal until after the resolution would make a create that
-	// is already known to be impossible wait on the unbounded git below, which is
-	// exactly the stall this hoist exists to bound. Before the hoist the fence
-	// check ran ahead of backend resolution and such a create returned promptly;
-	// keeping the refusal early preserves that. It is still behind everything a
-	// refusal needs — repo identity and the task-binding check — and still ahead
-	// of every mutation, so admission order is unchanged.
+	// Deferring the refusal past the resolution would make a create that is
+	// already known to be impossible wait on more unbounded git, which is exactly
+	// the stall this hoist exists to bound. Before the hoist the fence check ran
+	// ahead of backend resolution and such a create returned promptly; refusing
+	// here preserves that. It is still behind everything a refusal needs — repo
+	// identity and the task-binding check — and ahead of every mutation, so
+	// admission order is unchanged.
 	//
-	// The sampled state plus the post-lock check cover EVERY delete overlapping
-	// the unlocked region. Writing the delete's fence interval as
-	// [install, remove] and this region as [sample, check]:
+	// Together with the post-lock check this covers EVERY delete overlapping the
+	// create. Writing the delete's fence interval as [install, remove] and the
+	// create's unlocked span as [sample, check]:
 	//
-	//   - install before sample, remove after sample -> refused immediately below
-	//   - install within the region                  -> the generation moved
-	//   - remove after check                         -> the fence is still up
+	//   - install before sample, remove after sample -> the stamp moved (remove)
+	//   - install within the span                    -> the stamp moved (install)
+	//   - fence still up when asked                  -> active, either check
 	//   - install after check                        -> the create has reserved by
 	//     then, so DeleteProject's own fail-closed preflight refuses instead
 	//
-	// The first arm is why the fence is sampled and not just the counter: such a
-	// delete bumped the generation BEFORE the sample and drops its fence BEFORE
-	// the check, so both readings match while it ran across the whole gap (#2937
-	// review). A delete that finished entirely before the sample is not an overlap
-	// at all — that is an ordinary create after a completed delete.
-	deleteActive, deleteGen := m.projectDeleteStateFor(repo.ID)
-	if deleteActive {
-		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, true)
+	// The first arm is why the REMOVE is stamped and not only the install: such a
+	// delete began before the sample, so its install stamp cannot exceed it, and
+	// its fence may be gone by the time either check runs. A delete that finished
+	// entirely before the sample leaves a stamp at or below it and is admitted —
+	// an ordinary create after a completed delete, not a race.
+	deleteActive, deleteMoved := m.projectDeleteStateFor(repo.ID, deleteSeq)
+	if deleteActive || deleteMoved {
+		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleteActive)
 	}
 
 	// Same reasoning for the task-run cap, which the hoist also moved behind the
@@ -419,11 +461,11 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// The remaining two arms: a delete still holding its fence, and one that both
-	// started and finished while this create resolved. The already-running case
-	// returned above, before the resolvers.
+	// The re-check, against the SAME sample. It catches a delete that began, or
+	// began and finished, during the backend resolution above — the span the
+	// pre-resolver check could not see.
 	_, deleting := m.projectDeletes[repo.ID]
-	if deleting || m.projectDeleteGenLocked(repo.ID) != deleteGen {
+	if deleting || m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
 		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleting)
 	}
 	if err := m.refreshLocked(); err != nil {
