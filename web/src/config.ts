@@ -244,13 +244,18 @@ export class ConfigPane {
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    // preventScroll on BOTH: focus() scrolls its target into view by default, which
+    // would undo the offset rebuildKeepingScroll just restored. That is not a corner
+    // case — a user who wheels the pane while a field still holds focus is exactly the
+    // reader this change exists for, and a plain focus() would yank them back to the
+    // field the moment a save or an external refresh landed.
     if (wasEditing && this.editingInput) {
-      this.editingInput.focus();
+      this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
         this.editingInput.setSelectionRange(caretStart, caretEnd ?? caretStart);
       }
     } else if (wasToggle && this.advancedToggle) {
-      this.advancedToggle.focus();
+      this.advancedToggle.focus({ preventScroll: true });
     }
   }
 

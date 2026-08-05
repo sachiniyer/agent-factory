@@ -6603,12 +6603,12 @@ var ConfigPane = class {
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     if (wasEditing && this.editingInput) {
-      this.editingInput.focus();
+      this.editingInput.focus({ preventScroll: true });
       if (caretStart !== null) {
         this.editingInput.setSelectionRange(caretStart, caretEnd ?? caretStart);
       }
     } else if (wasToggle && this.advancedToggle) {
-      this.advancedToggle.focus();
+      this.advancedToggle.focus({ preventScroll: true });
     }
   }
   render() {
