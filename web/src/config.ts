@@ -28,6 +28,12 @@
 
 import { h } from "./dom.js";
 import type { ConfigEntry } from "./types.js";
+import { rebuildKeepingScroll } from "./scrollkeep.js";
+
+/** The config list is ONE global manifest, so every rebuild shows the same list and
+ *  the reader's place is always worth keeping — there is no project or filter here to
+ *  change what the list contains. */
+const CONFIG_LIST_TOKEN = "config";
 
 /** What the config view can ask the shell to do. Saving is the shell's job (it
  *  owns the token and the refresh), so the pane reports intent and renders the
@@ -177,6 +183,9 @@ export class ConfigPane {
    *  imply an atomicity across keys that the writer does not offer. */
   private editing: string | null = null;
   private draft = "";
+  // The live input for `editing`, so a rebuild can hand focus and the caret back to
+  // the field the user is typing in (#2933). Null whenever no field is open.
+  private editingInput: HTMLInputElement | null = null;
 
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
@@ -201,11 +210,37 @@ export class ConfigPane {
     // it open would invite a second write of the same thing.
     if (status && !status.error && status.key === this.editing) {
       this.editing = null;
+      this.draft = "";
     }
-    this.render();
+    // A rebuild replaces the input the user may be typing in. The typed text already
+    // survives (render reads `draft`), but focus and the caret did not — and losing
+    // focus mid-edit is worse than it sounds: the app's document-level keys are gated
+    // on `isNativeControl(document.activeElement)` (index.ts), so with focus back on
+    // <body> the REST of what the user types stops being a value and starts being
+    // shortcuts — a "[" or "]" in a path would cycle the view out from under them.
+    //
+    // Restored only when the field genuinely HAD focus, so a rebuild never steals it
+    // from wherever the user actually is.
+    const focused = this.editingInput !== null && document.activeElement === this.editingInput;
+    const caret = focused ? this.editingInput?.selectionStart ?? null : null;
+    // The config list is always the same list — one global manifest — so a rebuild
+    // never legitimately starts at the top (#2933). Keeping the place matters most
+    // right after a save, which is exactly when this fires.
+    rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    if (focused && this.editingInput) {
+      this.editingInput.focus();
+      if (caret !== null) {
+        // Put the caret back where it was rather than at the end: a re-render landing
+        // mid-word would otherwise jump the user to the end of their own value.
+        this.editingInput.setSelectionRange(caret, caret);
+      }
+    }
   }
 
   private render(): void {
+    // Dropped first: every rebuild replaces the controls, and a handle to the previous
+    // input would name a detached node for the rest of this render.
+    this.editingInput = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -344,6 +379,9 @@ export class ConfigPane {
 
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
+    if (this.editing === e.key) {
+      this.editingInput = input;
+    }
     input.setAttribute("aria-label", e.key);
 
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");

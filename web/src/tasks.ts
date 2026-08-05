@@ -26,6 +26,7 @@ import { icon } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron, previewIsRedundant } from "./schedule.js";
 import type { TaskData } from "./types.js";
+import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 
 /** The add-task form's inputs (a subset of task.Task the browser fills; the daemon
  *  re-validates). Exactly one of cron / watchCmd is meaningful, per `trigger`. */
@@ -124,6 +125,9 @@ export class TasksPane {
   readonly el: HTMLElement;
   private lastTasks: TaskData[] | null = null;
   private lastProject: string | null = null;
+  // Which list was last rendered, so a rebuild driven by a task event (a cron fire, a
+  // next-run recalculation) keeps the reader's place (#2933).
+  private lastToken: string | null = null;
 
   constructor(private readonly actions: TaskActions) {
     this.el = h("section", { class: "af-tasks" });
@@ -137,10 +141,13 @@ export class TasksPane {
     if (this.lastTasks === tasks && this.lastProject === selectedProject) {
       return;
     }
+    const token = listToken([selectedProject]);
+    const previous = this.lastToken;
+    this.lastToken = token;
     this.lastTasks = tasks;
     this.lastProject = selectedProject;
     const scoped = selectedProject ? tasks.filter((t) => t.project_path === selectedProject) : [];
-    this.render(scoped);
+    rebuildKeepingScroll(this.el, previous, token, () => this.render(scoped));
   }
 
   private render(tasks: TaskData[]): void {

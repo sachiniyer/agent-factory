@@ -48,6 +48,7 @@ import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -674,6 +675,9 @@ export class AppShell {
   private readonly filterDot: HTMLElement;
   private filterMenuOpen = false;
   private lastStatusFilter: StatusFilter | null = null;
+  // Which list the rail last rendered, so a rebuild driven by status churn keeps the
+  // reader's place while a project/filter change still starts at the top (#2933).
+  private lastRailToken: string | null = null;
 
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
@@ -1179,7 +1183,21 @@ export class AppShell {
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
     if (sessionsChanged || selectionChanged || projectChanged || filterChanged) {
-      this.renderRail(state);
+      // The rail rebuilds on session STATUS CHURN, not only on something the user did,
+      // so a reader scrolled down it was being returned to the top by other people's
+      // sessions (#2933). Keep the place while it is the same list; a project or filter
+      // change is a different list and correctly starts at the top.
+      const railToken = listToken([
+        state.selectedProject,
+        Object.entries(state.statusFilter)
+          .filter(([, on]) => on)
+          .map(([kind]) => kind)
+          .sort()
+          .join(","),
+      ]);
+      const previousRailToken = this.lastRailToken;
+      this.lastRailToken = railToken;
+      rebuildKeepingScroll(this.railList, previousRailToken, railToken, () => this.renderRail(state));
     }
 
     // The main pane's STRUCTURE only changes when the selected session changes (or on

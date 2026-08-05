@@ -5772,6 +5772,82 @@ async function assertActiveTerminalReclaimsPeerGeometry(
     .toBeLessThan(repaired.scrollTop);
 }
 
+test("#2933: session churn rebuilds the rail without taking the reader back to the top", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The rail rebuilds with replaceChildren whenever the sessions array reference
+  // changes — which is on STATUS CHURN, not on anything the user did. replaceChildren
+  // clamps a scroll container to 0 (#1894), so a reader scrolled down the rail was
+  // being returned to the top by other people's sessions.
+  //
+  // Asserted at the mechanism, not the symptom: a MutationObserver proves the rebuild
+  // really happened, so a run where no event arrived cannot pass by accident.
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+  const tabName = "scrollkeep-2933";
+
+  // Short viewport so the seeded rail is taller than its box — without an overflowing
+  // rail there is no scroll offset to lose and the test would prove nothing.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 400 } });
+  const p = await ctx.newPage();
+  let created = false;
+  try {
+    await openTokenless(p);
+    const list = p.locator(".af-rail-list");
+    const overflows = await list.evaluate((el) => el.scrollHeight > el.clientHeight + 8);
+    expect(overflows, "the seeded rail must overflow at 400px, or this proves nothing").toBe(true);
+
+    // Park the reader somewhere that is not the top.
+    await list.evaluate((el) => {
+      el.scrollTop = 64;
+    });
+    const parked = await list.evaluate((el) => el.scrollTop);
+    expect(parked, "the rail must actually be scrolled before the churn").toBeGreaterThan(0);
+
+    await p.evaluate(() => {
+      const el = document.querySelector(".af-rail-list");
+      const w = window as unknown as { __railRebuilds: number };
+      w.__railRebuilds = 0;
+      if (el) {
+        new MutationObserver(() => {
+          w.__railRebuilds += 1;
+        }).observe(el, { childList: true });
+      }
+    });
+
+    // Churn from OUTSIDE the browser, on a session that is not even selected: exactly
+    // the shape of the real complaint, where somebody else's session moves the list.
+    af("sessions", "tab-create", SESSION_B, "--command", "bash", "--name", tabName);
+    created = true;
+
+    await expect
+      .poll(() => p.evaluate(() => (window as unknown as { __railRebuilds: number }).__railRebuilds), {
+        message: "the out-of-band change must actually rebuild the rail",
+        timeout: 20_000,
+      })
+      .toBeGreaterThan(0);
+
+    expect(
+      await list.evaluate((el) => el.scrollTop),
+      "a rebuild driven by churn must keep the reader's place",
+    ).toBe(parked);
+  } finally {
+    if (created) {
+      try {
+        af("sessions", "tab-delete", SESSION_B, "--name", tabName);
+      } catch {
+        // best effort: the assertion above is the subject, not the cleanup
+      }
+    }
+    await ctx.close();
+  }
+});
+
 test("#2347: activating a terminal repairs peer-owned geometry before scrolling", REAL_FIXTURE, async ({
   browser,
 }) => {
