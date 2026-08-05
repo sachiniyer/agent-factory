@@ -7377,6 +7377,11 @@ var AttachTerminal = class {
   // second later, and under live output the row the finger is on has scrolled by
   // then — copying whatever slid beneath it instead of what was pressed.
   touchPressCell = null;
+  // …and a marker on that row. A FULL scrollback ring trims from the top while the
+  // finger rests, shifting every absolute index down under the anchor; a marker is
+  // what xterm gives you to survive that, and it is the mechanism the viewport
+  // anchor above already uses.
+  touchPressMarker = null;
   // Text the press selected, waiting for the finger to lift. The clipboard write has
   // to happen in the touchend handler: Safari only honours it from a trusted
   // user-gesture task, and a setTimeout callback is not one.
@@ -7453,13 +7458,16 @@ var AttachTerminal = class {
     this.touchCopyFired = false;
     this.touchCopyPending = null;
     this.cancelTouchLongPress();
+    this.disposeTouchPressMarker();
     this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
     if (this.touchPressCell) {
+      this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
       this.startTouchLongPress();
     }
   };
   onTouchEnd = () => {
     this.cancelTouchLongPress();
+    this.disposeTouchPressMarker();
     const pending = this.touchCopyPending;
     this.touchCopyPending = null;
     if (pending === null) {
@@ -7472,7 +7480,7 @@ var AttachTerminal = class {
   // never makes (#2849). Suppressed ONLY for a press af has already acted on, so a
   // desktop right-click keeps the browser's menu.
   onContextMenu = (event) => {
-    if (this.touchCopyFired) {
+    if (this.lastPointerWasTouch && this.touchCopyFired) {
       event.preventDefault();
     }
   };
@@ -7481,6 +7489,7 @@ var AttachTerminal = class {
     const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
     if (moved) {
       this.cancelTouchLongPress();
+      this.discardPendingTouchCopy();
     }
     if (this.touchScrollY === null) {
       return;
@@ -7590,6 +7599,7 @@ var AttachTerminal = class {
     const plan = terminalUserScrollPlan(source, this.visibleFitFrame !== null);
     if (plan.cancelScheduledVisibleFit) {
       this.cancelTouchLongPress();
+      this.disposeTouchPressMarker();
       this.cancelVisibleFitFrame();
     }
     this.fitVisibleHost();
@@ -7696,6 +7706,30 @@ var AttachTerminal = class {
       this.touchLongPressTimer = null;
     }
   }
+  /** Drops a copy the press had already staged, and the selection that promised it,
+   *  so the gesture leaves nothing behind claiming it copied something. */
+  discardPendingTouchCopy() {
+    if (this.touchCopyPending === null && !this.touchCopyFired) {
+      return;
+    }
+    this.touchCopyPending = null;
+    this.touchCopyFired = false;
+    this.term.clearSelection();
+  }
+  /** Marks the pressed row so a scrollback trim during the hold moves the anchor with
+   *  the text. Alternate buffers cannot register markers, hence the null. */
+  registerPressMarker(row) {
+    const buffer = this.term.buffer.active;
+    try {
+      return this.term.registerMarker(row - (buffer.baseY + buffer.cursorY));
+    } catch {
+      return null;
+    }
+  }
+  disposeTouchPressMarker() {
+    this.touchPressMarker?.dispose();
+    this.touchPressMarker = null;
+  }
   /** The cell under a viewport point, in ABSOLUTE buffer coordinates so it survives
    *  everything the terminal does to the viewport afterwards. */
   bufferCellAtPoint(x, y) {
@@ -7721,12 +7755,17 @@ var AttachTerminal = class {
     }
     const buffer = this.term.buffer.active;
     const cols = this.term.cols;
-    let first = press.row;
+    const marked = this.touchPressMarker?.line ?? -1;
+    const pressedRow = marked >= 0 ? marked : press.row;
+    if (pressedRow < 0 || pressedRow >= buffer.length) {
+      return;
+    }
+    let first = pressedRow;
     while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
       first -= 1;
     }
-    let last = press.row;
-    while (buffer.getLine(last + 1)?.isWrapped === true) {
+    let last = pressedRow;
+    while (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
       last += 1;
     }
     const cells = [];
@@ -7740,7 +7779,7 @@ var AttachTerminal = class {
         cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
       }
     }
-    const pressed = (press.row - first) * cols + press.col;
+    const pressed = (pressedRow - first) * cols + press.col;
     const range = wordRangeAtColumn(cells, pressed) ?? { start: 0, length: lineContentColumns(cells) };
     if (range.length === 0) {
       return;
