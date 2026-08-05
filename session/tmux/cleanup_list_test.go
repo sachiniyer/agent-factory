@@ -451,3 +451,42 @@ func TestSocketAbsentWithUnreadableProcessTableStillRefuses(t *testing.T) {
 		t.Errorf("error = %q, want it to say how to FIND the server when it cannot name one", err)
 	}
 }
+
+// TestOnlyServerProcessesCountAsALiveServer guards the predicate behind the
+// socket-absent refusal (Codex on #2956).
+//
+// tmux retitles its processes, and MEASURED on Linux the server and a client are
+// "tmux: server" and "tmux: client". A HasPrefix(comm, "tmux") test counts the
+// CLIENT as a server — and a client exists whenever anyone is actually using
+// tmux, so that mistake turns an ordinary ENOENT into "a server is running",
+// refuses the reset, and aims `kill -USR1` at a process that cannot recreate a
+// server socket.
+//
+// Measured directly, by attaching a real client to a private server:
+//
+//	pid=1034121 comm='tmux: server'
+//	pid=1034153 comm='tmux: client'
+func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
+	for _, tc := range []struct {
+		comm string
+		want bool
+	}{
+		{"tmux: server", true},
+		// The fallback for builds/platforms that do not retitle. Exact only.
+		{"tmux", true},
+		// The one that made this a bug: a client is not a server.
+		{"tmux: client", false},
+		// Neighbours a prefix match would also have swallowed.
+		{"tmuxinator", false},
+		{"tmux-mem-cpu-load", false},
+		{"tmuxp", false},
+		{"", false},
+		{"emacs", false},
+	} {
+		t.Run(tc.comm, func(t *testing.T) {
+			if got := isTmuxServerComm(tc.comm); got != tc.want {
+				t.Errorf("isTmuxServerComm(%q) = %v, want %v", tc.comm, got, tc.want)
+			}
+		})
+	}
+}

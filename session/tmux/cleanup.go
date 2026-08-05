@@ -248,9 +248,7 @@ func liveTmuxServerPIDs() []int {
 	uid := os.Getuid()
 	var pids []int
 	for pid, p := range snap {
-		// tmux renames the server task to "tmux: server" (verified on Linux);
-		// a plain "tmux" covers builds and platforms that do not.
-		if !strings.HasPrefix(p.Comm, "tmux") {
+		if !isTmuxServerComm(p.Comm) {
 			continue
 		}
 		if owner, ok := proctree.UID(pid); ok && owner != uid {
@@ -405,6 +403,22 @@ func recreateSocketAdvice(pids []int) string {
 	}
 	return "Recreate its socket with " + shellsuggest.Command("kill", append([]string{"-USR1"}, named...)...) +
 		" — or stop that server — then re-run"
+}
+
+// isTmuxServerComm reports whether a kernel task name is a tmux SERVER.
+//
+// Measured on Linux: tmux retitles its processes, and the server and a client
+// are "tmux: server" and "tmux: client" respectively. A HasPrefix(comm, "tmux")
+// test therefore counts CLIENTS as servers — and a client exists whenever
+// anyone is actually using tmux, so that mistake turns an ordinary ENOENT into
+// "a server is running", refuses the reset, and points `kill -USR1` at a process
+// that cannot recreate a server socket (Codex on #2956).
+//
+// The bare "tmux" fallback is for builds and platforms that do not retitle. It
+// is EXACT, never a prefix, for the reason above: a prefix is what swallowed
+// the client.
+func isTmuxServerComm(comm string) bool {
+	return comm == "tmux: server" || comm == "tmux"
 }
 
 // namedPIDs renders the PIDs we can actually name; the 0 sentinel means the
