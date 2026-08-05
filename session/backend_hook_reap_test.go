@@ -881,6 +881,16 @@ exit 0
 	// runs BEFORE the TempDir removal registered by t.TempDir() above — no writer survives
 	// into os.RemoveAll. launchPgid is populated by provisionOrReap below and read here at
 	// cleanup time.
+	//
+	// This signals, and relies on PID 1 to reap. It cannot wait(2) the tunnel: launch_cmd
+	// backgrounded it and then exited, so the test was never its parent — and it must not
+	// be, because a test-owned server would survive a reap and pass against the very bug
+	// this test exists to catch (see the comment on the script above). Every environment
+	// the suite runs in supplies a reaping init: systemd on dev boxes and CI runners, and
+	// tini in the container harness, which passes --init for exactly this reason
+	// (scripts/testbox.sh). Under a PID 1 that ignores SIGCHLD the killed tunnel would
+	// linger as a defunct entry until that PID 1 exits — no socket, no CPU, and no way
+	// around it from here short of giving the tunnel an owner the test is not allowed to be.
 	t.Cleanup(func() {
 		if p.launchPgid != 0 {
 			_ = syscall.Kill(-p.launchPgid, syscall.SIGKILL)
