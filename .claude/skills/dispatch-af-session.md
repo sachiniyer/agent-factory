@@ -28,10 +28,13 @@ green PR into a week-old PR.
    - gofmt -l .
    - go build ./...
    - golangci-lint run --timeout=3m --fast
-   - deadcode -test ./...
    - scripts/lint-file-length.sh
    - go test ./<only the package you changed>/...  (skip if it is daemon/ or app/)
    - <any task-specific gate>
+
+   NOT deadcode. It is whole-program reachability analysis, not a lint, and a
+   fleet of sessions running it at once buries the box. CI's Lint job runs it on
+   every push and will tell you if you left something unreachable.
 
    Do NOT run make test-container / remote-roundtrip-container /
    playtest-container as a routine gate — CI runs the full matrix on every

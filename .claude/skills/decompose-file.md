@@ -47,7 +47,6 @@ merges before the next file begins.
    gofmt -l .
    go build ./...
    golangci-lint run --timeout=3m --fast
-   deadcode -test ./...
    scripts/lint-file-length.sh
    go test ./<the package you split>/...   # skip if it is daemon/ or app/
 

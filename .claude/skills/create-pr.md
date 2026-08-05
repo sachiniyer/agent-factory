@@ -15,7 +15,6 @@ Create a PR for the current branch against `master`.
    gofmt -l .                    # fix any output with: gofmt -w <file>
    go build ./...
    golangci-lint run --timeout=3m --fast
-   deadcode -test ./...
    scripts/lint-file-length.sh
    go test ./<only the package you changed>/...   # skip if it is daemon/ or app/
 
@@ -55,8 +54,8 @@ Create a PR for the current branch against `master`.
    - [x] `gofmt -l .` produces no output
    - [x] `go build ./...` passes
    - [x] `go test` on the changed package passes (CI runs the full matrix)
-   - [x] `deadcode -test ./...` produces no output
    - [x] `scripts/lint-file-length.sh` passes
+   - [x] `deadcode` left to CI (whole-program analysis; the Lint job runs it)
    - [ ] Manually tested in TUI (if applicable)
    EOF
    )"
