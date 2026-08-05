@@ -98,6 +98,8 @@ credential value in argv or endpoint JSON.
 - `url` (**required**) — the `af agent-server`'s base URL (`http://host:port` or `ws://host:port`), reachable from the daemon. It must be plain HTTP — a `wss://`/`https://` URL is rejected (af serves no TLS).
 - `token` (**required**) — the bearer token the server printed on startup.
 
+> **If af cannot tell your endpoint from a log line, it refuses the launch.** A backgrounded tunnel may share stdout with the endpoint, and some log shapes are genuinely indistinguishable from a record — `[INVALID,` opening a log array looks exactly like `[INFO] opening {config`. Rather than guess (and risk dialing a URL and bearer token taken from a log line), af fails the provision and names the line it could not classify. The fix is one redirect: send the tunnel's output to `/dev/null` or a file so stdout carries only the endpoint JSON. See [#2845](https://github.com/sachiniyer/agent-factory/issues/2845).
+
 These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. Keep non-JSON output on stderr — af reads the endpoint from **stdout only**, and it must be a complete top-level object with no fields beyond those above, so a structured log that happens to carry `url` and `token` is never mistaken for it. If `launch_cmd` fails in any way after it has started, af runs `delete_cmd` to reap whatever it may have provisioned — see [`delete_cmd` runs on any failed launch](#delete_cmd-runs-on-any-failed-launch).
 
 ### `delete_cmd`

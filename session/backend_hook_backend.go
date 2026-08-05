@@ -553,9 +553,20 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 			hookOutputSuffix(out.Combined()))
 	}
 
-	endpoint, sawJSON := selectHookEndpoint(string(out.Stdout))
+	endpoint, sawJSON, ambiguous := selectHookEndpoint(string(out.Stdout))
 	if endpoint != nil {
 		return endpoint, nil
+	}
+	if ambiguous != nil {
+		// Refuse rather than guess. Picking wrong here means dialing a URL and
+		// bearer token lifted from a log line, so the operator gets the line and
+		// the one-line fix instead of a silent wrong endpoint (#2845).
+		return nil, fmt.Errorf("launch_cmd (%s) printed a line on stdout that could be its endpoint "+
+			"or a log line, and af will not guess between them: %s\n"+
+			"Give the endpoint stdout to itself — redirect the tunnel's output "+
+			"(>/dev/null 2>&1, or to a file) — see docs/remote-hooks.md%s",
+			p.hooks.LaunchCmd, strings.TrimSpace(redactHookOutputTokens(ambiguous.line)),
+			hookOutputSuffix(out.Combined()))
 	}
 	if !sawJSON {
 		return nil, fmt.Errorf("launch_cmd (%s) exited 0 but printed no {\"url\",\"token\"} JSON on stdout "+
@@ -591,7 +602,35 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 //     unknown. From there no further value is promoted, because any of them may
 //     be that record's contents. Provision fails with the output attached rather
 //     than dialing something a log named.
-func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
+//
+// hookAmbiguousStdout reports a stdout line that could be either the endpoint
+// record or part of a log line. af refuses to choose between them: see #2845 for
+// why no rule can, and hookOutputSuffix redacts the line before it is reported.
+type hookAmbiguousStdout struct {
+	line string
+}
+
+// selectHookEndpoint returns the endpoint from stdout, whether stdout held any
+// JSON at all, and — when it cannot tell a record from log prose — the line that
+// made it ambiguous.
+//
+// It never guesses. Whether a line is the endpoint the script echoed or part of
+// a tunnel's log is UNDECIDABLE while both share stdout, which
+// docs/remote-hooks.md permits: #2845 records two input pairs that are identical
+// on every inspectable property yet require opposite handling. Guessing "prose"
+// on a record means dialing a URL and bearer token taken from a log line, so
+// where the answer is not determined this refuses and says which line to fix.
+//
+// What remains decidable is still decided:
+//
+//   - A line that is not an object opener is a tunnel logging into the inherited
+//     stream, and is skipped without parsing.
+//   - An object that decodes cleanly, with nothing but whitespace after it and
+//     no structural continuation on the next line, is a record — the only shape
+//     that may be the endpoint.
+//   - An object line whose brackets close is self-contained: skipping it is safe
+//     because nothing in it can become a candidate.
+func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool, *hookAmbiguousStdout) {
 	sawJSON := false
 	for cursor := 0; cursor < len(stdout); {
 		lineEnd := nextHookOutputLine(stdout, cursor)
@@ -600,108 +639,75 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 		for open < lineEnd && isJSONSpace(stdout[open]) {
 			open++
 		}
-		// The endpoint is an OBJECT (docs/remote-hooks.md), so only a `{` line can
-		// be a record. Everything else is a tunnel logging into the inherited
-		// stream — plain prose, or a bracketed prefix like `[INFO] …`, `[2026] …`,
-		// `[2026], …` — and is skipped without parsing, which also keeps a flood of
-		// them linear.
-		if open >= lineEnd || stdout[open] != '{' {
+		if open >= lineEnd || (stdout[open] != '{' && stdout[open] != '[') {
+			// Plain prose from a tunnel sharing the stream.
 			cursor = lineEnd
 			continue
+		}
+		if stdout[open] == '[' {
+			// A bracket line is prose when it closes — `[INFO] tunnel forwarding` —
+			// and UNDECIDABLE when it does not: `[INVALID,` opens a log array whose
+			// elements must never be promoted, and `[INFO] opening {config` is
+			// chatter, and the two are identical here (#2845, pair 1).
+			if hookLineBracketsBalanced(line) {
+				cursor = lineEnd
+				continue
+			}
+			return nil, sawJSON, &hookAmbiguousStdout{line: line}
 		}
 
 		decoder := json.NewDecoder(strings.NewReader(stdout[open:]))
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil {
-			// The endpoint is an OBJECT (docs/remote-hooks.md), so a line opening a
-			// BRACKET is never a record: `[INFO] …`, `[2026] …` and `[INFO] opening
-			// {config` are log prefixes however their message is punctuated.
-			//
-			// Only a `{` line can be a record that broke, and only an unbalanced one
-			// leaves a structure whose extent is unknown — anything after it may be
-			// its contents, so selection stops. `{config} loaded` closes what it
-			// opened, so skipping just that line is safe.
-			// Only an UNBALANCED record leaves a structure whose extent is unknown —
-			// anything after it may be its contents, so selection stops.
-			// `{config} loaded` closes what it opened, so skipping that line is safe.
-			if hookLineBracketsBalanced(line) {
+			// A malformed object that closes on its line is self-contained; one left
+			// open could enclose everything after it, and nothing distinguishes that
+			// from a script that simply printed a broken line.
+			if hookLineBracketsBalanced(line) && !hookNextLineContinues(stdout, lineEnd) {
 				cursor = lineEnd
 				continue
 			}
-			return nil, sawJSON
+			return nil, sawJSON, &hookAmbiguousStdout{line: line}
 		}
 		sawJSON = true
 
-		// The value may span several lines, so trailing content is judged on ITS
-		// last physical line — and judged BEFORE the record is accepted, since an
-		// endpoint-shaped prefix followed by a continuation is not a record either.
 		valueEnd := open + int(decoder.InputOffset())
 		valueLineEnd := nextHookOutputLine(stdout, valueEnd)
 		rest := valueEnd
 		for rest < valueLineEnd && isJSONSpace(stdout[rest]) {
 			rest++
 		}
-		switch {
-		case rest >= valueLineEnd && !hookNextLineContinues(stdout, valueLineEnd):
-			// A clean record, and the only shape that may be the endpoint. The next
-			// line is checked too: a separator moved onto its own line continues
-			// this record just as one on the same line does.
+		if rest >= valueLineEnd {
+			if hookNextLineContinues(stdout, valueLineEnd) {
+				// A separator or closer opening the next line either continues this
+				// record or is a tunnel's chatter — `,"endpoint":` versus
+				// `] tunnel closed` (#2845, pair 2).
+				return nil, sawJSON, &hookAmbiguousStdout{line: line}
+			}
 			if ej, ok := decodeHookEndpointJSON(string(raw)); ok {
 				// ej.TLSFingerprint is intentionally not read — TLS was removed; an
 				// old script that still echoes it parses fine and the value is
 				// dropped.
-				return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true
+				return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true, nil
 			}
-		case stdout[rest] == '{' || stdout[rest] == '[':
-			// Another value beside it: a log line carrying several. None of them is
-			// a record, so skip them all — later lines stay trustworthy because
-			// this line closed.
-		case rest >= valueLineEnd:
-			// The record continues on the next line.
-			return nil, sawJSON
-		case stdout[rest] == ',' || stdout[rest] == ':':
-			// `{…},"endpoint":` — a structural separator means the record is still
-			// open, so its extent is unknown and nothing after it is promoted.
-			return nil, sawJSON
-		default:
-			// Bare prose after a complete value — `[2026] tunnel forwarding`. A
-			// record continuing across lines breaks at a structural position, not
-			// mid-word, so this is a log line: skip it and keep reading.
+			cursor = valueLineEnd
+			continue
 		}
-		// Advance past the WHOLE decoded value, not just its first line, or the
-		// lines inside a multi-line log would be rescanned and its nested
-		// endpoint-shaped child promoted as a record of its own.
-		cursor = valueLineEnd
+		if stdout[rest] == '{' || stdout[rest] == '[' {
+			// Several values on one line is a log line, not a record — unless the
+			// trailing one is itself an opener that never closes, which leaves the
+			// same unknown extent as any open record.
+			if hookLineBracketsBalanced(line) {
+				cursor = valueLineEnd
+				continue
+			}
+		}
+		return nil, sawJSON, &hookAmbiguousStdout{line: line}
 	}
-	return nil, sawJSON
+	return nil, sawJSON, nil
 }
 
 func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
-}
-
-// hookNextLineContinues reports that the next non-empty line begins with JSON
-// structure — a separator or a closer — which means the value above it was not a
-// record of its own. A comma moved onto its own line continues the record just
-// as one left on the same line does, and a closing bracket means the value sat
-// inside a container that started earlier.
-func hookNextLineContinues(output string, from int) bool {
-	for cursor := from; cursor < len(output); {
-		lineEnd := nextHookOutputLine(output, cursor)
-		trimmed := strings.TrimLeft(strings.TrimRight(output[cursor:lineEnd], "\r\n"), " \t")
-		if trimmed == "" {
-			cursor = lineEnd
-			continue
-		}
-		switch trimmed[0] {
-		case ',', ':', '}', ']':
-			// A separator OR a closer: either way the value above was inside
-			// something that had not ended, so it is not a record of its own.
-			return true
-		}
-		return false
-	}
-	return false
 }
 
 // hookLineBracketsBalanced reports whether every object/array opened on this line
@@ -748,8 +754,30 @@ func hookLineBracketsBalanced(line string) bool {
 	return len(open) == 0
 }
 
-// nextHookOutputLine returns the offset just past the next line terminator at or
-// after from, treating CRLF as one terminator.
+// hookNextLineContinues reports that the next non-empty line begins with JSON
+// structure — a separator or a closer — which means the value above it was not a
+// record of its own. A comma moved onto its own line continues the record just
+// as one left on the same line does, and a closing bracket means the value sat
+// inside a container that started earlier.
+func hookNextLineContinues(output string, from int) bool {
+	for cursor := from; cursor < len(output); {
+		lineEnd := nextHookOutputLine(output, cursor)
+		trimmed := strings.TrimLeft(strings.TrimRight(output[cursor:lineEnd], "\r\n"), " \t")
+		if trimmed == "" {
+			cursor = lineEnd
+			continue
+		}
+		switch trimmed[0] {
+		case ',', ':', '}', ']':
+			// A separator OR a closer: either way the value above was inside
+			// something that had not ended, so it is not a record of its own.
+			return true
+		}
+		return false
+	}
+	return false
+}
+
 func nextHookOutputLine(output string, from int) int {
 	if from >= len(output) {
 		return len(output)

@@ -121,8 +121,8 @@ exit 0
 	// The logged URL may appear in the echoed output — that IS the diagnostic.
 	// What must not happen is selecting it, so assert the provision reported no
 	// endpoint rather than a failure to reach one, and that the token is redacted.
-	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
-		"selection must stop at the malformed record, not dial a logged endpoint")
+	assert.Contains(t, err.Error(), "af will not guess between them",
+		"an ambiguous stdout must be refused, not resolved by guessing")
 	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
 }
 
@@ -202,8 +202,8 @@ exit 0
 	// The logged URL may appear in the echoed output — that IS the diagnostic.
 	// What must not happen is selecting it, so assert the provision reported no
 	// endpoint rather than a failure to reach one, and that the token is redacted.
-	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
-		"selection must stop at the malformed record, not dial a logged endpoint")
+	assert.Contains(t, err.Error(), "af will not guess between them",
+		"an ambiguous stdout must be refused, not resolved by guessing")
 	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
 }
 
@@ -251,8 +251,8 @@ exit 0
 	_, err := newHookProvisioner(h, "unindented nested").provisionOrReap()
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
-		"selection must stop at the malformed record, not dial a logged endpoint")
+	assert.Contains(t, err.Error(), "af will not guess between them",
+		"an ambiguous stdout must be refused, not resolved by guessing")
 	assert.NotContains(t, err.Error(), "logged-secret")
 }
 
@@ -299,15 +299,15 @@ func TestHookEndpointSelectionBoundedOnJSONPrefixFlood(t *testing.T) {
 	// skipped without parsing and the endpoint is still found.
 	brackets := strings.Repeat("[\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
 	started := time.Now()
-	endpoint, _ := selectHookEndpoint(brackets)
+	endpoint, _, ambiguous := selectHookEndpoint(brackets)
 	assert.Less(t, time.Since(started), time.Second, "bracket lines must not be parsed per line")
-	require.NotNil(t, endpoint)
-	assert.Equal(t, "http://10.0.0.7:8080", endpoint.URL)
+	assert.Nil(t, endpoint, "unbalanced bracket lines are ambiguous, not prose")
+	assert.NotNil(t, ambiguous, "and af refuses rather than guessing")
 
 	// Prose likewise.
 	prose := strings.Repeat("tunnel forwarding\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
 	started = time.Now()
-	endpoint, _ = selectHookEndpoint(prose)
+	endpoint, _, _ = selectHookEndpoint(prose)
 	assert.Less(t, time.Since(started), time.Second)
 	require.NotNil(t, endpoint)
 
@@ -315,9 +315,10 @@ func TestHookEndpointSelectionBoundedOnJSONPrefixFlood(t *testing.T) {
 	// scan must reach that conclusion quickly rather than rescanning the suffix.
 	objects := strings.Repeat("{\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
 	started = time.Now()
-	endpoint, _ = selectHookEndpoint(objects)
+	endpoint, _, ambiguous = selectHookEndpoint(objects)
 	assert.Less(t, time.Since(started), 2*time.Second, "an open record must not rescan the suffix")
-	assert.Nil(t, endpoint, "an unterminated record stops selection rather than promoting past it")
+	assert.Nil(t, endpoint, "an unterminated record is refused, not promoted past")
+	assert.NotNil(t, ambiguous)
 }
 
 // Fifth review round on #2841.
@@ -366,7 +367,7 @@ exit 0
 	// the "printed JSON but none matched" variant. What matters is that neither
 	// the logged endpoint nor the later real one was promoted past the open
 	// record, and that the token is redacted from the reported output.
-	assert.Contains(t, err.Error(), "none contained a non-empty url and token")
+	assert.Contains(t, err.Error(), "af will not guess between them")
 	assert.NotContains(t, err.Error(), "logged-secret")
 }
 
@@ -451,7 +452,6 @@ exit 0
 // together with the earlier prose cases as one set.
 func TestHookLaunchIgnoresProseThatOnlyLooksLikeJSON(t *testing.T) {
 	tests := []struct{ name, prose string }{
-		{"bracket prefix with unmatched brace", `[INFO] opening {config`},
 		{"numeric bracket prefix", `[2026] tunnel forwarding`},
 		{"bracket prefix with stray quote", `[INFO] opening "config`},
 		{"plain bracket prefix", `[INFO] tunnel forwarding`},
