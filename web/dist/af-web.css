@@ -1077,6 +1077,9 @@ body {
   font: inherit;
   font-size: var(--af-fs-xs);
 }
+.af-tabbar-dragging {
+  touch-action: none;
+}
 .af-tab-insert {
   position: absolute;
   top: 0;

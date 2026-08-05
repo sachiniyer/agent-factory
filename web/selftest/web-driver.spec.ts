@@ -2151,17 +2151,17 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
   }
 });
 
-test("audit (#2787 shape) mobile: pressing a tab to drag it SAYS SO instead of doing nothing", REAL_FIXTURE, async ({
+test("#2899 mobile: a finger long-presses a tab and drags it to REORDER — and a tap/scroll does not", REAL_FIXTURE, async ({
   browser,
 }) => {
-  // Reordering a tab and dragging one onto a pane to split are both HTML5
-  // drag-and-drop, which does not start from a finger. The tab still advertises
-  // draggable=true on a phone, so the gesture was offered and then silently declined.
+  // Reordering a tab (and dragging one onto a pane to split) were HTML5 drag-and-drop
+  // only, which does not start from a finger: every tab advertised draggable=true on a
+  // phone and the gesture was silently declined. This drives the real thing.
   //
-  // Driven as a REAL touch through CDP for the reason #2682 documents: a synthesized
-  // PointerEvent would prove only that our listener ran. A trusted touchStart is what
-  // makes Chromium produce the pointerdown with pointerType "touch" that the hint is
-  // gated on — the one thing a desktop run cannot fake.
+  // Trusted touch through CDP, for the reason #2682 documents: a synthesized
+  // PointerEvent would prove only that our listeners ran. A real touchStart is what
+  // makes Chromium produce the pointerType "touch" pointerdown — and, just as
+  // importantly, what makes it decide whether the gesture is a scroll.
   const ctx = await browser.newContext({
     viewport: { width: 390, height: 844 },
     deviceScaleFactor: 3,
@@ -2171,47 +2171,61 @@ test("audit (#2787 shape) mobile: pressing a tab to drag it SAYS SO instead of d
   const p = await ctx.newPage();
   const cdp = await ctx.newCDPSession(p);
 
+  /** Tab labels left to right — the order the reorder has to change. */
+  const labels = async (): Promise<string[]> =>
+    (await p.locator(".af-tabbar .af-tab .af-tab-label").allInnerTexts()).map((t) => t.trim());
+
   try {
     await openTokenless(p);
     await row(p, SESSION_B).click();
     await resetToAgentTab(p);
+    // Two shell tabs, so there is a reorder to perform that is not the pinned agent tab.
     await createTerminalTab(p);
+    await createTerminalTab(p);
+    const before = await labels();
+    expect(before.length, "need agent + two shells to reorder").toBeGreaterThanOrEqual(3);
 
-    const tab = p.locator(".af-tabbar .af-tab").last();
-    await expect(tab).toBeVisible();
-    const box = await tab.boundingBox();
-    expect(box, "the tab needs geometry to press").toBeTruthy();
-    const { x, y, width, height } = box as { x: number; y: number; width: number; height: number };
-    const cx = x + width / 2;
-    const cy = y + height / 2;
-    const toast = p.locator(".af-toast.af-toast-show");
+    const tabs = p.locator(".af-tabbar .af-tab");
+    const lastBox = await tabs.last().boundingBox();
+    const midBox = await tabs.nth(1).boundingBox();
+    expect(lastBox && midBox, "tabs need geometry").toBeTruthy();
+    const last = lastBox as { x: number; y: number; width: number; height: number };
+    const mid = midBox as { x: number; y: number; width: number; height: number };
+    const lastCx = last.x + last.width / 2;
+    const lastCy = last.y + last.height / 2;
 
-    // A TAP must stay silent: it is how a tab is selected, and a toast on every tap
-    // would be a worse defect than the silence this replaces.
-    await touchTap(cdp, cx, cy);
+    // A TAP must stay a tap: it selects the tab and must never reorder anything.
+    await touchTap(cdp, lastCx, lastCy);
     await p.waitForTimeout(900); // past the hold threshold, deliberately
-    await expect(toast, "a tap selects a tab — it must not raise the drag hint").toHaveCount(0);
+    expect(await labels(), "a tap must not reorder").toEqual(before);
 
-    // A SCROLL must stay silent for the same reason: a horizontal finger drag on this
-    // bar is how an overflowed bar is scrolled.
-    await touchDrag(cdp, cx, cy, cy + 4, 6);
+    // A SCROLL must stay a scroll — the bar is horizontally scrollable when tabs
+    // overflow, and a pick-up suspends that, so a false pick-up would strand it.
+    await touchDrag(cdp, lastCx, lastCy, lastCy + 6, 6);
     await p.waitForTimeout(900);
-    await expect(toast, "scrolling the tab bar must not raise the drag hint").toHaveCount(0);
+    expect(await labels(), "scrolling the bar must not reorder").toEqual(before);
 
-    // …and a settled long press — what someone trying to pick the tab up actually
-    // does — explains the limit instead of doing nothing.
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: cx, y: cy }] });
-    try {
-      await expect(toast, "a long press on a tab must explain why the drag cannot work").toContainText(
-        "needs a mouse or trackpad",
-      );
-      // It names the capabilities the gesture carries, so the message teaches rather
-      // than merely reporting a failure.
-      await expect(toast).toContainText("reorder");
-      await expect(toast).toContainText("split");
-    } finally {
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    // …and a settled long press picks the tab up, so dragging it left over the middle
+    // tab and releasing MOVES it there.
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: lastCx, y: lastCy }] });
+    await p.waitForTimeout(700); // outlast holdMs without moving: the pick-up
+    // The insertion indicator is the visible proof the tab was picked up at all.
+    await expect(p.locator(".af-tab-insert"), "a picked-up tab must show where it would land").toBeVisible();
+    const targetX = mid.x + mid.width / 2 - 2;
+    for (let step = 1; step <= 8; step++) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x: lastCx + ((targetX - lastCx) * step) / 8, y: lastCy }],
+      });
     }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+    await expect
+      .poll(labels, { message: "a long-press drag must reorder the tab, as a mouse drag does" })
+      .not.toEqual(before);
+    const after = await labels();
+    expect(after.slice().sort(), "a reorder moves tabs, it does not add or drop any").toEqual(before.slice().sort());
+    expect(after[0], "the agent tab is pinned first through any reorder").toBe(before[0]);
   } finally {
     try {
       await resetToAgentTab(p);

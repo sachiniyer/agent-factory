@@ -10819,27 +10819,84 @@ var SplitView = class {
       e.preventDefault();
       this.hideZone(pane);
       const drag = this.parseDrag(e.dataTransfer?.getData(TAB_DND_MIME));
-      if (!drag || !this.tree) {
+      if (!drag) {
         return;
       }
-      const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
-      if (tab === null) {
-        return;
-      }
-      const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
-      const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
-      const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
-      if (opened === null) {
-        return;
-      }
-      this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
-      const landed = leaves(this.tree).find((l) => l.tab === opened);
-      if (landed) {
-        this.focusedId = landed.id;
-      }
-      this.commit();
-      this.refocus();
+      this.applyTabDrop(pane, drag, e.clientX, e.clientY);
     });
+  }
+  /**
+   * Lands a dragged tab on `pane` at a point — the shared body of a drop, whatever
+   * delivered it. The HTML5 `drop` above calls it; so does a touch release
+   * (dropTabAt), because a finger cannot start drag-and-drop at all (#2899). One body
+   * rather than two: every rule below (id resolution, the #1901 self-split dedupe, the
+   * focus choice) is a rule a second implementation would drift away from.
+   */
+  applyTabDrop(pane, drag, clientX, clientY) {
+    if (!this.tree) {
+      return;
+    }
+    const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
+    if (tab === null) {
+      return;
+    }
+    const zone = this.zoneAt(pane.container, clientX, clientY);
+    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
+    if (opened === null) {
+      return;
+    }
+    this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
+    const landed = leaves(this.tree).find((l) => l.tab === opened);
+    if (landed) {
+      this.focusedId = landed.id;
+    }
+    this.commit();
+    this.refocus();
+  }
+  /** The pane whose box contains a viewport point, or null. Used by the touch path,
+   *  which has no browser hit-testing to route a drop for it. */
+  paneAtPoint(clientX, clientY) {
+    for (const pane of this.panes.values()) {
+      const r = pane.container.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+        return pane;
+      }
+    }
+    return null;
+  }
+  /** Shows the drop zone a touch release at this point would use, and clears every
+   *  other pane's. Returns whether a pane is under the point at all. */
+  showTabDropHintAt(clientX, clientY) {
+    const over = this.paneAtPoint(clientX, clientY);
+    for (const pane of this.panes.values()) {
+      if (pane !== over) {
+        this.hideZone(pane);
+      }
+    }
+    if (!over) {
+      return false;
+    }
+    this.showZone(over, this.zoneAt(over.container, clientX, clientY));
+    return true;
+  }
+  /** Clears any drop zone left showing by showTabDropHintAt. */
+  clearTabDropHint() {
+    for (const pane of this.panes.values()) {
+      this.hideZone(pane);
+    }
+  }
+  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
+   *  false means the release was not over any pane, so the caller can treat it as a
+   *  bar drop (reorder) instead. */
+  dropTabAt(clientX, clientY, drag) {
+    const pane = this.paneAtPoint(clientX, clientY);
+    if (!pane) {
+      return false;
+    }
+    this.hideZone(pane);
+    this.applyTabDrop(pane, drag, clientX, clientY);
+    return true;
   }
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the
    *  center. */
@@ -11833,7 +11890,7 @@ function tabPressVerdict(sample, limits) {
     return "abandon";
   }
   if (sample.heldMs >= limits.holdMs) {
-    return "explain";
+    return "pickUp";
   }
   return "waiting";
 }
@@ -11849,7 +11906,7 @@ function isActionableSession(s) {
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
-var TAB_DRAG_TOUCH_NOTICE = "Dragging a tab needs a mouse or trackpad \xB7 use it to reorder tabs or split a pane";
+var TAB_PINNED_NOTICE = "The agent tab stays first \xB7 drag it onto a pane to split instead";
 var MAX_TABS = 9;
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
 function supportsTabManagement(s) {
@@ -12945,7 +13002,7 @@ var AppShell = class {
     this.tabInsert.setAttribute("aria-hidden", "true");
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
-    this.attachTabTouchHint(tabBar);
+    this.attachTabTouchDrag(tabBar);
     const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
     this.main.className = "af-main af-main-term";
     this.main.replaceChildren(head, this.termHost);
@@ -13037,29 +13094,48 @@ var AppShell = class {
     });
   }
   /**
-   * Tells a touch user why pressing and dragging a tab does nothing (#2787's shape).
+   * Makes a tab draggable by FINGER: long-press to pick it up, drag to reorder it in
+   * the bar or onto a pane to split, release to land it (#2899).
    *
-   * Reordering a tab and dragging one onto a pane to split are both HTML5
-   * drag-and-drop, which does not start from a finger on the mobile browsers that
-   * matter. Every tab still advertises `draggable=true` there, so the gesture is
-   * offered and then silently declined — the exact failure mode this audit went
-   * looking for. Restoring the capability on touch is a real UX decision (arrows? a
-   * per-tab menu? a long-press drag?) and belongs in its own change; making the
-   * refusal AUDIBLE does not, and is what this is.
+   * Both capabilities were HTML5 drag-and-drop only, which does not start from a
+   * finger — Chrome on Android never fires `dragstart` for touch, Safari's support is
+   * narrow and version-dependent — while every tab still advertised `draggable=true`.
+   * So the gesture was offered and silently declined: no movement, no indicator, no
+   * message. This is the #2787 shape, and the fix is the gesture, not a hint.
    *
-   * It watches only the HOLD. A horizontal finger drag on this bar is ambiguous — it
-   * is also how an overflowed bar is scrolled — so any real movement hands the finger
-   * straight back (tabtouch.ts). Nothing here captures the pointer, changes
-   * touch-action, or calls preventDefault: the cost of a wrong guess is one toast,
-   * never a bar that will not scroll.
+   * The pick-up is a HOLD, and that is load-bearing. A horizontal finger drag on this
+   * bar is genuinely ambiguous — it is also how an overflowed bar is scrolled — so
+   * until the hold completes the finger belongs to the browser and any travel past
+   * slop hands it back for good (tabtouch.ts). Only once the tab is picked up does
+   * this suspend scrolling, and only on the bar.
+   *
+   * Everything after the pick-up reuses the mouse path rather than reimplementing it:
+   * the same insertion math (tabreorder.ts), the same indicator (showTabInsert), the
+   * same pane drop body (split.ts applyTabDrop, via the actions). The one thing a
+   * finger needs that a mouse gets free is hit-testing — there is no `dragover` to
+   * say which pane it is over — which is what paneDropHintAt/dropTabOnPaneAt supply.
    */
-  attachTabTouchHint(bar) {
+  attachTabTouchDrag(bar) {
     let press = null;
-    const cancel = () => {
-      if (press) {
+    const release = () => {
+      if (press?.timer !== null && press?.timer !== void 0) {
         window.clearTimeout(press.timer);
-        press = null;
       }
+      if (press?.held) {
+        bar.classList.remove("af-tabbar-dragging");
+        this.hideTabInsert();
+        this.actions.clearPaneDropHint();
+      }
+      press = null;
+    };
+    const pickUp = () => {
+      if (!press) {
+        return;
+      }
+      press.held = true;
+      press.timer = null;
+      bar.classList.add("af-tabbar-dragging");
+      this.showTabInsert(bar, press.x);
     };
     bar.addEventListener(
       "pointerdown",
@@ -13071,33 +13147,65 @@ var AppShell = class {
         if (!btn || !bar.contains(btn)) {
           return;
         }
-        cancel();
-        const timer = window.setTimeout(() => {
-          if (tabPressVerdict({ heldMs: TAB_PRESS_LIMITS.holdMs, movedPx: 0 }, TAB_PRESS_LIMITS) === "explain") {
-            this.actions.notice(TAB_DRAG_TOUCH_NOTICE);
-          }
-          press = null;
-        }, TAB_PRESS_LIMITS.holdMs);
-        press = { id: e.pointerId, x: e.clientX, y: e.clientY, timer };
-      },
-      { passive: true }
-    );
-    bar.addEventListener(
-      "pointermove",
-      (e) => {
-        if (!press || e.pointerId !== press.id) {
+        const index = Number(btn.dataset.tabIndex);
+        if (!Number.isInteger(index)) {
           return;
         }
-        const moved = pressDistance(press.x, press.y, e.clientX, e.clientY);
-        if (tabPressVerdict({ heldMs: 0, movedPx: moved }, TAB_PRESS_LIMITS) === "abandon") {
-          cancel();
-        }
+        release();
+        press = {
+          id: e.pointerId,
+          index,
+          x: e.clientX,
+          y: e.clientY,
+          timer: window.setTimeout(pickUp, TAB_PRESS_LIMITS.holdMs),
+          held: false
+        };
       },
       { passive: true }
     );
-    for (const done of ["pointerup", "pointercancel", "pointerleave"]) {
-      bar.addEventListener(done, cancel, { passive: true });
-    }
+    bar.addEventListener("pointermove", (e) => {
+      if (!press || e.pointerId !== press.id) {
+        return;
+      }
+      if (!press.held) {
+        if (tabPressVerdict({ heldMs: 0, movedPx: pressDistance(press.x, press.y, e.clientX, e.clientY) }, TAB_PRESS_LIMITS) === "abandon") {
+          release();
+        }
+        return;
+      }
+      e.preventDefault();
+      if (this.actions.paneDropHintAt(e.clientX, e.clientY)) {
+        this.hideTabInsert();
+      } else {
+        this.showTabInsert(bar, e.clientX);
+      }
+    });
+    bar.addEventListener("pointerup", (e) => {
+      if (!press || e.pointerId !== press.id) {
+        return;
+      }
+      const held = press.held;
+      const from = press.index;
+      const x = e.clientX;
+      const y = e.clientY;
+      release();
+      if (!held) {
+        return;
+      }
+      const drag = { id: this.currentTabRealIds[from] ?? "", index: from, tabs: this.currentTabIds };
+      if (this.actions.dropTabOnPaneAt(x, y, drag)) {
+        return;
+      }
+      const to = reorderTargetIndex(from, insertionIndexAt(tabCenters(bar), x));
+      if (to === null) {
+        if (from === 0) {
+          this.actions.notice(TAB_PINNED_NOTICE);
+        }
+        return;
+      }
+      this.actions.reorderTab(from, to);
+    });
+    bar.addEventListener("pointercancel", release, { passive: true });
   }
   /** Owns inline rename on the stable bar rather than on an individual button.
    *  Activating an inactive tab rebuilds the buttons synchronously on the first
@@ -14264,6 +14372,9 @@ var actions = {
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
   notice: surfaceNotice,
+  paneDropHintAt: (x, y) => splitView.showTabDropHintAt(x, y),
+  clearPaneDropHint: () => splitView.clearTabDropHint(),
+  dropTabOnPaneAt: (x, y, drag) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
   openConfigAssistant: doOpenConfigAssistant,

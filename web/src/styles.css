@@ -1405,6 +1405,14 @@ body {
 /* The insertion indicator for a reorder drag (#1813): an accent rule in the gap the
  * drop would land in. Absolutely positioned within the bar (hence the bar's
  * position:relative) and pointer-events:none so it never becomes the drag's target. */
+/* While a FINGER is dragging a tab (#2899), the bar must stop treating the gesture as
+ * its own horizontal scroll. Scoped to the life of the drag by a class rather than set
+ * on the bar permanently: an overflowed tab bar has to stay scrollable by touch, and
+ * only the picked-up tab suspends that. */
+.af-tabbar-dragging {
+  touch-action: none;
+}
+
 .af-tab-insert {
   position: absolute;
   top: 0;

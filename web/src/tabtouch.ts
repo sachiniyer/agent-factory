@@ -1,22 +1,19 @@
-// Recognising a touch attempt to DRAG a tab, so the tab bar can explain itself
-// instead of doing nothing (the #2787 shape).
+// Deciding when a finger on the tab bar has PICKED A TAB UP (#2899).
 //
-// Reordering a tab, and dragging one onto a pane to split, are both HTML5
-// drag-and-drop (ui.ts attachTabDrag / split.ts wireDrop). Drag-and-drop does not
-// start from a finger on the mobile browsers that matter — Chrome on Android never
+// Reordering a tab, and dragging one onto a pane to split, were both HTML5
+// drag-and-drop only (ui.ts attachTabDrag / split.ts wireDrop), and drag-and-drop does
+// not start from a finger on the mobile browsers that matter — Chrome on Android never
 // fires `dragstart` for touch input, and Safari's support is narrow and
-// version-dependent. Every tab still renders `draggable=true` there, so a phone user
-// presses a tab, drags, and gets NOTHING: no movement, no drop indicator, no message.
-// Silence is the defect; the missing capability is a separate, deliberate product
-// question (see the issue).
+// version-dependent. Every tab still rendered `draggable=true` there, so a phone user
+// pressed a tab, dragged, and got NOTHING: no movement, no drop indicator, no message.
 //
-// Detecting the ATTEMPT is the whole trick, because a horizontal finger drag on the
-// bar is genuinely ambiguous — it is also how the bar is scrolled when tabs overflow.
-// What is NOT ambiguous is a press that stays put: nobody long-presses a tab except
-// to pick it up. So the gesture this reads is the HOLD, and any real movement hands
-// the finger straight back to the browser's scroll. Nothing here claims the pointer,
-// suppresses scrolling, or calls preventDefault — a wrong guess costs a toast, never
-// a broken scroll.
+// Telling the two gestures apart is the whole trick, because a horizontal finger drag
+// on the bar is genuinely ambiguous — it is also how the bar is scrolled when tabs
+// overflow. What is NOT ambiguous is a press that stays put: nobody long-presses a tab
+// except to pick it up. So the pick-up is the HOLD, and any real movement before it
+// hands the finger back to the browser's scroll for good. Getting this wrong in the
+// permissive direction costs a bar that will not scroll, which is why the decision is
+// here, pure and tested, rather than inline in a pointer handler.
 
 /** What the press has done so far. `movedPx` is the distance from where the finger
  *  landed (not per-move delta), so a slow drift accumulates like a fast swipe. */
@@ -35,10 +32,10 @@ export interface TabPressLimits {
 
 /**
  * `abandon` — the finger moved: it is scrolling or swiping, so leave it alone.
- * `explain` — a settled long press: the user is trying to drag a tab.
- * `waiting`  — too early to tell; keep watching.
+ * `pickUp`  — a settled long press: the tab is now being dragged.
+ * `waiting` — too early to tell; keep watching.
  */
-export type TabPressVerdict = "waiting" | "explain" | "abandon";
+export type TabPressVerdict = "waiting" | "pickUp" | "abandon";
 
 /** Slop is checked BEFORE the hold, so a long, slow scroll can never be mistaken for
  *  a hold just because it took a while. */
@@ -47,13 +44,13 @@ export function tabPressVerdict(sample: TabPressSample, limits: TabPressLimits):
     return "abandon";
   }
   if (sample.heldMs >= limits.holdMs) {
-    return "explain";
+    return "pickUp";
   }
   return "waiting";
 }
 
 /** Deliberately longer than a tap and than the browser's own long-press callout, so
- *  the hint lands only on a press the user is still holding on purpose. */
+ *  a tab is picked up only by a press the user is still holding on purpose. */
 export const TAB_PRESS_LIMITS: TabPressLimits = { holdMs: 500, slopPx: 10 };
 
 /** Straight-line distance, the input to `movedPx`. */

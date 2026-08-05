@@ -1,9 +1,9 @@
-// Pins the hold-vs-scroll split behind the tab bar's touch hint.
+// Pins the hold-vs-scroll split behind the tab bar's touch drag (#2899).
 //
-// The property that matters most here is the NEGATIVE one: a finger that is scrolling
-// the overflowed tab bar must never be read as an attempt to drag a tab. The hint is
-// worth having only because it cannot fire on an ordinary scroll or tap — a toast
-// interrupting every swipe would be a worse defect than the silence it replaces.
+// The property that matters most is the NEGATIVE one: a finger scrolling the
+// overflowed tab bar must never be read as picking a tab up. Getting that wrong does
+// not merely misfire — picking up suspends the bar's touch-action, so a false pick-up
+// leaves the bar unable to scroll, which is worse than the silence being fixed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,12 +12,12 @@ import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js"
 
 const limits = { holdMs: 500, slopPx: 10 };
 
-test("a settled long press reads as an attempt to drag the tab", () => {
-  assert.equal(tabPressVerdict({ heldMs: 500, movedPx: 0 }, limits), "explain");
-  assert.equal(tabPressVerdict({ heldMs: 900, movedPx: 9 }, limits), "explain", "within slop still counts as settled");
+test("a settled long press picks the tab up", () => {
+  assert.equal(tabPressVerdict({ heldMs: 500, movedPx: 0 }, limits), "pickUp");
+  assert.equal(tabPressVerdict({ heldMs: 900, movedPx: 9 }, limits), "pickUp", "within slop still counts as settled");
 });
 
-test("a tap is over before the hold and never explains anything", () => {
+test("a tap is over before the hold and never picks anything up", () => {
   assert.equal(tabPressVerdict({ heldMs: 80, movedPx: 0 }, limits), "waiting");
   assert.equal(tabPressVerdict({ heldMs: 499, movedPx: 0 }, limits), "waiting");
 });
@@ -29,7 +29,7 @@ test("a finger that MOVES is scrolling the bar — hand it back, however long it
   assert.equal(
     tabPressVerdict({ heldMs: 5_000, movedPx: 11 }, limits),
     "abandon",
-    "a slow drag is a scroll, not a hold — this is what keeps the toast off every swipe",
+    "a slow drag is a scroll, not a hold — this is what keeps the bar scrollable",
   );
 });
 

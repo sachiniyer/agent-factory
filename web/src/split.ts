@@ -1438,38 +1438,100 @@ export class SplitView {
       e.preventDefault();
       this.hideZone(pane);
       const drag = this.parseDrag(e.dataTransfer?.getData(TAB_DND_MIME));
-      if (!drag || !this.tree) {
+      if (!drag) {
         return;
       }
-      // Resolve the dragged tab to the ordinal it should bind — by its STABLE id when
-      // it has one, else the guarded legacy index. See resolveDragTab; null cancels.
-      const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
-      if (tab === null) {
-        return;
-      }
-      const zone = this.zoneAt(pane.container, e.clientX, e.clientY);
-      // Dragging the pane's OWN tab onto its edge still splits — but the new half must
-      // open a DIFFERENT tab (#1901). Binding the dragged tab on both sides is what the
-      // one-tab-one-pane dedupe undoes, collapsing the split back to where it started.
-      const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
-      const opened = onItsOwnPane
-        ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs())
-        : tab;
-      if (opened === null) {
-        return; // no other tab to fill the new half — leave the layout as it stands
-      }
-      this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
-      // Focus the pane holding the tab that just landed — the NEW half (VS Code focuses
-      // the new split). On a self-split that half holds the COMPANION: the dragged tab
-      // never moved, so focusing it would hand focus back to the pane the user started
-      // from and the new pane would open unfocused.
-      const landed = leaves(this.tree).find((l) => l.tab === opened);
-      if (landed) {
-        this.focusedId = landed.id;
-      }
-      this.commit();
-      this.refocus();
+      this.applyTabDrop(pane, drag, e.clientX, e.clientY);
     });
+  }
+
+  /**
+   * Lands a dragged tab on `pane` at a point — the shared body of a drop, whatever
+   * delivered it. The HTML5 `drop` above calls it; so does a touch release
+   * (dropTabAt), because a finger cannot start drag-and-drop at all (#2899). One body
+   * rather than two: every rule below (id resolution, the #1901 self-split dedupe, the
+   * focus choice) is a rule a second implementation would drift away from.
+   */
+  private applyTabDrop(pane: Pane, drag: DragPayload, clientX: number, clientY: number): void {
+    if (!this.tree) {
+      return;
+    }
+    // Resolve the dragged tab to the ordinal it should bind — by its STABLE id when
+    // it has one, else the guarded legacy index. See resolveDragTab; null cancels.
+    const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
+    if (tab === null) {
+      return;
+    }
+    const zone = this.zoneAt(pane.container, clientX, clientY);
+    // Dragging the pane's OWN tab onto its edge still splits — but the new half must
+    // open a DIFFERENT tab (#1901). Binding the dragged tab on both sides is what the
+    // one-tab-one-pane dedupe undoes, collapsing the split back to where it started.
+    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const opened = onItsOwnPane
+      ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs())
+      : tab;
+    if (opened === null) {
+      return; // no other tab to fill the new half — leave the layout as it stands
+    }
+    this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
+    // Focus the pane holding the tab that just landed — the NEW half (VS Code focuses
+    // the new split). On a self-split that half holds the COMPANION: the dragged tab
+    // never moved, so focusing it would hand focus back to the pane the user started
+    // from and the new pane would open unfocused.
+    const landed = leaves(this.tree).find((l) => l.tab === opened);
+    if (landed) {
+      this.focusedId = landed.id;
+    }
+    this.commit();
+    this.refocus();
+  }
+
+  /** The pane whose box contains a viewport point, or null. Used by the touch path,
+   *  which has no browser hit-testing to route a drop for it. */
+  private paneAtPoint(clientX: number, clientY: number): Pane | null {
+    for (const pane of this.panes.values()) {
+      const r = pane.container.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+        return pane;
+      }
+    }
+    return null;
+  }
+
+  /** Shows the drop zone a touch release at this point would use, and clears every
+   *  other pane's. Returns whether a pane is under the point at all. */
+  showTabDropHintAt(clientX: number, clientY: number): boolean {
+    const over = this.paneAtPoint(clientX, clientY);
+    for (const pane of this.panes.values()) {
+      if (pane !== over) {
+        this.hideZone(pane);
+      }
+    }
+    if (!over) {
+      return false;
+    }
+    this.showZone(over, this.zoneAt(over.container, clientX, clientY));
+    return true;
+  }
+
+  /** Clears any drop zone left showing by showTabDropHintAt. */
+  clearTabDropHint(): void {
+    for (const pane of this.panes.values()) {
+      this.hideZone(pane);
+    }
+  }
+
+  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
+   *  false means the release was not over any pane, so the caller can treat it as a
+   *  bar drop (reorder) instead. */
+  dropTabAt(clientX: number, clientY: number, drag: DragPayload): boolean {
+    const pane = this.paneAtPoint(clientX, clientY);
+    if (!pane) {
+      return false;
+    }
+    this.hideZone(pane);
+    this.applyTabDrop(pane, drag, clientX, clientY);
+    return true;
   }
 
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the

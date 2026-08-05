@@ -72,6 +72,7 @@ import {
   tabToKeepOnClose,
   upsertSession,
 } from "./sessions.js";
+import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
 import { canHandoff, isArchived, type RowKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
@@ -1589,6 +1590,9 @@ const actions = {
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
   notice: surfaceNotice,
+  paneDropHintAt: (x: number, y: number) => splitView.showTabDropHintAt(x, y),
+  clearPaneDropHint: () => splitView.clearTabDropHint(),
+  dropTabOnPaneAt: (x: number, y: number, drag: DragPayload) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
   openConfigAssistant: doOpenConfigAssistant,
