@@ -510,6 +510,9 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	m.SetSplitPaneAvailable(false)
 
 	m.SetFocusRegion(layout.PaneRegion(7))
+	// A SECOND visible pane, which is what makes ←/→ meaningful: with one pane
+	// focusAdjacentPane has nowhere to move focus and the pair is gated off.
+	m.SetPaneCycleAvailable(true)
 	if !has(keys.KeyOpenPane) || has(keys.KeySplitPane) || !has(keys.KeyHidePane) ||
 		!has(keys.KeyPanePrev) || !has(keys.KeyPaneNext) || !has(keys.KeyEnter) {
 		t.Errorf("a focused pane must advertise pane focus/open/hide + attach, not split without a preview; options=%v", m.options)
@@ -533,6 +536,10 @@ func TestMenuProjectsFocusFooterIsHonest(t *testing.T) {
 	m := NewMenu()
 	m.SetInstance(readyUIInstance())
 	m.SetFocusRegion(layout.RegionProjects)
+	// A row under the cursor, which is what makes Enter and `D` live at all.
+	// The empty section is the same honesty question one state further out and
+	// has its own test: handleProjectsFocus consumes both as no-ops with no rows.
+	m.SetProjectRowsAvailable(true)
 
 	has := func(want keys.KeyName) bool {
 		for _, k := range m.options {
@@ -645,6 +652,79 @@ func TestMenuScrollChipKeepsBothClickZones(t *testing.T) {
 		}
 		if got := cellSlice(line, r.X, r.X+r.W); got != want {
 			t.Fatalf("the %q zone covers %q, want the key's own glyph", want, got)
+		}
+	}
+}
+
+// The footer must not offer a key that cannot fire from the state it is shown
+// in. menu.go already gates several — `S split pane` on a live preview (#1419),
+// the scroll pair on a truthful history owner, tab verbs on TabManagement,
+// retry/handoff on a limit wall — and the whole tree row on StateEmpty. These
+// two were the ungated ones, and each is a documented no-op in the state it was
+// still advertised in.
+
+// ←/→ move focus between VISIBLE panes; focusAdjacentPane returns early below
+// two of them, so with one pane open the pair does nothing at all.
+func TestMenuHidesPaneCycleWithNothingToCycleTo(t *testing.T) {
+	m := NewMenu()
+	m.SetInstance(readyUIInstance())
+	m.SetFocusRegion(layout.PaneRegion(1))
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if strings.Contains(out, "prev pane") || strings.Contains(out, "next pane") {
+		t.Fatalf("one visible pane has nowhere to move focus to:\n%s", out)
+	}
+
+	m.SetPaneCycleAvailable(true)
+	out = xansi.Strip(m.String())
+	if !strings.Contains(out, "prev pane") || !strings.Contains(out, "next pane") {
+		t.Fatalf("a second visible pane makes the pair live and it must be offered:\n%s", out)
+	}
+}
+
+// Enter and `D` in the Projects section act on the CURSOR'S ROW.
+// handleProjectsFocus consumes both as no-ops when SelectedProject reports
+// false, which is every time the section is empty.
+func TestMenuHidesProjectRowVerbsWithNoRows(t *testing.T) {
+	m := NewMenu()
+	m.SetFocusRegion(layout.RegionProjects)
+	m.SetSize(200, 1)
+
+	out := xansi.Strip(m.String())
+	if strings.Contains(out, "switch") || strings.Contains(out, "delete project") {
+		t.Fatalf("an empty Projects section has no row for these to act on:\n%s", out)
+	}
+	// The section is still escapable and searchable — gating the row verbs must
+	// not strand the user in it.
+	for _, want := range []string{"search", "focus", "help", "quit"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the way out of the section must survive; missing %q:\n%s", want, out)
+		}
+	}
+
+	m.SetProjectRowsAvailable(true)
+	out = xansi.Strip(m.String())
+	if !strings.Contains(out, "switch") || !strings.Contains(out, "delete project") {
+		t.Fatalf("with a row under the cursor both verbs are live and must be offered:\n%s", out)
+	}
+}
+
+// The gate must not disturb the row's group styling/separators, which are
+// computed from indices into the option slice.
+func TestMenuProjectsRowStaysWellFormedWhenGated(t *testing.T) {
+	for _, rows := range []bool{false, true} {
+		m := NewMenu()
+		m.SetFocusRegion(layout.RegionProjects)
+		m.SetProjectRowsAvailable(rows)
+		m.SetSize(200, 1)
+
+		out := xansi.Strip(m.String())
+		if strings.Contains(out, "  │") || strings.Contains(out, "│  ·") {
+			t.Fatalf("rows=%v: dangling separator in the hint row:\n%s", rows, out)
+		}
+		if strings.HasPrefix(strings.TrimSpace(out), "·") || strings.HasPrefix(strings.TrimSpace(out), "│") {
+			t.Fatalf("rows=%v: the row must not open with a separator:\n%s", rows, out)
 		}
 	}
 }

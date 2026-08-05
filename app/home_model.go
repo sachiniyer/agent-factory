@@ -888,6 +888,23 @@ func (m *home) syncFocus() {
 	m.menu.SetFocusRegion(active)
 	m.syncSplitPaneHint()
 	m.syncScrollHint()
+	// ←/→ move focus between VISIBLE panes, and focusAdjacentPane returns early
+	// below two of them, so the pair is inert with one pane open. Advertising it
+	// there is the same dead-affordance class as #2830/#2864.
+	m.menu.SetPaneCycleAvailable(len(m.visiblePanes) > 1)
+	m.syncProjectsHint()
+}
+
+// syncProjectsHint keeps the Projects footer's row-scoped verbs (Enter switch,
+// D delete) in step with whether the section HAS a row. Both act on the cursor,
+// and handleProjectsFocus consumes each as a no-op when SelectedProject reports
+// false, so an empty section must advertise neither.
+//
+// Called from syncFocus AND from both project refreshes: rows change on a
+// background poll, which is not guaranteed to reach a relayout, and a stale
+// gate here would re-advertise a verb that had just gone inert.
+func (m *home) syncProjectsHint() {
+	m.menu.SetProjectRowsAvailable(m.projects.HasProjects())
 }
 
 // focusRegion moves focus directly to the given region and re-solves the

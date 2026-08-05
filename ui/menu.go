@@ -2,6 +2,7 @@ package ui
 
 import (
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/keys"
@@ -82,6 +83,15 @@ type Menu struct {
 	// `S` can commit as another pane. Without that preview the key no-ops, so
 	// the footer must not advertise it (#1419).
 	splitPaneAvailable bool
+	// paneCycleAvailable is true only while a SECOND visible pane exists for
+	// ←/→ to move focus to. focusAdjacentPane returns early below two visible
+	// panes, so with one open the pair is inert and advertising it is a lie.
+	paneCycleAvailable bool
+	// projectRowsAvailable is true only while the Projects section has a row
+	// under its cursor. Enter and `D` there are row-scoped — SelectedProject
+	// reports false with none, and handleProjectsFocus consumes both as no-ops
+	// — so an empty section must advertise neither.
+	projectRowsAvailable bool
 	// statusText temporarily replaces key hints with a plain status row. Used
 	// for pointer gestures that need feedback but should not advertise
 	// clickable key zones while the gesture is in flight.
@@ -136,6 +146,27 @@ var automationsMenuOptions = []keys.KeyName{
 // do nothing.
 var projectsMenuOptions = []keys.KeyName{
 	keys.KeySwitchProjectRow, keys.KeyDeleteProject, keys.KeySearch, keys.KeyTab, keys.KeyHelp, keys.KeyQuit,
+}
+
+// projectsRowVerbs are the entries of projectsMenuOptions that act on the
+// CURSOR'S ROW, so an empty section can offer neither.
+var projectsRowVerbs = []keys.KeyName{keys.KeySwitchProjectRow, keys.KeyDeleteProject}
+
+// projectsOptions drops the row-scoped verbs when the section has no rows. The
+// comment above claims this set "advertises exactly the keys that DO something
+// there" — that was only true with a row under the cursor.
+func (m *Menu) projectsOptions() []keys.KeyName {
+	if m.projectRowsAvailable {
+		return projectsMenuOptions
+	}
+	opts := make([]keys.KeyName, 0, len(projectsMenuOptions))
+	for _, k := range projectsMenuOptions {
+		if slices.Contains(projectsRowVerbs, k) {
+			continue
+		}
+		opts = append(opts, k)
+	}
+	return opts
 }
 
 // interactiveMenuOptions is the whole bar while interactive (#1089, RFC
@@ -218,6 +249,29 @@ func (m *Menu) SetSplitPaneAvailable(available bool) {
 	m.updateOptions()
 }
 
+// SetPaneCycleAvailable controls whether the focused-pane hints advertise the
+// ←/→ pane-focus pair. Like the split-pane hint, the keys stay globally bound;
+// this only keeps the footer honest when there is nowhere for them to move
+// focus to.
+func (m *Menu) SetPaneCycleAvailable(available bool) {
+	if m.paneCycleAvailable == available {
+		return
+	}
+	m.paneCycleAvailable = available
+	m.updateOptions()
+}
+
+// SetProjectRowsAvailable controls whether the Projects hints advertise the
+// row-scoped verbs (Enter switch, D delete). Both act on the cursor's row, so
+// with no rows they are consumed as no-ops and must not be offered.
+func (m *Menu) SetProjectRowsAvailable(available bool) {
+	if m.projectRowsAvailable == available {
+		return
+	}
+	m.projectRowsAvailable = available
+	m.updateOptions()
+}
+
 // SetStatusText temporarily replaces the hint row with a centered status
 // message. Empty restores the normal context-sensitive key hints.
 func (m *Menu) SetStatusText(text string) {
@@ -251,10 +305,14 @@ func (m *Menu) updateOptions() {
 	// the automations branch: Enter switch / `/` search are its actions, the rest
 	// is cross-region chrome. Naming's submit/change-program hints still win.
 	if m.focusRegion == layout.RegionProjects && m.state != StateNewInstance {
-		m.options = projectsMenuOptions
+		m.options = m.projectsOptions()
+		actionEnd := 0
+		if m.projectRowsAvailable {
+			actionEnd = 2
+		}
 		m.groups = []menuGroup{
-			{start: 0, end: 2, isAction: true},
-			{start: 2, end: len(projectsMenuOptions), isAction: false},
+			{start: 0, end: actionEnd, isAction: true},
+			{start: actionEnd, end: len(m.options), isAction: false},
 		}
 		return
 	}
@@ -454,7 +512,10 @@ func (m *Menu) setPaneFocusOptions() {
 	if m.scrollAvailable {
 		actionGroup = append(actionGroup, keys.KeyShiftUp, keys.KeyShiftDown)
 	}
-	focusGroup := []keys.KeyName{keys.KeyPanePrev, keys.KeyPaneNext}
+	var focusGroup []keys.KeyName
+	if m.paneCycleAvailable {
+		focusGroup = []keys.KeyName{keys.KeyPanePrev, keys.KeyPaneNext}
+	}
 	paneGroup := []keys.KeyName{keys.KeyOpenPane}
 	if m.splitPaneAvailable {
 		paneGroup = append(paneGroup, keys.KeySplitPane)

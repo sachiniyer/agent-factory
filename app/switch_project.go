@@ -155,6 +155,7 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 // launch and on project switch (paths that fetch synchronously).
 func (m *home) refreshSidebarProjects() {
 	m.projects.SetProjects(m.projectRows(m.buildProjectList()))
+	m.syncProjectsHint()
 }
 
 // refreshSidebarProjectsFromSnapshot rebuilds the Projects rows from the all-repos
@@ -167,7 +168,9 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, f
 		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
 		return false
 	}
-	return m.projects.SetProjects(m.projectRows(m.buildProjectListFrom(data)))
+	changed := m.projects.SetProjects(m.projectRows(m.buildProjectListFrom(data)))
+	m.syncProjectsHint()
+	return changed
 }
 
 // switchToProjectRoot resolves a Projects-section row's repo root and switches
