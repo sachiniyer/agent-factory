@@ -125,6 +125,92 @@ function row(page: Page, title: string): Locator {
   return page.locator(".af-rail-list .af-row", { hasText: title });
 }
 
+/** Waits for a rail row to leave the TRANSIENT Lost state (#2813).
+ *
+ *  A freshly restored fixture session passes through Lost on its way to Ready
+ *  while the daemon re-establishes liveness. A test asserting on selection or
+ *  attachment during that window is racing fixture startup rather than the
+ *  behavior it names — which is exactly what the #1694 keyboard test's call log
+ *  showed: five resolutions at `probe-a — Lost`, then fourteen at `probe-a —
+ *  Ready`, with the selection assertion timing out across both.
+ *
+ *  This is a liveness gate, NOT a longer timeout: it waits for a named state to
+ *  be reached, so it returns the moment the row settles and fails loudly if the
+ *  row never does. Bumping the assertion's own timeout would have hidden the
+ *  race instead of removing it. */
+async function waitForRowSettled(page: Page, title: string): Promise<void> {
+  await expect(row(page, title), `${title} must appear in the rail`).toBeVisible({ timeout: 30_000 });
+  await expect(row(page, title), `${title} must settle out of the transient Lost state before it is driven`).not.toHaveAttribute(
+    "title",
+    /— Lost/,
+    { timeout: 30_000 },
+  );
+}
+
+/** Attaches to a session from the rail, having first let it settle (#2813/#2816).
+ *
+ *  Use this instead of inheriting attachment from whatever the previous test left
+ *  behind. Playwright discards the worker after ANY failure and re-runs beforeAll
+ *  with a fresh page, so a test that inherits state does not merely depend on its
+ *  predecessor passing — it FAILS when the predecessor fails, turning one flake
+ *  into two and hiding whether the second test's own behavior still works. */
+async function attachToSettledRow(page: Page, title: string): Promise<void> {
+  await showSessionsView(page);
+  await waitForRowSettled(page, title);
+  await row(page, title).click();
+  await expect(row(page, title), `${title} must be the selected row`).toHaveClass(/af-row-selected/);
+  await expect(page.locator(".af-app.af-kb-terminal"), "clicking a row hands the keyboard to its terminal").toBeVisible();
+}
+
+/** Selects the sessions view. The rail only exists there, so both helpers below
+ *  start here rather than assuming whichever view the previous test left. */
+async function showSessionsView(page: Page): Promise<void> {
+  const tab = page.locator('.af-viewtab[data-view="sessions"]');
+  await tab.click();
+  await expect(tab, "the sessions view must be active").toHaveClass(/af-viewtab-active/);
+}
+
+/** Puts the app in rail mode on the sessions view, from ANY starting state (#2816).
+ *
+ *  Idempotent by construction: it selects the sessions view, then detaches only if
+ *  the keyboard is currently owned by a terminal. Keyboard mode is "terminal" only
+ *  while a session is selected AND the sessions view is showing it (index.ts), so
+ *  both halves are needed and neither is safe to assume. */
+async function ensureRailOnSessions(page: Page): Promise<void> {
+  await showSessionsView(page);
+  // Poll rather than branch on one isVisible() read: that read does not wait, so a
+  // frame sampled mid-transition answers "not terminal", the detach is skipped, and
+  // the assertion that follows fails for a reason that has nothing to do with the
+  // test. Detaching inside the poll is safe because it is only issued while terminal
+  // mode is actually observed, and it is idempotent once rail mode is reached.
+  await expect
+    .poll(
+      async () => {
+        if (await page.locator(".af-app.af-kb-rail").isVisible()) {
+          return "rail";
+        }
+        if (await page.locator(".af-app.af-kb-terminal").isVisible()) {
+          await page.keyboard.press("Control+]");
+          return "terminal";
+        }
+        return "neither";
+      },
+      { message: "the rail must end up owning the keyboard", timeout: 15_000 },
+    )
+    .toBe("rail");
+}
+
+/** How far a terminal viewport sits from the bottom, in px (#2816).
+ *
+ *  0 (within a pixel of rounding) means "pinned to the newest output". This is the
+ *  honest way to ask "did the wheel scroll us back into history?", because it is
+ *  invariant under the terminal GROWING: new output keeps a pinned viewport pinned,
+ *  while it moves the raw scrollTop by a row every time. An exact scrollTop
+ *  comparison cannot tell those two apart, which is the whole of the #2681 flake. */
+async function distanceFromBottom(viewport: Locator): Promise<number> {
+  return viewport.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+}
+
 /** One of the quiet lifecycle glyphs revealed on the selected rail row (#2186). */
 function railAction(page: Page, title: string, name: "Archive session" | "Restore session" | "Kill session"): Locator {
   return row(page, title).getByRole("button", { name: `${name} “${title}”`, exact: true });
@@ -1396,11 +1482,17 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     // Outside application mouse mode, leave modifier-wheel semantics entirely to
     // xterm. On Linux xterm intentionally treats Shift+wheel as a no-op; the af
     // escape must not introduce a new scroll path in an ordinary shell.
-    const normalBottom = await viewport.evaluate((el) => el.scrollTop);
     await p.keyboard.down("Shift");
     await p.mouse.wheel(0, -900);
     await p.keyboard.up("Shift");
-    expect(await viewport.evaluate((el) => el.scrollTop), "normal-mode modifier wheel stays xterm-owned").toBe(normalBottom);
+    // "Still pinned to the bottom", not "scrollTop is the same number". The wheel can
+    // only be shown to have scrolled us by our LEAVING the bottom; a raw scrollTop
+    // equality also fails when the shell merely printed another line, which is a fact
+    // about output timing and not about who owns the wheel (#2816).
+    expect(
+      await distanceFromBottom(viewport),
+      "normal-mode modifier wheel stays xterm-owned: the viewport must not leave the bottom",
+    ).toBeLessThanOrEqual(1);
 
     // DECSET 9/X10 captures button-down only, not wheel. Its plain wheel must
     // remain browser-owned, and its modifier wheel must retain xterm semantics.
@@ -1416,7 +1508,15 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await p.keyboard.down("Shift");
     await p.mouse.wheel(0, -900);
     await p.keyboard.up("Shift");
-    expect(await viewport.evaluate((el) => el.scrollTop), "X10 modifier wheel keeps xterm behavior").toBe(x10Scrolled);
+    // Here the viewport is deliberately NOT at the bottom (the plain wheel above
+    // scrolled it up), so the bottom-distance form does not apply. The property af
+    // could break is "the modifier wheel introduced a scroll path", and any such
+    // scroll moves us UP — i.e. scrollTop DOWN. Assert that direction rather than
+    // exact equality, which also trips on unrelated buffer growth (#2816).
+    expect(
+      await viewport.evaluate((el) => el.scrollTop),
+      "X10 modifier wheel keeps xterm behavior: it must not scroll further into history",
+    ).toBeGreaterThanOrEqual(x10Scrolled);
     const mouseHint = host.locator(".af-mouse-capture-hint");
     await expect(mouseHint, "X10 wheel never advertises an unnecessary escape").not.toHaveClass(/af-visible/);
     await p.keyboard.type("printf '\\033[?9l'");
@@ -1429,30 +1529,41 @@ test("#2681/#2787: application mouse mode selects on a plain drag and keeps a mo
     await p.keyboard.press("Enter");
     await expect(xterm).toHaveClass(/enable-mouse-events/);
 
-    // Sample the baseline only once the terminal has stopped growing. A shell prompt
-    // still landing after this read moves scrollTop by a row for reasons that have
-    // nothing to do with who owns the wheel, and the assertion below would report
-    // that as the wheel having scrolled. Two identical samples, the same idiom as
-    // settledHitTestableTabMenu.
+    // Start from the bottom, then assert we are STILL at the bottom after the wheel.
+    //
+    // The settle-poll below is kept, because starting pinned is a real precondition —
+    // but settling before the wheel cannot make an exact scrollTop comparison after it
+    // safe, and that is why this assertion still flaked (#2813/#2816). In DEC 1000/1006
+    // the wheel bytes are delivered to the PTY — the assertion two lines down REQUIRES
+    // that — and the fixture's "application" is a bare shell, whose readline ECHOES
+    // them. Once that echo wraps a line the terminal grows and a pinned viewport's
+    // scrollTop moves down by exactly one row: the observed 816 -> 833. That is output
+    // arriving, not the wheel scrolling, and a wheel-up could not have produced it
+    // anyway — it moves scrollTop the other way.
+    //
+    // "Did the wheel take us off the bottom" is the property the test names, and it is
+    // invariant under the buffer growing, so it survives the echo it provokes.
     let previousTop = Number.NaN;
-    let bottom = 0;
     await expect
       .poll(
         async () => {
           const top = await viewport.evaluate((el) => el.scrollTop);
           const stable = top === previousTop;
           previousTop = top;
-          bottom = top;
           return stable;
         },
         { message: "output must settle before the wheel baseline is sampled", timeout: 10_000 },
       )
       .toBe(true);
+    expect(await distanceFromBottom(viewport), "the terminal must start pinned to the bottom").toBeLessThanOrEqual(1);
     inputPayloads.length = 0;
     await host.hover();
     await p.mouse.wheel(0, -900);
     await expect.poll(() => inputPayloads.length, { message: "application mouse mode must receive the plain wheel" }).toBeGreaterThan(0);
-    expect(await viewport.evaluate((el) => el.scrollTop), "plain wheel is application-owned by design").toBe(bottom);
+    expect(
+      await distanceFromBottom(viewport),
+      "plain wheel is application-owned by design: the viewport must not leave the bottom",
+    ).toBeLessThanOrEqual(1);
 
     const newestRow = host.locator(".xterm-rows > div", { hasText: "mouse-mode-80" }).last();
     await expect(newestRow).toBeVisible();
@@ -2019,10 +2130,19 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
 });
 
 test("the #1694 keyboard model: j/k navigate, Enter attaches, ctrl+] returns to rail", REAL_FIXTURE, async () => {
-  // We are attached to A (terminal mode from the previous flow). ctrl+] is the one
-  // KEYBOARD hatch back to the rail (#2517, mirroring the TUI's tea.KeyCtrlCloseBracket)
-  // — no stray byte leaks to the PTY. Escape is no longer a detach (it interrupts the
-  // agent); the dedicated interrupt-forwarding test below proves that on the PTY.
+  // Attach to A HERE rather than inheriting terminal mode from the previous flow
+  // (#2816). Inheriting made this test fail whenever its predecessor did: a failure
+  // makes Playwright discard the worker and re-run beforeAll with a fresh page, so
+  // the attachment this test opened on simply was not there, and the keyboard model
+  // was reported broken when only the setup was missing. attachToSettledRow also
+  // waits out the transient Lost window (#2813) that had this same assertion timing
+  // out against a row still churning liveness.
+  await attachToSettledRow(page, SESSION_A);
+
+  // ctrl+] is the one KEYBOARD hatch back to the rail (#2517, mirroring the TUI's
+  // tea.KeyCtrlCloseBracket) — no stray byte leaks to the PTY. Escape is no longer a
+  // detach (it interrupts the agent); the dedicated interrupt-forwarding test below
+  // proves that on the PTY.
   await page.keyboard.press("Control+]");
   await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
   await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
@@ -2108,7 +2228,11 @@ test("#2517: Escape interrupts the agent (forwards down the PTY) and never detac
 });
 
 test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", REAL_FIXTURE, async () => {
-  // Rail mode from the previous flow (the prior test ended by detaching with ctrl+]).
+  // Establish rail mode on the sessions view rather than inheriting it from the
+  // previous flow (#2816) — same reasoning as the j/k test above: an inherited
+  // precondition turns a predecessor's failure into this test's failure.
+  await ensureRailOnSessions(page);
+
   // [ / ] cycle the top-level view; they fire in rail mode only (a modal or focused
   // terminal would swallow them). In rail mode the active element is document.body, so
   // the document-level capture-phase keydown listener (index.ts) handles the press. The
@@ -8023,6 +8147,17 @@ test("#1900: the cache-buster is unique across a pane REMOUNT — ↻ never re-i
   await expect(frame).toHaveCount(0, { timeout: 15_000 });
   await tabByLabel(page, "vite").click();
   await expect(frame).toHaveCount(1, { timeout: 15_000 });
+  // The iframe EXISTING is not the iframe being POINTED anywhere: mountWebPane creates
+  // the element and sets src on a later tick, so reading the attribute here raced the
+  // mount and returned null — on which `.not.toContain` throws rather than passing
+  // (#2816). Wait for the remount to have actually addressed the tab, then assert what
+  // that address does NOT carry. This is a readiness gate on the same fact the
+  // assertion is about, not a timeout bump.
+  await expect(frame, "the remounted pane must be addressed before its URL is judged").toHaveAttribute(
+    "src",
+    /\/v1\/webtab\//,
+    { timeout: 15_000 },
+  );
   // A remount is a fresh mount, so its address is clean again — the same rule as a
   // first mount, and the reason the reset LOOKED harmless.
   expect(await frame.getAttribute("src"), "a remount must not be cache-busted").not.toContain("_afreload");
