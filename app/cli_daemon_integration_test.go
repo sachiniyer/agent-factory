@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -163,7 +165,58 @@ func runIntegrationAFOK(t *testing.T, bin, dir string, args ...string) string {
 	return out
 }
 
+// integrationWarmupWait bounds how long an integration CLI call waits out a
+// daemon that is up but still restoring its instances.
+//
+// It is a readiness wait, not a widened command timeout: the 30s per-invocation
+// bound below is unchanged, and only the one refusal that means "ask me again"
+// is waited on. A few seconds is plenty — the daemon restores quickly, and the
+// failure this exists for was on the very first call of a test.
+// A var, not a const, only so the timeout-path test can shorten it; production
+// test runs never reassign it.
+var integrationWarmupWait = 30 * time.Second
+
+// runIntegrationAF runs the built af binary, waiting out the daemon's warm-up
+// window rather than racing it (#2863).
+//
+// The first CLI call of a test is what auto-starts the daemon, so it races that
+// daemon's own session restore. In that window every state-dependent RPC is
+// refused with daemonStartingErrText and the CLI exits 1 — and the helper went
+// straight to require.NoError, so whether the test passed depended on how loaded
+// the runner was. The failure then read as "the TUI cannot see CLI changes
+// through the daemon" when what actually happened is that the CLI was told to
+// retry and the test refused to.
+//
+// Retrying here is not a policy this test invents: IsDaemonStartingErr's own doc
+// says callers should treat it as retryable, the refusal is an admission check
+// that happens BEFORE any state-dependent work (see errDaemonStarting), so
+// nothing was attempted and re-running is safe, and the TUI already does exactly
+// this — TestColdStartFromSnapshot_WaitsOutWarmingDaemon pins that behavior. The
+// helper was the one participant that did not.
+//
+// Deliberately narrow: it matches ONLY the warm-up refusal, via the product's own
+// classifier, so a genuine CLI failure still fails immediately and loudly rather
+// than being retried into a timeout. Nothing about what the callers assert
+// changes.
 func runIntegrationAF(t *testing.T, bin, dir string, args ...string) (string, error) {
+	t.Helper()
+	deadline := time.Now().Add(integrationWarmupWait)
+	for attempt := 1; ; attempt++ {
+		out, err := runIntegrationAFOnce(t, bin, dir, args...)
+		if !daemon.IsDaemonStartingErr(err) {
+			return out, err
+		}
+		if !time.Now().Before(deadline) {
+			// Keep the underlying refusal in the chain: a timeout here must still
+			// say WHY it gave up, not just that it did.
+			return out, fmt.Errorf("af %s: daemon was still restoring after %s (%d attempts): %w",
+				strings.Join(args, " "), integrationWarmupWait, attempt, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func runIntegrationAFOnce(t *testing.T, bin, dir string, args ...string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -315,4 +368,96 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, count, "instances.json must hold exactly one record for the title (#808)")
+}
+
+// fakeAFScript writes a stand-in for the af binary that runIntegrationAF can
+// exec. It counts its invocations in a file so a test can prove how many times
+// the helper actually ran it, then behaves as `body` dictates.
+func fakeAFScript(t *testing.T, dir, body string) (script, counter string) {
+	t.Helper()
+	counter = filepath.Join(dir, "attempts")
+	script = filepath.Join(dir, "fake-af")
+	// The counter path is quoted: t.TempDir() embeds the test name, and an
+	// unquoted path is one rename away from splitting on a space.
+	src := "#!/bin/sh\n" +
+		"n=$(cat '" + counter + "' 2>/dev/null || echo 0)\n" +
+		"n=$((n+1)); echo $n > '" + counter + "'\n" +
+		body
+	require.NoError(t, os.WriteFile(script, []byte(src), 0o755))
+	return script, counter
+}
+
+func fakeAFAttempts(t *testing.T, counter string) int {
+	t.Helper()
+	raw, err := os.ReadFile(counter)
+	require.NoError(t, err)
+	var n int
+	_, err = fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &n)
+	require.NoError(t, err)
+	return n
+}
+
+// TestRunIntegrationAF_WaitsOutTheDaemonWarmUp is the #2863 regression guard.
+//
+// The first CLI call of an integration test auto-starts the daemon and therefore
+// races its session restore; in that window the daemon refuses state-dependent
+// RPCs with the warm-up error and the CLI exits 1. The helper used to hand that
+// straight to require.NoError, so the test passed or failed on how loaded the
+// runner was.
+//
+// errDaemonStarting() is the same literal cold_start_test.go uses, and its init()
+// already asserts daemon.IsDaemonStartingErr recognizes it — so this cannot drift
+// into testing a string the product no longer emits.
+func TestRunIntegrationAF_WaitsOutTheDaemonWarmUp(t *testing.T) {
+	dir := t.TempDir()
+	script, counter := fakeAFScript(t, dir,
+		"if [ $n -lt 3 ]; then\n"+
+			"  echo '{\"error\":\""+errDaemonStarting().Error()+"\"}' >&2\n"+
+			"  exit 1\n"+
+			"fi\n"+
+			"echo ready\n")
+
+	out, err := runIntegrationAF(t, script, dir, "sessions", "list")
+	require.NoError(t, err, "a daemon that is merely still restoring must be waited out, not failed on")
+	assert.Equal(t, "ready\n", out)
+	assert.Equal(t, 3, fakeAFAttempts(t, counter),
+		"the helper must actually have retried; passing on the first attempt would prove nothing")
+}
+
+// TestRunIntegrationAF_DoesNotRetryARealFailure is the other half, and the one
+// that keeps this from weakening every test using the helper: only the warm-up
+// refusal is waited on. A genuine CLI failure must still fail immediately and
+// loudly rather than being retried into a timeout.
+func TestRunIntegrationAF_DoesNotRetryARealFailure(t *testing.T) {
+	dir := t.TempDir()
+	script, counter := fakeAFScript(t, dir,
+		"echo '{\"error\":\"no such session\"}' >&2\n"+
+			"exit 1\n")
+
+	started := time.Now()
+	_, err := runIntegrationAF(t, script, dir, "sessions", "kill", "nope")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no such session", "the real error must survive to the caller")
+	assert.Equal(t, 1, fakeAFAttempts(t, counter), "a real failure must be reported on the first attempt")
+	assert.Less(t, time.Since(started), integrationWarmupWait,
+		"a real failure must not be retried into the warm-up window")
+}
+
+// TestRunIntegrationAF_WarmUpTimeoutSaysWhy: if the daemon never finishes
+// restoring, the helper must still report the refusal it gave up on rather than a
+// bare timeout — otherwise the flake this fixes would come back as a mystery.
+func TestRunIntegrationAF_WarmUpTimeoutSaysWhy(t *testing.T) {
+	dir := t.TempDir()
+	script, _ := fakeAFScript(t, dir,
+		"echo '{\"error\":\""+errDaemonStarting().Error()+"\"}' >&2\n"+
+			"exit 1\n")
+
+	prev := integrationWarmupWait
+	integrationWarmupWait = 150 * time.Millisecond
+	t.Cleanup(func() { integrationWarmupWait = prev })
+
+	_, err := runIntegrationAF(t, script, dir, "sessions", "list")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still restoring", "the timeout must name the condition it waited on")
+	assert.Contains(t, err.Error(), errDaemonStarting().Error(), "and keep the underlying refusal")
 }
