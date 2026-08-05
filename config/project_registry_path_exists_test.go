@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,6 +42,40 @@ func TestProjectPathExists_DeterminateAnswers(t *testing.T) {
 	ancestorIsAFile := filepath.Join(root, "notes.txt", "checkout")
 	assert.False(t, projectPathExists(ancestorIsAFile),
 		"a path under a regular-file ancestor cannot exist, and ENOTDIR proves it")
+}
+
+// The sibling errnos of ENOTDIR (#2948, from the #2889 review): each PROVES the
+// path resolves to nothing, for any process with any credentials, so each is a
+// determinate absence rather than the ambiguity that fails closed.
+func TestProjectPathExists_UnresolvablePathsAreAbsent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX path resolution errnos")
+	}
+	root := t.TempDir()
+
+	// A symlink cycle: a -> b -> a. Resolution never terminates, so ELOOP.
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	require.NoError(t, os.Symlink(b, a))
+	require.NoError(t, os.Symlink(a, b))
+	require.ErrorIs(t, statErrOf(a), syscall.ELOOP, "the fixture must actually produce ELOOP")
+	assert.False(t, projectPathExists(a),
+		"a symlink cycle resolves to nothing: no checkout is present there")
+	assert.False(t, projectPathExists(filepath.Join(a, "checkout")),
+		"and nothing below it is present either")
+
+	// A component longer than NAME_MAX cannot name anything on this filesystem.
+	tooLong := filepath.Join(root, strings.Repeat("x", 5000))
+	require.ErrorIs(t, statErrOf(tooLong), syscall.ENAMETOOLONG, "the fixture must actually produce ENAMETOOLONG")
+	assert.False(t, projectPathExists(tooLong),
+		"a path that cannot name anything is absent, not ambiguous")
+}
+
+// statErrOf is the raw stat error, so a fixture can assert it really produced the
+// errno the case is about — a test for ELOOP that silently got ENOENT would be
+// asserting nothing.
+func statErrOf(path string) error {
+	_, err := os.Stat(path)
+	return err
 }
 
 // The regression this pins: an unreadable root must not be reported as gone.
