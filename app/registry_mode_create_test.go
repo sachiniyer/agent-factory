@@ -146,24 +146,23 @@ func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
 	}
 }
 
-// The no-project state outranks the session count. The refresh tick fetches with
-// an empty repoID, which the daemon answers with the cross-repo snapshot, so rows
-// from other repos reach the store even though the launch path skips exactly that
-// for registry mode — and none of them can be acted on under an empty active
-// scope. Ordered the other way, the first poll replaced this hint with
-// "s opens the selected tab" for anyone who has sessions elsewhere.
-func TestRegistryModeEmptyWorkspaceSurvivesForeignSessionsInTheStore(t *testing.T) {
+// A pane-empty workspace keeps its own message even with no active project.
+// "no panes open" and "no project selected" answer different questions and are
+// not alternatives — collapsing them told a user who had just closed their panes
+// to go pick a project instead of reopening one. Caught in review on this PR.
+func TestPaneEmptyWorkspaceKeepsItsOwnMessageWithoutAProject(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = ""
-	h.store.AddInstance(instanceWithFakeBackend(t, "from-another-repo"))
+	h.store.AddInstance(instanceWithFakeBackend(t, "somewhere"))
 	resizeHome(h, 120, 30)
-	require.Positive(t, h.store.NumInstances(), "precondition: a cross-repo row reached the projection")
+	require.Positive(t, h.store.NumInstances())
+	require.Empty(t, h.visiblePanes, "precondition: sessions exist, no pane is open")
 
 	view := flatten(h.View())
 
-	assert.Contains(t, view, "No project selected",
-		"a session that cannot be acted on must not displace the one hint that unblocks the user")
-	assert.NotContains(t, view, "s opens the selected tab")
+	assert.Contains(t, view, "no panes open", "the pane-empty state owns this message")
+	assert.NotContains(t, view, "No project selected",
+		"#2830 is scoped to the EMPTY rail; it must not reach a workspace that has sessions")
 }
 
 // Inside a repo the ordinary onboarding copy is untouched: `n` works there, so
