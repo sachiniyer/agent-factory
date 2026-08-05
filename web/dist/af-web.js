@@ -10187,6 +10187,9 @@ function previewOriginReachable(origin) {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
+      if (!ok) {
+        previewReachable.delete(port);
+      }
       resolve(ok);
     };
     const onMessage = (e) => {

@@ -394,6 +394,70 @@ func TestPreviewOrigin_NoHeaderCarriesTheLabelUpstream(t *testing.T) {
 		"only the ORIGIN part of Referer is secret — its path and query survive")
 }
 
+// TestPreviewOrigin_DoesNotLaunderHostileOrigins is the other half of the rewrite,
+// and the half that makes it safe rather than merely tidy.
+//
+// Rewriting EVERY non-empty Origin would convert a hostile one into a trusted one: a
+// form POST from another site (or an `Origin: null` from a sandboxed frame) to a
+// known — or leaked — preview URL would arrive at the dev server looking same-origin,
+// defeating the only signal an upstream CSRF guard has. And since this rewrite exists
+// precisely because labels can escape into request logs, "the attacker knows the
+// label" is the case it has to survive, not one it may assume away.
+//
+// A foreign Origin carries no secret of ours — it is the sender's own — so it is
+// passed through untouched for the upstream to refuse.
+func TestPreviewOrigin_DoesNotLaunderHostileOrigins(t *testing.T) {
+	seen := make(chan http.Header, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	m, previewAddr, sessionID, tabIDs := newPreviewOriginFixture(t, upstream.URL)
+	host := previewHostOf(t, m, previewAddr, sessionID, tabIDs[0])
+	targetURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+
+	// A forged X-Forwarded-Proto must not change what counts as "our own origin".
+	// If it did, the tab's real http:// Origin would stop matching and be forwarded
+	// verbatim — leaking the label this rewrite exists to contain — and the matching
+	// https spelling would be laundered instead.
+	forged, err := http.NewRequest(http.MethodPost, "http://"+previewAddr+"/api/save", strings.NewReader("{}"))
+	require.NoError(t, err)
+	forged.Host = host
+	forged.Header.Set("X-Forwarded-Proto", "https")
+	forged.Header.Set("Origin", "http://"+host)
+	fResp, err := previewHTTPClient().Do(forged)
+	require.NoError(t, err)
+	require.NoError(t, fResp.Body.Close())
+	fGot := <-seen
+	require.Equal(t, "http://"+targetURL.Host, fGot.Get("Origin"),
+		"a forged X-Forwarded-Proto must not make the tab's OWN origin look foreign — that would leak the label")
+	label2, ok2 := previewHostLabel(host)
+	require.True(t, ok2)
+	require.NotContains(t, fGot.Get("Origin"), label2)
+
+	for _, hostile := range []string{"http://evil.example", "null", "https://" + host} {
+		req, rerr := http.NewRequest(http.MethodPost, "http://"+previewAddr+"/api/save", strings.NewReader("{}"))
+		require.NoError(t, rerr)
+		req.Host = host
+		req.Header.Set("Origin", hostile)
+		req.Header.Set("Referer", hostile+"/attack")
+		resp, derr := previewHTTPClient().Do(req)
+		require.NoError(t, derr)
+		require.NoError(t, resp.Body.Close())
+
+		got := <-seen
+		require.Equal(t, hostile, got.Get("Origin"),
+			"a foreign Origin must reach the dev server AS IS, so its CSRF guard can refuse it")
+		require.NotEqual(t, "http://"+targetURL.Host, got.Get("Origin"),
+			"it must never be laundered into one the upstream trusts")
+		require.Equal(t, hostile+"/attack", got.Get("Referer"),
+			"the same holds for Referer — it is the sender's own, not this tab's secret")
+	}
+}
+
 // TestPreviewOrigin_RewritesSetCookieToItsOwnHost pins the cookie half of the
 // isolation. rewriteSetCookiePaths drops Domain, so a dev server that tries to set
 // Domain=localhost — which every per-tab origin would then send, defeating the
@@ -417,6 +481,47 @@ func TestPreviewOrigin_RewritesSetCookieToItsOwnHost(t *testing.T) {
 	require.Equal(t, "/api", c.Path, "at prefix \"\" the app's own cookie path is already correct")
 	require.Empty(t, c.Domain,
 		"Domain must be dropped: a Domain=localhost cookie would be sent to EVERY per-tab origin")
+
+	// A preview frame is CROSS-SITE with the SPA, so a Lax or Strict cookie — which is
+	// what an app gets by default — is withheld on every request from it, including
+	// same-origin ones. Left alone, a cookie-backed app looks permanently logged out
+	// the moment preview_listen_addr is enabled, having worked on the mirror.
+	require.Equal(t, http.SameSiteNoneMode, c.SameSite,
+		"Lax/Strict mean NEVER SENT in a cross-site frame, so the cookie is inert unless rewritten")
+	require.Contains(t, resp.Header.Get("Set-Cookie"), "SameSite=None",
+		"and it must reach the browser spelled that way, not merely parse as it")
+	require.True(t, c.Secure, "SameSite=None requires Secure; *.localhost is trustworthy so the browser takes it")
+	require.True(t, c.Partitioned,
+		"partitioned keeps this in a jar keyed to the top-level site rather than creating an ambient third-party cookie")
+}
+
+// TestMirrorRoute_LeavesAppCookieSemanticsAlone is the other half of the previous
+// test, and the reason it exists is that the fix must not reach the route that
+// already works. The mirrored preview is same-origin with the SPA, so the app's own
+// SameSite choice is honored there and must survive untouched.
+func TestMirrorRoute_LeavesAppCookieSemanticsAlone(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Set-Cookie", "sid=1; Path=/api; HttpOnly")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	m, _, sessionID, tabIDs := newPreviewOriginFixture(t, upstream.URL)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, webtabPathPrefix+sessionID+"/"+tabIDs[0]+"/api/login", nil)
+	newHTTPMux(&controlServer{manager: m}).ServeHTTP(rec, req)
+
+	// Asserted on the SERIALIZED header, which is what the browser actually reads.
+	// The parsed enum is a trap here: http.SameSiteDefaultMode is 1, while a cookie
+	// carrying no SameSite attribute parses to the zero value 0 — so comparing against
+	// the named constant tests something other than "the app's attribute is untouched".
+	setCookie := rec.Header().Get("Set-Cookie")
+	require.NotEmpty(t, setCookie)
+	require.NotContains(t, setCookie, "SameSite",
+		"the mirror is same-origin with the SPA: the app's cookie semantics are already correct there")
+	require.NotContains(t, setCookie, "Partitioned")
+	require.NotContains(t, setCookie, "Secure", "and must not be forced Secure on a plain-HTTP mirror")
+	require.Contains(t, setCookie, "Path=/v1/webtab/", "it is still re-scoped under the tab's prefix")
 }
 
 // TestPreviewOrigin_RootIsTheAppsOwnRoot pins that "/" on a per-tab origin reaches
@@ -699,4 +804,27 @@ func TestPreviewOrigin_ProbeHostAnswersUnauthenticated(t *testing.T) {
 	// label, so no tab could ever be addressed at it.
 	require.False(t, isPreviewLabel(previewProbeLabel),
 		"the probe label must be unable to name a tab")
+}
+
+// TestPreviewAuth_DoesNotRefreshOnUnknownSession pins that the mint guard reads only
+// the ALREADY-RESTORED map. /v1/preview-auth is a GET, and under the default
+// tokenless-loopback posture any cross-origin page can drive it without being able to
+// read the reply — so a miss path that runs findSessionByStableID + refreshLocked
+// would let that page force repeated disk work with random session ids. The guard
+// that stopped the registry being filled must not hand over a cheaper amplifier.
+func TestPreviewAuth_DoesNotRefreshOnUnknownSession(t *testing.T) {
+	upstream := echoUpstream(t, "app")
+	m, _, sessionID, tabIDs := newPreviewOriginFixture(t, upstream.URL)
+
+	// A live tab still validates through the tracked map.
+	require.True(t, m.hasIframeTab(sessionID, tabIDs[0]))
+
+	// Unknown ids answer false, and do so from memory. resolveStreamSession is the
+	// refreshing path; trackedStreamSession is the one this must use.
+	for _, id := range []string{"no-such-session", "", "af-" + sessionID, sessionID + "x"} {
+		require.False(t, m.hasIframeTab(id, tabIDs[0]), "unknown session %q must not validate", id)
+		require.Nil(t, m.trackedStreamSession(id), "and must not be resolvable from the tracked map")
+	}
+	// A known session with an unknown tab is equally a miss, with no refresh either.
+	require.False(t, m.hasIframeTab(sessionID, "no-such-tab"))
 }

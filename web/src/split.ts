@@ -184,6 +184,14 @@ function previewOriginReachable(origin: string): Promise<boolean> {
   if (cached !== undefined) {
     return cached;
   }
+  // Only a SUCCESS is cached; a failure is evicted below so the next ↻ re-probes.
+  // A cached false is sticky in the worst way: the everyday causes are transient —
+  // the operator has not forwarded the port yet, the listener is mid-rebind, the
+  // hidden frame timed out once under load — and every one of them resolves without
+  // the page reloading. Retry already clears the per-pane origin and re-fetches
+  // /v1/preview-auth, so a remembered "unreachable" would silently pin the pane to
+  // the mirror until a full SPA reload, which is the one thing the user has no reason
+  // to think of doing.
   // Keyed on the PORT, so a listener that moved is a different key and gets its own
   // probe; only a listener that came back on the SAME port reuses this answer, which
   // is the case where the answer is still true.
@@ -202,6 +210,9 @@ function previewOriginReachable(origin: string): Promise<boolean> {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
+      if (!ok) {
+        previewReachable.delete(port);
+      }
       resolve(ok);
     };
     const onMessage = (e: MessageEvent): void => {

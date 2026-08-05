@@ -143,6 +143,33 @@ func (cs *controlServer) webTabProxyHandler(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// requestOwnOrigin is the origin THIS request was addressed to, as the browser would
+// spell it in an Origin header: the scheme it actually reached af on, plus its Host.
+// It is what rewriteOriginHeader compares against, so only a header naming this very
+// tab's origin is rewritten and a foreign one is left for the upstream to judge.
+//
+// It deliberately does NOT use requestIsHTTPS, and the difference is the point.
+// That helper honors X-Forwarded-Proto because for its purpose — telling the upstream
+// what scheme the user's page is on — a forged value buys a peer nothing but broken
+// links for itself. Here the value decides IDENTITY, and a client-settable input
+// deciding identity is a bypass in both directions: send `X-Forwarded-Proto: https`
+// and the browser's real `Origin: http://…` stops matching, so the tab's own header
+// is misread as foreign and forwarded verbatim — leaking the capability label this
+// rewrite exists to contain; send the matching https spelling too and a foreign
+// origin gets laundered instead.
+//
+// So the scheme comes from the connection alone. The preview origin is plain HTTP by
+// construction: af terminates no TLS, and per-tab origins are *.localhost, which is
+// same-machine only — there is no legitimate TLS-terminating front on this route for
+// r.TLS to be missing behind.
+func requestOwnOrigin(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
 // serveWebTabRoute is the proxy itself, for a tab already resolved to a route. It
 // is reached from BOTH origins (webTabProxyHandler, previewOriginHandler) and holds
 // every invariant of the route in one place.
@@ -432,7 +459,7 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 				// Origin-checking CSRF guard now agrees with its own Host instead of
 				// seeing a name it does not recognize. Referer keeps its path and query,
 				// since only the origin part is the secret.
-				rewriteOriginHeader(pr.Out.Header, targetURL)
+				rewriteOriginHeader(pr.Out.Header, targetURL, requestOwnOrigin(pr.In))
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -476,7 +503,7 @@ func (cs *controlServer) serveWebTabRoute(w http.ResponseWriter, r *http.Request
 			// this tab's proxy path (and Domain dropped so it defaults to the proxy
 			// host) so the cookie lands on the right path and coexists with the
 			// daemon's token cookie.
-			rewriteSetCookiePaths(resp.Header, tabPathPrefix)
+			rewriteSetCookiePaths(resp.Header, tabPathPrefix, route.previewOrigin)
 			// Send the app's own redirects back through the prefix rather than out
 			// to the daemon's origin, which is where a bare "/login" would otherwise
 			// land (#1843).
