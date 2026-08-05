@@ -295,19 +295,29 @@ func TestHookOutputSuffixKeepsTextAfterCompleteTokenWithOtherLines(t *testing.T)
 // selecting an endpoint. Selection stops at the first malformed record now, so
 // the work is bounded by where that record begins.
 func TestHookEndpointSelectionBoundedOnJSONPrefixFlood(t *testing.T) {
-	flood := strings.Repeat("[\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
+	// Bracket lines are prose — an endpoint is an object — so a flood of them is
+	// skipped without parsing and the endpoint is still found.
+	brackets := strings.Repeat("[\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
 	started := time.Now()
-	endpoint, _ := selectHookEndpoint(flood)
-	assert.Less(t, time.Since(started), time.Second, "endpoint selection must not rescan the suffix per line")
-	assert.Nil(t, endpoint, "an unterminated record stops selection rather than promoting past it")
+	endpoint, _ := selectHookEndpoint(brackets)
+	assert.Less(t, time.Since(started), time.Second, "bracket lines must not be parsed per line")
+	require.NotNil(t, endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", endpoint.URL)
 
-	// The same flood as PROSE (not JSON openers) must still find the endpoint fast.
+	// Prose likewise.
 	prose := strings.Repeat("tunnel forwarding\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
 	started = time.Now()
 	endpoint, _ = selectHookEndpoint(prose)
 	assert.Less(t, time.Since(started), time.Second)
 	require.NotNil(t, endpoint)
-	assert.Equal(t, "http://10.0.0.7:8080", endpoint.URL)
+
+	// An unterminated OBJECT is a record that broke, and stops selection — the
+	// scan must reach that conclusion quickly rather than rescanning the suffix.
+	objects := strings.Repeat("{\n", 20_000) + `{"url":"http://10.0.0.7:8080","token":"secret"}` + "\n"
+	started = time.Now()
+	endpoint, _ = selectHookEndpoint(objects)
+	assert.Less(t, time.Since(started), 2*time.Second, "an open record must not rescan the suffix")
+	assert.Nil(t, endpoint, "an unterminated record stops selection rather than promoting past it")
 }
 
 // Fifth review round on #2841.
@@ -475,4 +485,51 @@ exit 0
 
 	require.Error(t, err, "a record that broke still stops selection")
 	assert.NotContains(t, err.Error(), "logged-secret")
+}
+
+// Ninth review round on #2841.
+
+// P1 3717439335: `{level:INVALID,…` dies on its first token exactly as `[INFO] …`
+// does, so an offset-based prose test could not separate them. An endpoint is an
+// OBJECT, so a `{` line can be a broken record and a `[` line never is.
+func TestHookLaunchRejectsUnbalancedBraceLogLine(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{level:INVALID,"endpoint":' '{"url":"http://wrong.invalid","token":"logged-secret"}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	_, err := newHookProvisioner(h, "unbalanced brace log").provisionOrReap()
+
+	require.Error(t, err, "an unbalanced brace-started log is a record that broke")
+	assert.NotContains(t, err.Error(), "logged-secret")
+}
+
+// P1 3717439336: the continuation separator moved onto its own line bypassed a
+// trailing check that only looked at the value's own line.
+func TestHookLaunchRejectsEndpointBeforeContinuationLine(t *testing.T) {
+	for _, sep := range []string{`,"endpoint":`, `:`, `}`, `]`} {
+		t.Run(sep, func(t *testing.T) {
+			h := newHookState(t, "printf '%s\\n' '{\"url\":\"http://wrong.invalid\",\"token\":\"logged-secret\"}' '"+sep+"'\n"+
+				`echo '{"url":"http://10.0.0.7:8080","token":"secret"}'`+"\nexit 0\n", "")
+			_, err := newHookProvisioner(h, "continuation line "+sep).provisionOrReap()
+
+			require.Error(t, err, "a value followed by JSON structure is not a record")
+			assert.NotContains(t, err.Error(), "logged-secret")
+		})
+	}
+}
+
+// P2 3717439337: punctuated bracketed prose is still prose.
+func TestHookLaunchIgnoresPunctuatedBracketProse(t *testing.T) {
+	for _, prose := range []string{`[2026], tunnel forwarding`, `[2026]: tunnel forwarding`, `[2026]; forwarding`} {
+		t.Run(prose, func(t *testing.T) {
+			h := newHookState(t, "printf '%s\\n' '"+prose+"'\n"+
+				`echo '{"url":"http://10.0.0.7:8080","token":"secret"}'`+"\nexit 0\n", "")
+			res, err := newHookProvisioner(h, "punctuated prose").provisionOrReap()
+
+			require.NoError(t, err, "punctuated bracketed prose must not stop selection")
+			require.NotNil(t, res.Endpoint)
+			assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+		})
+	}
 }

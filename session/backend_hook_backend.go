@@ -600,34 +600,35 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 		for open < lineEnd && isJSONSpace(stdout[open]) {
 			open++
 		}
-		if open >= lineEnd || (stdout[open] != '{' && stdout[open] != '[') {
-			cursor = lineEnd // prose: a tunnel logging into the inherited stream
+		// The endpoint is an OBJECT (docs/remote-hooks.md), so only a `{` line can
+		// be a record. Everything else is a tunnel logging into the inherited
+		// stream — plain prose, or a bracketed prefix like `[INFO] …`, `[2026] …`,
+		// `[2026], …` — and is skipped without parsing, which also keeps a flood of
+		// them linear.
+		if open >= lineEnd || stdout[open] != '{' {
+			cursor = lineEnd
 			continue
 		}
 
 		decoder := json.NewDecoder(strings.NewReader(stdout[open:]))
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil {
-			// Prose that was never JSON: the parse died on the first token, as
-			// `[INFO] …` does at its `I`. A record that BROKE gets further in
-			// (`{"level":INVALID` reaches offset 10). Only the latter leaves a
-			// structure whose extent is unknown; log prefixes that merely open a
-			// bracket must not poison the records after them.
-			if hookLineNeverStartedJSON(err) {
+			// The endpoint is an OBJECT (docs/remote-hooks.md), so a line opening a
+			// BRACKET is never a record: `[INFO] …`, `[2026] …` and `[INFO] opening
+			// {config` are log prefixes however their message is punctuated.
+			//
+			// Only a `{` line can be a record that broke, and only an unbalanced one
+			// leaves a structure whose extent is unknown — anything after it may be
+			// its contents, so selection stops. `{config} loaded` closes what it
+			// opened, so skipping just that line is safe.
+			// Only an UNBALANCED record leaves a structure whose extent is unknown —
+			// anything after it may be its contents, so selection stops.
+			// `{config} loaded` closes what it opened, so skipping that line is safe.
+			if hookLineBracketsBalanced(line) {
 				cursor = lineEnd
 				continue
 			}
-			// A line whose brackets close is self-contained: bracketed prose like
-			// "[INFO] tunnel forwarding", or a malformed record whose contents are
-			// all on this line. Either way skipping the LINE is safe, because
-			// nothing in it becomes a candidate. A line left open continues into
-			// the next, and from there the structure is unknown — anything after
-			// it may be that record's contents, so selection stops.
-			if !hookLineBracketsBalanced(line) {
-				return nil, sawJSON
-			}
-			cursor = lineEnd
-			continue
+			return nil, sawJSON
 		}
 		sawJSON = true
 
@@ -641,8 +642,10 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 			rest++
 		}
 		switch {
-		case rest >= valueLineEnd:
-			// A clean record, and the only shape that may be the endpoint.
+		case rest >= valueLineEnd && !hookNextLineContinues(stdout, valueLineEnd):
+			// A clean record, and the only shape that may be the endpoint. The next
+			// line is checked too: a separator moved onto its own line continues
+			// this record just as one on the same line does.
 			if ej, ok := decodeHookEndpointJSON(string(raw)); ok {
 				// ej.TLSFingerprint is intentionally not read — TLS was removed; an
 				// old script that still echoes it parses fine and the value is
@@ -653,6 +656,9 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 			// Another value beside it: a log line carrying several. None of them is
 			// a record, so skip them all — later lines stay trustworthy because
 			// this line closed.
+		case rest >= valueLineEnd:
+			// The record continues on the next line.
+			return nil, sawJSON
 		case stdout[rest] == ',' || stdout[rest] == ':':
 			// `{…},"endpoint":` — a structural separator means the record is still
 			// open, so its extent is unknown and nothing after it is promoted.
@@ -674,18 +680,29 @@ func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
-// hookLineNeverStartedJSON reports that a line only looked like JSON because of
-// its opening bracket. encoding/json reports where it gave up; failing on the
-// first token means nothing valid was ever parsed, which is a bracketed log
-// prefix rather than a record that broke partway.
-func hookLineNeverStartedJSON(err error) bool {
-	syntaxErr, ok := err.(*json.SyntaxError)
-	return ok && syntaxErr.Offset <= hookJSONFirstTokenOffset
+// hookNextLineContinues reports that the next non-empty line begins with JSON
+// structure — a separator or a closer — which means the value above it was not a
+// record of its own. A comma moved onto its own line continues the record just
+// as one left on the same line does, and a closing bracket means the value sat
+// inside a container that started earlier.
+func hookNextLineContinues(output string, from int) bool {
+	for cursor := from; cursor < len(output); {
+		lineEnd := nextHookOutputLine(output, cursor)
+		trimmed := strings.TrimLeft(strings.TrimRight(output[cursor:lineEnd], "\r\n"), " \t")
+		if trimmed == "" {
+			cursor = lineEnd
+			continue
+		}
+		switch trimmed[0] {
+		case ',', ':', '}', ']':
+			// A separator OR a closer: either way the value above was inside
+			// something that had not ended, so it is not a record of its own.
+			return true
+		}
+		return false
+	}
+	return false
 }
-
-// hookJSONFirstTokenOffset is the 1-based offset encoding/json reports when the
-// byte right after an opener is already invalid.
-const hookJSONFirstTokenOffset = 2
 
 // hookLineBracketsBalanced reports whether every object/array opened on this line
 // also closes on it, WITH A MATCHING BRACKET, ignoring brackets inside JSON
