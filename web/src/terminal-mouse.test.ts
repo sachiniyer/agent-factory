@@ -9,6 +9,7 @@ import {
   terminalMouseOverrideHeld,
   lineContentColumns,
   terminalCellAtPoint,
+  textFromCells,
   TOUCH_LONG_PRESS_MS,
   TOUCH_SCROLL_SLOP_PX,
   touchHistoryScrollPlan,
@@ -205,4 +206,11 @@ test("a wide glyph pushed past the wrap keeps its token whole (#2940)", () => {
   const separated = ["a", "b", "c", " ", /* row 2 */ "d", "e", " ", " "];
   assert.deepEqual(wordRangeAtColumn(separated, 0), { start: 0, length: 3 });
   assert.deepEqual(wordRangeAtColumn(separated, 4), { start: 4, length: 2 });
+});
+
+test("the copied text comes from the snapshot, continuations and all (#2940)", () => {
+  const cells = ["近", "", "藤", "", " ", "o", "k"];
+  assert.equal(textFromCells(cells, { start: 0, length: 4 }), "近藤");
+  assert.equal(textFromCells(cells, { start: 5, length: 2 }), "ok");
+  assert.equal(textFromCells(cells, { start: 0, length: 0 }), "");
 });

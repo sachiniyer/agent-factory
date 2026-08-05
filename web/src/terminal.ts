@@ -56,10 +56,10 @@ import {
   invertTerminalMouseOverride,
   lineContentColumns,
   terminalCellAtPoint,
-  type TerminalCellPoint,
   terminalMouseOverride,
   terminalMouseOverrideHeld,
   type TerminalMouseOverride,
+  textFromCells,
   TOUCH_LONG_PRESS_MS,
   touchHistoryScrollPlan,
   touchPressStillHeld,
@@ -87,6 +87,16 @@ const BACKOFF_MAX_MS = 10_000;
 // Debounce the fit→OpResize send so dragging a window edge sends one resize on
 // settle, not one per animation frame. The server echoes the winning size back.
 const RESIZE_DEBOUNCE_MS = 120;
+
+/** A long press resolved at touchstart: the flattened wrapped block, the index the
+ *  finger landed on, and the grid it was all read against. */
+interface TouchPressSnapshot {
+  cells: string[];
+  index: number;
+  firstRow: number;
+  cols: number;
+  bufferType: "normal" | "alternate";
+}
 
 interface PendingViewportAnchor {
   /** A marker follows the actual line while inactive output shifts the buffer. */
@@ -155,17 +165,16 @@ export class AttachTerminal {
   // coordinates. Resolving it when the timer fires would read the viewport half a
   // second later, and under live output the row the finger is on has scrolled by
   // then — copying whatever slid beneath it instead of what was pressed.
-  private touchPressCell: TerminalCellPoint | null = null;
-  // …and a marker on that row. A FULL scrollback ring trims from the top while the
-  // finger rests, shifting every absolute index down under the anchor; a marker is
-  // what xterm gives you to survive that, and it is the mechanism the viewport
-  // anchor above already uses.
+  // The press, READ WHEN THE FINGER LANDS: the whole wrapped block it fell in, and
+  // where in that block it fell. Resolving the text at touchstart instead of when the
+  // timer fires is what makes the copy immune to everything the terminal can do
+  // during the hold — a trim, an in-place rewrite by a progress bar, an
+  // alternate-screen TUI scrolling underneath, a reflow. Each of those was a separate
+  // way to copy the wrong text while looking like it worked; none of them can reach a
+  // snapshot. What is resolved late is only the HIGHLIGHT, which is cosmetic and is
+  // skipped when the live grid no longer matches.
+  private touchPress: TouchPressSnapshot | null = null;
   private touchPressMarker: IMarker | null = null;
-  // The grid the press was resolved against. A reflow (a peer's echoed size, or a
-  // local fit) re-lays wrapped content, so a column saved against the old width names
-  // a different cell in the new one; a buffer switch invalidates the row outright.
-  private touchPressBuffer: "normal" | "alternate" | null = null;
-  private touchPressCols = 0;
   // One-shot, armed by a recognised press: it suppresses the menu THAT touch provokes
   // and nothing else — a keyboard menu (Shift+F10, the Menu key, assistive tech)
   // arrives with no pointer event to re-scope it.
@@ -263,11 +272,9 @@ export class AttachTerminal {
     this.cancelTouchLongPress();
     this.discardPendingTouchCopy();
     this.disposeTouchPressMarker();
-    this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
-    if (this.touchPressCell) {
-      this.touchPressBuffer = this.term.buffer.active.type;
-      this.touchPressCols = this.term.cols;
-      this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
+    this.touchPress = press ? this.snapshotPress(press.clientX, press.clientY) : null;
+    if (this.touchPress) {
+      this.touchPressMarker = this.registerPressMarker(this.touchPress.firstRow);
       this.startTouchLongPress();
     }
   };
@@ -773,123 +780,107 @@ export class AttachTerminal {
     this.touchPressMarker = null;
   }
 
-  /** The cell under a viewport point, in ABSOLUTE buffer coordinates so it survives
-   *  everything the terminal does to the viewport afterwards. */
-  private bufferCellAtPoint(x: number, y: number): TerminalCellPoint | null {
-    const rowsEl = this.container.querySelector<HTMLElement>(".xterm-rows");
-    if (!rowsEl) {
-      return null;
-    }
-    const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), this.term.cols, this.term.rows);
-    return cell === null ? null : { col: cell.col, row: this.term.buffer.active.viewportY + cell.row };
-  }
-
   /**
-   * Selects the token the finger is resting on, and holds the text for the lift.
+   * Turns the snapshot into a selection and a staged copy.
    *
-   * The selection happens now, so the highlight appears under the finger at the
-   * moment the press is recognised; the clipboard write waits for touchend, where a
-   * user gesture is still in scope. Splitting the two is what makes the gesture work
-   * on Safari as well as Chrome.
+   * The TEXT comes from the snapshot, so it is what was under the finger when it
+   * landed. The HIGHLIGHT needs the live buffer and is therefore conditional: it is
+   * skipped, not guessed, when the grid has moved out from under the press.
    */
   private selectTouchWord(): void {
-    const press = this.touchPressCell;
+    const press = this.touchPress;
     if (!press) {
       return;
     }
-    const buffer = this.term.buffer.active;
-    const cols = this.term.cols;
-    // Everything below is resolved against the grid the finger pressed on, so a grid
-    // that is no longer that one invalidates the press rather than reinterpreting it.
-    // A reflow re-lays wrapped content under the saved column, and an alternate-screen
-    // switch (a TUI starting or exiting during the hold) makes the saved row name a
-    // line in a different buffer entirely. Both would copy real text from the wrong
-    // place, which is worse than copying nothing.
-    if (buffer.type !== this.touchPressBuffer || cols !== this.touchPressCols) {
-      return;
-    }
-    // The marker is the anchor whenever one exists: a full ring trims from the top
-    // while the finger rests, shifting every index below it. A marker reporting -1 has
-    // been DISPOSED — the pressed line itself was trimmed away — so there is nothing
-    // to copy; falling back to the raw row there would hand back whatever slid into
-    // that slot. The raw row is only a fallback where no marker could be made at all
-    // (an alternate buffer cannot register one).
-    let pressedRow: number;
-    if (this.touchPressMarker !== null) {
-      if (this.touchPressMarker.line < 0) {
-        return;
-      }
-      pressedRow = this.touchPressMarker.line;
-    } else {
-      pressedRow = press.row;
-    }
-    if (pressedRow < 0 || pressedRow >= buffer.length) {
-      return;
-    }
-    // A soft-wrapped line is SEVERAL buffer rows, and a phone is about forty columns
-    // wide — so the URLs and paths this gesture exists for wrap more often than not.
-    // Scan the whole wrapped block, or the token gets cut at the screen edge and the
-    // user silently copies a fragment of the thing they pressed on.
-    //
-    // Both walks are BOUNDED by the buffer. xterm's backing store is circular, so a
-    // read past the end can answer with the first retained row rather than nothing —
-    // and if that row is itself wrapped, an unbounded walk marches into unrelated
-    // scrollback, or never stops at all when the retained buffer is one long wrapped
-    // line.
-    let first = pressedRow;
-    while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
-      first -= 1;
-    }
-    let last = pressedRow;
-    while (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
-      last += 1;
-    }
-    // ONE ENTRY PER COLUMN, rows joined end to end, so an index is a position in the
-    // block. translateToString would collapse a wide character into a single index
-    // and quietly shift every column after it.
-    const cells: string[] = [];
-    for (let row = first; row <= last; row += 1) {
-      const line = buffer.getLine(row);
-      if (!line) {
-        break;
-      }
-      for (let col = 0; col < cols; col += 1) {
-        const buffered = line.getCell(col);
-        cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
-      }
-      // A wide glyph that will not fit the last cell is pushed to the next row, and
-      // xterm leaves the cell it vacated BLANK. That blank is structure, not content —
-      // xterm's own reflow reads it that way — so flattening it to a space would split
-      // an otherwise unbroken CJK or emoji token exactly at the wrap and copy one half.
-      // Narrowed to that case by looking at what the next row starts with, so an
-      // ordinary trailing blank keeps separating words.
-      const continues = buffer.getLine(row + 1);
-      if (
-        row < last &&
-        cells[cells.length - 1] === " " &&
-        continues !== undefined &&
-        continues.getCell(0)?.getWidth() === 2
-      ) {
-        cells[cells.length - 1] = "";
-      }
-    }
-    const pressed = (pressedRow - first) * cols + press.col;
-    const range = wordRangeAtColumn(cells, pressed) ?? { start: 0, length: lineContentColumns(cells) };
+    const range = wordRangeAtColumn(press.cells, press.index) ?? { start: 0, length: lineContentColumns(press.cells) };
     if (range.length === 0) {
       return; // a press on genuinely empty screen
     }
-    const at = wrappedCellPosition(range.start, cols);
-    this.term.select(at.col, first + at.row, range.length);
-    const text = this.term.getSelection();
+    const text = textFromCells(press.cells, range);
     if (text.trim() === "") {
-      this.term.clearSelection();
       return;
+    }
+    // A marker reporting -1 has been disposed — the block was trimmed away — and a
+    // different buffer or width means the row and column no longer name what they
+    // named when the finger landed. The copy is unaffected either way.
+    const markedFirstRow = this.touchPressMarker?.line ?? -1;
+    if (markedFirstRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
+      const at = wrappedCellPosition(range.start, press.cols);
+      this.term.select(at.col, markedFirstRow + at.row, range.length);
     }
     // Marked BEFORE the lift: the compatibility click this touch still owes is what
     // would otherwise reach the application and clear the selection just painted.
     this.touchCopyFired = true;
     this.suppressNextContextMenu = true;
     this.touchCopyPending = text;
+  }
+
+  /**
+   * Reads the press: the wrapped block under the finger, flattened one entry per
+   * column, plus where in it the finger landed.
+   *
+   * Everything the copy needs is taken HERE, while the finger is still going down.
+   * The alternative — keeping coordinates and reading the buffer when the timer fires
+   * — has to survive every mutation that can happen in 500ms, and each one is its own
+   * way to copy real text from the wrong place: a full ring trimming the pressed line
+   * or the earlier rows of its wrapped block, a progress bar rewriting the line in
+   * place, an alternate-screen TUI scrolling, a peer's resize reflowing the grid. A
+   * snapshot is immune to all of them at once.
+   */
+  private snapshotPress(x: number, y: number): TouchPressSnapshot | null {
+    const rowsEl = this.container.querySelector<HTMLElement>(".xterm-rows");
+    if (!rowsEl) {
+      return null;
+    }
+    const cols = this.term.cols;
+    const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), cols, this.term.rows);
+    if (!cell) {
+      return null;
+    }
+    const buffer = this.term.buffer.active;
+    const pressedRow = buffer.viewportY + cell.row;
+    if (pressedRow < 0 || pressedRow >= buffer.length) {
+      return null;
+    }
+    // A soft-wrapped line is SEVERAL buffer rows, and a phone is about forty columns
+    // wide, so the URLs and paths this gesture exists for wrap more often than not.
+    // Both walks are bounded by the buffer: xterm's store is circular, so a read past
+    // the end can answer with the first retained row rather than nothing.
+    let first = pressedRow;
+    while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
+      first -= 1;
+    }
+    // A block still marked wrapped at row 0 has had its earlier rows trimmed away, so
+    // what remains is a SUFFIX of the logical line. Copying it whole would return a
+    // fragment presented as the token.
+    if (buffer.getLine(first)?.isWrapped === true) {
+      return null;
+    }
+    let last = pressedRow;
+    while (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
+      last += 1;
+    }
+    const cells: string[] = [];
+    for (let row = first; row <= last; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line) {
+        return null;
+      }
+      for (let col = 0; col < cols; col += 1) {
+        const buffered = line.getCell(col);
+        cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+      }
+      // A wide glyph that will not fit the last cell is pushed to the next row, and
+      // the cell it vacated is left NULL — code 0, which is not a space anybody typed.
+      // Flattened to " " it splits an unbroken CJK or emoji token exactly at the wrap;
+      // read as the structure xterm's own reflow treats it as, the token survives. The
+      // code is what separates it from a real trailing space (code 32), which must
+      // keep separating words.
+      if (row < last && line.getCell(cols - 1)?.getCode() === 0) {
+        cells[cells.length - 1] = "";
+      }
+    }
+    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
   }
 
   /** The painted height of one terminal row, which turns a pixel-denominated gesture

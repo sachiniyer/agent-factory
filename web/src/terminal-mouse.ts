@@ -257,3 +257,10 @@ export function wrappedCellPosition(index: number, cols: number): TerminalCellPo
   return { col: index % cols, row: Math.floor(index / cols) };
 }
 
+
+/** The text of a cell range, dropping the empty continuations that keep an index a
+ *  column. Reading it off the snapshot rather than the live selection is what makes a
+ *  press immune to everything the terminal does during the hold. */
+export function textFromCells(cells: readonly string[], range: TerminalWordRange): string {
+  return cells.slice(range.start, range.start + range.length).join("");
+}

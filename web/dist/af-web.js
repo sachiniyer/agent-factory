@@ -7116,6 +7116,9 @@ function wrappedCellPosition(index, cols) {
   }
   return { col: index % cols, row: Math.floor(index / cols) };
 }
+function textFromCells(cells, range) {
+  return cells.slice(range.start, range.start + range.length).join("");
+}
 
 // src/theme.ts
 var THEME_CHOICES = ["auto", "light", "dark"];
@@ -7377,17 +7380,16 @@ var AttachTerminal = class {
   // coordinates. Resolving it when the timer fires would read the viewport half a
   // second later, and under live output the row the finger is on has scrolled by
   // then — copying whatever slid beneath it instead of what was pressed.
-  touchPressCell = null;
-  // …and a marker on that row. A FULL scrollback ring trims from the top while the
-  // finger rests, shifting every absolute index down under the anchor; a marker is
-  // what xterm gives you to survive that, and it is the mechanism the viewport
-  // anchor above already uses.
+  // The press, READ WHEN THE FINGER LANDS: the whole wrapped block it fell in, and
+  // where in that block it fell. Resolving the text at touchstart instead of when the
+  // timer fires is what makes the copy immune to everything the terminal can do
+  // during the hold — a trim, an in-place rewrite by a progress bar, an
+  // alternate-screen TUI scrolling underneath, a reflow. Each of those was a separate
+  // way to copy the wrong text while looking like it worked; none of them can reach a
+  // snapshot. What is resolved late is only the HIGHLIGHT, which is cosmetic and is
+  // skipped when the live grid no longer matches.
+  touchPress = null;
   touchPressMarker = null;
-  // The grid the press was resolved against. A reflow (a peer's echoed size, or a
-  // local fit) re-lays wrapped content, so a column saved against the old width names
-  // a different cell in the new one; a buffer switch invalidates the row outright.
-  touchPressBuffer = null;
-  touchPressCols = 0;
   // One-shot, armed by a recognised press: it suppresses the menu THAT touch provokes
   // and nothing else — a keyboard menu (Shift+F10, the Menu key, assistive tech)
   // arrives with no pointer event to re-scope it.
@@ -7468,11 +7470,9 @@ var AttachTerminal = class {
     this.cancelTouchLongPress();
     this.discardPendingTouchCopy();
     this.disposeTouchPressMarker();
-    this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
-    if (this.touchPressCell) {
-      this.touchPressBuffer = this.term.buffer.active.type;
-      this.touchPressCols = this.term.cols;
-      this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
+    this.touchPress = press ? this.snapshotPress(press.clientX, press.clientY) : null;
+    if (this.touchPress) {
+      this.touchPressMarker = this.registerPressMarker(this.touchPress.firstRow);
       this.startTouchLongPress();
     }
   };
@@ -7765,49 +7765,68 @@ var AttachTerminal = class {
     this.touchPressMarker?.dispose();
     this.touchPressMarker = null;
   }
-  /** The cell under a viewport point, in ABSOLUTE buffer coordinates so it survives
-   *  everything the terminal does to the viewport afterwards. */
-  bufferCellAtPoint(x, y) {
+  /**
+   * Turns the snapshot into a selection and a staged copy.
+   *
+   * The TEXT comes from the snapshot, so it is what was under the finger when it
+   * landed. The HIGHLIGHT needs the live buffer and is therefore conditional: it is
+   * skipped, not guessed, when the grid has moved out from under the press.
+   */
+  selectTouchWord() {
+    const press = this.touchPress;
+    if (!press) {
+      return;
+    }
+    const range = wordRangeAtColumn(press.cells, press.index) ?? { start: 0, length: lineContentColumns(press.cells) };
+    if (range.length === 0) {
+      return;
+    }
+    const text = textFromCells(press.cells, range);
+    if (text.trim() === "") {
+      return;
+    }
+    const markedFirstRow = this.touchPressMarker?.line ?? -1;
+    if (markedFirstRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
+      const at = wrappedCellPosition(range.start, press.cols);
+      this.term.select(at.col, markedFirstRow + at.row, range.length);
+    }
+    this.touchCopyFired = true;
+    this.suppressNextContextMenu = true;
+    this.touchCopyPending = text;
+  }
+  /**
+   * Reads the press: the wrapped block under the finger, flattened one entry per
+   * column, plus where in it the finger landed.
+   *
+   * Everything the copy needs is taken HERE, while the finger is still going down.
+   * The alternative — keeping coordinates and reading the buffer when the timer fires
+   * — has to survive every mutation that can happen in 500ms, and each one is its own
+   * way to copy real text from the wrong place: a full ring trimming the pressed line
+   * or the earlier rows of its wrapped block, a progress bar rewriting the line in
+   * place, an alternate-screen TUI scrolling, a peer's resize reflowing the grid. A
+   * snapshot is immune to all of them at once.
+   */
+  snapshotPress(x, y) {
     const rowsEl = this.container.querySelector(".xterm-rows");
     if (!rowsEl) {
       return null;
     }
-    const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), this.term.cols, this.term.rows);
-    return cell === null ? null : { col: cell.col, row: this.term.buffer.active.viewportY + cell.row };
-  }
-  /**
-   * Selects the token the finger is resting on, and holds the text for the lift.
-   *
-   * The selection happens now, so the highlight appears under the finger at the
-   * moment the press is recognised; the clipboard write waits for touchend, where a
-   * user gesture is still in scope. Splitting the two is what makes the gesture work
-   * on Safari as well as Chrome.
-   */
-  selectTouchWord() {
-    const press = this.touchPressCell;
-    if (!press) {
-      return;
+    const cols = this.term.cols;
+    const cell = terminalCellAtPoint(x, y, rowsEl.getBoundingClientRect(), cols, this.term.rows);
+    if (!cell) {
+      return null;
     }
     const buffer = this.term.buffer.active;
-    const cols = this.term.cols;
-    if (buffer.type !== this.touchPressBuffer || cols !== this.touchPressCols) {
-      return;
-    }
-    let pressedRow;
-    if (this.touchPressMarker !== null) {
-      if (this.touchPressMarker.line < 0) {
-        return;
-      }
-      pressedRow = this.touchPressMarker.line;
-    } else {
-      pressedRow = press.row;
-    }
+    const pressedRow = buffer.viewportY + cell.row;
     if (pressedRow < 0 || pressedRow >= buffer.length) {
-      return;
+      return null;
     }
     let first = pressedRow;
     while (first > 0 && buffer.getLine(first)?.isWrapped === true) {
       first -= 1;
+    }
+    if (buffer.getLine(first)?.isWrapped === true) {
+      return null;
     }
     let last = pressedRow;
     while (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
@@ -7817,32 +7836,17 @@ var AttachTerminal = class {
     for (let row = first; row <= last; row += 1) {
       const line = buffer.getLine(row);
       if (!line) {
-        break;
+        return null;
       }
       for (let col = 0; col < cols; col += 1) {
         const buffered = line.getCell(col);
         cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
       }
-      const continues = buffer.getLine(row + 1);
-      if (row < last && cells[cells.length - 1] === " " && continues !== void 0 && continues.getCell(0)?.getWidth() === 2) {
+      if (row < last && line.getCell(cols - 1)?.getCode() === 0) {
         cells[cells.length - 1] = "";
       }
     }
-    const pressed = (pressedRow - first) * cols + press.col;
-    const range = wordRangeAtColumn(cells, pressed) ?? { start: 0, length: lineContentColumns(cells) };
-    if (range.length === 0) {
-      return;
-    }
-    const at = wrappedCellPosition(range.start, cols);
-    this.term.select(at.col, first + at.row, range.length);
-    const text = this.term.getSelection();
-    if (text.trim() === "") {
-      this.term.clearSelection();
-      return;
-    }
-    this.touchCopyFired = true;
-    this.suppressNextContextMenu = true;
-    this.touchCopyPending = text;
+    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
   }
   /** The painted height of one terminal row, which turns a pixel-denominated gesture
    *  into rows. Falls back to a font-size estimate before the first row exists. */
