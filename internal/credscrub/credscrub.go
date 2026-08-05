@@ -81,11 +81,22 @@ var keyValueSecret = regexp.MustCompile(
 //     word is gone, so no amount of scheme matching can recover it.
 //
 // Keyed on the marker, so it fires only where a credential assignment was
-// already redacted and opaque token text follows. Length 16+ over a token
-// charset keeps it off ordinary prose; over-redaction here is the safe
-// direction, per the policy above.
+// already redacted and opaque token text follows.
+//
+// The length floor is 8, matching authScheme rather than being chosen
+// independently: authScheme treats `Bearer <8 chars>` as sensitive, so a token
+// the old writer persisted as `auth: [redacted-secret] <8 chars>` has to be
+// recoverable too. A recovery pass stricter than the pass it recovers for leaves
+// exactly the tokens the other one would have caught.
+//
+// The separator is `[ \t]+`, NOT `\s+`: this runs over multi-line log and config
+// blobs, and `\s` matches newlines, so a marker ending one line would consume the
+// start of the next unrelated line and silently delete it.
+//
+// Over-redaction within a line is the safe direction, per the policy above — a
+// long path following a redacted value is absorbed rather than left behind.
 var strandedAfterMarker = regexp.MustCompile(
-	`(?i)(` + credentialKeyPattern + regexp.QuoteMeta(SecretMarker) + `)\s+[A-Za-z0-9._~+/=-]{16,}`)
+	`(?i)(` + credentialKeyPattern + regexp.QuoteMeta(SecretMarker) + `)[ \t]+[A-Za-z0-9._~+/=-]{8,}`)
 
 // authScheme matches an HTTP auth scheme together with its credential, as one
 // unit. It MUST run before keyValueSecret, which otherwise consumes only the

@@ -51,6 +51,22 @@ func TestScrubRemovesCredentialShapes(t *testing.T) {
 	}
 }
 
+// TestScrubRecoversShortStrandedToken pins the length floor against authScheme's.
+// The table above asserts on a 21-char sentinel, so it cannot exercise a floor at
+// all — an earlier version of this test passed with the floor at 16 because the
+// case it added never contained the sentinel it asserted on.
+func TestScrubRecoversShortStrandedToken(t *testing.T) {
+	// 8 chars: exactly what authScheme treats as sensitive after `Bearer`, so a
+	// line the old writer persisted as `auth: [redacted-secret] <8 chars>` has to
+	// be recoverable too.
+	const short = "Sh0rtTk1"
+	got := Scrub("auth: " + SecretMarker + " " + short)
+	if strings.Contains(got, short) {
+		t.Fatalf("short stranded token survived; the recovery floor is stricter "+
+			"than authScheme's, so it leaves exactly what authScheme would catch: %q", got)
+	}
+}
+
 // TestScrubIsIdempotent is the #1260 lesson as a property: the bug report scrubs
 // the same text repeatedly by design, and the log is now scrubbed on the way to
 // disk and again when a bundle reads it back. A pass that re-wraps its own marker
@@ -90,6 +106,13 @@ func TestScrubKeepsTriageContext(t *testing.T) {
 	// strandedAfterMarker: it requires 16+ token-charset characters.
 	if got := Scrub("token=" + SecretMarker + " and then it failed"); got != "token="+SecretMarker+" and then it failed" {
 		t.Fatalf("stranded pass ate ordinary prose after a marker: %q", got)
+	}
+	// `\s` matches newlines, so a marker ending one line must not consume the
+	// start of the next: over multi-line log blobs that silently deletes an
+	// unrelated line.
+	multi := "token=" + SecretMarker + "\nauthentication-failed-now what"
+	if got := Scrub(multi); got != multi {
+		t.Fatalf("stranded pass crossed a newline and ate the next line: %q", got)
 	}
 	in := "worktree af_0f8fc14c_fix-login at 4f2a9c1e8b7d6c5a4f3e2d1c0b9a8f7e6d5c4b3a removed; session id 01J8Z9"
 	if got := Scrub(in); got != in {
