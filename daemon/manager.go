@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -63,6 +64,21 @@ type Manager struct {
 	// mutex, deliberately: the gate must resolve a request without ever touching a
 	// session lock (#1878's "the proxy must not do the restore's job").
 	previewOrigins *previewOriginRegistry
+
+	// editorOriginSecret is the PERSISTED HMAC key behind a session's VS Code origin
+	// (#2743). Deliberately separate from previewSecret and with the opposite
+	// lifetime: an editor's workbench state (layout, opened editors, terminal
+	// history) lives in origin-scoped browser IndexedDB, so its origin must be the
+	// same name after a daemon restart or that state is silently destroyed. Empty
+	// when it could not be loaded, which withholds editor origins rather than
+	// promising a stable one it cannot keep. Immutable after construction.
+	editorOriginSecret string
+
+	// editorLabels indexes editor host labels back to their sessions so an unknown
+	// preview host is an O(1) rejection. Any peer that can dial the preview listener
+	// can invent correctly-shaped hosts without a credential, so the miss path must
+	// not do per-session work (#2743 review).
+	editorLabels *editorLabelIndex
 
 	// limitDetector is the resolved usage-limit matcher set (#1146), built from
 	// cfg.LimitPatterns (it compiles the override regexes) and reused across poll
@@ -381,6 +397,16 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	if err != nil {
 		return nil, fmt.Errorf("mint preview secret: %w", err)
 	}
+	// The editor-origin secret is PERSISTED, unlike the one above (#2743): a session's
+	// VS Code origin must survive a daemon restart or the browser hands the editor a
+	// fresh, empty IndexedDB every time. Non-fatal — a daemon that cannot keep this
+	// secret should still start and simply serve editors on the app origin as before,
+	// rather than refusing to run over a preview feature that is off by default.
+	editorSecret, err := ensureEditorOriginSecret()
+	if err != nil {
+		log.WarningLog.Printf("editor preview origins disabled: %v", err)
+		editorSecret = ""
+	}
 	state := config.LoadState()
 	storage, err := session.NewStorage(state, "")
 	if err != nil {
@@ -393,6 +419,8 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		cfg:                    cfg,
 		previewSecret:          previewSecret,
 		previewOrigins:         newPreviewOriginRegistry(),
+		editorOriginSecret:     editorSecret,
+		editorLabels:           newEditorLabelIndex(),
 		pollReloadCh:           make(chan struct{}, 1),
 		ready:                  make(chan struct{}),
 		lifecycle:              lifecycle,

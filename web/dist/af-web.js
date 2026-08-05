@@ -10832,6 +10832,7 @@ var SplitView = class {
       return;
     }
     const webProxied = proxied && !isVSCode;
+    const mayUsePreviewOrigin = proxied && realId !== "";
     const probePath = webProxied ? webProxyPath(sessionId, realId, target, null) : "";
     let disposed = false;
     let probeSeq = 0;
@@ -10869,7 +10870,7 @@ var SplitView = class {
         previewSrcOnce = null;
       }
       if (previewSrcOnce === null) {
-        previewSrcOnce = webProxied && !this.archived && canUsePreviewOrigin(window.location) ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
+        previewSrcOnce = mayUsePreviewOrigin && !this.archived && canUsePreviewOrigin(window.location) ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
           if (origin === "") {
             return "";
           }

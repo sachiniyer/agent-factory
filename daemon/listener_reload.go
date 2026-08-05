@@ -212,7 +212,8 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 	policy := previewListenerPolicy(cfg)
 	notice := config.PreviewListenerExposureNotice(cfg)
 	closer, info, err := startTCPListenerWithListen(wl.previewMux, addr, cfg, policy, previewShell, previewOriginAuth(wl.manager),
-		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false, previewOrigin: true}, wl.listenTCP)
+		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false, previewOrigin: true,
+			previewWarmingUp: func() bool { return !wl.manager.Ready() }}, wl.listenTCP)
 	if err != nil {
 		return fmt.Errorf("apply preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))
 	}
@@ -246,6 +247,17 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 		log.WarningLog.Printf("%s", notice)
 	}
 	return nil
+}
+
+// previewConfigAddress returns the CONFIG address that produced the preview listener
+// currently serving — not the one config merely asks for. The two diverge exactly
+// when a live rebind FAILED: ApplyConfig has already swapped the requested config in
+// while reconcile left the previous listener accepting, so a decision made from
+// config would describe a listener that does not exist. "" when nothing is bound.
+func (wl *webListeners) previewConfigAddress() string {
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	return wl.previewConfigAddr
 }
 
 // close tears down both listeners (daemon shutdown). Errors are joined so one

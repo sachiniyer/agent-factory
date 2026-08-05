@@ -617,6 +617,43 @@ What to know before turning it on:
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
 
+#### VS Code tabs get one too — per session
+
+A **VS Code tab** moves onto a per-**session** origin, not a per-tab one: there is one
+editor per session, so both of a session's editors sit on the same origin and share one
+state store, as they should.
+
+This is a **confidentiality fix, not an ergonomics one**. code-server is VS Code *Web*,
+which keeps workbench state in the browser's IndexedDB — and its terminal history
+(`terminal.history.entries.commands`) is **global, not workspace-scoped**. On one shared
+origin that means one session's *Terminal: Run Recent Command* offers **another
+session's commands**, and *Go to Recent Directory* offers another session's checkout.
+Those command lines carry branch names, paths and sometimes secrets, and it looks
+exactly like your own history, so it never gets reported. Giving each session's editor
+its own origin is what partitions that store.
+
+Two consequences worth knowing:
+
+- **Editor origins require a LOOPBACK, fixed preview port.** With
+  `preview_listen_addr` bound to a network interface (or to an ephemeral `:0`), web
+  tabs still get per-tab origins but **editors do not** — they stay on the same-origin
+  mirror. On that listener the hostname is the only credential, and a remote client can
+  simply send `Host: <label>.localhost` to the exposed port; behind an editor origin is
+  a code-server running with auth disabled, i.e. a terminal. Since per-tab origins are
+  same-machine only anyway, a network bind could never have served a remote viewer an
+  editor, so nothing is lost by refusing.
+- **A session's editor origin is stable across daemon restarts**, unlike a web tab's.
+  It has to be: the editor's layout, open editors and history live behind that origin,
+  so a rotating name would wipe them on every restart. It is derived from a secret kept
+  at `~/.agent-factory/editor-origin-secret` (0600, the same posture as the daemon
+  token). Delete that file and every session's editor starts fresh.
+- **Existing editor state does not migrate.** Turning `preview_listen_addr` on moves
+  editors to new origins, so layout and history start empty once. That old state is the
+  shared store this fixes, so leaving it behind is the point.
+
+The shared **user-data directory is untouched** — settings, extensions and themes still
+carry across every session's editor, which is why af shares it in the first place.
+
 !!! note "Previews over a token-protected listener"
     Over a **token-protected** network listener, iframe sub-resource requests on the
     mirror path are kept authorized via a path-scoped cookie (see

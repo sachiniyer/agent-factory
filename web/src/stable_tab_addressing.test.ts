@@ -567,3 +567,30 @@ test("webSandbox: a vscode frame keeps its own grant regardless of origin", () =
     assert.ok(s.includes("allow-downloads"), s);
   }
 });
+
+// --- a VS Code tab's origin (#2743) ------------------------------------------
+//
+// The editor keeps its workbench state — layout, opened editors, and the terminal
+// history this closes — in origin-scoped browser IndexedDB. On the shared SPA origin
+// every session's editor reads one database, so one session's "Run Recent Command"
+// offers another session's commands. A per-session origin is what partitions it, and
+// the editor must land on that origin's ROOT.
+
+test("previewOriginSrc: a vscode tab (no target) frames the origin root", () => {
+  assert.equal(previewOriginSrc("http://afedit.localhost:8444", ""), "http://afedit.localhost:8444/");
+});
+
+test("previewOriginSrc: a vscode tab's src carries no path or query to collide with the editor's own", () => {
+  const src = previewOriginSrc("http://afedit.localhost:8444", "");
+  assert.equal(new URL(src).pathname, "/");
+  assert.equal(new URL(src).search, "", "the editor reads its own query string (?folder=…)");
+});
+
+test("webSandbox: a vscode frame on its own origin still gets same-origin — now safely", () => {
+  // It always had allow-same-origin (VS Code cannot run under an opaque origin). What
+  // changes is that the frame is now CROSS-origin to the SPA, so the browser's own
+  // origin check — not the sandbox — is what keeps it away from the parent's token.
+  const s = webSandbox(true, true);
+  assert.ok(s.includes("allow-same-origin"), s);
+  assert.ok(s.includes("allow-downloads"), s);
+});

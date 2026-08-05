@@ -322,7 +322,7 @@ func TestPreviewAuthEndpoint_WithholdsOriginUnlessBound(t *testing.T) {
 			cfg.PreviewListenAddr = ""
 		}, upstream.URL)
 		require.False(t, m.lifecycle.snapshot().listeners.PreviewConfigured)
-		require.True(t, m.hasIframeTab(sid, tabIDs[0]), "the tab is live — only the listener is missing")
+		requireIframeTab(t, m, sid, tabIDs[0], "the tab is live — only the listener is missing")
 		require.Empty(t, fetchPreviewAuthOrigin(t, m, sid, tabIDs[0]),
 			"a disabled preview listener must vend no origin")
 	})
@@ -340,10 +340,27 @@ func TestPreviewAuthEndpoint_WithholdsOriginUnlessBound(t *testing.T) {
 		listeners := m.lifecycle.snapshot().listeners
 		require.True(t, listeners.PreviewConfigured, "the address was configured")
 		require.False(t, listeners.PreviewBound, "the bind failed")
-		require.True(t, m.hasIframeTab(sid, tabIDs[0]), "the tab is live — only the bind failed")
+		requireIframeTab(t, m, sid, tabIDs[0], "the tab is live — only the bind failed")
 		require.Empty(t, fetchPreviewAuthOrigin(t, m, sid, tabIDs[0]),
 			"a configured-but-unbound preview listener must not vend an origin for a dead port")
 	})
+}
+
+// requireIframeTab asserts the (session, tab) pair really is a live iframe tab, so a
+// test that expects an EMPTY origin proves the reason it means to prove rather than
+// passing because the tab was never there.
+// requireIframeTabOK asserts whether (sid, tid) resolves as a live iframe tab, so a
+// test that expects a NEGATIVE proves the reason it means to prove.
+func requireIframeTabOK(t *testing.T, m *Manager, sid, tid string, want bool, msgAndArgs ...any) {
+	t.Helper()
+	_, ok := m.iframeTabKind(sid, tid)
+	require.Equal(t, want, ok, msgAndArgs...)
+}
+
+func requireIframeTab(t *testing.T, m *Manager, sid, tid, msg string) {
+	t.Helper()
+	_, ok := m.iframeTabKind(sid, tid)
+	require.True(t, ok, msg)
 }
 
 // fetchPreviewAuthOrigin calls GET /v1/preview-auth?session=&tab= on m's control

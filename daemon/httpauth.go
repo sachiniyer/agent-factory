@@ -222,6 +222,10 @@ type requestPosture struct {
 	// Zero value false keeps the control-plane behavior, so only the preview
 	// listener opts in.
 	previewOrigin bool
+	// previewWarmingUp reports whether the daemon has not finished restoring. It
+	// only ever matters alongside previewOrigin, and it decides WHICH framed page a
+	// denial renders — see servePosture. Nil means "not warming up".
+	previewWarmingUp func() bool
 }
 
 // servePosture runs the auth + CORS flow for one request against a posture the
@@ -255,13 +259,24 @@ func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p r
 	if p.gate != nil && !p.gate.authorize(r) {
 		if p.previewOrigin {
 			// A preview origin's denial is RENDERED IN A PANE, so it must not be the
-			// JSON envelope. The everyday cause is a daemon restart: the secret rotates
-			// and the registry empties, so an iframe left open keeps addressing a host
-			// that no longer names a tab. Say that, and say what fixes it.
+			// JSON envelope. WHICH page depends on whether the address can still become
+			// valid, and getting that backwards strands the frame either way.
 			//
-			// Deliberately NON-retrying: the old address can never become valid again
-			// under the new secret, so a self-refreshing page would spin forever. The
-			// web client mints a fresh origin when it rebuilds the pane.
+			// WARMING UP: the listener binds long before RestoreInstances (#829), so an
+			// editor iframe can navigate while the daemon still has no sessions to
+			// recognise its label by. That address becomes valid the moment restore
+			// finishes, so this must be the RETRYING notice — the expired page never
+			// re-requests, and the frame would sit on it until a manual reload even
+			// though the daemon recovered seconds later.
+			if p.previewWarmingUp != nil && p.previewWarmingUp() {
+				writeTabNoticePage(w, "Starting up",
+					"af is starting up — this tab will load as soon as the daemon has restored its sessions.", true)
+				return
+			}
+			// Otherwise the address really is dead: a web tab's label does not survive
+			// the secret rotating, and an editor label the restored daemon cannot place
+			// names no session it holds. Deliberately NON-retrying — nothing will make
+			// it valid — and the web client mints a fresh origin when it rebuilds.
 			writePreviewExpiredPage(w)
 			return
 		}

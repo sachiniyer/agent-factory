@@ -197,6 +197,9 @@ type livePosture struct {
 	// Zero value false keeps the control listener's behavior, and it is inert for the
 	// agent-server (static posture, no livePosture at all).
 	previewOrigin bool
+	// previewWarmingUp reports whether the daemon is still restoring, so a denial on
+	// the preview origin can render the RETRYING notice instead of the terminal one.
+	previewWarmingUp func() bool
 }
 
 // startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
@@ -290,7 +293,7 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				// The preview origin answers no cross-origin reader, ever — see previewOrigin.
 				cors = nil
 			}
-			return requestPosture{gate: g, cors: cors, previewOrigin: live.previewOrigin}
+			return requestPosture{gate: g, cors: cors, previewOrigin: live.previewOrigin, previewWarmingUp: live.previewWarmingUp}
 		})
 	} else {
 		gate := &authGate{

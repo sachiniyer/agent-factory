@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // TestPreviewListener_NeverEmitsCORSAllowOrigin is the load-bearing isolation test
@@ -124,7 +125,13 @@ func newPreviewDaemonWithTabs(t *testing.T, tune func(*config.Config), targets .
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
-	cfg.PreviewListenAddr = "127.0.0.1:0"
+	// A CONCRETE preview port, not ":0". Editor origins are withheld on an ephemeral
+	// port on purpose — an origin is scheme+host+PORT, so a port the kernel re-picks
+	// every bind cannot carry the stable origin an editor's browser state depends on.
+	// A test that wants to exercise editor origins therefore has to configure the port
+	// a real operator would; grabbing a free one keeps that faithful without pinning a
+	// fixed number that concurrent tests would collide on.
+	cfg.PreviewListenAddr = grabFreeLoopbackAddr(t)
 	if tune != nil {
 		tune(cfg)
 	}
@@ -698,7 +705,7 @@ func TestPreviewOriginRegistry_CapEvictsOldest(t *testing.T) {
 	first := previewTabHostLabel("secret", "s", "t0")
 	for i := 0; i <= previewOriginRegistryMax; i++ {
 		tid := fmt.Sprintf("t%d", i)
-		reg.register(previewTabHostLabel("secret", "s", tid), "s", tid)
+		reg.register(previewTabHostLabel("secret", "s", tid), "s", tid, session.TabKindWeb)
 	}
 	_, ok := reg.lookup(first)
 	require.False(t, ok, "the oldest entry must be evicted once the cap is exceeded")
@@ -706,13 +713,13 @@ func TestPreviewOriginRegistry_CapEvictsOldest(t *testing.T) {
 	newest := previewTabHostLabel("secret", "s", fmt.Sprintf("t%d", previewOriginRegistryMax))
 	ref, ok := reg.lookup(newest)
 	require.True(t, ok, "the newest entry must survive")
-	require.Equal(t, previewTabRef{sessionID: "s", tabID: fmt.Sprintf("t%d", previewOriginRegistryMax)}, ref)
+	require.Equal(t, previewTabRef{sessionID: "s", tabID: fmt.Sprintf("t%d", previewOriginRegistryMax), kind: session.TabKindWeb}, ref)
 
 	// Re-registering an existing label must not grow the order list (or the cap would
 	// evict live entries every time a pane remounted).
 	reg2 := newPreviewOriginRegistry()
 	for i := 0; i < 5; i++ {
-		reg2.register("same-label", "s", "t")
+		reg2.register("same-label", "s", "t", session.TabKindWeb)
 	}
 	require.Len(t, reg2.order, 1, "re-registering the same label must not append a duplicate")
 }
@@ -817,14 +824,14 @@ func TestPreviewAuth_DoesNotRefreshOnUnknownSession(t *testing.T) {
 	m, _, sessionID, tabIDs := newPreviewOriginFixture(t, upstream.URL)
 
 	// A live tab still validates through the tracked map.
-	require.True(t, m.hasIframeTab(sessionID, tabIDs[0]))
+	requireIframeTabOK(t, m, sessionID, tabIDs[0], true)
 
 	// Unknown ids answer false, and do so from memory. resolveStreamSession is the
 	// refreshing path; trackedStreamSession is the one this must use.
 	for _, id := range []string{"no-such-session", "", "af-" + sessionID, sessionID + "x"} {
-		require.False(t, m.hasIframeTab(id, tabIDs[0]), "unknown session %q must not validate", id)
+		requireIframeTabOK(t, m, id, tabIDs[0], false, "unknown session %q must not validate", id)
 		require.Nil(t, m.trackedStreamSession(id), "and must not be resolvable from the tracked map")
 	}
 	// A known session with an unknown tab is equally a miss, with no refresh either.
-	require.False(t, m.hasIframeTab(sessionID, "no-such-tab"))
+	requireIframeTabOK(t, m, sessionID, "no-such-tab", false)
 }

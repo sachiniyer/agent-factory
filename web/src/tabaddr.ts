@@ -297,7 +297,13 @@ export function canUsePreviewOrigin(loc: { protocol: string; hostname: string })
  *  prefix and 404ing (#1811).
  *
  *  The target's own query rides through verbatim, raw, for the same reason
- *  webProxyPath keeps it: for plenty of dev servers the query IS the address. */
+ *  webProxyPath keeps it: for plenty of dev servers the query IS the address.
+ *
+ *  A VSCODE tab passes target "" (it has none by design — its editor is a
+ *  daemon-managed code-server), which yields the bare origin root. That is exactly
+ *  right: the editor owns the whole origin, which is what stops one session's
+ *  workbench state — terminal history included — from being readable in another
+ *  session's editor (#2743). */
 export function previewOriginSrc(origin: string, target: string): string {
   const base = `${origin.replace(/\/$/, "")}/${targetPathOf(target)}`;
   const query = targetQueryOf(target);

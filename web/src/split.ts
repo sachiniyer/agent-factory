@@ -1121,6 +1121,17 @@ export class SplitView {
     // #1817's pre-existing behavior, not something this change introduces or should
     // silently redesign mid-rebase. Reported as a follow-up.
     const webProxied = proxied && !isVSCode;
+    // Whether this pane may be moved onto the tab's OWN origin. Deliberately NOT
+    // webProxied: that flag scopes the dead-server probe and the cache buster, both of
+    // which are web-tab concerns, while the origin move covers BOTH kinds — and the
+    // editor is the kind that most needs it (#2743). A vscode tab's editor keeps its
+    // workbench state, including terminal history, in origin-scoped browser
+    // IndexedDB, so every session's editor sharing the SPA's origin means every
+    // session's editor shares that history.
+    //
+    // The archived fence still applies through `proxied`'s own caller: an archived
+    // session never reaches load() at all.
+    const mayUsePreviewOrigin = proxied && realId !== "";
     const probePath = webProxied ? webProxyPath(sessionId, realId, target, null) : "";
     let disposed = false;
     // Supersedes an in-flight probe: a slow answer from an earlier attempt must never
@@ -1214,7 +1225,7 @@ export class SplitView {
       }
       if (previewSrcOnce === null) {
         previewSrcOnce =
-          webProxied && !this.archived && canUsePreviewOrigin(window.location)
+          mayUsePreviewOrigin && !this.archived && canUsePreviewOrigin(window.location)
             ? fetchPreviewOrigin(sessionId, realId, this.token ?? "").then(async (origin) => {
                 if (origin === "") {
                   return "";

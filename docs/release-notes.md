@@ -1,5 +1,25 @@
 # Release Notes
 
+## One session's terminal history no longer shows up in another session's editor
+
+- **A confidentiality fix.** code-server is VS Code *Web*, and it keeps its integrated
+  terminal history in the **browser's** storage, under a key that is global rather than
+  per-workspace. Because every session's editor was framed on the same origin, they all
+  shared one store — so *Terminal: Run Recent Command* in one session offered **another
+  session's commands**, and *Go to Recent Directory* offered another session's checkout.
+  Command lines routinely carry branch names, paths and occasionally secrets, and the
+  entries look exactly like your own, so this was unlikely to ever be reported as a bug.
+- Setting `preview_listen_addr` now gives **each session's editor its own origin**, which
+  is what makes the browser keep those stores apart. The origin is **stable across daemon
+  restarts** (an editor's layout and history live behind it, so a rotating name would
+  wipe them), derived from a 0600 secret in the af home.
+- **The shared user-data directory is untouched** — settings, extensions and themes still
+  carry across sessions, which is the reason it is shared.
+- Two things to expect: **existing editor state does not migrate** (it is the shared store
+  being fixed, so layout and history start empty once), and this is **same-machine only** —
+  a remote viewer keeps the shared-origin editor. See
+  [Web UI → per-tab preview origins](web.md#per-tab-preview-origins).
+
 ## Breaking: a remote hook's `launch_cmd` owns stdout
 
 - **`launch_cmd`'s stdout now carries its `{"url","token"}` endpoint JSON and

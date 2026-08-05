@@ -13,7 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -125,6 +127,12 @@ const previewOriginRegistryMax = 1024
 type previewTabRef struct {
 	sessionID string
 	tabID     string
+	// kind records which derivation minted this label, because the gate has to
+	// re-derive it the SAME way to authenticate it. A web tab's label is per-tab
+	// under the ephemeral secret; an editor's is per-session under the persisted
+	// one. Deriving the wrong one yields a value that can never match the presented
+	// host, which fails closed — the editor simply never loads (#2743 review).
+	kind session.TabKind
 }
 
 // previewOriginRegistry maps a minted host label back to its tab. It is the ONLY
@@ -150,13 +158,13 @@ func newPreviewOriginRegistry() *previewOriginRegistry {
 
 // register makes label addressable for (sessionID, tabID), evicting the oldest
 // entries once the cap is exceeded.
-func (p *previewOriginRegistry) register(label, sessionID, tabID string) {
+func (p *previewOriginRegistry) register(label, sessionID, tabID string, kind session.TabKind) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, exists := p.byLabel[label]; !exists {
 		p.order = append(p.order, label)
 	}
-	p.byLabel[label] = previewTabRef{sessionID: sessionID, tabID: tabID}
+	p.byLabel[label] = previewTabRef{sessionID: sessionID, tabID: tabID, kind: kind}
 	for len(p.order) > previewOriginRegistryMax {
 		oldest := p.order[0]
 		p.order = p.order[1:]
@@ -247,10 +255,12 @@ func isPreviewLabel(s string) bool {
 	return true
 }
 
-// hasIframeTab reports whether sessionID names a live session holding an IFRAME
-// tab with stable id tabID. It is the registration guard on /v1/preview-auth, and
-// it is deliberately NOT WebTabTarget: resolving a vscode target SPAWNS an editor,
-// which minting an address must never do.
+// iframeTabKind reports the kind of the IFRAME tab with stable id tabID in the live
+// session sessionID, and whether it is one at all. It is the registration guard on
+// /v1/preview-auth AND what selects the origin derivation (a web tab's is per-tab and
+// ephemeral, an editor's is per-session and stable, #2743). It is deliberately NOT
+// WebTabTarget: resolving a vscode target SPAWNS an editor, which minting an address
+// must never do.
 //
 // Resolved under ONE lock (TabTargetByID), the same discipline the proxy uses: an
 // id→ordinal then ordinal→tab pair takes the instance lock twice, and a tab closing
@@ -261,9 +271,9 @@ func isPreviewLabel(s string) bool {
 // resolveStreamSession's refresh would otherwise load a session off disk here — and
 // it fails the safe way: no origin is minted, so the client keeps the same-origin
 // mirror until the daemon has restored.
-func (m *Manager) hasIframeTab(sessionID, tabID string) bool {
+func (m *Manager) iframeTabKind(sessionID, tabID string) (session.TabKind, bool) {
 	if !m.Ready() {
-		return false
+		return 0, false
 	}
 	// The ALREADY-RESTORED map, never resolveStreamSession. That resolver's miss path
 	// runs findSessionByStableID + refreshLocked, i.e. it reads session state off disk
@@ -279,13 +289,197 @@ func (m *Manager) hasIframeTab(sessionID, tabID string) bool {
 	// tab it is currently rendering.
 	instance := m.trackedStreamSession(sessionID)
 	if instance == nil {
-		return false
+		return 0, false
 	}
 	kind, _, ok := instance.TabTargetByID(tabID)
 	if !ok {
-		return false
+		return 0, false
 	}
-	return kind == session.TabKindWeb || kind == session.TabKindVSCode
+	if kind != session.TabKindWeb && kind != session.TabKindVSCode {
+		return 0, false
+	}
+	return kind, true
+}
+
+// recoverEditorOrigin resolves an editor label the registry does not hold, by
+// re-deriving it from the sessions this daemon actually has.
+//
+// It exists because the editor label is deliberately STABLE across restarts — that is
+// the whole of #2743, so the browser hands the editor back its IndexedDB — while
+// previewOrigins is in-memory and empty on every boot. Without this, a UI left open
+// across a daemon restart keeps addressing a perfectly valid host that the new daemon
+// has simply not learned, and the pane shows "Preview address expired" until the user
+// reloads by hand: the restart the persisted secret was meant to survive.
+//
+// The derivation is one HMAC per tracked session, computed only on a registry miss and
+// registered on success, so the cost is paid once per label per boot. It reads the
+// already-restored map and nothing else — no disk, no refresh — for the same reason
+// the mint guard does (#1878): the auth path must never do the restore's job.
+//
+// Only EDITOR labels are recoverable, and only they need to be: a web tab's label is
+// derived from the ephemeral secret, so after a restart it is not merely unregistered
+// but genuinely invalid, and the client re-fetches one.
+func (m *Manager) recoverEditorOrigin(label string) (previewTabRef, bool) {
+	if m.editorOriginSecret == "" || !m.Ready() {
+		return previewTabRef{}, false
+	}
+	sessionID, ok := m.editorLabels.lookup(label, m.trackedSessionIDs, m.editorOriginSecret)
+	if !ok {
+		return previewTabRef{}, false
+	}
+	// The session owns this label, but only a session with a LIVE editor tab has an
+	// origin to serve — otherwise the label names nothing to proxy.
+	tabID, ok := m.liveVSCodeTab(sessionID)
+	if !ok {
+		return previewTabRef{}, false
+	}
+	ref := previewTabRef{sessionID: sessionID, tabID: tabID, kind: session.TabKindVSCode}
+	m.previewOrigins.register(label, sessionID, tabID, session.TabKindVSCode)
+	return ref, true
+}
+
+// trackedSessionIDs snapshots the stable ids of the sessions the daemon holds. It
+// takes the manager lock only for the copy — no hashing, no I/O — so a caller doing
+// per-session work cannot serialize ordinary session operations behind it.
+func (m *Manager) trackedSessionIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.instances))
+	for _, inst := range m.instances {
+		if inst != nil && inst.ID != "" {
+			ids = append(ids, inst.ID)
+		}
+	}
+	return ids
+}
+
+// editorLabelIndex maps editor host labels back to their sessions, so a miss costs a
+// map lookup rather than a scan.
+//
+// The scan it replaces was reachable by ANY peer that can dial the preview listener,
+// with no credential: a correctly-shaped `af….localhost` host is free to invent, and
+// each one used to cost an HMAC per live session — computed while holding the
+// manager's main mutex. On a box with hundreds of sessions that turns an O(1)
+// rejection into O(sessions) work AND serializes real session operations behind the
+// flood. Indexing keeps the recovery the persisted label needs while giving an
+// unknown host the O(1) rejection it should always have had.
+//
+// The index is a pure function of (secret, session id set), and the secret is fixed
+// for the process — so it is rebuilt only when a lookup misses AND the rate limit
+// allows, never per request. A session that appears later is picked up on the next
+// rebuild; nothing depends on that timing, because the normal path registers directly
+// through /v1/preview-auth when the client mounts the pane.
+type editorLabelIndex struct {
+	mu        sync.Mutex
+	byLabel   map[string]string
+	lastBuilt time.Time
+}
+
+// editorLabelIndexMinRebuild bounds how often a miss may trigger a rebuild, so a
+// flood of invented hosts cannot turn every request into a scan.
+const editorLabelIndexMinRebuild = time.Second
+
+func newEditorLabelIndex() *editorLabelIndex {
+	return &editorLabelIndex{byLabel: map[string]string{}}
+}
+
+func (x *editorLabelIndex) lookup(label string, ids func() []string, secret string) (string, bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if sid, ok := x.byLabel[label]; ok {
+		return sid, true
+	}
+	if !x.lastBuilt.IsZero() && time.Since(x.lastBuilt) < editorLabelIndexMinRebuild {
+		return "", false
+	}
+	x.lastBuilt = time.Now()
+	rebuilt := make(map[string]string, len(x.byLabel))
+	for _, id := range ids() {
+		rebuilt[editorOriginLabel(secret, id)] = id
+	}
+	x.byLabel = rebuilt
+	sid, ok := rebuilt[label]
+	return sid, ok
+}
+
+// liveVSCodeTab returns the stable id of any live VS Code tab in sessionID. There is
+// one editor per session, so every vscode tab addresses the same code-server and any
+// of them will do — which is the point: a shared per-session origin must not depend
+// on one particular tab still existing.
+func (m *Manager) liveVSCodeTab(sessionID string) (string, bool) {
+	if !m.Ready() {
+		return "", false
+	}
+	// The restored map, for the same reason iframeTabKind uses it: this runs on EVERY
+	// editor sub-resource request, and resolveStreamSession's miss path reads session
+	// state off disk. A miss here means the session is gone, which is an answer, not a
+	// reason to go looking on disk (#2948).
+	instance := m.trackedStreamSession(sessionID)
+	if instance == nil {
+		return "", false
+	}
+	for _, tab := range instance.GetTabs() {
+		if tab.Kind == session.TabKindVSCode && tab.ID != "" {
+			return tab.ID, true
+		}
+	}
+	return "", false
+}
+
+// previewPortIsEphemeral reports whether a preview_listen_addr asks the kernel to
+// pick the port (":0"). Such a port changes on every bind, and an origin is
+// scheme+host+PORT — so no label, however stable, yields a stable origin there.
+//
+// It takes the ACTIVE listener's config address, never the requested one. The two
+// diverge precisely when it matters: a daemon started on "127.0.0.1:0" whose live
+// change to a fixed port FAILS to bind has already had the fixed value swapped into
+// config while the old random-port listener keeps serving. Reading config there would
+// vend a supposedly stable editor origin on an ephemeral port, and the editor's
+// browser storage would vanish at the next restart or successful rebind — the exact
+// loss the persisted secret exists to prevent, arrived at by trusting the wrong
+// source. An empty address is ephemeral by the same logic: nothing is bound, so
+// nothing is stable.
+func previewPortIsEphemeral(activeAddr string) bool {
+	if activeAddr == "" {
+		return true
+	}
+	_, port, err := net.SplitHostPort(activeAddr)
+	return err != nil || port == "" || port == "0"
+}
+
+// editorOriginPortIsSafe reports whether the ACTIVE preview listener may carry an
+// EDITOR origin. Two conditions, and a web tab is held to neither.
+//
+//  1. Not ephemeral. An origin is scheme+host+PORT, so a port the kernel re-picks
+//     every bind cannot carry the stable origin an editor's browser state depends on.
+//  2. LOOPBACK-BOUND. This is the security half, and the editor is where it starts to
+//     matter. On this listener the host label is the ONLY credential for every peer,
+//     and *.localhost resolution is irrelevant to an attacker: a remote client can
+//     simply send `Host: <label>.localhost` to an exposed ip:port. What sits behind an
+//     editor origin is a code-server the daemon spawned with auth disabled — a
+//     terminal, i.e. arbitrary code execution as the user — and unlike a web tab's
+//     label, an editor's is derived from a PERSISTED secret, so it never rotates and
+//     one leak (editor content, a log, a screenshot, browser history) is permanent.
+//     A dev server behind a web-tab origin is a far smaller prize with a credential
+//     that dies at the next restart.
+//
+// Withholding costs nothing real: per-tab origins are same-machine only by nature, so
+// a network-bound preview listener was never going to serve a remote viewer an editor
+// anyway. The client falls back to the same-origin mirror, which is what a remote
+// viewer already uses.
+func editorOriginPortIsSafe(activeAddr string) bool {
+	return !previewPortIsEphemeral(activeAddr) && config.IsLoopbackListenAddr(activeAddr)
+}
+
+// activePreviewConfigAddr is the config address behind the preview listener that is
+// actually serving. It falls back to the requested config only when there is no
+// listener owner at all (tests that construct a bare Manager), where the two cannot
+// disagree because nothing has bound.
+func (m *Manager) activePreviewConfigAddr() string {
+	if m.webListeners == nil {
+		return m.Config().PreviewListenAddr
+	}
+	return m.webListeners.previewConfigAddress()
 }
 
 // previewOriginFor returns the browser-facing origin of one tab's preview —
@@ -318,11 +512,37 @@ func previewOriginFor(m *Manager, sessionID, tabID string) string {
 	if err != nil || port == "" {
 		return ""
 	}
-	if !m.hasIframeTab(sessionID, tabID) {
+	kind, ok := m.iframeTabKind(sessionID, tabID)
+	if !ok {
 		return ""
 	}
-	label := previewTabHostLabel(m.previewSecret, sessionID, tabID)
-	m.previewOrigins.register(label, sessionID, tabID)
+	// An editor origin promises STABILITY, and browser storage is partitioned by
+	// scheme, host AND PORT — so a stable label on an ephemeral port is not a stable
+	// origin. With preview_listen_addr = "127.0.0.1:0" the kernel picks a new port
+	// every bind, which would move the editor to a fresh origin (and a fresh, empty
+	// IndexedDB) on every daemon restart: exactly the data loss the persisted secret
+	// exists to prevent, reintroduced one layer down. Withhold instead, so the client
+	// keeps the same-origin mirror rather than being promised durability af cannot
+	// deliver. Web tabs are unaffected — their origins are ephemeral by design.
+	if kind == session.TabKindVSCode && !editorOriginPortIsSafe(m.activePreviewConfigAddr()) {
+		return ""
+	}
+	// The derivation forks on the tab kind, and the fork is the whole of #2743.
+	//
+	// A WEB tab gets a per-TAB label under the ephemeral secret: two previews of the
+	// same session are separate untrusted apps and must not read each other, and a
+	// preview holds nothing worth surviving a restart.
+	//
+	// A VSCODE tab gets a per-SESSION label under the PERSISTED secret. Per-session
+	// because there is one code-server per session, so a per-tab origin would put one
+	// editor behind two IndexedDBs; persisted because the editor's workbench state —
+	// including the terminal history this fixes — is origin-scoped, and a rotating
+	// origin would blank it on every daemon restart.
+	label := m.expectedOriginLabel(previewTabRef{sessionID: sessionID, tabID: tabID, kind: kind})
+	if label == "" {
+		return "" // no persisted secret ⇒ no stable editor origin to promise
+	}
+	m.previewOrigins.register(label, sessionID, tabID, kind)
 	return "http://" + label + previewHostSuffix + ":" + port
 }
 
@@ -343,15 +563,50 @@ func previewOriginAuth(m *Manager) *tcpListenerAuth {
 			}
 			ref, ok := m.previewOrigins.lookup(label)
 			if !ok {
+				// A label the registry does not hold may still be a legitimate editor
+				// origin this daemon simply has not learned yet — see recoverEditorOrigin.
+				ref, ok = m.recoverEditorOrigin(label)
+				if !ok {
+					return "", nil
+				}
+			}
+			// Re-check the listener's safety HERE, not only where the origin was minted.
+			// preview_listen_addr applies live, so a loopback listener can become
+			// network-bound under a registration that already exists — and
+			// bindPreviewLocked swaps the listener without touching the registry. Gating
+			// only the mint would leave `Host: <old label>.localhost` authorizing an
+			// auth-disabled editor on the newly exposed port. The gate is the one place
+			// every request must pass, so the check belongs here where it cannot be
+			// outrun by a config change (#2743 review).
+			if ref.kind == session.TabKindVSCode && !editorOriginPortIsSafe(m.activePreviewConfigAddr()) {
 				return "", nil
 			}
-			return previewTabHostLabel(m.previewSecret, ref.sessionID, ref.tabID), nil
+			// Re-derive by the SAME rule that minted it. A single derivation here would
+			// fail closed for the other kind — and fail closed invisibly, since the
+			// symptom is the framed "address expired" notice rather than an error.
+			return m.expectedOriginLabel(ref), nil
 		},
 		presented: func(r *http.Request) string {
 			label, _ := previewHostLabel(r.Host)
 			return label
 		},
 	}
+}
+
+// expectedOriginLabel re-derives the host label a registered tab's origin must
+// present. It is the authenticating half of previewOriginFor and MUST stay in step
+// with it: the two derivations are keyed on different things (a web tab on
+// (sid, tid) under the ephemeral secret, an editor on the session alone under the
+// persisted one), so a mismatch is not an error anyone sees — it is a gate that
+// silently refuses a correctly-minted origin.
+func (m *Manager) expectedOriginLabel(ref previewTabRef) string {
+	if ref.kind == session.TabKindVSCode {
+		if m.editorOriginSecret == "" {
+			return ""
+		}
+		return editorOriginLabel(m.editorOriginSecret, ref.sessionID)
+	}
+	return previewTabHostLabel(m.previewSecret, ref.sessionID, ref.tabID)
 }
 
 // newPreviewMux is the handler mounted on the preview listener. There is exactly
@@ -398,6 +653,9 @@ func (cs *controlServer) previewOriginHandler(w http.ResponseWriter, r *http.Req
 	}
 	ref, ok := cs.manager.previewOrigins.lookup(label)
 	if !ok {
+		ref, ok = cs.manager.recoverEditorOrigin(label)
+	}
+	if !ok {
 		// Not reachable through the gate, which denies an unregistered label first and
 		// renders the SAME page (servePosture's previewOrigin branch). Kept as the
 		// fail-closed floor for any future wiring that reaches this handler directly:
@@ -419,9 +677,23 @@ func (cs *controlServer) previewOriginHandler(w http.ResponseWriter, r *http.Req
 		writeHTTPError(w, r, http.StatusBadRequest, errors.New("invalid web tab path"))
 		return
 	}
+	tabID := ref.tabID
+	if ref.kind == session.TabKindVSCode {
+		// Every vscode tab of a session shares ONE label, so the registry entry holds
+		// whichever tab registered last. If that tab is closed while another editor
+		// pane stays open, the shared origin would resolve through a dead tab id and
+		// fail until the survivor remounted. The editor is a SESSION-level resource,
+		// so resolve it that way: any live vscode tab of this session addresses it.
+		live, ok := cs.manager.liveVSCodeTab(ref.sessionID)
+		if !ok {
+			writePreviewExpiredPage(w)
+			return
+		}
+		tabID = live
+	}
 	cs.serveWebTabRoute(w, r, webTabRoute{
 		sessionID: ref.sessionID,
-		tabID:     ref.tabID,
+		tabID:     tabID,
 		// Empty: the tab owns the origin ROOT, so there is no prefix to mirror under.
 		// Every prefix-aware rewrite (cookie Path, Location, Refresh) degenerates to
 		// the identity here, which is precisely what "the app owns its origin" means.

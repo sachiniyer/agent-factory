@@ -7746,6 +7746,160 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
   );
 });
 
+test("vscode tab (#2743): one session's editor state is readable in another's on the shared origin, and is NOT once each session has its own", REAL_FIXTURE, async () => {
+  // The leak and the fix, in one run, driven rather than reasoned about.
+  //
+  // code-server is VS Code Web and keeps workbench state — including
+  // `terminal.history.entries.commands` in `vscode-web-state-db-global`, which is NOT
+  // workspace-scoped — in ORIGIN-scoped browser storage. So the question is entirely
+  // "do two sessions' editors share an origin", and the honest way to answer it is to
+  // write a value in one session's editor and try to read it from the other's.
+  //
+  // localStorage stands in for IndexedDB deliberately: both are partitioned by the
+  // same origin rule, and the fake code-server this fixture runs has no real terminal
+  // to generate history with. What is under test is the PARTITION, not VS Code.
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  const previewPort = process.env.AF_WEB_PREVIEW_PORT;
+  test.skip(!afBin || !mockRepo || !previewPort, "set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const af = (...args: string[]): void => {
+    execFileSync(afBin as string, ["--repo", mockRepo as string, ...args], { stdio: "pipe" });
+  };
+
+  // Two sessions of its OWN, created out of band and killed in the finally. The
+  // seeded fixture sessions are permuted, archived and consumed by earlier tests in
+  // file order — probe-b is archived by the time this runs, and "cannot add a tab to
+  // an archived session" is not a fact about origins. A test whose subject is
+  // cross-SESSION isolation has to own both sessions outright.
+  //
+  // The names avoid the fixture's substring rule (no seeded name contains these, and
+  // these contain none), so the rail's hasText lookups cannot cross-match.
+  const SA = "probe-2743-alpha";
+  const SB = "probe-2743-beta";
+  const setPreview = (value: string): void => {
+    execFileSync(afBin as string, ["config", "set", "preview_listen_addr", value], { stdio: "pipe" });
+  };
+
+  const PROBE_KEY = "af-2743-probe";
+  const PROBE_VALUE = "AF_EDITOR_STATE_ALPHA_7b21e";
+
+  /** Opens `session`'s vscode tab, waits for the editor to render, and returns the
+   *  frame plus the origin it landed on. */
+  const openEditor = async (session: string): Promise<{ origin: string; frameUrl: string }> => {
+    await row(page, session).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await page.locator(".af-tabbar").locator(".af-tab", { hasText: "editor" }).click();
+    const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe");
+    await expect(frame).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.frameLocator(".af-webframe").locator("#marker")).toHaveText(VSCODE_MARKER, {
+      timeout: 30_000,
+    });
+    const src = (await frame.getAttribute("src")) ?? "";
+    return { origin: new URL(src, page.url()).origin, frameUrl: src };
+  };
+
+  /** Runs fn inside the editor frame of the CURRENTLY open pane, handing it the probe
+   *  key/value pair (a frame callback is serialized, so it can close over nothing). */
+  const inEditor = <T>(origin: string, fn: (kv: [string, string]) => T): Promise<T> => {
+    const f = page.frames().find((fr) => fr.url().startsWith(origin) && fr !== page.mainFrame());
+    expect(f, `an editor frame on ${origin} should be attached`).toBeTruthy();
+    return f!.evaluate(fn, [PROBE_KEY, PROBE_VALUE] as [string, string]);
+  };
+
+  // create then WAIT: `sessions create` can return before the record is resolvable,
+  // and tab-create against a half-created session fails. The entry script polls the
+  // same way for the same reason.
+  const afOk = (...args: string[]): boolean => {
+    try {
+      af(...args);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (const s of [SA, SB]) {
+    af("sessions", "create", "--name", s, "--program", "claude");
+    await expect.poll(() => afOk("sessions", "get", s), { timeout: 60_000 }).toBe(true);
+    af("sessions", "tab-create", s, "--kind", "vscode", "--name", "editor");
+  }
+
+  try {
+    // The rail learns about out-of-band sessions through the events plane, but a
+    // reload is the deterministic way to be sure both rows are present before the
+    // assertions start.
+    await page.reload();
+    await expect(row(page, SA)).toHaveCount(1, { timeout: 30_000 });
+    await expect(row(page, SB)).toHaveCount(1, { timeout: 30_000 });
+
+    // ---- 1. THE LEAK, on today's shared origin (preview_listen_addr unset) --------
+    const a0 = await openEditor(SA);
+    expect(a0.frameUrl, "with no preview listener the editor is on the SPA's own origin").toMatch(
+      /^\/v1\/webtab\//,
+    );
+    await inEditor(a0.origin, ([k, v]) => window.localStorage.setItem(k, v));
+
+    const b0 = await openEditor(SB);
+    expect(b0.origin, "both editors share the SPA origin today — that IS the bug").toBe(a0.origin);
+    const leaked = await inEditor(b0.origin, ([k]) => window.localStorage.getItem(k));
+    expect(
+      leaked,
+      "session B's editor reads session A's state on the shared origin — the #2743 leak, reproduced",
+    ).toBe(PROBE_VALUE);
+
+    // ---- 2. THE FIX: a per-session origin ----------------------------------------
+    setPreview(`127.0.0.1:${previewPort}`);
+    await page.reload();
+
+    const a1 = await openEditor(SA);
+    const b1 = await openEditor(SB);
+    const originRe = new RegExp(`^http://af[a-z2-7]{32}\\.localhost:${previewPort}$`);
+    expect(a1.origin, "session A's editor moves to its own origin").toMatch(originRe);
+    expect(b1.origin, "session B's editor moves to its own origin").toMatch(originRe);
+    expect(a1.origin, "two sessions' editors must not share an origin").not.toBe(b1.origin);
+    expect(new URL(a1.frameUrl).pathname, "the editor owns its origin's root").toBe("/");
+
+    // The partition is real: B cannot see the value A wrote, because it is a
+    // different origin and the browser keeps their storage apart.
+    //
+    // Re-open A first. Selecting a session tears its predecessor's pane down, so
+    // after the openEditor(SB) above there is no A frame attached to write into —
+    // only ONE editor frame exists at a time, which is why every write/read below is
+    // bracketed by its own openEditor.
+    await openEditor(SA);
+    await inEditor(a1.origin, ([k, v]) => window.localStorage.setItem(k, v + "_ON_A"));
+    await openEditor(SB);
+    const isolated = await inEditor(b1.origin, ([k]) => window.localStorage.getItem(k));
+    expect(
+      isolated,
+      "session B's editor must NOT see session A's state once each session owns an origin",
+    ).toBeNull();
+
+    // ---- 3. STABILITY: the origin must survive a daemon restart --------------------
+    // The whole reason the editor cannot reuse the web-tab derivation: that label is
+    // keyed on an in-memory secret, so a restart would hand the editor a brand-new
+    // origin and therefore an empty IndexedDB — fixing a leak by destroying the same
+    // data. Re-resolving the origin must yield the SAME name.
+    const a2 = await openEditor(SA);
+    expect(a2.origin, "a session's editor origin must be stable, not per-render").toBe(a1.origin);
+    const kept = await inEditor(a2.origin, ([k]) => window.localStorage.getItem(k));
+    expect(kept, "and its state must still be there").toBe(PROBE_VALUE + "_ON_A");
+  } finally {
+    setPreview("");
+    // Kill rather than archive: these sessions exist only for this test, and killing
+    // prunes their worktrees and branches so nothing is left for later tests to trip
+    // over. Best-effort — a cleanup failure must not mask the assertion that ran.
+    for (const s of [SA, SB]) {
+      try {
+        af("sessions", "kill", s);
+      } catch {
+        // already gone, or the daemon is unhappy — either way, not this test's verdict
+      }
+    }
+    await page.reload();
+  }
+});
+
 test("vscode tab (#2077): the labelled New tab menu creates a VS Code tab and serves it through the proxy", REAL_FIXTURE, async () => {
   // End to end, with no seeded fixture: pick VS Code from the tab bar's kind menu,
   // and the daemon spawns a code-server (the FAKE one on PATH — no CI box has a
