@@ -78,11 +78,16 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 		// A push that reports no branch leaves recovery with the empty RestoreBranch
 		// that clones the default branch — the reported bug. Refuse rather than
 		// "succeed" onto the wrong branch.
+		// NOT --force-reap here: the forced arm requires a known branch, and an empty
+		// one is precisely what this case has, so that retry would refuse again. An
+		// escape hatch that cannot open is the thing this whole guard is built to
+		// avoid, so name the alternative that actually ends it.
 		return fmt.Errorf(
 			"refusing to replace the sandbox for %q: its push reported no branch name, so a replacement "+
 				"would clone the repository's default branch and strand whatever the sandbox holds. "+
-				"It stays recoverable; if you know its work is expendable, force it with: %s",
-			instance.Title, forceReapCommandFor(instance.Title))
+				"af cannot recover this session onto its own branch without one. If its work is "+
+				"expendable, remove it and create a replacement: %s",
+			instance.Title, shellsuggest.Command("af", "sessions", "kill", "--", instance.Title))
 	}
 	// Record it the INSTANT it is durable, for the reason ArchiveSandbox records it
 	// there: from here the branch is the only handle on the user's work, so it
