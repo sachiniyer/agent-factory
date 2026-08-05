@@ -5,6 +5,8 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // RecoveryInvocation is the strict internal command rendered into persistent
@@ -86,7 +88,24 @@ func runRecoveryActorWith(
 	if lease == nil {
 		return errors.New("upgrade recovery acquisition returned no lease")
 	}
-	defer func() { retErr = errors.Join(retErr, lease.Release()) }()
+	// Releasing the lease is CLEANUP, and cleanup that fails after the real work
+	// succeeded must not be reported as the work failing. Joining it into retErr
+	// turned a successful recovery into a non-zero exit — and this actor's exit
+	// code is load-bearing: every terminal path below returns nil specifically so
+	// the loaded unit's Restart=on-failure cannot undo the circuit breaker the
+	// supervisor just set. A failed release would have restarted an actor for an
+	// upgrade that had already committed or rolled back (#2960).
+	//
+	// The lease is an flock plus a file handle; both are released by the kernel
+	// when this process exits moments later, so a release error costs nothing
+	// beyond the diagnostic. It is logged rather than dropped so a genuinely
+	// stuck lock is still visible.
+	defer func() {
+		if relErr := lease.Release(); relErr != nil {
+			log.WarningLog.Printf("upgrade recovery: could not release the recovery lease for transaction %s (the recovery itself is unaffected): %v",
+				invocation.TransactionID, relErr)
+		}
+	}()
 
 	err = supervise(ctx, txn, lease)
 	if err == nil {

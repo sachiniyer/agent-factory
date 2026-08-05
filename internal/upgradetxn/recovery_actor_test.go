@@ -131,3 +131,75 @@ func TestRecoveryActorRunnerMapsOnlyDisarmedTerminalOutcomesToCleanExit(t *testi
 		})
 	}
 }
+
+// Cleanup that fails after the real work succeeded must not be reported as the
+// work failing. This actor's exit code is load-bearing: every terminal path
+// returns nil precisely so the loaded unit's Restart=on-failure cannot undo the
+// circuit breaker the supervisor just set. Joining a lease-release error into
+// the return turned a committed upgrade into a non-zero exit, and the unit would
+// then restart an actor for an upgrade that had already finished (#2960).
+func TestRunRecoveryActor_LeaseReleaseFailureDoesNotFailTheRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		runErr error
+	}{
+		{name: "commit", runErr: nil},
+		{name: "abort", runErr: ErrUpgradeAborted},
+		{name: "rollback", runErr: ErrUpgradeRolledBack},
+		{name: "rollback failed circuit breaker", runErr: ErrRollbackRecoveryFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			txn, home, _ := prepareFixture(t)
+			invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
+			lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+			require.NoError(t, err)
+
+			// Close the handle out from under the lease so the actor's own
+			// deferred Release fails for real. Deliberately NOT calling Release
+			// here first: Release nils the handles, so a pre-call would leave the
+			// actor releasing nothing and the test would pass against the very
+			// bug it exists to catch. TestRecoveryLease_ReleaseFailsOnAClosedHandle
+			// proves this fixture actually breaks Release.
+			require.NoError(t, lease.file.Close())
+
+			err = runRecoveryActorWith(
+				context.Background(), invocation,
+				func(*Transaction) (*RecoveryLease, error) { return lease, nil },
+				func(context.Context, *Transaction, *RecoveryLease) error { return tc.runErr },
+			)
+			require.NoError(t, err,
+				"a failed lease release must not turn a completed recovery into a non-zero exit")
+		})
+	}
+}
+
+// The converse: a genuine supervision failure still fails, so the change did not
+// make the actor swallow outcomes that must reach the exit code.
+func TestRunRecoveryActor_SupervisionFailureStillFails(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+
+	err = runRecoveryActorWith(
+		context.Background(), invocation,
+		func(*Transaction) (*RecoveryLease, error) { return lease, nil },
+		func(context.Context, *Transaction, *RecoveryLease) error {
+			return errors.New("health probe failed")
+		},
+	)
+	require.Error(t, err)
+}
+
+// Proves the fixture the test above relies on: a closed handle really does make
+// Release fail. Kept separate because consuming the failure inside that test
+// would neutralise it — Release nils the handles, so the actor would then have
+// nothing left to fail on.
+func TestRecoveryLease_ReleaseFailsOnAClosedHandle(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+
+	require.NoError(t, lease.file.Close())
+	require.Error(t, lease.Release(), "closing the handle must make Release fail")
+}
