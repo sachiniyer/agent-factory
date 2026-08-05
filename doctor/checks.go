@@ -722,10 +722,11 @@ func staleTempHomeRemoveFix(ctx *scanContext, dir, tempDir, activeHome string) f
 		// no lock). Re-check it fresh — and refuse if the recheck cannot be
 		// PERFORMED, because a guard that cannot run has not passed.
 		//
-		// Fresh: ctx.tmuxSessions memoizes the listing for the run, so a listing
-		// that succeeded at detection is reused here rather than re-shelled. The
-		// marker lookups behind it are not memoized and do re-run.
-		claimed, err := liveTmuxHomes(ctx)
+		// liveTmuxHomesNow, not liveTmuxHomes: the run's memoized listing was
+		// taken before this window opened, so a session started since detection
+		// is absent from it and would be missed by exactly the guard meant to
+		// catch it.
+		claimed, err := liveTmuxHomesNow(ctx)
 		if err != nil {
 			return fmt.Errorf("refusing to remove %s: cannot check whether a live tmux session references it: %w", dir, err)
 		}

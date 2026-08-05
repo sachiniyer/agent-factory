@@ -190,17 +190,6 @@ func TestListedTmuxSessionsPass(t *testing.T) {
 			},
 			wantDetail: "0",
 		},
-		{
-			// tmux is not installed, so no tmux session can exist.
-			name: "tmux not installed",
-			exec: func(t *testing.T) cmd.Executor {
-				return cmd_test.MockCmdExec{
-					RunFunc:    func(*exec.Cmd) error { return nil },
-					OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, &exec.Error{Name: "tmux", Err: exec.ErrNotFound} },
-				}
-			},
-			wantDetail: "0",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptionsWithHome(t, home, false)
@@ -215,6 +204,80 @@ func TestListedTmuxSessionsPass(t *testing.T) {
 			require.Contains(t, rows[0].Detail, tc.wantDetail)
 		})
 	}
+}
+
+// TestUninvokableTmuxClientIsBlindness pins the case that reads most like a
+// determinate empty and is not one. `exec.ErrNotFound` proves doctor could not
+// invoke the tmux CLIENT — not that no server holds sessions. doctor's PATH is
+// not the sessions' PATH: a scan from a cron job or systemd unit with a minimal
+// PATH, or one straddling a package upgrade, finds no tmux while the server is
+// up. Reading that as "no sessions are live" is the #2874 defect wearing the
+// costume of an optimisation.
+func TestUninvokableTmuxClientIsBlindness(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	opts := testOptionsWithHome(t, home, true) // Fix: true
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc:    func(*exec.Cmd) error { return nil },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, &exec.Error{Name: "tmux", Err: exec.ErrNotFound} },
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := findCheckRows(report, "tmux-inspection")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusFail, rows[0].Status,
+		"a tmux client doctor could not execute is a session set it could not read, not an empty one")
+	require.Contains(t, rows[0].Detail, "executable file not found",
+		"the row must name why doctor could not look")
+	for _, f := range report.Findings {
+		require.Empty(t, f.FixAction,
+			"no fix may be armed when the tmux client could not be invoked: %s / %s", f.Check, f.Detail)
+	}
+}
+
+// TestStaleTempHomeFixRelistsTmux is the TOCTOU half of the recheck, and the
+// regression lock for a freshness bug the memo introduced: findings are applied
+// AFTER detection, so the session that must veto an rm -rf is exactly the one
+// that STARTED in that window — and it cannot appear in a listing taken before
+// the window opened. Detection here sees no sessions; by fix time one claims the
+// home.
+func TestStaleTempHomeFixRelistsTmux(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.claimed-after-detection")
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+	const late = tmux.TmuxPrefix + "started-after-detection"
+	detected := false
+	opts := macLikeTempHomeOptions(t, tempRoot, true) // Fix: true
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if len(c.Args) > 1 && c.Args[1] == "ls" {
+				if !detected {
+					detected = true
+					return []byte(""), nil // detection: nothing claims the home
+				}
+				return []byte(late + "\n"), nil // fix time: a session has appeared
+			}
+			if len(c.Args) > 1 && c.Args[1] == "show-environment" {
+				return []byte(tmux.EnvMarkerHome + "=" + dir + "\n"), nil
+			}
+			return []byte(""), nil
+		},
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.DirExists(t, dir,
+		"the fix-time recheck reused the run's memoized session list, so a session that started after "+
+			"detection was invisible and `--fix` removed a home a live session claims")
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1)
+	require.False(t, findings[0].Fixed)
+	require.Error(t, findings[0].FixErr, "the refusal must surface as a fix error, not a silent skip")
+	require.Contains(t, findings[0].FixErr.Error(), "live tmux session")
 }
 
 // TestUnreadableTmuxSessionListRefusesTempHomeRemoval covers the second
@@ -241,6 +304,38 @@ func TestUnreadableTmuxSessionListRefusesTempHomeRemoval(t *testing.T) {
 			"a home whose tmux claim could not be checked must not be offered for removal: %s", f.Detail)
 		require.False(t, f.Fixed)
 	}
+}
+
+// TestDefinitiveNoTmuxServerStillAllowsTempHomeRemoval is the anti-regression
+// direction for the removal path, and it is not redundant with the fixtures that
+// model an empty SUCCESSFUL listing: this drives tmux's exit-1 no-server
+// DIAGNOSTIC, the shape a real box with no tmux server returns. Refusing here
+// would leave abandoned temp homes uncollectable forever on exactly the machines
+// where they accumulate.
+//
+// Idea taken from #2906, a sibling attempt at this fix that is otherwise
+// superseded by #2877.
+func TestDefinitiveNoTmuxServerStillAllowsTempHomeRemoval(t *testing.T) {
+	tempRoot := t.TempDir()
+	dir := makeOldTempAFHome(t, tempRoot, "tmp.no-server-at-all")
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+	opts := macLikeTempHomeOptions(t, tempRoot, true) // Fix: true
+	opts.Exec = blindTmuxLsExec(t, "no server running on /tmp/tmux-1000/default", 1)
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	rows := findCheckRows(report, "tmux-inspection")
+	require.Len(t, rows, 1)
+	require.Equal(t, StatusPass, rows[0].Status,
+		"tmux answered — there is no server, so this is a real empty session set, not blindness")
+	findings := findByCheck(report, "stale-temp-home")
+	require.Len(t, findings, 1)
+	require.True(t, findings[0].Fixed, "fix outcome: %v", findings[0].FixErr)
+	require.NoDirExists(t, dir,
+		"a provably-unused home must still be removable on a box with no tmux server, or the guard "+
+			"has traded one bug for an uncollectable temp dir")
 }
 
 // TestUnreadableSessionRecordsDoNotMakeSessionsLookLeaked is the third read in
@@ -277,9 +372,16 @@ func TestUnreadableSessionRecordsDoNotMakeSessionsLookLeaked(t *testing.T) {
 	require.Equal(t, StatusFail, rows[0].Status)
 }
 
-// TestDoctorRunTimeIsBounded is a guard on the memo rather than on behaviour:
-// the session list feeds four checks, and re-shelling out per check would both
-// cost four tmux round trips and let one run see two different worlds.
+// TestDoctorSharesOneSessionListing guards the memo: the session list feeds four
+// checks, and re-shelling out per check would both cost four tmux round trips and
+// let one DETECTION pass see two different worlds.
+//
+// Scoped to a report-only run on purpose, and read the scope before "fixing" a
+// count that exceeds one. A `--fix` run lists again, deliberately:
+// staleTempHomeRemoveFix must see sessions that started AFTER detection, so
+// tightening this assertion to cover the fix path would mean deleting exactly
+// the re-list that keeps an rm -rf off a live home
+// (TestStaleTempHomeFixRelistsTmux is the one that would catch it).
 func TestDoctorSharesOneSessionListing(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	calls := 0
