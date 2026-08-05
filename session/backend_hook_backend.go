@@ -608,6 +608,15 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 		decoder := json.NewDecoder(strings.NewReader(stdout[open:]))
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil {
+			// Prose that was never JSON: the parse died on the first token, as
+			// `[INFO] …` does at its `I`. A record that BROKE gets further in
+			// (`{"level":INVALID` reaches offset 10). Only the latter leaves a
+			// structure whose extent is unknown; log prefixes that merely open a
+			// bracket must not poison the records after them.
+			if hookLineNeverStartedJSON(err) {
+				cursor = lineEnd
+				continue
+			}
 			// A line whose brackets close is self-contained: bracketed prose like
 			// "[INFO] tunnel forwarding", or a malformed record whose contents are
 			// all on this line. Either way skipping the LINE is safe, because
@@ -644,10 +653,14 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 			// Another value beside it: a log line carrying several. None of them is
 			// a record, so skip them all — later lines stay trustworthy because
 			// this line closed.
-		default:
-			// `{…},"endpoint":` — a separator or bare text means the record is still
-			// open, so its structure is unknown and nothing after it is promoted.
+		case stdout[rest] == ',' || stdout[rest] == ':':
+			// `{…},"endpoint":` — a structural separator means the record is still
+			// open, so its extent is unknown and nothing after it is promoted.
 			return nil, sawJSON
+		default:
+			// Bare prose after a complete value — `[2026] tunnel forwarding`. A
+			// record continuing across lines breaks at a structural position, not
+			// mid-word, so this is a log line: skip it and keep reading.
 		}
 		// Advance past the WHOLE decoded value, not just its first line, or the
 		// lines inside a multi-line log would be rescanned and its nested
@@ -660,6 +673,19 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
+
+// hookLineNeverStartedJSON reports that a line only looked like JSON because of
+// its opening bracket. encoding/json reports where it gave up; failing on the
+// first token means nothing valid was ever parsed, which is a bracketed log
+// prefix rather than a record that broke partway.
+func hookLineNeverStartedJSON(err error) bool {
+	syntaxErr, ok := err.(*json.SyntaxError)
+	return ok && syntaxErr.Offset <= hookJSONFirstTokenOffset
+}
+
+// hookJSONFirstTokenOffset is the 1-based offset encoding/json reports when the
+// byte right after an opener is already invalid.
+const hookJSONFirstTokenOffset = 2
 
 // hookLineBracketsBalanced reports whether every object/array opened on this line
 // also closes on it, WITH A MATCHING BRACKET, ignoring brackets inside JSON

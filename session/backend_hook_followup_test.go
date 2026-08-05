@@ -435,3 +435,44 @@ exit 0
 	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
 	assert.False(t, h.deleteRan(t))
 }
+
+// Eighth review round on #2841. Both findings are the prose-on-stdout path
+// breaking again — the fourth and fifth time in this PR — so they are pinned
+// together with the earlier prose cases as one set.
+func TestHookLaunchIgnoresProseThatOnlyLooksLikeJSON(t *testing.T) {
+	tests := []struct{ name, prose string }{
+		{"bracket prefix with unmatched brace", `[INFO] opening {config`},
+		{"numeric bracket prefix", `[2026] tunnel forwarding`},
+		{"bracket prefix with stray quote", `[INFO] opening "config`},
+		{"plain bracket prefix", `[INFO] tunnel forwarding`},
+		{"plain prose", `tunnel forwarding`},
+		{"brace prefix", `{config} loaded`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHookState(t, "printf '%s\\n' '"+test.prose+"'\n"+
+				`echo '{"url":"http://10.0.0.7:8080","token":"secret"}'`+"\nexit 0\n", "")
+			res, err := newHookProvisioner(h, "prose "+test.name).provisionOrReap()
+
+			require.NoError(t, err, "prose on stdout must never stop endpoint selection")
+			require.NotNil(t, res.Endpoint)
+			assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+			assert.False(t, h.deleteRan(t), "a working sandbox must not be reaped")
+		})
+	}
+}
+
+// The security direction must still hold against every prose shape above: a
+// record that genuinely broke still stops selection.
+func TestHookLaunchStillRejectsBrokenRecordsAfterProseFix(t *testing.T) {
+	h := newHookState(t, `
+echo '[INFO] tunnel forwarding'
+printf '%s\n' '{"level":INVALID,"endpoint":' '{"url":"http://wrong.invalid","token":"logged-secret"}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	_, err := newHookProvisioner(h, "prose then broken record").provisionOrReap()
+
+	require.Error(t, err, "a record that broke still stops selection")
+	assert.NotContains(t, err.Error(), "logged-secret")
+}
