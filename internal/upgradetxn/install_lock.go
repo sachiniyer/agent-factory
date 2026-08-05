@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // preparationLockName is the single lock that serialises publishing a
@@ -181,11 +183,33 @@ func acquireExecutableLock(executable string, nonblocking bool) (*os.File, error
 	prepare := func(lock *os.File) { alignLockWithDirectoryWriters(lock, dir) }
 	for attempt := 0; ; attempt++ {
 		lock, err := acquireFileLockPrepared(path, syscall.O_NOFOLLOW, nonblocking, prepare)
-		if err == nil || nonblocking || attempt >= executableLockOpenRetries ||
-			!errors.Is(err, os.ErrPermission) {
+		if err == nil || !errors.Is(err, os.ErrPermission) {
 			return lock, err
 		}
 		if _, shared := directoryWriterGroup(dir); !shared {
+			// A private directory. EACCES means a genuinely unauthorized caller and
+			// no amount of waiting changes the answer, so neither wait nor dress it
+			// up as contention.
+			return lock, err
+		}
+		if nonblocking {
+			// A shared directory, so this denial is very likely the transient
+			// 0600-to-0660 window of another writer's first acquisition. Report it
+			// as BUSY rather than as a permission error.
+			//
+			// That distinction decides what the caller does with it, and the two
+			// answers are not close. writeExecutableInPlaceWaiting defers only on
+			// ErrInstallLockBusy; on any other error it swaps the binary with
+			// NEITHER lock held, which is precisely the interleave with a live
+			// transaction this lock exists to prevent. Deferring an unattended
+			// launch-time update costs nothing — it retries next launch — while
+			// swapping unlocked can corrupt someone's rollback.
+			//
+			// Returned without sleeping: the caller asked not to wait (#2951), and
+			// this reports the state rather than waiting out the window.
+			return nil, ErrInstallLockBusy
+		}
+		if attempt >= executableLockOpenRetries {
 			return lock, err
 		}
 		time.Sleep(executableLockOpenRetryDelay)
@@ -223,6 +247,31 @@ func directoryWriterGroup(dir string) (int, bool) {
 	)
 	perm := info.Mode().Perm()
 	if perm&groupMayWrite != groupMayWrite || perm&otherMayWrite == otherMayWrite {
+		return 0, false
+	}
+	// Everything above reads the mode bits as if they described the set of
+	// principals who may replace the binary. Two things make that reading false,
+	// and the only safe response to either is to stop reading them.
+	//
+	// STICKY (e.g. 1770). Group write and search let a member CREATE entries, but
+	// the sticky bit restricts renaming and removing to the entry's owner, the
+	// directory's owner, or a privileged process — so a group member generally
+	// cannot replace a binary owned by someone else. Widening there admits
+	// exactly the principals who cannot install, handing them a blocking lock and
+	// a denial of service the private lock never had. Perm() drops this bit, so
+	// it has to be read off the full mode.
+	//
+	// EXTENDED ACLs. With a POSIX ACL present, the group class bits returned by
+	// stat are the ACL MASK, not the owning group's effective rights. A directory
+	// can grant a named user rwx while the owning group has r-x and the mask
+	// reads rwx: the mode says "group-writable", the truth is that the group
+	// cannot write and a user invisible to the mode can. Widening on that gets
+	// both halves wrong at once.
+	//
+	// Declining costs only the widening — the lock still works for its creator,
+	// and the topology behaves exactly as it did before any of this — whereas
+	// guessing wrong hands a blocking lock to non-writers.
+	if info.Mode()&os.ModeSticky != 0 || hasExtendedACL(dir) {
 		return 0, false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
@@ -359,4 +408,22 @@ func foreignTransactionOver(executable, selfID string) (string, error) {
 		return id, nil
 	}
 	return "", nil
+}
+
+// hasExtendedACL reports whether the path carries a POSIX access ACL, which
+// makes the group-class mode bits a MASK rather than a statement about the
+// owning group (see directoryWriterGroup).
+//
+// Presence is the whole question — the entries are never parsed. This is used
+// only to DECLINE widening, so the conservative answer on any uncertainty is
+// "assume ambiguity", and a probe that cannot tell simply reports false and
+// leaves the mode-bit reading in charge, which is where it was before.
+//
+// The xattr name is the Linux one. On other unixes the call fails and this
+// reports false: their ACL models differ, and inventing a cross-platform answer
+// here would be guessing rather than probing.
+func hasExtendedACL(path string) bool {
+	// A zero-length read: only the error matters, never the value.
+	_, err := unix.Getxattr(path, "system.posix_acl_access", nil)
+	return err == nil
 }

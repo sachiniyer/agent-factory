@@ -2,6 +2,7 @@ package upgradetxn
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // sharedInstallDir builds an install directory that is GROUP-writable, the shape
@@ -190,6 +192,121 @@ func TestExecutableLock_NotWidenedWhenTheGroupCannotTraverse(t *testing.T) {
 	perm, _ := lockFileStat(t, executable)
 	require.Equal(t, os.FileMode(journalFileMode), perm,
 		"group write without group execute is not write access to a directory, so there is no second writer to admit")
+}
+
+// A STICKY group-writable directory (1770) is not shared for this purpose.
+// Group write and search let a member CREATE entries, but the sticky bit
+// restricts renaming and removing to the entry's owner, the directory's owner,
+// or a privileged process — so a group member generally cannot replace a binary
+// owned by someone else. Widening there would hand a blocking lock to exactly
+// the principals who cannot install, which is a denial of service the private
+// lock never had.
+//
+// os.FileMode.Perm() drops the sticky bit, so a classifier reading Perm() alone
+// cannot see this at all.
+func TestExecutableLock_NotWidenedInAStickyDirectory(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	dir := filepath.Dir(executable)
+	require.NoError(t, os.Chmod(dir, 0o770|os.ModeSticky))
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSticky, "fixture must actually be sticky")
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	perm, _ := lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(journalFileMode), perm,
+		"a sticky directory does not let the group replace another user's binary, so the group must not get the lock either")
+}
+
+// With a POSIX ACL present, the group-class bits stat returns are the ACL MASK,
+// not the owning group's effective rights. A directory can grant a named user
+// rwx while the owning group has only r-x and the mask reads rwx: the mode says
+// "group-writable", the truth is that the group cannot write and a user the mode
+// cannot express can. Widening on that gets both halves wrong at once — it hands
+// a blocking lock to non-writers and still excludes the real writer.
+//
+// So the classifier declines whenever an ACL makes the bits ambiguous. This
+// drives setfacl rather than hand-encoding an ACL blob, and skips honestly where
+// the tool or the filesystem cannot provide one.
+func TestExecutableLock_NotWidenedWhenAnACLMakesTheModeBitsAmbiguous(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	dir := filepath.Dir(executable)
+
+	if _, err := exec.LookPath("setfacl"); err != nil {
+		t.Skip("setfacl is unavailable, so a real POSIX ACL cannot be created here")
+	}
+	// A named-user entry is what makes the group bits a mask rather than a
+	// statement about the group.
+	if out, err := exec.Command("setfacl", "-m", "u:root:rwx", dir).CombinedOutput(); err != nil {
+		t.Skipf("this filesystem does not support POSIX ACLs: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	// Read the xattr directly rather than through the helper under test, so this
+	// test compiles — and fails — against the code that lacks the helper.
+	if _, err := unix.Getxattr(dir, "system.posix_acl_access", nil); err != nil {
+		t.Skipf("no access ACL landed on the fixture: %v", err)
+	}
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o770), info.Mode().Perm(),
+		"precondition: the mode bits must still LOOK group-writable, or the test proves nothing about ambiguity")
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	perm, _ := lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(journalFileMode), perm,
+		"an ACL makes the group bits a mask, so they no longer describe who may replace the binary and must not decide who gets the lock")
+}
+
+// A NONBLOCKING caller that hits the transient 0600-to-0660 window must be told
+// BUSY, not denied.
+//
+// The distinction decides what happens next, and the outcomes are not close:
+// writeExecutableInPlaceWaiting defers only on ErrInstallLockBusy, and on any
+// other error it swaps the binary with NEITHER lock held — the interleave with a
+// live transaction this lock exists to prevent. Deferring an unattended
+// launch-time update costs a retry next launch; swapping unlocked can corrupt
+// someone's rollback.
+//
+// A 0000 lock stands in for the window: unopenable even by its owner, which is
+// the same EACCES the racing writer sees.
+func TestExecutableLock_NonblockingReportsBusyInsteadOfDeniedWhenShared(t *testing.T) {
+	requireUnprivileged(t)
+	executable := sharedInstallDir(t, 0o770)
+	lockPath := executableLockPath(executable)
+	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
+	require.NoError(t, os.Chmod(lockPath, 0o000))
+
+	err := withExecutableLock(executable, true, func() error {
+		t.Fatal("the critical section must not run when the lock cannot be opened")
+		return nil
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInstallLockBusy,
+		"a shared-directory denial must reach the caller as BUSY: any other error makes the launch updater swap the binary with no lock held")
+	require.NotErrorIs(t, err, os.ErrPermission,
+		"it must not also present as a permission error, or a caller matching on that first would still take the unlocked path")
+}
+
+// The same nonblocking call in a PRIVATE directory must stay a permission error.
+// There the denial is permanent and means a genuinely unauthorized caller;
+// reporting BUSY would tell the launch updater to defer forever and silently
+// stop auto-updating rather than fall back.
+func TestExecutableLock_NonblockingStaysDeniedInAPrivateDirectory(t *testing.T) {
+	requireUnprivileged(t)
+	executable := sharedInstallDir(t, 0o700)
+	lockPath := executableLockPath(executable)
+	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
+	require.NoError(t, os.Chmod(lockPath, 0o000))
+
+	err := withExecutableLock(executable, true, func() error {
+		t.Fatal("the critical section must not run when the lock cannot be opened")
+		return nil
+	})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrInstallLockBusy,
+		"a permanent denial must not masquerade as transient contention, or the updater defers forever instead of falling back")
+	require.ErrorIs(t, err, os.ErrPermission)
 }
 
 // A HARD LINK at the lock path aims the mode change at somebody else's inode.
