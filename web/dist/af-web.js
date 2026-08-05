@@ -7840,32 +7840,65 @@ var AttachTerminal = class {
     if (pressedRow < 0 || pressedRow >= buffer.length) {
       return null;
     }
-    let first = pressedRow;
-    while (first > 0 && pressedRow - first < TOUCH_PRESS_MAX_ROWS && buffer.getLine(first)?.isWrapped === true && this.rowEdgeContinues(first, 0, cols)) {
-      first -= 1;
-    }
-    if (buffer.getLine(first)?.isWrapped === true && this.rowEdgeContinues(first, 0, cols)) {
-      return null;
-    }
-    let last = pressedRow;
-    while (last + 1 < buffer.length && last - pressedRow < TOUCH_PRESS_MAX_ROWS && buffer.getLine(last + 1)?.isWrapped === true && this.rowEdgeContinues(last, cols - 1, cols)) {
-      last += 1;
-    }
-    if (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true && this.rowEdgeContinues(last, cols - 1, cols)) {
-      return null;
-    }
-    const cells = this.flattenRows(first, last, cols);
+    let cells = this.flattenRows(pressedRow, pressedRow, cols);
     if (cells === null) {
       return null;
     }
-    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
-  }
-  /** Whether the token at one edge of a row runs on — the only reason to pull another
-   *  wrapped row into the snapshot. A blank there ends the token and the walk. */
-  rowEdgeContinues(row, col, cols) {
-    const cells = this.flattenRows(row, row, cols);
-    const edge = cells?.[col];
-    return edge !== void 0 && (edge === "" || edge.trim() !== "");
+    let first = pressedRow;
+    let last = pressedRow;
+    let index = cell.col;
+    const reaches = () => wordRangeAtColumn(cells, index);
+    if (reaches() !== null) {
+      while (first > 0 && pressedRow - first < TOUCH_PRESS_MAX_ROWS && buffer.getLine(first)?.isWrapped === true && reaches()?.start === 0) {
+        const previous = this.flattenRows(first - 1, first - 1, cols);
+        if (previous === null) {
+          return null;
+        }
+        cells = previous.concat(cells);
+        index += cols;
+        first -= 1;
+      }
+      while (last + 1 < buffer.length && last - pressedRow < TOUCH_PRESS_MAX_ROWS && buffer.getLine(last + 1)?.isWrapped === true && (() => {
+        const range2 = reaches();
+        return range2 !== null && range2.start + range2.length === cells.length;
+      })()) {
+        const next = this.flattenRows(last + 1, last + 1, cols);
+        if (next === null) {
+          return null;
+        }
+        cells = cells.concat(next);
+        last += 1;
+      }
+      const range = reaches();
+      if (range === null) {
+        return null;
+      }
+      if (range.start === 0 && (first === 0 ? buffer.getLine(0)?.isWrapped === true : true)) {
+        return null;
+      }
+      if (range.start + range.length === cells.length && last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
+        return null;
+      }
+    } else {
+      while (first > 0 && pressedRow - first < TOUCH_PRESS_MAX_ROWS && buffer.getLine(first)?.isWrapped === true) {
+        first -= 1;
+      }
+      while (last + 1 < buffer.length && last - pressedRow < TOUCH_PRESS_MAX_ROWS && buffer.getLine(last + 1)?.isWrapped === true) {
+        last += 1;
+      }
+      if (buffer.getLine(first)?.isWrapped === true) {
+        return null;
+      }
+      if (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
+        return null;
+      }
+      cells = this.flattenRows(first, last, cols);
+      if (cells === null) {
+        return null;
+      }
+      index = (pressedRow - first) * cols + cell.col;
+    }
+    return { cells, index, firstRow: first, cols, bufferType: buffer.type };
   }
   /**
    * Flattens buffer rows to ONE ENTRY PER COLUMN, so an index is a column.

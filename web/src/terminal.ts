@@ -884,57 +884,93 @@ export class AttachTerminal {
     if (pressedRow < 0 || pressedRow >= buffer.length) {
       return null;
     }
-    // A soft-wrapped line is SEVERAL buffer rows, and a phone is about forty columns
-    // wide, so the URLs and paths this gesture exists for wrap more often than not.
-    //
-    // The walk is BOUNDED, and that bound is not decoration: this runs synchronously
-    // in touchstart for every touch — taps and scrolls included — and one very long
-    // wrapped logical line (minified JSON, base64, a stack trace) can be the entire
-    // 5000-row scrollback. Materialising that would be ~200k cell reads on a phone
-    // before the handler returns, i.e. a visible stall on every touch. Rows are
-    // therefore taken only while the token is still running at the edge, and only up
-    // to the cap.
-    let first = pressedRow;
-    while (
-      first > 0 &&
-      pressedRow - first < TOUCH_PRESS_MAX_ROWS &&
-      buffer.getLine(first)?.isWrapped === true &&
-      this.rowEdgeContinues(first, 0, cols)
-    ) {
-      first -= 1;
-    }
-    // A block still marked wrapped at its first row has had earlier rows trimmed away
-    // — what remains is a SUFFIX of the logical line, and copying it whole would
-    // present a fragment as the token. Hitting the cap mid-token is refused for the
-    // same reason rather than returning the part that happened to fit.
-    if (buffer.getLine(first)?.isWrapped === true && this.rowEdgeContinues(first, 0, cols)) {
-      return null;
-    }
-    let last = pressedRow;
-    while (
-      last + 1 < buffer.length &&
-      last - pressedRow < TOUCH_PRESS_MAX_ROWS &&
-      buffer.getLine(last + 1)?.isWrapped === true &&
-      this.rowEdgeContinues(last, cols - 1, cols)
-    ) {
-      last += 1;
-    }
-    if (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true && this.rowEdgeContinues(last, cols - 1, cols)) {
-      return null;
-    }
-    const cells = this.flattenRows(first, last, cols);
+    let cells = this.flattenRows(pressedRow, pressedRow, cols);
     if (cells === null) {
       return null;
     }
-    return { cells, index: (pressedRow - first) * cols + cell.col, firstRow: first, cols, bufferType: buffer.type };
-  }
+    let first = pressedRow;
+    let last = pressedRow;
+    let index = cell.col;
 
-  /** Whether the token at one edge of a row runs on — the only reason to pull another
-   *  wrapped row into the snapshot. A blank there ends the token and the walk. */
-  private rowEdgeContinues(row: number, col: number, cols: number): boolean {
-    const cells = this.flattenRows(row, row, cols);
-    const edge = cells?.[col];
-    return edge !== undefined && (edge === "" || edge.trim() !== "");
+    // The walk follows the PRESSED TOKEN, not the row edges. A soft-wrapped line is
+    // several buffer rows and a phone is about forty columns wide, so the URLs and
+    // paths this gesture exists for wrap — but only the token under the finger has
+    // any claim on the neighbouring rows. Walking on whatever happens to sit at an
+    // edge drags in unrelated text, and on a long wrapped line it runs to the cap and
+    // throws the whole press away.
+    //
+    // Bounded, and the bound is not decoration: this runs synchronously in touchstart
+    // for EVERY touch, taps and scrolls included, and one long wrapped logical line
+    // can be the entire 5000-row scrollback. Following the token keeps the cost
+    // proportional to what is being copied instead of to the line it sits in.
+    const reaches = (): TerminalWordRange | null => wordRangeAtColumn(cells as string[], index);
+    if (reaches() !== null) {
+      while (
+        first > 0 &&
+        pressedRow - first < TOUCH_PRESS_MAX_ROWS &&
+        buffer.getLine(first)?.isWrapped === true &&
+        reaches()?.start === 0
+      ) {
+        const previous = this.flattenRows(first - 1, first - 1, cols);
+        if (previous === null) {
+          return null;
+        }
+        cells = previous.concat(cells as string[]);
+        index += cols;
+        first -= 1;
+      }
+      while (
+        last + 1 < buffer.length &&
+        last - pressedRow < TOUCH_PRESS_MAX_ROWS &&
+        buffer.getLine(last + 1)?.isWrapped === true &&
+        (() => {
+          const range = reaches();
+          return range !== null && range.start + range.length === (cells as string[]).length;
+        })()
+      ) {
+        const next = this.flattenRows(last + 1, last + 1, cols);
+        if (next === null) {
+          return null;
+        }
+        cells = (cells as string[]).concat(next);
+        last += 1;
+      }
+      // A token still running at the edge of the last row taken is a token that did
+      // not fit the bound — and the part that fit is a fragment, which is the failure
+      // this gesture keeps having to avoid. The same is true of a wrapped block whose
+      // earlier rows were trimmed away, leaving a suffix at row 0.
+      const range = reaches();
+      if (range === null) {
+        return null;
+      }
+      if (range.start === 0 && (first === 0 ? buffer.getLine(0)?.isWrapped === true : true)) {
+        return null;
+      }
+      if (range.start + range.length === (cells as string[]).length && last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
+        return null;
+      }
+    } else {
+      // A press on blank space copies the LINE, so here the whole wrapped block is the
+      // subject and an edge-pruned fragment would quietly copy part of it.
+      while (first > 0 && pressedRow - first < TOUCH_PRESS_MAX_ROWS && buffer.getLine(first)?.isWrapped === true) {
+        first -= 1;
+      }
+      while (last + 1 < buffer.length && last - pressedRow < TOUCH_PRESS_MAX_ROWS && buffer.getLine(last + 1)?.isWrapped === true) {
+        last += 1;
+      }
+      if (buffer.getLine(first)?.isWrapped === true) {
+        return null; // a suffix, not a line
+      }
+      if (last + 1 < buffer.length && buffer.getLine(last + 1)?.isWrapped === true) {
+        return null; // capped mid-line
+      }
+      cells = this.flattenRows(first, last, cols);
+      if (cells === null) {
+        return null;
+      }
+      index = (pressedRow - first) * cols + cell.col;
+    }
+    return { cells, index, firstRow: first, cols, bufferType: buffer.type };
   }
 
   /**
