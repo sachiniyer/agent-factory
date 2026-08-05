@@ -292,6 +292,16 @@ func projectDeleteRefusal(req CreateSessionRequest, repoID string, inProgress bo
 	return err
 }
 
+// admitTaskRunFast is the pre-resolver half of the task-run cap, for a caller
+// that does not hold m.mu. It returns the SAME errAtConcurrencyLimit sentinel as
+// the authoritative check, so the watch-delivery path cannot tell the two apart
+// and parks the event either way.
+func (m *Manager) admitTaskRunFast(repoID, taskID string, limit int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.admitTaskRunLocked(repoID, taskID, limit)
+}
+
 // projectDeleteStateFor samples BOTH halves of the repo's delete state for a
 // caller that does not hold m.mu; it takes the lock itself.
 //
@@ -364,6 +374,23 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	deleteActive, deleteGen := m.projectDeleteStateFor(repo.ID)
 	if deleteActive {
 		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, true)
+	}
+
+	// Same reasoning for the task-run cap, which the hoist also moved behind the
+	// resolvers. A capped watch delivery for a stalled repo would otherwise hang
+	// in unbounded git instead of returning errAtConcurrencyLimit promptly and
+	// parking the event on the durable queue — the cap's whole contract is that a
+	// refusal is cheap and the event retries when a slot frees.
+	//
+	// ADVISORY, and one-way on purpose. It reads the counts without the
+	// refreshLocked below, so it may only REFUSE early, never admit: the
+	// authoritative check still runs post-refresh, under the same lock hold as the
+	// reservation. refreshLocked replaces m.instances wholesale, so a stale count
+	// can be high as well as low, and a spurious refusal here costs one park and
+	// retry — the same tradeoff releaseTaskRunLocked already documents for its
+	// momentary over-count, and the opposite of admitting one too many.
+	if err := m.admitTaskRunFast(repo.ID, req.TaskID, req.MaxConcurrentRuns); err != nil {
+		return nil, "", nil, nil, err
 	}
 
 	runtimeKind := session.BackendLocal

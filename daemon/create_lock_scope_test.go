@@ -151,6 +151,47 @@ func TestReserveCreate_RefusesWhenAProjectDeleteCompletedDuringResolution(t *tes
 	require.Nil(t, got.release, "a refused create must not hand back a reservation to release")
 }
 
+// A task create that is already at its concurrency cap must be refused BEFORE
+// backend resolution, for the same reason an already-deleted project's create
+// is: the answer is already known, and the resolver is unbounded git.
+//
+// The cap's contract is that a refusal is cheap and the watch-delivery path
+// parks the event to retry when a slot frees. Hanging in the resolver instead
+// converts that park into a stall on exactly the repo this change is about.
+func TestReserveCreate_RefusesACappedTaskRunBeforeResolvingTheBackend(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	// Fill the single slot with a reservation — an admitted create that has not
+	// registered its instance yet, which is what the cap counts.
+	manager.mu.Lock()
+	manager.reserveTaskRunLocked(repoID, "task-1", 1)
+	manager.mu.Unlock()
+
+	var resolverRuns atomic.Int64
+	prev := backendKindForCreate
+	backendKindForCreate = func(opts session.InstanceOptions, root string) (session.BackendKind, error) {
+		resolverRuns.Add(1)
+		return prev(opts, root)
+	}
+	t.Cleanup(func() { backendKindForCreate = prev })
+
+	_, _, release, _, err := manager.reserveCreate(CreateSessionRequest{
+		RepoPath:          repoPath,
+		TitleBase:         "capped",
+		Program:           "claude",
+		TaskID:            "task-1",
+		MaxConcurrentRuns: 1,
+	})
+	if release != nil {
+		release()
+	}
+	require.ErrorIs(t, err, errAtConcurrencyLimit,
+		"a create over its task cap must be refused with the sentinel the delivery path parks on")
+	require.Nil(t, release, "a refused create must not hand back a reservation to release")
+	require.Zero(t, resolverRuns.Load(),
+		"the cap refusal must come BEFORE backend resolution: resolving first makes a capped delivery wait on unbounded git instead of parking")
+}
+
 // TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample is the
 // INVERSE ordering, which the delete generation alone does not catch.
 //
