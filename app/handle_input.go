@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -315,7 +316,7 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 	// is not even a project. Ahead of that check, this one names the actual
 	// blocker, which is also why nothing below needs a repo-less path anymore.
 	if m.repoRoot == "" {
-		return m, m.handleNotice(errors.New(noActiveProjectNotice()))
+		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.projectsFocused())))
 	}
 	m.pendingProgram = m.program
 	// Every create starts with an empty prompt field and an unchosen backend. The
@@ -419,17 +420,34 @@ func (m *home) startNewInstance(remote bool) (tea.Model, tea.Cmd) {
 // KeySetPrompt calls out that hardcoding ctrl+p "would silently drift the day a
 // user rebinds that action". A user who unbound it entirely gets the section
 // instead of a key that does nothing.
-func noActiveProjectNotice() string {
-	return "select a project first — " + switchProjectPickHint() +
+func noActiveProjectNotice(projectsFocused bool) string {
+	return "select a project first — " + switchProjectPickHint(projectsFocused) +
 		"; af is running with no active project, so there is no repo for this session to live in"
 }
 
-// switchProjectPickHint names the action that gives af an active project. It is
-// shared by every surface that has to say so — the create refusal above and the
-// registry-mode empty workspace (#2830) — because a user who reads one and then
-// the other must not be told two different keys. Falls back to naming the
-// section when switch_project is unbound, which is still actionable.
-func switchProjectPickHint() string {
+// switchProjectPickHint names the action that gives af an active project — for
+// the region the user is actually in.
+//
+// The focus argument is the whole point, not a refinement. The Projects section
+// is captive (#1620) and suppresses ctrl+p BY NAME (see handleProjectsFocus), so
+// a hint advertising it while that section holds the keyboard would reproduce
+// #2830 exactly, with a different dead key — and registry mode focuses Projects
+// at startup, which is precisely when this copy is on screen. From there Enter
+// on the cursor row IS the pick, and it is what the section header already
+// advertises. Everywhere else Enter means something else and ctrl+p is the key
+// that works.
+//
+// Shared by every surface that has to say this — the create refusal above and
+// the registry-mode empty workspace — so the two cannot drift on wording. What
+// they must NOT share is a single hardcoded key, which is the mistake this
+// signature exists to prevent.
+func switchProjectPickHint(projectsFocused bool) string {
+	if projectsFocused {
+		// A fixed binding with no configKey: Enter cannot be rebound away from
+		// this, so the word is literal — and it matches the Projects header's own
+		// "· enter switch" rather than the ↵ glyph the help column renders.
+		return "press enter to pick one"
+	}
 	if k := keys.GlobalKeyBindings[keys.KeySwitchProject].Help().Key; k != "" {
 		return fmt.Sprintf("press %s to pick one", k)
 	}
@@ -469,4 +487,11 @@ func (m *home) suggestSessionName(naming *session.Instance) string {
 func (m *home) clearNamingPlaceholder() {
 	m.namingPlaceholder = ""
 	m.sidebar.SetNamingPlaceholder(nil, "")
+}
+
+// projectsFocused reports whether the captive Projects section currently holds
+// the keyboard. Which keys are live depends on it (#1620), so any copy naming a
+// key has to ask.
+func (m *home) projectsFocused() bool {
+	return m.ring.Active() == layout.RegionProjects
 }

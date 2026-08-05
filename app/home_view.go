@@ -178,7 +178,7 @@ func (m *home) View() string {
 			// Registry mode (#2477): no active project, so the blocker is not the
 			// missing sessions but the missing project — and `n` cannot create one
 			// from any focused region here (#2830).
-			cols = append(cols, ui.NoActiveProjectWorkspace(m.lastLayout.Workspace, switchProjectPickHint()))
+			cols = append(cols, ui.NoActiveProjectWorkspace(m.lastLayout.Workspace, switchProjectPickHint(m.projectsFocused())))
 		default:
 			cols = append(cols, ui.FirstRunWorkspace(m.lastLayout.Workspace))
 		}

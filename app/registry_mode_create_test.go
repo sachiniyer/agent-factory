@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/ui/layout"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -108,8 +110,37 @@ func TestRegistryModeEmptyWorkspaceDoesNotAdvertiseCreate(t *testing.T) {
 		"no focused region in registry mode can honor that promise (#2830)")
 	assert.Contains(t, view, "No project selected",
 		"the empty state must name the actual blocker")
-	assert.Contains(t, view, switchProjectPickHint(),
-		"and it must name the same action, in the same words, as the create refusal")
+	assert.Contains(t, view, "press enter to pick one",
+		"registry mode focuses the captive Projects section, where Enter on the cursor row "+
+			"IS the pick — and where ctrl+p is suppressed by name (#1620)")
+	assert.NotContains(t, view, "ctrl+p",
+		"advertising the project-switch key from the one section that swallows it would "+
+			"reproduce #2830 with a different dead key")
+}
+
+// The same copy from a region where ctrl+p actually works must name ctrl+p.
+// Which key is live depends on focus, so a single hardcoded hint is wrong on one
+// of the two screens whichever key it picks.
+func TestRegistryModeEmptyWorkspaceNamesTheKeyThatWorksWhereFocusIs(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = ""
+	resizeHome(h, 120, 30)
+	h.focusRegion(layout.RegionTree)
+	require.False(t, h.projectsFocused(), "precondition: the captive section does not hold the keyboard")
+
+	view := flatten(h.View())
+
+	assert.Contains(t, view, "press ctrl+p to pick one",
+		"from the tree, ctrl+p reaches the project picker and Enter does not")
+	assert.NotContains(t, view, "press enter to pick one")
+}
+
+// The create refusal is reached by pressing `n`, which only arrives from a
+// region that is NOT the captive Projects section — so it names ctrl+p. Pinned
+// because the two surfaces share a helper and must still be allowed to differ.
+func TestNoActiveProjectNoticeNamesTheKeyForItsFocus(t *testing.T) {
+	assert.Contains(t, noActiveProjectNotice(false), "press ctrl+p to pick one")
+	assert.Contains(t, noActiveProjectNotice(true), "press enter to pick one")
 }
 
 // Inside a repo the ordinary onboarding copy is untouched: `n` works there, so
