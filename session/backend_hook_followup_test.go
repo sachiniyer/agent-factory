@@ -19,16 +19,15 @@ echo '{"level":INVALID,"endpoint":{"url":"http://wrong.invalid","token":"logged-
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, "")
-	_, err := newHookProvisioner(h, "malformed stdout log").provisionOrReap()
+	res, err := newHookProvisioner(h, "malformed stdout log").provisionOrReap()
 
-	// Past a malformed record the stream structure is unknown, so nothing after it is promoted.
-	require.Error(t, err, "a malformed JSON record on stdout must not be salvaged past")
-	// The logged URL may appear in the echoed output — that IS the diagnostic.
-	// What must not happen is selecting it, so assert the provision reported no
-	// endpoint rather than a failure to reach one, and that the token is redacted.
-	assert.Contains(t, err.Error(), `printed no {"url","token"} JSON on stdout`,
-		"selection must stop at the malformed record, not dial a logged endpoint")
-	assert.NotContains(t, err.Error(), "logged-secret", "the logged token must not reach the error")
+	// The malformed record closes on its own line, so skipping that LINE is safe:
+	// its nested endpoint never becomes a candidate, and later lines stay
+	// trustworthy. The real record is still selected.
+	require.NoError(t, err)
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.Equal(t, "secret", res.Endpoint.Token)
 }
 
 // A malformed wrapper with no real endpoint after it must fail the provision
@@ -218,6 +217,9 @@ echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
 `, "")
 	res, err := newHookProvisioner(h, "same line pair").provisionOrReap()
+
+	// Several values on one line is a log line, not a record: none of them is
+	// promoted, and the real record on the next line is.
 	require.NoError(t, err)
 	require.NotNil(t, res.Endpoint)
 	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
@@ -306,4 +308,62 @@ func TestHookEndpointSelectionBoundedOnJSONPrefixFlood(t *testing.T) {
 	assert.Less(t, time.Since(started), time.Second)
 	require.NotNil(t, endpoint)
 	assert.Equal(t, "http://10.0.0.7:8080", endpoint.URL)
+}
+
+// Fifth review round on #2841.
+
+// P2 3717118574: an endpoint line with leading JSON whitespace was classified as
+// prose and skipped, failing a launch that printed a valid endpoint.
+func TestHookLaunchAcceptsIndentedEndpointLine(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '  {"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "indented endpoint").provisionOrReap()
+	require.NoError(t, err, "leading whitespace must not make an endpoint line prose")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+}
+
+// P2 3717118585: bracketed prose at column 0 is the most common tunnel log
+// prefix there is. It must not poison the rest of stdout.
+func TestHookLaunchIgnoresBracketedProseOnStdout(t *testing.T) {
+	h := newHookState(t, `
+echo '[INFO] tunnel forwarding'
+echo '[WARN] retrying'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	res, err := newHookProvisioner(h, "bracketed prose").provisionOrReap()
+	require.NoError(t, err, "bracketed prose must not stop endpoint selection")
+	require.NotNil(t, res.Endpoint)
+	assert.Equal(t, "http://10.0.0.7:8080", res.Endpoint.URL)
+	assert.False(t, h.deleteRan(t))
+}
+
+// P1 3717118579: a line whose valid JSON prefix is followed by a continuation
+// (`{"level":"info"},"endpoint":`) leaves the record open, so later lines carry
+// its contents and must not be promoted.
+func TestHookLaunchRejectsEndpointAfterTrailingContinuation(t *testing.T) {
+	h := newHookState(t, `
+printf '%s\n' '{"level":"info"},"endpoint":' '{"url":"http://wrong.invalid","token":"logged-secret"}'
+echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
+exit 0
+`, "")
+	_, err := newHookProvisioner(h, "trailing continuation").provisionOrReap()
+	require.Error(t, err, "a record left open by trailing text must stop selection")
+	// sawJSON is true here — the `{"level":"info"}` prefix decoded — so this is
+	// the "printed JSON but none matched" variant. What matters is that neither
+	// the logged endpoint nor the later real one was promoted past the open
+	// record, and that the token is redacted from the reported output.
+	assert.Contains(t, err.Error(), "none contained a non-empty url and token")
+	assert.NotContains(t, err.Error(), "logged-secret")
+}
+
+// P2 3717118577: a hard-wrapped SERIALIZED token ends at its escaped closing
+// quote; stepping over it ran the redaction through the failure detail.
+func TestHookOutputSuffixStopsWrappedTokenAtEscapedQuote(t *testing.T) {
+	suffix := hookOutputSuffix([]byte("INFO endpoint=\\\"token\\\":\\\"se\ncret\\\"error=quota-exceeded"))
+	assert.NotContains(t, suffix, "cret\\\"error", "the wrapped token tail must be redacted")
+	assert.Contains(t, suffix, "error=quota-exceeded", "the failure detail must survive")
 }

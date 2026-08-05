@@ -594,16 +594,31 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 	sawJSON := false
 	for cursor := 0; cursor < len(stdout); {
-		if stdout[cursor] != '{' && stdout[cursor] != '[' {
-			// Prose: a tunnel logging into the inherited stream.
-			cursor = nextHookOutputLine(stdout, cursor)
+		lineEnd := nextHookOutputLine(stdout, cursor)
+		line := strings.TrimRight(stdout[cursor:lineEnd], "\r\n")
+		open := cursor
+		for open < lineEnd && isJSONSpace(stdout[open]) {
+			open++
+		}
+		if open >= lineEnd || (stdout[open] != '{' && stdout[open] != '[') {
+			cursor = lineEnd // prose: a tunnel logging into the inherited stream
 			continue
 		}
-		decoder := json.NewDecoder(strings.NewReader(stdout[cursor:]))
+
+		decoder := json.NewDecoder(strings.NewReader(stdout[open:]))
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil {
-			// A malformed record: everything after it may be its contents.
-			return nil, sawJSON
+			// A line whose brackets close is self-contained: bracketed prose like
+			// "[INFO] tunnel forwarding", or a malformed record whose contents are
+			// all on this line. Either way skipping the LINE is safe, because
+			// nothing in it becomes a candidate. A line left open continues into
+			// the next, and from there the structure is unknown — anything after
+			// it may be that record's contents, so selection stops.
+			if !hookLineBracketsBalanced(line) {
+				return nil, sawJSON
+			}
+			cursor = lineEnd
+			continue
 		}
 		sawJSON = true
 		if ej, ok := decodeHookEndpointJSON(string(raw)); ok {
@@ -611,11 +626,60 @@ func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool) {
 			// script that still echoes it parses fine and the value is dropped.
 			return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true
 		}
-		// Resume at the next LINE, so an object sharing this record's last physical
-		// line is a log beside it, not a record of its own.
-		cursor = nextHookOutputLine(stdout, cursor+int(decoder.InputOffset()))
+		// A value decoded — but what follows it ON THIS LINE decides whether the
+		// record really ended there.
+		rest := open + int(decoder.InputOffset())
+		for rest < lineEnd && isJSONSpace(stdout[rest]) {
+			rest++
+		}
+		switch {
+		case rest >= lineEnd:
+			// Clean record, nothing trailing.
+		case stdout[rest] == '{' || stdout[rest] == '[':
+			// Another value beside it: a log line carrying several. None of them is
+			// a record of its own, so skip the line — but later lines stay
+			// trustworthy, since this one closed.
+		default:
+			// `{"level":"info"},"endpoint":` — a separator or bare text means the
+			// record continues onto the next line, so its structure is unknown and
+			// nothing after it can be promoted.
+			return nil, sawJSON
+		}
+		cursor = lineEnd
 	}
 	return nil, sawJSON
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+// hookLineBracketsBalanced reports whether every object/array opened on this line
+// also closes on it, ignoring brackets inside JSON strings. It is the difference
+// between a self-contained line and a record that continues into the next.
+func hookLineBracketsBalanced(line string) bool {
+	depth := 0
+	inString := false
+	escaped := false
+	for index := 0; index < len(line); index++ {
+		switch {
+		case escaped:
+			escaped = false
+		case line[index] == '\\' && inString:
+			escaped = true
+		case line[index] == '"':
+			inString = !inString
+		case inString:
+		case line[index] == '{' || line[index] == '[':
+			depth++
+		case line[index] == '}' || line[index] == ']':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0 && !inString
 }
 
 // nextHookOutputLine returns the offset just past the next line terminator at or

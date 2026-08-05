@@ -258,6 +258,12 @@ func extendHookTokenValue(output string, value hookOutputRange) int {
 		case ' ', '\t', '"':
 			return end
 		case '\\':
+			// An ESCAPED closing quote ends a serialized value just as a bare one
+			// ends a raw value. Stepping over it would run the redaction through
+			// the diagnostic behind the token.
+			if end+1 < len(output) && output[end+1] == '"' {
+				return end
+			}
 			end += 2
 		default:
 			end++
