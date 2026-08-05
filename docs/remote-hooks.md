@@ -181,9 +181,10 @@ Many `launch_cmd`s must leave a process running to make the agent-server reachab
 **Give the tunnel somewhere else to write.** stdout belongs to the endpoint record ([above](#stdout-is-the-endpoints-exclusively)), so a backgrounded process must not inherit it:
 
 ```bash
-mytunnel --to "$HOST" >/dev/null 2>&1 &          # discard it
-mytunnel --to "$HOST" >>"$WORKDIR/tunnel.log" 2>&1 &   # or keep it, off stdout
-mytunnel --to "$HOST" >&2 &                      # or fold it into stderr
+# Pick one — all three keep stdout clean:
+mytunnel --to "$HOST" >/dev/null 2>&1 &                 # discard the tunnel's output
+mytunnel --to "$HOST" >>"$WORKDIR/tunnel.log" 2>&1 &    # or keep it, in a file
+mytunnel --to "$HOST" >&2 &                             # or fold it into stderr
 ```
 
 Any of the three is fine — af reads stderr for diagnostics only, never for an endpoint. What fails is inheriting **stdout**, and it fails loudly at provision time rather than silently later.
@@ -300,39 +301,40 @@ For a real orchestrator, replace `WORKDIR=…` / `nohup af …` with your provis
 
 Since [#2845](https://github.com/sachiniyer/agent-factory/issues/2845), `launch_cmd`'s stdout carries the endpoint JSON and nothing else. **Most scripts need no change** — if yours only ever `echo`s the endpoint, and everything it backgrounds is already redirected, you are done. What breaks is a script that lets another writer inherit stdout, and the fix is one redirect per writer.
 
-**Do I need to change anything?** Run your `launch_cmd` by hand and look at stdout alone:
+**Do I need to change anything?** Run your `launch_cmd` by hand with stderr discarded, so what you see is exactly what af parses. **This provisions real infrastructure**, so the reap is part of the check, not an afterthought — run both lines:
 
 ```bash
 ./.agent-factory/hooks/launch.sh --name migration-check --title 'migration check' \
   --repo "$(git remote get-url origin)" 2>/dev/null
+./.agent-factory/hooks/delete.sh --name migration-check      # reap it, whatever the above printed
 ```
 
-One JSON object and nothing else means you are already compliant. Any other line — a progress message, a tunnel log, a second record — is what af will now refuse. (This provisions real infrastructure, so reap it afterwards with your `delete_cmd --name migration-check`.)
+One JSON object and nothing else means you are already compliant. Any other line — a progress message, a tunnel's log, a second record — is what af now refuses.
 
-**Before** — the tunnel inherits stdout, and its log lines land on the endpoint's stream:
+**Before** — the tunnel inherits stdout, so its log lines land on the endpoint's stream:
 
 ```bash
 # provision, then open the forward that makes the server reachable
-kubectl port-forward "pod/$NAME" 8443:8443 &     # ← logs "Forwarding from …" to STDOUT
-echo "waiting for the agent-server" # ← and so does this progress line
+kubectl port-forward "pod/$NAME" 8443:8443 &                    # ← prints "Forwarding from …" on stdout
+echo "waiting for the agent-server"                             # ← and this is on stdout too
 printf '{"url":"http://127.0.0.1:8443","token":"%s"}\n' "$TOKEN"
 ```
 
 **After** — every other writer is given somewhere else to go:
 
 ```bash
-kubectl port-forward "pod/$NAME" 8443:8443 >/dev/null 2>&1 &   # ← or >>"$WORKDIR/tunnel.log" 2>&1
-echo "waiting for the agent-server" >&2                        # ← progress belongs on stderr
+kubectl port-forward "pod/$NAME" 8443:8443 >/dev/null 2>&1 &    # ← or >>"$WORKDIR/tunnel.log" 2>&1
+echo "waiting for the agent-server" >&2                         # ← progress belongs on stderr
 printf '{"url":"http://127.0.0.1:8443","token":"%s"}\n' "$TOKEN"
 ```
 
-The three substitutions that cover essentially every script:
+The endpoint `printf` is unchanged, and always is: it is the one thing stdout is for. The three substitutions around it cover essentially every script:
 
 | On stdout today | Change to |
 |---|---|
-| `mytunnel &` | `mytunnel >/dev/null 2>&1 &`, or `>>"$WORKDIR/tunnel.log" 2>&1 &` to keep the log |
+| `mytunnel &` | `mytunnel >/dev/null 2>&1 &` — or `mytunnel >>"$WORKDIR/tunnel.log" 2>&1 &` to keep the log |
 | `echo "progress…"` | `echo "progress…" >&2` |
-| `some-cli provision` (chatty, output unused) | `some-cli provision >&2`, or `>/dev/null` if you do not want it |
+| `some-cli provision` (chatty, output unused) | `some-cli provision >&2` — or `some-cli provision >/dev/null 2>&1` to drop it |
 
 Keep the endpoint `printf`/`echo` itself exactly as it is: it is the one thing stdout is for. If you miss a writer, af tells you which line it was — the error quotes it and names the redirect.
 
