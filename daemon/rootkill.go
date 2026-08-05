@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -101,6 +102,16 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	return nil
 }
 
+// forgetKillRetry drops a session's retry state. The schedule describes ONE
+// tombstone, so it must not outlive it: the key is repo+title, and a later
+// session reusing that title — a recreated root agent especially — would
+// otherwise inherit a retired entry and never be finished at all.
+func (m *Manager) forgetKillRetry(key string) {
+	m.mu.Lock()
+	delete(m.killRetries, key)
+	m.mu.Unlock()
+}
+
 // noteKillRetryFailure books a failed tombstone cleanup against its retry
 // schedule and reports it at the right volume.
 //
@@ -193,7 +204,11 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// passed the check just before the tombstone became visible. Both happen before
 	// record deletion so an unknown outcome keeps the stable-id retry handle.
 	if err := m.stopVSCodeForInstance(key, instance.ID); err != nil {
-		log.WarningLog.Printf("finishing kill of %q: VS Code editor teardown remains unknown; retaining the record for the next poll: %v", instance.Title, err)
+		// Paced like the record-delete failure below: a persistent editor cleanup
+		// failure is the same once-per-poll hot loop this scheduler exists to bound
+		// (#2737), just reached by a different return.
+		m.noteKillRetryFailure(key, instance.Title,
+			fmt.Errorf("VS Code editor teardown remains unknown: %w", err))
 		return
 	}
 
@@ -207,7 +222,8 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// bounded teardown does not need a daemon restart to converge (#1917).
 	teardownErr := instance.Kill()
 	if err := m.stopVSCodeForInstance(key, instance.ID); err != nil {
-		log.WarningLog.Printf("finishing kill of %q: could not confirm the VS Code editor stopped; retaining the record for the next poll: %v", instance.Title, err)
+		m.noteKillRetryFailure(key, instance.Title,
+			fmt.Errorf("could not confirm the VS Code editor stopped: %w", err))
 		return
 	}
 	// Through the one choke point (#1917): it refuses while the teardown's outcome
@@ -222,9 +238,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		log.InfoLog.Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
 		return
 	}
-	m.mu.Lock()
-	delete(m.killRetries, key)
-	m.mu.Unlock()
+	m.forgetKillRetry(key)
 	removed := false
 	m.mu.Lock()
 	if m.instances[key] == instance {

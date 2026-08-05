@@ -100,3 +100,27 @@ func TestCleanupHandleUnusableIsNarrow(t *testing.T) {
 		"an unknown workspace state is retried, not retired")
 	assert.True(t, CleanupHandleUnusable(fmt.Errorf("%w: no posture recorded", ErrCleanupHandleUnusable)))
 }
+
+// Review finding on #2855: a cleanup that backs off, escalates, and only THEN
+// turns out to be unusable must still report the retirement. "retrying every 5m"
+// and "af has stopped" say opposite things, and the operator acted on the first.
+func TestCleanupRetryReportsRetirementAfterAnEscalation(t *testing.T) {
+	var retry CleanupRetry
+	now := time.Unix(1_800_000_000, 0)
+
+	escalations := 0
+	for i := 0; i < cleanupRetryEscalationThreshold; i++ {
+		if retry.RecordFailure(now, errors.New("host unreachable")) {
+			escalations++
+		}
+		now = now.Add(cleanupRetryBackoffMax)
+	}
+	require.Equal(t, 1, escalations, "the backoff escalation fires once")
+	require.False(t, retry.Retired())
+
+	unusable := fmt.Errorf("%w: posture never recorded", ErrCleanupHandleUnusable)
+	assert.True(t, retry.RecordFailure(now, unusable),
+		"discovering the cause is permanent must be reported even after a backoff escalation")
+	assert.True(t, retry.Retired())
+	assert.False(t, retry.RecordFailure(now, unusable), "but only once")
+}

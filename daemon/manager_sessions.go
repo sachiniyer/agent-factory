@@ -55,6 +55,10 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	defer func() {
 		m.mu.Lock()
 		delete(m.killsInFlight, key)
+		// An explicit kill supersedes any finishUserKill schedule for this session,
+		// including a retired one — that is the "kill it again to retry" the
+		// retirement log points the operator at (#2737).
+		delete(m.killRetries, key)
 		m.mu.Unlock()
 	}()
 
