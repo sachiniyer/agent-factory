@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -156,9 +157,35 @@ func buildIntegrationBinary(t *testing.T) string {
 	return bin
 }
 
+// runIntegrationAFOK runs af and fails the test if it errors — but RETRIES for as
+// long as the daemon answers that it is still restoring sessions.
+//
+// That answer is not a failure, it is an instruction: the documented, retryable
+// warm-up state, which the daemon publishes precisely so a client can come back.
+// The FIRST call in one of these tests is what auto-starts the daemon, so it
+// races the daemon's own restore, and turning that race into require.NoError
+// reddened a PR whose diff was TypeScript (#2863).
+//
+// The retry is keyed on the product's own classifier rather than a string this
+// test keeps in step by hand, and on the CONDITION rather than a nap chosen to
+// out-wait a restore. A refused call did nothing, so re-running it is safe.
 func runIntegrationAFOK(t *testing.T, bin, dir string, args ...string) string {
 	t.Helper()
-	out, err := runIntegrationAF(t, bin, dir, args...)
+	var (
+		out string
+		err error
+	)
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		out, err = runIntegrationAF(t, bin, dir, args...)
+		if !daemon.IsDaemonStartingErr(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("af %s: the daemon never finished restoring: %v", strings.Join(args, " "), err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	require.NoError(t, err)
 	return out
 }

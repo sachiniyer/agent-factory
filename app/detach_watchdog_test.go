@@ -95,10 +95,21 @@ func TestWatchdog_NoSpuriousDumpAfterHeaderDetach(t *testing.T) {
 	// threshold. This guards against the regression assertion silently passing
 	// because the dump path was misconfigured.
 	beginDetachWatchdog("control-uncanceled")
-	time.Sleep(slowDetachThreshold + 300*time.Millisecond)
-	_, err = os.Stat(dumpPath)
-	require.NoError(t, err,
+	// Wait for the dump on the CONDITION, not on a fixed nap. Writing it means a
+	// goroutine has to be scheduled and a full goroutine dump has to reach disk,
+	// neither of which has an upper bound on a loaded box; a nap sized for an idle
+	// one turns a busy machine into a failed assertion (#2879). The ceiling is a
+	// failure deadline, not an expectation.
+	control := time.Now()
+	dumpExists := func() bool {
+		_, statErr := os.Stat(dumpPath)
+		return statErr == nil
+	}
+	require.Eventually(t, dumpExists, 30*time.Second, 10*time.Millisecond,
 		"control: an un-canceled watchdog must write detach-slow.log after the threshold")
+	// How long a REAL dump took on this machine, used below to size the window the
+	// regression case must stay silent for.
+	controlTook := time.Since(control)
 	endDetachWatchdog()
 	require.NoError(t, os.Remove(dumpPath))
 
@@ -115,8 +126,11 @@ func TestWatchdog_NoSpuriousDumpAfterHeaderDetach(t *testing.T) {
 	_, cmd := h.Update(repaintAfterDetachMsg{})
 	require.Nil(t, cmd)
 
-	time.Sleep(slowDetachThreshold + 300*time.Millisecond)
-	_, err = os.Stat(dumpPath)
-	require.True(t, os.IsNotExist(err),
+	// An ABSENCE, so the window is what gives it teeth: require nothing to appear
+	// for at least as long as a real dump just took on this same machine, so a
+	// merely-slow watchdog cannot be mistaken for a silent one. Sized from that
+	// measurement rather than from a constant, which is what keeps it honest under
+	// the load that made the constant wrong in the first place (#2879).
+	require.Never(t, dumpExists, controlTook+300*time.Millisecond, 10*time.Millisecond,
 		"watchdog wrote a spurious goroutine dump for a header-selection detach (#683)")
 }

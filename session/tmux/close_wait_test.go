@@ -96,11 +96,23 @@ func exitedProcess(t *testing.T) proctree.Process {
 	return process
 }
 
+// The "did not burn its budget" assertions below are a FRACTION of the budget
+// they are given, never an absolute wall-clock figure. The property is "returns
+// as soon as the process is gone rather than polling to its deadline", and a
+// fraction states exactly that while staying true on a loaded machine — where an
+// absolute ceiling like 250ms is a statement about the scheduler, not about the
+// code under test (#2879). A regression that really does burn the budget takes
+// the whole of it and still fails.
+const (
+	exitWaitBudget = 30 * time.Second
+	exitWaitPrompt = exitWaitBudget / 4
+)
+
 func TestWaitForProcessExit_ExitedProcess(t *testing.T) {
 	start := time.Now()
-	require.True(t, waitForProcessExit(exitedProcess(t), 2*time.Second),
+	require.True(t, waitForProcessExit(exitedProcess(t), exitWaitBudget),
 		"an already-exited PID must report exited")
-	require.Less(t, time.Since(start), time.Second,
+	require.Less(t, time.Since(start), exitWaitPrompt,
 		"a dead PID must be detected without burning the timeout")
 }
 
@@ -118,9 +130,9 @@ func TestWaitForProcessExit_ZombieCountsAsExited(t *testing.T) {
 	require.NoError(t, cmd.Process.Kill())
 
 	start := time.Now()
-	require.True(t, waitForProcessExit(process, 500*time.Millisecond),
+	require.True(t, waitForProcessExit(process, exitWaitBudget),
 		"a pane that exited but remains an unreaped zombie is no longer writing")
-	require.Less(t, time.Since(start), 250*time.Millisecond,
+	require.Less(t, time.Since(start), exitWaitPrompt,
 		"an exited pane must not burn the teardown wait budget")
 }
 
