@@ -852,7 +852,11 @@ exit 0
 // of SIGPIPE when our read end closes, no signal from us involved).
 //
 // The stand-in tunnel is a real HTTP server, backgrounded by launch_cmd, holding
-// stdout exactly as a port-forward logging its activity does.
+// STDERR exactly as a port-forward logging its activity does. stderr is the
+// stream a background process may still inherit — stdout became the endpoint
+// record's alone in #2845 — and it is the one that matters here anyway: both are
+// af-owned files the capture could wait on or drain, so a tunnel writing to
+// either is a target of any such policy.
 func TestHookProvisionKeepsASuccessfulLaunchsTunnelAlive(t *testing.T) {
 	shrinkHookTimeouts(t, 10*time.Second, 5*time.Second)
 	dir := t.TempDir()
@@ -862,8 +866,9 @@ func TestHookProvisionKeepsASuccessfulLaunchsTunnelAlive(t *testing.T) {
 	// even when the tunnel is reaped, so the reachability assertion would pass
 	// against the very bug it exists to catch. (It did, on the first draft.)
 	//
-	// So: a real backgrounded HTTP server that ALSO writes to stdout, which is what
-	// makes it a pipe-holder and therefore a target of any drain policy.
+	// So: a real backgrounded HTTP server that ALSO writes to launch_cmd's stderr,
+	// which is what makes it a pipe-holder and therefore a target of any drain
+	// policy.
 	tunnel := filepath.Join(dir, "tunnel.py")
 	require.NoError(t, os.WriteFile(tunnel, []byte(`
 import http.server, socketserver, sys, threading, time
@@ -874,8 +879,8 @@ class H(http.server.BaseHTTPRequestHandler):
 srv = socketserver.TCPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(srv.server_address[1]))
 threading.Thread(target=srv.serve_forever, daemon=True).start()
-while True:                      # holds launch_cmd's stdout, like a forwarder logging
-    print("tunnel forwarding", flush=True)
+while True:                      # holds launch_cmd's stderr, like a forwarder logging
+    print("tunnel forwarding", file=sys.stderr, flush=True)
     time.sleep(0.05)
 `), 0o644))
 	if _, err := exec.LookPath("python3"); err != nil {

@@ -6,6 +6,8 @@ Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-ex
 
 > **Transport:** the `af agent-server` serves **plain HTTP** (no TLS — af terminates none of its own). The URL must be `http://` (or `ws://`), and the bearer token travels over the connection, so your `launch_cmd` must make the agent-server reachable from the daemon over a private network or tunnel it controls (a container's published loopback port, an SSH forward, a tailnet address).
 
+> **⚠️ Breaking change (#2845): `launch_cmd`'s stdout is now the endpoint's alone.** stdout must carry the `{"url","token"}` JSON and **nothing else** — no tunnel logs, no progress lines. Anything else on it fails the provision with an error quoting the offending output. Only scripts that let another writer share stdout are affected, and the fix is one redirect. See [Migrating to an endpoint-only stdout](#migrating-to-an-endpoint-only-stdout).
+
 > **⚠️ Breaking change (#1592 Phase 4 PR7).** The old hook contract — `launch_cmd` returning a session id, plus `list_cmd`/`attach_cmd`/`terminal_cmd` scripts for enumeration, terminal proxying, and preview capture — has been **removed**. `launch_cmd` now returns an `af agent-server` endpoint, and the only other script is `delete_cmd`. A config that still sets `list_cmd`, `attach_cmd`, or `terminal_cmd` is **rejected** with an error pointing here. See [Migrating from the old contract](#migrating-from-the-old-contract) for a copy-pasteable recipe.
 
 ## Configuration
@@ -40,7 +42,7 @@ Run `af doctor` from inside the repository to check the remote-hook setup: it va
 
 ## Script protocol
 
-Both scripts run directly (not through a shell), return exit code 0 on success, and may write progress/log lines to **stderr** (only `launch_cmd`'s JSON on stdout matters).
+Both scripts run directly (not through a shell) and return exit code 0 on success. Write progress and log lines to **stderr** — af reads it for diagnostics and never for endpoints, so a script may say as much there as it likes, and so may anything it backgrounds. `launch_cmd`'s **stdout is reserved for its endpoint JSON**: see [stdout is the endpoint's, exclusively](#stdout-is-the-endpoints-exclusively).
 
 ### Session names
 
@@ -89,7 +91,7 @@ delivering approved values through that provider's secret mechanism and for
 forwarding the `--session-env` **names** to the remote agent-server. Do not put a
 credential value in argv or endpoint JSON.
 
-**stdout (one JSON object):**
+**stdout (the endpoint JSON, and nothing else):**
 
 ```json
 {"url": "http://10.0.0.7:8443", "token": "…bearer…"}
@@ -98,9 +100,24 @@ credential value in argv or endpoint JSON.
 - `url` (**required**) — the `af agent-server`'s base URL (`http://host:port` or `ws://host:port`), reachable from the daemon. It must be plain HTTP — a `wss://`/`https://` URL is rejected (af serves no TLS).
 - `token` (**required**) — the bearer token the server printed on startup.
 
-> **If af cannot tell your endpoint from a log line, it refuses the launch.** A backgrounded tunnel may share stdout with the endpoint, and some log shapes are genuinely indistinguishable from a record — `[INVALID,` opening a log array looks exactly like `[INFO] opening {config`. Rather than guess (and risk dialing a URL and bearer token taken from a log line), af fails the provision and names the line it could not classify. The fix is one redirect: send the tunnel's output to `/dev/null` or a file so stdout carries only the endpoint JSON. See [#2845](https://github.com/sachiniyer/agent-factory/issues/2845).
+These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. If `launch_cmd` fails in any way after it has started, af runs `delete_cmd` to reap whatever it may have provisioned — see [`delete_cmd` runs on any failed launch](#delete_cmd-runs-on-any-failed-launch).
 
-These values are the `af agent-server` startup banner (`addr`/`token`). A legacy `tls_fingerprint` field is accepted-and-ignored, so an old script keeps parsing, but it does nothing — drop it. Keep non-JSON output on stderr — af reads the endpoint from **stdout only**, and it must be a complete top-level object with no fields beyond those above, so a structured log that happens to carry `url` and `token` is never mistaken for it. If `launch_cmd` fails in any way after it has started, af runs `delete_cmd` to reap whatever it may have provisioned — see [`delete_cmd` runs on any failed launch](#delete_cmd-runs-on-any-failed-launch).
+#### stdout is the endpoint's, exclusively
+
+**`launch_cmd`'s stdout carries that JSON object and nothing else.** Not a progress line, not a tunnel's log, not a second JSON record — the whole stream, from the first byte to the last, is one endpoint object. Surrounding whitespace is fine (a trailing newline, an indent, a blank line); everything else is a contract violation and **fails the provision**:
+
+```
+launch_cmd (./.agent-factory/hooks/launch.sh) printed something other than its endpoint on stdout: [INFO] forwarding 127.0.0.1:9000 -> pod/af-7
+stdout carries the {"url","token"} endpoint JSON and nothing else. Redirect every other writer off it — start a tunnel as `mytunnel >/dev/null 2>&1 &`, or send it to a file — and write progress to stderr instead. See docs/remote-hooks.md
+```
+
+The error quotes the first thing on stdout that was not the endpoint record, and the script's full output follows it, so you can see which line to move.
+
+The object itself is checked against the schema above: a top-level object with `url` and `token` both non-empty, and **no field beyond** `url`, `token`, and the legacy `tls_fingerprint`. So a structured log that happens to carry `url` and `token` is never mistaken for an endpoint, and printing one instead of the record fails with the schema error rather than this one.
+
+**Why the stream is reserved.** af used to read the endpoint out of a stdout it shared with a backgrounded tunnel, which meant deciding, per line, whether it was the record the script echoed or part of a log. That question has **no answer** — `[INVALID,` opening a log array matches `[INFO] opening {config` on every property a classifier can inspect, yet the two require opposite handling ([#2845](https://github.com/sachiniyer/agent-factory/issues/2845) has the proof, and the seven rules that each closed one counterexample and admitted the next). Guessing wrong in the dangerous direction means **dialing a URL and sending a bearer token both lifted from a log line**, and anything that can write to your hook's stdout chooses those bytes. Reserving the stream deletes the question instead of ranking answers to it: the endpoint is a parse now.
+
+**stderr is unchanged** and still takes everything else — your own progress lines, and any output from a process you background. Nothing about the endpoint is read from it.
 
 ### `delete_cmd`
 
@@ -151,23 +168,32 @@ A script that exceeds its budget is killed and the operation fails.
 
 **A reap stops the whole launch tree first, then runs `delete_cmd`.** If your `launch_cmd` shells out to a provisioner (`terraform`, `gcloud`, `kubectl`) and is killed at its budget while that provisioner is still working, af kills the entire process group it started *before* running `delete_cmd`. Without that, the surviving provisioner would finish creating infrastructure **after** `delete_cmd` had already reaped and reported success — a resource that bills with nothing pointing at it, since a failed provision leaves af no record of the session.
 
-This applies only to a `launch_cmd` that **just failed**, where everything it started is garbage by definition. It never applies to one that succeeded — see [Backgrounding a tunnel](#backgrounding-a-tunnel-is-supported-you-need-do-nothing) — and it does not apply on kill or archive, where the launch ended long ago. Making `delete_cmd` idempotent is still worthwhile, and a `launch_cmd` that cleans up after itself on `EXIT`/`TERM` is still good practice.
+This applies only to a `launch_cmd` that **just failed**, where everything it started is garbage by definition. It never applies to one that succeeded — see [Backgrounding a tunnel](#backgrounding-a-tunnel-is-supported-redirect-its-stdout) — and it does not apply on kill or archive, where the launch ended long ago. Making `delete_cmd` idempotent is still worthwhile, and a `launch_cmd` that cleans up after itself on `EXIT`/`TERM` is still good practice.
 
-### Backgrounding a tunnel is supported — you need do nothing
-
-**Nothing to change in your `launch_cmd`.** This documents a behaviour change that only ever *removes* a restriction.
+### Backgrounding a tunnel is supported — redirect its stdout
 
 Many `launch_cmd`s must leave a process running to make the agent-server reachable — an `ssh -L` forward, a `kubectl port-forward`, a tunnel client. That process is not a leak: it is the thing af then dials. af treats it as **yours** and never touches it.
 
 - af bounds and kills **the script**, never anything a script that **succeeded** left running. (A launch that *failed* is torn down as a tree — see [Script timeouts](#script-timeouts). If you want a process to survive even that, start it with `setsid`.)
-- The script's stdout and stderr go to two temporary **files**, not pipes. A background process may inherit them and keep writing as long as it likes: af has already stopped reading, and there is no pipe whose closure could disturb it. Keeping them apart is what lets af read the endpoint from stdout alone — a `launch_cmd` that logs JSON to stderr cannot have that log mistaken for its endpoint.
+- The script's stdout and stderr go to two temporary **files**, not pipes. A background process may hold them open and keep writing as long as it likes: af has already stopped reading, and there is no pipe whose closure could disturb it.
 - af stops reading when the **script** exits, and its **exit status** decides success.
 
-You may redirect a tunnel's output (`>/dev/null 2>&1 &`) or disown it if you prefer tidy logs, but you do not have to — both behave identically.
+**Give the tunnel somewhere else to write.** stdout belongs to the endpoint record ([above](#stdout-is-the-endpoints-exclusively)), so a backgrounded process must not inherit it:
 
-The one rule: **echo the endpoint JSON from the script itself, before it exits** — not from the background process. af reads what the script had written by the time it exited.
+```bash
+mytunnel --to "$HOST" >/dev/null 2>&1 &          # discard it
+mytunnel --to "$HOST" >>"$WORKDIR/tunnel.log" 2>&1 &   # or keep it, off stdout
+mytunnel --to "$HOST" >&2 &                      # or fold it into stderr
+```
 
-> **Fixed in this release.** A `launch_cmd` that backgrounded a process holding stdout previously **hung the provision**: af waited for the output pipe to close and the tunnel held it open indefinitely, so the 5-minute budget never applied. If you added a `>/dev/null` redirect to work around that, keep it or drop it — both work now.
+Any of the three is fine — af reads stderr for diagnostics only, never for an endpoint. What fails is inheriting **stdout**, and it fails loudly at provision time rather than silently later.
+
+Two rules, and they are the whole contract:
+
+1. **Echo the endpoint JSON from the script itself, before it exits** — not from the background process. af reads what the script had written by the time it exited.
+2. **Nothing else writes to stdout**, for the life of the script.
+
+> **Also fixed earlier.** A `launch_cmd` that backgrounded a process holding stdout once **hung the provision**: af waited for the output pipe to close and the tunnel held it open indefinitely, so the 5-minute budget never applied. That is long fixed — output goes to files now — so the redirect above is about the *content* of stdout, not about avoiding a hang.
 
 ## Capabilities & the agent-server
 
@@ -216,9 +242,10 @@ fi
 
 # Start the agent-server; capture its startup banner (one JSON line on stdout).
 # `nohup … &` detaches it: this script exits as soon as it has the banner, and the
-# server must outlive it. Both redirects are required — they keep the server off
-# this script's stdout/stderr, which af reads to end of file, and they are where
-# the server's own startup errors land.
+# server must outlive it. Both redirects are required. `>"$BANNER"` keeps the
+# server off THIS script's stdout, which carries the endpoint record and nothing
+# else, and gives us the banner to read; `2>"$LOG"` is where its own startup
+# errors land, for the failure branch below to surface.
 BANNER="$WORKDIR/banner.json"
 LOG="$WORKDIR/agent-server.log"
 ARGS=(agent-server --listen 0.0.0.0:0 --repo "$WORKDIR/workspace" --title "$TITLE")
@@ -251,8 +278,9 @@ printf '{"url":"http://%s","token":"%s"}\n' "$ADDR" "$TOKEN"
 >
 > If you replace this with your own launcher, keep the two properties that matter:
 > the server **survives this script**, and it **does not inherit this script's
-> stdout/stderr**. A launcher that holds those pipes open will hang `launch_cmd`
-> until the server exits, because af reads them to end of file.
+> stdout**. A process writing to stdout puts its output where only the endpoint
+> record belongs, and the provision fails naming the line. Its stderr may be
+> inherited freely.
 
 The matching `delete.sh`:
 
@@ -267,6 +295,46 @@ rm -rf "$WORKDIR"
 ```
 
 For a real orchestrator, replace `WORKDIR=…` / `nohup af …` with your provisioning (create a pod, `ssh` to a host, spin up a Modal/Daytona sandbox) and run `af agent-server` there, then surface its banner however you reach it (e.g. read a published address). The daemon only needs the `url` and `token` back — over plain HTTP, so make sure the address you hand back is reachable from the daemon on a private network or tunnel.
+
+## Migrating to an endpoint-only stdout
+
+Since [#2845](https://github.com/sachiniyer/agent-factory/issues/2845), `launch_cmd`'s stdout carries the endpoint JSON and nothing else. **Most scripts need no change** — if yours only ever `echo`s the endpoint, and everything it backgrounds is already redirected, you are done. What breaks is a script that lets another writer inherit stdout, and the fix is one redirect per writer.
+
+**Do I need to change anything?** Run your `launch_cmd` by hand and look at stdout alone:
+
+```bash
+./.agent-factory/hooks/launch.sh --name migration-check --title 'migration check' \
+  --repo "$(git remote get-url origin)" 2>/dev/null
+```
+
+One JSON object and nothing else means you are already compliant. Any other line — a progress message, a tunnel log, a second record — is what af will now refuse. (This provisions real infrastructure, so reap it afterwards with your `delete_cmd --name migration-check`.)
+
+**Before** — the tunnel inherits stdout, and its log lines land on the endpoint's stream:
+
+```bash
+# provision, then open the forward that makes the server reachable
+kubectl port-forward "pod/$NAME" 8443:8443 &     # ← logs "Forwarding from …" to STDOUT
+echo "waiting for the agent-server" # ← and so does this progress line
+printf '{"url":"http://127.0.0.1:8443","token":"%s"}\n' "$TOKEN"
+```
+
+**After** — every other writer is given somewhere else to go:
+
+```bash
+kubectl port-forward "pod/$NAME" 8443:8443 >/dev/null 2>&1 &   # ← or >>"$WORKDIR/tunnel.log" 2>&1
+echo "waiting for the agent-server" >&2                        # ← progress belongs on stderr
+printf '{"url":"http://127.0.0.1:8443","token":"%s"}\n' "$TOKEN"
+```
+
+The three substitutions that cover essentially every script:
+
+| On stdout today | Change to |
+|---|---|
+| `mytunnel &` | `mytunnel >/dev/null 2>&1 &`, or `>>"$WORKDIR/tunnel.log" 2>&1 &` to keep the log |
+| `echo "progress…"` | `echo "progress…" >&2` |
+| `some-cli provision` (chatty, output unused) | `some-cli provision >&2`, or `>/dev/null` if you do not want it |
+
+Keep the endpoint `printf`/`echo` itself exactly as it is: it is the one thing stdout is for. If you miss a writer, af tells you which line it was — the error quotes it and names the redirect.
 
 ## Migrating from the old contract
 

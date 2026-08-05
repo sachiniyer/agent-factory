@@ -490,14 +490,18 @@ func decodeHookEndpointJSON(candidate string) (hookEndpointJSON, bool) {
 }
 
 // launch runs the user's launch_cmd with the provision spec as flags, then
-// recovers the {url,token} JSON it echoes on STDOUT — the stream docs/remote-hooks.md
-// reserves for it ("only launch_cmd's JSON on stdout matters"). stderr is the
-// script's own narrative and is never a source of endpoints, so a launch_cmd that
-// logs JSON there cannot outrank the real record (#2637).
+// PARSES the {url,token} JSON it echoes on STDOUT — the stream
+// docs/remote-hooks.md reserves exclusively for it. stderr is the script's own
+// narrative and is never a source of endpoints, so a launch_cmd that logs JSON
+// there cannot outrank the real record (#2637).
 //
-// Shape is still checked, because stdout can hold more than the endpoint: the
-// documented schema is the discriminator, mirroring how docker/ssh validate their
-// agent-server banner.
+// stdout being the endpoint's alone is what makes this a parse. While it was
+// shared with a background tunnel, deciding whether a given line was the record
+// or a log was UNDECIDABLE — #2845 exhibits two input pairs identical on every
+// property a classifier can inspect that require opposite handling — and the
+// dangerous half of that guess was dialing a URL with a bearer token both lifted
+// from a log line. Reserving the stream deletes the question instead of ranking
+// answers to it.
 func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 	args := []string{
 		"--name", p.slug,
@@ -553,244 +557,143 @@ func (p *hookProvisioner) launch() (*AgentServerEndpoint, error) {
 			hookOutputSuffix(out.Combined()))
 	}
 
-	endpoint, sawJSON, ambiguous := selectHookEndpoint(string(out.Stdout))
+	endpoint, sawJSON, violation := parseHookEndpoint(string(out.Stdout))
 	if endpoint != nil {
 		return endpoint, nil
 	}
-	if ambiguous != nil {
-		// Refuse rather than guess. Picking wrong here means dialing a URL and
-		// bearer token lifted from a log line, so the operator gets the line and
-		// the one-line fix instead of a silent wrong endpoint (#2845).
-		return nil, fmt.Errorf("launch_cmd (%s) printed a line on stdout that could be its endpoint "+
-			"or a log line, and af will not guess between them: %s\n"+
-			"Give the endpoint stdout to itself — redirect the tunnel's output "+
-			"(>/dev/null 2>&1, or to a file) — see docs/remote-hooks.md%s",
-			p.hooks.LaunchCmd, strings.TrimSpace(redactHookOutputTokens(ambiguous.line)),
-			hookOutputSuffix(out.Combined()))
+	if violation != nil {
+		// The contract was violated, so say so and name the fix. This is the error
+		// an operator meets at 2am after adding a tunnel to a script that worked
+		// yesterday, and everything they need to act is in it: which stream, what
+		// was on it that should not have been, and the redirect that repairs it.
+		return nil, fmt.Errorf("launch_cmd (%s) printed something other than its endpoint on stdout: %s\n"+
+			"stdout carries the {\"url\",\"token\"} endpoint JSON and nothing else. Redirect every other "+
+			"writer off it — start a tunnel as `mytunnel >/dev/null 2>&1 &`, or send it to a file — and "+
+			"write progress to stderr instead. See docs/remote-hooks.md%s",
+			p.hooks.LaunchCmd, hookStdoutExcerpt(violation.offending), hookOutputSuffix(out.Combined()))
 	}
 	if !sawJSON {
 		return nil, fmt.Errorf("launch_cmd (%s) exited 0 but printed no {\"url\",\"token\"} JSON on stdout "+
 			"(see docs/remote-hooks.md for the recipe)%s", p.hooks.LaunchCmd, hookOutputSuffix(out.Combined()))
 	}
-	return nil, fmt.Errorf("launch_cmd (%s) exited 0 and printed JSON on stdout, but none contained a non-empty url and token; "+
-		"it must echo the af agent-server's {\"url\",\"token\"}%s", p.hooks.LaunchCmd, hookOutputSuffix(out.Combined()))
+	return nil, fmt.Errorf("launch_cmd (%s) exited 0 and printed JSON on stdout, but it is not the endpoint record; "+
+		"it must echo the af agent-server's {\"url\",\"token\"} with both non-empty "+
+		"(see docs/remote-hooks.md for the recipe)%s",
+		p.hooks.LaunchCmd, hookOutputSuffix(out.Combined()))
 }
 
-// selectHookEndpoint returns the first value in stdout matching the documented
-// endpoint schema, and whether stdout held any JSON at all (which separates
-// "printed nothing usable" from "printed the wrong shape" in the error).
-//
-// stdout is not exclusively the endpoint's. docs/remote-hooks.md has launch_cmd
-// echo its endpoint there, and ALSO lets a background tunnel inherit the stream
-// and keep logging — so plain prose between records is normal and must not
-// disturb selection. What must never happen is promoting a value that belongs to
-// a malformed JSON record: the daemon would dial a logged service with a logged
-// credential and reap the real sandbox when that failed.
-//
-// Deciding which of those a value is, once the surrounding JSON is malformed, is
-// not possible from the bytes — a log can break before its endpoint value and
-// leave it at column 0 of the next line, identical to a record the script
-// echoed. Earlier rules (shape, wrapper provenance, line start, column) each
-// bought one counterexample. So this does not rank candidates; it tracks whether
-// the stream is still trustworthy:
-//
-//   - A line that is not a JSON opener is prose — tunnel chatter. Skipped, and
-//     it changes nothing.
-//   - A line that opens a JSON value and decodes completely is a record. It is a
-//     candidate, and scanning continues after it.
-//   - A line that opens a JSON value and does NOT decode leaves the structure
-//     unknown. From there no further value is promoted, because any of them may
-//     be that record's contents. Provision fails with the output attached rather
-//     than dialing something a log named.
-//
-// hookAmbiguousStdout reports a stdout line that could be either the endpoint
-// record or part of a log line. af refuses to choose between them: see #2845 for
-// why no rule can, and hookOutputSuffix redacts the line before it is reported.
-type hookAmbiguousStdout struct {
-	line string
+// hookStdoutViolation carries the stdout bytes that were not the endpoint
+// record. launch_cmd's stdout is reserved for the {"url","token"} JSON, so
+// anything else on it breaks the contract — offending is the text quoted back to
+// the operator, redacted and bounded by hookStdoutExcerpt before it is shown.
+type hookStdoutViolation struct {
+	offending string
 }
 
-// selectHookEndpoint returns the endpoint from stdout, whether stdout held any
-// JSON at all, and — when it cannot tell a record from log prose — the line that
-// made it ambiguous.
-//
-// It never guesses. Whether a line is the endpoint the script echoed or part of
-// a tunnel's log is UNDECIDABLE while both share stdout, which
-// docs/remote-hooks.md permits: #2845 records two input pairs that are identical
-// on every inspectable property yet require opposite handling. Guessing "prose"
-// on a record means dialing a URL and bearer token taken from a log line, so
-// where the answer is not determined this refuses and says which line to fix.
-//
-// What remains decidable is still decided:
-//
-//   - A line that is not an object opener is a tunnel logging into the inherited
-//     stream, and is skipped without parsing.
-//   - An object that decodes cleanly, with nothing but whitespace after it and
-//     no structural continuation on the next line, is a record — the only shape
-//     that may be the endpoint.
-//   - An object line whose brackets close is self-contained: skipping it is safe
-//     because nothing in it can become a candidate.
-func selectHookEndpoint(stdout string) (*AgentServerEndpoint, bool, *hookAmbiguousStdout) {
-	sawJSON := false
-	for cursor := 0; cursor < len(stdout); {
-		lineEnd := nextHookOutputLine(stdout, cursor)
-		line := strings.TrimRight(stdout[cursor:lineEnd], "\r\n")
-		open := cursor
-		for open < lineEnd && isJSONSpace(stdout[open]) {
-			open++
-		}
-		if open >= lineEnd || (stdout[open] != '{' && stdout[open] != '[') {
-			// Plain prose from a tunnel sharing the stream.
-			cursor = lineEnd
-			continue
-		}
-		if stdout[open] == '[' {
-			// A bracket line is prose when it closes — `[INFO] tunnel forwarding` —
-			// and UNDECIDABLE when it does not: `[INVALID,` opens a log array whose
-			// elements must never be promoted, and `[INFO] opening {config` is
-			// chatter, and the two are identical here (#2845, pair 1).
-			if hookLineBracketsBalanced(line) {
-				cursor = lineEnd
-				continue
-			}
-			return nil, sawJSON, &hookAmbiguousStdout{line: line}
-		}
+// hookStdoutExcerptRunes bounds the offending text in the error's first line. A
+// flooding tunnel must not paste megabytes into a headline whose job is to name
+// one thing to go fix; the script's whole output is attached below it anyway.
+const hookStdoutExcerptRunes = 200
 
-		decoder := json.NewDecoder(strings.NewReader(stdout[open:]))
-		var raw json.RawMessage
-		if err := decoder.Decode(&raw); err != nil {
-			// A malformed object that closes on its line is self-contained; one left
-			// open could enclose everything after it, and nothing distinguishes that
-			// from a script that simply printed a broken line.
-			if hookLineBracketsBalanced(line) && !hookNextLineContinues(stdout, lineEnd) {
-				cursor = lineEnd
-				continue
-			}
-			return nil, sawJSON, &hookAmbiguousStdout{line: line}
-		}
-		sawJSON = true
+// hookStdoutExcerptScanBytes bounds what the excerpt reads to find that line.
+// The offending text can be the whole of a flooded stdout, and rendering one
+// line of it must not cost a redaction pass over all of it.
+const hookStdoutExcerptScanBytes = 8 << 10
 
-		valueEnd := open + int(decoder.InputOffset())
-		valueLineEnd := nextHookOutputLine(stdout, valueEnd)
-		rest := valueEnd
-		for rest < valueLineEnd && isJSONSpace(stdout[rest]) {
-			rest++
-		}
-		if rest >= valueLineEnd {
-			if hookNextLineContinues(stdout, valueLineEnd) {
-				// A separator or closer opening the next line either continues this
-				// record or is a tunnel's chatter — `,"endpoint":` versus
-				// `] tunnel closed` (#2845, pair 2).
-				return nil, sawJSON, &hookAmbiguousStdout{line: line}
-			}
-			if ej, ok := decodeHookEndpointJSON(string(raw)); ok {
-				// ej.TLSFingerprint is intentionally not read — TLS was removed; an
-				// old script that still echoes it parses fine and the value is
-				// dropped.
-				return &AgentServerEndpoint{URL: ej.URL, Token: ej.Token}, true, nil
-			}
-			cursor = valueLineEnd
-			continue
-		}
-		if stdout[rest] == '{' || stdout[rest] == '[' {
-			// Several values on one line is a log line, not a record — unless the
-			// trailing one is itself an opener that never closes, which leaves the
-			// same unknown extent as any open record.
-			if hookLineBracketsBalanced(line) {
-				cursor = valueLineEnd
-				continue
-			}
-		}
-		return nil, sawJSON, &hookAmbiguousStdout{line: line}
+// parseHookEndpoint reads launch_cmd's stdout, which by contract holds the
+// {"url","token"} endpoint record and nothing else. It returns the endpoint,
+// whether stdout held JSON at all (which separates "printed nothing" from
+// "printed the wrong shape" in the error), and any content that was not the
+// record.
+//
+// This is a parse, not a classification, and that is the whole point of the
+// schema change. While docs/remote-hooks.md let a background tunnel inherit
+// stdout, "is this line the endpoint or a log?" was UNDECIDABLE: #2845 exhibits
+// two input pairs identical on every inspectable property that require opposite
+// handling, and seven successive rules each closed one counterexample and
+// admitted the next. Reserving the stream removes the question rather than
+// answering it — one JSON value, of the documented shape, surrounded by nothing
+// but whitespace.
+//
+// Whitespace is not content: a trailing newline from `echo`, an indent, a blank
+// line, and a CRLF ending are all what a shell normally produces and none of
+// them is another writer on the stream.
+func parseHookEndpoint(stdout string) (*AgentServerEndpoint, bool, *hookStdoutViolation) {
+	open := 0
+	for open < len(stdout) && isJSONSpace(stdout[open]) {
+		open++
 	}
-	return nil, sawJSON, nil
+	if open >= len(stdout) {
+		// Nothing at all on stdout. That is a different diagnosis from "it also
+		// printed something else", and gets its own error.
+		return nil, false, nil
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(stdout[open:]))
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		// stdout does not begin with a JSON value, so all of it is the other output
+		// the contract forbids — a tunnel that logged first, or a status line.
+		return nil, false, &hookStdoutViolation{offending: stdout[open:]}
+	}
+
+	valueEnd := open + int(decoder.InputOffset())
+	tail := valueEnd
+	for tail < len(stdout) && isJSONSpace(stdout[tail]) {
+		tail++
+	}
+	endpoint, isEndpoint := decodeHookEndpointJSON(string(raw))
+	if tail >= len(stdout) {
+		if isEndpoint {
+			// endpoint.TLSFingerprint is intentionally not read — TLS was removed; an
+			// old script that still echoes it parses fine and the value is dropped.
+			return &AgentServerEndpoint{URL: endpoint.URL, Token: endpoint.Token}, true, nil
+		}
+		// One value, wrong shape. That is a different diagnosis from a shared
+		// stream, and the operator needs to hear about the schema, not a redirect.
+		return nil, true, nil
+	}
+
+	// More than one thing on stdout, so quote the FIRST of them that is not the
+	// endpoint record — the leading value when it is not one, otherwise whatever
+	// follows the record. This chooses what to SHOW, never what to dial: both
+	// halves are refused either way, so no guess is smuggled back in. A second
+	// endpoint-shaped object is refused too, because picking between them is
+	// exactly the guess this contract exists to delete.
+	if !isEndpoint {
+		return nil, true, &hookStdoutViolation{offending: stdout[open:valueEnd]}
+	}
+	return nil, true, &hookStdoutViolation{offending: stdout[tail:]}
+}
+
+// hookStdoutExcerpt renders the non-endpoint stdout for the error's first line:
+// its first non-empty line, token-redacted and bounded. One concrete string is
+// what an operator greps their own script for.
+//
+// Redaction runs BEFORE the line split, so a pretty-printed record collapses to
+// one informative line rather than an excerpt reading `{`, and a token wrapped
+// across a break is still caught.
+func hookStdoutExcerpt(offending string) string {
+	if len(offending) > hookStdoutExcerptScanBytes {
+		offending = offending[:hookStdoutExcerptScanBytes]
+	}
+	for rest := redactHookOutputTokens(offending); rest != ""; {
+		line, remainder, _ := strings.Cut(rest, "\n")
+		rest = remainder
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if runes := []rune(trimmed); len(runes) > hookStdoutExcerptRunes {
+			return strings.TrimRight(string(runes[:hookStdoutExcerptRunes]), " \t") + "…"
+		}
+		return trimmed
+	}
+	return ""
 }
 
 func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
-}
-
-// hookLineBracketsBalanced reports whether every object/array opened on this line
-// also closes on it, WITH A MATCHING BRACKET, ignoring brackets inside JSON
-// strings. It is the difference between a self-contained line and a record that
-// continues into the next.
-//
-// Types are tracked, not just a depth count: `{"level":]` closes nothing, and
-// counting it as balanced would treat a record that is still open as
-// self-contained, letting the next line's logged endpoint be promoted.
-//
-// An unterminated string only matters while a bracket is still open. Bracketed
-// prose with a stray quote — `[INFO] opening "config` — has already closed
-// everything it opened, and must not poison the records after it.
-func hookLineBracketsBalanced(line string) bool {
-	var open []byte
-	inString := false
-	escaped := false
-	for index := 0; index < len(line); index++ {
-		switch {
-		case escaped:
-			escaped = false
-		case line[index] == '\\' && inString:
-			escaped = true
-		case line[index] == '"':
-			inString = !inString
-		case inString:
-		case line[index] == '{' || line[index] == '[':
-			open = append(open, line[index])
-		case line[index] == '}' || line[index] == ']':
-			if len(open) == 0 {
-				return false
-			}
-			want := byte('{')
-			if line[index] == ']' {
-				want = '['
-			}
-			if open[len(open)-1] != want {
-				return false
-			}
-			open = open[:len(open)-1]
-		}
-	}
-	return len(open) == 0
-}
-
-// hookNextLineContinues reports that the next non-empty line begins with JSON
-// structure — a separator or a closer — which means the value above it was not a
-// record of its own. A comma moved onto its own line continues the record just
-// as one left on the same line does, and a closing bracket means the value sat
-// inside a container that started earlier.
-func hookNextLineContinues(output string, from int) bool {
-	for cursor := from; cursor < len(output); {
-		lineEnd := nextHookOutputLine(output, cursor)
-		trimmed := strings.TrimLeft(strings.TrimRight(output[cursor:lineEnd], "\r\n"), " \t")
-		if trimmed == "" {
-			cursor = lineEnd
-			continue
-		}
-		switch trimmed[0] {
-		case ',', ':', '}', ']':
-			// A separator OR a closer: either way the value above was inside
-			// something that had not ended, so it is not a record of its own.
-			return true
-		}
-		return false
-	}
-	return false
-}
-
-func nextHookOutputLine(output string, from int) int {
-	if from >= len(output) {
-		return len(output)
-	}
-	breakAt := strings.IndexAny(output[from:], "\r\n")
-	if breakAt < 0 {
-		return len(output)
-	}
-	next := from + breakAt + 1
-	if output[from+breakAt] == '\r' && next < len(output) && output[next] == '\n' {
-		next++
-	}
-	return next
 }
 
 // reap runs delete_cmd to tear down whatever launch_cmd provisioned, idempotently

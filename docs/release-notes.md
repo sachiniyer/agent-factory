@@ -1,5 +1,29 @@
 # Release Notes
 
+## Breaking: a remote hook's `launch_cmd` owns stdout
+
+- **`launch_cmd`'s stdout now carries its `{"url","token"}` endpoint JSON and
+  nothing else.** Surrounding whitespace is fine; a progress line, a backgrounded
+  tunnel's log, or a second JSON record is not, and fails the provision with an
+  error quoting the offending output and naming the fix. Only the
+  **remote-hook** backend is affected — `local`, `docker`, and `ssh` sessions do
+  not run these scripts.
+- **Migration, one redirect per writer:** give everything except the endpoint
+  somewhere else to go — `mytunnel >/dev/null 2>&1 &` (or `>>tunnel.log 2>&1`)
+  and `echo "progress…" >&2`. **stderr is unchanged** and still takes anything,
+  including output from a process the script backgrounds. A script that already
+  keeps stdout clean needs no change. See [Migrating to an endpoint-only
+  stdout](remote-hooks.md#migrating-to-an-endpoint-only-stdout).
+- **Why it had to break.** af previously read the endpoint out of a stdout the
+  docs let a tunnel share, which meant deciding per line whether a line was the
+  record or a log — a question with no answer, since `[INVALID,` opening a log
+  array is identical on every inspectable property to `[INFO] opening {config`
+  and the two need opposite handling. Guessing wrong in the dangerous direction
+  meant **dialing a URL and sending a bearer token both taken from a log line**,
+  which anything able to write to the hook's stdout could choose. Reserving the
+  stream makes the endpoint a parse, and there is deliberately no opt-out: an
+  escape hatch would restore exactly the ambiguity this removes.
+
 ## Absolute-path assets load in a web-tab preview
 
 - Setting `preview_listen_addr` (for example `127.0.0.1:8444`) now opens a second

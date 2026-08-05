@@ -4,8 +4,10 @@
 # starts an `af agent-server` there, and echoes that server's authed endpoint.
 #
 # Args:  --name <slug> --title <title> --repo <url> [--branch <b>] [--program <p>]
-# stdout: one JSON object {"url","token"}  (the agent-server banner)
-# stderr: progress logs
+# stdout: one JSON object {"url","token"} (the agent-server banner) AND NOTHING
+#         ELSE — anything else on stdout fails the provision (#2845). Every
+#         process this script backgrounds must be redirected off stdout.
+# stderr: progress logs, and anything a backgrounded tunnel wants to say
 #
 # See docs/remote-hooks.md for the full contract and a ready-to-use reference.
 
@@ -38,7 +40,9 @@ echo "Provisioning session $NAME..." >&2
 #   4. Re-emit its {addr,token} as the endpoint contract below.
 #
 # The daemon dials the URL you print, so it must be reachable from the daemon
-# (a public/forwarded address, or a tunnel you open here).
+# (a public/forwarded address, or a tunnel you open here). If you open one,
+# redirect it — `mytunnel >/dev/null 2>&1 &`, or to a file — so the endpoint
+# below is the only thing on stdout.
 
 # echo '{"url": "http://HOST:PORT", "token": "TOKEN"}'
 echo "Error: fill in your provisioning logic in launch.sh" >&2

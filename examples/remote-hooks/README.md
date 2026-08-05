@@ -14,6 +14,12 @@ For the full protocol specification and a ready-to-use reference `launch.sh`, se
 | `launch.sh` | Provision the workspace, start an `af agent-server`, echo its `{url,token}` |
 | `delete.sh` | Tear the provisioned sandbox back down |
 
+`launch.sh`'s **stdout carries that `{url,token}` object and nothing else** — put
+progress on stderr, and redirect anything you background (`mytunnel >/dev/null
+2>&1 &`). Anything else on stdout fails the provision with an error quoting the
+line; see [stdout is the endpoint's,
+exclusively](../../docs/remote-hooks.md#stdout-is-the-endpoints-exclusively).
+
 The old `list.sh` / `attach.sh` / `terminal.sh` are **gone**: enumeration, terminal
 proxying, and preview capture are now served by the in-workspace `af agent-server`
 over its `ws://` stream. The daemon drives a hook session exactly like a
