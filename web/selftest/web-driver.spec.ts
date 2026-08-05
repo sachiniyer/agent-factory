@@ -198,6 +198,22 @@ async function ensureRailOnSessions(page: Page): Promise<void> {
       { message: "the rail must end up owning the keyboard", timeout: 15_000 },
     )
     .toBe("rail");
+
+  // Hand the keyboard back to the DOCUMENT. Selecting the view above is a click on a
+  // <button>, which leaves that button focused — and index.ts's document-level key
+  // handler returns early for a focused native control, deliberately, so a focused
+  // "+ New" keeps its own Enter (isNativeControl, index.ts). Without this blur the
+  // helper swallows the very chords it exists to set up: the first `]` after it went
+  // to the viewtab button and the view never cycled. Rail mode's real invariant is
+  // the one the callers state — "the active element is document.body" — so establish
+  // that, not merely the CSS class.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.tagName ?? ""), {
+      message: "no native control may hold focus, or the document-level key handler never sees the chord",
+      timeout: 5_000,
+    })
+    .toBe("BODY");
 }
 
 /** How far a terminal viewport sits from the bottom, in px (#2816).
