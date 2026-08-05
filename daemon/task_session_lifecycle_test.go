@@ -273,10 +273,13 @@ func TestTaskSessionLifecycle_BindsTheTeardownToTheStableID(t *testing.T) {
 	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
 	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
 
-	var gotID, gotTitle string
+	// A channel, not shared vars: the seam runs on the teardown goroutine while the
+	// assertion runs on the test's, so plain fields would be a data race (-race
+	// catches it) and the handoff is what publishes the write.
+	got := make(chan KillSessionRequest, 1)
 	prev := killSessionForLifecycle
 	killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
-		gotID, gotTitle = req.ID, req.Title
+		got <- req
 		return nil
 	}
 	t.Cleanup(func() { killSessionForLifecycle = prev })
@@ -284,9 +287,13 @@ func TestTaskSessionLifecycle_BindsTheTeardownToTheStableID(t *testing.T) {
 	was := endRunOnIdleEdge(t, inst)
 	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
 
-	require.Eventually(t, func() bool { return gotID != "" }, 20*time.Second, 25*time.Millisecond)
-	assert.Equal(t, inst.ID, gotID, "the teardown must name the session that actually finished")
-	assert.Equal(t, "nightly", gotTitle)
+	select {
+	case req := <-got:
+		assert.Equal(t, inst.ID, req.ID, "the teardown must name the session that actually finished")
+		assert.Equal(t, "nightly", req.Title)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the declared teardown never ran")
+	}
 }
 
 // TestTaskSessionLifecycle_DeferredWhileAttached is the paused-path gap: a run
