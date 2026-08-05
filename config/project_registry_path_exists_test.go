@@ -31,6 +31,15 @@ func TestProjectPathExists_DeterminateAnswers(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
 	assert.False(t, projectPathExists(file),
 		"a regular file is determinately not a project root")
+
+	// ENOTDIR is as determinate as ENOENT and must not be swept into the
+	// fail-closed arm: an ancestor that is a regular file means NOTHING can exist
+	// below it (#2889 review). Go does not map it to ErrNotExist, so a rule that
+	// only special-cases ErrNotExist reports this as present — a fabricated
+	// POSITIVE, the mirror of the bug this function was fixed for.
+	ancestorIsAFile := filepath.Join(root, "notes.txt", "checkout")
+	assert.False(t, projectPathExists(ancestorIsAFile),
+		"a path under a regular-file ancestor cannot exist, and ENOTDIR proves it")
 }
 
 // The regression this pins: an unreadable root must not be reported as gone.

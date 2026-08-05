@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
@@ -757,13 +758,20 @@ func projectFromRecord(record projectRecord) Project {
 // of which take ErrNotExist as determinate and turn every other stat failure
 // into an error rather than a verdict.
 //
+// ENOTDIR is determinate too, and belongs with ErrNotExist rather than in the
+// fail-closed arm: an ancestor that is a regular file means nothing can exist
+// below it. Go does not map ENOTDIR to ErrNotExist, so special-casing only
+// ErrNotExist would report that path as PRESENT — a fabricated positive, the
+// exact mirror of the bug this function was fixed for (#2889 review).
+//
 // It also moves the two registration guards that consult this in the safe
 // direction: an ambiguous re-registration is REFUSED rather than allowed to
 // proceed on the strength of a stat nobody could perform.
 func projectPathExists(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		return !errors.Is(err, os.ErrNotExist)
+		determinatelyAbsent := errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+		return !determinatelyAbsent
 	}
 	return info.IsDir()
 }
