@@ -113,6 +113,13 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 // they never agreed to. When the branch cannot be learned there is no correct
 // replacement to perform, so the honest answer is to say so and name the
 // alternative.
+//
+// It applies where something could still BE saved — a reachable sandbox, or one
+// whose reachability was never established. Deliberately NOT on probeAbsent: af
+// knows that runtime is gone, so nothing is stranded by replacing it, the strand
+// already happened, and refusing would only make a recoverable session
+// unrecoverable for no gain. That arm is the one verdict the design licenses
+// unconditionally.
 func requireKnownSandboxBranch(instance *session.Instance) error {
 	if instance.GetBranch() != "" {
 		return nil

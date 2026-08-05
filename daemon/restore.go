@@ -140,6 +140,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		if !force {
 			return "", refuseIndeterminateReap(title)
 		}
+		// Forced past an unanswerable probe: the sandbox may well be alive behind a
+		// broken path, so a replacement still must not land on the default branch and
+		// strand work it had already PUSHED — which is not what the flag offered to
+		// discard. Unlike probeAbsent below, "gone" was never established here.
+		if err := requireKnownSandboxBranch(instance); err != nil {
+			return "", err
+		}
 		log.WarningLog.Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
 	case probeAbsent:
 		// af's own not-provisioned sentinel: nothing to preserve, so replacement is
@@ -158,15 +165,10 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			if !force {
 				return "", err
 			}
+			if berr := requireKnownSandboxBranch(instance); berr != nil {
+				return "", berr
+			}
 			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox anyway (%v); anything it has not pushed is discarded", title, err)
-		}
-	}
-
-	// Never provision with an empty RestoreBranch, whichever arm got here, and
-	// regardless of --force-reap: see requireKnownSandboxBranch.
-	if isRemoteWorkspace(instance) {
-		if err := requireKnownSandboxBranch(instance); err != nil {
-			return "", err
 		}
 	}
 
