@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,18 +152,21 @@ func TestReserveCreate_RefusesWhenAProjectDeleteCompletedDuringResolution(t *tes
 }
 
 // TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample is the
-// INVERSE ordering, and the delete generation alone does not catch it.
+// INVERSE ordering, which the delete generation alone does not catch.
 //
-// The generation answers "did a delete BEGIN after my sample". A delete that was
-// ALREADY running when the create sampled bumped the counter before that sample
-// and removes its fence before the re-check — so both readings match, the fence
-// reads clear, and the create is admitted even though the delete ran to
-// completion across the entire unlocked region. Reported on the #2937 review with
-// a working repro; this is that repro.
+// The generation answers "did a delete BEGIN after my sample". A delete already
+// running at the sample bumped the counter before it and drops its fence before
+// the re-check, so both readings match and the create would be admitted despite
+// that delete running across the entire unlocked region.
+//
+// It asserts two things, and the second is why the refusal sits where it does:
+// the create is refused, and it is refused WITHOUT resolving its backend. A
+// create that is already known to be impossible must not first wait on the
+// unbounded `git rev-parse` this change exists to keep off blocking paths.
 //
 // The delete is parked inside deregisterRootAgents, which runs after the fence is
 // installed, so a create that starts while it is parked necessarily samples with
-// the fence up — which is the state the test needs and cannot otherwise pin down.
+// the fence up — the state the test needs and cannot otherwise pin down.
 func TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 
@@ -193,12 +197,17 @@ func TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample(t *
 	manager.mu.Unlock()
 	require.True(t, fenceUp, "precondition: the delete must hold its fence while parked")
 
-	inResolver := make(chan struct{})
-	releaseResolver := make(chan struct{})
+	// The resolver must never run. A create refused for an active delete is
+	// already known to be impossible, and backend resolution is the unbounded
+	// `git rev-parse` this whole change exists to keep off the blocking paths —
+	// so making that create wait on a stalled mount before telling it no is the
+	// defect, not merely an inefficiency. Before the resolution was hoisted, the
+	// fence check ran ahead of it and such a create returned promptly (#2937
+	// review); this asserts that property survived the hoist.
+	var resolverRuns atomic.Int64
 	prevResolver := backendKindForCreate
 	backendKindForCreate = func(opts session.InstanceOptions, root string) (session.BackendKind, error) {
-		close(inResolver)
-		<-releaseResolver
+		resolverRuns.Add(1)
 		return prevResolver(opts, root)
 	}
 	t.Cleanup(func() { backendKindForCreate = prevResolver })
@@ -214,16 +223,27 @@ func TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample(t *
 		})
 		results <- createResult{release: release, err: err}
 	}()
-	// Reaching the resolver is what proves the sample already happened, and it
-	// happened while the fence above was up.
-	select {
-	case <-inResolver:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the create never reached backend resolution")
-	}
 
-	// Now let the delete finish and drop its fence, so the create's re-check sees
-	// a clear field and an unchanged generation.
+	// It must refuse while the delete is STILL PARKED. Waiting on the result here,
+	// before releasing the delete, is the assertion: a create that only refused
+	// after the delete finished would time out instead.
+	var got createResult
+	select {
+	case got = <-results:
+	case <-time.After(20 * time.Second):
+		close(releaseDelete)
+		<-deleted
+		t.Fatal("the create did not refuse while a delete held the fence: it is waiting on something, which is what refusing before backend resolution is meant to prevent")
+	}
+	if got.release != nil {
+		got.release()
+	}
+	require.Error(t, got.err, "a create sampled during an active delete must be refused")
+	require.ErrorContains(t, got.err, "is being deleted")
+	require.Nil(t, got.release, "a refused create must not hand back a reservation to release")
+	require.Zero(t, resolverRuns.Load(),
+		"the refusal must come BEFORE backend resolution: resolving first makes an impossible create wait on unbounded git")
+
 	close(releaseDelete)
 	select {
 	case err := <-deleted:
@@ -231,22 +251,4 @@ func TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample(t *
 	case <-time.After(20 * time.Second):
 		t.Fatal("the delete never completed")
 	}
-	manager.mu.Lock()
-	_, fenceStillUp := manager.projectDeletes[repoID]
-	manager.mu.Unlock()
-	require.False(t, fenceStillUp, "precondition: the fence must be down before the create resumes")
-
-	close(releaseResolver)
-	var got createResult
-	select {
-	case got = <-results:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the create never finished after the resolver was released")
-	}
-	if got.release != nil {
-		got.release()
-	}
-	require.Error(t, got.err, "a create that sampled DURING an active delete must be refused, not admitted once that delete finishes")
-	require.ErrorContains(t, got.err, "while this session create resolved its backend")
-	require.Nil(t, got.release, "a refused create must not hand back a reservation to release")
 }

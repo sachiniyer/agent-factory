@@ -265,6 +265,33 @@ func (m *Manager) projectDeleteGenLocked(repoID string) uint64 {
 	return m.projectDeleteGen[repoID]
 }
 
+// projectDeleteRefusal builds the refusal every delete-fence arm returns, so the
+// three of them cannot drift in wording or in what they promise the caller.
+//
+// inProgress distinguishes a delete still running from one that finished while
+// this create was outside m.mu; the guidance differs, and a create told to
+// "retry after deletion finishes" about a delete that already finished would be
+// telling the user to wait for nothing.
+//
+// TaskOrigin is daemon-only provenance independent of retained identity or
+// concurrency ownership. Legacy targeted rows can have neither TaskID nor
+// TaskRepoID, but admission still knows this create came from automation.
+// Nothing has reserved a name, created a runtime, or sent a prompt on any of
+// these paths, so the refusal is provably not attempted and carries the
+// wire-visible marker. Keep the older identity shapes as compatibility evidence
+// for in-process callers constructed before TaskOrigin was added; ordinary
+// client creates carry none of these fields and retain their plain error.
+func projectDeleteRefusal(req CreateSessionRequest, repoID string, inProgress bool) error {
+	err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repoID)
+	if !inProgress {
+		err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repoID)
+	}
+	if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
+		err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+	}
+	return err
+}
+
 // projectDeleteStateFor samples BOTH halves of the repo's delete state for a
 // caller that does not hold m.mu; it takes the lock itself.
 //
@@ -308,28 +335,36 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 	// damage to the one create that asked. The sibling git call this function makes
 	// under the lock (branch holds) is already bounded with its own deadline (#856);
 	// this was the path that was not.
-	// Sample the repo's delete state first. The resolvers below run outside m.mu,
-	// which leaves room for a DeleteProject to install its fence, complete, and
-	// remove the fence entirely within this gap — so the post-lock fence check
-	// alone would see a clear field and admit a create into a project the user
-	// just deleted.
+	// Sample the repo's delete state first, and refuse an ALREADY-RUNNING delete
+	// right here — ahead of the resolvers, not after them.
 	//
-	// Sampled state plus the post-lock check cover EVERY delete that overlaps the
-	// unlocked region, and it takes both halves to do it. Writing the delete's
-	// fence interval as [install, remove] and this region as [sample, check]:
+	// Deferring this refusal until after the resolution would make a create that
+	// is already known to be impossible wait on the unbounded git below, which is
+	// exactly the stall this hoist exists to bound. Before the hoist the fence
+	// check ran ahead of backend resolution and such a create returned promptly;
+	// keeping the refusal early preserves that. It is still behind everything a
+	// refusal needs — repo identity and the task-binding check — and still ahead
+	// of every mutation, so admission order is unchanged.
 	//
-	//   - install before sample, remove after sample -> deleteActive here
+	// The sampled state plus the post-lock check cover EVERY delete overlapping
+	// the unlocked region. Writing the delete's fence interval as
+	// [install, remove] and this region as [sample, check]:
+	//
+	//   - install before sample, remove after sample -> refused immediately below
 	//   - install within the region                  -> the generation moved
 	//   - remove after check                         -> the fence is still up
 	//   - install after check                        -> the create has reserved by
 	//     then, so DeleteProject's own fail-closed preflight refuses instead
 	//
-	// The first case is why the fence is sampled and not just the counter: such a
+	// The first arm is why the fence is sampled and not just the counter: such a
 	// delete bumped the generation BEFORE the sample and drops its fence BEFORE
 	// the check, so both readings match while it ran across the whole gap (#2937
 	// review). A delete that finished entirely before the sample is not an overlap
 	// at all — that is an ordinary create after a completed delete.
 	deleteActive, deleteGen := m.projectDeleteStateFor(repo.ID)
+	if deleteActive {
+		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, true)
+	}
 
 	runtimeKind := session.BackendLocal
 	if req.ForceRemote {
@@ -355,28 +390,12 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The remaining two arms: a delete still holding its fence, and one that both
+	// started and finished while this create resolved. The already-running case
+	// returned above, before the resolvers.
 	_, deleting := m.projectDeletes[repo.ID]
-	// Every arm is the same refusal: a delete owns this project's state and this
-	// create has reserved nothing. The two sampled arms catch the deletes the
-	// fence cannot report here — one that finished during the gap, and one that
-	// was already running when the gap opened.
-	if deleting || deleteActive || m.projectDeleteGenLocked(repo.ID) != deleteGen {
-		err := fmt.Errorf("project %s is being deleted; retry the session create after deletion finishes", repo.ID)
-		if !deleting {
-			err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repo.ID)
-		}
-		// TaskOrigin is daemon-only provenance independent of retained identity or
-		// concurrency ownership. Legacy targeted rows can have neither TaskID nor
-		// TaskRepoID, but admission still knows this create came from automation.
-		// Nothing has reserved a name, created a runtime, or sent a prompt, so the
-		// refusal is provably not attempted and carries the wire-visible marker.
-		// Keep the older identity shapes as compatibility evidence for in-process
-		// callers constructed before TaskOrigin was added; ordinary client creates
-		// carry none of these fields and retain their plain error.
-		if req.TaskOrigin || req.TaskID != "" || req.TaskRepoID != "" {
-			err = notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
-		}
-		return nil, "", nil, nil, err
+	if deleting || m.projectDeleteGenLocked(repo.ID) != deleteGen {
+		return nil, "", nil, nil, projectDeleteRefusal(req, repo.ID, deleting)
 	}
 	if err := m.refreshLocked(); err != nil {
 		return nil, "", nil, nil, err
