@@ -41,8 +41,6 @@ var knownCrossDeviceDivergence = map[string]string{
 	"hardlink.sameInode": "#2919: same cause — the link structure is not reproduced",
 	"xattr.file":         "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
 	"xattr.dir":          "#2919: same cause, on directories",
-	"mtime.file":         "#2919: the copy writes new files, so mtime becomes the copy time",
-	"mtime.dir":          "#2919: same cause, on directories",
 }
 
 // TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded is the class
@@ -196,7 +194,13 @@ func describeFidelity(t *testing.T, root string) map[string]string {
 	} {
 		info, err := os.Lstat(path)
 		require.NoError(t, err)
-		described[property] = info.ModTime().UTC().Format(time.RFC3339Nano)
+		// Seconds, not nanoseconds. Linux writes these with utimensat at full
+		// resolution but the non-Linux fallback is futimes, which takes
+		// microseconds — so a nanosecond comparison would pass here and fail on
+		// macOS for a copy behaving exactly as designed. Second granularity
+		// still catches the regression that matters, because a copy that does
+		// not preserve times at all stamps them with now.
+		described[property] = info.ModTime().UTC().Truncate(time.Second).Format(time.RFC3339)
 	}
 
 	for property, path := range map[string]string{

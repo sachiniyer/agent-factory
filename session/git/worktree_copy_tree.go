@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -453,7 +454,14 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 			destinationPath, err,
 		)
 	}
-	return preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory")
+	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
+		return err
+	}
+	// Times last, and only here. Creating an entry inside a directory updates
+	// that directory's own mtime, so a timestamp written any earlier would be
+	// overwritten by the copy's own writes — the same ordering the mode already
+	// depends on.
+	return preserveSourceTimes(int(destination.Fd()), info, destinationPath, "directory")
 }
 
 // holeCopyChunk is the read granularity of the hole-preserving copy. It is a
@@ -520,6 +528,36 @@ func isAllZero(chunk []byte) bool {
 		}
 	}
 	return true
+}
+
+// preserveSourceTimes reproduces a source node's access and modification times
+// on the descriptor that owns its copy.
+//
+// The copy writes new nodes, so without this every file and directory in an
+// archived worktree carries the time it was archived rather than the time its
+// contents were last touched. rename(2) keeps them exactly, so this is one more
+// place where which filesystem $AF_HOME sits on decided what a restored session
+// looked like (#2919). It is not cosmetic: build tools decide what to rebuild
+// from mtime, and git's index stores stat data, so a restored worktree that
+// looks entirely new re-hashes every file it could have trusted.
+//
+// Times come from the same fstat the mode came from, so the two cannot disagree
+// about which node was measured, and both are written to a descriptor rather
+// than a name. The platform split behind setTimesFromStat is where the
+// Linux/BSD differences live.
+func preserveSourceTimes(destinationFD int, sourceInfo os.FileInfo, destinationPath, kind string) error {
+	stat, ok := sourceInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Nothing to copy from: leave the times alone rather than invent them.
+		return nil
+	}
+	if err := setTimesFromStat(destinationFD, stat); err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to preserve timestamps on destination %s %s: %w",
+			kind, destinationPath, err,
+		)
+	}
+	return nil
 }
 
 // preserveSourceMode restores a source node's permission bits on the descriptor
@@ -642,6 +680,12 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// After the contents for the same reason the mode is: writing bytes bumps
+	// mtime, so this has to be the last thing that touches the file.
+	if err := preserveSourceTimes(outFD, info, destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}
