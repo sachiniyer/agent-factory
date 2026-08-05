@@ -198,6 +198,16 @@ type RestoreSessionRequest struct {
 	// actions send it so a restore queued for one row cannot resurrect a
 	// different session that reuses the title before dispatch.
 	ID string `json:"id"`
+	// ForceReap replaces a REACHABLE sandbox without first pushing its work
+	// (#2923). Recovery refuses that by default, because a sandbox that still
+	// answers may hold commits nothing else has a copy of; this is the operator
+	// saying they know it is expendable.
+	//
+	// Deliberately per-request, so it names one session and expires with the
+	// command. There is no config key for it: a global switch would silently
+	// restore the data-losing behaviour for every session at once, which is the
+	// shape this repo does not ship.
+	ForceReap bool `json:"force_reap,omitempty"`
 }
 
 type RestoreSessionResponse struct {

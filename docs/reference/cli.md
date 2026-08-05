@@ -1561,9 +1561,25 @@ conversation when required.
 Fails if the session is not restorable, or if its origin repository is gone.
 The restored worktree path is printed on success.
 
+For a sandbox session (docker/ssh/hook) whose sandbox still ANSWERS but whose
+agent is gone, restore first pushes the sandbox's work to origin, because
+recovery re-clones from there and anything unpushed would be destroyed. If that
+push fails, or if af cannot tell whether the sandbox is gone or merely
+unreachable, the restore REFUSES and the session stays recoverable.
+
+--force-reap replaces the sandbox anyway, without the push. It discards whatever
+that sandbox has not pushed, so it is for a sandbox you know is expendable. It
+applies to this one session and this one command; there is no global equivalent.
+
 ```
-af sessions restore <title>
+af sessions restore <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--force-reap` |  | replace a reachable sandbox WITHOUT pushing its work first (discards anything it has not pushed) |
 
 **Global flags**
 

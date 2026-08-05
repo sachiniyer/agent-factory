@@ -427,7 +427,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// blip yields probeUnknown and is refused outright; a durable outage is what
 	// the poll's debounce settles to Lost, which drops this session out of
 	// LimitReached and hands it to the Lost-restore loop (the one place remote
-	// re-provision belongs, with its own recheck). What remains is probeDead: the
+	// re-provision belongs, with its own recheck). What remains is an answered death: the
 	// sandbox answered that its agent exited while blocked — the #1786 case — and
 	// that is authoritative, so it re-spawns at once, exactly as before.
 	as := instance.AgentServer()
@@ -437,7 +437,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// prompt below is all it needs.
 	case probeUnknown:
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
-	case probeDead:
+	case probeAbsent, probeAnsweredDead:
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
 		// LimitResetAt reports (zero, false) once that has happened. Re-applying the

@@ -1577,13 +1577,13 @@
       "af completion zsh --help": "cli.shell-completion",
       "af completion zsh --no-descriptions": "cli.shell-completion",
       "af config --help": "meta.discovery",
-      "af config get --help": "meta.discovery",
       "af config get --explain": "config.explain",
+      "af config get --help": "meta.discovery",
       "af config get --json": "cli.json-envelope",
       "af config get --project": "config.read-project",
       "af config get --repo": "config.read-project",
-      "af config list --help": "meta.discovery",
       "af config list --explain": "config.explain",
+      "af config list --help": "meta.discovery",
       "af config list --json": "cli.json-envelope",
       "af config list --project": "config.read-project",
       "af config list --repo": "config.read-project",
@@ -1651,6 +1651,7 @@
       "af sessions preview --tab": "session.preview-tab",
       "af sessions preview --tab-id": "session.preview-tab",
       "af sessions preview --tab-name": "session.preview-tab",
+      "af sessions restore --force-reap": "session.restore",
       "af sessions restore --help": "meta.discovery",
       "af sessions retry-limit --help": "meta.discovery",
       "af sessions send-prompt --all": "session.send-prompt.broadcast",
@@ -1700,6 +1701,7 @@
       "af tasks add --help": "meta.discovery",
       "af tasks add --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks add --name": "task.add",
+      "af tasks add --on-complete": "task.on-complete",
       "af tasks add --program": "task.add",
       "af tasks add --prompt": "task.add",
       "af tasks add --target-session": "task.add",
@@ -1715,6 +1717,7 @@
       "af tasks update --help": "meta.discovery",
       "af tasks update --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks update --name": "task.edit",
+      "af tasks update --on-complete": "task.on-complete",
       "af tasks update --program": "task.edit",
       "af tasks update --project-path": "task.edit.project-path",
       "af tasks update --prompt": "task.edit",
@@ -1729,9 +1732,7 @@
       "af upgrade --help": "meta.discovery",
       "af upgrade --ignore-active-upgrade": "install.upgrade",
       "af upgrade --no-restart": "install.upgrade",
-      "af version --help": "meta.discovery",
-      "af tasks add --on-complete": "task.on-complete",
-      "af tasks update --on-complete": "task.on-complete"
+      "af version --help": "meta.discovery"
     }
   },
   "field_coverage": {
@@ -1833,6 +1834,11 @@
         "cli": {
           "id": {
             "ok": "The CLI resolves and dispatches one restore by title under explicit --repo scoping; stable ID protects retained TUI/web intent that can outlive the selected row."
+          }
+        },
+        "tui": {
+          "force_reap": {
+            "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it — not a button or a keystroke that a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
           }
         }
       },
@@ -2084,6 +2090,11 @@
       "ReorderTab": {
         "tab_index": {
           "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+        }
+      },
+      "RestoreSession": {
+        "force_reap": {
+          "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it — not a button or a keystroke a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
         }
       }
     }

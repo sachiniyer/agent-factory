@@ -29,7 +29,7 @@ import (
 //
 //  1. DISTINGUISH. AgentServer.Alive returns an error, so "the sandbox answered:
 //     the agent is gone" and "the sandbox never answered" stop being the same
-//     `false`. See livenessProbe: probeDead is authoritative and acted on at
+//     `false`. See livenessProbe: an ANSWERED probe is authoritative and acted on at
 //     once (#935/#1108 immediacy, unchanged); probeUnknown is an absence of
 //     evidence and settles nothing on its own. Most of the safety lives here —
 //     no amount of debouncing rescues a caller that cannot tell the two apart,
@@ -37,7 +37,7 @@ import (
 //     debounce of its own.
 //  2. DEBOUNCE before a second probe. A run of failed Snapshots earns one bounded
 //     Alive confirmation, but never manufactures death from silence. Only an
-//     ANSWERED probeDead may settle Lost; probeUnknown preserves last-known state
+//     an ANSWERED death may settle Lost; probeUnknown preserves last-known state
 //     because unreachable is not dead (#2589).
 //
 // The debounce demands the failure be DURABLE on two independent axes:
@@ -183,17 +183,17 @@ func (m *Manager) clearRemoteLoss(key string) {
 // sandbox never pushed, so the question that matters is not "was it lost?" but
 // "is it gone NOW?" — asked against live state, immediately before acting.
 //
-// probeAlive proves the sandbox is there and heals the stale Lost row. probeDead
+// probeAlive proves the sandbox is there and heals the stale Lost row. An answered death
 // is session-specific evidence that replacement is safe: either the server
 // answered false or af's clientless sentinel says this runtime is explicitly not
 // provisioned. probeUnknown authorizes nothing: unreachable is not dead, and
-// collapsing it into probeDead is exactly how a connectivity failure can discard
+// collapsing it into a death is exactly how a connectivity failure can discard
 // unpushed work (#2589).
 //
 // Bounded, so a wedged remote cannot stall the poll goroutine here either.
 func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProbe {
 	if !isRemoteWorkspace(instance) {
-		return probeDead // a local session has no remote sandbox to preserve
+		return probeAbsent // a local session has no remote sandbox to preserve
 	}
 	return aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout)
 }
@@ -313,7 +313,7 @@ func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session
 		log.InfoLog.Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
 		m.clearRemoteLoss(key)
 		return
-	case probeDead:
+	case probeAbsent, probeAnsweredDead:
 		// The server answered: reachable, agent gone. The snapshots were failing
 		// for some other reason. An answer of any kind ends the transport episode.
 		log.WarningLog.Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
@@ -336,10 +336,18 @@ type livenessProbe int
 const (
 	// probeAlive: the agent answered and is running.
 	probeAlive livenessProbe = iota
-	// probeDead: session-specific evidence says the runtime is absent. Either the
-	// agent-server answered and reports its agent gone, or af has an explicit
-	// not-provisioned sentinel for this session. Callers may act on it immediately.
-	probeDead
+	// probeAbsent: af has an explicit not-provisioned sentinel for this session —
+	// the clientless AgentServer, which is raised when af KNOWS there is no runtime
+	// to contact. Nothing is preserved by refusing, so this licenses a reap.
+	probeAbsent
+	// probeAnsweredDead: the agent-server ANSWERED and reports its agent gone. That
+	// answer proves the sandbox is REACHABLE — a live container whose agent process
+	// crashed, OOMed, or exited — so whatever it holds is still there to be saved.
+	// It is death evidence for the AGENT and liveness evidence for the SANDBOX, and
+	// keeping those apart is the whole point of the split: collapsing it into
+	// "absent" is what let recovery reap a reachable sandbox with unpushed commits
+	// in it (#2923).
+	probeAnsweredDead
 	// probeUnknown: the probe could not be answered — a transport failure or a
 	// timeout. NOT evidence of death. Only repetition over time (the debounce)
 	// may turn a run of these into a conclusion.
@@ -361,7 +369,9 @@ func probeLiveness(instance *session.Instance, as session.AgentServer) livenessP
 	if alive {
 		return probeAlive
 	}
-	return probeDead
+	// A local probe is in-process, so an answer of "not alive" is not evidence
+	// about any sandbox — there is none to reach.
+	return probeAbsent
 }
 
 // aliveWithin runs a possibly-slow remote Alive() probe under a hard local
@@ -374,7 +384,7 @@ func probeLiveness(instance *session.Instance, as session.AgentServer) livenessP
 // never blocks and nothing leaks past that; at most one such goroutine exists
 // per wedged remote per tick.
 //
-// A timeout reports probeUnknown rather than probeDead: a server that cannot
+// A timeout reports probeUnknown rather than a death: a server that cannot
 // answer in time has told us nothing, and the whole point of the tri-state is
 // that we stop inventing a verdict from silence.
 func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
@@ -393,13 +403,19 @@ func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
 	case r := <-done:
 		switch {
 		case errors.Is(r.err, session.ErrRemoteSandboxNotProvisioned):
-			return probeDead
+			// af's own sentinel: it KNOWS there is no runtime to contact, so there is
+			// nothing to preserve. Note this is the ONLY absence evidence — a
+			// genuinely destroyed container fails with a TRANSPORT error, which lands
+			// on probeUnknown below. Keying a refusal off this sentinel instead of off
+			// reachability would strand every truly-gone sandbox forever.
+			return probeAbsent
 		case r.err != nil:
 			return probeUnknown
 		case r.alive:
 			return probeAlive
 		default:
-			return probeDead
+			// It answered. The agent is gone but the sandbox is THERE.
+			return probeAnsweredDead
 		}
 	case <-timer.C:
 		return probeUnknown

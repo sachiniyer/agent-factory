@@ -685,6 +685,12 @@ func init() {
 	SessionsCmd.AddCommand(sessionsArchiveCmd)
 	SessionsCmd.AddCommand(sessionsHandoffCmd)
 	SessionsCmd.AddCommand(sessionsRetryLimitCmd)
+	// The escape hatch for recovery's refusal to reap a reachable sandbox without
+	// pushing it first (#2923). Per-command and per-session on purpose — the
+	// refusal names this exact invocation, and no config key restores the
+	// data-losing behaviour globally.
+	sessionsRestoreCmd.Flags().Bool("force-reap", false,
+		"replace a reachable sandbox WITHOUT pushing its work first (discards anything it has not pushed)")
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)

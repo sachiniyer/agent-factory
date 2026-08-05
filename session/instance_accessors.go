@@ -81,6 +81,23 @@ func (i *Instance) GetBranch() string {
 	return i.Branch
 }
 
+// SetSandboxBranch records the branch a SANDBOX session's own runtime reports,
+// under the same mutex GetBranch reads it with.
+//
+// It exists because a sandbox session's daemon-side Branch has no other honest
+// source. The in-sandbox provision creates the branch with the SANDBOX's config
+// and never mutates this Instance, so the name reaches the daemon only as an
+// Archive() return — from ArchiveSandbox, and now from the push recovery performs
+// before replacing a reachable sandbox (#2923/#2925). The daemon must not derive
+// it instead: the sandbox's branch_prefix may differ, and BranchForTitle appends a
+// random suffix for titles that sanitize away, so a derived name would be
+// confidently wrong — worse than the empty one it replaced.
+func (i *Instance) SetSandboxBranch(branch string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Branch = branch
+}
+
 // GetWorktreeBranch returns the canonical branch recorded by the GitWorktree,
 // or empty when the instance has no worktree. Unlike GetGitWorktree, this is not
 // gated on started: kill/archive cleanup still acts on a restore-failed row's

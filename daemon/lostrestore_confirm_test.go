@@ -263,7 +263,7 @@ type deadPaneBackend struct{ *session.FakeBackend }
 func (b *deadPaneBackend) HasUpdated(*session.Instance) (bool, bool, string) {
 	return false, false, "" // what a DEAD session's suppressed capture returns
 }
-func (b *deadPaneBackend) IsAlive(*session.Instance) (bool, error) { return false, nil } // probeDead
+func (b *deadPaneBackend) IsAlive(*session.Instance) (bool, error) { return false, nil } // answered dead
 func (b *deadPaneBackend) Type() string                            { return "local" }
 
 // TestRefreshInstanceStatus_SnapshotNilErrorOnDeadSession_IsNotAnObservation is

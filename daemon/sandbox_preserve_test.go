@@ -1,0 +1,176 @@
+package daemon
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// sandboxProbeServer stands in for an in-sandbox `af agent-server` on the three
+// postures recovery has to tell apart. The alive answer is what decides which
+// branch the daemon takes; the archive handler is what proves whether the push
+// happened before anything was reaped.
+type sandboxProbeServer struct {
+	url          string
+	archiveCalls atomic.Int32
+	archiveFails atomic.Bool
+	branch       atomic.Value // string
+	unreachable  atomic.Bool
+}
+
+func newSandboxProbeServer(t *testing.T, branch string) *sandboxProbeServer {
+	t.Helper()
+	s := &sandboxProbeServer{}
+	s.branch.Store(branch)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if s.unreachable.Load() {
+			// A transport failure — NOT af's not-provisioned sentinel. This is what a
+			// genuinely destroyed container looks like, and also what a broken network
+			// path to a live one looks like, which is exactly why it cannot license a
+			// reap.
+			http.Error(w, "transport unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/agent/snapshot":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "capture failed"},
+			})
+		case "/v1/agent/alive":
+			// Answered, agent gone: reachable. The sandbox is still there.
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
+		case "/v1/agent/archive":
+			s.archiveCalls.Add(1)
+			if s.archiveFails.Load() {
+				http.Error(w, "push rejected by origin", http.StatusInternalServerError)
+				return
+			}
+			b, _ := s.branch.Load().(string)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"branch": b}})
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	s.url = srv.URL
+	return s
+}
+
+// REACHABLE: the sandbox answers that its agent is gone, so it is still there and
+// may hold commits nothing else has a copy of. Recovery must push BEFORE it
+// replaces anything, and must record the branch that push reports (#2923/#2925).
+//
+// On master this reaps immediately and never calls archive, so the replacement
+// clones from origin — three hours behind — and `RestoreBranch` stays empty,
+// which makes both sandbox runtimes skip the restore fetch and land on the
+// repository's DEFAULT branch. That is the reported bug in #2959.
+func TestRestoreSession_ReachableSandboxIsPushedBeforeItIsReplaced(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "reachable", srv.url, session.Lost)
+
+	if inst.GetBranch() != "" {
+		t.Fatalf("precondition: a never-archived sandbox session has no branch recorded, got %q", inst.GetBranch())
+	}
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "reachable", RepoID: repoID}); err != nil {
+		t.Fatalf("RestoreSession: %v", err)
+	}
+
+	if got := srv.archiveCalls.Load(); got != 1 {
+		t.Fatalf("archive calls = %d, want 1: a reachable sandbox must have its work pushed before it is "+
+			"replaced — recovery re-clones from origin, so anything unpushed is destroyed by the reap", got)
+	}
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1 after a successful push", got)
+	}
+	if got := inst.GetBranch(); got != "af/session-branch" {
+		t.Fatalf("recorded branch = %q, want the branch the SANDBOX reported: an empty one makes the "+
+			"replacement skip the restore fetch and clone the repository's default branch", got)
+	}
+	if rec := recordFor(t, repoID, "reachable"); rec == nil || rec.Branch != "af/session-branch" {
+		t.Fatalf("persisted record = %+v, want the branch durable the instant the push made it so", rec)
+	}
+}
+
+// REACHABLE, PUSH FAILS: refuse. The archive path aborts to Lost when its push
+// fails rather than tearing down anyway; recovery must do the same, because the
+// sandbox is the only place that work exists.
+func TestRestoreSession_ReachableSandboxIsNotReplacedWhenThePushFails(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.archiveFails.Store(true)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "push-fails", srv.url, session.Lost)
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "push-fails", RepoID: repoID})
+
+	if err == nil {
+		t.Fatal("a restore whose pre-reap push failed reported success; the sandbox would have been " +
+			"replaced and its unpushed commits destroyed")
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("recover calls = %d, want 0: nothing may be replaced when the push did not land", got)
+	}
+	if !strings.Contains(err.Error(), "--force-reap") {
+		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
+	}
+}
+
+// INDETERMINATE: the probe cannot be answered at all. Unreachable is not gone —
+// the sandbox may be live behind a broken network path, still holding work — so
+// recovery refuses, reaps nothing, and says how to override.
+//
+// Note the discriminator: this is a TRANSPORT error, which is what a genuinely
+// destroyed container also produces. Keying the refusal off af's
+// not-provisioned sentinel instead would strand every truly-gone sandbox forever.
+func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.unreachable.Store(true)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "indeterminate", srv.url, session.Lost)
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "indeterminate", RepoID: repoID})
+
+	if err == nil {
+		t.Fatal("a restore against an unreachable sandbox reported success: it would have replaced a " +
+			"sandbox that may still hold unpushed work, and cloned the default branch")
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("recover calls = %d, want 0: an unanswerable probe authorizes nothing", got)
+	}
+	if got := srv.archiveCalls.Load(); got != 0 {
+		t.Fatalf("archive calls = %d, want 0: there is nothing to push to when the sandbox cannot be reached", got)
+	}
+	if !strings.Contains(err.Error(), "--force-reap") {
+		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
+	}
+}
+
+// The escape hatch. Without it the refusal above is a dead end for a sandbox the
+// operator knows is gone, which is the #2917 shape. It is per-session and
+// per-command: this flag, this title, this invocation.
+func TestRestoreSession_ForceReapReplacesAReachableSandboxWithoutPushing(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.archiveFails.Store(true) // even with the push broken, the override proceeds
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "forced", srv.url, session.Lost)
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: "forced", RepoID: repoID, ForceReap: true,
+	}); err != nil {
+		t.Fatalf("RestoreSession(--force-reap): %v", err)
+	}
+
+	if got := backend.recoverCalls(); got != 1 {
+		t.Fatalf("recover calls = %d, want 1: --force-reap is the operator overriding the refusal", got)
+	}
+	if got := srv.archiveCalls.Load(); got != 0 {
+		t.Fatalf("archive calls = %d, want 0: the override is explicitly the no-push path", got)
+	}
+}

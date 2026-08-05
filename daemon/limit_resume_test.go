@@ -152,7 +152,7 @@ func TestResumeFromLimit_PersistsRespawnMutationsWhenSendPromptFails(t *testing.
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
 	}
 
-	// alive=false → probeDead → the respawn arm. The respawn rebuilds the worktree
+	// alive=false → an answered death → the respawn arm. The respawn rebuilds the worktree
 	// and succeeds; the SendPrompt that follows it fails.
 	backend := &limitResumeBackend{
 		FakeBackend:   session.NewFakeBackend(),
@@ -187,7 +187,7 @@ func TestResumeFromLimit_PersistsRespawnMutationsWhenSendPromptFails(t *testing.
 }
 
 // TestResumeFromLimit_KeepsLimitBlockedWhenSendPromptFails is the post-#1857
-// codex finding. On the probeDead arm Respawn ends in ConfirmLive, so the session
+// codex finding. On the answered-death arm Respawn ends in ConfirmLive, so the session
 // reads LiveRunning before its pending prompt has been delivered — and #1857's
 // checkpoint serializes the whole instance right there. A SendPrompt failure (or
 // a crash before the send) therefore left an UNBLOCKED session on both axes while
@@ -204,7 +204,7 @@ func TestResumeFromLimit_KeepsLimitBlockedWhenSendPromptFails(t *testing.T) {
 	// respawn round-trip as well as the block itself.
 	resetAt := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
 
-	// alive=false → probeDead → the respawn arm, whose ConfirmLive drops the limit.
+	// alive=false → an answered death → the respawn arm, whose ConfirmLive drops the limit.
 	// The SendPrompt that follows it fails.
 	backend := &limitResumeBackend{
 		FakeBackend:   session.NewFakeBackend(),
@@ -255,7 +255,7 @@ func TestResumeFromLimit_KeepsLimitBlockedWhenSendPromptFails(t *testing.T) {
 func TestResumeFromLimit_RespawnArm_ClearsLimitDurablyOnSuccess(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 
-	// alive=false → probeDead → the respawn arm; SendPrompt succeeds (no error
+	// alive=false → an answered death → the respawn arm; SendPrompt succeeds (no error
 	// hook), which is the resume's single completion point.
 	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: false}
 	inst := registerStarted(t, manager, repoID, repoPath, "resumed-1857", backend, true, session.Running)

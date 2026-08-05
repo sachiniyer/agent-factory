@@ -387,10 +387,32 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 			log.WarningLog.Printf("not re-provisioning lost remote session %q: could not determine whether its existing sandbox is gone; unreachable is not dead, and replacement could discard unpushed work", inst.Title)
 		}
 		return
-	case probeDead:
-		// The sandbox answered that its agent is gone. This session-specific
-		// evidence, unlike a transport failure, permits recovery. An explicit
-		// not-provisioned sentinel reaches the same arm for inert records.
+	case probeAbsent:
+		// af's own not-provisioned sentinel: it KNOWS there is no runtime to reach,
+		// so there is nothing to preserve and the replacement is unconditional. This
+		// is the ONLY arm that licenses that, which is why the sentinel and a
+		// transport failure had to stop being the same verdict (#2923).
+		m.mu.Lock()
+		st.remoteUnknownAttempts = 0
+		st.nextAttempt = time.Time{}
+		m.mu.Unlock()
+	case probeAnsweredDead:
+		// It ANSWERED. The agent is gone but the sandbox is reachable, so whatever it
+		// never pushed is still there — and recovery re-clones from origin, which
+		// would destroy it. Push first, and refuse to replace anything if that push
+		// does not land, exactly as ArchiveSandbox refuses via AbortArchiveToLost.
+		if err := m.preserveSandboxBeforeReap(repoID, inst); err != nil {
+			m.mu.Lock()
+			logIt := !st.remoteUnknownLogged
+			st.remoteUnknownLogged = true
+			st.remoteUnknownAttempts++
+			st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
+			m.mu.Unlock()
+			if logIt {
+				log.WarningLog.Printf("%v", err)
+			}
+			return
+		}
 		m.mu.Lock()
 		st.remoteUnknownAttempts = 0
 		st.nextAttempt = time.Time{}

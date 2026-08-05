@@ -1,0 +1,125 @@
+package daemon
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// sandboxPushTimeout bounds the pre-reap push. It is generous compared with the
+// liveness probe because this one is a git push over the network rather than a
+// health check, but it is BOUNDED for the same reason: recovery runs on the
+// daemon poll, and a wedged sandbox must not stall it. A push that does not
+// finish in time is treated exactly like one that failed — nothing is reaped.
+const sandboxPushTimeout = 2 * time.Minute
+
+// forceReapCommandFor renders the per-session escape hatch the refusals below
+// must name. A guard that blocks without naming its own release is #2917, so
+// every refusal in this file ends with this string.
+//
+// Per-session and explicit by construction: it names one title, and there is no
+// global switch that restores the reaping-without-a-push behaviour for
+// everything at once.
+func forceReapCommandFor(title string) string {
+	return fmt.Sprintf("af sessions restore %q --force-reap", title)
+}
+
+// preserveSandboxBeforeReap runs the push that makes a reachable sandbox's work
+// durable before recovery destroys it (#2923/#2925/#2959).
+//
+// Recovery re-provisions from origin, so anything the sandbox never pushed is
+// gone the moment it is reaped. The archive path already gets this right and
+// says why: "the workspace state must be durable on GitHub before anything is
+// torn down." Recovery reaped first and never pushed at all.
+//
+// It also fixes where the branch NAME comes from. A sandbox session's daemon-side
+// Branch is written by exactly one thing — the Archive() return — so a session
+// that was never archived recovers with an empty RestoreBranch, which makes the
+// docker/ssh runtimes SKIP the restore fetch and clone the repo's DEFAULT branch.
+// This push is that same call, so recording its result here closes the empty-
+// branch recovery at the same time, and from the only source that can be trusted:
+// the sandbox itself. The daemon cannot derive the name — the in-sandbox worktree
+// uses the SANDBOX's branch_prefix, and BranchForTitle adds a random suffix for
+// titles that sanitize away — so a derived name would be confidently wrong.
+//
+// Returns nil when the caller may proceed to reap. A non-nil error means REFUSE:
+// leave the session Lost and recoverable, because the alternative is destroying
+// work that nothing else has a copy of.
+func (m *Manager) preserveSandboxBeforeReap(repoID string, instance *session.Instance) error {
+	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
+	if err != nil {
+		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
+		// push fails. The session stays Lost and the retry loop keeps trying, which
+		// is what makes this recoverable rather than terminal.
+		return fmt.Errorf(
+			"refusing to replace the sandbox for %q: its agent is gone but the sandbox still ANSWERS, "+
+				"and the push that would make its unpushed work durable failed (%w). "+
+				"Replacing it now would destroy any commits it holds. "+
+				"It stays recoverable and the daemon keeps retrying; if you know its work is expendable, force it with: %s",
+			instance.Title, err, forceReapCommandFor(instance.Title))
+	}
+	if branch == "" {
+		// A push that reports no branch leaves recovery with the empty RestoreBranch
+		// that clones the default branch — the reported bug. Refuse rather than
+		// "succeed" onto the wrong branch.
+		return fmt.Errorf(
+			"refusing to replace the sandbox for %q: its push reported no branch name, so a replacement "+
+				"would clone the repository's default branch and strand whatever the sandbox holds. "+
+				"It stays recoverable; if you know its work is expendable, force it with: %s",
+			instance.Title, forceReapCommandFor(instance.Title))
+	}
+	// Record it the INSTANT it is durable, for the reason ArchiveSandbox records it
+	// there: from here the branch is the only handle on the user's work, so it
+	// belongs on the record whatever happens to the sandbox next.
+	instance.SetSandboxBranch(branch)
+	m.persistInstance(repoID, instance)
+	log.InfoLog.Printf("recovery of %q: pushed its sandbox's work to %s before replacing it", instance.Title, branch)
+	return nil
+}
+
+// refuseIndeterminateReap is the message for a sandbox whose reachability could
+// not be established at all — a transport failure or a timed-out probe.
+//
+// Unreachable is NOT gone. A replacement here would reap a sandbox that may still
+// be holding hours of unpushed commits, so the decision is to refuse: stranded
+// cloud spend is visible on a bill and fixable afterwards, lost work is neither.
+func refuseIndeterminateReap(title string) error {
+	return fmt.Errorf(
+		"cannot restore %q: af could not determine whether its sandbox is gone or merely unreachable, "+
+			"and replacing it would discard anything it has not pushed. "+
+			"It stays recoverable and the daemon keeps retrying; if you know the sandbox is gone, force it with: %s",
+		title, forceReapCommandFor(title))
+}
+
+// archiveWithin runs the sandbox's push under a hard local deadline, mirroring
+// aliveWithin.
+//
+// It bounds the CALLER's wait, not the underlying REST call — AgentServer.Archive
+// takes no context, for the same reason Alive does not. The orphaned goroutine
+// writes to a BUFFERED channel so it never blocks and nothing leaks past its own
+// call timeout.
+//
+// A timeout is an ERROR here, not an empty branch: the push may or may not have
+// landed, and the caller must treat "we do not know" as a refusal rather than as
+// permission to reap.
+func archiveWithin(as session.AgentServer, timeout time.Duration) (string, error) {
+	type result struct {
+		branch string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		branch, err := as.Archive()
+		done <- result{branch: branch, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.branch, r.err
+	case <-timer.C:
+		return "", fmt.Errorf("the sandbox did not finish pushing within %s", timeout)
+	}
+}

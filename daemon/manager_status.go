@@ -529,7 +529,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// record — an outage/reboot casualty that is recovery-eligible, not a
 		// corpse the user wanted gone.
 		switch probe := probeLiveness(instance, as); probe {
-		case probeDead:
+		case probeAbsent, probeAnsweredDead:
 			// AUTHORITATIVE: the agent-server (or local tmux) was asked and
 			// reports the agent gone. No debounce — the evidence is present and
 			// bad, not absent. #935's immediacy is unchanged for both runtimes.
