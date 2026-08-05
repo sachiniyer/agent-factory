@@ -383,3 +383,56 @@ func TestTaskSessionLifecycle_WaitsForPostWorktreeHooks(t *testing.T) {
 		t.Fatal("the teardown never ran after the hooks finished")
 	}
 }
+
+// TestTaskSessionLifecycle_ParkedIntentIsReclaimedWhenTheSessionGoes: an intent
+// is drained by a normal poll of the session that owes it, so a session killed
+// while one is parked would never come back to collect. Leaking a map entry
+// inside the change that exists to stop leaks is not acceptable, and it is the
+// same reclamation the paused-poll lease sweep performs.
+func TestTaskSessionLifecycle_ParkedIntentIsReclaimedWhenTheSessionGoes(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-archive")
+	stubTaskLifecycle(t, "task-archive", task.OnCompleteArchive)
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, was)
+
+	key := daemonInstanceKey(repoID, "nightly")
+	manager.mu.Lock()
+	_, parked := manager.deferredTaskLifecycle[key]
+	manager.mu.Unlock()
+	require.True(t, parked, "precondition: the intent is parked")
+
+	// The session goes away without ever being polled again.
+	manager.mu.Lock()
+	delete(manager.instances, key)
+	manager.sweepDeferredTaskLifecycleLocked()
+	_, stillParked := manager.deferredTaskLifecycle[key]
+	manager.mu.Unlock()
+	assert.False(t, stillParked, "an intent whose session is gone must be reclaimed")
+}
+
+// TestTaskSessionLifecycle_ParkedIntentIsReclaimedOnTitleReuse: the map is keyed
+// by daemon instance key, which is a title — so a same-titled replacement must
+// not inherit the original's owed teardown.
+func TestTaskSessionLifecycle_ParkedIntentIsReclaimedOnTitleReuse(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, was)
+
+	// A different session now holds the title.
+	replacement, err := session.NewInstance(session.InstanceOptions{
+		Title: "nightly", Path: repoPath, Program: "claude", TaskID: "task-kill",
+	})
+	require.NoError(t, err)
+	key := daemonInstanceKey(repoID, "nightly")
+	manager.mu.Lock()
+	manager.instances[key] = replacement
+	manager.sweepDeferredTaskLifecycleLocked()
+	_, stillParked := manager.deferredTaskLifecycle[key]
+	manager.mu.Unlock()
+	assert.False(t, stillParked, "a replacement session must not inherit the original's owed teardown")
+}

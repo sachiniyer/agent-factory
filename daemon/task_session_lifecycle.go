@@ -105,6 +105,26 @@ func (m *Manager) deferTaskSessionLifecycleWhilePaused(repoID string, instance *
 	m.mu.Unlock()
 }
 
+// sweepDeferredTaskLifecycle drops parked intents whose session is gone or has
+// been replaced.
+//
+// An intent is drained by a normal poll of the session that owes it, so a session
+// killed (by the user, or with its project) while one is parked would never come
+// back to collect — and the entry would sit in the map for the daemon's lifetime.
+// That is the same reclamation the paused-poll lease sweep does for the same
+// reason, and leaking a map entry inside the change that exists to stop leaks
+// would be a poor joke.
+//
+// Runs under m.mu, from the same snapshot hold RefreshStatuses already takes.
+func (m *Manager) sweepDeferredTaskLifecycleLocked() {
+	for key, owedID := range m.deferredTaskLifecycle {
+		inst := m.instances[key]
+		if inst == nil || inst.ID != owedID {
+			delete(m.deferredTaskLifecycle, key)
+		}
+	}
+}
+
 // applyDeferredTaskSessionLifecycle drains an intent parked while the session was
 // attached, once it is being polled normally again.
 //

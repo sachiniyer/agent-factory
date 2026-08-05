@@ -300,6 +300,9 @@ func (m *Manager) RefreshStatuses() {
 		repoID, _ := splitDaemonInstanceKey(key)
 		entries = append(entries, entry{repoID: repoID, instance: inst})
 	}
+	// Reclaim lifecycle intents whose session is gone, in the same hold that
+	// already has the instance map (#2595).
+	m.sweepDeferredTaskLifecycleLocked()
 	m.mu.Unlock()
 
 	// Drop debounce state for sessions that are gone or replaced, colocated with
