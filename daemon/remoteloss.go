@@ -100,6 +100,25 @@ type remoteLossState struct {
 // wants, and why the sites that replace a runtime under one identity must retire
 // their own state explicitly (see noteRuntimeReplaced).
 //
+// THE RULE, because this keeps being got wrong one map at a time (#1723, #1678,
+// #1738, #1794, #2868, #2876). Before adding any per-session map to Manager, ask
+// what the entry DESCRIBES:
+//
+//   - A RUNTIME — failures it accumulated, observations of it, work owed to it,
+//     a process it owns: key it here. A title is a slot that outlives its
+//     occupant, so a title-keyed entry is inherited by the next session to take
+//     that name, which is a bug every single time.
+//   - A SLOT — "an exclusive operation is running against this name", "this name
+//     is reserved", the lock that serializes ops on it: key it by
+//     daemonInstanceKey. Being shared with a successor is the entire point, and
+//     these are point-in-time within one operation anyway.
+//
+// If a map is genuinely slot-shaped but its VALUE describes a runtime, the third
+// option is to store the stable id alongside and compare before acting —
+// deferredTaskLifecycle and vscodeSupervisor.servers both do this deliberately,
+// and killRetries instead drops its entry at the very events that free the title.
+// What is never safe is a title key, a runtime-shaped value, and no guard.
+//
 // Legacy records persisted before #1195 carry no ID; they fall back to the
 // daemon key. Nothing materializes an ID-less Instance — FromInstanceData
 // backfills one in memory for exactly this reason, and the daemon load path

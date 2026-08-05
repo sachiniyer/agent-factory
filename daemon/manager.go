@@ -255,10 +255,16 @@ type Manager struct {
 	// poll pass as mission recovery. Guarded by m.mu.
 	handoffSettleOwed map[string]pendingHandoffEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
-	// daemon instance key. A remote probe failure is transport-shaped — one
-	// blip fails identically to a dead sandbox — so the poll accumulates
-	// consecutive failures here and only settles Lost once they are durable.
-	// Guarded by m.mu; entries are dropped the moment a probe succeeds.
+	// stableSessionKey — the stable instance ID, which is what every writer and
+	// every clearRemoteLoss call site actually passes. This said "daemon instance
+	// key" until #2868, and being wrong here is not cosmetic: it is the comment a
+	// reader consults when deciding how to key the NEXT per-session map, and
+	// lostRestoreStates is what came of consulting it.
+	//
+	// A remote probe failure is transport-shaped — one blip fails identically to a
+	// dead sandbox — so the poll accumulates consecutive failures here and only
+	// settles Lost once they are durable. Guarded by m.mu; entries are dropped the
+	// moment a probe succeeds.
 	remoteLossStates map[string]*remoteLossState
 	// instanceOpLocks serializes the mutually-exclusive per-session
 	// operations — kill teardown and Lost-recovery — by daemon instance key.
