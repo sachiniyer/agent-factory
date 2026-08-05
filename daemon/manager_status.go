@@ -77,7 +77,7 @@ func (m *Manager) PauseStatusPoll(repoID, title, id string) {
 // resumes on the next tick rather than waiting out the lease (#1160).
 //
 // It also frees the session's backstop-timer entry (#2015). That entry is keyed
-// by remoteLossKey (the stable instance ID), so an ID-bearing resume can delete
+// by stableSessionKey (the stable instance ID), so an ID-bearing resume can delete
 // it directly. Legacy title-only callers resolve the tracked instance as before.
 // sweepPausedPollState reclaims any entry this cannot (a crashed TUI that never
 // resumes, a session torn down mid-pause), so a lookup miss here is harmless.
@@ -92,7 +92,7 @@ func (m *Manager) ResumeStatusPoll(repoID, title, id string) {
 	m.pausedMu.Unlock()
 }
 
-// taskRunProbeKey resolves the taskRunProbeDue key (remoteLossKey — the stable
+// taskRunProbeKey resolves the taskRunProbeDue key (stableSessionKey — the stable
 // instance ID) for a tracked session, or "" when the session is no longer tracked
 // (already torn down; the sweep drops any orphaned entry). Reads m.instances under
 // m.mu and is never called with pausedMu held, so the two locks stay unnested.
@@ -103,7 +103,7 @@ func (m *Manager) taskRunProbeKey(repoID, title, id string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if inst := m.instances[daemonInstanceKey(repoID, title)]; inst != nil {
-		return remoteLossKey(repoID, inst)
+		return stableSessionKey(repoID, inst)
 	}
 	return ""
 }
@@ -141,7 +141,7 @@ func (m *Manager) taskRunBackstopDue(key string) bool {
 //
 // That sibling keys garbage on "session gone", but a session stays live across a
 // detach, so this keys garbage on "not currently paused" instead.
-// taskRunProbeDue is keyed by remoteLossKey (the stable instance ID), while
+// taskRunProbeDue is keyed by stableSessionKey (the stable instance ID), while
 // pausedPolls also admits a legacy title key, so the live set is bridged by
 // walking m.instances. m.mu and pausedMu are taken SEPARATELY, never nested —
 // the poll deliberately keeps them apart so a slow probe under one can't block
@@ -175,7 +175,7 @@ func (m *Manager) sweepPausedPollState() {
 		repoID, _ := splitDaemonInstanceKey(key)
 		pairs = append(pairs, keyPair{
 			repoID: repoID, title: inst.Title, id: inst.ID,
-			probeKey: remoteLossKey(repoID, inst),
+			probeKey: stableSessionKey(repoID, inst),
 		})
 	}
 	m.mu.Unlock()
@@ -369,7 +369,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// finishUserKill never ran: the tombstone sat unprocessed for the daemon's whole
 	// life, and the error told the user it would be retried automatically. That was
 	// a promise the code did not keep.
-	key := remoteLossKey(repoID, instance)
+	key := stableSessionKey(repoID, instance)
 	if instance.UserKilled() {
 		m.clearRemoteLoss(key)
 		m.finishUserKill(repoID, instance)
@@ -412,7 +412,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// observeTaskRunWhilePaused for why it can end a run but never conclude
 		// death, and taskRunPollBackstop for why this is not a return to per-tick
 		// probing.
-		if instance.TaskRunActive() && m.taskRunBackstopDue(remoteLossKey(repoID, instance)) {
+		if instance.TaskRunActive() && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
 			m.observeTaskRunWhilePaused(repoID, key, instance)
 			return
 		}

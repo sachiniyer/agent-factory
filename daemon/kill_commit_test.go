@@ -186,7 +186,7 @@ func TestRestoreLostSessions_ObservedAliveThenDied_StartsFreshEpisode(t *testing
 	inst := registerStarted(t, manager, repoID, repoPath, "long-lived", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	key := daemonInstanceKey(repoID, "long-lived")
+	key := stableSessionKey(repoID, inst)
 	manager.RestoreLostSessions() // recovers; arms the confirmation
 	if got := backend.recoverCalls(); got != 1 {
 		t.Fatalf("recover calls = %d, want 1", got)

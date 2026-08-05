@@ -595,7 +595,7 @@ func TestRefreshStatuses_NewSessionDoesNotInheritDebounceState(t *testing.T) {
 	advance(time.Second)
 	manager.RefreshStatuses()
 	manager.mu.Lock()
-	freshState := manager.remoteLossStates[remoteLossKey(repoID, fresh)]
+	freshState := manager.remoteLossStates[stableSessionKey(repoID, fresh)]
 	manager.mu.Unlock()
 	if freshState == nil || freshState.consecutiveFailures != 1 {
 		t.Fatalf("new session failure state = %#v, want a fresh one-failure episode", freshState)

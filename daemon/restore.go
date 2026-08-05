@@ -123,10 +123,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	case probeAlive:
 		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
-		m.clearRemoteLoss(remoteLossKey(repoID, instance))
+		// Both of these are per-runtime state and both are filed under the session's
+		// stable identity, never under the repo/title `key` above (#2868).
+		stateKey := stableSessionKey(repoID, instance)
+		m.clearRemoteLoss(stateKey)
 		m.persistInstance(repoID, instance)
 		m.mu.Lock()
-		delete(m.lostRestoreStates, key)
+		delete(m.lostRestoreStates, stateKey)
 		m.mu.Unlock()
 		return instance.GetWorktreePath(), nil
 	case probeUnknown:
@@ -156,6 +159,6 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// auto path now prevents (#1976). consecutiveFailures is CARRIED; RestoreLostSessions
 	// clears the state once a poll observes the runtime alive, and the auto loop charges
 	// an immediate re-loss against the same episode.
-	m.armRestoreConfirmation(key, repoID, instance)
+	m.armRestoreConfirmation(repoID, instance)
 	return instance.GetWorktreePath(), nil
 }

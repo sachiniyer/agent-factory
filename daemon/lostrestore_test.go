@@ -103,7 +103,7 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	observeAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
-	_, hasState := manager.lostRestoreStates[daemonInstanceKey(repoID, "stranded")]
+	_, hasState := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
 	manager.mu.Unlock()
 	if hasState {
 		t.Fatal("a confirmed-alive recovery must drop the retry state")
@@ -120,7 +120,7 @@ func TestRestoreSession_RecoversLostInstanceOnDemand(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst := registerStarted(t, manager, repoID, repoPath, "stranded", backend, true, session.Lost)
-	key := daemonInstanceKey(repoID, "stranded")
+	key := stableSessionKey(repoID, inst)
 	manager.mu.Lock()
 	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 3}
 	manager.mu.Unlock()
@@ -687,12 +687,14 @@ func TestRestoreLostSessions_StateCleanedForGoneSessions(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	zeroRestoreBackoff(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: errors.New("down")}
-	registerStarted(t, manager, repoID, repoPath, "doomed", backend, true, session.Lost)
+	inst := registerStarted(t, manager, repoID, repoPath, "doomed", backend, true, session.Lost)
 
 	manager.RestoreLostSessions()
-	key := daemonInstanceKey(repoID, "doomed")
+	// The episode is filed under the session's stable identity; the manager map
+	// still addresses it by repo/title (#2868).
+	stateKey := stableSessionKey(repoID, inst)
 	manager.mu.Lock()
-	_, hasState := manager.lostRestoreStates[key]
+	_, hasState := manager.lostRestoreStates[stateKey]
 	manager.mu.Unlock()
 	if !hasState {
 		t.Fatal("a failed attempt must record retry state")
@@ -700,12 +702,12 @@ func TestRestoreLostSessions_StateCleanedForGoneSessions(t *testing.T) {
 
 	// The session disappears (user killed it; record + map entry gone).
 	manager.mu.Lock()
-	delete(manager.instances, key)
+	delete(manager.instances, daemonInstanceKey(repoID, "doomed"))
 	manager.mu.Unlock()
 	manager.RestoreLostSessions()
 
 	manager.mu.Lock()
-	_, hasState = manager.lostRestoreStates[key]
+	_, hasState = manager.lostRestoreStates[stateKey]
 	manager.mu.Unlock()
 	if hasState {
 		t.Fatal("retry state for a gone session must be dropped")

@@ -10,7 +10,7 @@ import (
 // registerTaskRun seeds a started, task-run-active instance — the only shape
 // that arms taskRunProbeDue. taskRunActive is derived from TaskID (#1892), so a
 // non-empty TaskID is what distinguishes this from registerStarted's user
-// session. The instance still carries a stable ID (remoteLossKey's basis), which
+// session. The instance still carries a stable ID (stableSessionKey's basis), which
 // is exactly the key the backstop timer is stored under.
 func registerTaskRun(t *testing.T, m *Manager, repoID, repoPath, title string) *session.Instance {
 	t.Helper()
@@ -40,7 +40,7 @@ func probeDueLen(m *Manager) int {
 
 // TestResumeStatusPoll_FreesTaskRunProbeDueEntry is the #2015 fail-first: a clean
 // detach must FREE the backstop-timer entry an attach armed. The map is written
-// by taskRunBackstopDue under remoteLossKey (the stable instance ID), but the
+// by taskRunBackstopDue under stableSessionKey (the stable instance ID), but the
 // buggy ResumeStatusPoll deletes under daemonInstanceKey(repoID,title) — keys
 // that never coincide for an ID-bearing session — so the delete is a no-op and
 // the entry leaks. The map must return to its pre-attach baseline of 0.
@@ -49,7 +49,7 @@ func TestResumeStatusPoll_FreesTaskRunProbeDueEntry(t *testing.T) {
 	inst := registerTaskRun(t, manager, repoID, repoPath, "attached-run")
 
 	if inst.ID == "" {
-		t.Fatal("precondition: a task-run instance must carry a stable ID (remoteLossKey's basis)")
+		t.Fatal("precondition: a task-run instance must carry a stable ID (stableSessionKey's basis)")
 	}
 	if !inst.TaskRunActive() {
 		t.Fatal("precondition: instance must be task-run-active to arm the backstop")

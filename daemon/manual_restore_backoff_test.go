@@ -36,11 +36,11 @@ import (
 func TestRestoreSession_ImmediateReLossAfterManualRestore_EscalatesNotResets(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &diesOnSpawnBackend{FakeBackend: session.NewFakeBackend()}
-	registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
+	inst := registerStarted(t, manager, repoID, repoPath, "flapper", backend, true, session.Lost)
 
 	// The automatic loop has already tried and failed three times: a real backoff
 	// episode is in progress when the user reaches for manual restore.
-	key := daemonInstanceKey(repoID, "flapper")
+	key := stableSessionKey(repoID, inst)
 	manager.mu.Lock()
 	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 3}
 	manager.mu.Unlock()
@@ -92,7 +92,7 @@ func TestRestoreSession_LongLivedThenDied_ResetsBackoff(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "long-lived", backend, true, session.Lost)
 	zeroRestoreBackoff(t)
 
-	key := daemonInstanceKey(repoID, "long-lived")
+	key := stableSessionKey(repoID, inst)
 	manager.mu.Lock()
 	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 3}
 	manager.mu.Unlock()
@@ -143,9 +143,9 @@ func TestRestoreSession_FailedManualRestoresShareDiagnosticsAndBackoff(t *testin
 		Err:          &os.PathError{Op: "stat", Path: worktreePath, Err: os.ErrNotExist},
 	}
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: restoreErr}
-	registerStarted(t, manager, repoID, repoPath, "manual-failure", backend, true, session.Lost)
+	inst := registerStarted(t, manager, repoID, repoPath, "manual-failure", backend, true, session.Lost)
 
-	key := daemonInstanceKey(repoID, "manual-failure")
+	key := stableSessionKey(repoID, inst)
 	manager.mu.Lock()
 	manager.lostRestoreStates[key] = &lostRestoreState{consecutiveFailures: 2}
 	manager.mu.Unlock()
