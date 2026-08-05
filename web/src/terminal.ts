@@ -59,6 +59,7 @@ import {
   terminalMouseOverride,
   terminalMouseOverrideHeld,
   type TerminalMouseOverride,
+  type TerminalWordRange,
   textFromCells,
   TOUCH_LONG_PRESS_MS,
   touchHistoryScrollPlan,
@@ -803,16 +804,46 @@ export class AttachTerminal {
     // A marker reporting -1 has been disposed — the block was trimmed away — and a
     // different buffer or width means the row and column no longer name what they
     // named when the finger landed. The copy is unaffected either way.
+    //
+    // And even when all three agree, the CELLS can have been rewritten in place by a
+    // progress display or a TUI: the row still exists, at the same index, the same
+    // width, in the same buffer, holding different text. Highlighting there would
+    // point at the replacement while the clipboard holds the original — the selection
+    // is this gesture's only statement about what was copied, so it must not make a
+    // false one. Reading the live range back and comparing is what makes the highlight
+    // an assertion rather than an assumption.
     const markedFirstRow = this.touchPressMarker?.line ?? -1;
     if (markedFirstRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
       const at = wrappedCellPosition(range.start, press.cols);
-      this.term.select(at.col, markedFirstRow + at.row, range.length);
+      if (this.liveTextAt(markedFirstRow, range, press.cols) === text) {
+        this.term.select(at.col, markedFirstRow + at.row, range.length);
+      }
     }
     // Marked BEFORE the lift: the compatibility click this touch still owes is what
     // would otherwise reach the application and clear the selection just painted.
     this.touchCopyFired = true;
     this.suppressNextContextMenu = true;
     this.touchCopyPending = text;
+  }
+
+  /** The text the live buffer currently holds where a snapshot's range sits, or null
+   *  if that no longer resolves. Used to check the highlight before painting it. */
+  private liveTextAt(firstRow: number, range: TerminalWordRange, cols: number): string | null {
+    const buffer = this.term.buffer.active;
+    const cells: string[] = [];
+    const firstNeeded = Math.floor(range.start / cols);
+    const lastNeeded = Math.floor((range.start + range.length - 1) / cols);
+    for (let offset = firstNeeded; offset <= lastNeeded; offset += 1) {
+      const line = buffer.getLine(firstRow + offset);
+      if (!line) {
+        return null;
+      }
+      for (let col = 0; col < cols; col += 1) {
+        const buffered = line.getCell(col);
+        cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+      }
+    }
+    return textFromCells(cells, { start: range.start - firstNeeded * cols, length: range.length });
   }
 
   /**

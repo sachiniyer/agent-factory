@@ -7788,11 +7788,32 @@ var AttachTerminal = class {
     const markedFirstRow = this.touchPressMarker?.line ?? -1;
     if (markedFirstRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
       const at = wrappedCellPosition(range.start, press.cols);
-      this.term.select(at.col, markedFirstRow + at.row, range.length);
+      if (this.liveTextAt(markedFirstRow, range, press.cols) === text) {
+        this.term.select(at.col, markedFirstRow + at.row, range.length);
+      }
     }
     this.touchCopyFired = true;
     this.suppressNextContextMenu = true;
     this.touchCopyPending = text;
+  }
+  /** The text the live buffer currently holds where a snapshot's range sits, or null
+   *  if that no longer resolves. Used to check the highlight before painting it. */
+  liveTextAt(firstRow, range, cols) {
+    const buffer = this.term.buffer.active;
+    const cells = [];
+    const firstNeeded = Math.floor(range.start / cols);
+    const lastNeeded = Math.floor((range.start + range.length - 1) / cols);
+    for (let offset = firstNeeded; offset <= lastNeeded; offset += 1) {
+      const line = buffer.getLine(firstRow + offset);
+      if (!line) {
+        return null;
+      }
+      for (let col = 0; col < cols; col += 1) {
+        const buffered = line.getCell(col);
+        cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
+      }
+    }
+    return textFromCells(cells, { start: range.start - firstNeeded * cols, length: range.length });
   }
   /**
    * Reads the press: the wrapped block under the finger, flattened one entry per
