@@ -386,6 +386,9 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 }
 
 func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string) (resumeFromLimitOutcome, error) {
+	// Set by the respawn arm's settlement below and reported at the very end, so a
+	// failed durable write neither aborts the resume nor disappears from it.
+	var settleErr error
 	// Re-verify under the lock: a self-recovery or the poll may have cleared the
 	// limit between the check above and the lock.
 	if !instance.LimitReached() {
@@ -496,8 +499,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// wrong contract — a failed write silently reverted branchCreatedByUs and
 		// orphaned the branch the rebuild had just created. Durable, and enrolled
 		// for retry when it fails.
-		if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, perr)
+		// Carried, not returned here: the resume has not finished yet, and the
+		// prompt below must still be attempted — a failed write is no reason to
+		// leave the agent parked. It is reported at the end, because this arm is
+		// also reachable through the public ResumeFromLimit RPC and a caller that
+		// hears only about the prompt would never learn its rebuilt branch's
+		// provenance is still memory-only.
+		settleErr = m.persistSettlement(repoID, key, instance)
+		if settleErr != nil {
+			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, settleErr)
 		}
 	}
 
@@ -529,6 +539,15 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	repoStartLock.Unlock()
 	if persistErr != nil {
 		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+	}
+	if settleErr != nil {
+		// The resume itself landed — the prompt was delivered and the limit lifted —
+		// but the respawn's durable state did not. Say both, so a caller cannot read
+		// this as a failed resume, and cannot read a successful resume as meaning
+		// everything is on disk (#2883).
+		return resumePerformed, fmt.Errorf(
+			"resumed %q, but the state its respawn rebuilt could not be written to disk: %w",
+			requestedTitle, settleErr)
 	}
 	return resumePerformed, nil
 }

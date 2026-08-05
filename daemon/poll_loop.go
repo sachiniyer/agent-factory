@@ -50,6 +50,25 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// root title). Backoff-throttled per session, like root-ensure.
 			manager.RestoreLostSessions()
 
+			// Retry any SETTLEMENT write that did not land — the writes that record
+			// the outcome of an irreversible step (#2781, #2883). A no-op unless a
+			// write actually failed, and it holds each row's op-lock, so a session
+			// another pass is still inside is skipped rather than checkpointed
+			// half-built.
+			//
+			// BEFORE the two resume passes, not after. A stale obligation on disk
+			// contradicts what memory already decided, and either pass can act on
+			// that memory: a handoff parked at a usage limit has moved its mission
+			// into Prompt and cleared the pending marker in memory while disk still
+			// carries it, so an auto-resume firing first would send that prompt and
+			// leave the marker for the next daemon to deliver a second time — the
+			// #2781 duplicate, re-entered through pass ordering. Retiring the write
+			// first is what keeps memory and disk from disagreeing across a pass that
+			// reads one of them. A settlement that fails during THIS tick simply
+			// waits for the next one; the window that matters is a restart, not a
+			// tick.
+			manager.FlushOwedSettlements()
+
 			// Complete a handoff mission whose post-swap checkpoint survived a
 			// daemon restart before delivery was confirmed. This runs after status
 			// and Lost recovery so it acts only on a positively ready pane, and
@@ -64,14 +83,6 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// session must be settled onto its liveness first; it borrows the
 			// same per-session op-lock discipline.
 			manager.ResumeLimitedSessions()
-
-			// Retry any SETTLEMENT write that did not land — the writes that
-			// record the outcome of an irreversible step (#2781, #2883). It runs
-			// LAST so it sees the settled state of everything this tick produced,
-			// and it holds each row's op-lock, so a session another pass is still
-			// inside is skipped rather than checkpointed half-built. A no-op
-			// unless a write actually failed.
-			manager.FlushOwedSettlements()
 
 			// Handle stop before ticker.
 			select {
