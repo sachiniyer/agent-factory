@@ -10,20 +10,22 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// failRecoverySettlement fails the first write for title that carries a
-// POST-recovery row — the settlement a recovery owes once its respawn succeeded.
-// Keying on "no longer the pre-recovery Lost state" rather than on one exact
-// liveness keeps it from silently matching nothing if a path settles through a
-// different live state; a seam that never fires would make every assertion
-// downstream of it vacuous.
+// fullDiskFor makes every record write for title fail, until heal() is called.
 //
-// It records every write it sees so a failure can say what actually happened
-// instead of only that the expectation did not.
-func failRecoverySettlement(t *testing.T, title string, failure error) (fired func() bool, seen func() string) {
+// It models the real condition — the disk is full, not one chosen write is
+// unlucky — which is what the settlement contract is actually about. Targeting a
+// single write cannot do that here: the recovery path also takes best-effort
+// writes whose failures are swallowed, so a one-shot injection can be consumed by
+// one of those and leave the settlement itself writing cleanly, which is exactly
+// how the first version of this test passed the wrong thing.
+//
+// It records what it saw so a failure reports what actually happened.
+func fullDiskFor(t *testing.T, title string, failure error) (failed func() int, seen func() string, heal func()) {
 	t.Helper()
 	var mu sync.Mutex
-	hit := false
 	var writes []string
+	n := 0
+	healed := false
 	prev := testHookPersistInstanceData
 	t.Cleanup(func() { testHookPersistInstanceData = prev })
 	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
@@ -32,17 +34,17 @@ func failRecoverySettlement(t *testing.T, title string, failure error) (fired fu
 		if data.Title != title {
 			return nil
 		}
-		writes = append(writes, fmt.Sprintf("liveness=%v op=%v started-row", data.Liveness, data.InFlightOp))
-		if hit || data.Liveness == session.LiveLost {
+		writes = append(writes, fmt.Sprintf("liveness=%v healed=%v", data.Liveness, healed))
+		if healed {
 			return nil
 		}
-		hit = true
+		n++
 		return failure
 	}
-	return func() bool {
+	return func() int {
 			mu.Lock()
 			defer mu.Unlock()
-			return hit
+			return n
 		}, func() string {
 			mu.Lock()
 			defer mu.Unlock()
@@ -50,6 +52,10 @@ func failRecoverySettlement(t *testing.T, title string, failure error) (fired fu
 				return "no writes at all for this session"
 			}
 			return strings.Join(writes, " | ")
+		}, func() {
+			mu.Lock()
+			healed = true
+			mu.Unlock()
 		}
 }
 
@@ -72,12 +78,12 @@ func TestRestoreLostSessions_SettlementPersistFailureIsRetried(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "stranded", backend, true, session.Lost)
 
 	diskFull := errors.New("no space left on device")
-	injected, seen := failRecoverySettlement(t, "stranded", diskFull)
+	failedWrites, seen, heal := fullDiskFor(t, "stranded", diskFull)
 
 	manager.RestoreLostSessions()
 
-	if !injected() {
-		t.Fatalf("no recovery settlement write was ever failed, so this test exercised nothing; writes seen: %s", seen())
+	if failedWrites() == 0 {
+		t.Fatalf("no write was ever failed, so this test exercised nothing; writes seen: %s", seen())
 	}
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running: the recovery itself must still have succeeded", got)
@@ -91,6 +97,8 @@ func TestRestoreLostSessions_SettlementPersistFailureIsRetried(t *testing.T) {
 	// nothing ever would: the row is already LiveRunning in memory, so the status
 	// poll compares LiveRunning against LiveRunning and writes nothing, and the
 	// whole-state shutdown checkpoint is what an unclean exit skips.
+	// Disk comes back. The poll owes this write and must finish it.
+	heal()
 	manager.FlushOwedSettlements()
 
 	rec := recordFor(t, repoID, "stranded")
@@ -109,7 +117,7 @@ func TestRestoreLostOrDeadSession_SettlementPersistFailureIsRetried(t *testing.T
 	inst := registerStarted(t, manager, repoID, repoPath, "manual", backend, true, session.Lost)
 
 	diskFull := errors.New("no space left on device")
-	injected, seen := failRecoverySettlement(t, "manual", diskFull)
+	failedWrites, seen, heal := fullDiskFor(t, "manual", diskFull)
 
 	// The caller is told, unlike the automatic loop which has nobody to tell: the
 	// retry set only helps if the daemon lives long enough to drain it, and the
@@ -122,13 +130,14 @@ func TestRestoreLostOrDeadSession_SettlementPersistFailureIsRetried(t *testing.T
 	if !strings.Contains(err.Error(), "agent is running") {
 		t.Fatalf("error must say the session IS restored, not just that a write failed: %v", err)
 	}
-	if !injected() {
-		t.Fatalf("no recovery settlement write was ever failed, so this test exercised nothing; writes seen: %s", seen())
+	if failedWrites() == 0 {
+		t.Fatalf("no write was ever failed, so this test exercised nothing; writes seen: %s", seen())
 	}
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running", got)
 	}
 
+	heal()
 	manager.FlushOwedSettlements()
 
 	rec := recordFor(t, repoID, "manual")
