@@ -257,6 +257,7 @@ func (m *Manager) pollLeaseActiveLocked(repoID, title, id string, now time.Time)
 func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *session.Instance) {
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
+	taskRunWasActive := instance.TaskRunActive()
 	epoch := instance.StateEpoch() // see refreshInstanceStatus (#2135)
 	obs, err := instance.AgentServer().Snapshot()
 	// Whatever happened, no loss episode survives an attach (see above).
@@ -276,6 +277,10 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
 	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
+	// The run may have just ended here, on the one path that cannot act on it: the
+	// attach owns this session's tmux. Park the declared lifecycle so the first
+	// unpaused tick applies it, instead of losing the edge entirely (#2595).
+	m.deferTaskSessionLifecycleWhilePaused(repoID, instance, taskRunWasActive)
 }
 
 // RefreshStatuses recomputes every started instance's status the way the TUI
@@ -553,6 +558,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// state it reacts to is durable, so a teardown can never outrun the record of
 	// why it happened.
 	m.applyTaskSessionLifecycleOnRunEnd(repoID, instance, taskRunWasActive)
+	// And drain a lifecycle owed from a run that finished while this session was
+	// attached, now that it is being polled normally again.
+	m.applyDeferredTaskSessionLifecycle(repoID, instance)
 }
 
 // SaveInstances writes the manager's authoritative in-memory instances to disk

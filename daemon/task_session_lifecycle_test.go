@@ -261,3 +261,118 @@ func TestTaskSessionLifecycle_IgnoresSessionsNoTaskSpawned(t *testing.T) {
 	manager.mu.Unlock()
 	assert.True(t, stillRegistered, "a user's own session is never task-reaped")
 }
+
+// TestTaskSessionLifecycle_BindsTheTeardownToTheStableID is the stale-identity
+// guard. The teardown runs later on a goroutine, and ArchiveSession/KillSession
+// fall back to {Title, RepoID} only when ID is empty — so a title-only request
+// would let a kill plus a same-titled re-create in that gap retarget the reap
+// onto the REPLACEMENT session. #2779 was the last time a lifecycle op keyed on
+// a title reached the wrong worktree.
+func TestTaskSessionLifecycle_BindsTheTeardownToTheStableID(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+
+	var gotID, gotTitle string
+	prev := killSessionForLifecycle
+	killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
+		gotID, gotTitle = req.ID, req.Title
+		return nil
+	}
+	t.Cleanup(func() { killSessionForLifecycle = prev })
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+
+	require.Eventually(t, func() bool { return gotID != "" }, 20*time.Second, 25*time.Millisecond)
+	assert.Equal(t, inst.ID, gotID, "the teardown must name the session that actually finished")
+	assert.Equal(t, "nightly", gotTitle)
+}
+
+// TestTaskSessionLifecycle_DeferredWhileAttached is the paused-path gap: a run
+// can finish while a TUI is attached, and that path spends the completion edge
+// without being able to act on it. Losing the edge there skipped the declared
+// policy permanently — the exact leak #2595 exists to fix, through the one door
+// the first cut did not cover.
+func TestTaskSessionLifecycle_DeferredWhileAttached(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-archive")
+	stubTaskLifecycle(t, "task-archive", task.OnCompleteArchive)
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, was)
+
+	// Nothing happens while the intent is parked.
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, session.LiveReady, inst.GetLiveness(), "the attach must not be torn down under")
+
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+	require.Eventually(t, func() bool {
+		return inst.GetLiveness() == session.LiveArchived
+	}, 20*time.Second, 25*time.Millisecond, "the owed lifecycle must be applied once the attach ends")
+}
+
+// TestTaskSessionLifecycle_DeferredIntentDropsWhenTheUserAdoptsTheSession: the
+// rule the edge enforces has to survive the deferral. A user who attached, read
+// the result, and set the session working again has adopted it.
+func TestTaskSessionLifecycle_DeferredIntentDropsWhenTheUserAdoptsTheSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, was)
+
+	// The user picks the work back up during the attach.
+	inst.SetStatusForTest(session.Running)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, present := manager.instances[daemonInstanceKey(repoID, "nightly")]
+	manager.mu.Unlock()
+	assert.True(t, present, "work a user started is theirs, not the task's")
+
+	// And the intent is spent, so returning to idle does not reap it later.
+	inst.SetStatusForTest(session.Ready)
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+	time.Sleep(200 * time.Millisecond)
+	manager.mu.Lock()
+	_, stillPresent := manager.instances[daemonInstanceKey(repoID, "nightly")]
+	manager.mu.Unlock()
+	assert.True(t, stillPresent, "a dropped intent must not resurface")
+}
+
+// TestTaskSessionLifecycle_WaitsForPostWorktreeHooks: post_worktree_commands run
+// concurrently with the agent (task.WaitForReady deliberately does not charge a
+// slow build hook against the startup budget), so a short task can finish while
+// its own provisioning is mid-flight. Archiving MOVES that worktree and killing
+// REMOVES it, either of which pulls the ground out from under a running hook.
+func TestTaskSessionLifecycle_WaitsForPostWorktreeHooks(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+
+	hooks := make(chan struct{})
+	reaped := make(chan struct{})
+	prev := killSessionForLifecycle
+	killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
+		close(reaped)
+		return nil
+	}
+	t.Cleanup(func() { killSessionForLifecycle = prev })
+
+	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, hooks)
+
+	select {
+	case <-reaped:
+		t.Fatal("the teardown ran while post-worktree hooks were still in flight")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(hooks)
+	select {
+	case <-reaped:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the teardown never ran after the hooks finished")
+	}
+}

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"time"
+
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -19,6 +21,21 @@ import (
 //
 // The verb now lives on the task (task.OnComplete), and this is where it is
 // applied.
+
+// killSessionForLifecycle is the kill a declared teardown performs. A package var
+// so a test can assert WHICH session the deferred goroutine names — the stale-id
+// retarget it guards against is invisible if the only observable is that some
+// session went away. Production points it at the real RPC and never reassigns it.
+var killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
+	_, err := m.KillSession(req)
+	return err
+}
+
+// taskLifecycleHookWait bounds how long a declared teardown waits for a session's
+// post_worktree_commands to finish before giving up and leaving it in place. Long
+// enough for an ordinary build/install hook, short enough that a hung one leaks a
+// session rather than a goroutine.
+const taskLifecycleHookWait = 10 * time.Minute
 
 // runEndedIntoIdle reports whether this tick is the moment a task run finished
 // with its session sitting idle and healthy.
@@ -59,6 +76,69 @@ func runEndedIntoIdle(instance *session.Instance, taskRunWasActive bool) bool {
 	return instance.GetLiveness() == session.LiveReady
 }
 
+// deferTaskSessionLifecycleWhilePaused records that a run finished on the PAUSED
+// poll path, so its declared lifecycle is applied once the attach ends.
+//
+// A run can finish while a TUI is attached full-screen: observeTaskRunWhilePaused
+// settles the agent idle on the backstop tick, which ends the run and clears the
+// marker there. The completion edge is then spent, and the ordinary hook — which
+// only runs on the unpaused path — never sees it, so a declared archive/kill was
+// skipped PERMANENTLY and the session leaked despite the policy. That is the exact
+// failure #2595 exists to fix, reached through the one door the fix did not cover.
+//
+// Applying it inline instead is not the answer: the pause exists because the
+// attached client owns the tmux server for the attach's duration, and tearing the
+// session down under it is what the pause is there to prevent. So the intent is
+// parked and drained on the first unpaused tick.
+func (m *Manager) deferTaskSessionLifecycleWhilePaused(repoID string, instance *session.Instance, taskRunWasActive bool) {
+	if !runEndedIntoIdle(instance, taskRunWasActive) || instance.TaskID == "" {
+		return
+	}
+	key := daemonInstanceKey(repoID, instance.Title)
+	m.mu.Lock()
+	if m.deferredTaskLifecycle == nil {
+		m.deferredTaskLifecycle = make(map[string]string)
+	}
+	// Keyed by session id, not by the map key alone: a kill and a same-titled
+	// re-create would otherwise inherit the original's owed teardown.
+	m.deferredTaskLifecycle[key] = instance.ID
+	m.mu.Unlock()
+}
+
+// applyDeferredTaskSessionLifecycle drains an intent parked while the session was
+// attached, once it is being polled normally again.
+//
+// It re-checks that the session is STILL the one that finished and still idle. A
+// user who attached, read the result, and then set the session working again has
+// adopted it — that work is theirs, not the task's, and the same rule the edge
+// enforces has to hold across the deferral.
+func (m *Manager) applyDeferredTaskSessionLifecycle(repoID string, instance *session.Instance) {
+	if instance.TaskID == "" {
+		return
+	}
+	key := daemonInstanceKey(repoID, instance.Title)
+	m.mu.Lock()
+	owedID, owed := m.deferredTaskLifecycle[key]
+	if owed {
+		delete(m.deferredTaskLifecycle, key)
+	}
+	m.mu.Unlock()
+	if !owed {
+		return
+	}
+	if owedID != instance.ID || instance.GetLiveness() != session.LiveReady || instance.TaskRunActive() {
+		// Either a different session now holds this title, or the user picked the
+		// work back up during the attach. Drop the intent rather than carrying it
+		// forward: a verb owed to a finished run must not land on new work.
+		return
+	}
+	// The run genuinely ended and nothing has happened since, so this is the same
+	// decision the edge would have made — taken now that the attach has released
+	// the session. taskRunWasActive is passed as true because the edge it names
+	// already happened, on the paused tick that parked this intent.
+	m.applyTaskSessionLifecycleOnRunEnd(repoID, instance, true)
+}
+
 // applyTaskSessionLifecycleOnRunEnd applies the owning task's on_complete verb to
 // a session whose run just finished. A no-op for every session that is not a
 // task-spawned one whose run ended on this tick, and for the default keep — which
@@ -77,7 +157,15 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	if taskID == "" {
 		return
 	}
+	// Capture the STABLE ID here, not just the title. The teardown below runs
+	// later on another goroutine, and ArchiveSession/KillSession fall back to
+	// {Title, RepoID} only when ID is empty — so a title-only request lets a kill
+	// and a same-titled re-create in the gap retarget the reap onto the
+	// REPLACEMENT session. That is the unstable-identity verb class, and #2779 was
+	// the last time a lifecycle op keyed on a title reached the wrong worktree.
+	sessionID := instance.ID
 	title := instance.Title
+	hooksDone := instance.PostWorktreeHooksDone()
 	verb, err := m.taskSessionLifecycle(repoID, taskID)
 	if err != nil {
 		// An unreadable or unscopable task store is not permission to tear a
@@ -91,7 +179,7 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	if verb == task.OnCompleteKeep {
 		return
 	}
-	go m.runTaskSessionLifecycle(repoID, title, taskID, verb)
+	go m.runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb, hooksDone)
 }
 
 // taskSessionLifecycle resolves the on_complete verb for one task in a repo.
@@ -124,13 +212,37 @@ func (m *Manager) taskSessionLifecycle(repoID, taskID string) (string, error) {
 // (#2779), the same refusal when a task still targets the session, the same
 // events. A policy that tore down sessions through a private path would be a
 // second lifecycle implementation, and the two would drift.
-func (m *Manager) runTaskSessionLifecycle(repoID, title, taskID, verb string) {
+//
+// Both requests carry the stable id, so a session killed and re-created under the
+// same title between the completion edge and this call cannot be reaped in the
+// original's place — the resolver only falls back to {Title, RepoID} when ID is
+// empty.
+func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb string, hooksDone <-chan struct{}) {
+	// post_worktree_commands can still be running: the agent's readiness and the
+	// hook run are deliberately concurrent (task.WaitForReady does not charge a
+	// slow build hook against the startup budget), so a short task can finish while
+	// its own provisioning is mid-flight. Archiving would MOVE the worktree out
+	// from under those hooks and killing would REMOVE it, so wait for them.
+	//
+	// Bounded, because this must not become a way for a hung hook to wedge the
+	// reap forever — the same reasoning the concurrency cap gives for not waiting
+	// on hooks to release a slot. On timeout the session is left in place and says
+	// why, which is the recoverable outcome.
+	if hooksDone != nil {
+		select {
+		case <-hooksDone:
+		case <-time.After(taskLifecycleHookWait):
+			log.WarningLog.Printf("task %s: post-worktree hooks for session %q have run for over %s; leaving the session in place rather than tearing down a worktree they may still be writing to",
+				taskID, title, taskLifecycleHookWait)
+			return
+		}
+	}
 	var err error
 	switch verb {
 	case task.OnCompleteArchive:
-		_, _, err = m.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
+		_, _, err = m.ArchiveSession(ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
 	case task.OnCompleteKill:
-		_, err = m.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+		err = killSessionForLifecycle(m, KillSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
 	default:
 		// Unreachable: ValidateTrigger refuses an unknown verb on write, and
 		// SessionLifecycle canonicalizes. Log rather than guess — picking a verb

@@ -734,6 +734,15 @@ func (u TaskUpdate) apply(t Task) Task {
 	if u.MaxConcurrentRuns == nil {
 		t.clearInapplicableCap()
 	}
+	// Same rule, same reason, for the spawned-session lifecycle (#2595): adding a
+	// target_session to a per-run task that declares on_complete would otherwise
+	// merge into a record ValidateTrigger rejects, so ordinary retargeting would
+	// fail from every surface that does not expose the field — and force a CLI user
+	// to know to pass --on-complete keep alongside. An explicitly-patched verb is
+	// left alone so a contradictory request still surfaces as an error.
+	if u.OnComplete == nil {
+		t.clearInapplicableOnComplete()
+	}
 	return t
 }
 
@@ -755,6 +764,22 @@ func (t Task) capApplies() bool {
 func (t *Task) clearInapplicableCap() {
 	if t.MaxConcurrentRuns > 0 && !t.capApplies() {
 		t.MaxConcurrentRuns = 0
+	}
+}
+
+// onCompleteApplies reports whether this task's shape can carry a spawned-session
+// lifecycle: it governs a session the task CREATED, so it is meaningful only when
+// the task creates one. A target-session task delivers into a session the user
+// named for reuse, which is not the task's to reap.
+func (t Task) onCompleteApplies() bool {
+	return CanonicalTargetSession(t.TargetSession) == ""
+}
+
+// clearInapplicableOnComplete drops a stale lifecycle verb from a task whose
+// shape can no longer carry one.
+func (t *Task) clearInapplicableOnComplete() {
+	if t.SessionLifecycle() != OnCompleteKeep && !t.onCompleteApplies() {
+		t.OnComplete = ""
 	}
 }
 

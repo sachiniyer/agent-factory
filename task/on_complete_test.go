@@ -245,3 +245,46 @@ func TestTaskUpdateOnCompleteSurvivesGob(t *testing.T) {
 	require.NotNil(t, decoded.OnComplete, "a patch reverting to the default must survive the control socket")
 	assert.Equal(t, "", *decoded.OnComplete)
 }
+
+// TestUpdateTaskAddingATargetSessionDropsAnInapplicableVerb is the retargeting
+// case. A per-run task that declares on_complete would otherwise merge with a
+// newly-added target_session into a record ValidateTrigger rejects, so ordinary
+// retargeting would fail from every surface that does not expose the field — and
+// force a CLI user to know to pass --on-complete keep alongside.
+//
+// It mirrors the max_concurrent_runs rule exactly: an unpatched, now-inapplicable
+// field is dropped by the shared merge.
+func TestUpdateTaskAddingATargetSessionDropsAnInapplicableVerb(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	require.NoError(t, AddTask(Task{
+		ID: "abc", CronExpr: "0 3 * * *", Prompt: "p",
+		ProjectPath: dir, Program: "claude", Enabled: true, OnComplete: OnCompleteArchive,
+	}))
+
+	target := "shared"
+	updated, err := UpdateTask("abc", TaskUpdate{TargetSession: &target}, ProjectExpectation{})
+	require.NoError(t, err, "retargeting a task must not be blocked by a verb the new shape cannot carry")
+	assert.Equal(t, "shared", updated.TargetSession)
+	assert.Empty(t, updated.OnComplete, "the inapplicable lifecycle is dropped, not left to fail validation")
+}
+
+// TestUpdateTaskExplicitVerbWithATargetSessionStillErrors: dropping is only for
+// a field the caller did NOT mention. Asking for both in one patch is a
+// contradiction and must still surface as one rather than being silently ignored.
+func TestUpdateTaskExplicitVerbWithATargetSessionStillErrors(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	require.NoError(t, AddTask(Task{
+		ID: "abc", CronExpr: "0 3 * * *", Prompt: "p",
+		ProjectPath: dir, Program: "claude", Enabled: true,
+	}))
+
+	target := "shared"
+	verb := OnCompleteKill
+	_, err := UpdateTask("abc", TaskUpdate{TargetSession: &target, OnComplete: &verb}, ProjectExpectation{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "target_session")
+}

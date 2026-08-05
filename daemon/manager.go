@@ -206,6 +206,13 @@ type Manager struct {
 	// effect on the next daemon start" contract — a re-added project's root
 	// materializes on restart, not mid-run). Guarded by m.mu.
 	deletedRootRepos map[string]struct{}
+	// deferredTaskLifecycle parks a task's declared on_complete verb (#2595) for a
+	// session whose run finished while a TUI was attached, mapping the session's
+	// daemon key to the stable id of the session that finished. The paused poll
+	// path spends the completion edge without being able to act on it (tearing
+	// down under a live attach is what the pause prevents), so the intent waits
+	// here and the first unpaused tick drains it. Guarded by m.mu.
+	deferredTaskLifecycle map[string]string
 	// killsInFlight marks sessions (by daemon instance key) with an exclusive
 	// lifecycle operation in progress (kill/archive/restore). The status poll's
 	// finish-kill pass for tombstoned records (#1108) therefore never runs a
