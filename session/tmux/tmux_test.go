@@ -316,6 +316,14 @@ func TestStartTimeoutCleanupSucceeds(t *testing.T) {
 			if strings.Contains(cmd.String(), "list-panes") {
 				return nil, tmuxCantFindSessionError(t, sessionName)
 			}
+			if strings.Contains(cmd.String(), "display-message") {
+				// Measured: for a session that does not exist, display-message
+				// exits 0 with EMPTY output. The generic "output" stub models
+				// something else entirely — tmux answering with a pane id we
+				// cannot parse — which is NOT evidence of absence and correctly
+				// refuses cleanup since #2962 round 3.
+				return nil, nil
+			}
 			return []byte("output"), nil
 		},
 	}

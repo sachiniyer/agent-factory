@@ -12,6 +12,15 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+// errPaneQueryFoundNoPane marks a pane-PID query that tmux ANSWERED with no
+// pane at all — measured: `display-message -p -t '=missing:' '#{pane_pid}'`
+// exits 0 with EMPTY output for a session that does not exist.
+//
+// Distinct from every other panePID failure on purpose. "tmux gave me output I
+// could not parse" and "tmux said there is no pane" are not the same claim, and
+// only the second is evidence of absence (Codex on #2966).
+var errPaneQueryFoundNoPane = errors.New("tmux reported no pane for this session")
+
 // ErrSessionVanishedBeforeCapture marks a pane-list read that failed because
 // tmux says the session does not exist. Whether that is a determinate EMPTY or a
 // lost ancestry depends on the caller: see captureSessionProcessTrees.
@@ -344,7 +353,14 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 // unaccounted for. Leader death cannot prove they stopped writing (#1104/#802),
 // so that stays a blocker (Codex on #2966).
 func sessionGoneWithNoPaneObserved(captureErr, pidErr error) bool {
-	return pidErr != nil && errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
+	// BOTH reads must say absence, and the pane query must say it SPECIFICALLY.
+	// `pidErr != nil` was too weak: it also covers "display-message returned
+	// output I could not parse", which happens while the session EXISTS. Pairing
+	// that with a session that then vanished before list-panes would treat a lost
+	// ancestry as an empty one and authorize deleting the worktree with detached
+	// descendants never captured (Codex on #2966).
+	return errors.Is(pidErr, errPaneQueryFoundNoPane) &&
+		errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity
@@ -386,9 +402,19 @@ func (t *TmuxSession) panePID() (int, error) {
 		if ctx.Err() != nil {
 			return 0, fmt.Errorf("%w: display-message pane_pid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
+		if missingTmuxSession(err, t.sanitizedName) {
+			return 0, errPaneQueryFoundNoPane
+		}
 		return 0, fmt.Errorf("failed to query pane pid: %w", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		// tmux answered and named no pane. Measured: this is what a missing
+		// session produces — exit 0, empty output — so it is the one panePID
+		// failure that is evidence of ABSENCE rather than of an unreadable answer.
+		return 0, errPaneQueryFoundNoPane
+	}
+	pid, err := strconv.Atoi(trimmed)
 	if err != nil || pid <= 0 {
 		return 0, fmt.Errorf("unexpected pane pid output %q", string(output))
 	}

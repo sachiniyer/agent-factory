@@ -257,3 +257,57 @@ has-session)     exit 0 ;;`)
 			"combined failure — pidErr is nil here, so the capture error is the only carrier (#1917)", err)
 	}
 }
+
+// TestUnparseablePaneOutputIsNotAbsence is the third-round Codex finding: the
+// determinate-empty predicate accepted ANY pane-query failure, including one
+// from a session that plainly existed.
+//
+// Here display-message returns garbage (tmux answered, we could not read it) and
+// the session then vanishes before list-panes. That pairing is a LOST ANCESTRY —
+// detached descendants and SID members were never captured — not an empty
+// session, so cleanup must refuse.
+//
+// The sibling below pins the case that MUST still pass, so the fix is a
+// discrimination rather than a blanket refusal.
+func TestUnparseablePaneOutputIsNotAbsence(t *testing.T) {
+	scriptedTmuxOnPath(t, `
+display-message) echo "not-a-pid" ;;
+list-panes)      echo "can't find session: af_garbled" >&2; exit 1 ;;
+kill-session)    exit 0 ;;
+has-session)     exit 1 ;;`)
+
+	ts := NewTmuxSessionFromSanitizedName("af_garbled", "")
+	state, err := ts.CloseAndWaitForPaneExit()
+
+	if state == PaneStateKnown {
+		t.Fatalf("CloseAndWaitForPaneExit = PaneStateKnown with err=%v: display-message ANSWERED with "+
+			"unreadable output, which is not evidence the session was absent — pairing it with a "+
+			"vanished session treats a lost ancestry as an empty one (#2962 round 3)", err)
+	}
+	if err == nil {
+		t.Error("the refusal must say why")
+	}
+}
+
+// TestEmptyPaneOutputIsAbsence is the other half: tmux answering with NO pane is
+// what a missing session actually produces (measured: exit 0, empty output), and
+// that paired with a vanished session is a real empty set. Refusing here would
+// block every ordinary teardown of an already-exited agent.
+func TestEmptyPaneOutputIsAbsence(t *testing.T) {
+	scriptedTmuxOnPath(t, `
+display-message) exit 0 ;;
+list-panes)      echo "can't find session: af_absent" >&2; exit 1 ;;
+kill-session)    exit 0 ;;
+has-session)     exit 1 ;;`)
+
+	ts := NewTmuxSessionFromSanitizedName("af_absent", "")
+	state, err := ts.CloseAndWaitForPaneExit()
+
+	if state != PaneStateKnown {
+		t.Fatalf("CloseAndWaitForPaneExit = %v (err=%v), want PaneStateKnown: tmux answered that there "+
+			"is no pane AND no session, which is a determinate empty", state, err)
+	}
+	if err != nil {
+		t.Errorf("error = %v, want nil", err)
+	}
+}
