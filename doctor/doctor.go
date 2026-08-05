@@ -236,6 +236,21 @@ type scanContext struct {
 	// selfAncestors holds our own PID and every ancestor — never proposed
 	// for a kill, no matter what markers they carry.
 	selfAncestors map[int]bool
+	// The run's ONE tmux session listing, memoized by tmuxSessions.
+	//
+	// tmuxErr non-nil means BLIND, not "no sessions are live" — the same
+	// distinction snap/snapErr carry for the process table, and for the same
+	// reason: every consumer of this list treats a name's ABSENCE as evidence
+	// that the session is dead, and two of them act on that evidence by killing
+	// processes or removing a home (#2874). checkTmuxInspection turns the
+	// failure into a FAIL row; the consumers then stay silent.
+	//
+	// Memoized rather than re-listed per check so one run cannot see two
+	// different worlds — a check that disagrees with the row reporting the
+	// listing is worse than either answer alone.
+	tmuxNames   []string
+	tmuxErr     error
+	tmuxScanned bool
 	// daemons memoizes the run's daemon scan (see daemonProcs); daemonsScanned
 	// distinguishes "scanned, found none" from "not scanned yet".
 	daemons        []daemonProc
@@ -365,6 +380,9 @@ func Run(opts Options) (*Report, error) {
 	checkSplitBrainBinaries(ctx, report)
 	checkStaleSockets(ctx, report, health)
 	checkAutostartSupervision(ctx, report, health)
+	// Before every check that reads the session list, so its silence is
+	// explained before it is read rather than after.
+	checkTmuxInspection(ctx, report)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
 	checkLeakedTmuxSessions(ctx, report)

@@ -398,19 +398,36 @@ func DeleteRepoInstances(repoID string) error {
 	return nil
 }
 
-// LoadAllRepoInstances loads instances from all per-repo files.
+// LoadAllRepoInstances loads instances from all per-repo files, DROPPING any
+// repo whose file could not be read.
+//
+// The dropped repos are invisible in this form, which is safe only for a caller
+// that does something with the records it got. A caller that reasons from what
+// is MISSING — "this tmux session has no record, so it leaked", "no record names
+// this branch, so nothing owns it" — is reasoning from an absence that may just
+// be an unread file, and must take LoadAllRepoInstancesReportingSkips instead
+// (#2874).
 func LoadAllRepoInstances() (map[string]json.RawMessage, error) {
+	result, _, err := LoadAllRepoInstancesReportingSkips()
+	return result, err
+}
+
+// LoadAllRepoInstancesReportingSkips is LoadAllRepoInstances plus the repoIDs it
+// could not read, so a caller can tell "this home has no such record" from "I
+// could not read one of the files that would have said so".
+func LoadAllRepoInstancesReportingSkips() (map[string]json.RawMessage, []string, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result := make(map[string]json.RawMessage)
+	var skipped []string
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return result, nil
+			return result, nil, nil
 		}
-		return nil, fmt.Errorf("failed to read instances directory: %w", err)
+		return nil, nil, fmt.Errorf("failed to read instances directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -421,11 +438,12 @@ func LoadAllRepoInstances() (map[string]json.RawMessage, error) {
 		data, err := loadRepoInstancesForAll(repoID)
 		if err != nil {
 			log.WarningLog.Printf("failed to load instances for repo %s: %v", repoID, err)
+			skipped = append(skipped, repoID)
 			continue
 		}
 		result[repoID] = data
 	}
-	return result, nil
+	return result, skipped, nil
 }
 
 // DeleteAllRepoInstances deletes all per-repo instance files.
