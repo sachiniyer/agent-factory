@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -148,13 +149,17 @@ type updateDriver struct {
 	// download fetches and verifies a release archive, returning the candidate
 	// binary. Only called once activation is enabled — a driver that cannot
 	// install has no business spending a user's bandwidth.
-	download func(url string, timeout time.Duration) ([]byte, error)
+	download func(ctx context.Context, url string, timeout time.Duration) ([]byte, error)
 	// activate hands the candidate to the transactional upgrade path. It
 	// quiesces and exits this daemon on success, so it does not return normally
 	// in the happy case.
-	activate func(candidate []byte, toVersion string) error
+	activate func(ctx context.Context, candidate []byte, toVersion string) error
 	// activationEnabled reports the operator opt-in, re-read every wake.
 	activationEnabled func() bool
+	// executableIdentity fingerprints the binary this daemon is running, so a
+	// staged candidate is never installed over an executable something else
+	// replaced while it was downloading.
+	executableIdentity func() (string, error)
 	// rejected holds tags whose activation this process already failed to
 	// start. Without it a release that cannot be activated would be retried
 	// every six hours forever — the "bad release re-breaks the box" outcome the
@@ -187,15 +192,16 @@ func startUpdateDriver(manager *Manager, requestExit func(), stopCh <-chan struc
 
 func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 	return &updateDriver{
-		cachePath:         autoupdate.CheckCachePath(),
-		currentVersion:    strings.TrimPrefix(Version(), "v"),
-		config:            manager.Config,
-		discover:          discoverLatestReleaseTag,
-		now:               func() time.Time { return time.Now().UTC() },
-		download:          stageReleaseCandidate,
-		activationEnabled: daemonUpgradeActivationEnabled,
-		activate: func(candidate []byte, toVersion string) error {
-			return triggerUpgradeActivation(context.Background(), manager.lifecycle, requestExit, candidate, toVersion)
+		cachePath:          autoupdate.CheckCachePath(),
+		currentVersion:     strings.TrimPrefix(Version(), "v"),
+		config:             manager.Config,
+		discover:           discoverLatestReleaseTag,
+		now:                func() time.Time { return time.Now().UTC() },
+		download:           stageReleaseCandidate,
+		executableIdentity: runningExecutableIdentity,
+		activationEnabled:  daemonUpgradeActivationEnabled,
+		activate: func(ctx context.Context, candidate []byte, toVersion string) error {
+			return triggerUpgradeActivation(ctx, manager.lifecycle, requestExit, candidate, toVersion)
 		},
 	}
 }
@@ -203,8 +209,29 @@ func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 // stageReleaseCandidate downloads and verifies a release archive through the
 // same shared stager the in-place installers use, so the daemon and an
 // interactive af cannot diverge on release integrity.
-func stageReleaseCandidate(url string, timeout time.Duration) ([]byte, error) {
-	return autoupdate.DefaultCandidateStager().Download(url, timeout)
+func stageReleaseCandidate(ctx context.Context, url string, timeout time.Duration) ([]byte, error) {
+	return autoupdate.DefaultCandidateStager().DownloadWithContext(ctx, url, timeout)
+}
+
+// runningExecutableIdentity fingerprints the binary this daemon is running.
+// Size and modification time, not a hash: the question is only "did something
+// replace this file", an in-place install is always a rename over the path so
+// both move, and hashing tens of megabytes on a path that must stay cheap buys
+// nothing here.
+func runningExecutableIdentity() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s:%d:%d", resolved, info.Size(), info.ModTime().UnixNano()), nil
 }
 
 // discoverLatestReleaseTag resolves the newest release on channel through the
@@ -247,6 +274,19 @@ func (d *updateDriver) run(stopCh <-chan struct{}) {
 	// updateDriverStartupBackoff.
 	d.nextCheckNotBefore = d.now().Add(updateDriverStartupBackoff)
 
+	// A context that ends with the daemon, so an in-flight staging download is
+	// abandoned on shutdown rather than holding RunDaemon's wg.Wait() open for
+	// the whole download budget.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	timer := time.NewTimer(d.firstWake())
 	defer timer.Stop()
 	for {
@@ -255,13 +295,13 @@ func (d *updateDriver) run(stopCh <-chan struct{}) {
 			return
 		case <-timer.C:
 		}
-		d.checkOnce()
+		d.checkOnce(ctx)
 		timer.Reset(updateDriverWakeInterval)
 	}
 }
 
 // checkOnce runs one wake of the loop.
-func (d *updateDriver) checkOnce() updateCheckOutcome {
+func (d *updateDriver) checkOnce(ctx context.Context) updateCheckOutcome {
 	cfg := d.config()
 	if cfg == nil {
 		// No config means no honest answer about enablement or channel. Skip
@@ -339,7 +379,7 @@ func (d *updateDriver) checkOnce() updateCheckOutcome {
 		log.InfoLog.Printf("auto-update: %s is available but this daemon already failed to activate it; not retrying that release until the daemon restarts", latest)
 		return updateCheckAvailable
 	}
-	return d.activateRelease(tag, latest, channel)
+	return d.activateRelease(ctx, tag, latest, channel)
 }
 
 // activateRelease stages the candidate and hands it to the transactional upgrade
@@ -355,11 +395,23 @@ func (d *updateDriver) checkOnce() updateCheckOutcome {
 // make — and if the candidate rolls back, it would have suppressed the launch
 // path that still works. If activation succeeds, an af launch finds the new
 // version already current and installs nothing anyway.
-func (d *updateDriver) activateRelease(tag, latest, channel string) updateCheckOutcome {
+func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel string) updateCheckOutcome {
 	log.InfoLog.Printf("auto-update: %s is available on the %s channel · staging it for a daemon-owned upgrade from %s", latest, channel, d.currentVersion)
 
+	// Fingerprint the executable BEFORE the download. Staging takes minutes, the
+	// shared cache lock was released before it, and an interactive `af` or
+	// `af upgrade` may legitimately install in that window — the interlock does
+	// not stop it, because no transaction exists yet. Handing over afterwards
+	// would install this now-stale candidate over that newer binary and preserve
+	// the newer one as the rollback target.
+	before, identityErr := d.executableIdentity()
+	if identityErr != nil {
+		log.WarningLog.Printf("auto-update: cannot fingerprint the running executable, so %s is not safe to activate: %v", latest, identityErr)
+		return updateCheckFailed
+	}
+
 	url := autoupdate.DownloadURL(tag, updateDriverGOOS, updateDriverGOARCH)
-	candidate, err := d.download(url, updateDriverDownloadBudget)
+	candidate, err := d.download(ctx, url, updateDriverDownloadBudget)
 	if err != nil {
 		// A download failure is transient — a flaky link, a half-published
 		// release — so it is not grounds to reject the tag for this daemon's
@@ -368,7 +420,31 @@ func (d *updateDriver) activateRelease(tag, latest, channel string) updateCheckO
 		return updateCheckFailed
 	}
 
-	if err := d.activate(candidate, latest); err != nil {
+	// Shutdown beats an upgrade. An operator who asked this daemon to stop must
+	// not get a published transaction and a started candidate instead — and
+	// RunDaemon is waiting on this goroutine, so continuing would also hold that
+	// stop open. Checked after the download because that is where the minutes go.
+	if err := ctx.Err(); err != nil {
+		log.InfoLog.Printf("auto-update: daemon is shutting down; abandoning the staged upgrade to %s", latest)
+		return updateCheckSkipped
+	}
+
+	after, identityErr := d.executableIdentity()
+	if identityErr != nil {
+		log.WarningLog.Printf("auto-update: cannot re-check the running executable, so %s is not safe to activate: %v", latest, identityErr)
+		return updateCheckFailed
+	}
+	if after != before {
+		// Something else installed while this was staging. This daemon's idea of
+		// the current version is now stale, so it is not entitled to decide that
+		// its candidate is an upgrade. Leave it to the next window, by which time
+		// this daemon has either been restarted onto the new binary or the check
+		// runs against honest inputs.
+		log.InfoLog.Printf("auto-update: the executable changed while %s was staging, so it is no longer safe to activate; leaving it to the next check", latest)
+		return updateCheckSkipped
+	}
+
+	if err := d.activate(ctx, candidate, latest); err != nil {
 		// The hand-off did not happen and this daemon is still serving. Reject
 		// the tag so the next window does not walk into the same failure, and
 		// say so loudly: an unattended box has nobody watching the logs, so the

@@ -67,11 +67,23 @@ func (stager CandidateStager) NewDownloadClient(timeout time.Duration) *http.Cli
 // is intrinsic to the shared stager so manual upgrade and auto-update cannot
 // accidentally diverge on release integrity.
 func (stager CandidateStager) Download(archiveURL string, timeout time.Duration) ([]byte, error) {
+	return stager.DownloadWithContext(context.Background(), archiveURL, timeout)
+}
+
+// DownloadWithContext is Download bounded by parent as well as by timeout, so a
+// caller that is being torn down can abandon a multi-minute transfer instead of
+// holding its shutdown open. The daemon uses it: its staging download runs on a
+// goroutine the daemon waits for, and a release archive is large enough that an
+// uncancellable fetch would turn an operator's stop into a minutes-long hang.
+func (stager CandidateStager) DownloadWithContext(parent context.Context, archiveURL string, timeout time.Duration) ([]byte, error) {
 	manifestURL, archiveName, err := checksumLocation(archiveURL)
 	if err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
+	ctx := parent
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
