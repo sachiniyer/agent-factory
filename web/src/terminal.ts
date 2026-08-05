@@ -161,6 +161,15 @@ export class AttachTerminal {
   // what xterm gives you to survive that, and it is the mechanism the viewport
   // anchor above already uses.
   private touchPressMarker: IMarker | null = null;
+  // The grid the press was resolved against. A reflow (a peer's echoed size, or a
+  // local fit) re-lays wrapped content, so a column saved against the old width names
+  // a different cell in the new one; a buffer switch invalidates the row outright.
+  private touchPressBuffer: "normal" | "alternate" | null = null;
+  private touchPressCols = 0;
+  // One-shot, armed by a recognised press: it suppresses the menu THAT touch provokes
+  // and nothing else — a keyboard menu (Shift+F10, the Menu key, assistive tech)
+  // arrives with no pointer event to re-scope it.
+  private suppressNextContextMenu = false;
   // Text the press selected, waiting for the finger to lift. The clipboard write has
   // to happen in the touchend handler: Safari only honours it from a trusted
   // user-gesture task, and a setTimeout callback is not one.
@@ -247,18 +256,24 @@ export class AttachTerminal {
     this.touchOriginY = press?.clientY ?? 0;
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
-    this.touchCopyFired = false;
-    this.touchCopyPending = null;
+    // Through the shared discard, so a press the timer already staged loses its
+    // SELECTION too. A second finger arriving on a held press lands here, and a
+    // pinch that left the highlight behind would be claiming a copy that never
+    // happened — in application mouse mode nothing else would clear it.
     this.cancelTouchLongPress();
+    this.discardPendingTouchCopy();
     this.disposeTouchPressMarker();
     this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
     if (this.touchPressCell) {
+      this.touchPressBuffer = this.term.buffer.active.type;
+      this.touchPressCols = this.term.cols;
       this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
       this.startTouchLongPress();
     }
   };
   private readonly onTouchEnd = (): void => {
     this.cancelTouchLongPress();
+    this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
     // Browsers that DO deliver a lift copy here; the ones that answer a held touch
     // with a compatibility click instead have already copied there. Whichever runs
@@ -276,6 +291,7 @@ export class AttachTerminal {
    */
   private readonly onTouchCancel = (): void => {
     this.cancelTouchLongPress();
+    this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
     this.discardPendingTouchCopy();
   };
@@ -294,14 +310,16 @@ export class AttachTerminal {
   // never makes (#2849). Suppressed ONLY for a press af has already acted on, so a
   // desktop right-click keeps the browser's menu.
   private readonly onContextMenu = (event: MouseEvent): void => {
-    // Both conditions. touchCopyFired survives until the NEXT touchstart (the
-    // compatibility click it suppresses arrives after touchend, so it cannot be
-    // cleared sooner), which on a touchscreen laptop would otherwise swallow the
-    // browser menu from an ordinary right-click made any time after a touch copy —
-    // taking away the desktop right-click → Copy path this never meant to touch.
-    if (this.lastPointerWasTouch && this.touchCopyFired) {
-      event.preventDefault();
+    // ONE SHOT, consumed here. Anything longer-lived suppresses menus this gesture
+    // never provoked: a right-click after a touch copy on a touchscreen laptop, and —
+    // since they arrive with no pointer event at all — a keyboard menu from Shift+F10,
+    // the Menu key, or assistive technology, whose Copy route is the very thing the
+    // rest of this file is trying to give people.
+    if (!this.suppressNextContextMenu) {
+      return;
     }
+    this.suppressNextContextMenu = false;
+    event.preventDefault();
   };
   private readonly onTouchMove = (event: TouchEvent): void => {
     this.handleUserScroll("touch");
@@ -781,12 +799,30 @@ export class AttachTerminal {
     }
     const buffer = this.term.buffer.active;
     const cols = this.term.cols;
-    // The marker outranks the raw row it was made from: a full ring trims from the
-    // top while the finger rests, and every absolute index below shifts with it. A
-    // disposed marker reports -1, so only a non-negative line can win — the same rule
-    // viewportAnchorLine applies to the viewport's own anchor.
-    const marked = this.touchPressMarker?.line ?? -1;
-    const pressedRow = marked >= 0 ? marked : press.row;
+    // Everything below is resolved against the grid the finger pressed on, so a grid
+    // that is no longer that one invalidates the press rather than reinterpreting it.
+    // A reflow re-lays wrapped content under the saved column, and an alternate-screen
+    // switch (a TUI starting or exiting during the hold) makes the saved row name a
+    // line in a different buffer entirely. Both would copy real text from the wrong
+    // place, which is worse than copying nothing.
+    if (buffer.type !== this.touchPressBuffer || cols !== this.touchPressCols) {
+      return;
+    }
+    // The marker is the anchor whenever one exists: a full ring trims from the top
+    // while the finger rests, shifting every index below it. A marker reporting -1 has
+    // been DISPOSED — the pressed line itself was trimmed away — so there is nothing
+    // to copy; falling back to the raw row there would hand back whatever slid into
+    // that slot. The raw row is only a fallback where no marker could be made at all
+    // (an alternate buffer cannot register one).
+    let pressedRow: number;
+    if (this.touchPressMarker !== null) {
+      if (this.touchPressMarker.line < 0) {
+        return;
+      }
+      pressedRow = this.touchPressMarker.line;
+    } else {
+      pressedRow = press.row;
+    }
     if (pressedRow < 0 || pressedRow >= buffer.length) {
       return;
     }
@@ -821,6 +857,21 @@ export class AttachTerminal {
         const buffered = line.getCell(col);
         cells.push(buffered === undefined ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
       }
+      // A wide glyph that will not fit the last cell is pushed to the next row, and
+      // xterm leaves the cell it vacated BLANK. That blank is structure, not content —
+      // xterm's own reflow reads it that way — so flattening it to a space would split
+      // an otherwise unbroken CJK or emoji token exactly at the wrap and copy one half.
+      // Narrowed to that case by looking at what the next row starts with, so an
+      // ordinary trailing blank keeps separating words.
+      const continues = buffer.getLine(row + 1);
+      if (
+        row < last &&
+        cells[cells.length - 1] === " " &&
+        continues !== undefined &&
+        continues.getCell(0)?.getWidth() === 2
+      ) {
+        cells[cells.length - 1] = "";
+      }
     }
     const pressed = (pressedRow - first) * cols + press.col;
     const range = wordRangeAtColumn(cells, pressed) ?? { start: 0, length: lineContentColumns(cells) };
@@ -837,6 +888,7 @@ export class AttachTerminal {
     // Marked BEFORE the lift: the compatibility click this touch still owes is what
     // would otherwise reach the application and clear the selection just painted.
     this.touchCopyFired = true;
+    this.suppressNextContextMenu = true;
     this.touchCopyPending = text;
   }
 

@@ -190,3 +190,19 @@ test("a token that soft-wraps is scanned across the rows it wraps onto (#2849)",
   assert.deepEqual(wrappedCellPosition(0, 0), { col: 0, row: 0 });
 });
 
+
+test("a wide glyph pushed past the wrap keeps its token whole (#2940)", () => {
+  // xterm leaves the vacated cell BLANK when a wide glyph will not fit the last
+  // column and moves it to the next row. Read as a space that blank splits a CJK or
+  // emoji token exactly at the wrap; read as the structure it is, the token survives.
+  const cols = 4;
+  const padded = ["近", "", "藤", "", /* row 2 */ "", "京", "", " "];
+  assert.deepEqual(wordRangeAtColumn(padded, 1), { start: 0, length: 7 });
+  assert.deepEqual(wordRangeAtColumn(padded, 5), { start: 0, length: 7 });
+  assert.deepEqual(wrappedCellPosition(4, cols), { col: 0, row: 1 });
+
+  // …and an ordinary blank at the boundary still separates two words.
+  const separated = ["a", "b", "c", " ", /* row 2 */ "d", "e", " ", " "];
+  assert.deepEqual(wordRangeAtColumn(separated, 0), { start: 0, length: 3 });
+  assert.deepEqual(wordRangeAtColumn(separated, 4), { start: 4, length: 2 });
+});

@@ -7383,6 +7383,15 @@ var AttachTerminal = class {
   // what xterm gives you to survive that, and it is the mechanism the viewport
   // anchor above already uses.
   touchPressMarker = null;
+  // The grid the press was resolved against. A reflow (a peer's echoed size, or a
+  // local fit) re-lays wrapped content, so a column saved against the old width names
+  // a different cell in the new one; a buffer switch invalidates the row outright.
+  touchPressBuffer = null;
+  touchPressCols = 0;
+  // One-shot, armed by a recognised press: it suppresses the menu THAT touch provokes
+  // and nothing else — a keyboard menu (Shift+F10, the Menu key, assistive tech)
+  // arrives with no pointer event to re-scope it.
+  suppressNextContextMenu = false;
   // Text the press selected, waiting for the finger to lift. The clipboard write has
   // to happen in the touchend handler: Safari only honours it from a trusted
   // user-gesture task, and a setTimeout callback is not one.
@@ -7456,18 +7465,20 @@ var AttachTerminal = class {
     this.touchOriginY = press?.clientY ?? 0;
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
-    this.touchCopyFired = false;
-    this.touchCopyPending = null;
     this.cancelTouchLongPress();
+    this.discardPendingTouchCopy();
     this.disposeTouchPressMarker();
     this.touchPressCell = press ? this.bufferCellAtPoint(press.clientX, press.clientY) : null;
     if (this.touchPressCell) {
+      this.touchPressBuffer = this.term.buffer.active.type;
+      this.touchPressCols = this.term.cols;
       this.touchPressMarker = this.registerPressMarker(this.touchPressCell.row);
       this.startTouchLongPress();
     }
   };
   onTouchEnd = () => {
     this.cancelTouchLongPress();
+    this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
     this.flushTouchCopy();
   };
@@ -7482,6 +7493,7 @@ var AttachTerminal = class {
    */
   onTouchCancel = () => {
     this.cancelTouchLongPress();
+    this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
     this.discardPendingTouchCopy();
   };
@@ -7499,9 +7511,11 @@ var AttachTerminal = class {
   // never makes (#2849). Suppressed ONLY for a press af has already acted on, so a
   // desktop right-click keeps the browser's menu.
   onContextMenu = (event) => {
-    if (this.lastPointerWasTouch && this.touchCopyFired) {
-      event.preventDefault();
+    if (!this.suppressNextContextMenu) {
+      return;
     }
+    this.suppressNextContextMenu = false;
+    event.preventDefault();
   };
   onTouchMove = (event) => {
     this.handleUserScroll("touch");
@@ -7776,8 +7790,18 @@ var AttachTerminal = class {
     }
     const buffer = this.term.buffer.active;
     const cols = this.term.cols;
-    const marked = this.touchPressMarker?.line ?? -1;
-    const pressedRow = marked >= 0 ? marked : press.row;
+    if (buffer.type !== this.touchPressBuffer || cols !== this.touchPressCols) {
+      return;
+    }
+    let pressedRow;
+    if (this.touchPressMarker !== null) {
+      if (this.touchPressMarker.line < 0) {
+        return;
+      }
+      pressedRow = this.touchPressMarker.line;
+    } else {
+      pressedRow = press.row;
+    }
     if (pressedRow < 0 || pressedRow >= buffer.length) {
       return;
     }
@@ -7799,6 +7823,10 @@ var AttachTerminal = class {
         const buffered = line.getCell(col);
         cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
       }
+      const continues = buffer.getLine(row + 1);
+      if (row < last && cells[cells.length - 1] === " " && continues !== void 0 && continues.getCell(0)?.getWidth() === 2) {
+        cells[cells.length - 1] = "";
+      }
     }
     const pressed = (pressedRow - first) * cols + press.col;
     const range = wordRangeAtColumn(cells, pressed) ?? { start: 0, length: lineContentColumns(cells) };
@@ -7813,6 +7841,7 @@ var AttachTerminal = class {
       return;
     }
     this.touchCopyFired = true;
+    this.suppressNextContextMenu = true;
     this.touchCopyPending = text;
   }
   /** The painted height of one terminal row, which turns a pixel-denominated gesture
