@@ -138,29 +138,42 @@ const RAIL_STEP_SETTLE_MS = 5_000;
 
 /** Where the rail selection is, as a walk sees it.
  *
- *  `id` is the BRANCH, not the title, and that distinction is load-bearing (#2893):
- *  rowTitle (web/src/status.ts) prepends mutable prefixes — `[lost] `, `[deleting] `,
- *  `[model changed] ` — so the displayed title changes under the Lost -> Ready churn
- *  #2813 documented, with the selection never moving. Keying movement off the title
- *  would read that repaint as a step. The branch is per-session and does not churn.
+ *  `index` is the row's POSITION in the rail, and that choice is load-bearing (#2893).
+ *  Two earlier attempts were both wrong:
  *
- *  `title` is kept for assertions, which match session names as substrings and so are
- *  unaffected by a prefix appearing. */
+ *    * the TITLE churns — rowTitle (web/src/status.ts) prepends `[lost] `,
+ *      `[deleting] `, `[model changed] `, so a repaint under the Lost -> Ready churn of
+ *      #2813 looks like a step with the selection never moving;
+ *    * the BRANCH collides — sessionRow renders `s.branch || "—"`, so every row without
+ *      a branch shares one identity, and a real move between two of them looks like no
+ *      move at all, which this helper would then report as the end of the list.
+ *
+ *  Position cannot do either. It is also exactly what nav means by moving: nextSelection
+ *  (web/src/nav.ts) walks positions in `orderedIds`.
+ *
+ *  `title` is carried alongside for assertions, which match session names as substrings
+ *  and so are unaffected by a prefix appearing. */
 interface RailStop {
-  id: string;
+  index: number;
   title: string;
 }
 
+/** The selected rail row's position and title, or null when the rail does not show
+ *  exactly one selected row. Read in ONE evaluate so position and title cannot come
+ *  from two different renders. */
 async function readRailStop(page: Page): Promise<RailStop | null> {
-  const selected = selectedRailRow(page);
-  if ((await selected.count()) !== 1) {
-    return null;
-  }
-  const [id, title] = await Promise.all([
-    selected.locator(".af-row-branch").innerText(),
-    selected.locator(".af-row-title").innerText(),
-  ]);
-  return { id: id.trim(), title: title.trim() };
+  return page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll(".af-rail-list .af-row"));
+    const selected = rows.filter((r) => r.classList.contains("af-row-selected"));
+    if (selected.length !== 1) {
+      return null;
+    }
+    const el = selected[0] as Element;
+    return {
+      index: rows.indexOf(el),
+      title: (el.querySelector(".af-row-title")?.textContent ?? "").trim(),
+    };
+  });
 }
 
 /**
@@ -184,11 +197,11 @@ async function readRailStop(page: Page): Promise<RailStop | null> {
  */
 async function stepRailSelection(page: Page, key: string, from: RailStop): Promise<RailStop | null> {
   await page.keyboard.press(key);
-  // Reports `from.id` — not null — while the rail is unsettled, so the poll keeps
+  // Reports `from.index` — not null — while the rail is unsettled, so the poll keeps
   // waiting instead of satisfying `.not.toBe(...)` on the first tick.
-  const readId = async (): Promise<string> => (await readRailStop(page))?.id ?? from.id;
+  const readIndex = async (): Promise<number> => (await readRailStop(page))?.index ?? from.index;
   try {
-    await expect.poll(readId, { timeout: RAIL_STEP_SETTLE_MS }).not.toBe(from.id);
+    await expect.poll(readIndex, { timeout: RAIL_STEP_SETTLE_MS }).not.toBe(from.index);
   } catch {
     const settled = await readRailStop(page);
     if (settled === null) {
@@ -197,7 +210,9 @@ async function stepRailSelection(page: Page, key: string, from: RailStop): Promi
           `does not render). That is a nav defect, not the end of the list.`,
       );
     }
-    return null; // genuinely clamped: still exactly one selected row, still this one
+    // A render slower than the poll window is a LATE move, not a clamp. Returning null
+    // here would end the walk early and let the anti-vacuity checks cover a prefix.
+    return settled.index === from.index ? null : settled;
   }
   return readRailStop(page);
 }
@@ -1498,7 +1513,7 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   const down = [top, ...(await walkRailSelection(p, "j", top, maxSteps))];
   const bottom = down[down.length - 1]!;
   const up = [bottom, ...(await walkRailSelection(p, "k", bottom, maxSteps))];
-  const ids = (stops: RailStop[]) => [...new Set(stops.map((r) => r.id))].sort();
+  const positions = (stops: RailStop[]) => [...new Set(stops.map((r) => r.index))].sort();
 
   // Anti-vacuity, and the reason a truncated walk cannot pass quietly. Two invariants
   // that hold regardless of WHICH rows this fixture makes enterable, so they stay true
@@ -1507,8 +1522,8 @@ test("#2234: creating and id-less rows expose no lifecycle actions; the shared p
   // asserted less and reported success. Symmetry is safe in THIS test because its
   // snapshot is intercepted and static; the shared-page filter test uses the weaker
   // form, since its live events plane may legitimately change the roster mid-walk.
-  expect(ids(down).length, "j must walk more than one row, or the walk proves nothing").toBeGreaterThan(1);
-  expect(ids(up), "k must walk back over exactly the rows j walked").toEqual(ids(down));
+  expect(positions(down).length, "j must walk more than one row, or the walk proves nothing").toBeGreaterThan(1);
+  expect(positions(up), "k must walk back over exactly the rows j walked").toEqual(positions(down));
   expect(
     [...down, ...up].map((r) => r.title),
     "j/k must never make the runtime-uncertain row the terminal target",
@@ -5052,17 +5067,21 @@ test("filter (feat): keyboard nav walks the VISIBLE rows — j never lands on a 
   // events plane, where a session.updated landing mid-walk legitimately changes the
   // roster. Demanding symmetry here would turn ordinary daemon churn into a red —
   // inventing exactly the kind of flake this change exists to remove.
-  expect(new Set(down.map((r) => r.id)).size, "j must move the selection across more than one row").toBeGreaterThan(1);
-  expect(new Set(up.map((r) => r.id)).size, "k must walk back across more than one row").toBeGreaterThan(1);
+  expect(new Set(down.map((r) => r.index)).size, "j must move the selection across more than one row").toBeGreaterThan(
+    1,
+  );
+  expect(new Set(up.map((r) => r.index)).size, "k must walk back across more than one row").toBeGreaterThan(1);
   expect(
     visited.map((r) => r.title),
     "j must never select a row the filter hides",
   ).not.toContainEqual(expect.stringContaining(SESSION_B));
-  // Every row it did land on is one the rail is actually drawing.
-  for (const id of new Set(visited.map((r) => r.id))) {
-    const stop = visited.find((r) => r.id === id)!;
-    await expect(row(page, stop.title), `${stop.title} must be a visible row`).toBeVisible();
-  }
+  // The old trailing loop re-found each visited row with row(page, title) to assert it
+  // was visible. That is now BOTH redundant and wrong (#2893): redundant because
+  // readRailStop only ever reports a row matched inside `.af-rail-list` that carries
+  // `.af-row-selected`, so every recorded stop was a drawn rail row at the moment it
+  // was recorded; and wrong because the rendered title carries mutable prefixes, so
+  // re-finding by that text fails when the churn this walk was changed to tolerate
+  // drops a `[lost] ` between the walk and the check.
 });
 
 test("add + delete a registered empty project (#2456): appears while another is selected, then deletes", REAL_FIXTURE, async () => {
