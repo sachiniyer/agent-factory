@@ -2404,6 +2404,16 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     inputPayloads.length = 0;
     await touchLongPress(cdp, x + 2, pressY);
 
+    // Staged, so a red here says WHICH half broke. A selection proves the press was
+    // recognised and resolved to a cell; the failure toast proves the copy ran and
+    // both clipboard paths refused. Without these, "the clipboard still holds the
+    // sentinel" is equally consistent with the gesture never firing at all.
+    await expect(selection, "the press must resolve to a cell and paint a selection").not.toHaveCount(0);
+    await expect(
+      p.locator("[role=alert]", { hasText: "Copy failed" }),
+      "the copy must not fall all the way through to the clipboard-unavailable toast",
+    ).toHaveCount(0);
+
     // THE assertion: a finger, no keyboard, and the token is on the system clipboard.
     await expect
       .poll(() => p.evaluate(() => navigator.clipboard.readText()), {
