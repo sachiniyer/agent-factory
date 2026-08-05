@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -461,7 +461,7 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 	// that directory's own mtime, so a timestamp written any earlier would be
 	// overwritten by the copy's own writes — the same ordering the mode already
 	// depends on.
-	return preserveSourceTimes(int(destination.Fd()), info, destinationPath, "directory")
+	return preserveSourceModTime(int(destination.Fd()), ".", info.ModTime(), destinationPath, "directory")
 }
 
 // holeCopyChunk is the read granularity of the hole-preserving copy. It is a
@@ -530,8 +530,7 @@ func isAllZero(chunk []byte) bool {
 	return true
 }
 
-// preserveSourceTimes reproduces a source node's access and modification times
-// on the descriptor that owns its copy.
+// preserveSourceModTime reproduces a source node's modification time on its copy.
 //
 // The copy writes new nodes, so without this every file and directory in an
 // archived worktree carries the time it was archived rather than the time its
@@ -541,19 +540,23 @@ func isAllZero(chunk []byte) bool {
 // from mtime, and git's index stores stat data, so a restored worktree that
 // looks entirely new re-hashes every file it could have trusted.
 //
-// Times come from the same fstat the mode came from, so the two cannot disagree
-// about which node was measured, and both are written to a descriptor rather
-// than a name. The platform split behind setTimesFromStat is where the
-// Linux/BSD differences live.
-func preserveSourceTimes(destinationFD int, sourceInfo os.FileInfo, destinationPath, kind string) error {
-	stat, ok := sourceInfo.Sys().(*syscall.Stat_t)
-	if !ok {
-		// Nothing to copy from: leave the times alone rather than invent them.
-		return nil
-	}
-	if err := setTimesFromStat(destinationFD, stat); err != nil {
+// Anchored to a directory descriptor plus a name, like the node creation around
+// it, with AT_SYMLINK_NOFOLLOW so a name swapped for a symlink between creation
+// and this call cannot redirect the timestamp onto a file outside the tree. A
+// DIRECTORY passes its own descriptor with "." — that addresses the directory
+// itself without AT_EMPTY_PATH, which is Linux-only, so one call covers every
+// platform at full nanosecond resolution.
+//
+// Both slots are set to the source mtime because there is no portable way to set
+// one and leave the other: UTIME_OMIT is not defined on darwin. atime is
+// therefore NOT preserved, deliberately — it is rewritten by any read, most
+// filesystems mount relatime so it is already approximate, and nothing in a
+// worktree depends on it. mtime is the property tools actually read.
+func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, destinationPath, kind string) error {
+	stamp := unix.NsecToTimespec(sourceModTime.UnixNano())
+	if err := unix.UtimesNanoAt(dirFD, name, []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf(
-			"cannot move worktree across filesystems: failed to preserve timestamps on destination %s %s: %w",
+			"cannot move worktree across filesystems: failed to preserve the source modification time on destination %s %s: %w",
 			kind, destinationPath, err,
 		)
 	}
@@ -685,7 +688,9 @@ func copyRegularFileAtWithIdentity(
 	}
 	// After the contents for the same reason the mode is: writing bytes bumps
 	// mtime, so this has to be the last thing that touches the file.
-	if err := preserveSourceTimes(outFD, info, destinationPath, "file"); err != nil {
+	if err := preserveSourceModTime(
+		int(destination.Fd()), filepath.Base(destinationPath), info.ModTime(), destinationPath, "file",
+	); err != nil {
 		_ = out.Close()
 		return created, err
 	}
