@@ -100,6 +100,10 @@ type lostRestoreState struct {
 	// remoteLogged dedupes the "not restoring a remote session" note to once
 	// per Lost episode.
 	remoteLogged bool
+	// preserveFailureLogged dedupes the pre-reap push failure, separately from
+	// remoteUnknownLogged: the two describe different verdicts, and a session can
+	// move from one to the other while its retry episode continues.
+	preserveFailureLogged bool
 	// remoteUnknownLogged dedupes the safety note while a Lost remote sandbox
 	// remains unreachable. Unknown never authorizes destructive re-provisioning.
 	remoteUnknownLogged bool
@@ -403,8 +407,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// does not land, exactly as ArchiveSandbox refuses via AbortArchiveToLost.
 		if err := m.preserveSandboxBeforeReap(repoID, key, inst); err != nil {
 			m.mu.Lock()
-			logIt := !st.remoteUnknownLogged
-			st.remoteUnknownLogged = true
+			// Its OWN dedupe flag. remoteUnknownLogged is set by the unknown arm and
+			// never reset, so sharing it meant a sandbox that first went unreachable and
+			// later answered — with an actionable push failure like a rejected origin
+			// auth — kept reporting only the obsolete "unreachable" note and never
+			// surfaced the real reason it was not recovering.
+			logIt := !st.preserveFailureLogged
+			st.preserveFailureLogged = true
 			st.remoteUnknownAttempts++
 			st.nextAttempt = time.Now().Add(lostRestoreBackoff(st.remoteUnknownAttempts))
 			m.mu.Unlock()

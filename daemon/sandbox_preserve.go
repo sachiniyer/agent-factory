@@ -32,12 +32,39 @@ const sandboxPushTimeout = 2 * time.Minute
 // containing $HOME, $(...) or a backtick still expands inside the double quotes
 // it produces (#1978). A command advertised for copy-paste has to be one the
 // shell reads as a single literal argument.
-func forceReapCommandFor(title string) string {
+func sessionRepoScope(instance *session.Instance) []string {
+	// A destructive suggestion MUST carry the scope it was resolved under. Without
+	// it, an operator who ran the original command with --repo /b copies a
+	// title-only command that resolveRepoID re-resolves against their CWD — so it
+	// either misses the session or, worse, force-reaps a same-titled one in a
+	// different repo. Prefer the worktree's resolved repo root, falling back to the
+	// instance path for a row whose worktree is not reconstructable.
+	root := instance.GetRepoPath()
+	if root == "" {
+		root = instance.Path
+	}
+	if root == "" {
+		return nil
+	}
+	return []string{"--repo", root}
+}
+
+func forceReapCommandFor(instance *session.Instance) []string {
 	// `--` before the title, and the flag before it: shellsuggest quotes an argument
 	// but deliberately leaves option termination to the call site, so a title
 	// beginning with "-" would otherwise be parsed as a flag and the advertised
 	// command would exit "unknown flag" instead of releasing the refusal.
-	return shellsuggest.Command("af", "sessions", "restore", "--force-reap", "--", title)
+	args := append([]string{"sessions", "restore"}, sessionRepoScope(instance)...)
+	return append(args, "--force-reap", "--", instance.Title)
+}
+
+func forceReapCommand(instance *session.Instance) string {
+	return shellsuggest.Command("af", forceReapCommandFor(instance)...)
+}
+
+func killCommand(instance *session.Instance) string {
+	args := append([]string{"sessions", "kill"}, sessionRepoScope(instance)...)
+	return shellsuggest.Command("af", append(args, "--", instance.Title)...)
 }
 
 // preserveSandboxBeforeReap runs the push that makes a reachable sandbox's work
@@ -72,7 +99,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 				"and the push that would make its unpushed work durable failed (%w). "+
 				"Replacing it now would destroy any commits it holds. "+
 				"It stays recoverable and the daemon keeps retrying; if you know its work is expendable, force it with: %s",
-			instance.Title, err, forceReapCommandFor(instance.Title))
+			instance.Title, err, forceReapCommand(instance))
 	}
 	if branch == "" {
 		// A push that reports no branch leaves recovery with the empty RestoreBranch
@@ -87,7 +114,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 				"would clone the repository's default branch and strand whatever the sandbox holds. "+
 				"af cannot recover this session onto its own branch without one. If its work is "+
 				"expendable, remove it and create a replacement: %s",
-			instance.Title, shellsuggest.Command("af", "sessions", "kill", "--", instance.Title))
+			instance.Title, killCommand(instance))
 	}
 	// Record it the INSTANT it is durable, for the reason ArchiveSandbox records it
 	// there: from here the branch is the only handle on the user's work, so it
@@ -144,7 +171,7 @@ func requireKnownSandboxBranch(instance *session.Instance) error {
 			"including work it had already pushed. The branch is recorded when a sandbox is archived or when "+
 			"recovery pushes a reachable one, and neither has happened here. If its work is expendable, remove "+
 			"it and create a replacement: %s",
-		instance.Title, shellsuggest.Command("af", "sessions", "kill", "--", instance.Title))
+		instance.Title, killCommand(instance))
 }
 
 // refuseIndeterminateReap is the message for a sandbox whose reachability could
@@ -153,12 +180,12 @@ func requireKnownSandboxBranch(instance *session.Instance) error {
 // Unreachable is NOT gone. A replacement here would reap a sandbox that may still
 // be holding hours of unpushed commits, so the decision is to refuse: stranded
 // cloud spend is visible on a bill and fixable afterwards, lost work is neither.
-func refuseIndeterminateReap(title string) error {
+func refuseIndeterminateReap(instance *session.Instance) error {
 	return fmt.Errorf(
 		"cannot restore %q: af could not determine whether its sandbox is gone or merely unreachable, "+
 			"and replacing it would discard anything it has not pushed. "+
 			"It stays recoverable and the daemon keeps retrying; if you know the sandbox is gone, force it with: %s",
-		title, forceReapCommandFor(title))
+		instance.Title, forceReapCommand(instance))
 }
 
 // archiveWithin runs the sandbox's push under a hard local deadline, mirroring

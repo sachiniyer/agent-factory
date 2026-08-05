@@ -138,7 +138,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// release HERE: a refusal whose advertised retry lands on the same branch and
 		// refuses again is the same defect wearing a helpful message.
 		if !force {
-			return "", refuseIndeterminateReap(title)
+			return "", refuseIndeterminateReap(instance)
 		}
 		// Forced past an unanswerable probe: the sandbox may well be alive behind a
 		// broken path, so a replacement still must not land on the default branch and
