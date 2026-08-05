@@ -325,6 +325,36 @@ func TestExecutableLock_NonblockingReportsBusyInsteadOfDeniedWhenShared(t *testi
 		"it must not also present as a permission error, or a caller matching on that first would still take the unlocked path")
 }
 
+// A PERMANENT denial in a SHARED directory must stay a permission error too.
+//
+// This is the topology this PR accepts as unfixable: a 0770 directory whose
+// owner is not in its group, with the lock already widened to that group. The
+// directory owner can still replace the binary through the owner bits, but can
+// never open the lock — and the directory is genuinely shared, so a busy answer
+// keyed on sharedness alone would tell the launch updater to defer, report
+// success, and silently never install again.
+//
+// The lock is left group-usable but owner-inaccessible, which is what an
+// already-completed widening looks like to someone outside its group.
+func TestExecutableLock_NonblockingStaysDeniedWhenTheLockIsAlreadyWidened(t *testing.T) {
+	requireUnprivileged(t)
+	executable := sharedInstallDir(t, 0o770)
+	lockPath := executableLockPath(executable)
+	require.NoError(t, os.WriteFile(lockPath, nil, 0o600))
+	// Group rw, owner nothing: Linux checks the owner class first, so this is the
+	// EACCES a non-group caller sees against a lock whose widening already landed.
+	require.NoError(t, os.Chmod(lockPath, 0o060))
+
+	err := withExecutableLock(executable, true, func() error {
+		t.Fatal("the critical section must not run when the lock cannot be opened")
+		return nil
+	})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrInstallLockBusy,
+		"the widening already completed, so this denial is permanent: reporting busy would defer the launch updater forever and silently retire auto-update for this user")
+	require.ErrorIs(t, err, os.ErrPermission)
+}
+
 // The same nonblocking call in a PRIVATE directory must stay a permission error.
 // There the denial is permanent and means a genuinely unauthorized caller;
 // reporting BUSY would tell the launch updater to defer forever and silently

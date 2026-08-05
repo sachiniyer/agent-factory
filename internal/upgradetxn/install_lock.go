@@ -186,27 +186,36 @@ func acquireExecutableLock(executable string, nonblocking bool) (*os.File, error
 		if err == nil || !errors.Is(err, os.ErrPermission) {
 			return lock, err
 		}
-		if _, shared := directoryWriterGroup(dir); !shared {
+		gid, shared := directoryWriterGroup(dir)
+		if !shared {
 			// A private directory. EACCES means a genuinely unauthorized caller and
 			// no amount of waiting changes the answer, so neither wait nor dress it
 			// up as contention.
 			return lock, err
 		}
 		if nonblocking {
-			// A shared directory, so this denial is very likely the transient
-			// 0600-to-0660 window of another writer's first acquisition. Report it
-			// as BUSY rather than as a permission error.
+			// A denial here is reported as BUSY only if it is TRANSIENT — the
+			// 0600-to-0660 window of another writer's first acquisition.
 			//
-			// That distinction decides what the caller does with it, and the two
-			// answers are not close. writeExecutableInPlaceWaiting defers only on
-			// ErrInstallLockBusy; on any other error it swaps the binary with
-			// NEITHER lock held, which is precisely the interleave with a live
-			// transaction this lock exists to prevent. Deferring an unattended
-			// launch-time update costs nothing — it retries next launch — while
-			// swapping unlocked can corrupt someone's rollback.
+			// That distinction decides what the caller does with it, and both wrong
+			// answers are bad in opposite directions. writeExecutableInPlaceWaiting
+			// defers only on ErrInstallLockBusy; on any other error it swaps the
+			// binary with NEITHER lock held, which is the interleave with a live
+			// transaction this lock exists to prevent. But a PERMANENT denial
+			// reported as busy is worse still: the launch updater defers, reports
+			// success, and silently never installs again.
 			//
-			// Returned without sleeping: the caller asked not to wait (#2951), and
-			// this reports the state rather than waiting out the window.
+			// "Is the directory shared" does not answer that question, which is what
+			// an earlier version of this branch got wrong. In the ownership topology
+			// this PR accepts as unfixable — a 0770 directory whose owner is not in
+			// its group, with the lock already widened to that group — the directory
+			// owner is denied permanently while the directory is genuinely shared.
+			//
+			// Returned without sleeping either way: the caller asked not to wait
+			// (#2951), and this reads the lock's state rather than waiting on it.
+			if !executableLockDenialIsTransient(path, gid) {
+				return lock, err
+			}
 			return nil, ErrInstallLockBusy
 		}
 		if attempt >= executableLockOpenRetries {
@@ -460,4 +469,39 @@ func hasExtendedACL(path string) bool {
 func lockHasInheritedACL(lock *os.File) bool {
 	_, err := unix.Fgetxattr(int(lock.Fd()), "system.posix_acl_access", nil)
 	return err == nil
+}
+
+// executableLockDenialIsTransient distinguishes a permission denial that will
+// clear on its own from one that never will, for a caller that cannot wait to
+// find out.
+//
+// The transient case is another writer's FIRST acquisition: the file must exist
+// before its mode can be adjusted, so it is briefly private between the create
+// and the fchmod. Microseconds later it is group-usable.
+//
+// The permanent case looks identical to the failed open and is only
+// distinguishable from the lock itself: once the widening has completed, the
+// group bits are set and the file carries the directory's group — so a caller
+// still denied at that point is denied for WHO IT IS, not for when it arrived.
+// The directory owner outside the directory's own group is exactly that caller,
+// and telling it to defer would silently retire its auto-update.
+//
+// stat needs only search permission on the directory, which any caller that got
+// this far already has. An absent lock means we are racing its creation, which
+// is the transient case by definition.
+func executableLockDenialIsTransient(lockPath string, dirGid int) bool {
+	info, err := os.Lstat(lockPath)
+	if err != nil {
+		return true
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	const groupUsable = 0o060
+	widened := info.Mode().Perm()&groupUsable == groupUsable && int(stat.Gid) == dirGid
+	return !widened
 }
