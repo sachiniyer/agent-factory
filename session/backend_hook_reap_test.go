@@ -100,11 +100,13 @@ mkdir -p '%s'/sandboxes/"$name"
 echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
 %s
 `, dir, dir, launchBody))
+	// No mkdir before the log line: dir is t.TempDir(), which already exists, and
+	// on the wedged-reap paths that mkdir was a whole fork+exec standing between
+	// the spawn and the only evidence the script ever writes (#2821).
 	writeHookScript(t, h.delete, fmt.Sprintf(`
-mkdir -p '%s'
 echo "$name" >> '%s'/delete-ran.log
 %s
-`, dir, dir, deleteBody))
+`, dir, deleteBody))
 	return h
 }
 
@@ -382,23 +384,48 @@ func TestHookReapTimeoutIsUnknownState(t *testing.T) {
 // then deleted the record and the workspace leaked exactly one poll later, the same
 // leak as master, one tick delayed. A second reap while delete_cmd is still wedged
 // must (i) ACTUALLY re-run delete_cmd and (ii) keep returning the unknown sentinel.
+//
+// (i) is asserted on how long the reap BLOCKED, not on what the script logged,
+// and that is the whole point of #2821. The script's log line was the old proof,
+// and it is not kill-proof: delete_cmd is SIGKILLed at the bound, so on a loaded
+// box the spawn can miss the budget and be killed before its first instruction —
+// leaving no line, and no way for the count to tell "the product latched" from
+// "this box was busy". The two look identical, so the count could only ever
+// produce a false FAIL.
+//
+// Blocking time cannot be destroyed that way. A latch returns the CACHED error
+// with no spawn and no wait, in microseconds; a real re-invocation runs the
+// wedged script into the bound and blocks for it. Load pushes that duration UP,
+// never down, so the assertion is one-sided in the safe direction. It is also the
+// only thing that separates the two here: the error assertions cannot, because
+// the cached error a latch returns IS the unknown-state error.
 func TestHookReapTimeoutIsReRunnable(t *testing.T) {
-	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond)
-	h := newHookState(t, "exit 0\n", "sleep 5\n") // logs one line, then wedges
+	const bound = 300 * time.Millisecond
+	shrinkHookTimeouts(t, bound, bound)
+	h := newHookState(t, "exit 0\n", "sleep 5\n") // wedges until the bound kills it
 	p := newHookProvisioner(h, "re-runnable wedged reap")
 	p.launchStarted = true
 
-	first := p.reap()
+	first, firstTook := timeReap(p)
 	require.True(t, errors.Is(first, ErrWorkspaceStateUnknown), "first timed-out reap must be unknown-state")
-	require.Equal(t, 1, h.deleteRunCount(t), "delete_cmd ran once")
+	require.GreaterOrEqual(t, firstTook, bound,
+		"the first reap must run the wedged delete_cmd into its bound")
 
-	second := p.reap()
+	second, secondTook := timeReap(p)
 	require.Error(t, second,
 		"a second reap while delete_cmd is still wedged must not return nil — a nil would let deleteSessionRecord delete the record and orphan the workspace one poll later")
 	require.True(t, errors.Is(second, ErrWorkspaceStateUnknown),
 		"a re-run timed-out reap must keep returning ErrWorkspaceStateUnknown")
-	require.Equal(t, 2, h.deleteRunCount(t),
-		"the second reap must ACTUALLY re-invoke delete_cmd (the log line count grows), not skip it via a latch")
+	require.GreaterOrEqual(t, secondTook, bound,
+		"the second reap must ACTUALLY re-invoke delete_cmd, not skip it via a latch: it has to block on the still-wedged script for the full bound, where a latch would return the cached error immediately")
+}
+
+// timeReap runs a reap and reports how long it blocked, which is what tells a
+// real invocation apart from a latch — see TestHookReapTimeoutIsReRunnable.
+func timeReap(p *hookProvisioner) (error, time.Duration) {
+	started := time.Now()
+	err := p.reap()
+	return err, time.Since(started)
 }
 
 // TestHookReapAnsweredErrorIsKnownStateAndLatches is the other half: a delete_cmd
