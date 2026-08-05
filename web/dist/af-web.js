@@ -13118,10 +13118,13 @@ var AppShell = class {
   attachTabTouchDrag(bar) {
     let press = null;
     const release = () => {
-      if (press?.timer !== null && press?.timer !== void 0) {
+      if (press === null) {
+        return;
+      }
+      if (press.timer !== null) {
         window.clearTimeout(press.timer);
       }
-      if (press?.held) {
+      if (press.held) {
         bar.classList.remove("af-tabbar-dragging");
         this.hideTabInsert();
         this.actions.clearPaneDropHint();
@@ -13141,6 +13144,9 @@ var AppShell = class {
       "pointerdown",
       (e) => {
         if (e.pointerType === "mouse" || e.pointerType === "pen") {
+          return;
+        }
+        if (press?.held) {
           return;
         }
         const btn = e.target instanceof Element ? e.target.closest(".af-tab") : null;
@@ -13196,14 +13202,18 @@ var AppShell = class {
       if (this.actions.dropTabOnPaneAt(x, y, drag)) {
         return;
       }
-      const to = reorderTargetIndex(from, insertionIndexAt(tabCenters(bar), x));
+      const source = this.resolveBarDragPayload(drag);
+      if (source === null) {
+        return;
+      }
+      const to = reorderTargetIndex(source, insertionIndexAt(tabCenters(bar), x));
       if (to === null) {
-        if (from === 0) {
+        if (source === 0) {
           this.actions.notice(TAB_PINNED_NOTICE);
         }
         return;
       }
-      this.actions.reorderTab(from, to);
+      this.actions.reorderTab(source, to);
     });
     bar.addEventListener("pointercancel", release, { passive: true });
   }
@@ -13317,6 +13327,12 @@ var AppShell = class {
     if (typeof drag.index !== "number" || !Array.isArray(drag.tabs)) {
       return null;
     }
+    return this.resolveBarDragPayload(drag);
+  }
+  /** The identity resolution itself, for a payload already in hand — the touch drag
+   *  builds its payload directly rather than round-tripping it through a dataTransfer
+   *  string, and must resolve it by exactly the same rule. */
+  resolveBarDragPayload(drag) {
     return resolveDragTab(drag, this.currentTabRealIds, this.currentTabIds, this.currentTabIds.length);
   }
   /** Draws the insertion indicator in the gap a drop at `clientX` would land in. */

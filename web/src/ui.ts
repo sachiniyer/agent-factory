@@ -2007,10 +2007,13 @@ export class AppShell {
     let press: TabPress | null = null;
 
     const release = (): void => {
-      if (press?.timer !== null && press?.timer !== undefined) {
+      if (press === null) {
+        return;
+      }
+      if (press.timer !== null) {
         window.clearTimeout(press.timer);
       }
-      if (press?.held) {
+      if (press.held) {
         bar.classList.remove("af-tabbar-dragging");
         this.hideTabInsert();
         this.actions.clearPaneDropHint();
@@ -2037,6 +2040,9 @@ export class AppShell {
         // Mouse and pen keep real drag-and-drop; this is the finger's path only.
         if (e.pointerType === "mouse" || e.pointerType === "pen") {
           return;
+        }
+        if (press?.held) {
+          return; // a drag is already in flight; a second finger must not hijack it
         }
         const btn = e.target instanceof Element ? e.target.closest<HTMLElement>(".af-tab") : null;
         if (!btn || !bar.contains(btn)) {
@@ -2099,16 +2105,24 @@ export class AppShell {
       if (this.actions.dropTabOnPaneAt(x, y, drag)) {
         return; // landed in a pane: split or replaced
       }
-      const to = reorderTargetIndex(from, insertionIndexAt(tabCenters(bar), x));
+      // Re-resolve the tab by its STABLE id rather than trusting the index captured at
+      // pointerdown. The bar rebuilds on every snapshot, so another client reordering
+      // or closing a tab mid-drag would otherwise move whatever now sits at that
+      // ordinal. Same resolution the mouse drop uses — one rule, not two.
+      const source = this.resolveBarDragPayload(drag);
+      if (source === null) {
+        return; // the tab is gone, or the roster changed under the drag
+      }
+      const to = reorderTargetIndex(source, insertionIndexAt(tabCenters(bar), x));
       if (to === null) {
         // The pinned agent tab, or a release where the tab already sits. Only the
         // first is worth explaining, and it is the one a user will retry.
-        if (from === 0) {
+        if (source === 0) {
           this.actions.notice(TAB_PINNED_NOTICE);
         }
         return;
       }
-      this.actions.reorderTab(from, to);
+      this.actions.reorderTab(source, to);
     });
 
     // pointercancel only — NOT pointerleave. A touch pointer is implicitly captured by
@@ -2248,6 +2262,13 @@ export class AppShell {
     if (typeof drag.index !== "number" || !Array.isArray(drag.tabs)) {
       return null;
     }
+    return this.resolveBarDragPayload(drag);
+  }
+
+  /** The identity resolution itself, for a payload already in hand — the touch drag
+   *  builds its payload directly rather than round-tripping it through a dataTransfer
+   *  string, and must resolve it by exactly the same rule. */
+  private resolveBarDragPayload(drag: DragPayload): number | null {
     return resolveDragTab(drag, this.currentTabRealIds, this.currentTabIds, this.currentTabIds.length);
   }
 
