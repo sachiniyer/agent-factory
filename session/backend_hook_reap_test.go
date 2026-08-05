@@ -868,6 +868,24 @@ exit 0
 	writeHookScript(t, h.delete, fmt.Sprintf(`echo "$name" >> %s/delete-ran.log`, shellsuggest.Arg(dir)))
 
 	p := newHookProvisioner(h, "tunnel holder")
+	// Own the tunnel's lifetime, exactly as TestHookLaunchDoesNotKillBackgroundedChildren
+	// below owns its child's. The production code is right to leave this process alone —
+	// that is the whole claim — but "nothing in the capture path reaps it" is not the same
+	// as "nobody reaps it". Without this the tunnel outlives the test forever: t.TempDir()
+	// removes the directory out from under a python3 that keeps looping and holding a
+	// listening socket, detached, owned by no one (#2842 — 65 of them accumulated on the
+	// dev box, the oldest six days old).
+	//
+	// This cannot weaken the claim: t.Cleanup runs after the test body, so the reachability
+	// assertion has already passed by the time the kill fires. And t.Cleanup is LIFO, so it
+	// runs BEFORE the TempDir removal registered by t.TempDir() above — no writer survives
+	// into os.RemoveAll. launchPgid is populated by provisionOrReap below and read here at
+	// cleanup time.
+	t.Cleanup(func() {
+		if p.launchPgid != 0 {
+			_ = syscall.Kill(-p.launchPgid, syscall.SIGKILL)
+		}
+	})
 	res, err := p.provisionOrReap()
 	require.NoError(t, err, "a launch_cmd that exits 0 with a valid endpoint must succeed")
 	require.NotNil(t, res.Endpoint)
