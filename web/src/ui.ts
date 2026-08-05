@@ -47,6 +47,7 @@ import {
 import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
+import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -169,6 +170,13 @@ export interface AppState {
 }
 
 /** Callbacks the shell invokes; index.ts owns the real behavior. */
+/** What a finger gets told when it tries to drag a tab. Names both capabilities the
+ *  gesture carries — reorder and split — and the input that can perform them, so the
+ *  message explains the limit rather than just reporting a failure. Sentence case, `·`
+ *  as the fragment separator, per the repo's copy conventions. */
+export const TAB_DRAG_TOUCH_NOTICE =
+  "Dragging a tab needs a mouse or trackpad · use it to reorder tabs or split a pane";
+
 export interface Actions {
   connect(token: string): void;
   disconnect(): void;
@@ -213,6 +221,11 @@ export interface Actions {
   /** Closes the tab at `index` of the selected session (the `w` key / × button);
    *  the agent tab (index 0) is unclosable. */
   closeTab(index: number): void;
+  /** Surfaces a transient message in the toast the failed-tab-op path already owns.
+   *  For a UI condition the user needs told about that is NOT an error from the
+   *  daemon — a gesture this device cannot perform, say — so it goes through the
+   *  same visible channel instead of being swallowed (#2787's shape). */
+  notice(message: string): void;
   /** Sets one global config key. index.ts POSTs SetConfigValue (the same validated,
    *  locked, atomic writer `af config set` uses), then re-reads the manifest so the
    *  form shows what the file actually holds. Validation is deliberately NOT done
@@ -1803,6 +1816,9 @@ export class AppShell {
     // double-click can activate an inactive tab and synchronously replace every
     // button; a listener owned by the old button cannot receive the final dblclick.
     this.attachTabRename(tabBar);
+    // Both drags above are HTML5 drag-and-drop, which a finger cannot start. Same
+    // delegation again, to tell a touch user that rather than doing nothing.
+    this.attachTabTouchHint(tabBar);
 
     // Retry and the filtered-selection fallback are fixed pane-level actions. Their
     // hidden containers create no flex items on the common path, while visible
@@ -1945,6 +1961,74 @@ export class AppShell {
       this.dragFromIndex = null;
       this.hideTabInsert();
     });
+  }
+
+  /**
+   * Tells a touch user why pressing and dragging a tab does nothing (#2787's shape).
+   *
+   * Reordering a tab and dragging one onto a pane to split are both HTML5
+   * drag-and-drop, which does not start from a finger on the mobile browsers that
+   * matter. Every tab still advertises `draggable=true` there, so the gesture is
+   * offered and then silently declined — the exact failure mode this audit went
+   * looking for. Restoring the capability on touch is a real UX decision (arrows? a
+   * per-tab menu? a long-press drag?) and belongs in its own change; making the
+   * refusal AUDIBLE does not, and is what this is.
+   *
+   * It watches only the HOLD. A horizontal finger drag on this bar is ambiguous — it
+   * is also how an overflowed bar is scrolled — so any real movement hands the finger
+   * straight back (tabtouch.ts). Nothing here captures the pointer, changes
+   * touch-action, or calls preventDefault: the cost of a wrong guess is one toast,
+   * never a bar that will not scroll.
+   */
+  private attachTabTouchHint(bar: HTMLElement): void {
+    let press: { id: number; x: number; y: number; timer: number } | null = null;
+    const cancel = (): void => {
+      if (press) {
+        window.clearTimeout(press.timer);
+        press = null;
+      }
+    };
+    bar.addEventListener(
+      "pointerdown",
+      (e: PointerEvent) => {
+        // Mouse and pen keep real drag-and-drop; only a finger needs telling.
+        if (e.pointerType === "mouse" || e.pointerType === "pen") {
+          return;
+        }
+        const btn = e.target instanceof Element ? e.target.closest<HTMLElement>(".af-tab") : null;
+        if (!btn || !bar.contains(btn)) {
+          return;
+        }
+        cancel();
+        const timer = window.setTimeout(() => {
+          // Reaching the timer IS the settled-hold verdict: any movement past slop
+          // would have cancelled it below. Routed through the predicate anyway so the
+          // threshold lives in one tested place.
+          if (tabPressVerdict({ heldMs: TAB_PRESS_LIMITS.holdMs, movedPx: 0 }, TAB_PRESS_LIMITS) === "explain") {
+            this.actions.notice(TAB_DRAG_TOUCH_NOTICE);
+          }
+          press = null;
+        }, TAB_PRESS_LIMITS.holdMs);
+        press = { id: e.pointerId, x: e.clientX, y: e.clientY, timer };
+      },
+      { passive: true },
+    );
+    bar.addEventListener(
+      "pointermove",
+      (e: PointerEvent) => {
+        if (!press || e.pointerId !== press.id) {
+          return;
+        }
+        const moved = pressDistance(press.x, press.y, e.clientX, e.clientY);
+        if (tabPressVerdict({ heldMs: 0, movedPx: moved }, TAB_PRESS_LIMITS) === "abandon") {
+          cancel(); // scrolling the bar — not our gesture
+        }
+      },
+      { passive: true },
+    );
+    for (const done of ["pointerup", "pointercancel", "pointerleave"]) {
+      bar.addEventListener(done, cancel, { passive: true });
+    }
   }
 
   /** Owns inline rename on the stable bar rather than on an individual button.

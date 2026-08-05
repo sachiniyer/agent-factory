@@ -2151,6 +2151,78 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
   }
 });
 
+test("audit (#2787 shape) mobile: pressing a tab to drag it SAYS SO instead of doing nothing", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // Reordering a tab and dragging one onto a pane to split are both HTML5
+  // drag-and-drop, which does not start from a finger. The tab still advertises
+  // draggable=true on a phone, so the gesture was offered and then silently declined.
+  //
+  // Driven as a REAL touch through CDP for the reason #2682 documents: a synthesized
+  // PointerEvent would prove only that our listener ran. A trusted touchStart is what
+  // makes Chromium produce the pointerdown with pointerType "touch" that the hint is
+  // gated on — the one thing a desktop run cannot fake.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+
+  try {
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+
+    const tab = p.locator(".af-tabbar .af-tab").last();
+    await expect(tab).toBeVisible();
+    const box = await tab.boundingBox();
+    expect(box, "the tab needs geometry to press").toBeTruthy();
+    const { x, y, width, height } = box as { x: number; y: number; width: number; height: number };
+    const cx = x + width / 2;
+    const cy = y + height / 2;
+    const toast = p.locator(".af-toast.af-toast-show");
+
+    // A TAP must stay silent: it is how a tab is selected, and a toast on every tap
+    // would be a worse defect than the silence this replaces.
+    await touchTap(cdp, cx, cy);
+    await p.waitForTimeout(900); // past the hold threshold, deliberately
+    await expect(toast, "a tap selects a tab — it must not raise the drag hint").toHaveCount(0);
+
+    // A SCROLL must stay silent for the same reason: a horizontal finger drag on this
+    // bar is how an overflowed bar is scrolled.
+    await touchDrag(cdp, cx, cy, cy + 4, 6);
+    await p.waitForTimeout(900);
+    await expect(toast, "scrolling the tab bar must not raise the drag hint").toHaveCount(0);
+
+    // …and a settled long press — what someone trying to pick the tab up actually
+    // does — explains the limit instead of doing nothing.
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: cx, y: cy }] });
+    try {
+      await expect(toast, "a long press on a tab must explain why the drag cannot work").toContainText(
+        "needs a mouse or trackpad",
+      );
+      // It names the capabilities the gesture carries, so the message teaches rather
+      // than merely reporting a failure.
+      await expect(toast).toContainText("reorder");
+      await expect(toast).toContainText("split");
+    } finally {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    }
+  } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
 test("the #1694 keyboard model: j/k navigate, Enter attaches, ctrl+] returns to rail", REAL_FIXTURE, async () => {
   // Attach to A HERE rather than inheriting terminal mode from the previous flow
   // (#2816). Inheriting made this test fail whenever its predecessor did: a failure

@@ -11827,6 +11827,21 @@ function reorderTargetIndex(from, insertion) {
   return target === from ? null : target;
 }
 
+// src/tabtouch.ts
+function tabPressVerdict(sample, limits) {
+  if (sample.movedPx > limits.slopPx) {
+    return "abandon";
+  }
+  if (sample.heldMs >= limits.holdMs) {
+    return "explain";
+  }
+  return "waiting";
+}
+var TAB_PRESS_LIMITS = { holdMs: 500, slopPx: 10 };
+function pressDistance(fromX, fromY, toX, toY) {
+  return Math.hypot(toX - fromX, toY - fromY);
+}
+
 // src/ui.ts
 function isActionableSession(s) {
   return typeof s.id === "string" && s.id !== "" && (s.lifecycle_action === "archive" || s.lifecycle_action === "restore");
@@ -11834,6 +11849,7 @@ function isActionableSession(s) {
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
+var TAB_DRAG_TOUCH_NOTICE = "Dragging a tab needs a mouse or trackpad \xB7 use it to reorder tabs or split a pane";
 var MAX_TABS = 9;
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
 function supportsTabManagement(s) {
@@ -12929,6 +12945,7 @@ var AppShell = class {
     this.tabInsert.setAttribute("aria-hidden", "true");
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
+    this.attachTabTouchHint(tabBar);
     const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
     this.main.className = "af-main af-main-term";
     this.main.replaceChildren(head, this.termHost);
@@ -13018,6 +13035,69 @@ var AppShell = class {
       this.dragFromIndex = null;
       this.hideTabInsert();
     });
+  }
+  /**
+   * Tells a touch user why pressing and dragging a tab does nothing (#2787's shape).
+   *
+   * Reordering a tab and dragging one onto a pane to split are both HTML5
+   * drag-and-drop, which does not start from a finger on the mobile browsers that
+   * matter. Every tab still advertises `draggable=true` there, so the gesture is
+   * offered and then silently declined — the exact failure mode this audit went
+   * looking for. Restoring the capability on touch is a real UX decision (arrows? a
+   * per-tab menu? a long-press drag?) and belongs in its own change; making the
+   * refusal AUDIBLE does not, and is what this is.
+   *
+   * It watches only the HOLD. A horizontal finger drag on this bar is ambiguous — it
+   * is also how an overflowed bar is scrolled — so any real movement hands the finger
+   * straight back (tabtouch.ts). Nothing here captures the pointer, changes
+   * touch-action, or calls preventDefault: the cost of a wrong guess is one toast,
+   * never a bar that will not scroll.
+   */
+  attachTabTouchHint(bar) {
+    let press = null;
+    const cancel = () => {
+      if (press) {
+        window.clearTimeout(press.timer);
+        press = null;
+      }
+    };
+    bar.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (e.pointerType === "mouse" || e.pointerType === "pen") {
+          return;
+        }
+        const btn = e.target instanceof Element ? e.target.closest(".af-tab") : null;
+        if (!btn || !bar.contains(btn)) {
+          return;
+        }
+        cancel();
+        const timer = window.setTimeout(() => {
+          if (tabPressVerdict({ heldMs: TAB_PRESS_LIMITS.holdMs, movedPx: 0 }, TAB_PRESS_LIMITS) === "explain") {
+            this.actions.notice(TAB_DRAG_TOUCH_NOTICE);
+          }
+          press = null;
+        }, TAB_PRESS_LIMITS.holdMs);
+        press = { id: e.pointerId, x: e.clientX, y: e.clientY, timer };
+      },
+      { passive: true }
+    );
+    bar.addEventListener(
+      "pointermove",
+      (e) => {
+        if (!press || e.pointerId !== press.id) {
+          return;
+        }
+        const moved = pressDistance(press.x, press.y, e.clientX, e.clientY);
+        if (tabPressVerdict({ heldMs: 0, movedPx: moved }, TAB_PRESS_LIMITS) === "abandon") {
+          cancel();
+        }
+      },
+      { passive: true }
+    );
+    for (const done of ["pointerup", "pointercancel", "pointerleave"]) {
+      bar.addEventListener(done, cancel, { passive: true });
+    }
   }
   /** Owns inline rename on the stable bar rather than on an individual button.
    *  Activating an inactive tab rebuilds the buttons synchronously on the first
@@ -13895,6 +13975,9 @@ function reorderSessionTab(from, to) {
 function surfaceTabError(e) {
   const msg = errorText(e);
   console.error("af-web: operation failed:", msg);
+  showTransientNotice(msg);
+}
+function showTransientNotice(msg) {
   if (tabErrorTimer !== null) {
     window.clearTimeout(tabErrorTimer);
   }
@@ -13903,6 +13986,9 @@ function surfaceTabError(e) {
     tabErrorTimer = null;
     store.set({ tabError: null });
   }, TAB_ERROR_MS);
+}
+function surfaceNotice(message) {
+  showTransientNotice(message);
 }
 function clearTabError() {
   if (tabErrorTimer !== null) {
@@ -14177,6 +14263,7 @@ var actions = {
   closeTab: closeSessionTab,
   renameTab: renameSessionTab,
   reorderTab: reorderSessionTab,
+  notice: surfaceNotice,
   switchView,
   setConfigValue: applyConfigValue,
   openConfigAssistant: doOpenConfigAssistant,
