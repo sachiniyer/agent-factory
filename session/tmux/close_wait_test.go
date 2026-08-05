@@ -207,8 +207,21 @@ func TestCloseAndWaitForPaneExit_QueriesPaneBeforeKill(t *testing.T) {
 // TestCloseAndWaitForPaneExit_SessionGone: when the pane PID cannot be
 // queried (session already dead), the method must skip the wait and still
 // perform the Close teardown.
+//
+// The fixture states the case in the shape tmux actually produces, which matters
+// since #2962 made the destructive path distinguish a session that is GONE from a
+// pane list it could not READ. Measured against tmux 3.4 for a missing session:
+//
+//	display-message -p -t '=X:' '#{pane_pid}'  ->  exit 0, EMPTY output
+//	list-panes -s -t '=X:' -F '#{pane_pid}'    ->  exit 1, "can't find session: X"
+//
+// The bare fmt.Errorf this replaces modelled neither: it is an unclassifiable
+// failure, which now correctly refuses cleanup. That direction is covered by
+// TestCloseAndWaitUnqueryablePaneStillChecksTheProcessSet, so both outcomes stay
+// pinned rather than one being traded for the other.
 func TestCloseAndWaitForPaneExit_SessionGone(t *testing.T) {
 	killed := false
+	sessionName := toTmuxName("close-wait-gone", "")
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "kill-session") {
@@ -217,11 +230,15 @@ func TestCloseAndWaitForPaneExit_SessionGone(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			return nil, fmt.Errorf("can't find session")
+			if strings.Contains(cmd.String(), "list-panes") {
+				return nil, tmuxCantFindSessionError(t, sessionName)
+			}
+			// display-message answers, with nothing: exit 0 and empty output.
+			return nil, nil
 		},
 	}
 
-	session := newTmuxSession(toTmuxName("close-wait-gone", ""), "claude", NewMockPtyFactory(t), cmdExec)
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), cmdExec)
 
 	start := time.Now()
 	state, err := session.CloseAndWaitForPaneExit()
@@ -230,4 +247,20 @@ func TestCloseAndWaitForPaneExit_SessionGone(t *testing.T) {
 		"tmux answered every command, so the pane's fate is established")
 	require.Less(t, time.Since(start), time.Second)
 	require.True(t, killed, "kill-session must still run when the pane PID is unqueryable")
+}
+
+// tmuxCantFindSessionError builds the error tmux really returns for a command
+// against a session that does not exist: an *exec.ExitError with status 1 and
+// the diagnostic on STDERR. A hand-rolled fmt.Errorf has no Stderr, so the
+// classifier that separates "gone" from "unreadable" cannot see it — the whole
+// distinction #2962 turns on.
+func tmuxCantFindSessionError(t *testing.T, sanitizedName string) error {
+	t.Helper()
+	c := exec.Command("sh", "-c", `printf "can't find session: %s\n" "$NAME" >&2; exit 1`)
+	c.Env = append(os.Environ(), "NAME="+sanitizedName)
+	_, err := c.Output()
+	if err == nil {
+		t.Fatal("the fixture must actually fail, or it proves nothing")
+	}
+	return err
 }

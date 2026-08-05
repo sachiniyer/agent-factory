@@ -256,19 +256,29 @@ func TestLocalBackendServicesTabManagement(t *testing.T) {
 	}
 }
 
-// TestLocalBackendKillBestEffort_TmuxFails is a regression test for issue
-// #478. When the tmux teardown fails, Kill must still clear in-memory state
-// and return nil so the caller can finish removing the session from the
-// persisted instances.json. The failure is surfaced as a WarningLog entry
-// (including the instance title) for diagnosis.
+// TestLocalBackendKillBestEffort_TmuxFails is the #478 regression, NARROWED by
+// #2962 to the failures where its reasoning still holds.
+//
+// #478 says a tmux teardown failure must not block deletion: clear the in-memory
+// state, return nil, log a warning. That is right when the kill-session error is
+// the idempotent already-gone no-op (#967) — the session is dead, so nothing can
+// still be writing to the worktree the caller goes on to delete.
+//
+// It is NOT right when the session survived the kill, which is what this test
+// used to assert: `has-session` reported the session still present, and Kill
+// dropped the record and deleted the worktree anyway, over a session that may
+// still have been writing (#2962). That case now refuses; see
+// TestLocalBackendKillRefusesWhenTheSessionSurvivedTheKill.
+//
+// So this fixture models the failure #478 was actually written for.
 func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
-			// has-session reports the session still present, so the failed
-			// kill-session is a GENUINE teardown failure rather than the
-			// idempotent already-gone no-op (#967). Everything else fails.
+			// kill-session fails, and has-session reports the session GONE: the
+			// #967 idempotent no-op. A dead session cannot be writing, so the
+			// teardown has reached its goal and deletion may proceed.
 			if strings.Contains(c.String(), "has-session") {
-				return nil
+				return errors.New("can't find session")
 			}
 			return errors.New("kill failed")
 		},
@@ -284,17 +294,53 @@ func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 		Tabs:    []*Tab{newAgentTab(ts)},
 	}
 
-	buf := captureWarningLog(t)
-
-	require.NoError(t, inst.Kill(), "tmux cleanup failure must not block deletion")
+	require.NoError(t, inst.Kill(), "a kill-session failure over an already-gone session must not block deletion")
 	assert.False(t, inst.Started(), "started flag should be cleared")
 	assert.Nil(t, inst.tmuxLocked(), "tmux pointer should be cleared so a retry is a clean no-op")
 
-	logged := buf.String()
-	assert.Contains(t, logged, "best-effort-tmux", "warning must include instance title for correlation in agent-factory.log")
-	assert.Contains(t, logged, "tmux cleanup for tab")
-
 	require.NoError(t, inst.Kill(), "second kill on a cleared instance must be a no-op")
+}
+
+// TestLocalBackendKillRefusesWhenTheSessionSurvivedTheKill is the #2962 half of
+// the narrowing above, and the behaviour change worth reviewing carefully.
+//
+// BEFORE: kill-session failed, has-session confirmed the session was STILL
+// ALIVE, and Kill returned nil — dropping the record and deleting the worktree
+// out from under a live pane.
+//
+// AFTER: it refuses, and the record and tmux pointer stay intact so a retry has
+// something to work with. This costs a user whose tmux cannot be killed the
+// ability to drop the record until they fix tmux; that is the same trade #1917
+// already made for a kill whose deadline tripped, and it would be incoherent to
+// block when we are merely UNSURE the session died while proceeding when we have
+// positive evidence it did not.
+func TestLocalBackendKillRefusesWhenTheSessionSurvivedTheKill(t *testing.T) {
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			// has-session reports the session still present, so the failed
+			// kill-session is a GENUINE teardown failure rather than the
+			// idempotent already-gone no-op (#967).
+			if strings.Contains(c.String(), "has-session") {
+				return nil
+			}
+			return errors.New("kill failed")
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	ts := tmux.NewTmuxSessionWithDeps("survivor-tmux", "bash", nil, cmdExec)
+	inst := &Instance{
+		Title:   "survivor-tmux",
+		backend: &LocalBackend{},
+		started: true,
+		Tabs:    []*Tab{newAgentTab(ts)},
+	}
+
+	err := inst.Kill()
+	require.Error(t, err, "a session that survived its kill must not license deleting its worktree (#2962)")
+	assert.NotNil(t, inst.tmuxLocked(),
+		"the tmux pointer must survive a refused teardown, or the retry the error asks for has nothing to act on")
 }
 
 // TestLocalBackendKillBestEffort_WorktreeFails covers the issue #478
@@ -379,10 +425,14 @@ func TestLocalBackendKill_RecoversStaleWorktreeDir(t *testing.T) {
 func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
-			// has-session reports present so the failed kill-session is a
-			// genuine teardown failure, not the #967 idempotent no-op.
+			// The session is already GONE, so the failed kill-session is the #967
+			// idempotent no-op and #478's best-effort contract still applies. (A
+			// SURVIVING session now blocks the kill outright — see
+			// TestLocalBackendKillRefusesWhenTheSessionSurvivedTheKill — which
+			// would make this test about tmux rather than about the multi-component
+			// warning it exists to check.)
 			if strings.Contains(c.String(), "has-session") {
-				return nil
+				return errors.New("can't find session")
 			}
 			return errors.New("kill failed")
 		},
@@ -416,9 +466,8 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 	assert.Nil(t, inst.gitWorktree)
 
 	logged := buf.String()
-	assert.Contains(t, logged, "tmux cleanup for tab")
 	assert.Contains(t, logged, "git worktree cleanup failed")
-	assert.Equal(t, 2, strings.Count(logged, `kill "both-fail":`), "title should appear in both component warnings")
+	assert.Contains(t, logged, `kill "both-fail":`, "title should appear in the component warning")
 }
 
 // captureWarningLog redirects log.WarningLog to a buffer for the duration of

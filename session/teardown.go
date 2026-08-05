@@ -210,8 +210,20 @@ func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName s
 	if state != tmux.PaneStateKnown {
 		return stateUnknown, fmt.Errorf("%s %q: tab %q: %w", verb, title, tabName, err)
 	}
-	// tmux ANSWERED. Whatever it said, the session's fate is established, so #478's
-	// best-effort contract holds: log and let the caller drop the record.
+	// Unreachable by construction since #2962: CloseAndWaitForPaneExit returns
+	// KNOWN only after every gate passes, and each gate returns UNKNOWN with the
+	// error. It used to be able to return KNOWN alongside "kill failed, session
+	// still alive", and this branch logged exactly that and let the caller delete
+	// the worktree anyway — which was the #2962 defect, since a live session may
+	// still be writing to it.
+	//
+	// #478's best-effort contract still holds for the tmux failure it was written
+	// for: a kill-session that fails because the session is ALREADY GONE is the
+	// idempotent no-op (#967), reports no error, and drops the record as before.
+	// What no longer qualifies is a kill that failed with the session still alive.
+	//
+	// Kept rather than deleted so that if the contract moves again the failure is
+	// visible instead of silent.
 	if err != nil {
 		log.WarningLog.Printf("%s %q: tmux cleanup for tab %q failed: %v", verb, title, tabName, err)
 	}

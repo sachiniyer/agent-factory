@@ -83,6 +83,14 @@ func nameKeyedTmuxExec() (cmd_test.MockCmdExec, func(sessionName string)) {
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so the
+			// generic stub is not neutral there: it reads as a pane whose pid is
+			// unreadable, i.e. a process set that could not be established, which
+			// since #2962 correctly refuses cleanup. These mock sessions have no real
+			// panes, so the truthful answer is an empty list.
+			if strings.Contains(cmd.String(), "list-panes") {
+				return nil, nil
+			}
 			return []byte("content"), nil
 		},
 	}

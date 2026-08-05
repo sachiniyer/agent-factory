@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -186,8 +187,18 @@ func TestRefreshStatuses_DeadNilMonitorDoesNotPanic(t *testing.T) {
 	// vanished session; the nil monitor would panic HasUpdated before the fix
 	// regardless.
 	mockExec := cmd_test.MockCmdExec{
-		RunFunc:    func(*exec.Cmd) error { return errSessionAbsent },
-		OutputFunc: func(*exec.Cmd) ([]byte, error) { return []byte("content"), nil },
+		RunFunc: func(*exec.Cmd) error { return errSessionAbsent },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so the
+			// generic stub is not neutral there: it reads as a pane whose pid is
+			// unreadable, i.e. a process set that could not be established, which
+			// since #2962 correctly refuses cleanup. These mock sessions have no real
+			// panes, so the truthful answer is an empty list.
+			if strings.Contains(cmd.String(), "list-panes") {
+				return nil, nil
+			}
+			return []byte("content"), nil
+		},
 	}
 	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_999_nil_monitor", "claude", tmux.MakePtyFactory(), mockExec)
 	backend := nilMonitorBackend{FakeBackend: session.NewFakeBackend(), ts: ts}

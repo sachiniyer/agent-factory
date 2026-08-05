@@ -79,6 +79,16 @@ func nameKeyedExec(alive map[string]bool) cmd_test.MockCmdExec {
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so a
+			// generic "content" stub is not a neutral default — it reads as a pane
+			// whose pid is unparseable, i.e. a process set that could not be
+			// established, which since #2962 correctly refuses worktree cleanup.
+			// These sessions have no real panes, so the truthful answer is an empty
+			// list. Everything else keeps the generic stub (capture-pane content and
+			// friends assert on it).
+			if strings.Contains(cmd.String(), "list-panes") {
+				return nil, nil
+			}
 			return []byte("content"), nil
 		},
 	}
