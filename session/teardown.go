@@ -171,6 +171,28 @@ var ErrWorkspaceStateUnknown = errors.New("the worktree action was cut off by it
 // It lives here, beside the sentinels, because the teardown choke points are their
 // only producers: teardownTabs raises them, ghostCleanup forwards them, and no
 // other code constructs them. One producer, one predicate, one place to change.
+// ErrCleanupHandleUnusable marks a retained cleanup handle that CANNOT be made
+// to work by retrying it. It is not "the workspace state is unknown" — that is
+// ErrWorkspaceStateUnknown, which is retried precisely because a later attempt
+// may learn more. This is the narrower claim that a later attempt is the same
+// attempt: the handle itself is missing something no retry can supply.
+//
+// The case it was added for is a pre-#2704 SSH kill tombstone (#2737). Those
+// records carry no host-key posture, so they restore as strict; when the host was
+// learned under the af-owned accept-new store, the reconnect can never verify it
+// and the cleanup retried once per second forever. Wrapping that failure lets the
+// daemon retire the record instead of looping on it.
+//
+// It composes with ErrWorkspaceStateUnknown rather than replacing it: the
+// workspace state IS still unknown, so the record must not be deleted — it is
+// only the RETRYING that stops.
+var ErrCleanupHandleUnusable = errors.New("this cleanup handle cannot be completed by retrying it")
+
+// CleanupHandleUnusable reports whether err came from a handle no retry can fix.
+func CleanupHandleUnusable(err error) bool {
+	return errors.Is(err, ErrCleanupHandleUnusable)
+}
+
 func TeardownStateUnknown(err error) bool {
 	return errors.Is(err, ErrPaneMayBeLive) || errors.Is(err, ErrWorkspaceStateUnknown)
 }

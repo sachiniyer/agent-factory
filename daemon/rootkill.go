@@ -101,6 +101,41 @@ func (m *Manager) persistKillTombstone(repoID string, instance *session.Instance
 	return nil
 }
 
+// noteKillRetryFailure books a failed tombstone cleanup against its retry
+// schedule and reports it at the right volume.
+//
+// A cause that may heal backs off and keeps trying, so an outage that ends still
+// recovers without a daemon restart (#1122). A cause that cannot heal by
+// retrying — a cleanup handle missing something no attempt can supply — is
+// retired: it is reported ONCE with what the operator can do, and then left
+// alone instead of relitigating it every poll (#2737). The record is retained
+// either way; retiring stops the retrying, not the retention.
+func (m *Manager) noteKillRetryFailure(key, title string, err error) {
+	m.mu.Lock()
+	retry := m.killRetries[key]
+	if retry == nil {
+		retry = &session.CleanupRetry{}
+		m.killRetries[key] = retry
+	}
+	escalate := retry.RecordFailure(nowFunc(), err)
+	retired, failures := retry.Retired(), retry.Failures()
+	m.mu.Unlock()
+
+	switch {
+	case retired && escalate:
+		log.ErrorLog.Printf("finishing kill of %q: this cleanup cannot be completed by retrying it, so af has stopped trying "+
+			"after %d attempt(s). The record is KEPT so nothing is silently orphaned — resolve the cause and restart the daemon, "+
+			"or kill the session again to retry: %v", title, failures, err)
+	case retired:
+		// Already reported; stay silent rather than repeat it.
+	case escalate:
+		log.ErrorLog.Printf("finishing kill of %q failed %d consecutive times; the cause looks persistent — "+
+			"retrying every %s: %v", title, failures, session.CleanupRetrySettledInterval(), err)
+	default:
+		log.WarningLog.Printf("finishing kill of %q: not deleting the record yet (retrying): %v", title, err)
+	}
+}
+
 // finishUserKill completes the teardown of a session whose record carries the
 // kill-intent tombstone (#1108): the previous KillSession was interrupted by a
 // daemon crash or a teardown error after the tombstone write. Mirrors the tail
@@ -114,6 +149,14 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	key := daemonInstanceKey(repoID, instance.Title)
 	m.mu.Lock()
 	if _, busy := m.killsInFlight[key]; busy {
+		m.mu.Unlock()
+		return
+	}
+	// Retrying a retained tombstone is paced, and a tombstone that cannot be
+	// completed by retrying is not retried at all. This used to run on every
+	// status poll — once a second, forever, for a cause that could not heal
+	// (#2737).
+	if retry := m.killRetries[key]; retry != nil && !retry.Due(nowFunc()) {
 		m.mu.Unlock()
 		return
 	}
@@ -172,13 +215,16 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// workspace. This loop IS the retry.
 	deleted, err := m.deleteSessionRecord(repoID, instance.Title, instance.ID, teardownErr)
 	if err != nil {
-		log.WarningLog.Printf("finishing kill of %q: not deleting the record yet (will retry next poll): %v", instance.Title, err)
+		m.noteKillRetryFailure(key, instance.Title, err)
 		return
 	}
 	if !deleted {
 		log.InfoLog.Printf("finishing kill of %q skipped storage delete: current record has a different instance identity", instance.Title)
 		return
 	}
+	m.mu.Lock()
+	delete(m.killRetries, key)
+	m.mu.Unlock()
 	removed := false
 	m.mu.Lock()
 	if m.instances[key] == instance {

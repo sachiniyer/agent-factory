@@ -212,6 +212,12 @@ type Manager struct {
 	// second concurrent teardown, duplicate operations are rejected, and project
 	// deletion can see a restore claim before the row changes lifecycle state.
 	killsInFlight map[string]struct{}
+
+	// killRetries paces finishUserKill's retry of a retained tombstone, keyed by
+	// daemon instance key. Without it the poll retried every second forever
+	// (#2737). In memory on purpose: a restart re-attempts a retired record once,
+	// which is right when an operator may have fixed the cause in between.
+	killRetries map[string]*session.CleanupRetry
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
@@ -393,6 +399,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		rootKilledAt:           make(map[string]time.Time),
 		deletedRootRepos:       make(map[string]struct{}),
 		killsInFlight:          make(map[string]struct{}),
+		killRetries:            make(map[string]*session.CleanupRetry),
 		restoresInFlight:       make(map[string]struct{}),
 		lostRestoreStates:      make(map[string]*lostRestoreState),
 		limitResumeStates:      make(map[string]*limitResumeState),

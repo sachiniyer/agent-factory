@@ -65,6 +65,18 @@ func (p *sshProvisioner) reap() error {
 		if err := p.dialForReap(); err != nil {
 			reapErr := fmt.Errorf("%w: backend=ssh: reconnecting to %s to remove remote session dir %q failed: %w",
 				ErrWorkspaceStateUnknown, p.cfg.Host, p.sessionDir, err)
+			if p.hostKeyVerification == "" {
+				// A pre-#2704 tombstone recorded no host-key posture, so it restored
+				// as strict. If the host was only ever learned in the af-owned
+				// accept-new store, this reconnect cannot verify it and no later
+				// attempt will differ — the missing field is not coming back. Mark it
+				// unusable so the daemon retires the record instead of retrying it
+				// once per poll forever (#2737). The workspace state is still unknown,
+				// so the record is retained either way; only the retrying stops.
+				reapErr = fmt.Errorf("%w: %w (this tombstone predates #2704 and recorded no host-key posture, "+
+					"so it is verified strictly; add %s to your known_hosts to let the cleanup finish)",
+					ErrCleanupHandleUnusable, reapErr, p.cfg.Host)
+			}
 			log.WarningLog.Printf("%v", reapErr)
 			return reapErr
 		}
