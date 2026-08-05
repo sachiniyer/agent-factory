@@ -24,7 +24,7 @@ import { h } from "./dom.js";
 import { asForm, field, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
 import { icon } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
-import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron } from "./schedule.js";
+import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron, previewIsRedundant } from "./schedule.js";
 import type { TaskData } from "./types.js";
 
 /** The add-task form's inputs (a subset of task.Task the browser fills; the daemon
@@ -572,8 +572,12 @@ class SchedulePicker {
     }
 
     const s = this.schedule();
+    // Keep the values current even while hidden, so unhiding never flashes a
+    // stale preview from the previously selected type.
     this.humanLine.textContent = scheduleDescribe(s);
     this.cronOut.value = scheduleCron(s);
+    // Custom echoes the field the user is typing into, three times over (#2812).
+    this.previewRow.hidden = previewIsRedundant(s);
   }
 }
 

@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron, describe, parseCron } from "./schedule.js";
+import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron, describe, parseCron, previewIsRedundant } from "./schedule.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // web/src → repo-root/schedule/testdata/vectors.json (single source of truth,
@@ -190,4 +190,43 @@ test("weekdays are deduped and ordered Sunday-first regardless of input order", 
   const s: Schedule = { type: "weekly", hour: 9, minute: 0, weekdays: [3, 0, 1, 3] };
   assert.equal(cron(s), "0 9 * * 0,1,3");
   assert.equal(describe(s), "Every week on Sun, Mon, Wed at 9:00 AM");
+});
+
+/**
+ * #2812: with Custom selected, the modal showed the same expression three times
+ * — the field the user types into, the plain-English line ("Custom: 0 0 1 1 *"),
+ * and the read-only "Generated cron". For every preset the pair is the point:
+ * describe() is English and cron() is the generated expression, so the two
+ * differ and reading them together is what lets a user trust what gets saved.
+ * For Custom they collapse onto the input above.
+ *
+ * Derived from the VALUES rather than testing `type === "custom"`, so a future
+ * schedule kind whose preview collapses the same way is covered without another
+ * edit here — and so a change that makes Custom's describe() say something real
+ * turns the preview back on by itself.
+ */
+test("previewIsRedundant hides only a preview that echoes its own input", () => {
+  assert.equal(previewIsRedundant({ type: "custom", raw: "0 0 1 1 *" }), true);
+  assert.equal(previewIsRedundant({ type: "custom", raw: "  0 0 1 1 *  " }), true,
+    "surrounding whitespace does not make an echo informative");
+  assert.equal(previewIsRedundant({ type: "custom", raw: "0 0 1" }), true,
+    "a half-typed expression is still an echo of the field above");
+  assert.equal(previewIsRedundant({ type: "custom", raw: "" }), true,
+    "an empty Custom field has nothing to preview at all");
+  assert.equal(previewIsRedundant({ type: "custom" }), true);
+});
+
+test("previewIsRedundant keeps every preset's preview, which is not an echo", () => {
+  const presets: Schedule[] = [
+    { type: "everyNMinutes", interval: 15 },
+    { type: "everyNHours", interval: 2 },
+    { type: "hourly", minute: 30 },
+    { type: "daily", hour: 9, minute: 0 },
+    { type: "weekly", hour: 9, minute: 0, weekdays: [1, 3] },
+    { type: "monthly", hour: 9, minute: 0, dayOfMonth: 1 },
+  ];
+  for (const s of presets) {
+    assert.equal(previewIsRedundant(s), false, `${s.type} preview carries plain English the inputs do not`);
+    assert.notEqual(describe(s), cron(s), `${s.type}: the two halves must differ for the pairing to be worth showing`);
+  }
 });

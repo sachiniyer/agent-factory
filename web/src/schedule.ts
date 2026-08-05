@@ -123,6 +123,32 @@ export function describe(s: Schedule): string {
 }
 
 /**
+ * Reports whether the schedule preview — describe() over cron() — would merely
+ * repeat an expression the form already shows in an editable field (#2812).
+ *
+ * For every preset the pair is the whole point: describe() is plain English and
+ * cron() is the generated expression, so the two differ, and reading them
+ * together is what lets a user trust what is about to be saved. For Custom they
+ * collapse: the user typed the cron, cron() hands it back verbatim and
+ * describe() prefixes it with "Custom: ", so the modal showed one expression
+ * three times.
+ *
+ * Derived from the VALUES rather than testing `type === "custom"`. A schedule
+ * kind added later whose preview collapses the same way is covered with no edit
+ * here, and — the direction that actually matters — if Custom's preview ever
+ * gains a fact the input cannot carry (the TUI shows the next fire time, #2596),
+ * this turns the row back on by itself instead of hiding the new information.
+ */
+export function previewIsRedundant(s: Schedule): boolean {
+  const generated = cron(s).trim();
+  // Nothing to preview at all: an empty Custom field generates no expression.
+  if (generated === "") {
+    return true;
+  }
+  return generated === (s.raw ?? "").trim() && describe(s).trim().endsWith(generated);
+}
+
+/**
  * Best-effort maps a 5-field cron expression back to a structured Schedule. It
  * recognizes exactly the shapes cron() emits — so a task saved by the picker
  * re-opens as its matching preset — plus the Sunday day-of-week alias (7).

@@ -11041,6 +11041,13 @@ function describe(s) {
       return `Custom: ${s.raw ?? ""}`;
   }
 }
+function previewIsRedundant(s) {
+  const generated = cron(s).trim();
+  if (generated === "") {
+    return true;
+  }
+  return generated === (s.raw ?? "").trim() && describe(s).trim().endsWith(generated);
+}
 function parseCron(expr) {
   const f = fields(expr);
   if (f.length !== 5) {
@@ -11601,6 +11608,7 @@ var SchedulePicker = class {
     const s = this.schedule();
     this.humanLine.textContent = describe(s);
     this.cronOut.value = cron(s);
+    this.previewRow.hidden = previewIsRedundant(s);
   }
 };
 function pad22(n) {
