@@ -258,6 +258,43 @@ func TestExecutableLock_NotWidenedWhenAnACLMakesTheModeBitsAmbiguous(t *testing.
 		"an ACL makes the group bits a mask, so they no longer describe who may replace the binary and must not decide who gets the lock")
 }
 
+// A DEFAULT ACL is the inheritance case, and it is invisible to a probe that
+// looks only at the directory's own access ACL.
+//
+// A directory can carry a `system.posix_acl_default` named-user entry and no
+// access ACL at all: the mode bits then look plainly group-writable. The lock
+// created inside it INHERITS that entry, with the mask intersected down by the
+// 0600 create mode, so the entry is present but inert — and a later Chmod(0660)
+// does not touch the entry, it widens the MASK, which switches the entry on. A
+// named user who can traverse but not write the directory can then open a lock
+// that BLOCKS, without ever being able to replace the binary.
+func TestExecutableLock_NotWidenedWhenTheLockInheritsADefaultACL(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	dir := filepath.Dir(executable)
+
+	if _, err := exec.LookPath("setfacl"); err != nil {
+		t.Skip("setfacl is unavailable, so a real default ACL cannot be created here")
+	}
+	// -d is the point: a DEFAULT entry only, leaving the directory with no access
+	// ACL of its own.
+	if out, err := exec.Command("setfacl", "-d", "-m", "u:root:rwx", dir).CombinedOutput(); err != nil {
+		t.Skipf("this filesystem does not support POSIX ACLs: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if _, err := unix.Getxattr(dir, "system.posix_acl_default", nil); err != nil {
+		t.Skipf("no default ACL landed on the fixture: %v", err)
+	}
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o770), info.Mode().Perm(),
+		"precondition: the mode bits must still look group-writable, or the test proves nothing about the inherited case")
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	perm, _ := lockFileStat(t, executable)
+	require.Equal(t, os.FileMode(journalFileMode), perm,
+		"widening the mode widens the inherited ACL's mask, turning on entries for principals who cannot replace the binary but can hold the blocking lock")
+}
+
 // A NONBLOCKING caller that hits the transient 0600-to-0660 window must be told
 // BUSY, not denied.
 //

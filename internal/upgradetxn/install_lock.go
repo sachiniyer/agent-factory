@@ -323,6 +323,15 @@ func alignLockWithDirectoryWriters(lock *os.File, dir string) {
 		return
 	}
 
+	// An ACL the lock INHERITED from the directory's default is inert only while
+	// the mask stays narrow. Widening the mode widens the mask, which switches the
+	// inherited entries on — so this file's own ACL has to be consulted, not just
+	// the directory's. Checked before either branch, because narrowing an
+	// ACL-bearing file rewrites its mask too.
+	if lockHasInheritedACL(lock) {
+		return
+	}
+
 	gid, shared := directoryWriterGroup(dir)
 	if !shared {
 		if info.Mode().Perm() != journalFileMode {
@@ -423,7 +432,32 @@ func foreignTransactionOver(executable, selfID string) (string, error) {
 // reports false: their ACL models differ, and inventing a cross-platform answer
 // here would be guessing rather than probing.
 func hasExtendedACL(path string) bool {
-	// A zero-length read: only the error matters, never the value.
-	_, err := unix.Getxattr(path, "system.posix_acl_access", nil)
+	// BOTH ACLs, and the default one is not optional. A directory can carry only
+	// a system.posix_acl_default named-user entry and no access ACL of its own, so
+	// probing the access ACL alone reports "unambiguous" for a directory whose
+	// ACL reaches the lock by INHERITANCE rather than by being present here.
+	for _, attr := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
+		// A zero-length read: only the error matters, never the value.
+		if _, err := unix.Getxattr(path, attr, nil); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// lockHasInheritedACL reports whether the OPENED lock carries an access ACL of
+// its own, read from the descriptor rather than the path.
+//
+// A file created in a directory with a default ACL inherits it, with the mask
+// intersected down by the 0600 create mode — so the inherited entries are
+// present but inert. A later Chmod(0660) does not touch those entries; it widens
+// the MASK, which switches them on. The named user in an inherited entry can
+// then open a lock that BLOCKS, without necessarily being able to write the
+// directory or replace the binary at all.
+//
+// Checking the descriptor closes that regardless of how the ACL arrived, and
+// costs no extra TOCTOU: it is the same object about to be chmod'ed.
+func lockHasInheritedACL(lock *os.File) bool {
+	_, err := unix.Fgetxattr(int(lock.Fd()), "system.posix_acl_access", nil)
 	return err == nil
 }
