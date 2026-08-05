@@ -228,6 +228,22 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		}
 		return nil, err
 	}
+	// The tree root last, for the same post-order reason as every directory inside
+	// it: writing the children bumped it. rename(2) carries the root's timestamps
+	// like any other, so leaving them at the copy time would be a divergence the
+	// fidelity guard does not probe only because it probes entries INSIDE the root
+	// (#2919).
+	var sourceRootStat unix.Stat_t
+	if err := unix.Fstat(int(source.Fd()), &sourceRootStat); err != nil {
+		copied.close()
+		return nil, fmt.Errorf(
+			"cannot move worktree across filesystems: failed to read the source root timestamps for %s: %w", src, err,
+		)
+	}
+	if err := preserveSourceTimes(int(destParent.Fd()), destName, &sourceRootStat, dest, "directory"); err != nil {
+		copied.close()
+		return nil, err
+	}
 	return copied, nil
 }
 
@@ -331,6 +347,18 @@ func copyDirectoryLevel(
 			directory.entries = append(directory.entries, entry)
 		}
 		if err != nil {
+			return err
+		}
+		// Post-order for a directory: copyDirectoryEntry above has already written
+		// every child, and each of those writes bumped this entry's mtime. Stamping
+		// before the recursion would be immediately undone (#2919).
+		kind := "file"
+		if inspected.fileType == unix.S_IFDIR {
+			kind = "directory"
+		} else if inspected.fileType == unix.S_IFLNK {
+			kind = "symlink"
+		}
+		if err := preserveSourceTimes(int(destination.Fd()), name, stat, childDestinationPath, kind); err != nil {
 			return err
 		}
 	}
@@ -548,6 +576,43 @@ func preserveSourceMode(destinationFD int, sourceMode os.FileMode, destinationPa
 		return fmt.Errorf(
 			"cannot move worktree across filesystems: failed to preserve mode %#o on destination %s %s: %w",
 			sourceMode.Perm(), kind, destinationPath, err,
+		)
+	}
+	return nil
+}
+
+// preserveSourceTimes stamps the destination entry with the source's access and
+// modification times (#2919).
+//
+// Anchored to the parent DIRECTORY descriptor plus a name, not to a path and not
+// to the entry's own descriptor. Both halves of that are deliberate:
+//
+//   - parent-fd + name keeps the descriptor-anchored discipline the rest of this
+//     copier uses, so a worktree process cannot swap what the name resolves to
+//     between creating the node and stamping it (#2708/#2714);
+//   - AT_SYMLINK_NOFOLLOW stamps a SYMLINK itself rather than its target, which
+//     matters because the target may live outside the tree being archived — a
+//     copier that followed here would mutate a file it was never asked to touch.
+//
+// UtimesNanoAt with a name is also what avoids a platform split: the
+// descriptor-only spelling needs AT_EMPTY_PATH, which is Linux-only.
+//
+// #2919 expected the timestamp READ to need a Linux/Darwin split too, on the
+// grounds that Darwin spells the stat fields Atimespec/Mtimespec. It does not, at
+// the x/sys this repo pins: golang.org/x/sys@v0.47.0's ztypes_darwin_arm64.go
+// declares Atim/Mtim exactly as Linux does. Verified by cross-compiling —
+// GOOS=darwin caught the Atimespec spelling as undefined, which is how the split
+// turned out to be unnecessary rather than merely untested.
+//
+// Ordering is the caller's job. A directory's mtime must be stamped only after
+// its children exist, since creating them updates it; copyDirectoryLevel calls
+// this after the recursive copy of an entry returns, which is post-order.
+func preserveSourceTimes(parentFD int, name string, stat *unix.Stat_t, destinationPath, kind string) error {
+	times := []unix.Timespec{stat.Atim, stat.Mtim}
+	if err := unix.UtimesNanoAt(parentFD, name, times, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to preserve timestamps on destination %s %s: %w",
+			kind, destinationPath, err,
 		)
 	}
 	return nil
