@@ -41,10 +41,18 @@ func TestMoveDirCrossDevice_FarFutureMtimeIsNotWrapped(t *testing.T) {
 	if err := unix.UtimesNanoAt(unix.AT_FDCWD, probe, []unix.Timespec{stamp, stamp}, 0); err != nil {
 		t.Skipf("this filesystem cannot store a 2300 mtime: %v", err)
 	}
+	// Read back, and SKIP rather than fail if the filesystem did not keep it.
+	// utimensat reports success on APFS and then clamps to 9223372036 — which is
+	// exactly UnixNano's own ceiling (2262-04-11), so on macOS the wrap this test
+	// is about is not reachable: the filesystem cannot hold a value outside the
+	// range that wraps. Checking the WRITE succeeded is not enough; only the
+	// read-back says whether the fixture carries what the test needs.
 	sourceInfo, err := os.Lstat(probe)
 	require.NoError(t, err)
-	require.Equal(t, int64(farFutureSec), sourceInfo.ModTime().Unix(),
-		"precondition: the fixture really carries the far-future stamp")
+	if sourceInfo.ModTime().Unix() != farFutureSec {
+		t.Skipf("this filesystem clamped the probe mtime to %d, so an out-of-UnixNano-range value cannot be stored here",
+			sourceInfo.ModTime().Unix())
+	}
 
 	original := renamePath
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
