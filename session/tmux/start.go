@@ -39,11 +39,9 @@ func (t *TmuxSession) Start(workDir string) error {
 	program := t.programCmd()
 	wrappedProgram, launchEnv, importNames, envErr := t.launchEnvironment(program)
 	if envErr != nil {
-		// Nothing has run new-session, and the probe above proved the name absent —
-		// so no pane exists behind it and a teardown need not gate on liveness
-		// (#2985). Reading the environment is what fails here when tmux is
-		// unavailable, and it is read-only.
-		t.setProvenNoPane(true)
+		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
+		// can exist behind it and a teardown need not gate on liveness (#2985).
+		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
@@ -52,7 +50,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	args, envErr = t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
-		t.setProvenNoPane(true)
+		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
 	}
 	cmd, systemdScoped := newTmuxServerCommand(args...)

@@ -25,16 +25,34 @@ import (
 // by setting a flag, so the test cannot pass on a fact production never records.
 func neverSpawnedSession(t *testing.T, name string) *tmux.TmuxSession {
 	t.Helper()
+	// tmux's REAL absence answer: exit 1 carrying "can't find session". A bare exit
+	// 1 is not it — policy and wrapper failures share that status while the session
+	// is alive — and the exemption's strict re-probe rejects the ambiguous form.
+	absent, err := exec.Command("sh", "-c",
+		fmt.Sprintf("printf \"can't find session: %s\\n\" >&2; exit 1", name)).Output()
+	_ = absent
+	if err == nil {
+		t.Fatal("fixture: expected the shell to exit 1")
+	}
+	answersAbsent := func(c *exec.Cmd) bool {
+		for _, a := range c.Args {
+			if a == "has-session" {
+				return true
+			}
+		}
+		return false
+	}
 	execu := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
-			for _, a := range c.Args {
-				if a == "has-session" {
-					return fmt.Errorf("exit status 1") // answered: the name is free
-				}
+			if answersAbsent(c) {
+				return err
 			}
 			return fmt.Errorf("tmux is unavailable")
 		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if answersAbsent(c) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("permission denied talking to the tmux server")
 		},
 	}

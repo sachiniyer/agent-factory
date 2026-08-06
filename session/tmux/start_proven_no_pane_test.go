@@ -21,12 +21,26 @@ import (
 // sides: the proof is claimed where absence was established, and refused
 // everywhere else.
 
-// answeredAbsent is a has-session answer of "no such session" — the positive
-// absence Start requires before it will create anything.
-func answeredAbsent(c *exec.Cmd) (bool, error) {
+// determinateAbsence is tmux's real "no such session" answer: exit 1 carrying the
+// exact diagnostic. A bare exit 1 is NOT this — wrapper and policy failures share
+// that status while the session is very much alive — and the strict probe the
+// exemption rests on rejects it, which is the whole point of building the fixture
+// out of a real ExitError instead of a formatted string.
+func determinateAbsence(t *testing.T, name string) error {
+	t.Helper()
+	_, err := exec.Command("sh", "-c", fmt.Sprintf("printf \"can't find session: %s\\n\" >&2; exit 1", name)).Output()
+	if err == nil {
+		t.Fatal("fixture: expected the shell to exit 1")
+	}
+	return err
+}
+
+// answeredAbsent routes has-session to a determinate absence answer.
+func answeredAbsent(t *testing.T, c *exec.Cmd, name string) (bool, error) {
+	t.Helper()
 	for _, a := range c.Args {
 		if a == "has-session" {
-			return true, fmt.Errorf("exit status 1")
+			return true, determinateAbsence(t, name)
 		}
 	}
 	return false, nil
@@ -45,14 +59,16 @@ func answeredAbsent(c *exec.Cmd) (bool, error) {
 func TestStart_EnvironmentFailureBeforeSpawn_ProvesNoPane(t *testing.T) {
 	execu := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
-			if absent, err := answeredAbsent(c); absent {
+			if absent, err := answeredAbsent(t, c, "af_2985_env"); absent {
 				return err
 			}
 			return fmt.Errorf("tmux is unavailable")
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			if len(c.Args) >= 2 && c.Args[1] == "show-options" {
-				return nil, fmt.Errorf("permission denied talking to the tmux server")
+			// has-session must answer here too: the exemption re-probes STRICTLY
+			// before it will claim anything, and that probe reads Output.
+			if absent, err := answeredAbsent(t, c, "af_2985_env"); absent {
+				return nil, err
 			}
 			return nil, fmt.Errorf("permission denied talking to the tmux server")
 		},
@@ -130,7 +146,7 @@ func TestStart_SpawnSucceededThenFailed_ProvesNothing(t *testing.T) {
 
 	execu := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
-			if absent, err := answeredAbsent(c); absent {
+			if absent, err := answeredAbsent(t, c, "af_2985_spawned"); absent {
 				return err
 			}
 			time.Sleep(2 * time.Second)
@@ -153,5 +169,33 @@ func TestStart_SpawnSucceededThenFailed_ProvesNothing(t *testing.T) {
 		t.Fatal("new-session RAN — the spawn succeeded and only the readiness poll failed — so a pane " +
 			"may be live. Claiming no pane here is exactly the unsound predicate that would delete a " +
 			"live agent's worktree (#2985 acceptance criterion 2)")
+	}
+}
+
+// TestStart_ProbeDeniedNotAbsent_ProvesNothing is the P1 on this change: the gate
+// at the top of Start reads probeSession, which collapses EVERY non-timeout
+// execution failure into absence. A wrapper or socket policy that denies access
+// while the server and its pane are alive therefore looks like a free name — and
+// latching on that would skip the teardown's liveness gate and delete the worktree
+// under a running agent.
+func TestStart_ProbeDeniedNotAbsent_ProvesNothing(t *testing.T) {
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error {
+			// Exit 1 with no "can't find session" diagnostic: the shape a policy
+			// denial takes, and indistinguishable from absence to the lossy probe.
+			return fmt.Errorf("exit status 1")
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, fmt.Errorf("permission denied talking to the tmux server")
+		},
+	}
+	session := NewTmuxSessionFromSanitizedNameWithDeps("af_2985_denied", "claude", NewMockPtyFactory(t), execu)
+
+	if err := session.Start(t.TempDir()); err == nil {
+		t.Fatal("Start must fail when the environment cannot be read")
+	}
+	if session.ProvenNoPane() {
+		t.Fatal("a denied has-session is not an absent one: the lossy probe reports both the same way, " +
+			"so claiming no pane here would let a teardown delete a live agent's worktree")
 	}
 }

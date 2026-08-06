@@ -355,6 +355,29 @@ func (t *TmuxSession) ProvenNoPane() bool {
 	return t.provenNoPane
 }
 
+// proveNoPaneIfDeterminatelyAbsent records "nothing is running behind this name",
+// but ONLY on tmux's determinate answer that the session is not there.
+//
+// The gate at the top of Start is not that answer. probeSession collapses every
+// non-timeout execution failure into absence — its own comment says it "has always
+// conflated" the two — so a wrapper or socket policy that denies access while the
+// server and its pane are very much alive reads as "the name is free". Latching on
+// that would let a teardown skip the liveness gate and delete or move the worktree
+// out from under a live agent, which is the exact loss the gate exists to prevent.
+//
+// probeSessionStrict is the package's existing answer to that distinction: only
+// tmux's exact "can't find session" diagnostic, or a definitive no-server answer,
+// counts as determinate. Anything else stays unknown, and unknown keeps the gate —
+// which means a create that fails while tmux is unreachable in an indeterminate way
+// still leaves a tombstone. That is the correct trade: a tombstone is recoverable
+// by the user, a worktree deleted under a running agent is not.
+func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() {
+	exists, known, _ := probeSessionStrict(t.cmdExec, t.sanitizedName)
+	if known && !exists {
+		t.setProvenNoPane(true)
+	}
+}
+
 func (t *TmuxSession) setProvenNoPane(proven bool) {
 	t.provenMu.Lock()
 	t.provenNoPane = proven
