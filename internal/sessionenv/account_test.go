@@ -1,0 +1,150 @@
+package sessionenv
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func envValue(env []string, name string) (string, bool) {
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == name {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// THE CONSTRAINT (#2983). A session must receive exactly ONE account's
+// credential and have the others actively removed.
+//
+// This is written as an EXCLUSION test on purpose. The naive implementation —
+// delivering the account through the session-env allowlist — passes every
+// presence check: the credential is there, the agent authenticates, the flag was
+// accepted. What it does not do is remove the ambient identity, and for both of
+// these CLIs an ambient API key takes precedence over the config directory. So
+// "the session has a credential" is exactly the assertion that cannot tell the
+// working implementation from the broken one.
+func TestApplyAccount_RemovesTheAmbientIdentity(t *testing.T) {
+	ambient := []string{
+		"PATH=/usr/bin",
+		"ANTHROPIC_API_KEY=sk-ambient-should-not-survive",
+		"ANTHROPIC_AUTH_TOKEN=tok-ambient-should-not-survive",
+		"CLAUDE_CODE_OAUTH_TOKEN=oauth-ambient-should-not-survive",
+		"CLAUDE_CONFIG_DIR=/home/op/.claude",
+		"ANTHROPIC_BASE_URL=https://proxy.internal",
+	}
+
+	scoped, err := ApplyAccount(ambient, Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
+	require.NoError(t, err)
+
+	for _, name := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"} {
+		_, present := envValue(scoped, name)
+		require.False(t, present,
+			"%s survived into an account-scoped session: an ambient key outranks the config directory, so the account selection would be silently ignored", name)
+	}
+
+	dir, ok := envValue(scoped, "CLAUDE_CONFIG_DIR")
+	require.True(t, ok, "the account's credential root must be injected")
+	require.Equal(t, "/afhome/accounts/claude/work", dir,
+		"the session must get the SELECTED account's directory, not the daemon's ambient one")
+
+	// The operator's deployment config is not an identity and must survive, or
+	// scoping an account would break a proxied install.
+	base, ok := envValue(scoped, "ANTHROPIC_BASE_URL")
+	require.True(t, ok)
+	require.Equal(t, "https://proxy.internal", base)
+	path, ok := envValue(scoped, "PATH")
+	require.True(t, ok)
+	require.Equal(t, "/usr/bin", path)
+}
+
+// The ambient config dir must be REPLACED, not merely joined. If both survived,
+// which one wins is the agent's parsing order rather than af's decision.
+func TestApplyAccount_ReplacesRatherThanAppendsTheConfigDir(t *testing.T) {
+	scoped, err := ApplyAccount(
+		[]string{"CODEX_HOME=/home/op/.codex"},
+		Account{Agent: "codex", Name: "personal", Dir: "/afhome/accounts/codex/personal"},
+	)
+	require.NoError(t, err)
+
+	count := 0
+	for _, kv := range scoped {
+		if strings.HasPrefix(kv, "CODEX_HOME=") {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "exactly one CODEX_HOME must reach the session")
+	dir, _ := envValue(scoped, "CODEX_HOME")
+	require.Equal(t, "/afhome/accounts/codex/personal", dir)
+}
+
+// Two sessions on different accounts must get different roots. This is the
+// assertion an allowlist implementation fails: passthrough carries the daemon's
+// ONE value to every session, so both would be identical while each looked
+// correct in isolation.
+func TestApplyAccount_DifferentAccountsGetDifferentRoots(t *testing.T) {
+	ambient := []string{"CLAUDE_CONFIG_DIR=/home/op/.claude"}
+
+	a, err := ApplyAccount(ambient, Account{Agent: "claude", Name: "a", Dir: "/afhome/accounts/claude/a"})
+	require.NoError(t, err)
+	b, err := ApplyAccount(ambient, Account{Agent: "claude", Name: "b", Dir: "/afhome/accounts/claude/b"})
+	require.NoError(t, err)
+
+	dirA, _ := envValue(a, "CLAUDE_CONFIG_DIR")
+	dirB, _ := envValue(b, "CLAUDE_CONFIG_DIR")
+	require.NotEqual(t, dirA, dirB, "two accounts must not resolve to one credential root")
+	require.Equal(t, "/afhome/accounts/claude/a", dirA)
+	require.Equal(t, "/afhome/accounts/claude/b", dirB)
+}
+
+// An agent whose credential relocation was never VERIFIED must refuse, not
+// silently accept a selection that does nothing. gemini and amp have the
+// allowlist entries but were not testable, and allowlist membership is not
+// evidence.
+func TestApplyAccount_RefusesAnUnverifiedAgent(t *testing.T) {
+	for _, agent := range []string{"gemini", "amp", "aider", "opencode", "unknown"} {
+		_, err := ApplyAccount(nil, Account{Agent: agent, Name: "x", Dir: "/d"})
+		require.Error(t, err, "agent %q must refuse rather than accept an inert account selection", agent)
+		require.Contains(t, err.Error(), "does not support multiple accounts")
+		require.Contains(t, err.Error(), "claude", "the error must name what IS supported")
+	}
+}
+
+// An account with no directory is a configuration error, never an empty scope
+// that silently falls back to the ambient identity.
+func TestApplyAccount_RefusesAnEmptyDirectory(t *testing.T) {
+	_, err := ApplyAccount(nil, Account{Agent: "claude", Name: "work", Dir: "   "})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no credential directory")
+}
+
+// Every allowlisted name for a scoped agent must be classified as either an
+// identity (removed) or deliberately kept. Without this the subtraction list
+// rots silently: a credential added to agentNames later would keep passing
+// through, and the exclusion tests above would still be green because they only
+// name the variables that existed when they were written.
+func TestAccountCredentialsAreClassified(t *testing.T) {
+	for agent := range accountConfigVars {
+		for name := range agentNames[agent] {
+			_, isCredential := accountCredentialNames[agent][name]
+			_, isKept := accountNonCredentialNames[agent][name]
+			require.True(t, isCredential || isKept,
+				"%s is allowlisted for %s but classified neither as an identity to remove nor as deployment config to keep; "+
+					"an unclassified credential passes through and silently overrides the selected account", name, agent)
+			require.False(t, isCredential && isKept,
+				"%s for %s is classified both ways", name, agent)
+		}
+	}
+}
+
+// The config variable itself is always removed before injection, so an ambient
+// copy cannot shadow the account.
+func TestAccountScopedNames_AlwaysDeniesTheConfigVar(t *testing.T) {
+	for agent, configVar := range accountConfigVars {
+		denied := accountScopedNames(agent, configVar)
+		_, ok := denied[configVar]
+		require.True(t, ok, "%s must be denied before it is injected for %s", configVar, agent)
+	}
+}
