@@ -416,7 +416,61 @@ func (t *TmuxSession) sweepVanishedSessionProcesses() error {
 	// refresh — the marker scan IS the evidence standing in for the ancestry tmux
 	// lost, so passing the capture failure through would make it a blocker again
 	// and defeat the point.
-	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil)
+	if err := reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil); err != nil {
+		return err
+	}
+	return t.markerlessWorktreeOccupants()
+}
+
+// markerlessWorktreeOccupants is the evidence for a session that never had a
+// marker to find (#2998).
+//
+// The scan above stands in for the ancestry tmux forgot — but only for a session
+// that EXPORTED the marker. sessionEnvFlags returns nil on tmux < 3.2, and
+// sessions from pre-marker builds never carried one, so for those the scan finds
+// nothing because nothing was ever MARKED. That is indistinguishable from finding
+// nothing because nothing survived, and a descendant that escaped a lost-ancestry
+// teardown is invisible.
+//
+// A cwd inside the workspace needs no marker, no tmux version, and no ancestry.
+// It is the one signal that still works where the scan above is blind.
+//
+// # It reports; it never kills
+//
+// A match proves OCCUPANCY, not ownership: an operator's shell sitting in the
+// worktree is indistinguishable from an escaped agent child. So this returns an
+// error naming the pids, which keeps the workspace intact and the record
+// retryable, and leaves the decision with the operator.
+//
+// # Only on this branch
+//
+// The caller reaches here only when the session vanished with no pane ever
+// observed. An ordinary teardown — pane seen, tree captured, exit confirmed —
+// never consults occupancy and gains no new refusal, which matters because the
+// session's OWN long-lived processes and the tmux server itself can hold a cwd
+// inside the workspace. Running this everywhere blocked a routine archive in the
+// web selftest, which is the "constant breakage traded for a rare one" #2998
+// rejects by name.
+//
+// An unreadable process table, or a workspace the caller did not supply, leaves
+// this evidence simply unavailable — logged, and never converted into a claim
+// that nothing is there.
+func (t *TmuxSession) markerlessWorktreeOccupants() error {
+	if t.worktreePath == "" {
+		return nil
+	}
+	occupants, err := proctree.OccupantsOfDir(t.worktreePath)
+	if err != nil {
+		log.WarningLog.Printf("tmux session %s vanished; could not check %s for processes still working inside it: %v",
+			t.sanitizedName, t.worktreePath, err)
+		return nil
+	}
+	if len(occupants) == 0 {
+		return nil
+	}
+	return fmt.Errorf("tmux session %s is gone, but %d process(es) are still working inside %s — %s; "+
+		"they carry no agent-factory marker, so ownership cannot be proven and they are reported rather than killed",
+		t.sanitizedName, len(occupants), t.worktreePath, proctree.DescribeOccupants(occupants))
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity

@@ -1,11 +1,12 @@
-package git
+package proctree
 
 import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 
-	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // Occupant is a process positively observed to be operating inside a worktree.
@@ -15,7 +16,7 @@ import (
 // the process IS DOING, not an inference from something it is missing. Nothing
 // is ever added because it lacks a marker (#2998).
 type Occupant struct {
-	Process proctree.Process
+	Process Process
 	// WorkingDir is the resolved cwd that matched, kept so a report can say WHY
 	// this process was attributed rather than asking the operator to trust it.
 	WorkingDir string
@@ -56,12 +57,12 @@ type Occupant struct {
 // unreadable list read as "everything is dead" and armed a sweep against live
 // sessions (#2874). A process whose individual cwd is unreadable is skipped
 // rather than guessed at, which can only omit a real occupant, never invent one.
-func WorktreeOccupants(worktreePath string) ([]Occupant, error) {
-	if worktreePath == "" {
+func OccupantsOfDir(dir string) ([]Occupant, error) {
+	if dir == "" {
 		return nil, fmt.Errorf("cannot look for worktree occupants: no worktree path was given")
 	}
-	root := normalizeWorktreePath(worktreePath)
-	snap, err := proctree.Snapshot()
+	root := pathutil.ResolveForCompare(dir)
+	snap, err := Snapshot()
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the process table to look for processes inside %s: %w", root, err)
 	}
@@ -69,7 +70,7 @@ func WorktreeOccupants(worktreePath string) ([]Occupant, error) {
 	seen := make(map[int]bool)
 	var occupants []Occupant
 	for pid := range snap {
-		cwd, ok := proctree.WorkingDir(pid)
+		cwd, ok := WorkingDir(pid)
 		if !ok {
 			// The kernel will not disclose this one's cwd: a foreign process, a
 			// kernel thread, or one that exited in the gap. Unreadable is not a
@@ -77,14 +78,14 @@ func WorktreeOccupants(worktreePath string) ([]Occupant, error) {
 			// as either would be inventing a fact.
 			continue
 		}
-		if !pathAtOrUnder(root, filepath.Clean(cwd)) {
+		if !dirContains(root, filepath.Clean(cwd)) {
 			continue
 		}
 		// The whole subtree, because a child of a worktree-cwd'd process belongs to
 		// the same occupancy even if it chdir'd elsewhere — and it is frequently the
 		// one actually holding files open. Its membership is inherited from a
 		// POSITIVE match on its ancestor, not assumed from its own cwd.
-		for _, descendant := range proctree.TreeOf(snap, pid) {
+		for _, descendant := range TreeOf(snap, pid) {
 			if seen[descendant.PID] {
 				continue
 			}
@@ -94,7 +95,7 @@ func WorktreeOccupants(worktreePath string) ([]Occupant, error) {
 			// show the chain rather than implying each one matched directly.
 			dir := cwd
 			if descendant.PID != pid {
-				if own, ok := proctree.WorkingDir(descendant.PID); ok {
+				if own, ok := WorkingDir(descendant.PID); ok {
 					dir = own
 				}
 			}
@@ -122,4 +123,17 @@ func DescribeOccupants(occupants []Occupant) string {
 		out += fmt.Sprintf("pid %d (cwd %s)", o.Process.PID, o.WorkingDir)
 	}
 	return out
+}
+
+// dirContains reports whether p is root or lies beneath it. Path containment,
+// never a string prefix: /x/wt-backup starts with /x/wt and is not inside it.
+func dirContains(root, p string) bool {
+	if p == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

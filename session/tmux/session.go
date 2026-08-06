@@ -147,6 +147,12 @@ type TmuxSession struct {
 	//
 	// The name of the tmux session and the sanitized name used for tmux commands.
 	sanitizedName string
+	// worktreePath is the workspace a destructive teardown is about to mutate, set
+	// by the caller that knows it. Empty means "not supplied", which is the
+	// pre-#2998 state and simply skips the occupancy evidence — never a claim that
+	// there is no workspace. Read only on the vanished-session branch, which runs
+	// after every tmux command this object issues, so a plain field is sufficient.
+	worktreePath string
 	// program is the command the pane runs. It is mutated by Restore() while
 	// other goroutines read it, so all access goes through the programMu-guarded
 	// accessors in program.go (#1254) — never touch these fields directly.
@@ -328,6 +334,14 @@ func NewTmuxSessionWithDeps(name string, program string, ptyFactory PtyFactory, 
 // tmux interactions mock-backed (hermetic).
 func NewTmuxSessionFromSanitizedNameWithDeps(sanitizedName, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
 	return newTmuxSession(sanitizedName, program, ptyFactory, cmdExec)
+}
+
+// SetWorktreePath supplies the workspace a destructive teardown is about to
+// mutate, so a vanished session can be checked for processes still working
+// inside it — the one signal that survives when no AF_SESSION marker was ever
+// exported (#2998). Optional: unset simply means that evidence is unavailable.
+func (t *TmuxSession) SetWorktreePath(path string) {
+	t.worktreePath = path
 }
 
 // SanitizedName returns the sanitized tmux session name.
