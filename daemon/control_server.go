@@ -46,6 +46,23 @@ const (
 func (e *mutationCommittedError) Error() string           { return e.err.Error() }
 func (e *mutationCommittedError) Unwrap() error           { return e.err }
 func (e *mutationCommittedError) MutationCommitted() bool { return true }
+
+// committedFailure marks a failure whose SIDE EFFECTS ALREADY LANDED.
+//
+// It exists so the marker is one call rather than a three-line literal each site
+// re-derives. Three outcomes must be distinguishable on every mutating path, not
+// two: succeeded, failed with nothing committed, and failed with the work already
+// done. Only the middle is safe to retry blindly — a retry of the third is not
+// recovery, it re-runs a partially applied change.
+//
+// The rule for choosing it: ask what survives if the caller does nothing. If the
+// answer is "the operation happened", this is the constructor to use, and the
+// event announcing what happened belongs immediately before it — every other
+// client learns the truth from that event, not from the error.
+func committedFailure(format string, args ...any) error {
+	return &mutationCommittedError{err: fmt.Errorf(format, args...)}
+}
+
 func (e *mutationCommittedError) APIErrorCode() string {
 	return apiproto.ErrorCodeMutationCommitted
 }

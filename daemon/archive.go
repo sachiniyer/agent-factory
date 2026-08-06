@@ -365,9 +365,9 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			// genuinely-clean failure here, and it stays a plain error precisely
 			// because retrying it is safe. Three outcomes, not two (#3029).
 			m.publishEvent(agentproto.EventSessionArchived, instance.ToInstanceData())
-			committedErr := &mutationCommittedError{err: fmt.Errorf(
+			committedErr := committedFailure(
 				"archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery",
-				req.Title, archivedPath, perr, rbErr)}
+				req.Title, archivedPath, perr, rbErr)
 			log.WarningLog.Printf("%v", committedErr)
 			return "", session.InstanceData{}, committedErr
 		}
@@ -380,8 +380,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// and publish before this older Archived projection (#2680 Codex review).
 	m.publishEvent(agentproto.EventSessionArchived, archived)
 	if hookErr != nil {
-		committedErr := &mutationCommittedError{err: fmt.Errorf(
-			"archive committed, but on-archive hook failed: %w", hookErr)}
+		committedErr := committedFailure("archive committed, but on-archive hook failed: %w", hookErr)
 		log.WarningLog.Printf("%v", committedErr)
 		return archivedPath, archived, committedErr
 	}
@@ -539,9 +538,9 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// sandbox that no longer exists. Only a failure with nothing committed is
 		// safe to retry blindly.
 		m.publishEvent(agentproto.EventSessionArchived, instance.ToInstanceData())
-		committedErr := &mutationCommittedError{err: fmt.Errorf(
+		committedErr := committedFailure(
 			"archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w",
-			title, branch, perr)}
+			title, branch, perr)
 		log.WarningLog.Printf("%v", committedErr)
 		return "", committedErr
 	}
@@ -563,7 +562,9 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 		// Lost; persist that and surface the failure (an explicit retry re-provisions
 		// from the still-pushed branch).
 		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("failed to restore remote session %q (re-provisioning its sandbox): %w", title, err)
+		// RestoreFromArchive already replaced the sandbox before this failed, so the
+		// prior one is gone whatever the caller does next (#3033).
+		return "", committedFailure("failed to restore remote session %q (re-provisioning its sandbox): %w", title, err)
 	}
 	// A FRESH sandbox now backs this session, so its accumulated remote-loss
 	// failures describe a sandbox that is gone (#1794). Reset BEFORE the persist
@@ -698,9 +699,15 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			// their worktree is safely recorded when nothing recorded it.
 			restoredPath := instance.GetWorktreePath()
 			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-				return "", fmt.Errorf("restore of %q was cut off mid-relocate AND its new location %s could not be written to disk (%v); the worktree is there but nothing durable points at it — move it back or re-register it manually before restarting the daemon: %w", req.Title, restoredPath, perr, err)
+				// The bytes moved. Committed, and the worst version of it — nothing
+				// durable points at them (#3033).
+				return "", committedFailure("restore of %q was cut off mid-relocate AND its new location %s could not be written to disk (%v); the worktree is there but nothing durable points at it — move it back or re-register it manually before restarting the daemon: %w", req.Title, restoredPath, perr, err)
 			}
-			return "", fmt.Errorf("restore of %q was cut off mid-relocate; its worktree is recorded at %s so it is not lost, but its git registration is unverified — check that path and retry: %w", req.Title, restoredPath, err)
+			// The relocate moved the bytes and the new location IS recorded, so the
+			// move committed even though the registration is unverified. A retry is
+			// still the right next step here — but the caller must know it is
+			// retrying against a moved tree, not a clean failure (#3033).
+			return "", committedFailure("restore of %q was cut off mid-relocate; its worktree is recorded at %s so it is not lost, but its git registration is unverified — check that path and retry: %w", req.Title, restoredPath, err)
 		}
 		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
 	}
@@ -752,7 +759,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		if perr := commitRestore(); perr != nil {
 			return "", fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err)
 		}
-		return "", fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err)
+		// The worktree is home. Only the agent did not come up, and the Lost-restore
+		// loop owns that retry — but the relocate itself has committed (#3033).
+		return "", committedFailure("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err)
 	}
 
 	worktreePath := instance.GetWorktreePath()
