@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 
@@ -129,33 +128,44 @@ func copySourceXattrs(sourceFD, destinationFD int, destinationPath, kind string,
 	return nil
 }
 
+// xattrDestination latches the discovery that a destination holds no extended
+// attributes at all, so the rest of THAT copy stops attempting them instead of
+// logging the same warning once per file in the worktree.
+//
+// One per copy, like the hardlink map in copyDirectoryContents and for the same
+// reason. A process-wide latch would be wrong rather than merely untidy: this
+// copier also serves RestoreWorktreeTo, whose destination is an arbitrary
+// repository filesystem rather than the archive root, so a single restore onto a
+// filesystem without xattr support would silently disable attribute copying for
+// every later archive in the daemon's lifetime — and the daemon is long-lived.
+//
+// Not atomic: a copy walks its tree on one goroutine, and the value never escapes
+// the copy that made it.
+type xattrDestination struct {
+	holdsNone bool
+}
+
 // copyNonACLXattrs and copyACLXattrs are the two halves of the copy, split around
-// the mode. Both go quiet for the rest of the archive once the destination
-// filesystem has said it holds no attributes at all: that is a property of the
-// archive root, so re-attempting it per node would log the same warning once per
-// file in the worktree.
-func copyNonACLXattrs(sourceFD, destinationFD int, destinationPath, kind string) error {
-	return copyXattrPhase(sourceFD, destinationFD, destinationPath, kind, false)
+// the mode — see isACLXattr for why the split is load-bearing.
+func copyNonACLXattrs(support *xattrDestination, sourceFD, destinationFD int, destinationPath, kind string) error {
+	return copyXattrPhase(support, sourceFD, destinationFD, destinationPath, kind, false)
 }
 
-func copyACLXattrs(sourceFD, destinationFD int, destinationPath, kind string) error {
-	return copyXattrPhase(sourceFD, destinationFD, destinationPath, kind, true)
+func copyACLXattrs(support *xattrDestination, sourceFD, destinationFD int, destinationPath, kind string) error {
+	return copyXattrPhase(support, sourceFD, destinationFD, destinationPath, kind, true)
 }
 
-func copyXattrPhase(sourceFD, destinationFD int, destinationPath, kind string, acl bool) error {
-	if destinationHoldsNoXattrs.Load() {
+func copyXattrPhase(support *xattrDestination, sourceFD, destinationFD int, destinationPath, kind string, acl bool) error {
+	if support.holdsNone {
 		return nil
 	}
 	err := copySourceXattrs(sourceFD, destinationFD, destinationPath, kind, acl)
 	if errors.Is(err, errXattrUnsupportedDestination) {
-		destinationHoldsNoXattrs.Store(true)
+		support.holdsNone = true
 		return nil
 	}
 	return err
 }
-
-// destinationHoldsNoXattrs latches once a destination refuses attributes outright.
-var destinationHoldsNoXattrs atomic.Bool
 
 // pruneDestinationXattrs removes attributes the destination has and the source does
 // not.
@@ -200,8 +210,18 @@ func pruneDestinationXattrs(sourceFD, destinationFD int, destinationPath, kind s
 // AFTER the mode: setting system.posix_acl_access rewrites the mode, and chmod
 // rewrites the ACL mask, so an ACL written before the mode is silently undone.
 // Everything else must be applied BEFORE it, because setting an attribute in the
-// user namespace requires write permission on the inode and the final mode may have
-// none (a checked-in 0444 file).
+// user namespace requires write permission on the inode.
+//
+// LINUX ONLY, and the split is named for what it does rather than for a guarantee
+// it makes. Darwin does not represent ACLs as extended attributes — they live
+// behind acl(3), so these names never appear in a darwin Flistxattr listing, this
+// phase is an empty pass there, and a macOS worktree's named-user ACL entries are
+// NOT reproduced by the cross-device copy. That is unchanged by #2919 rather than
+// introduced by it (nothing carried any attribute before), and closing it needs the
+// ACL API, not another name in this predicate. Not in knownCrossDeviceDivergence:
+// that inventory is keyed by properties describeFidelity actually measures, and
+// measuring this one needs a darwin runner the guard does not have. Tracked in
+// #2919 instead, so the limit is written down where the follow-up will look.
 func isACLXattr(name string) bool {
 	return name == "system.posix_acl_access" || name == "system.posix_acl_default"
 }

@@ -237,6 +237,9 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
 	links := map[pathIdentity]copiedFileLink{}
+	// Same scoping as links above: whether this DESTINATION holds extended
+	// attributes is learned once per copy and never leaks into another one.
+	xattrs := &xattrDestination{}
 	routes := []copiedDirectoryRoute{{parent: -1, directory: &root}}
 	for index := 0; index < len(routes); index++ {
 		job := routes[index]
@@ -259,6 +262,7 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			destination,
 			relativeRoutePath(components),
 			links,
+			xattrs,
 		)
 		if err == nil {
 			// The level is complete, and nothing is ever written directly into
@@ -268,7 +272,7 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			// is free: a read-only source directory takes its mode now rather
 			// than blocking its own contents (#2872).
 			err = applyCopiedDirectoryMode(
-				sourceDirectory, destinationDirectory, directoryRoutePath(destinationPath, components),
+				sourceDirectory, destinationDirectory, directoryRoutePath(destinationPath, components), xattrs,
 			)
 		}
 		_ = destinationDirectory.Close()
@@ -294,6 +298,7 @@ func copyDirectoryLevel(
 	destinationRoot *os.File,
 	relativeDirectory string,
 	links map[pathIdentity]copiedFileLink,
+	xattrs *xattrDestination,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -337,7 +342,7 @@ func copyDirectoryLevel(
 			if first, seen := links[inspected]; seen {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
-				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected)
+				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
 				if err == nil {
 					links[inspected] = copiedFileLink{
 						path:     filepath.Join(relativeDirectory, name),
@@ -538,10 +543,29 @@ func workingDirectoryMode(sourceMode os.FileMode) uint32 {
 	return uint32(sourceMode.Perm()) | 0o700
 }
 
+// workingFileMode is the mode a destination FILE is created with while the copy
+// is still filling it, and it exists for the same reason as
+// workingDirectoryMode.
+//
+// Creating the file at its final mode makes a read-only source file impossible
+// to finish: setting an attribute in the user namespace requires write
+// permission on the INODE, and an already-open write descriptor does not supply
+// it, so on a checked-in 0444 file every user.* attribute failed EACCES no
+// matter where in the sequence it was attempted. Ordering alone cannot fix that
+// — the inode is read-only from the moment openat() creates it — so the copy
+// runs at a mode that guarantees it can write and preserveSourceMode installs
+// the real one once the attributes are on.
+//
+// Only owner bits are added, exactly as for directories: no other user gains
+// access to the staging file at any point, whatever the source's mode says.
+func workingFileMode(sourceMode os.FileMode) uint32 {
+	return uint32(sourceMode.Perm()) | 0o600
+}
+
 // applyCopiedDirectoryMode gives a finished destination directory the mode its
 // source carries, reading that mode from the source descriptor the route walk
 // just validated rather than from anything cached earlier.
-func applyCopiedDirectoryMode(source, destination *os.File, destinationPath string) error {
+func applyCopiedDirectoryMode(source, destination *os.File, destinationPath string, support *xattrDestination) error {
 	info, err := source.Stat()
 	if err != nil {
 		return fmt.Errorf(
@@ -562,16 +586,18 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 	// an ACL applied before the mode would be silently undone.
 	//
 	// setxattr moves ctime only, so the times applied below still land last (#2919).
-	if err := copyNonACLXattrs(int(source.Fd()), int(destination.Fd()), destinationPath, "directory"); err != nil {
+	if err := copyNonACLXattrs(support, int(source.Fd()), int(destination.Fd()), destinationPath, "directory"); err != nil {
 		return err
 	}
+	// While the directory is still writable: removing an inherited attribute needs
+	// write permission just as setting one does, and the mode below may take it away.
+	pruneDestinationXattrs(int(source.Fd()), int(destination.Fd()), destinationPath, "directory")
 	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
 		return err
 	}
-	if err := copyACLXattrs(int(source.Fd()), int(destination.Fd()), destinationPath, "directory"); err != nil {
+	if err := copyACLXattrs(support, int(source.Fd()), int(destination.Fd()), destinationPath, "directory"); err != nil {
 		return err
 	}
-	pruneDestinationXattrs(int(source.Fd()), int(destination.Fd()), destinationPath, "directory")
 	// Times last, and only here. Creating an entry inside a directory updates
 	// that directory's own mtime, so a timestamp written any earlier would be
 	// overwritten by the copy's own writes — the same ordering the mode already
@@ -735,7 +761,7 @@ func copyFile(src, dst string) error {
 }
 
 func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
-	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil)
+	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil, &xattrDestination{})
 	return err
 }
 
@@ -743,6 +769,7 @@ func copyRegularFileAtWithIdentity(
 	source, destination *os.File,
 	name, sourcePath, destinationPath string,
 	inspected *pathIdentity,
+	support *xattrDestination,
 ) (copiedEntry, error) {
 	fd, err := unix.Openat(
 		int(source.Fd()), name,
@@ -771,7 +798,7 @@ func copyRegularFileAtWithIdentity(
 	outFD, err := unix.Openat(
 		int(destination.Fd()), filepath.Base(destinationPath),
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		uint32(info.Mode().Perm()),
+		workingFileMode(info.Mode()),
 	)
 	if err != nil {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination file %s exclusively: %w", destinationPath, err)
@@ -793,26 +820,30 @@ func copyRegularFileAtWithIdentity(
 		_ = out.Close()
 		return created, err
 	}
-	// After the contents, not before: openat() created this file no wider than
-	// the source (a umask only clears bits), so widening it back is the last
-	// step, once there is nothing half-written left to expose. The already-open
-	// descriptor keeps its write access regardless of the new mode.
-	// Non-ACL attributes go on BEFORE the mode: setting one in the user namespace
-	// needs write permission on the inode, and the final mode may have none (a
-	// checked-in 0444 file). ACLs go on after it — see applyCopiedDirectoryMode.
-	if err := copyNonACLXattrs(int(in.Fd()), outFD, destinationPath, "file"); err != nil {
-		_ = out.Close()
-		return created, err
-	}
-	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
-		_ = out.Close()
-		return created, err
-	}
-	if err := copyACLXattrs(int(in.Fd()), outFD, destinationPath, "file"); err != nil {
+	// The mode comes after the contents AND after every step that needs the inode
+	// writable. workingFileMode created this file owner-writable for exactly that
+	// reason; preserveSourceMode narrows it to the source's mode here, once there
+	// is nothing half-written left to expose. The already-open descriptor keeps
+	// its write access regardless of the new mode.
+	//
+	// Non-ACL attributes go on BEFORE the mode and the prune runs while the inode
+	// is still writable, because removing one needs write permission just as
+	// setting one does. ACLs go on AFTER it: the access ACL and the mode bits are
+	// one state seen two ways, so chmod would silently rewrite an ACL written
+	// earlier. applyCopiedDirectoryMode does the same four steps in the same order.
+	if err := copyNonACLXattrs(support, int(in.Fd()), outFD, destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}
 	pruneDestinationXattrs(int(in.Fd()), outFD, destinationPath, "file")
+	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	if err := copyACLXattrs(support, int(in.Fd()), outFD, destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
 	// After the contents for the same reason the mode is: writing bytes bumps
 	// mtime, so this has to be the last thing that touches the file.
 	if err := preserveSourceModTime(

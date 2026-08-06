@@ -141,14 +141,19 @@ func mustOpen(t *testing.T, path string) *os.File {
 // on, so an ordinary attribute was lost silently on every read-only node in the tree.
 func TestCopyTree_CopiesXattrsOntoReadOnlyNodes(t *testing.T) {
 	source, destination := xattrFixture(t)
+	// Attribute FIRST, then chmod. Setting a user.* attribute needs write permission
+	// on the inode, so a fixture built read-only cannot be given one — the first
+	// version of this test tried, took the EACCES for "this filesystem has no user
+	// xattrs", and SKIPPED. It reported green on every run without once exercising
+	// the ordering it exists to pin.
 	readOnly := filepath.Join(source, "locked.txt")
-	require.NoError(t, os.WriteFile(readOnly, []byte("contents"), 0o444))
-	if err := unix.Setxattr(readOnly, "user.af_locked", []byte("kept"), 0); err != nil {
-		t.Skipf("this filesystem does not support user xattrs: %v", err)
-	}
+	require.NoError(t, os.WriteFile(readOnly, []byte("contents"), 0o644))
+	require.NoError(t, unix.Setxattr(readOnly, "user.af_locked", []byte("kept"), 0))
+	require.NoError(t, os.Chmod(readOnly, 0o444))
 	readOnlyDir := filepath.Join(source, "lockeddir")
-	require.NoError(t, os.Mkdir(readOnlyDir, 0o555))
+	require.NoError(t, os.Mkdir(readOnlyDir, 0o755))
 	require.NoError(t, unix.Setxattr(readOnlyDir, "user.af_lockeddir", []byte("kept"), 0))
+	require.NoError(t, os.Chmod(readOnlyDir, 0o555))
 
 	require.NoError(t, moveDirCrossDevice(source, destination))
 
