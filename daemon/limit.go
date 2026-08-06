@@ -385,19 +385,28 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	return err
 }
 
-// publishSessionSnapshot pushes this session's current projection to clients under
-// the repo ordering lock, the same discipline the resume's completion event uses:
-// session.updated replaces a client's whole session projection, so letting one race a
-// newer tab mutation could put the client back on an older roster.
+// publishSessionSnapshot pushes this session's current projection to clients while
+// holding the repo ordering lock, the same discipline the resume's completion event
+// and every tab mutation keep: session.updated replaces a client's whole session
+// projection, so letting one race a newer tab mutation puts the client back on an
+// older roster.
 //
 // Deliberately does NOT persist. The op axis is scrubbed before disk anyway, and these
 // are transient fence transitions — the durable checkpoints stay where they were.
 func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instance) {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	data := instance.ToInstanceData()
-	repoStartLock.Unlock()
-	m.publishEvent(agentproto.EventSessionUpdated, data)
+	defer repoStartLock.Unlock()
+	// Publish INSIDE the critical section, which is the whole point of taking the lock
+	// and the part an earlier version of this helper got wrong while claiming otherwise.
+	// session.updated replaces a client's entire session projection, so snapshotting
+	// here and publishing after the unlock lets an overlapping tab create/close publish
+	// its newer whole-session payload first and this stale one last — the new tab
+	// vanishes, or the closed one comes back, until an unrelated update or a reconnect.
+	// Same ordering the tab mutations keep (daemon/manager_tabs.go) and the resume's own
+	// completion event keeps; publishEvent is non-blocking, so holding the lock across
+	// it cannot stall on a slow subscriber.
+	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 }
 
 func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string) (resumeFromLimitOutcome, error) {
