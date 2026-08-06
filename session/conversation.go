@@ -128,25 +128,6 @@ func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {
 	return true
 }
 
-// SetTabConversation records a provider conversation on a named tab. It is used
-// by daemon-owned post-spawn capture; tabs without a matching name are ignored
-// so a late capture racing with tab close degrades to a no-op.
-func (i *Instance) SetTabConversation(name string, conv AgentConversationData) bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	for _, tab := range i.Tabs {
-		if tab.Name != name {
-			continue
-		}
-		if tab.Conversation == conv {
-			return false
-		}
-		tab.Conversation = conv
-		return true
-	}
-	return false
-}
-
 func prepareLaunchConversation(i *Instance, program string) string {
 	rewritten, conversation := planCreateConversation(i, program)
 	if conversation.HasID() {
