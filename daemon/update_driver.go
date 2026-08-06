@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -157,6 +158,11 @@ type updateDriver struct {
 	activate func(ctx context.Context, candidate []byte, toVersion string) error
 	// activationEnabled reports the operator opt-in, re-read every wake.
 	activationEnabled func() bool
+	// candidateRejected reports whether these exact candidate bytes already
+	// reached a rollback on this box. Nil means the question cannot be answered
+	// — an unresolvable home — and is treated as "do not activate", never as
+	// "nothing is rejected".
+	candidateRejected func(candidate []byte) (bool, upgradetxn.RejectedCandidate, error)
 	// executableIdentity fingerprints the executable on disk right now.
 	executableIdentity func() (string, error)
 	// baselineExecutable is that fingerprint taken at daemon start, when the
@@ -215,6 +221,13 @@ func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 		baselineExecutable: baseline,
 		baselineErr:        baselineErr,
 		activationEnabled:  daemonUpgradeActivationEnabled,
+		candidateRejected: func(candidate []byte) (bool, upgradetxn.RejectedCandidate, error) {
+			home, err := config.GetConfigDir()
+			if err != nil {
+				return false, upgradetxn.RejectedCandidate{}, err
+			}
+			return upgradetxn.CandidateRejected(home, candidate)
+		},
 		activate: func(ctx context.Context, candidate []byte, toVersion string) error {
 			// The baseline goes with it: Prepare re-verifies it under the locks,
 			// which is the only place the comparison cannot be raced.
@@ -468,6 +481,15 @@ func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel
 		return updateCheckSkipped
 	}
 
+	// A candidate this box already installed and rolled back must not be activated
+	// again, on this boot or any later one. Checked here rather than before the
+	// download because the ledger is keyed on the candidate's DIGEST — a tag can be
+	// re-cut with corrected bytes, and refusing by tag would block the fix for that
+	// release forever. The bandwidth is the price of not being permanently stuck.
+	if outcome, ok := d.candidateIsActivatable(candidate, latest); !ok {
+		return outcome
+	}
+
 	if err := d.activate(ctx, candidate, latest); err != nil {
 		// The hand-off did not happen and this daemon is still serving. Reject
 		// the tag so the next window does not walk into the same failure, and
@@ -519,6 +541,33 @@ func (d *updateDriver) executableStillOurs(latest string) (updateCheckOutcome, b
 	}
 	if current != d.baselineExecutable {
 		log.InfoLog.Printf("auto-update: the executable on disk is no longer the one this daemon is running, so %s is not safe to activate; leaving it to the next check or a daemon restart", latest)
+		return updateCheckSkipped, false
+	}
+	return updateCheckSkipped, true
+}
+
+// candidateIsActivatable answers the durable rejected-candidate ledger.
+//
+// A read failure refuses the activation. "I could not tell" is not "it is fine":
+// answering yes on an unreadable ledger would reinstall the very binary that broke
+// this box, which is the failure the ledger exists to prevent — and an unattended
+// box has nobody to notice. A missing ledger is not a read failure; it decodes as
+// empty, so a box that has never rolled anything back is unaffected.
+func (d *updateDriver) candidateIsActivatable(candidate []byte, latest string) (updateCheckOutcome, bool) {
+	if d.candidateRejected == nil {
+		log.WarningLog.Printf("auto-update: no rejected-candidate ledger is reachable, so %s cannot be shown to be safe to activate", latest)
+		return updateCheckFailed, false
+	}
+	rejected, entry, err := d.candidateRejected(candidate)
+	if err != nil {
+		log.WarningLog.Printf("auto-update: cannot read the rejected-candidate ledger, so %s is not safe to activate: %v", latest, err)
+		return updateCheckFailed, false
+	}
+	if rejected {
+		log.WarningLog.Printf(
+			"auto-update: %s is byte-for-byte the candidate this box rolled back at %s (%s); refusing to activate it again — publish a corrected build to move past it",
+			latest, entry.RejectedAt.Format(time.RFC3339), entry.Reason,
+		)
 		return updateCheckSkipped, false
 	}
 	return updateCheckSkipped, true
