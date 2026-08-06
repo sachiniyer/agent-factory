@@ -84,7 +84,12 @@ func (m *Manager) PauseStatusPoll(repoID, title, id string) {
 func (m *Manager) PauseStatusPollFor(repoID, title, id, holder string) {
 	key := statusPollLeaseKey(repoID, title, id)
 	m.pausedMu.Lock()
-	m.pausedPolls[key] = nowFunc().Add(statusPollLease)
+	holders := m.pausedPolls[key]
+	if holders == nil {
+		holders = make(map[string]time.Time)
+		m.pausedPolls[key] = holders
+	}
+	holders[holder] = nowFunc().Add(statusPollLease)
 	m.pausedMu.Unlock()
 }
 
@@ -106,9 +111,19 @@ func (m *Manager) ResumeStatusPollFor(repoID, title, id, holder string) {
 	key := statusPollLeaseKey(repoID, title, id)
 	probeKey := m.taskRunProbeKey(repoID, title, id)
 	m.pausedMu.Lock()
-	delete(m.pausedPolls, key)
-	if probeKey != "" {
-		delete(m.taskRunProbeDue, probeKey)
+	holders := m.pausedPolls[key]
+	delete(holders, holder)
+	last := len(holders) == 0
+	if last {
+		delete(m.pausedPolls, key)
+		// The backstop entry belongs to the PAUSE, not to any one holder: it is
+		// armed while the session is paused and exists to bound how long that pause
+		// may hide a task run's completion (#1892). Dropping it while another holder
+		// still has the session paused would disarm the backstop for a pause that is
+		// still in effect — the same one-slot mistake this change fixes, one map over.
+		if probeKey != "" {
+			delete(m.taskRunProbeDue, probeKey)
+		}
 	}
 	m.pausedMu.Unlock()
 }
@@ -173,8 +188,13 @@ func (m *Manager) sweepPausedPollState() {
 	// Stable IDs make lease ownership safe under title reuse, but they also make
 	// every session lifetime a distinct map key. Reclaim expired leases even when
 	// their session was deleted and will never call isPollPaused again.
-	for key, expiry := range m.pausedPolls {
-		if !now.Before(expiry) {
+	for key, holders := range m.pausedPolls {
+		for holder, expiry := range holders {
+			if !now.Before(expiry) {
+				delete(holders, holder)
+			}
+		}
+		if len(holders) == 0 {
 			delete(m.pausedPolls, key)
 		}
 	}
@@ -239,11 +259,21 @@ func (m *Manager) pollLeaseActiveLocked(repoID, title, id string, now time.Time)
 		keys = append([]string{statusPollIDKey(id)}, keys...)
 	}
 	for _, key := range keys {
-		expiry, ok := m.pausedPolls[key]
+		holders, ok := m.pausedPolls[key]
 		if !ok {
 			continue
 		}
-		if now.Before(expiry) {
+		// ANY unexpired holder keeps the pause in effect; expired ones are reclaimed
+		// lazily, exactly as the single-entry version did.
+		live := false
+		for holder, expiry := range holders {
+			if now.Before(expiry) {
+				live = true
+				continue
+			}
+			delete(holders, holder)
+		}
+		if live {
 			return true
 		}
 		delete(m.pausedPolls, key)

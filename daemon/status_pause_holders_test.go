@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -93,5 +94,58 @@ func TestPauseStatusPoll_LegacyHolderStillPausesAndResumes(t *testing.T) {
 	manager.ResumeStatusPoll(repoID, "legacy", inst.ID)
 	if manager.isPollPaused(repoID, "legacy", inst.ID) {
 		t.Fatal("the legacy path must still resume")
+	}
+}
+
+// The task-run backstop entry belongs to the PAUSE, not to any one holder: it is
+// armed while a session is paused and bounds how long that pause may hide a task
+// run's completion from the concurrency cap (#1892). Disarming it while another
+// holder still has the session paused would be the same one-slot mistake this
+// change fixes, one map over — so it is cleared only when the last holder leaves.
+func TestResumeStatusPoll_BackstopSurvivesUntilTheLastHolderLeaves(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerStarted(t, manager, repoID, repoPath, "shared", session.NewFakeBackend(), true, session.Running)
+	inst := manager.instances[daemonInstanceKey(repoID, "shared")]
+	probeKey := stableSessionKey(repoID, inst)
+
+	manager.PauseStatusPollFor(repoID, "shared", inst.ID, "tui-a")
+	manager.PauseStatusPollFor(repoID, "shared", inst.ID, "tui-b")
+	manager.pausedMu.Lock()
+	manager.taskRunProbeDue[probeKey] = nowFunc().Add(taskRunPollBackstop)
+	manager.pausedMu.Unlock()
+
+	manager.ResumeStatusPollFor(repoID, "shared", inst.ID, "tui-a")
+	manager.pausedMu.Lock()
+	_, armed := manager.taskRunProbeDue[probeKey]
+	manager.pausedMu.Unlock()
+	if !armed {
+		t.Fatal("one holder left but the session is still paused; disarming the backstop leaves that pause unbounded")
+	}
+
+	manager.ResumeStatusPollFor(repoID, "shared", inst.ID, "tui-b")
+	manager.pausedMu.Lock()
+	_, stillArmed := manager.taskRunProbeDue[probeKey]
+	manager.pausedMu.Unlock()
+	if stillArmed {
+		t.Fatal("the last holder left; the backstop entry must be reclaimed with the pause")
+	}
+}
+
+// An expired holder must not keep a pause alive for a holder that never released,
+// and must not block the last-holder cleanup either — the lease bound is what makes
+// a crashed client safe (#1160), and per-holder keying must not weaken it.
+func TestPauseStatusPoll_AnExpiredHolderDoesNotHoldThePause(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerStarted(t, manager, repoID, repoPath, "shared", session.NewFakeBackend(), true, session.Running)
+	inst := manager.instances[daemonInstanceKey(repoID, "shared")]
+
+	base := nowFunc()
+	manager.PauseStatusPollFor(repoID, "shared", inst.ID, "crashed")
+	restore := nowFunc
+	nowFunc = func() time.Time { return base.Add(statusPollLease + time.Second) }
+	defer func() { nowFunc = restore }()
+
+	if manager.isPollPaused(repoID, "shared", inst.ID) {
+		t.Fatal("the only holder's lease expired; a crashed client must not blind the daemon")
 	}
 }

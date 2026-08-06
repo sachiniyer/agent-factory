@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -86,12 +88,35 @@ func (target sessionActionTarget) setPRInfoRequest(info session.PRInfoData) daem
 	return daemon.SetPRInfoRequest{ID: target.id, Title: target.title, RepoID: target.repoID, PRInfo: info}
 }
 
+// statusPollHolder identifies THIS TUI process as a holder of the daemon's
+// pause lease (#3027). Per PROCESS, not per attach: a TUI attaches to one session
+// full-screen at a time, so one id per process is enough to tell two TUIs apart,
+// and it keeps a pause and its later resume matched without threading an id
+// through the attach lifecycle. Random rather than the pid, because a pid is
+// reused and a recycled one would let a new process release the lease a dead one
+// took — the revocation this exists to prevent, with extra steps.
+var statusPollHolder = "tui-" + randomStatusPollHolder()
+
+func randomStatusPollHolder() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Never fatal: an empty holder is the legacy shared slot, which is exactly
+		// the pre-#3027 behaviour rather than a broken one.
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
+
 func (target sessionActionTarget) pauseStatusPollRequest() daemon.PauseStatusPollRequest {
-	return daemon.PauseStatusPollRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
+	return daemon.PauseStatusPollRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID, Holder: statusPollHolder,
+	}
 }
 
 func (target sessionActionTarget) resumeStatusPollRequest() daemon.ResumeStatusPollRequest {
-	return daemon.ResumeStatusPollRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
+	return daemon.ResumeStatusPollRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID, Holder: statusPollHolder,
+	}
 }
 
 func (target sessionActionTarget) handoffRequest(to string) daemon.HandoffSessionRequest {
