@@ -553,7 +553,19 @@ func isAllZero(chunk []byte) bool {
 // filesystems mount relatime so it is already approximate, and nothing in a
 // worktree depends on it. mtime is the property tools actually read.
 func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, destinationPath, kind string) error {
-	stamp := unix.NsecToTimespec(sourceModTime.UnixNano())
+	// TimeToTimespec, not NsecToTimespec(t.UnixNano()). UnixNano is only defined
+	// for 1678–2262 and wraps silently outside it, while a filesystem can hold
+	// timestamps well beyond that (ext4 with 256-byte inodes reaches 2446). The
+	// wrapped spelling reproduced such a node CENTURIES off and still reported
+	// success; this one converts seconds and nanoseconds separately and refuses
+	// a value the platform cannot represent.
+	stamp, err := unix.TimeToTimespec(sourceModTime)
+	if err != nil {
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: source modification time %s on %s %s is out of range for this platform: %w",
+			sourceModTime.UTC().Format(time.RFC3339), kind, destinationPath, err,
+		)
+	}
 	if err := unix.UtimesNanoAt(dirFD, name, []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf(
 			"cannot move worktree across filesystems: failed to preserve the source modification time on destination %s %s: %w",
