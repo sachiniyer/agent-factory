@@ -73,6 +73,60 @@ func TestQuotaSessionStates_ExcludesInertRowsAndCarriesLimitState(t *testing.T) 
 	}
 }
 
+// Codex #2996: the filter must exclude every state with no running agent, and
+// must resolve liveness through the ROLLFORWARD — a pre-#1195 record carries the
+// zero Liveness while its real state lives in the legacy status field, so reading
+// data.Liveness directly counts an old archived row as a running session.
+func TestQuotaSessionStates_ExcludesVanishedAgentsAndLegacyArchivedRecords(t *testing.T) {
+	raw, err := json.Marshal([]session.InstanceData{
+		{Title: "running", Program: "claude", Liveness: session.LiveRunning},
+		{Title: "ready", Program: "claude", Liveness: session.LiveReady},
+		{Title: "parked", Program: "claude", Liveness: session.LiveLimitReached},
+		// Agent vanished: counting these turns a box full of dead rows into
+		// "N session(s) running, none parked at a limit".
+		{Title: "lost", Program: "claude", Liveness: session.LiveLost},
+		{Title: "dead", Program: "claude", Liveness: session.LiveDead},
+		// Pre-#1195: Liveness unset, real state in the legacy status field. A
+		// legacy RUNNING record is the fixture that makes the rollforward
+		// load-bearing — a legacy ARCHIVED one is excluded either way by the
+		// allowlist, so it proves nothing. Without the rollforward this row
+		// resolves to LivenessUnset and is dropped: a real session UNDER-reported,
+		// which is the same dishonesty as inventing one. Verified by mutation.
+		{Title: "legacy-running", Program: "claude", Status: session.Running},
+		{Title: "legacy-archived", Program: "claude", Status: session.Archived},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	states, _ := quotaSessionStates(map[string]json.RawMessage{"repo": raw})
+	if len(states) != 4 {
+		t.Fatalf("states = %d, want 4 (running, ready, limit-reached, legacy-running): lost/dead have "+
+			"no agent, the legacy ARCHIVED row must resolve to archived, and the legacy RUNNING row "+
+			"must resolve to running rather than being dropped as unset", len(states))
+	}
+	parked := 0
+	for _, state := range states {
+		if state.LimitReached {
+			parked++
+		}
+	}
+	if parked != 1 {
+		t.Fatalf("parked = %d, want 1: a limit-reached session still HAS an agent and is the report's strongest signal", parked)
+	}
+}
+
+// A state nobody considered must not become evidence of a healthy account, which
+// is why the running check is an allowlist.
+func TestQuotaAgentIsRunning_UnsetLivenessIsNotRunning(t *testing.T) {
+	if quotaAgentIsRunning(session.LivenessUnset) {
+		t.Fatal("an unresolvable liveness was treated as a running agent; it is not evidence of anything")
+	}
+	if !quotaAgentIsRunning(session.LiveLimitReached) {
+		t.Fatal("a limit-reached session has an agent parked at the wall and must count")
+	}
+}
+
 // A record blob that will not parse is COUNTED, never silently dropped: it might
 // have been the parked one, and a report that hides it reads as authoritative.
 func TestQuotaSessionStates_CountsUnparseableRecordsRatherThanHidingThem(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/quota"
 	"github.com/sachiniyer/agent-factory/session"
@@ -43,6 +44,22 @@ Two different things, kept apart on purpose:
 
 Read-only: it reads local session records and starts nothing.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		// --daemon-url / AF_DAEMON_URL promises to target a REMOTE daemon. This
+		// command reads local record files, which describe this host and no other,
+		// so honouring the flag by ignoring it would hand an operator a
+		// valid-looking quota report for the wrong machine — the precise failure
+		// this command exists to avoid, arriving through the target rather than
+		// through a guessed number. Refuse instead. apiclient.IsRemoteTarget is the
+		// established seam for exactly this: its doc names suppressing the local
+		// disk fallback, because a remote read has no local disk to fall back to.
+		//
+		// Refusing rather than fetching is a scope choice, not a verdict on the
+		// feature: serving this remotely needs the daemon to expose the report, and
+		// an honest error today beats a wrong answer today (#2983).
+		if apiclient.IsRemoteTarget() {
+			return fmt.Errorf("af quota reads this machine's session records and cannot report on a remote daemon; " +
+				"unset --daemon-url/AF_DAEMON_URL to report on this host, or run af quota on the daemon's host")
+		}
 		records, skipped, err := config.LoadAllRepoInstancesReportingSkips()
 		if err != nil {
 			return fmt.Errorf("cannot read session records: %w", err)
@@ -89,19 +106,44 @@ func quotaSessionStates(records map[string]json.RawMessage) ([]quota.SessionStat
 			continue
 		}
 		for _, instance := range data {
-			// Archived and killed rows are not running an agent, so they say
-			// nothing about current usage and must not pad the counts.
-			if instance.Liveness == session.LiveArchived || instance.UserKilled {
+			// Resolve the EFFECTIVE liveness rather than reading data.Liveness:
+			// a pre-#1195 record carries the zero value there while its real state
+			// lives in the legacy status field, so a direct comparison classifies an
+			// old archived row as live and counts it as a running session.
+			liveness := session.EffectiveLiveness(instance)
+			if !quotaAgentIsRunning(liveness) || instance.UserKilled {
 				continue
 			}
 			states = append(states, quota.SessionState{
 				Program:      quotaAgentName(instance.Program),
-				LimitReached: instance.Liveness == session.LiveLimitReached,
+				LimitReached: liveness == session.LiveLimitReached,
 				ResetAt:      instance.LimitResetAt,
 			})
 		}
 	}
 	return states, unreadable
+}
+
+// quotaAgentIsRunning reports whether a record still has an agent process behind
+// it, and is therefore evidence about CURRENT usage.
+//
+// An allowlist, not a denylist of inert states. The report's claims are
+// "N session(s) running" and "no limit seen", so a state this function has not
+// considered must not silently become evidence of a healthy account — the same
+// reason the quota axis defaults to "not reported". LivenessUnset lands here too:
+// a record whose state cannot be resolved is not proof of a running agent.
+//
+// LiveLimitReached counts as running deliberately: the agent IS there, parked at
+// the wall, and that parking is the strongest signal this report has.
+// Lost and Dead do not: their agent vanished, so counting them inflates the
+// session totals and turns a machine full of dead rows into "no limit seen".
+func quotaAgentIsRunning(liveness session.Liveness) bool {
+	switch liveness {
+	case session.LiveRunning, session.LiveReady, session.LiveLimitReached:
+		return true
+	default:
+		return false
+	}
 }
 
 // quotaAgentName maps a session's recorded program to the canonical agent enum.
