@@ -40,8 +40,6 @@ var knownCrossDeviceDivergence = map[string]string{
 	"mtime.symlink":      "#2919: the link's own mtime is not set — there is no portable dirfd-relative lstat to read it from, and the TARGET's mtime is what tools actually read",
 	"hardlink.nlink":     "#2919: each entry is copied independently, so a linked pair arrives as two files",
 	"hardlink.sameInode": "#2919: same cause — the link structure is not reproduced",
-	"xattr.file":         "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
-	"xattr.dir":          "#2919: same cause, on directories",
 }
 
 // TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded is the class
@@ -231,4 +229,51 @@ func describeFidelity(t *testing.T, root string) map[string]string {
 	described["contents.hardA"] = string(contents)
 
 	return described
+}
+
+// TestMoveDirCrossDevice_CopiesEveryReadableExtendedAttribute goes past the
+// single probe attribute the differential test measures. The bug was that NO
+// namespace was reproduced (#2919), so the property worth pinning is "every
+// attribute this process can read comes back", not "one known name comes back".
+func TestMoveDirCrossDevice_CopiesEveryReadableExtendedAttribute(t *testing.T) {
+	workspace := t.TempDir()
+	source := filepath.Join(workspace, "src")
+	require.NoError(t, os.MkdirAll(filepath.Join(source, "dir"), 0o755))
+	filePath := filepath.Join(source, "plain.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("contents"), 0o644))
+
+	// Several attributes, and one with an empty value: a zero-length xattr is a
+	// real thing that a size-then-read copier gets wrong if it treats size 0 as
+	// "absent" rather than "present and empty".
+	want := map[string]string{
+		"user.af_one":   "first",
+		"user.af_two":   "second",
+		"user.af_empty": "",
+	}
+	for name, value := range want {
+		if err := unix.Setxattr(filePath, name, []byte(value), 0); err != nil {
+			t.Skipf("this filesystem does not support user xattrs: %v", err)
+		}
+		require.NoError(t, unix.Setxattr(filepath.Join(source, "dir"), name, []byte(value), 0))
+	}
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	destination := filepath.Join(workspace, "dst")
+	require.NoError(t, moveDirCrossDevice(source, destination))
+
+	for _, path := range []string{
+		filepath.Join(destination, "plain.txt"),
+		filepath.Join(destination, "dir"),
+	} {
+		for name, value := range want {
+			buffer := make([]byte, 64)
+			read, err := unix.Getxattr(path, name, buffer)
+			require.NoErrorf(t, err, "%s lost extended attribute %s", path, name)
+			assert.Equalf(t, value, string(buffer[:read]),
+				"%s changed the value of %s", path, name)
+		}
+	}
 }

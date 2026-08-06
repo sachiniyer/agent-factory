@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -457,6 +458,13 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
 		return err
 	}
+	// Same ordering as the file path, for the same reason: a chmod after the ACL
+	// would rewrite the permission bits the ACL just set.
+	if err := copyExtendedAttributes(
+		int(source.Fd()), int(destination.Fd()), destinationPath, "directory",
+	); err != nil {
+		return err
+	}
 	// Times last, and only here. Creating an entry inside a directory updates
 	// that directory's own mtime, so a timestamp written any earlier would be
 	// overwritten by the copy's own writes — the same ordering the mode already
@@ -561,6 +569,117 @@ func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, dest
 		)
 	}
 	return nil
+}
+
+// copyExtendedAttributes reproduces the extended attributes of a source node on
+// its copy. rename(2) carries them for free; the copy reproduces only what it is
+// written to reproduce, and until now that was nothing (#2919) — so ACLs, file
+// capabilities and SELinux labels were dropped by an archive on one filesystem
+// and kept by an archive on another.
+//
+// The one that bites quietly is a directory's system.posix_acl_default: losing it
+// does not change any existing file, it changes what permissions files created in
+// the restored tree get afterwards, which can be WIDER than the policy intended.
+//
+// Descriptor-anchored like every other property here, for the reason the file is
+// built around: a worktree process can replace any pathname mid-copy, and an
+// l*xattr call names a path.
+//
+// Per-attribute tolerance is deliberate and is NOT the silent drop this issue is
+// about. Three failures are expected and skippable:
+//
+//   - the destination filesystem has no xattr support at all, which must not fail
+//     an archive that works there today;
+//   - an attribute vanished between the listing and the read;
+//   - the namespace needs privilege this process does not have. security.* and
+//     trusted.* need CAP_SYS_ADMIN, and security.selinux needs policy privilege,
+//     so attempting them would fail every archive on an SELinux box for a
+//     property no unprivileged copier can reproduce.
+//
+// The last of those stays recorded in knownCrossDeviceDivergence rather than
+// being fixed here, because an unattempted namespace and a dropped one look
+// identical afterwards, and that indistinguishability is the actual defect.
+// Anything else is a real error and fails the move.
+func copyExtendedAttributes(sourceFD, destinationFD int, destinationPath, kind string) error {
+	names, err := listExtendedAttributes(sourceFD)
+	if err != nil {
+		if unsupportedExtendedAttributes(err) {
+			return nil
+		}
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to list extended attributes for destination %s %s: %w",
+			kind, destinationPath, err,
+		)
+	}
+	for _, name := range names {
+		value, err := readExtendedAttribute(sourceFD, name)
+		if err != nil {
+			// Listed but unreadable: raced removal, or a namespace this process
+			// cannot see. Neither is something the copy can reproduce.
+			continue
+		}
+		if err := unix.Fsetxattr(destinationFD, name, value, 0); err != nil {
+			if unsupportedExtendedAttributes(err) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+				continue
+			}
+			return fmt.Errorf(
+				"cannot move worktree across filesystems: failed to set extended attribute %s on destination %s %s: %w",
+				name, kind, destinationPath, err,
+			)
+		}
+	}
+	return nil
+}
+
+// listExtendedAttributes returns the attribute names on fd. The kernel reports
+// them as a single NUL-separated block, and the size is asked for first because
+// it can change between the two calls.
+func listExtendedAttributes(fd int) ([]string, error) {
+	size, err := unix.Flistxattr(fd, nil)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	buffer := make([]byte, size)
+	read, err := unix.Flistxattr(fd, buffer)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, name := range strings.Split(string(buffer[:read]), "\x00") {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// readExtendedAttribute returns one attribute's value, sizing the buffer the same
+// two-call way as the listing.
+func readExtendedAttribute(fd int, name string) ([]byte, error) {
+	size, err := unix.Fgetxattr(fd, name, nil)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	value := make([]byte, size)
+	read, err := unix.Fgetxattr(fd, name, value)
+	if err != nil {
+		return nil, err
+	}
+	return value[:read], nil
+}
+
+// unsupportedExtendedAttributes reports whether an error means "this filesystem
+// does not do xattrs", which is a fact about the target rather than a failure.
+// Linux spells it EOPNOTSUPP and darwin ENOTSUP; both constants exist on both
+// platforms, so naming both needs no build tag.
+func unsupportedExtendedAttributes(err error) bool {
+	return errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTSUP)
 }
 
 // preserveSourceMode restores a source node's permission bits on the descriptor
@@ -683,6 +802,12 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// After the mode: system.posix_acl_access and the mode are two views of the
+	// same permission bits, and a chmod after the ACL would rewrite it.
+	if err := copyExtendedAttributes(int(in.Fd()), outFD, destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}
