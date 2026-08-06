@@ -277,3 +277,51 @@ func TestMoveDirCrossDevice_CopiesEveryReadableExtendedAttribute(t *testing.T) {
 		}
 	}
 }
+
+// TestMoveDirCrossDevice_CopiesExtendedAttributesOfReadOnlyNodes is the #2991 P1.
+// openat(2) creates a file with the SOURCE's permission bits, so a checked-in
+// 0444 file is unwritable the moment it exists — and ordinary xattrs need write
+// access. Every attribute on such a file was silently dropped, and the copier's
+// own per-attribute EACCES tolerance is what hid it: an unreproducible namespace
+// and a common read-only file failed identically.
+//
+// The mode assertion is half the test. Widening the file to set the attributes
+// and then failing to restore its mode would trade this bug for #2869.
+func TestMoveDirCrossDevice_CopiesExtendedAttributesOfReadOnlyNodes(t *testing.T) {
+	workspace := t.TempDir()
+	source := filepath.Join(workspace, "src")
+	readOnlyDir := filepath.Join(source, "ro-dir")
+	require.NoError(t, os.MkdirAll(readOnlyDir, 0o755))
+	readOnlyFile := filepath.Join(source, "ro.txt")
+	require.NoError(t, os.WriteFile(readOnlyFile, []byte("contents"), 0o644))
+
+	if err := unix.Setxattr(readOnlyFile, "user.af_ro", []byte("kept"), 0); err != nil {
+		t.Skipf("this filesystem does not support user xattrs: %v", err)
+	}
+	require.NoError(t, unix.Setxattr(readOnlyDir, "user.af_ro", []byte("kept"), 0))
+	// Modes go on last: the attributes above need the write bit that these remove.
+	require.NoError(t, os.Chmod(readOnlyFile, 0o444))
+	require.NoError(t, os.Chmod(readOnlyDir, 0o555))
+
+	originalRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = originalRename })
+
+	destination := filepath.Join(workspace, "dst")
+	require.NoError(t, moveDirCrossDevice(source, destination))
+
+	for path, wantMode := range map[string]os.FileMode{
+		filepath.Join(destination, "ro.txt"): 0o444,
+		filepath.Join(destination, "ro-dir"): 0o555,
+	} {
+		buffer := make([]byte, 32)
+		read, err := unix.Getxattr(path, "user.af_ro", buffer)
+		require.NoErrorf(t, err, "%s lost its extended attribute because it was read-only", path)
+		assert.Equal(t, "kept", string(buffer[:read]))
+
+		info, err := os.Lstat(path)
+		require.NoError(t, err)
+		assert.Equalf(t, wantMode, info.Mode().Perm(),
+			"%s was widened for its attributes and not restored", path)
+	}
+}

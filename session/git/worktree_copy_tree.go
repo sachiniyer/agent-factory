@@ -455,13 +455,20 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 			destinationPath, err,
 		)
 	}
+	// Ordinary xattrs first, while the directory still carries the working mode
+	// (created |0700), because they need write access. Directories never hit the
+	// read-only problem files do, but the ordering is the same for both so there
+	// is one rule to remember.
+	if err := copyExtendedAttributes(
+		int(source.Fd()), int(destination.Fd()), destinationPath, "directory", xattrsBeforeMode,
+	); err != nil {
+		return err
+	}
 	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
 		return err
 	}
-	// Same ordering as the file path, for the same reason: a chmod after the ACL
-	// would rewrite the permission bits the ACL just set.
 	if err := copyExtendedAttributes(
-		int(source.Fd()), int(destination.Fd()), destinationPath, "directory",
+		int(source.Fd()), int(destination.Fd()), destinationPath, "directory", xattrsAfterMode,
 	); err != nil {
 		return err
 	}
@@ -571,9 +578,45 @@ func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, dest
 	return nil
 }
 
+// maxExtendedAttributeValue bounds a single attribute read. Ordinary attributes
+// are hundreds of bytes; darwin exposes com.apple.ResourceFork through the same
+// API and its value can be fork-sized, so an unbounded read would pull it into
+// the daemon's memory in one allocation. Exceeding this fails the move rather
+// than skipping the attribute: a value too large to copy is a real limitation
+// someone must see, not a property to drop quietly.
+const maxExtendedAttributeValue = 16 << 20
+
+// xattrPhase splits the copy around the mode, because the two halves need
+// different permissions and disagree about ordering.
+//
+//   - Ordinary namespaces (user.*, and darwin's com.apple.*) need WRITE
+//     permission on the destination, so they must be written while it is still
+//     writable — before the source's mode is restored. A checked-in 0444 file is
+//     created 0444 by openat(2), so this is the common case, not a corner: with
+//     the write bit already gone, every one of its attributes was silently
+//     dropped. Measured before the fix — "READ-ONLY FILE LOST ITS XATTR".
+//   - system.posix_acl_* needs only OWNERSHIP, and must be written AFTER the
+//     mode: the ACL and the mode are two views of the same permission bits, and
+//     a chmod recalculates the ACL mask, so an ACL written first would be
+//     rewritten by the mode that follows it.
+type xattrPhase int
+
+const (
+	xattrsBeforeMode xattrPhase = iota // everything except the ACLs
+	xattrsAfterMode                    // only the ACLs
+)
+
+func (phase xattrPhase) wants(name string) bool {
+	isACL := strings.HasPrefix(name, "system.posix_acl_")
+	if phase == xattrsAfterMode {
+		return isACL
+	}
+	return !isACL
+}
+
 // copyExtendedAttributes reproduces the extended attributes of a source node on
-// its copy. rename(2) carries them for free; the copy reproduces only what it is
-// written to reproduce, and until now that was nothing (#2919) — so ACLs, file
+// its copy. rename(2) carries them for free; the copy reproduced only what it was
+// written to reproduce, and for xattrs that was nothing (#2919) — so ACLs, file
 // capabilities and SELinux labels were dropped by an archive on one filesystem
 // and kept by an archive on another.
 //
@@ -585,25 +628,19 @@ func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, dest
 // built around: a worktree process can replace any pathname mid-copy, and an
 // l*xattr call names a path.
 //
-// Per-attribute tolerance is deliberate and is NOT the silent drop this issue is
-// about. Three failures are expected and skippable:
-//
-//   - the destination filesystem has no xattr support at all, which must not fail
-//     an archive that works there today;
-//   - an attribute vanished between the listing and the read;
-//   - the namespace needs privilege this process does not have. security.* and
-//     trusted.* need CAP_SYS_ADMIN, and security.selinux needs policy privilege,
-//     so attempting them would fail every archive on an SELinux box for a
-//     property no unprivileged copier can reproduce.
-//
-// The last of those stays recorded in knownCrossDeviceDivergence rather than
-// being fixed here, because an unattempted namespace and a dropped one look
-// identical afterwards, and that indistinguishability is the actual defect.
-// Anything else is a real error and fails the move.
-func copyExtendedAttributes(sourceFD, destinationFD int, destinationPath, kind string) error {
+// Only three failures are skipped, and each is a fact about the target rather
+// than a copy that went wrong: the filesystem has no xattr support, the attribute
+// vanished between the listing and the read, or the namespace needs privilege
+// this process does not have (security.* and trusted.* need CAP_SYS_ADMIN, and
+// attempting them would fail every archive on an SELinux box for something no
+// unprivileged copier can reproduce; that gap stays recorded here rather than
+// papered over). EVERYTHING else — EIO from a network filesystem, a transient
+// resource failure — fails the move. An error nobody sees produces an archive
+// that is quietly incomplete, which is the defect this issue is about.
+func copyExtendedAttributes(sourceFD, destinationFD int, destinationPath, kind string, phase xattrPhase) error {
 	names, err := listExtendedAttributes(sourceFD)
 	if err != nil {
-		if unsupportedExtendedAttributes(err) {
+		if skippableExtendedAttributeError(err) {
 			return nil
 		}
 		return fmt.Errorf(
@@ -612,14 +649,21 @@ func copyExtendedAttributes(sourceFD, destinationFD int, destinationPath, kind s
 		)
 	}
 	for _, name := range names {
-		value, err := readExtendedAttribute(sourceFD, name)
-		if err != nil {
-			// Listed but unreadable: raced removal, or a namespace this process
-			// cannot see. Neither is something the copy can reproduce.
+		if !phase.wants(name) {
 			continue
 		}
+		value, err := readExtendedAttribute(sourceFD, name)
+		if err != nil {
+			if skippableExtendedAttributeError(err) {
+				continue
+			}
+			return fmt.Errorf(
+				"cannot move worktree across filesystems: failed to read extended attribute %s from source for %s %s: %w",
+				name, kind, destinationPath, err,
+			)
+		}
 		if err := unix.Fsetxattr(destinationFD, name, value, 0); err != nil {
-			if unsupportedExtendedAttributes(err) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			if skippableExtendedAttributeError(err) {
 				continue
 			}
 			return fmt.Errorf(
@@ -632,23 +676,17 @@ func copyExtendedAttributes(sourceFD, destinationFD int, destinationPath, kind s
 }
 
 // listExtendedAttributes returns the attribute names on fd. The kernel reports
-// them as a single NUL-separated block, and the size is asked for first because
-// it can change between the two calls.
+// them as one NUL-separated block whose size must be asked for first — and the
+// set can change in between, so ERANGE is a retry rather than a failure.
 func listExtendedAttributes(fd int) ([]string, error) {
-	size, err := unix.Flistxattr(fd, nil)
-	if err != nil {
-		return nil, err
-	}
-	if size == 0 {
-		return nil, nil
-	}
-	buffer := make([]byte, size)
-	read, err := unix.Flistxattr(fd, buffer)
-	if err != nil {
+	buffer, err := readSizedExtendedAttribute(func(into []byte) (int, error) {
+		return unix.Flistxattr(fd, into)
+	})
+	if err != nil || len(buffer) == 0 {
 		return nil, err
 	}
 	var names []string
-	for _, name := range strings.Split(string(buffer[:read]), "\x00") {
+	for _, name := range strings.Split(string(buffer), "\x00") {
 		if name != "" {
 			names = append(names, name)
 		}
@@ -656,30 +694,54 @@ func listExtendedAttributes(fd int) ([]string, error) {
 	return names, nil
 }
 
-// readExtendedAttribute returns one attribute's value, sizing the buffer the same
-// two-call way as the listing.
+// readExtendedAttribute returns one attribute's value, sized the same racy way.
 func readExtendedAttribute(fd int, name string) ([]byte, error) {
-	size, err := unix.Fgetxattr(fd, name, nil)
-	if err != nil {
-		return nil, err
-	}
-	if size == 0 {
-		return nil, nil
-	}
-	value := make([]byte, size)
-	read, err := unix.Fgetxattr(fd, name, value)
-	if err != nil {
-		return nil, err
-	}
-	return value[:read], nil
+	return readSizedExtendedAttribute(func(into []byte) (int, error) {
+		return unix.Fgetxattr(fd, name, into)
+	})
 }
 
-// unsupportedExtendedAttributes reports whether an error means "this filesystem
-// does not do xattrs", which is a fact about the target rather than a failure.
-// Linux spells it EOPNOTSUPP and darwin ENOTSUP; both constants exist on both
-// platforms, so naming both needs no build tag.
-func unsupportedExtendedAttributes(err error) bool {
-	return errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTSUP)
+// readSizedExtendedAttribute runs the size-then-read dance the xattr API forces.
+// A worktree process can add or grow an attribute between the two calls, which
+// returns ERANGE; that is a race to retry, not a reason to abort a whole archive.
+// Bounded, so a pathologically churning attribute cannot spin forever.
+func readSizedExtendedAttribute(read func([]byte) (int, error)) ([]byte, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		size, err := read(nil)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			// Present and empty is a real state, distinct from absent, and the
+			// caller must be able to reproduce it.
+			return nil, nil
+		}
+		if size > maxExtendedAttributeValue {
+			return nil, fmt.Errorf("extended attribute value of %d bytes exceeds the %d byte copy limit", size, maxExtendedAttributeValue)
+		}
+		buffer := make([]byte, size)
+		got, err := read(buffer)
+		if err == nil {
+			return buffer[:got], nil
+		}
+		if !errors.Is(err, unix.ERANGE) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("extended attribute kept changing size while it was read")
+}
+
+// skippableExtendedAttributeError reports whether an error describes the target
+// rather than a failed copy: no xattr support on the filesystem, an attribute
+// that vanished mid-copy, or a namespace needing privilege this process lacks.
+// Linux spells unsupported EOPNOTSUPP and darwin ENOTSUP; both constants exist on
+// both platforms, so naming both needs no build tag. Verified by cross-compiling.
+func skippableExtendedAttributeError(err error) bool {
+	return errors.Is(err, unix.EOPNOTSUPP) ||
+		errors.Is(err, unix.ENOTSUP) ||
+		errors.Is(err, unix.ENODATA) ||
+		errors.Is(err, unix.EPERM) ||
+		errors.Is(err, unix.EACCES)
 }
 
 // preserveSourceMode restores a source node's permission bits on the descriptor
@@ -801,13 +863,28 @@ func copyRegularFileAtWithIdentity(
 	// the source (a umask only clears bits), so widening it back is the last
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
+	// openat(2) created this file with the SOURCE's permission bits, so a 0444
+	// source is already unwritable here — and ordinary xattrs need write access.
+	// Widen to owner-only for the duration: narrower than the mode this file is
+	// about to be given, and the tree is not reachable under its final name yet.
+	if err := unix.Fchmod(outFD, 0o600); err != nil {
+		_ = out.Close()
+		return created, fmt.Errorf(
+			"cannot move worktree across filesystems: failed to make destination file %s writable for its extended attributes: %w",
+			destinationPath, err,
+		)
+	}
+	if err := copyExtendedAttributes(int(in.Fd()), outFD, destinationPath, "file", xattrsBeforeMode); err != nil {
+		_ = out.Close()
+		return created, err
+	}
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}
-	// After the mode: system.posix_acl_access and the mode are two views of the
-	// same permission bits, and a chmod after the ACL would rewrite it.
-	if err := copyExtendedAttributes(int(in.Fd()), outFD, destinationPath, "file"); err != nil {
+	// ACLs last: they need only ownership, and the chmod above would have
+	// rewritten the mask of an ACL written before it.
+	if err := copyExtendedAttributes(int(in.Fd()), outFD, destinationPath, "file", xattrsAfterMode); err != nil {
 		_ = out.Close()
 		return created, err
 	}
