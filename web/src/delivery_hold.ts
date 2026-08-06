@@ -36,6 +36,18 @@
 // Failure is graceful in the same way the TUI's is: every lease RPC is
 // best-effort, and a lapsed lease means the daemon delivers as it does today —
 // the pre-#3024 behaviour, not a broken one.
+//
+// WHAT THIS DOES NOT PROMISE, stated because "15s idle" reads like more than it
+// is. The hold lasts while a pane holding the draft EXISTS, up to the idle bound
+// — not for 15 seconds unconditionally. Close or rebind that pane and the lease
+// lapses within one lease period while the draft is still sitting in the PTY,
+// because whether an uncommitted draft exists is a fact about the PTY and nothing
+// in the browser can observe it once the pane is gone. Holding on regardless
+// would be worse: an indefinite deferral for a session nobody is watching, with
+// nothing left to release it, which is the unbounded hold #1160 exists to
+// prevent. It is also exactly what the TUI does — detaching with a half-typed
+// line resumes deliveries and leaves that line in the pane. Closing this gap
+// needs the daemon to see the draft, not a cleverer client.
 
 /** What the caller should do. "pause" takes or extends the lease; there is
  *  deliberately no release verb — see the note above. */
