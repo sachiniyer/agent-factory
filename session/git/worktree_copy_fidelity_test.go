@@ -39,8 +39,6 @@ import (
 var knownCrossDeviceDivergence = map[string]string{
 	"mtime.symlink":          "#2919: the link's own mtime is not set — there is no portable dirfd-relative lstat to read it from, and the TARGET's mtime is what tools actually read",
 	"hardlink.externalNlink": "#2919: an inode with one name inside the worktree and another OUTSIDE it keeps both aliases across a rename, but the copy can only create the in-tree name — there is nothing it could link the outside name to. Unfixable by construction, unlike the in-tree pair.",
-	"xattr.file":             "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
-	"xattr.dir":              "#2919: same cause, on directories",
 }
 
 // TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded is the class

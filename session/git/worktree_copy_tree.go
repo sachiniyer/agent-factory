@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // This file holds the recursive cross-device tree copier. Its counterpart,
@@ -552,6 +555,14 @@ func applyCopiedDirectoryMode(source, destination *os.File, destinationPath stri
 	if err := preserveSourceMode(int(destination.Fd()), info.Mode(), destinationPath, "directory"); err != nil {
 		return err
 	}
+	// After the mode and before the times, and neither is arbitrary. The access ACL
+	// and the mode bits are one state seen two ways: setting system.posix_acl_access
+	// rewrites the mode, and chmod rewrites the ACL mask, so an ACL applied before
+	// the mode would be silently undone. setxattr moves ctime only, so the times
+	// applied below still land last (#2919).
+	if err := copySourceXattrs(int(source.Fd()), int(destination.Fd()), destinationPath, "directory"); err != nil {
+		return err
+	}
 	// Times last, and only here. Creating an entry inside a directory updates
 	// that directory's own mtime, so a timestamp written any earlier would be
 	// overwritten by the copy's own writes — the same ordering the mode already
@@ -623,6 +634,137 @@ func isAllZero(chunk []byte) bool {
 		}
 	}
 	return true
+}
+
+// copySourceXattrs reproduces a source node's extended attributes on its copy.
+//
+// rename(2) keeps them for free. The copy reproduced only what it was written to
+// reproduce, so every namespace was dropped and which filesystem $AF_HOME sits on
+// decided whether a restored worktree kept them (#2919). What is lost is not
+// decoration: system.posix_acl_access / _default carry named-user and named-group
+// grants, and a DIRECTORY's default ACL vanishing is the surprising direction —
+// files created in the restored tree afterwards inherit plain umask permissions,
+// which can be WIDER than the policy that was archived. security.capability turns a
+// vendored helper into one that silently cannot bind; security.selinux mislabels a
+// tree on an enforcing box.
+//
+// Descriptor-anchored like every other step here: the F* forms take the descriptors
+// the walk already validated, so no path is re-derived and the name-swap race the
+// copier exists to avoid stays avoided.
+//
+// The failure policy is per-attribute and deliberately asymmetric, because "the
+// archive refused to run" is a worse outcome than "one label could not be stored" —
+// but only while the loss is LOGGED rather than silent, which is the actual
+// complaint in #2919:
+//
+//   - the destination filesystem holds no xattrs at all (EOPNOTSUPP) -> warn once and
+//     stop trying. The archive root's filesystem is not a per-file choice.
+//   - one attribute is refused (EPERM/EACCES - security.capability needs CAP_SETFCAP,
+//     security.selinux needs relabel permission) -> warn naming it, keep going.
+//   - anything else -> fail the copy. E2BIG and ENOSPC are errors, not policy limits.
+//
+// trusted.* needs no special case: an unprivileged lister never sees it, so it never
+// appears in the list to attempt.
+func copySourceXattrs(sourceFD, destinationFD int, destinationPath, kind string) error {
+	names, err := listXattrNames(sourceFD)
+	if err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) {
+			return nil // the SOURCE filesystem has no xattrs; nothing to carry
+		}
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to list extended attributes for destination %s %s: %w",
+			kind, destinationPath, err,
+		)
+	}
+	for _, name := range names {
+		value, err := readXattrValue(sourceFD, name)
+		if err != nil {
+			// Deliberately not fatal, and deliberately not errno-matched: the "it
+			// vanished between listing and reading" errno is ENODATA on Linux and
+			// ENOATTR on darwin, and naming both would need a platform split for a
+			// case that costs one attribute. Warned, so it is not silent.
+			log.WarningLog.Printf(
+				"archive: reading extended attribute %q from %s %s: %v", name, kind, destinationPath, err,
+			)
+			continue
+		}
+		if err := unix.Fsetxattr(destinationFD, name, value, 0); err != nil {
+			switch {
+			case errors.Is(err, unix.EOPNOTSUPP):
+				log.WarningLog.Printf(
+					"archive: %s %s cannot hold extended attributes on this filesystem; %d attribute(s) not copied",
+					kind, destinationPath, len(names),
+				)
+				return nil
+			case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):
+				log.WarningLog.Printf(
+					"archive: extended attribute %q not reproduced on %s %s (needs privilege): %v",
+					name, kind, destinationPath, err,
+				)
+			default:
+				return fmt.Errorf(
+					"cannot move worktree across filesystems: failed to set extended attribute %q on destination %s %s: %w",
+					name, kind, destinationPath, err,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// listXattrNames returns the attribute names visible on fd. Sized in two calls
+// because the set can change between them, so a list that grew is read short and
+// retried rather than silently truncated.
+func listXattrNames(fd int) ([]string, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		size, err := unix.Flistxattr(fd, nil)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			return nil, nil
+		}
+		buffer := make([]byte, size)
+		read, err := unix.Flistxattr(fd, buffer)
+		if err != nil {
+			if errors.Is(err, unix.ERANGE) {
+				continue // the list grew between the sizing and the read
+			}
+			return nil, err
+		}
+		names := make([]string, 0, 4)
+		for _, name := range bytes.Split(buffer[:read], []byte{0}) {
+			if len(name) > 0 {
+				names = append(names, string(name))
+			}
+		}
+		return names, nil
+	}
+	return nil, fmt.Errorf("extended attribute list kept growing while it was read")
+}
+
+// readXattrValue reads one attribute's value, sized the same two-call way. A present
+// attribute with an empty value is meaningful, so nil-with-no-error is a real result.
+func readXattrValue(fd int, name string) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		size, err := unix.Fgetxattr(fd, name, nil)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			return nil, nil
+		}
+		value := make([]byte, size)
+		read, err := unix.Fgetxattr(fd, name, value)
+		if err != nil {
+			if errors.Is(err, unix.ERANGE) {
+				continue // the value grew between the sizing and the read
+			}
+			return nil, err
+		}
+		return value[:read], nil
+	}
+	return nil, fmt.Errorf("extended attribute %q kept growing while it was read", name)
 }
 
 // preserveSourceModTime reproduces a source node's modification time on its copy.
@@ -778,6 +920,12 @@ func copyRegularFileAtWithIdentity(
 	// step, once there is nothing half-written left to expose. The already-open
 	// descriptor keeps its write access regardless of the new mode.
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
+		_ = out.Close()
+		return created, err
+	}
+	// Between the mode and the times, for the ACL/mode ordering reason spelled out in
+	// applyCopiedDirectoryMode.
+	if err := copySourceXattrs(int(in.Fd()), outFD, destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err
 	}
