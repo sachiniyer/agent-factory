@@ -401,6 +401,23 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 
 		case PhaseRolledBack:
+			// Disqualify the candidate before anything else in this phase, and
+			// before cleanup removes the journal that names it. A candidate that
+			// had to be rolled back must never be activated again on any later
+			// boot: the six-hour check would otherwise find the same release, and
+			// an unattended box would re-break itself on a loop. Idempotent on the
+			// digest, so re-entry after an actor crash refreshes rather than
+			// duplicates.
+			//
+			// A failure here is returned rather than logged past. The transaction
+			// stays recoverable and re-entry retries; carrying on would leave the
+			// box healthy now and certain to reinstall the same broken binary.
+			if err := RecordRejectedCandidate(
+				journal.HomeDir, journal.CandidateSHA256, journal.ToVersion,
+				"the candidate failed validation and was rolled back",
+			); err != nil {
+				return fmt.Errorf("record the rolled-back candidate as rejected: %w", err)
+			}
 			// The terminal rollback verdict proves the previous daemon was
 			// healthy at the boundary, not that it survived the actor crash that
 			// may have followed. Re-establish that invariant before cleanup.
@@ -470,6 +487,17 @@ func (s Supervisor) finishFailedRollback(
 		// Do not disable the persistent actor unless the terminal circuit-breaker
 		// is durable. A later takeover must still have a chance to finish it.
 		return errors.Join(cause, fmt.Errorf("persist rollback failure: %w", err))
+	}
+	// A candidate whose rollback FAILED is at least as disqualified as one whose
+	// rollback succeeded — the box is in a worse state, not a better one — so it is
+	// recorded on this path too. Joined rather than returned alone: the rollback
+	// failure is the headline and must not be replaced by a bookkeeping error.
+	journal := txn.Journal()
+	if err := RecordRejectedCandidate(
+		journal.HomeDir, journal.CandidateSHA256, journal.ToVersion,
+		"the candidate was rolled back and the rollback did not complete",
+	); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
 	}
 	if err := s.Operations.DisableRecoveryJob(ctx, txn.Journal()); err != nil {
 		return errors.Join(
