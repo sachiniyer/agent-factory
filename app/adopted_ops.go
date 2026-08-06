@@ -76,6 +76,32 @@ func (a adoptedOps) forget(inst *session.Instance) {
 	delete(a, inst)
 }
 
+// pruneTo drops every entry whose instance is no longer among live.
+//
+// Chasing each lifecycle exit individually is what would rot: a row can leave the
+// store through a project switch, a removal, a swap, or a local transition that
+// clears the op without any snapshot involved, and each new exit added later
+// would have to remember this map. Since the key is a pointer, a missed exit
+// leaks the entry AND keeps the instance reachable, so the map would quietly
+// become the thing preventing garbage collection of the rows it describes.
+//
+// Reconciling against the store instead makes the map self-correcting: whatever
+// path a row left by, its entry is gone on the next snapshot.
+func (a adoptedOps) pruneTo(live []*session.Instance) {
+	if len(a) == 0 {
+		return
+	}
+	keep := make(map[*session.Instance]struct{}, len(live))
+	for _, inst := range live {
+		keep[inst] = struct{}{}
+	}
+	for inst := range a {
+		if _, ok := keep[inst]; !ok {
+			delete(a, inst)
+		}
+	}
+}
+
 // vetoesReconcile reports whether inst's in-flight op should stop the reconcile
 // from swapping or removing the row.
 //

@@ -186,6 +186,10 @@ func (m *home) materializeSnapshot(data []session.InstanceData) {
 			log.WarningLog.Printf("skipping session %q from snapshot: %v", d.Title, err)
 			continue
 		}
+		// A row BUILT from a snapshot can already carry a daemon-owned op, and it is
+		// just as adopted as one mirrored onto an existing row — the cold-start
+		// variant of the same corpse (#3005).
+		m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 		m.store.AddInstance(inst)()
 	}
 }
@@ -490,8 +494,13 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			if m.adoptedSnapshotOps.vetoesReconcile(inst) {
 				continue
 			}
-			m.adoptedSnapshotOps.forget(inst)
+			// Only on SUCCESS: swapInstanceFromSnapshot returns false and leaves the
+			// old row in place when the replacement cannot be built, and forgetting
+			// first would reclassify its adopted op as local — vetoing every later
+			// retry and turning a transient build failure into the permanent stale row
+			// this change exists to prevent.
 			if m.swapInstanceFromSnapshot(d) {
+				m.adoptedSnapshotOps.forget(inst)
 				changed = true
 			}
 			continue
@@ -549,6 +558,12 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		m.adoptedSnapshotOps.forget(inst)
 		changed = true
 	}
+	// Provenance is keyed by pointer, so an entry for a row that has left the store
+	// by ANY route — removal, swap, project switch — would leak and keep that
+	// instance reachable. Reconciling the map against the live set here covers every
+	// exit without each one having to remember this map (#3005).
+	m.adoptedSnapshotOps.pruneTo(m.store.GetInstances())
+
 	// Prune panes whose backing session can no longer render — a removed
 	// instance takes its open panes with it (#1088), and a session archived out
 	// of band (`af sessions archive` while the TUI runs, #1028) leaves its pane
@@ -601,6 +616,7 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
 		return false
 	}
+	m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 	m.store.AddInstance(inst)()
 	return true
 }

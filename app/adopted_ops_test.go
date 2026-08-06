@@ -110,3 +110,38 @@ func TestAdoptedOps_AlreadyCarriedOpIsStillRecorded(t *testing.T) {
 	require.False(t, m.adoptedSnapshotOps.vetoesReconcile(inst),
 		"a snapshot reporting the op this row already carries is still evidence the daemon owns it")
 }
+
+// Provenance must not outlive the rows it describes. The key is a pointer, so a
+// leaked entry does not merely waste a map slot — it keeps the instance
+// reachable, making this map the thing that prevents collection of the corpses it
+// was added to help remove.
+func TestAdoptedOps_PruneDropsRowsThatLeftTheStore(t *testing.T) {
+	kept := liveInstance(t, "kept")
+	gone := liveInstance(t, "gone")
+	a := adoptedOps{}
+	a.note(kept, session.OpReplacing)
+	a.note(gone, session.OpArchiving)
+
+	a.pruneTo([]*session.Instance{kept})
+
+	require.Len(t, a, 1, "an entry whose row left the store must be dropped whatever route it left by")
+	_, stillThere := a[gone]
+	require.False(t, stillThere)
+	_, survives := a[kept]
+	require.True(t, survives, "a live row keeps its provenance")
+}
+
+// A row built directly FROM a snapshot can already carry a daemon-owned op — the
+// cold-start path. It is just as adopted as one mirrored onto an existing row,
+// and without recording it there the very first reconcile after launch treats it
+// as local and vetoes forever.
+func TestAdoptedOps_NoteRecordsAnOpCarriedFromConstruction(t *testing.T) {
+	inst := liveInstance(t, "cold-start")
+	require.NoError(t, inst.Transition(session.BeginHandoff()))
+
+	a := adoptedOps{}
+	a.note(inst, inst.GetInFlightOp())
+
+	require.False(t, a.vetoesReconcile(inst),
+		"an op a snapshot-built row arrived carrying is adopted, not local")
+}
