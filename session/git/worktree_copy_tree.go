@@ -397,12 +397,24 @@ func copySymlinkEntry(
 	if err != nil {
 		return copiedEntry{}, err
 	}
-	current, err := identityAt(source, name)
-	if err != nil || !inspected.same(current) {
+	// One stat serves both the identity re-check and the timestamp: sampling the
+	// source twice would open a second window in which the name could be swapped
+	// between the two reads, and the copier's whole discipline is that a fact
+	// about a name is only good for the sample it came from.
+	sourceStat, err := statAt(source, name)
+	if err != nil || !inspected.same(identityFromStat(sourceStat)) {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while it was copied", sourcePath)
 	}
 	if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination symlink %s exclusively: %w", destinationPath, err)
+	}
+	// The LINK's own mtime, not its target's. preserveSourceModTime already
+	// passes AT_SYMLINK_NOFOLLOW, so this stamps the link itself and can never
+	// follow it out of the tree — the same reason that flag is there for files.
+	if err := preserveSourceModTime(
+		int(destination.Fd()), name, symlinkModTime(sourceStat), destinationPath, "symlink",
+	); err != nil {
+		return copiedEntry{}, err
 	}
 	// Identify the node right after creating it: every later step can fail, and
 	// the caller can only record what it can name and identify.
@@ -552,6 +564,24 @@ func isAllZero(chunk []byte) bool {
 // therefore NOT preserved, deliberately — it is rewritten by any read, most
 // filesystems mount relatime so it is already approximate, and nothing in a
 // worktree depends on it. mtime is the property tools actually read.
+// symlinkModTime reads a link's own modification time out of the stat that
+// identified it.
+//
+// No build tag, and that is worth recording because the inventory entry this
+// replaces said there was "no portable dirfd-relative lstat to read it from".
+// There is: statAt is one, used on every entry already. The field spelling is
+// portable too — x/sys/unix.Stat_t calls it Mtim on Linux, darwin and the BSDs
+// alike. Mtimespec is the STDLIB syscall.Stat_t spelling on darwin, which is a
+// different type this copier does not use. Verified by cross-building, not by
+// reading: GOOS=darwin and GOOS=freebsd.
+//
+// TimespecToNsec rather than Sec/Nsec arithmetic, because Timespec's field
+// widths differ by platform and that mismatch only appears on the platform you
+// are not building for.
+func symlinkModTime(stat *unix.Stat_t) time.Time {
+	return time.Unix(0, unix.TimespecToNsec(stat.Mtim))
+}
+
 func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, destinationPath, kind string) error {
 	stamp := unix.NsecToTimespec(sourceModTime.UnixNano())
 	if err := unix.UtimesNanoAt(dirFD, name, []unix.Timespec{stamp, stamp}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
