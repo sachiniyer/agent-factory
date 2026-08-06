@@ -166,5 +166,22 @@ func readRejectedLedger(home string) (rejectedLedger, error) {
 			path, ledger.SchemaVersion, journalSchemaVersion,
 		)
 	}
+	// Decoding successfully is not the same as being a ledger. `null`, `{}`, and
+	// `{"candidates":[{}]}` are all valid JSON that unmarshal without error into a
+	// zero value or a digest-less entry, and every one of them would read as "this
+	// box has rejected nothing" — silently re-arming releases it rolled back. That is
+	// the same outcome as a corrupt file, so it gets the same fail-closed answer
+	// rather than a different one that happens to parse.
+	if ledger.SchemaVersion < 1 {
+		return rejectedLedger{}, fmt.Errorf(
+			"the rejected-candidate ledger at %s has no schema version; refusing to read it as an empty ledger", path)
+	}
+	for i, entry := range ledger.Candidates {
+		if !validDigest(entry.SHA256) {
+			return rejectedLedger{}, fmt.Errorf(
+				"the rejected-candidate ledger at %s has an entry (#%d) with no usable digest; refusing to read it as an empty ledger",
+				path, i+1)
+		}
+	}
 	return ledger, nil
 }

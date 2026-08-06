@@ -343,6 +343,20 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 
 		case PhaseRollbackFailed:
+			// Restartable, and it runs BEFORE recovery is disabled. If the record on
+			// the way in did not land — a transient write failure, or an actor that
+			// died between persisting this phase and recording — disabling the job
+			// here would strand the candidate un-disqualified with nothing left to
+			// retry it, and the same bytes would be installable again the moment the
+			// transaction was repaired. Idempotent on the digest, so re-entry after a
+			// successful record only refreshes it.
+			if err := RecordRejectedCandidate(
+				journal.HomeDir, journal.CandidateSHA256, journal.ToVersion,
+				"the candidate was rolled back and the rollback did not complete",
+			); err != nil {
+				return errors.Join(ErrRollbackRecoveryFailed,
+					fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+			}
 			if err := s.Operations.DisableRecoveryJob(ctx, journal); err != nil {
 				return errors.Join(
 					ErrRollbackRecoveryFailed,
@@ -489,15 +503,21 @@ func (s Supervisor) finishFailedRollback(
 		return errors.Join(cause, fmt.Errorf("persist rollback failure: %w", err))
 	}
 	// A candidate whose rollback FAILED is at least as disqualified as one whose
-	// rollback succeeded — the box is in a worse state, not a better one — so it is
-	// recorded on this path too. Joined rather than returned alone: the rollback
-	// failure is the headline and must not be replaced by a bookkeeping error.
+	// rollback succeeded — the box is in a worse state, not a better one.
+	//
+	// Returning here rather than joining and carrying on is what makes the failure
+	// recoverable: the recovery job stays ENABLED, so a resumed supervisor re-enters
+	// the PhaseRollbackFailed branch above and retries the rejection. Disabling
+	// recovery with the candidate still un-disqualified would leave nothing to retry
+	// it, and the same broken bytes would be installable again once the transaction
+	// was cleared.
 	journal := txn.Journal()
 	if err := RecordRejectedCandidate(
 		journal.HomeDir, journal.CandidateSHA256, journal.ToVersion,
 		"the candidate was rolled back and the rollback did not complete",
 	); err != nil {
-		cause = errors.Join(cause, fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+		return errors.Join(ErrRollbackRecoveryFailed, cause,
+			fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
 	}
 	if err := s.Operations.DisableRecoveryJob(ctx, txn.Journal()); err != nil {
 		return errors.Join(

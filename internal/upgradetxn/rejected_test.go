@@ -122,3 +122,28 @@ func TestRejectedLedger_IsOwnerOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
+
+// TestCandidateRejected_StructurallyInvalidLedgerErrors — decoding successfully is
+// not the same as being a ledger. Each of these is valid JSON that unmarshals
+// without error into a zero value or a digest-less entry, and each would otherwise
+// read as "this box has rejected nothing", silently re-arming every release it
+// rolled back. Same outcome as a corrupt file, so it must get the same fail-closed
+// answer rather than a different one that happens to parse.
+func TestCandidateRejected_StructurallyInvalidLedgerErrors(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"null", `null`},
+		{"empty object", `{}`},
+		{"no schema version", `{"candidates":[]}`},
+		{"entry with no digest", `{"schema_version":1,"candidates":[{}]}`},
+		{"entry with a junk digest", `{"schema_version":1,"candidates":[{"sha256":"not-a-digest"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			require.NoError(t, RecordRejectedCandidate(home, digest([]byte("bad")), "1.0.207", "rolled back"))
+			require.NoError(t, os.WriteFile(rejectedLedgerPath(home), []byte(tc.body), 0o600))
+
+			_, _, err := CandidateRejected(home, []byte("anything"))
+			require.Errorf(t, err, "%s must not read as an empty ledger", tc.name)
+		})
+	}
+}
