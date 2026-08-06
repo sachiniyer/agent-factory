@@ -7787,11 +7787,11 @@ var AttachTerminal = class {
     if (text.trim() === "") {
       return;
     }
-    const markedFirstRow = this.touchPressMarker?.line ?? -1;
-    if (markedFirstRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
+    const anchorRow = this.touchPressMarker !== null ? this.touchPressMarker.line : press.firstRow;
+    if (anchorRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
       const at = wrappedCellPosition(range.start, press.cols);
-      if (this.liveTextAt(markedFirstRow, range, press.cols) === text) {
-        this.term.select(at.col, markedFirstRow + at.row, range.length);
+      if (this.liveTextAt(anchorRow, range, press.cols) === text) {
+        this.term.select(at.col, anchorRow + at.row, range.length);
       } else {
         this.term.clearSelection();
       }
@@ -7921,7 +7921,7 @@ var AttachTerminal = class {
         const buffered = line.getCell(col);
         cells.push(buffered === void 0 ? " " : buffered.getWidth() === 0 ? "" : buffered.getChars() || " ");
       }
-      if (buffer.getLine(row + 1)?.isWrapped === true && line.getCell(cols - 1)?.getCode() === 0) {
+      if (row + 1 < buffer.length && buffer.getLine(row + 1)?.isWrapped === true && line.getCell(cols - 1)?.getCode() === 0) {
         cells[cells.length - 1] = "";
       }
     }

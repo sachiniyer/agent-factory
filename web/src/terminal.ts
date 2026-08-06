@@ -819,11 +819,16 @@ export class AttachTerminal {
     // is this gesture's only statement about what was copied, so it must not make a
     // false one. Reading the live range back and comparing is what makes the highlight
     // an assertion rather than an assumption.
-    const markedFirstRow = this.touchPressMarker?.line ?? -1;
-    if (markedFirstRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
+    // An alternate buffer cannot register a marker at all, so a marker-only rule would
+    // skip the highlight in every full-screen TUI — the most common agent pane there
+    // is — leaving the copy silent. Fall back to the row the snapshot was taken at:
+    // the live-text comparison below is what actually protects the highlight, and it
+    // is just as strict against a raw row as against a marked one.
+    const anchorRow = this.touchPressMarker !== null ? this.touchPressMarker.line : press.firstRow;
+    if (anchorRow >= 0 && press.bufferType === this.term.buffer.active.type && press.cols === this.term.cols) {
       const at = wrappedCellPosition(range.start, press.cols);
-      if (this.liveTextAt(markedFirstRow, range, press.cols) === text) {
-        this.term.select(at.col, markedFirstRow + at.row, range.length);
+      if (this.liveTextAt(anchorRow, range, press.cols) === text) {
+        this.term.select(at.col, anchorRow + at.row, range.length);
       } else {
         // Declining to paint is not enough when something is ALREADY painted: a
         // selection made earlier (a modifier drag in a mouse-aware TUI, which xterm
@@ -1002,7 +1007,11 @@ export class AttachTerminal {
       // (code 32). Flattened to " " it splits an unbroken CJK or emoji token exactly
       // at the wrap; read as structure, the token survives and a real trailing space
       // still separates words.
-      if (buffer.getLine(row + 1)?.isWrapped === true && line.getCell(cols - 1)?.getCode() === 0) {
+      // The lookahead is BOUNDED: xterm's store is circular, so getLine(buffer.length)
+      // aliases to the first retained row rather than answering undefined, and a
+      // wrapped row there would make an ordinary null cell at the bottom of the buffer
+      // look like wrap padding.
+      if (row + 1 < buffer.length && buffer.getLine(row + 1)?.isWrapped === true && line.getCell(cols - 1)?.getCode() === 0) {
         cells[cells.length - 1] = "";
       }
     }
