@@ -332,6 +332,12 @@ type home struct {
 	// interactivePauseAt throttles the renew to statusPollRenewInterval.
 	// Event-loop only.
 	interactivePauseTarget sessionActionTarget
+	// interactivePauseHolder is the pause-lease holder minted for the CURRENT
+	// interactive lifecycle (#3027). Per lifecycle, not per process: these commands
+	// run through tea.Batch, so a resume for a previous lifecycle can land after the
+	// next pause, and a shared id would let it delete a lease the new lifecycle
+	// holds. Cleared with the target it belongs to.
+	interactivePauseHolder string
 	interactivePauseAt     time.Time
 
 	// initialPaneOpened latches the one-time startup auto-open: the first

@@ -252,8 +252,9 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		}
 		// Interactive ended (or focus left the pane): release the lease now so the
 		// daemon resumes delivering into the session immediately.
-		release := m.interactivePauseTarget.resumeStatusPollRequestAs(interactivePollHolder)
+		release := m.interactivePauseTarget.resumeStatusPollRequestAs(m.interactivePauseHolder)
 		m.interactivePauseTarget = sessionActionTarget{}
+		m.interactivePauseHolder = ""
 		m.interactivePauseAt = time.Time{}
 		return func() tea.Msg {
 			_ = resume(release)
@@ -265,13 +266,23 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		// Newly interactive on this session (or the focused session changed): release
 		// any previous hold and pause the new target.
 		prev := m.interactivePauseTarget
+		// The OUTGOING lifecycle's holder travels with its resume, and the incoming
+		// one gets a freshly minted id (#3028 review). These commands run through
+		// tea.Batch, so a resume for the previous lifecycle can land AFTER the new
+		// pause; sharing one id would make that late resume delete the lease the new
+		// lifecycle just took, resuming the poll and automated delivery while the
+		// user types. Distinct ids make the stale resume address a holder nobody
+		// holds — a no-op — which is the same reason each attach mints its own.
+		prevHolder := m.interactivePauseHolder
+		holder := newStatusPollHolder("preview")
 		m.interactivePauseTarget = want
+		m.interactivePauseHolder = holder
 		m.interactivePauseAt = time.Now()
 		return func() tea.Msg {
 			if !prev.isZero() {
-				_ = resume(prev.resumeStatusPollRequestAs(interactivePollHolder))
+				_ = resume(prev.resumeStatusPollRequestAs(prevHolder))
 			}
-			_ = pause(want.pauseStatusPollRequestAs(interactivePollHolder))
+			_ = pause(want.pauseStatusPollRequestAs(holder))
 			return nil
 		}
 	}
@@ -282,8 +293,9 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		return nil
 	}
 	m.interactivePauseAt = time.Now()
+	holder := m.interactivePauseHolder
 	return func() tea.Msg {
-		_ = pause(want.pauseStatusPollRequestAs(interactivePollHolder))
+		_ = pause(want.pauseStatusPollRequestAs(holder))
 		return nil
 	}
 }

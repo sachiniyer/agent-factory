@@ -113,13 +113,6 @@ func newStatusPollHolder(kind string) string {
 	return "tui-" + kind + "-" + hex.EncodeToString(b[:])
 }
 
-// interactivePollHolder is the holder for the live-preview pause path
-// (interactivePollPauseCmd). Stable for the process because that path holds at
-// most one target at a time and swaps it under its own serialization — but
-// DISTINCT from any attach's holder, so an attach's resume cannot revoke the
-// preview's hold or the reverse.
-var interactivePollHolder = newStatusPollHolder("preview")
-
 func (target sessionActionTarget) pauseStatusPollRequestAs(holder string) daemon.PauseStatusPollRequest {
 	return daemon.PauseStatusPollRequest{
 		ID: target.id, Title: target.title, RepoID: target.repoID, Holder: holder,
