@@ -785,7 +785,7 @@ func stubGhostCleanup(t *testing.T) (wtCalls *[]string, tmuxCalls *[]string) {
 		wt = append(wt, title)
 		return git.CleanupSettled, nil
 	}
-	ghostKillTmuxByName = func(name string) (tmux.PaneState, error) {
+	ghostKillTmuxByName = func(name, _ string) (tmux.PaneState, error) {
 		tm = append(tm, name)
 		return tmux.PaneStateKnown, nil
 	}
@@ -876,7 +876,7 @@ func TestGhostCleanup_TmuxBeforeWorktree(t *testing.T) {
 		order = append(order, "worktree")
 		return git.CleanupSettled, nil
 	}
-	ghostKillTmuxByName = func(name string) (tmux.PaneState, error) {
+	ghostKillTmuxByName = func(name, _ string) (tmux.PaneState, error) {
 		order = append(order, "tmux")
 		return tmux.PaneStateKnown, nil
 	}
@@ -908,7 +908,7 @@ func TestGhostCleanup_TmuxBeforeWorktree(t *testing.T) {
 // only appear via storage corruption, and silently killing whatever tmux
 // session it names could destroy unrelated work.
 func TestGhostKillTmuxByName_RefusesNonAfPrefix(t *testing.T) {
-	state, err := ghostKillTmuxByName("not-ours")
+	state, err := ghostKillTmuxByName("not-ours", "")
 	if err == nil {
 		t.Fatalf("expected refusal for non-af prefix, got nil")
 	}

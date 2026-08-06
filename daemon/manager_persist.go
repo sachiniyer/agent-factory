@@ -296,11 +296,19 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 // teardown modes do (#1917): the caller goes on to DELETE this ghost's worktree,
 // so it must be able to tell "tmux confirmed the session is gone" from "tmux never
 // answered". A refused name never ran a tmux command, so its state is known.
-var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, error) {
+//
+// worktreePath is the workspace this cleanup goes on to DELETE. It is supplied
+// so a vanished session that never exported an AF_SESSION marker can still be
+// checked for processes working inside that workspace (#2998). Leaving it unset
+// here would disable the safeguard on precisely the destructive path that needs
+// it — this caller proceeds straight to ghostCleanupWorktree.
+var ghostKillTmuxByName = func(sanitizedName, worktreePath string) (tmux.PaneState, error) {
 	if !strings.HasPrefix(sanitizedName, tmux.TmuxPrefix) {
 		return tmux.PaneStateKnown, fmt.Errorf("refusing to kill tmux session without %q prefix: %q", tmux.TmuxPrefix, sanitizedName)
 	}
-	return tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "").CloseAndWaitForPaneExit()
+	ts := tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "")
+	ts.SetWorktreePath(worktreePath)
+	return ts.CloseAndWaitForPaneExit()
 }
 
 // ghostCleanupWorktree performs best-effort worktree teardown for a ghost
@@ -417,7 +425,14 @@ func ghostCleanup(data *session.InstanceData, title string) error {
 	// record intact for a retry. Tmux still goes FIRST for the #802 reason (a live
 	// agent racing git's recursive delete leaks a half-deleted directory).
 	for _, name := range ghostTmuxNames(data) {
-		state, killErr := ghostKillTmuxByName(name)
+		// Empty for an external record, matching ghostCleanupWorktree's own bail:
+		// that path removes nothing, so there is no destructive action to protect
+		// and the user's own checkout must not be gated on.
+		ghostWorktree := data.Worktree.WorktreePath
+		if data.Worktree.ExternalWorktree {
+			ghostWorktree = ""
+		}
+		state, killErr := ghostKillTmuxByName(name, ghostWorktree)
 		if killErr != nil {
 			log.WarningLog.Printf("ghost session %q: tmux cleanup failed for %q: %v", title, name, killErr)
 		}

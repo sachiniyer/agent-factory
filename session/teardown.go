@@ -286,8 +286,18 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 
 	var errs []error
 	paneMayBeLive := false
-	for _, c := range closed {
-		state, err := mode.closeTab(c.ts, worktreePathOf(gw), title, c.name)
+	for i, c := range closed {
+		// Only the LAST tab supplies the workspace. Every tab of an instance works
+		// in the SAME worktree, so a check run mid-loop sees the siblings this loop
+		// has not closed yet and reports them as occupants — refusing a teardown
+		// whose own later iterations were about to remove the very processes it
+		// objected to (Codex on #3001). By the final iteration every earlier tab is
+		// closed, which is the "after every tab" the check actually needs.
+		tabWorktree := ""
+		if i == len(closed)-1 {
+			tabWorktree = worktreePathOf(gw)
+		}
+		state, err := mode.closeTab(c.ts, tabWorktree, title, c.name)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -584,6 +594,15 @@ func (teardownArchive) finalize(i *Instance, _ []closedTab, _ *git.GitWorktree) 
 // is no worktree to protect. Nil-safe because gw is documented nil-able here.
 func worktreePathOf(gw *git.GitWorktree) string {
 	if gw == nil {
+		return ""
+	}
+	// An external worktree — an `--here` session, or a legacy one adopted in
+	// place — is the USER's own checkout, and Cleanup deliberately removes
+	// nothing for it. There is no destructive action to protect, while the path
+	// is exactly where the user's own shell normally sits: gating on it would
+	// refuse the kill and retain the tombstoned record indefinitely, over a
+	// process that was never in danger (Codex on #3001).
+	if gw.IsExternalWorktree() {
 		return ""
 	}
 	return gw.GetWorktreePath()
