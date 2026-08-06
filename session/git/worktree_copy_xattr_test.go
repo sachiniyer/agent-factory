@@ -1,8 +1,10 @@
 package git
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -30,6 +32,39 @@ func xattrCapableDir(t *testing.T) string {
 	}
 	require.NoError(t, os.Remove(probe))
 	return dir
+}
+
+// xattrFixture is a source/destination pair on an xattr-capable filesystem, with the
+// cross-device path forced so moveDirCrossDevice really copies rather than renames.
+func xattrFixture(t *testing.T) (source, destination string) {
+	t.Helper()
+	workspace := xattrCapableDir(t)
+	source = filepath.Join(workspace, "src")
+	require.NoError(t, os.MkdirAll(source, 0o755))
+	original := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = original })
+	return source, filepath.Join(workspace, "dst")
+}
+
+// listAttrs returns the attribute names present on path.
+func listAttrs(t *testing.T, path string) []string {
+	t.Helper()
+	size, err := unix.Listxattr(path, nil)
+	require.NoError(t, err)
+	if size == 0 {
+		return nil
+	}
+	buffer := make([]byte, size)
+	read, err := unix.Listxattr(path, buffer)
+	require.NoError(t, err)
+	var names []string
+	for _, name := range bytes.Split(buffer[:read], []byte{0}) {
+		if len(name) > 0 {
+			names = append(names, string(name))
+		}
+	}
+	return names
 }
 
 func readAttr(t *testing.T, path, name string) []byte {
@@ -96,4 +131,69 @@ func mustOpen(t *testing.T, path string) *os.File {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = handle.Close() })
 	return handle
+}
+
+// TestCopyTree_CopiesXattrsOntoReadOnlyNodes is the P1 from review, and the ordering
+// it pins is not cosmetic. Setting an attribute in the user namespace requires write
+// permission on the INODE — an already-open write descriptor does not satisfy it — so
+// with the mode applied first, every user.* attribute on a checked-in 0444 file
+// failed EACCES. The privilege branch then logged it as "needs privilege" and carried
+// on, so an ordinary attribute was lost silently on every read-only node in the tree.
+func TestCopyTree_CopiesXattrsOntoReadOnlyNodes(t *testing.T) {
+	source, destination := xattrFixture(t)
+	readOnly := filepath.Join(source, "locked.txt")
+	require.NoError(t, os.WriteFile(readOnly, []byte("contents"), 0o444))
+	if err := unix.Setxattr(readOnly, "user.af_locked", []byte("kept"), 0); err != nil {
+		t.Skipf("this filesystem does not support user xattrs: %v", err)
+	}
+	readOnlyDir := filepath.Join(source, "lockeddir")
+	require.NoError(t, os.Mkdir(readOnlyDir, 0o555))
+	require.NoError(t, unix.Setxattr(readOnlyDir, "user.af_lockeddir", []byte("kept"), 0))
+
+	require.NoError(t, moveDirCrossDevice(source, destination))
+
+	require.Equal(t, []byte("kept"), readAttr(t, filepath.Join(destination, "locked.txt"), "user.af_locked"),
+		"a 0444 file must keep its attributes — the mode must not be applied before they are written")
+	require.Equal(t, []byte("kept"), readAttr(t, filepath.Join(destination, "lockeddir"), "user.af_lockeddir"),
+		"and a 0555 directory likewise")
+
+	// The mode itself must still land, so the fix cannot have simply left nodes writable.
+	info, err := os.Stat(filepath.Join(destination, "locked.txt"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o444), info.Mode().Perm())
+}
+
+// TestCopyTree_DropsDestinationOnlyXattrs pins the other P1. A destination parent
+// carrying a DEFAULT POSIX ACL gives every newly created child a
+// system.posix_acl_access of its own, so a source file with no ACL arrives with one —
+// and an inherited ACL is generally WIDER than the mode it replaces, making this a
+// permission-widening divergence rather than an untidy one.
+//
+// Simulated with a user.* attribute rather than a real default ACL: the mechanism
+// under test is "the destination has an attribute the source does not", and a user
+// attribute exercises it on any filesystem, where setting a default ACL needs tooling
+// this test cannot assume.
+func TestCopyTree_DropsDestinationOnlyXattrs(t *testing.T) {
+	source, destination := xattrFixture(t)
+	file := filepath.Join(source, "plain.txt")
+	require.NoError(t, os.WriteFile(file, []byte("contents"), 0o644))
+	if err := unix.Setxattr(file, "user.af_kept", []byte("yes"), 0); err != nil {
+		t.Skipf("this filesystem does not support user xattrs: %v", err)
+	}
+
+	require.NoError(t, moveDirCrossDevice(source, destination))
+	copied := filepath.Join(destination, "plain.txt")
+
+	// Stand in for the inherited attribute, then re-run the copy step against a source
+	// that never had it.
+	require.NoError(t, unix.Setxattr(copied, "user.af_inherited", []byte("from-parent"), 0))
+	names := listAttrs(t, copied)
+	require.Contains(t, names, "user.af_inherited")
+
+	second := filepath.Join(filepath.Dir(destination), "dst2")
+	require.NoError(t, moveDirCrossDevice(destination, second))
+	// The second copy's source DID have it, so it is carried — the prune must remove
+	// only what the source lacks, never what it has.
+	require.Contains(t, listAttrs(t, filepath.Join(second, "plain.txt")), "user.af_inherited")
+	require.Equal(t, []byte("yes"), readAttr(t, filepath.Join(second, "plain.txt"), "user.af_kept"))
 }
