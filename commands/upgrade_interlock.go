@@ -44,6 +44,9 @@ import (
 // in the command the user types.
 const ignoreActiveUpgradeFlag = "ignore-active-upgrade"
 
+// allowRejectedFlag overrides the rejected-candidate ledger on the manual path.
+const allowRejectedFlag = "allow-rejected"
+
 // upgradeIgnoreActiveUpgrade is that flag's value. A package var, like
 // upgradeAllowDowngrade, so adding it churns no runUpgrade call site.
 var upgradeIgnoreActiveUpgrade bool

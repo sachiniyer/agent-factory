@@ -1,9 +1,11 @@
 package upgradetxn
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -14,17 +16,17 @@ import (
 // on a loop. The read here goes to disk with no warm state in between, which is the
 // only way to tell a durable record from a remembered one.
 func TestCandidateRejected_SurvivesARestart(t *testing.T) {
-	home := t.TempDir()
+	executable := filepath.Join(t.TempDir(), "af")
 	candidate := []byte("the binary that failed validation")
 
-	rejected, _, err := CandidateRejected(home, candidate)
+	rejected, _, err := CandidateRejected(executable, candidate)
 	require.NoError(t, err, "a home that has never rolled anything back has no ledger, which is not an error")
 	require.False(t, rejected, "premise: nothing is rejected yet")
 
-	require.NoError(t, RecordRejectedCandidate(home, digest(candidate), "1.0.207", "rolled back"))
+	require.NoError(t, RecordRejectedCandidate(executable, digest(candidate), "1.0.207", "rolled back"))
 
 	// No shared handle, no cache: this is what a later boot sees.
-	rejected, entry, err := CandidateRejected(home, candidate)
+	rejected, entry, err := CandidateRejected(executable, candidate)
 	require.NoError(t, err)
 	require.True(t, rejected, "a candidate that reached rollback must stay refused across restarts")
 	require.Equal(t, "1.0.207", entry.Version, "the operator needs to know WHICH release, not just that one was refused")
@@ -38,17 +40,17 @@ func TestCandidateRejected_SurvivesARestart(t *testing.T) {
 // turned into a permanent block, which is the unoverridable shape #2859 was bitten
 // by. Publishing a corrected build under the same tag must be the way out.
 func TestCandidateRejected_AdmitsARecutTagWithDifferentBytes(t *testing.T) {
-	home := t.TempDir()
+	executable := filepath.Join(t.TempDir(), "af")
 	broken := []byte("1.0.207 as first published — broken")
 	fixed := []byte("1.0.207 re-cut with the fix")
 
-	require.NoError(t, RecordRejectedCandidate(home, digest(broken), "1.0.207", "rolled back"))
+	require.NoError(t, RecordRejectedCandidate(executable, digest(broken), "1.0.207", "rolled back"))
 
-	rejected, _, err := CandidateRejected(home, broken)
+	rejected, _, err := CandidateRejected(executable, broken)
 	require.NoError(t, err)
 	require.True(t, rejected, "the exact bytes that failed stay refused")
 
-	rejected, _, err = CandidateRejected(home, fixed)
+	rejected, _, err = CandidateRejected(executable, fixed)
 	require.NoError(t, err)
 	require.False(t, rejected,
 		"a corrected build under the SAME tag must be installable, or the box is stuck on that release forever")
@@ -60,21 +62,21 @@ func TestCandidateRejected_AdmitsARecutTagWithDifferentBytes(t *testing.T) {
 // it can least afford to reinstall a broken binary.
 func TestCandidateRejected_UnreadableLedgerErrorsRatherThanAdmitting(t *testing.T) {
 	t.Run("corrupt bytes", func(t *testing.T) {
-		home := t.TempDir()
-		require.NoError(t, RecordRejectedCandidate(home, digest([]byte("bad")), "1.0.207", "rolled back"))
-		require.NoError(t, os.WriteFile(rejectedLedgerPath(home), []byte("{not json"), 0o600))
+		executable := filepath.Join(t.TempDir(), "af")
+		require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
+		require.NoError(t, os.WriteFile(rejectedLedgerPath(executable), []byte("{not json"), 0o600))
 
-		_, _, err := CandidateRejected(home, []byte("anything"))
+		_, _, err := CandidateRejected(executable, []byte("anything"))
 		require.Error(t, err, "a corrupt ledger must not read as an empty one")
 	})
 
 	t.Run("newer schema", func(t *testing.T) {
-		home := t.TempDir()
-		require.NoError(t, RecordRejectedCandidate(home, digest([]byte("bad")), "1.0.207", "rolled back"))
-		require.NoError(t, os.WriteFile(rejectedLedgerPath(home),
+		executable := filepath.Join(t.TempDir(), "af")
+		require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
+		require.NoError(t, os.WriteFile(rejectedLedgerPath(executable),
 			[]byte(`{"schema_version":9999,"candidates":[]}`), 0o600))
 
-		_, _, err := CandidateRejected(home, []byte("anything"))
+		_, _, err := CandidateRejected(executable, []byte("anything"))
 		require.Error(t, err,
 			"an older binary must not decode a newer ledger on a guess and activate what a newer one disqualified")
 	})
@@ -85,29 +87,29 @@ func TestCandidateRejected_UnreadableLedgerErrorsRatherThanAdmitting(t *testing.
 // candidate is recorded repeatedly; and a long-lived box must not grow the file
 // without limit.
 func TestRecordRejectedCandidate_IsIdempotentAndBounded(t *testing.T) {
-	home := t.TempDir()
+	executable := filepath.Join(t.TempDir(), "af")
 	candidate := []byte("rolled back twice")
 
-	require.NoError(t, RecordRejectedCandidate(home, digest(candidate), "1.0.207", "rolled back"))
-	require.NoError(t, RecordRejectedCandidate(home, digest(candidate), "1.0.207", "rolled back again"))
+	require.NoError(t, RecordRejectedCandidate(executable, digest(candidate), "1.0.207", "rolled back"))
+	require.NoError(t, RecordRejectedCandidate(executable, digest(candidate), "1.0.207", "rolled back again"))
 
-	ledger, err := readRejectedLedger(home)
+	ledger, err := readRejectedLedger(executable)
 	require.NoError(t, err)
 	require.Len(t, ledger.Candidates, 1, "re-entry must refresh the entry, not duplicate it")
 	require.Equal(t, "rolled back again", ledger.Candidates[0].Reason)
 
 	for i := 0; i < maxRejectedCandidates+5; i++ {
 		require.NoError(t, RecordRejectedCandidate(
-			home, digest([]byte{byte(i), 'x'}), "1.0.2", "rolled back"))
+			executable, digest([]byte{byte(i), 'x'}), "1.0.2", "rolled back"))
 	}
-	ledger, err = readRejectedLedger(home)
+	ledger, err = readRejectedLedger(executable)
 	require.NoError(t, err)
 	require.Len(t, ledger.Candidates, maxRejectedCandidates, "the ledger must stay bounded")
 
 	// The most recent rejection is the one that matters most, so it must be the last
 	// thing evicted — dropping newest-first would forget the release breaking you now.
 	newest := []byte{byte(maxRejectedCandidates + 4), 'x'}
-	rejected, _, err := CandidateRejected(home, newest)
+	rejected, _, err := CandidateRejected(executable, newest)
 	require.NoError(t, err)
 	require.True(t, rejected, "the newest rejection must survive the cap")
 }
@@ -115,10 +117,10 @@ func TestRecordRejectedCandidate_IsIdempotentAndBounded(t *testing.T) {
 // TestRejectedLedger_IsOwnerOnly — the ledger decides whether a binary may be
 // activated, so a user who can write it can re-enable a release this box refused.
 func TestRejectedLedger_IsOwnerOnly(t *testing.T) {
-	home := t.TempDir()
-	require.NoError(t, RecordRejectedCandidate(home, digest([]byte("bad")), "1.0.207", "rolled back"))
+	executable := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
 
-	info, err := os.Stat(filepath.Join(upgradeRoot(home), rejectedLedgerName))
+	info, err := os.Stat(rejectedLedgerPath(executable))
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
@@ -138,12 +140,70 @@ func TestCandidateRejected_StructurallyInvalidLedgerErrors(t *testing.T) {
 		{"entry with a junk digest", `{"schema_version":1,"candidates":[{"sha256":"not-a-digest"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			require.NoError(t, RecordRejectedCandidate(home, digest([]byte("bad")), "1.0.207", "rolled back"))
-			require.NoError(t, os.WriteFile(rejectedLedgerPath(home), []byte(tc.body), 0o600))
+			executable := filepath.Join(t.TempDir(), "af")
+			require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
+			require.NoError(t, os.WriteFile(rejectedLedgerPath(executable), []byte(tc.body), 0o600))
 
-			_, _, err := CandidateRejected(home, []byte("anything"))
+			_, _, err := CandidateRejected(executable, []byte("anything"))
 			require.Errorf(t, err, "%s must not read as an empty ledger", tc.name)
 		})
 	}
+}
+
+// TestCandidateRejected_IsSharedAcrossHomesOnOneExecutable is why the ledger is keyed
+// by executable rather than by AGENT_FACTORY_HOME. One installation can serve several
+// homes — commands/upgrade_interlock.go takes an executable-scoped lock for exactly
+// that reason — and the thing a bad candidate breaks is the shared binary. A per-home
+// ledger would let home B reinstall the bytes home A had just rolled back, over the
+// executable they share.
+func TestCandidateRejected_IsSharedAcrossHomesOnOneExecutable(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "af")
+	candidate := []byte("the build that failed validation")
+
+	// Home A rolls it back. Homes are not even named here — that is the point.
+	require.NoError(t, RecordRejectedCandidate(executable, digest(candidate), "1.0.207", "rolled back"))
+
+	// Home B, a different AGENT_FACTORY_HOME, asks about the same installation.
+	rejected, entry, err := CandidateRejected(executable, candidate)
+	require.NoError(t, err)
+	require.True(t, rejected,
+		"a second home sharing this executable must see the rejection; otherwise it reinstalls the broken bytes over the binary the first home just recovered")
+	require.Equal(t, "1.0.207", entry.Version)
+
+	// A DIFFERENT installation is genuinely unaffected — the scope is the binary,
+	// not the machine.
+	other := filepath.Join(t.TempDir(), "af")
+	rejected, _, err = CandidateRejected(other, candidate)
+	require.NoError(t, err)
+	require.False(t, rejected, "an unrelated installation must not inherit another's quarantine")
+}
+
+// TestRecordRejectedCandidate_KeepsInsertionOrderUnderABackwardClock pins the cap
+// against a clock that steps backwards — NTP correcting a drifted box, which is
+// exactly the sort of box that has been rebooting into a bad release. Sorting by
+// RejectedAt would file the newest entry first and the cap would then discard the
+// very rejection just recorded, while the call still returned success and the
+// supervisor went on to disable recovery.
+func TestRecordRejectedCandidate_KeepsInsertionOrderUnderABackwardClock(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "af")
+	for i := 0; i < maxRejectedCandidates; i++ {
+		require.NoError(t, RecordRejectedCandidate(executable, digest([]byte{byte(i), 'a'}), "1.0.1", "rolled back"))
+	}
+	// Backdate every stored entry so the next append is the OLDEST by wall clock.
+	ledger, err := readRejectedLedger(executable)
+	require.NoError(t, err)
+	for i := range ledger.Candidates {
+		ledger.Candidates[i].RejectedAt = time.Now().UTC().Add(24 * time.Hour)
+	}
+	encoded, err := json.MarshalIndent(ledger, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(rejectedLedgerPath(executable), encoded, 0o600))
+
+	latest := []byte("the one that just failed")
+	require.NoError(t, RecordRejectedCandidate(executable, digest(latest), "1.0.207", "rolled back"))
+
+	rejected, _, err := CandidateRejected(executable, latest)
+	require.NoError(t, err)
+	require.True(t, rejected,
+		"the rejection just recorded must survive the cap even when every other entry is stamped later than it")
 }

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"strings"
 	"time"
 )
 
@@ -23,9 +23,19 @@ import (
 // The ledger lives beside the rollback path that writes it rather than in the driver
 // that reads it: the driver is one caller, and a rollback is authoritative about its
 // own candidate whether or not any driver is running.
+//
+// It is keyed by EXECUTABLE, not by home. One installation can serve several
+// AGENT_FACTORY_HOMEs (see commands/upgrade_interlock.go, which takes an
+// executable-scoped lock for exactly this reason), and the thing a bad candidate
+// breaks is the shared binary. A per-home ledger would let home B reinstall the
+// bytes home A had just rolled back, over the executable they share — defeating A's
+// quarantine and breaking every home using that installation. So the record sits
+// beside the binary it disqualifies, in the same dotfile convention the staged
+// upgrade artifacts already use.
 
-// rejectedLedgerName is the ledger file inside the upgrade root.
-const rejectedLedgerName = "rejected-candidates.json"
+// rejectedLedgerSuffix names the ledger beside the executable it governs, matching
+// the ".<base>.af-upgrade-<id>.previous" convention binaryArtifactPaths already uses.
+const rejectedLedgerSuffix = ".af-rejected-candidates.json"
 
 // maxRejectedCandidates bounds the ledger. It is a disqualification list for
 // binaries this box actually installed and rolled back, so it grows only when an
@@ -63,8 +73,9 @@ type rejectedLedger struct {
 	Candidates    []RejectedCandidate `json:"candidates"`
 }
 
-func rejectedLedgerPath(home string) string {
-	return filepath.Join(upgradeRoot(home), rejectedLedgerName)
+func rejectedLedgerPath(executable string) string {
+	return filepath.Join(filepath.Dir(executable),
+		"."+filepath.Base(executable)+rejectedLedgerSuffix)
 }
 
 // CandidateRejected reports whether these exact candidate bytes already reached a
@@ -77,8 +88,8 @@ func rejectedLedgerPath(home string) string {
 // A ledger that cannot be read returns the error rather than false. "I could not tell"
 // is not "it is fine": answering false on a read failure would re-activate the release
 // that broke the box, which is the whole failure this prevents.
-func CandidateRejected(home string, candidate []byte) (bool, RejectedCandidate, error) {
-	ledger, err := readRejectedLedger(home)
+func CandidateRejected(executable string, candidate []byte) (bool, RejectedCandidate, error) {
+	ledger, err := readRejectedLedger(executable)
 	if err != nil {
 		return false, RejectedCandidate{}, err
 	}
@@ -98,15 +109,14 @@ func CandidateRejected(home string, candidate []byte) (bool, RejectedCandidate, 
 // history the cap exists to keep. A repeat refreshes the existing entry's timestamp
 // and reason instead: the record moves to the front, so the most recently offending
 // release is the last one the cap discards.
-func RecordRejectedCandidate(home, sha256, version, reason string) error {
+func RecordRejectedCandidate(executable, sha256, version, reason string) error {
 	if sha256 == "" {
 		return errors.New("cannot reject an upgrade candidate with no digest")
 	}
-	root := upgradeRoot(home)
-	if err := ensureDurableDirectory(home, root, transactionDirMode); err != nil {
-		return fmt.Errorf("prepare the upgrade root for the rejected-candidate ledger: %w", err)
+	if strings.TrimSpace(executable) == "" {
+		return errors.New("cannot reject an upgrade candidate without the executable it applies to")
 	}
-	ledger, err := readRejectedLedger(home)
+	ledger, err := readRejectedLedger(executable)
 	if err != nil {
 		return err
 	}
@@ -122,8 +132,12 @@ func RecordRejectedCandidate(home, sha256, version, reason string) error {
 		Reason:     reason,
 		RejectedAt: time.Now().UTC(),
 	})
-	// Newest last, so dropping from the front discards the oldest.
-	sort.SliceStable(kept, func(i, j int) bool { return kept[i].RejectedAt.Before(kept[j].RejectedAt) })
+	// Order is INSERTION order, deliberately not sorted by RejectedAt. A clock that
+	// steps backwards — NTP correcting a drifted box, which is exactly the sort of
+	// box that has been rebooting into a bad release — would sort the entry just
+	// appended ahead of older ones, and the cap below would then discard it while
+	// this function still returned success. The supervisor would disable recovery
+	// believing the candidate was disqualified when it had just been dropped.
 	if len(kept) > maxRejectedCandidates {
 		kept = kept[len(kept)-maxRejectedCandidates:]
 	}
@@ -131,7 +145,7 @@ func RecordRejectedCandidate(home, sha256, version, reason string) error {
 	if err != nil {
 		return fmt.Errorf("encode the rejected-candidate ledger: %w", err)
 	}
-	if err := durableAtomicWriteFile(rejectedLedgerPath(home), encoded, rejectedLedgerMode); err != nil {
+	if err := durableAtomicWriteFile(rejectedLedgerPath(executable), encoded, rejectedLedgerMode); err != nil {
 		return fmt.Errorf("write the rejected-candidate ledger: %w", err)
 	}
 	return nil
@@ -145,8 +159,8 @@ func RecordRejectedCandidate(home, sha256, version, reason string) error {
 // — a truncated write, a full disk — is also a moment when the box is least able to
 // survive re-installing a broken binary. The ledger is written atomically, so a
 // partial file means something outside this code touched it.
-func readRejectedLedger(home string) (rejectedLedger, error) {
-	path := rejectedLedgerPath(home)
+func readRejectedLedger(executable string) (rejectedLedger, error) {
+	path := rejectedLedgerPath(executable)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return rejectedLedger{SchemaVersion: journalSchemaVersion}, nil

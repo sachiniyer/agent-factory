@@ -222,11 +222,14 @@ func newUpdateDriver(manager *Manager, requestExit func()) *updateDriver {
 		baselineErr:        baselineErr,
 		activationEnabled:  daemonUpgradeActivationEnabled,
 		candidateRejected: func(candidate []byte) (bool, upgradetxn.RejectedCandidate, error) {
-			home, err := config.GetConfigDir()
+			// Scoped to the EXECUTABLE, not this home: one installation can serve
+			// several AGENT_FACTORY_HOMEs, and the binary is what a bad candidate
+			// breaks (#2212).
+			executable, err := upgradeTriggerExecutableFn()
 			if err != nil {
 				return false, upgradetxn.RejectedCandidate{}, err
 			}
-			return upgradetxn.CandidateRejected(home, candidate)
+			return upgradetxn.CandidateRejected(executable, candidate)
 		},
 		activate: func(ctx context.Context, candidate []byte, toVersion string) error {
 			// The baseline goes with it: Prepare re-verifies it under the locks,
@@ -488,6 +491,15 @@ func (d *updateDriver) activateRelease(ctx context.Context, tag, latest, channel
 	// release forever. The bandwidth is the price of not being permanently stuck.
 	if outcome, ok := d.candidateIsActivatable(candidate, latest); !ok {
 		return outcome
+	}
+	// The ledger read touches the filesystem and can block, so re-ask the same
+	// question the check above this one asks: past this line triggerUpgradeActivation
+	// enters Prepare before it ever consults the context, and the detached recovery
+	// job start takes no context at all. A shutdown that landed during the read must
+	// not publish a transaction on its way out.
+	if ctx.Err() != nil {
+		log.InfoLog.Printf("auto-update: daemon is shutting down; abandoning the staged upgrade to %s", latest)
+		return updateCheckSkipped
 	}
 
 	if err := d.activate(ctx, candidate, latest); err != nil {

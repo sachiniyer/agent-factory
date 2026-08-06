@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/spf13/cobra"
 )
@@ -76,6 +77,14 @@ var upgradeAllowDowngrade bool
 // shipped.
 var upgradeNoRestart bool
 
+// upgradeAllowRejected overrides the rejected-candidate ledger. A human is present
+// on this path, which is the whole difference from the daemon and launch updaters:
+// those refuse outright because nobody is there to weigh it, while `af upgrade` is
+// the repair command and must not be the thing that CANNOT be used to repair. A
+// candidate that failed validation once may still be the right thing to install
+// deliberately — after the cause is understood, or to reproduce it.
+var upgradeAllowRejected bool
+
 // daemonHealthFn is indirected so tests can describe the daemon's liveness
 // without a real control socket or PID file. Read-only: daemon.Health never
 // spawns or signals anything.
@@ -88,6 +97,8 @@ func init() {
 		"Leave the running daemon alone (af upgrade restarts it by default so the new binary takes effect)")
 	upgradeCmd.Flags().BoolVar(&upgradeIgnoreActiveUpgrade, ignoreActiveUpgradeFlag, false,
 		"Install even while a daemon upgrade transaction is in progress (this can leave that upgrade unable to roll back)")
+	upgradeCmd.Flags().BoolVar(&upgradeAllowRejected, allowRejectedFlag, false,
+		"Install even if this exact build was rolled back on this machine (it failed validation here before)")
 }
 
 var upgradeCmd = &cobra.Command{
@@ -227,6 +238,25 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 	resolvedPath, err := filepath.EvalSymlinks(execPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve executable path: %w", err)
+	}
+
+	// The ledger applies here too: after a rollback leaves the user on the older
+	// version, the still-latest release is the exact build that failed validation,
+	// so the ordinary repair command would silently reinstall it and restart the
+	// daemon on it. Refused by default — but overridable, because a human is on this
+	// path and `af upgrade` is the command they repair WITH. An unoverridable block
+	// here would be the shape #2859 was bitten by.
+	if !upgradeAllowRejected {
+		rejected, entry, ledgerErr := upgradetxn.CandidateRejected(resolvedPath, binary)
+		if ledgerErr != nil {
+			return fmt.Errorf("cannot read the rejected-candidate ledger, so this release is not safe to install (use --%s to install anyway): %w",
+				allowRejectedFlag, ledgerErr)
+		}
+		if rejected {
+			return fmt.Errorf(
+				"this release (%s) is byte-for-byte the build this machine rolled back at %s (%s); it failed validation here. Publish a corrected build, or pass --%s to install it anyway",
+				entry.Version, entry.RejectedAt.Format(time.RFC3339), entry.Reason, allowRejectedFlag)
+		}
 	}
 
 	if err := writeExecutableInPlace(resolvedPath, binary, upgradeIgnoreActiveUpgrade, "--"+ignoreActiveUpgradeFlag); err != nil {

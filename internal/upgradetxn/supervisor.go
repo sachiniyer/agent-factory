@@ -351,7 +351,7 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			// transaction was repaired. Idempotent on the digest, so re-entry after a
 			// successful record only refreshes it.
 			if err := RecordRejectedCandidate(
-				journal.HomeDir, journal.CandidateSHA256, journal.ToVersion,
+				journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
 				"the candidate was rolled back and the rollback did not complete",
 			); err != nil {
 				return errors.Join(ErrRollbackRecoveryFailed,
@@ -427,7 +427,7 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			// stays recoverable and re-entry retries; carrying on would leave the
 			// box healthy now and certain to reinstall the same broken binary.
 			if err := RecordRejectedCandidate(
-				journal.HomeDir, journal.CandidateSHA256, journal.ToVersion,
+				journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
 				"the candidate failed validation and was rolled back",
 			); err != nil {
 				return fmt.Errorf("record the rolled-back candidate as rejected: %w", err)
@@ -513,7 +513,7 @@ func (s Supervisor) finishFailedRollback(
 	// was cleared.
 	journal := txn.Journal()
 	if err := RecordRejectedCandidate(
-		journal.HomeDir, journal.CandidateSHA256, journal.ToVersion,
+		journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
 		"the candidate was rolled back and the rollback did not complete",
 	); err != nil {
 		return errors.Join(ErrRollbackRecoveryFailed, cause,
