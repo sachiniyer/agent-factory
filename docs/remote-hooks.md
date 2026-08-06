@@ -90,7 +90,7 @@ Each command value is the path of one executable — it is run directly, not thr
 
 ### Validating your setup
 
-Run `af doctor` from inside the repository to check the remote-hook setup: it validates that `launch_cmd` + `delete_cmd` are configured (and that no removed key lingers), and that each script exists and is executable. There is no read-only connectivity probe — the provision-and-expose contract has no dry-run verb (running `launch_cmd` would provision real infrastructure), so the live wire round-trip is exercised by actually creating a session.
+Run `af doctor` from inside the repository to check the remote-hook setup: it validates that your provisioning command (`provision_cmd` or `launch_cmd`) and `delete_cmd` are configured (and that no removed key lingers), and that each configured script exists and is executable. There is no read-only connectivity probe — neither contract has a dry-run verb (running either provisioning script provisions real infrastructure), so the live wire round-trip is exercised by actually creating a session.
 
 ## Script protocol
 

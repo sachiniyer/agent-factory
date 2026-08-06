@@ -255,11 +255,11 @@ When the repository you run it in configures a [remote-hook backend](remote-hook
 `af doctor` also validates that setup, so a misconfigured remote surfaces as a
 diagnosable problem instead of a cryptic failure at session-launch time:
 
-- **remote-config** — the required `remote_hooks` commands (`launch_cmd`,
-  `delete_cmd`) are present, naming the missing field and the in-repo config file
-  when one is not. It also rejects a config still carrying the removed pre-PR7
-  keys (`list_cmd`/`attach_cmd`/`terminal_cmd`), naming the stale key and pointing
-  at the migration recipe.
+- **remote-config** — the required `remote_hooks` commands (one of
+  `provision_cmd`/`launch_cmd`, plus `delete_cmd`) are present, naming the missing
+  field and the in-repo config file when one is not. It also rejects a config
+  still carrying the removed pre-PR7 keys (`list_cmd`/`attach_cmd`/`terminal_cmd`),
+  naming the stale key and pointing at the migration recipe.
 - **remote-hook-script** — every configured hook command resolves to something
   runnable: a path that exists and carries the execute bit (with the exact
   `chmod +x` fix otherwise), or a bare name found on `$PATH`.
