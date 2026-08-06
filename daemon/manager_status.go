@@ -67,6 +67,21 @@ func statusPollLeaseKey(repoID, title, id string) string {
 // heartbeat) just pushes the expiry out; the pause is per stable identity, so a
 // same-title successor never inherits the old attach's lease (#2358).
 func (m *Manager) PauseStatusPoll(repoID, title, id string) {
+	m.PauseStatusPollFor(repoID, title, id, "")
+}
+
+// PauseStatusPollFor is PauseStatusPoll for a client that identifies itself, so a
+// release only lifts the pause when the LAST holder leaves (#3027).
+//
+// A holder is required because the obvious alternative does not work: counting
+// pauses and resumes would treat the attached TUI's once-a-second heartbeat as a
+// new acquisition and the count would climb forever. Keyed by holder, a renewal is
+// an overwrite of that holder's expiry — which is what a heartbeat means.
+//
+// An empty holder is the legacy shared slot. Clients that omit it share one entry
+// among themselves, which is exactly the pre-#3027 behaviour, so nothing that
+// exists today changes until it starts sending one.
+func (m *Manager) PauseStatusPollFor(repoID, title, id, holder string) {
 	key := statusPollLeaseKey(repoID, title, id)
 	m.pausedMu.Lock()
 	m.pausedPolls[key] = nowFunc().Add(statusPollLease)
@@ -82,6 +97,12 @@ func (m *Manager) PauseStatusPoll(repoID, title, id string) {
 // sweepPausedPollState reclaims any entry this cannot (a crashed TUI that never
 // resumes, a session torn down mid-pause), so a lookup miss here is harmless.
 func (m *Manager) ResumeStatusPoll(repoID, title, id string) {
+	m.ResumeStatusPollFor(repoID, title, id, "")
+}
+
+// ResumeStatusPollFor is ResumeStatusPoll for an identified holder; see
+// PauseStatusPollFor.
+func (m *Manager) ResumeStatusPollFor(repoID, title, id, holder string) {
 	key := statusPollLeaseKey(repoID, title, id)
 	probeKey := m.taskRunProbeKey(repoID, title, id)
 	m.pausedMu.Lock()

@@ -595,6 +595,12 @@ type SetPRInfoResponse struct {
 type PauseStatusPollRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
+	// Holder identifies WHICH client holds the pause, so a release only lifts it
+	// when the last holder leaves (#3027). Empty means the legacy shared holder:
+	// every client that omits it shares one slot, which is exactly the pre-#3027
+	// behaviour, so an old client keeps working and only loses the protection
+	// against a peer's release revoking its own claim.
+	Holder string `json:"holder"`
 	// ID is the attached session's stable id. Keying the lease by identity keeps
 	// an old heartbeat from pausing a different session that reused the title.
 	ID string `json:"id"`
@@ -612,6 +618,8 @@ type ResumeStatusPollRequest struct {
 	RepoID string `json:"repo_id"`
 	// ID is the stable lease key; see PauseStatusPollRequest.ID.
 	ID string `json:"id"`
+	// Holder must match the one that took the pause; see PauseStatusPollRequest.
+	Holder string `json:"holder"`
 }
 
 type ResumeStatusPollResponse struct {
