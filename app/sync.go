@@ -778,22 +778,21 @@ func reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv sessi
 		// resulting liveness (running, limit-parked, or startup-unknown).
 		_ = inst.Transition(session.ClearOp())
 		return true
+	case session.OpRespawning:
+		// Same contract for the limit-resume fence (#2997), and for the same reason:
+		// a respawn settles to running, back to limit-parked, or to lost, so keying
+		// the release on any particular liveness would strand the fence on the
+		// others. This clause is what makes adopting the op above safe — and unlike
+		// OpCreating, a missed release would not even show, since OpRespawning
+		// composes to the settled liveness rather than masking it as Loading.
+		_ = inst.Transition(session.ClearOp())
+		return true
 	}
 	return false
 }
 
 func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
 	if inst.GetInFlightOp() == op {
-		return false
-	}
-	// OpRespawning is the daemon's internal fence against its own status poll
-	// (#2997), not a client overlay: it composes to the settled liveness, so there
-	// is nothing here to mirror. Returning before the ClearOp below matters — the
-	// unrecognized-op default sits AFTER it, so falling through would drop this
-	// TUI's own in-flight overlay on the way to doing nothing, and report no change
-	// while having made one. Nothing clears an adopted OpRespawning either, because
-	// nothing adopts it.
-	if op == session.OpRespawning {
 		return false
 	}
 	if inst.GetInFlightOp() != session.OpNone {
@@ -815,6 +814,17 @@ func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.L
 		err = inst.Transition(session.MarkRestoring())
 	case session.OpReplacing:
 		err = inst.Transition(session.BeginHandoff())
+	case session.OpRespawning:
+		// A limit resume re-spawning the runtime (#2997). Adopted for ACTION GATING,
+		// not for display: it composes to the settled liveness, so mirroring it
+		// changes no pixel. Without it this TUI's own
+		// ValidateRuntimeAction(RuntimeActionHandoff) reads OpNone and opens the
+		// picker, and the daemon then refuses the selected handoff because its
+		// authoritative instance still carries the fence — an action offered and
+		// then rejected. The settle path below must clear it; see there for why
+		// adopting is safe here in a way adopting OpCreating on an established row
+		// was not.
+		err = inst.Transition(session.BeginRespawn())
 	default:
 		return false
 	}

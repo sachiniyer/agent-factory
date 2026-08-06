@@ -186,3 +186,24 @@ func TestSaveInstances_KeepsARespawningRowAlongsideStartedSibling(t *testing.T) 
 	}
 	t.Fatal("the shutdown checkpoint dropped the respawning row; the next daemon start would orphan its workspace")
 }
+
+// #3004 review finding 4 (P2): the fence has to gate ACTIONS, not just the poll.
+// The TUI re-derives RuntimeActionHandoff on its own instance (app/handle_handoff.go)
+// while the daemon re-validates on its authoritative one (daemon/handoff.go), so a
+// fence the TUI does not mirror means the picker opens and the daemon then refuses
+// the selected handoff. This pins the session-side contract that agreement rests on:
+// the fence refuses a competing runtime action, and lowering it restores the action.
+// The mirroring itself is app/sync.go's reconcile, covered by CI.
+func TestRespawnFenceRefusesACompetingRuntimeAction(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionHandoff),
+		"a limit-parked session is handoff-able before the resume starts")
+
+	require.NoError(t, i.Transition(BeginRespawn()))
+	require.Error(t, i.ValidateRuntimeAction(RuntimeActionHandoff),
+		"a session mid-respawn must refuse a handoff, on whichever side asks")
+
+	i.clearRespawnFence()
+	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionHandoff),
+		"and the action comes back once the fence is down")
+}
