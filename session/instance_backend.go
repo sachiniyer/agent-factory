@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // currentBackend snapshots the instance's backend under i.mu (#2096). The
@@ -64,7 +66,55 @@ func (i *Instance) Respawn() error {
 	if err := i.ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
 		return fmt.Errorf("respawn: %w", err)
 	}
-	return i.currentBackend().Respawn(i)
+	// Raise the in-flight fence for the whole re-spawn (#2997). A REMOTE respawn
+	// pushes the sandbox's unpushed work and re-provisions a fresh one, which
+	// outlasts the status poll interval — and the poll's own skip is keyed on the
+	// instance-visible op (daemon/manager_status.go: "the poll must not probe a
+	// session whose tmux is being spun up/torn down and mark it Lost"). This
+	// operation advertised nothing, so that skip never engaged: the poll observed
+	// the sandbox being torn down BY THIS CALL, read it as an independent death,
+	// and applied ObserveLiveness(LiveLost) — which is the unconditional daemon-truth
+	// edge and preserves only the op axis, so LiveLimitReached was overwritten
+	// underneath a resume that was still running. The resume then failed its own
+	// RuntimeActionResumeLimit precondition, and Lost recovery could later clear the
+	// limit without delivering the queued prompt, so the user's work silently never
+	// ran.
+	//
+	// AFTER the validation above, not before: that validation requires OpNone, so a
+	// fence raised first would reject the very call it is protecting.
+	//
+	// OpCreating rather than a new op: a respawn is creating a fresh runtime, it
+	// composes to the Loading status the UI already renders for that, and — the
+	// load-bearing part — ConfirmLive is allowed from OpCreating and clears it, so
+	// the success path already ends with the fence down and needs no new edge.
+	if err := i.Transition(BeginCreate()); err != nil {
+		return fmt.Errorf("respawn: %w", err)
+	}
+	if err := i.currentBackend().Respawn(i); err != nil {
+		// Lower the fence on the way out. Without this a failed respawn leaves the
+		// session permanently busy: the poll skips it forever and every runtime
+		// action refuses it as in-flight — a strand worse than the clobber.
+		i.clearRespawnFence()
+		return err
+	}
+	// Success normally ends in ConfirmLive, which clears the op. A backend that
+	// returns without reaching it must not leave the fence standing either.
+	i.clearRespawnFence()
+	return nil
+}
+
+// clearRespawnFence lowers the Respawn fence if it is still up. ClearOp is
+// unconditionally legal (it only ever moves the op axis back to None and leaves
+// liveness alone), but it is applied only when this call's own OpCreating is still
+// present, so a concurrent kill/archive overlay that superseded it is not cleared
+// out from under its owner.
+func (i *Instance) clearRespawnFence() {
+	if i.GetInFlightOp() != OpCreating {
+		return
+	}
+	if err := i.Transition(ClearOp()); err != nil {
+		log.WarningLog.Printf("respawn: clearing the in-flight fence for %q: %v", i.Title, err)
+	}
 }
 
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing
