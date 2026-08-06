@@ -317,12 +317,6 @@ func tabLabelFor(inst *session.Instance, idx int) string {
 	return ""
 }
 
-// isAgentSlot reports whether the effective tab index is the agent tab (index 0).
-// Index 0 is always the agent tab; every other slot is a shell/terminal tab.
-func (w *TabbedWindow) isAgentSlot() bool {
-	return w.effectiveTab() == 0
-}
-
 // SetRect implements layout.Pane: the pane renders exactly r. The inner
 // TabPane gets the area inside the frame minus the header line; that inner
 // size is also what the instances' tmux sessions are resized to (see
@@ -524,17 +518,6 @@ func (w *TabbedWindow) ScrollDown() {
 	if err := w.tab.ScrollDown(w.effectiveInstance(), w.effectiveTab()); err != nil {
 		log.InfoLog.Printf("tabbed window failed to scroll down: %v", err)
 	}
-}
-
-// IsInPreviewTab returns true if the Agent tab is the pane's tab.
-func (w *TabbedWindow) IsInPreviewTab() bool {
-	return w.isAgentSlot()
-}
-
-// IsInTerminalTab returns true if a non-agent (terminal) tab is the pane's
-// tab.
-func (w *TabbedWindow) IsInTerminalTab() bool {
-	return !w.isAgentSlot()
 }
 
 // GetActiveTab returns the pane's current tab index.
