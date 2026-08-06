@@ -2,6 +2,7 @@ package proctree
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -67,7 +68,18 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 		return nil, fmt.Errorf("cannot read the process table to look for processes inside %s: %w", root, err)
 	}
 
-	seen := make(map[int]bool)
+	// The SCANNING process is never an occupant of its own gate. The daemon is
+	// routinely auto-started by an `af` invocation whose cwd is a managed worktree
+	// and inherits it (startDaemonChild leaves cmd.Dir unset), so a later blind
+	// kill or archive would positively match the daemon itself and refuse — on
+	// every retry, forever, until the daemon happened to be restarted elsewhere.
+	// A guard whose failure mode is permanent is worse than the rare deletion it
+	// prevents.
+	//
+	// ONLY this process, never its subtree. The daemon spawns the sessions, so its
+	// descendants include exactly the escapees this gate exists to find; skipping
+	// the tree would blind it to them to fix a self-match.
+	seen := map[int]bool{os.Getpid(): true}
 	var occupants []Occupant
 	for pid := range snap {
 		cwd, ok := WorkingDir(pid)
