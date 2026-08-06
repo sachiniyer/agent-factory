@@ -252,7 +252,7 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		}
 		// Interactive ended (or focus left the pane): release the lease now so the
 		// daemon resumes delivering into the session immediately.
-		release := m.interactivePauseTarget.resumeStatusPollRequest()
+		release := m.interactivePauseTarget.resumeStatusPollRequestAs(interactivePollHolder)
 		m.interactivePauseTarget = sessionActionTarget{}
 		m.interactivePauseAt = time.Time{}
 		return func() tea.Msg {
@@ -269,9 +269,9 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		m.interactivePauseAt = time.Now()
 		return func() tea.Msg {
 			if !prev.isZero() {
-				_ = resume(prev.resumeStatusPollRequest())
+				_ = resume(prev.resumeStatusPollRequestAs(interactivePollHolder))
 			}
-			_ = pause(want.pauseStatusPollRequest())
+			_ = pause(want.pauseStatusPollRequestAs(interactivePollHolder))
 			return nil
 		}
 	}
@@ -283,7 +283,7 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 	}
 	m.interactivePauseAt = time.Now()
 	return func() tea.Msg {
-		_ = pause(want.pauseStatusPollRequest())
+		_ = pause(want.pauseStatusPollRequestAs(interactivePollHolder))
 		return nil
 	}
 }

@@ -88,34 +88,47 @@ func (target sessionActionTarget) setPRInfoRequest(info session.PRInfoData) daem
 	return daemon.SetPRInfoRequest{ID: target.id, Title: target.title, RepoID: target.repoID, PRInfo: info}
 }
 
-// statusPollHolder identifies THIS TUI process as a holder of the daemon's
-// pause lease (#3027). Per PROCESS, not per attach: a TUI attaches to one session
-// full-screen at a time, so one id per process is enough to tell two TUIs apart,
-// and it keeps a pause and its later resume matched without threading an id
-// through the attach lifecycle. Random rather than the pid, because a pid is
-// reused and a recycled one would let a new process release the lease a dead one
-// took — the revocation this exists to prevent, with extra steps.
-var statusPollHolder = "tui-" + randomStatusPollHolder()
-
-func randomStatusPollHolder() string {
+// newStatusPollHolder mints an identity for one HOLDER of the daemon's pause
+// lease (#3027). The daemon keys the lease by holder so a release only lifts the
+// pause when the last holder leaves; a holder that is not unique per lifecycle
+// therefore hands one lifecycle the power to revoke another's claim.
+//
+// Per LIFECYCLE, not per process, and that distinction is the #3028 review's
+// point: runStatusPollResume is launched asynchronously and can still be blocked
+// on the previous heartbeat after the attach callback has cleared its re-entry
+// gates. Re-attach quickly and, with one id per process, that delayed resume
+// deletes the holder the NEW attach just took — re-enabling the poll and
+// automated delivery underneath a user who is attached and typing. A fresh id per
+// attach makes the stale resume address a holder nobody holds, which is a no-op.
+//
+// Random rather than a pid or a counter: a pid is reused, and a recycled one would
+// let a new process release a lease a dead one took — this defect again.
+func newStatusPollHolder(kind string) string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// Never fatal: an empty holder is the legacy shared slot, which is exactly
-		// the pre-#3027 behaviour rather than a broken one.
+		// Never fatal: an empty holder is the legacy shared slot, which is the
+		// pre-#3027 behaviour rather than a broken one.
 		return ""
 	}
-	return hex.EncodeToString(b[:])
+	return "tui-" + kind + "-" + hex.EncodeToString(b[:])
 }
 
-func (target sessionActionTarget) pauseStatusPollRequest() daemon.PauseStatusPollRequest {
+// interactivePollHolder is the holder for the live-preview pause path
+// (interactivePollPauseCmd). Stable for the process because that path holds at
+// most one target at a time and swaps it under its own serialization — but
+// DISTINCT from any attach's holder, so an attach's resume cannot revoke the
+// preview's hold or the reverse.
+var interactivePollHolder = newStatusPollHolder("preview")
+
+func (target sessionActionTarget) pauseStatusPollRequestAs(holder string) daemon.PauseStatusPollRequest {
 	return daemon.PauseStatusPollRequest{
-		ID: target.id, Title: target.title, RepoID: target.repoID, Holder: statusPollHolder,
+		ID: target.id, Title: target.title, RepoID: target.repoID, Holder: holder,
 	}
 }
 
-func (target sessionActionTarget) resumeStatusPollRequest() daemon.ResumeStatusPollRequest {
+func (target sessionActionTarget) resumeStatusPollRequestAs(holder string) daemon.ResumeStatusPollRequest {
 	return daemon.ResumeStatusPollRequest{
-		ID: target.id, Title: target.title, RepoID: target.repoID, Holder: statusPollHolder,
+		ID: target.id, Title: target.title, RepoID: target.repoID, Holder: holder,
 	}
 }
 

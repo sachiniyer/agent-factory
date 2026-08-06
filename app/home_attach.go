@@ -197,7 +197,12 @@ func (m *home) attachOverlayCallback(target sessionActionTarget, label, traceSuf
 	resume := m.resumeStatusPoll
 	pauseDone := make(chan struct{})
 	heartbeatExited := make(chan struct{})
-	go runStatusPollPauseHeartbeat(pause, target.pauseStatusPollRequest(), pauseDone, heartbeatExited)
+	// One holder per ATTACH (#3027, #3028 review). runStatusPollResume below is
+	// asynchronous and can outlive this attach's re-entry gates, so a re-attach
+	// with a shared id would have the previous attach's late resume revoke the new
+	// one's lease. A fresh id makes that stale resume address nobody.
+	attachHolder := newStatusPollHolder("attach")
+	go runStatusPollPauseHeartbeat(pause, target.pauseStatusPollRequestAs(attachHolder), pauseDone, heartbeatExited)
 
 	m.attached.Store(true)
 	defer m.attached.Store(false)
@@ -217,7 +222,7 @@ func (m *home) attachOverlayCallback(target sessionActionTarget, label, traceSuf
 	// never blocks on the wait or the RPC — attach/detach responsiveness is the
 	// whole point of #1160.
 	close(pauseDone)
-	go runStatusPollResume(resume, target.resumeStatusPollRequest(), heartbeatExited)
+	go runStatusPollResume(resume, target.resumeStatusPollRequestAs(attachHolder), heartbeatExited)
 	detachStart := time.Now()
 	detachTraceMark(label + "-<-ch-unblocked" + traceSuffix)
 	m.attachTransitioning = false
