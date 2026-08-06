@@ -145,6 +145,20 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			return m.mintSandboxCallback(cfg, pending.ID)
 		},
 	})
+	// A create that does not finish must not leave a live credential behind
+	// (#3012 review). The mint happens INSIDE NewInstance, so a provisioning
+	// failure after it — or any later abandonment on this path — would otherwise
+	// leave an orphaned sandbox authenticating indefinitely, with no session left
+	// for an operator to kill. Deferred and armed rather than repeated at each
+	// exit: the exits are many and one forgotten `return` is a credential that
+	// never dies. Disarmed only once the session is committed to the roster,
+	// where KillSession and archive take over revocation.
+	createCommitted := false
+	defer func() {
+		if !createCommitted {
+			m.sandboxTokens.revoke(pending.ID)
+		}
+	}()
 	if err != nil {
 		return session.InstanceData{}, err
 	}
@@ -249,6 +263,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, persistErr
 	}
 	creatingProjectionSettled = true
+	// The session is on the roster and persisted, so its credential is now owned
+	// by the ordinary lifecycle — KillSession and archive revoke it from here.
+	createCommitted = true
 	// Publish from the Manager, not only the control-server wrapper: task delivery
 	// and root-agent ensure call Manager.CreateSession directly. They announced the
 	// same pending row above and therefore must settle it on the same events plane.

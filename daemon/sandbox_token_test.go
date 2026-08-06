@@ -72,14 +72,21 @@ func TestSandboxTokenRegistry_SessionsDoNotShareCredentials(t *testing.T) {
 // The scope is what stops a compromised sandbox owning the host, so the denials
 // are asserted by name rather than by counting.
 func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
-	for _, path := range []string{"/v1/CreateSession", "/v1/Snapshot", "/v1/SendPrompt", "/v1/AddTask"} {
+	for _, path := range []string{"/v1/CreateSession", "/v1/ListBackends", "/v1/ListDirectory"} {
 		assert.Truef(t, sandboxAllowedPath(path), "%s is what a remote agent is for", path)
 	}
 	for _, path := range []string{
-		// DeliverPrompt runs instructions through every agent on the machine. It is
-		// the single verb that would make a sandbox credential equivalent to the
-		// operator's, which is the whole reason this scoping exists.
+		// DeliverPrompt runs instructions through every agent on the machine.
 		"/v1/DeliverPrompt",
+		// These four NAME a session, so admitting them without binding the
+		// credential to its owner reproduces DeliverPrompt one agent at a time
+		// (#3012 review): SendPrompt and CreateTab take a session id directly,
+		// AddTask reaches one through Task.TargetSession, and Snapshot is the
+		// enumeration that makes any of them aimable.
+		"/v1/SendPrompt",
+		"/v1/CreateTab",
+		"/v1/AddTask",
+		"/v1/Snapshot",
 		"/v1/SetConfigValue",
 		"/v1/DeleteProject",
 		"/v1/KillSession",
@@ -111,6 +118,8 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 		"a sandbox credential must work for a route its scope admits")
 	assert.False(t, gate.authorize(request("/v1/DeliverPrompt", secret)),
 		"a sandbox credential must NOT reach DeliverPrompt")
+	assert.False(t, gate.authorize(request("/v1/SendPrompt", secret)),
+		"nor SendPrompt, which names a session and so reaches the same authority one agent at a time")
 
 	// The operator's own token is unaffected by any of this.
 	assert.True(t, gate.authorize(request("/v1/DeliverPrompt", "operator-token")))
@@ -129,7 +138,7 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	m := &Manager{}
 
-	_, _, err := m.mintSandboxCallback(daemonTestConfig(false, "0.0.0.0:8443"), "sess-a")
+	_, _, err := m.mintSandboxCallback(daemonTestConfig(false, "10.0.0.5:8443"), "sess-a")
 	require.Error(t, err, "a credential against a listener that demands none enforces nothing")
 	assert.Contains(t, err.Error(), requireTokenFixHint,
 		"the refusal must name the one-line fix, or the operator is left guessing")
@@ -146,9 +155,23 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listen_addr")
 
-	url, token, err := m.mintSandboxCallback(daemonTestConfig(true, "0.0.0.0:8443"), "sess-a")
+	// A loopback listener with require_loopback_token off is exempted by the gate
+	// BEFORE any token is examined, so a credential there enforces nothing.
+	loopback := daemonTestConfig(true, "127.0.0.1:8443")
+	_, _, err = m.mintSandboxCallback(loopback, "sess-a")
+	require.Error(t, err, "the gate exempts loopback, so the scope would not be enforced")
+	assert.Contains(t, err.Error(), requireLoopbackTokenFixHint)
+
+	// A BIND address is not a dialable one: from inside a sandbox a wildcard names
+	// the sandbox, and port 0 names nothing fixed at all.
+	for _, addr := range []string{"0.0.0.0:8443", ":8443", "10.0.0.5:0"} {
+		_, _, err = m.mintSandboxCallback(daemonTestConfig(true, addr), "sess-a")
+		require.Errorf(t, err, "listen_addr %q is not dialable from a sandbox", addr)
+	}
+
+	url, token, err := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:8443"), "sess-a")
 	require.NoError(t, err)
-	assert.Equal(t, "http://0.0.0.0:8443", url)
+	assert.Equal(t, "http://10.0.0.5:8443", url)
 	assert.NotEmpty(t, token)
 	owner, ok := m.sandboxTokens.sessionFor(token)
 	require.True(t, ok)

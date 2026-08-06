@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 
@@ -134,14 +135,15 @@ func errSandboxCallbackNeedsRequireToken() error {
 // Order matters: the posture is checked BEFORE a secret is generated, so a
 // refused provision never leaves an unusable credential in the registry.
 func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url, token string, err error) {
-	if cfg == nil || !cfg.RequireToken {
+	if cfg == nil {
 		return "", "", errSandboxCallbackNeedsRequireToken()
 	}
-	url = sandboxCallbackURL(cfg.ListenAddr)
-	if url == "" {
-		return "", "", fmt.Errorf(
-			"refusing to give this sandbox a callback credential: listen_addr is empty, so the daemon serves " +
-				"no HTTP listener for it to call back to. Set listen_addr to an address the sandbox can reach")
+	if err := sandboxCallbackPostureOK(cfg); err != nil {
+		return "", "", err
+	}
+	url, err = sandboxCallbackURL(cfg.ListenAddr)
+	if err != nil {
+		return "", "", err
 	}
 	token, err = m.sandboxTokens.mint(sessionID)
 	if err != nil {
@@ -158,10 +160,54 @@ func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url
 // fact about the operator's network — the sandbox will simply fail to connect,
 // which is a diagnosable outcome, whereas a wrong guess silently points the agent
 // at whatever answers that address on ITS side of the network.
-func sandboxCallbackURL(listenAddr string) string {
+func sandboxCallbackURL(listenAddr string) (string, error) {
 	addr := strings.TrimSpace(listenAddr)
 	if addr == "" {
-		return ""
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is empty, so the daemon serves no HTTP listener for it to call back to. Set listen_addr to an address the sandbox can reach")
 	}
-	return "http://" + addr
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q is not host:port, so no callback URL can be derived from it", addr)
+	}
+	// A BIND address is not automatically a DIALABLE one, and the difference is not
+	// cosmetic: a wildcard or empty host means "every interface HERE", which from
+	// inside a sandbox names the SANDBOX, so the agent would quietly call itself.
+	// Port 0 means "whatever the kernel picked", which this config value cannot know.
+	//
+	// Refused rather than guessed. Rewriting a wildcard into some interface address
+	// would invent a fact about the operator's network, and a wrong guess points the
+	// agent at whatever answers there — far worse to debug than a named refusal.
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set listen_addr to an address the sandbox can reach", addr)
+	}
+	if port == "0" {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q asks the kernel to choose a port, so no fixed callback URL exists. Set an explicit port", addr)
+	}
+	return "http://" + net.JoinHostPort(host, port), nil
 }
+
+// sandboxCallbackPostureOK reports whether a credential handed out now would
+// actually be CHECKED when it comes back (#3012 review).
+//
+// require_token alone does not establish that, and believing it did was the
+// original bug in this refusal. authGate.authRequired exempts loopback peers
+// BEFORE it looks at any token, so on a loopback listen_addr with
+// require_loopback_token at its default false a same-host or host-network
+// sandbox reaches the whole control plane with no credential — and therefore no
+// scope at all. Minting there hands out something ceremonial and calls it a
+// boundary.
+//
+// The predicate is "will this request be authenticated", not "is a config key
+// set", which is why it mirrors the gate's own terms rather than restating them.
+func sandboxCallbackPostureOK(cfg *config.Config) error {
+	if !cfg.RequireToken {
+		return errSandboxCallbackNeedsRequireToken()
+	}
+	if config.IsLoopbackListenAddr(cfg.ListenAddr) && !cfg.RequireLoopbackToken {
+		return fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is loopback and require_loopback_token is false, so the gate exempts same-host callers before it checks any token and the credential's scope would enforce nothing. Enable it: %s", requireLoopbackTokenFixHint)
+	}
+	return nil
+}
+
+// requireLoopbackTokenFixHint is the one-line fix for the loopback posture.
+const requireLoopbackTokenFixHint = "af config set require_loopback_token true"

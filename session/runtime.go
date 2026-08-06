@@ -181,6 +181,19 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
 
+// InjectsSandboxCallback reports whether this kind's provisioner actually
+// delivers the #2999 callback credential into the workspace.
+//
+// Narrower than ProvisionsOffBox on purpose (#3012 review). Only the ssh and
+// sandbox provisioners call writeCallbackEnv; docker and hook do not read the
+// spec fields at all. Minting for them would have been strictly harmful — the
+// create would newly fail whenever require_token was off, and buy the agent
+// nothing when it succeeded, because nothing carries the credential in. A
+// capability nobody delivers must not impose its precondition.
+func (k BackendKind) InjectsSandboxCallback() bool {
+	return k == BackendSSH || k == BackendSandbox
+}
+
 // SetRuntimeForTest replaces the Runtime registered for kind with ctor and
 // returns a restore function. It is the exported form of the registry swap the
 // in-package sandbox tests already do by hand, so tests OUTSIDE this package (the

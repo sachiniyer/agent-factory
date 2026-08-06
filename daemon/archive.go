@@ -368,6 +368,14 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// Still inside opLock: lifecycle event order must match committed operation
 	// order. Publishing after this method returns lets an immediate restore finish
 	// and publish before this older Archived projection (#2680 Codex review).
+	// The archive COMMITTED, so the sandbox holding this session's callback
+	// credential is inert — its branch is pushed and its
+	// runtime reaped (#3012 review). Revoke here, not only in KillSession: a
+	// token copied out of the sandbox before the archive would otherwise keep
+	// authenticating until the daemon restarted.
+	// Placed after the commit, so a teardown that FAILED and
+	// left the session Lost keeps its credential and can still be driven.
+	m.sandboxTokens.revoke(archived.ID)
 	m.publishEvent(agentproto.EventSessionArchived, archived)
 	if hookErr != nil {
 		committedErr := &mutationCommittedError{err: fmt.Errorf(

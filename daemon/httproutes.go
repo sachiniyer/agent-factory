@@ -45,9 +45,18 @@ type HTTPRoute struct {
 	// would grant every future route by default, which is the wrong direction for
 	// a credential handed to a machine af provisioned but does not trust.
 	//
-	// DeliverPrompt is the one to keep in view when editing this: it runs
-	// instructions through every agent on the machine, so it is precisely what the
-	// operator's own token grants and a sandbox's must not.
+	// THE RULE FOR ADDING ONE, learned the hard way (#3012 review). A route may be
+	// opted in only if it CANNOT NAME ANOTHER SESSION. Denying DeliverPrompt while
+	// allowing SendPrompt was security theatre: SendPrompt takes an arbitrary
+	// session id, so a sandbox could enumerate with Snapshot and then run
+	// instructions in every agent on the machine one at a time — the exact
+	// authority the denial was supposed to withhold. AddTask reaches the same end
+	// through Task.TargetSession, and Snapshot is the enumeration that makes it
+	// aimable.
+	//
+	// Those four stay OUT until the credential is bound to its owning session and
+	// session-targeted operations are enforced against it. Route-level scoping
+	// alone cannot express "this session only", so it must not be asked to.
 	sandboxAllowed bool
 	// requestType is the RPC request struct this route decodes, kept so a consumer
 	// that needs the FULL body shape can reflect it rather than re-deriving a
@@ -118,12 +127,11 @@ var httpRoutes = []HTTPRoute{
 		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SuggestSessionName) },
 	},
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/Snapshot",
-		sandboxAllowed: true,
-		Description:    "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
-		requestType:    reflect.TypeOf(SnapshotRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.Snapshot) },
+		Method:      http.MethodPost,
+		Path:        "/v1/Snapshot",
+		Description: "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
+		requestType: reflect.TypeOf(SnapshotRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.Snapshot) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -154,12 +162,11 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RestoreSession) },
 	},
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/SendPrompt",
-		sandboxAllowed: true,
-		Description:    "Send a prompt to an existing session's agent.",
-		requestType:    reflect.TypeOf(SendPromptRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendPrompt) },
+		Method:      http.MethodPost,
+		Path:        "/v1/SendPrompt",
+		Description: "Send a prompt to an existing session's agent.",
+		requestType: reflect.TypeOf(SendPromptRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendPrompt) },
 	},
 	// Promoted out of internalHTTPRoutes in #1934 — the follow-up promised in
 	// #1592 Phase 2 PR3, which then sat unwritten while the state it exits stayed
@@ -224,12 +231,11 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeliverPrompt) },
 	},
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/CreateTab",
-		sandboxAllowed: true,
-		Description:    "Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target).",
-		requestType:    reflect.TypeOf(CreateTabRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CreateTab) },
+		Method:      http.MethodPost,
+		Path:        "/v1/CreateTab",
+		Description: "Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target).",
+		requestType: reflect.TypeOf(CreateTabRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CreateTab) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -280,20 +286,18 @@ var httpRoutes = []HTTPRoute{
 
 	// Tasks.
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/ListTasks",
-		sandboxAllowed: true,
-		Description:    "List every task across all repos.",
-		requestType:    reflect.TypeOf(ListTasksRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListTasks) },
+		Method:      http.MethodPost,
+		Path:        "/v1/ListTasks",
+		Description: "List every task across all repos.",
+		requestType: reflect.TypeOf(ListTasksRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListTasks) },
 	},
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/AddTask",
-		sandboxAllowed: true,
-		Description:    "Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit.",
-		requestType:    reflect.TypeOf(AddTaskRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddTask) },
+		Method:      http.MethodPost,
+		Path:        "/v1/AddTask",
+		Description: "Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit.",
+		requestType: reflect.TypeOf(AddTaskRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddTask) },
 	},
 	{
 		Method:      http.MethodPost,

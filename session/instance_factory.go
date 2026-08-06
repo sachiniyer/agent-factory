@@ -150,7 +150,7 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 		// local create fail whenever require_token is off, turning a sandbox-only
 		// refusal into a total outage — the credential is scoped to the feature
 		// that needs it, and so is its refusal.
-		if opts.SandboxCallback != nil {
+		if opts.SandboxCallback != nil && kind.InjectsSandboxCallback() {
 			url, token, err := opts.SandboxCallback()
 			if err != nil {
 				return ProvisionResult{}, err
