@@ -206,6 +206,28 @@ func TeardownStateUnknown(err error) bool {
 // wedged tmux server into MoveWorktree on a possibly-live pane (#1917 review).
 // Two copies of a safety rule is one copy of a safety rule.
 func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string) (teardownState, error) {
+	// A session that provably never created a pane has no liveness to establish,
+	// so it is KNOWN without asking tmux — which matters because the machines
+	// where this happens are the ones where asking cannot be answered (#2985).
+	//
+	// The gate is the right place for it, and the retention decision is not. A
+	// create that fails before spawning used to reach the gate, come back unknown,
+	// and be retained as a tombstone holding its title. Exempting it at the
+	// RETENTION end instead would either suppress ErrWorkspaceStateUnknown too —
+	// releasing the title over a half-removed worktree the record is the only
+	// handle on — or drop the record while teardownTabs returns at this gate
+	// BEFORE handleWorktree, leaving the freshly created worktree on disk with
+	// nothing pointing at it. Answering here lets the rest of the skeleton run:
+	// the worktree is removed, finalize clears the refs, and the record drops with
+	// no tombstone and no orphan.
+	//
+	// The predicate is deliberately the narrow one. "Start did not succeed" is a
+	// weaker statement that includes a create whose pane spawned and whose setup
+	// then failed, and skipping the gate for THAT would delete a worktree under a
+	// live agent — see ProvenNoPane.
+	if ts.ProvenNoPane() {
+		return stateKnown, nil
+	}
 	state, err := ts.CloseAndWaitForPaneExit()
 	if state != tmux.PaneStateKnown {
 		return stateUnknown, fmt.Errorf("%s %q: tab %q: %w", verb, title, tabName, err)

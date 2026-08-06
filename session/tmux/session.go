@@ -172,6 +172,17 @@ type TmuxSession struct {
 	// text is not enough to claim that a prior delivery was stranded (#2225).
 	// Protected by inputMu; it never gates delivery.
 	lastPastedTail string
+	// provenNoPane records that a Start attempt PROVED this name had no tmux
+	// session and then returned before running new-session, so nothing can be
+	// running behind it. Guarded by provenMu; read through ProvenNoPane.
+	//
+	// The default is false and that direction is the safety property: every other
+	// way a TmuxSession comes into being — a restore binding a persisted name, a
+	// pending-cleanup handle, a sibling tab, an adoption — may have a live pane
+	// behind it, and a teardown must gate on liveness for all of them. Only Start
+	// can establish otherwise, and only at the two points below.
+	provenNoPane bool
+	provenMu     sync.RWMutex
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -328,6 +339,26 @@ func NewTmuxSessionWithDeps(name string, program string, ptyFactory PtyFactory, 
 // tmux interactions mock-backed (hermetic).
 func NewTmuxSessionFromSanitizedNameWithDeps(sanitizedName, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
 	return newTmuxSession(sanitizedName, program, ptyFactory, cmdExec)
+}
+
+// ProvenNoPane reports that this session object provably never created a pane:
+// Start found the name positively absent and failed before running new-session.
+//
+// It is NOT "Start did not succeed", and the difference is the whole point. A
+// create whose spawn worked and whose later setup failed has a live pane and an
+// object that never completed its success path — a predicate built on the latter
+// would licence deleting a worktree out from under that pane (#2985). This says
+// only what was proved, so it stays false wherever nothing was.
+func (t *TmuxSession) ProvenNoPane() bool {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.provenNoPane
+}
+
+func (t *TmuxSession) setProvenNoPane(proven bool) {
+	t.provenMu.Lock()
+	t.provenNoPane = proven
+	t.provenMu.Unlock()
 }
 
 // SanitizedName returns the sanitized tmux session name.
