@@ -1750,6 +1750,7 @@
       "af token show --help": "meta.discovery",
       "af token show --json": "cli.json-envelope",
       "af upgrade --allow-downgrade": "install.upgrade",
+      "af upgrade --allow-rejected": "install.upgrade",
       "af upgrade --help": "meta.discovery",
       "af upgrade --ignore-active-upgrade": "install.upgrade",
       "af upgrade --no-restart": "install.upgrade",
