@@ -682,6 +682,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	m.mu.Lock()
 	if m.instances[key] == inst {
 		delete(m.instances, key)
+		m.forgetSessionRuntimeStateLocked(repoID, inst)
 	}
 	m.mu.Unlock()
 	return carried, true, nil
