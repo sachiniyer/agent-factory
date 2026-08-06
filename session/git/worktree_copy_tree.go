@@ -497,8 +497,11 @@ func copySymlinkEntry(
 	if err != nil {
 		return copiedEntry{}, err
 	}
-	current, err := identityAt(source, name)
-	if err != nil || !inspected.same(current) {
+	// One lstat serves both the race re-check and the timestamp below: statAt is
+	// Fstatat with AT_SYMLINK_NOFOLLOW, so it reads the LINK rather than what it
+	// points at, and it is the same call identityAt was already making here.
+	sourceStat, err := statAt(source, name)
+	if err != nil || !inspected.same(identityFromStat(sourceStat)) {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while it was copied", sourcePath)
 	}
 	if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
@@ -521,6 +524,34 @@ func copySymlinkEntry(
 	confirmedIdentity, err := identityAt(destination, name)
 	if err != nil || !destinationIdentity.same(confirmedIdentity) || destinationLink != link {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while it was copied", destinationPath)
+	}
+	// The link's OWN mtime. AT_SYMLINK_NOFOLLOW means this addresses the link
+	// rather than following it to its target.
+	//
+	// The confirmation above does NOT cover this call, which is the correction
+	// the review of the duplicate raised: the stamp resolves `name` one more
+	// time, so a racer that swaps the entry in between lands our timestamp on an
+	// inode we never created. AT_SYMLINK_NOFOLLOW refuses to FOLLOW a symlink; it
+	// does not refuse to stamp a hard link, so the reachable damage is a foreign
+	// file's mtime — outside the staging tree included.
+	//
+	// It cannot be prevented here. Holding a symlink open needs O_PATH|O_NOFOLLOW
+	// on Linux or O_SYMLINK on darwin, and stamping through that descriptor needs
+	// AT_EMPTY_PATH, which is Linux-only — the portability wall this whole item
+	// keeps running into. So it is DETECTED instead, and detection means the
+	// archive refuses rather than commits, which is what every other replacement
+	// check in this function already does.
+	if err := copyTreeBeforeSymlinkStamp(destinationPath); err != nil {
+		return created, err
+	}
+	if err := preserveSourceModTime(
+		int(destination.Fd()), name, symlinkModTime(sourceStat), destinationPath, "symlink",
+	); err != nil {
+		return created, err
+	}
+	stampedIdentity, err := identityAt(destination, name)
+	if err != nil || !destinationIdentity.same(stampedIdentity) {
+		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while its timestamp was applied", destinationPath)
 	}
 	return created, nil
 }
@@ -693,6 +724,19 @@ func isAllZero(chunk []byte) bool {
 // therefore NOT preserved, deliberately — it is rewritten by any read, most
 // filesystems mount relatime so it is already approximate, and nothing in a
 // worktree depends on it. mtime is the property tools actually read.
+// symlinkModTime reads a link's own modification time from the lstat that
+// identified it.
+//
+// No build tag, deliberately: x/sys/unix.Stat_t spells this Mtim on Linux,
+// darwin AND the BSDs. Mtimespec is the STDLIB syscall.Stat_t spelling on
+// darwin — a different type this copier never touches — and assuming it here is
+// what broke the macOS build, since Linux CI cannot see the difference.
+// TimespecToNsec rather than Sec/Nsec arithmetic, because Timespec's field
+// widths also vary by platform.
+func symlinkModTime(stat *unix.Stat_t) time.Time {
+	return time.Unix(0, unix.TimespecToNsec(stat.Mtim))
+}
+
 func preserveSourceModTime(dirFD int, name string, sourceModTime time.Time, destinationPath, kind string) error {
 	// TimeToTimespec, not NsecToTimespec(t.UnixNano()). UnixNano is only defined
 	// for 1678–2262 and wraps silently outside it, while a filesystem can hold

@@ -496,7 +496,24 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 	}
 
-	state, closeErr := ts.CloseAndWaitForPaneExit()
+	// Blindness matters here even though the swap deletes nothing. If the old
+	// session vanished with no pane observed, its marker sweep is vacuous for a
+	// markerless agent, so a detached child may still be writing this worktree —
+	// and this method is about to start a REPLACEMENT into it. Two agents writing
+	// one worktree is the exact corruption this refuses on every other branch.
+	//
+	// Refused on blindness rather than on an occupancy scan, unlike the teardown
+	// paths: the worktree is shared with the session's other tabs, which are
+	// legitimately live during a swap, so a scan here would match them and refuse
+	// every multi-tab swap. Blind is anomalous on this path — a swap runs against
+	// a live session the user is looking at, whose pane is normally observed — so
+	// refusing costs nothing in the ordinary case (#2998).
+	state, blind, closeErr := ts.CloseAndWaitForPaneExitReportingBlindness()
+	if state == tmux.PaneStateKnown && blind {
+		return fmt.Errorf("swap agent: %q's old session vanished without its pane ever being observed, "+
+			"so a detached child may still be writing %s; not starting a replacement that would write it too",
+			i.Title, workDir)
+	}
 	if state == tmux.PaneStateUnknown {
 		return fmt.Errorf("swap agent: cannot confirm %q's current agent stopped (%v); "+
 			"not starting a replacement, because two agents writing %s at once would corrupt the work in it",

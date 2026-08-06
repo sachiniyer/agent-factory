@@ -503,11 +503,41 @@ async function resetToAgentTab(page: Page): Promise<void> {
  *  one-keystroke shell path. */
 async function createTerminalTab(page: Page): Promise<void> {
   const tabbar = page.locator(".af-tabbar");
+  // What the pane is bound to BEFORE the new tab exists, so the wait at the end is
+  // for a change of state rather than for an elapsed duration.
+  const pane = page.locator(".af-term-host .af-pane").first();
+  const boundBefore = await pane.getAttribute("data-tab-id");
+  const tabsBefore = await tabbar.locator(".af-tab").count();
+
   await tabbar.locator(".af-tab-new").click();
   const menu = tabbar.locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
   await expect(menu).toBeHidden();
+
+  // The menu closing says the REQUEST went out. It does not say the tab exists, nor
+  // that the pane has been rebound to it — and returning there is a race every caller
+  // inherits, because `.af-term-host` is a single PERSISTENT element (web/src/index.ts
+  // keeps it alive across renders so a focused xterm survives rail updates). Clicking
+  // it before the rebind focuses the xterm of the tab being LEFT, so keystrokes meant
+  // for a fresh shell go to the agent instead.
+  //
+  // That produces a red nobody can read. Text typed into claude still appears inside
+  // `.af-term-host`, so a toContainText assertion passes and only the "did it
+  // execute?" assertion fails, twenty lines later, looking exactly like a lost
+  // keystroke in the product (#2811/#2856) rather than a test that typed into the
+  // wrong terminal.
+  //
+  // data-tab-id is the honest signal: split.ts publishes what each pane is bound to
+  // precisely because an ordinal shifts and a name can be renamed (#1779/#1901).
+  // Waiting for it does NOT wait for the socket — the rebind happens during the UI
+  // reconcile while the new tab's WebSocket is still connecting — so a caller that
+  // means to type into a connecting terminal still can.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(tabsBefore + 1, { timeout: 30_000 });
+  await expect(pane, "the pane must be bound to the new tab before anyone types into it").not.toHaveAttribute(
+    "data-tab-id",
+    boundBefore ?? "",
+  );
 }
 
 /**
@@ -1903,6 +1933,13 @@ test("#2811: typing the instant a tab opens loses nothing — type-ahead is held
   // The old failure mode was not a lost keystroke but a MANGLED command: the
   // dropped prefix left the surviving tail to reach the shell on its own and run
   // as something else. So the assertion is that the whole line arrives intact.
+  //
+  // What this test does NOT do is guarantee it exercised the hold. It types into a
+  // tab whose socket is very likely still connecting, which is the realistic path a
+  // user takes — but on a fast local daemon the socket can win the race, and then
+  // this passes through the ordinary already-open path and would pass with the hold
+  // removed. The test below is the one that proves the hold; this one covers the
+  // end-to-end shape it protects.
   const ctx = await browser.newContext();
   const p = await ctx.newPage();
 
@@ -1911,11 +1948,19 @@ test("#2811: typing the instant a tab opens loses nothing — type-ahead is held
     await row(p, SESSION_B).click();
     await resetToAgentTab(p);
 
-    const host = p.locator(".af-term-host");
-    // No wait for data-term-status here, on purpose: that attribute belongs to the
-    // pane and can still read "open" from the tab we just left while THIS tab's
-    // socket is connecting — which is exactly how the #2796 CI run typed into a
-    // connecting terminal and lost the front of its command.
+    // Scoped to the PANE, not to `.af-term-host`. The host is one persistent element
+    // shared by every tab, so an assertion made against it can be satisfied by the tab
+    // being LEFT — which is how this test could report the marker present but no line
+    // of output: the text had gone to the agent, where nothing executes it. The pane is
+    // what carries the tab binding, so every assertion below is about the shell this
+    // test created.
+    // Still no wait for data-term-status, on purpose: it is set on `main`
+    // (web/src/ui.ts) rather than per pane, so it can read "open" from the tab we just
+    // left while THIS tab's socket is connecting — exactly how the #2796 run typed into
+    // a connecting terminal and lost the front of its command. createTerminalTab waits
+    // for the pane REBIND instead, which is deterministic and does not wait away the
+    // window under test.
+    const host = p.locator(".af-term-host .af-pane").first();
     await createTerminalTab(p);
     await host.click();
     const marker = "af-2811-typeahead-ok";
@@ -1944,6 +1989,98 @@ test("#2811: typing the instant a tab opens loses nothing — type-ahead is held
       false,
     );
   } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
+test("#2811: type-ahead survives a socket that is not open — held, then delivered in order", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The sibling test above types into a probably-connecting tab, which is realistic but
+  // not a guarantee: a fast daemon can open the socket first, and then it proves nothing
+  // about the hold. This one removes the timing from the question entirely by making the
+  // socket deterministically NOT open, so every byte typed here MUST go through the
+  // pending queue. Delete the queue and this test fails.
+  //
+  // The gap is manufactured the way the spec already mocks a socket (#2276 above uses
+  // routeWebSocket to keep one open-but-silent): the route closes every stream attempt,
+  // so the client sits in its reconnect loop with readyState never OPEN — the same
+  // condition a fresh tab is in before its first open, which is what sendInput keys on.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  let forwardStream = false;
+
+  try {
+    await p.routeWebSocket(
+      (url) => url.pathname.includes("/stream"),
+      (ws) => {
+        if (forwardStream) {
+          ws.connectToServer();
+          return;
+        }
+        // Refuse this attempt. onclose → scheduleReconnect, so the terminal stays in
+        // "reconnecting" and every keystroke takes the held path.
+        ws.close();
+      },
+    );
+
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+
+    const main = p.locator(".af-main");
+    const host = p.locator(".af-term-host .af-pane").first();
+    // The deterministic precondition, and the whole point of this test: the socket is
+    // demonstrably NOT open before a single key is typed. A duration would only make
+    // this likely; the status seam makes it certain.
+    await expect(main, "the stream must be down before typing, or the hold is untested").toHaveAttribute(
+      "data-term-status",
+      "reconnecting",
+      { timeout: 30_000 },
+    );
+
+    const marker = "af-2811-held-then-delivered";
+    await host.click();
+    await p.keyboard.type(`printf '%s\\n' ${marker}`);
+    await p.keyboard.press("Enter");
+
+    // Nothing can have reached the shell yet — there is no socket. Let one through and
+    // the queue must deliver the whole line, in order, to a shell that then runs it.
+    forwardStream = true;
+    await expect(main, "the stream must come back so the held input can be delivered").toHaveAttribute(
+      "data-term-status",
+      "open",
+      { timeout: 45_000 },
+    );
+
+    await expect
+      .poll(
+        async () =>
+          (await host.locator(".xterm-rows > div").allInnerTexts()).filter((line) => line.trim() === marker).length,
+        {
+          message: "input typed while the socket was down must be delivered and EXECUTED, not dropped",
+          timeout: 30_000,
+        },
+      )
+      .toBeGreaterThan(0);
+
+    // And in order: a queue that delivered the bytes scrambled would leave the shell on
+    // a continuation prompt with nothing run, which is the corruption #2811 described.
+    const screen = (await host.locator(".xterm-rows > div").allInnerTexts()).map((l) => l.trimEnd());
+    const lastNonEmpty = [...screen].reverse().find((l) => l.trim() !== "") ?? "";
+    expect(
+      lastNonEmpty.trimStart().startsWith(">"),
+      `shell left at a continuation prompt: ${JSON.stringify(screen.slice(-4))}`,
+    ).toBe(false);
+  } finally {
+    forwardStream = true;
     try {
       await resetToAgentTab(p);
     } finally {

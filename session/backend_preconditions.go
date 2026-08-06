@@ -141,8 +141,16 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 		// command is missing is the worst offender in this class: it is CONFIGURED,
 		// so a config-only check calls it available, and the failure lands later,
 		// mid-provision, as somebody else's error.
+		// Probe the PROVISIONING command this repo actually configured. Validate
+		// guarantees exactly one is set, so probing launch_cmd unconditionally
+		// would run lookPath("") for every provision_cmd repo and report the
+		// preferred contract as unavailable in every picker (#2847).
+		provisionKey, provisionCmd := "launch_cmd", cfg.RemoteHooks.LaunchCmd
+		if cfg.RemoteHooks.UsesProvisionCmd() {
+			provisionKey, provisionCmd = "provision_cmd", cfg.RemoteHooks.ProvisionCmd
+		}
 		for _, hook := range []struct{ key, cmd string }{
-			{"launch_cmd", cfg.RemoteHooks.LaunchCmd},
+			{provisionKey, provisionCmd},
 			{"delete_cmd", cfg.RemoteHooks.DeleteCmd},
 		} {
 			if _, err := lookPath(hook.cmd); err != nil {

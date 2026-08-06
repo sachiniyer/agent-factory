@@ -296,11 +296,17 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 // teardown modes do (#1917): the caller goes on to DELETE this ghost's worktree,
 // so it must be able to tell "tmux confirmed the session is gone" from "tmux never
 // answered". A refused name never ran a tmux command, so its state is known.
-var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, error) {
+//
+// The bool reports that the session VANISHED WITH NO PANE OBSERVED, so its marker
+// evidence was vacuous. The caller acts on it AFTER closing every ghost name —
+// never per-name, or an earlier vanished tab would scan while a later one is
+// still live, refuse, and return before that later tab is ever closed, leaving
+// the record permanently stuck (#2998, Codex on #3001).
+var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, bool, error) {
 	if !strings.HasPrefix(sanitizedName, tmux.TmuxPrefix) {
-		return tmux.PaneStateKnown, fmt.Errorf("refusing to kill tmux session without %q prefix: %q", tmux.TmuxPrefix, sanitizedName)
+		return tmux.PaneStateKnown, false, fmt.Errorf("refusing to kill tmux session without %q prefix: %q", tmux.TmuxPrefix, sanitizedName)
 	}
-	return tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "").CloseAndWaitForPaneExit()
+	return tmux.NewTmuxSessionFromSanitizedName(sanitizedName, "").CloseAndWaitForPaneExitReportingBlindness()
 }
 
 // ghostCleanupWorktree performs best-effort worktree teardown for a ghost
@@ -315,8 +321,16 @@ var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, error) {
 // is the only handle anything has on the leftovers. Report that so the caller keeps
 // it (#1917) — the third site in this PR where a bounded call failed, someone logged
 // it, and a destructive step went ahead anyway.
+// ghostWorktreeRemovable is the eligibility predicate ghostCleanupWorktree bails
+// on, named once so the occupancy gate cannot guard a workspace that the cleanup
+// would never touch. Gating a record whose cleanup is a no-op can only retain it
+// forever (#2998 review).
+func ghostWorktreeRemovable(data *session.InstanceData) bool {
+	return data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree
+}
+
 var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
-	if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
+	if !ghostWorktreeRemovable(data) {
 		return git.CleanupSettled, nil
 	}
 	// Unknown provenance means KEEP (#1953): a nil flag predates 2026-04-17 and
@@ -416,14 +430,27 @@ func ghostCleanup(data *session.InstanceData, title string) error {
 	// a pane writing into the workspace, so we stop before touching it and keep the
 	// record intact for a retry. Tmux still goes FIRST for the #802 reason (a live
 	// agent racing git's recursive delete leaks a half-deleted directory).
+	ghostBlind := false
 	for _, name := range ghostTmuxNames(data) {
-		state, killErr := ghostKillTmuxByName(name)
+		state, blind, killErr := ghostKillTmuxByName(name)
+		ghostBlind = ghostBlind || blind
 		if killErr != nil {
 			log.WarningLog.Printf("ghost session %q: tmux cleanup failed for %q: %v", title, name, killErr)
 		}
 		if state != tmux.PaneStateKnown {
 			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
 				title, session.ErrPaneMayBeLive, killErr)
+		}
+	}
+	// After every ghost tmux name is closed, and only if one of them was blind:
+	// its marker evidence was vacuous, so a markerless process may still be inside
+	// the workspace this is about to delete. Empty for an external record, matching
+	// ghostCleanupWorktree's own bail — that path removes nothing, so there is no
+	// destructive action to protect and the user's own checkout must not gate it.
+	if ghostBlind && ghostWorktreeRemovable(data) {
+		if err := session.CheckWorktreeOccupants(data.Worktree.WorktreePath); err != nil {
+			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
+				title, session.ErrPaneMayBeLive, err)
 		}
 	}
 	state, cleanupErr := ghostCleanupWorktree(data, title)

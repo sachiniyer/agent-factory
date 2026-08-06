@@ -85,6 +85,11 @@ type home struct {
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
 
+	// adoptedSnapshotOps separates daemon-adopted in-flight ops from local
+	// optimistic ones, which the reconcile guards must treat oppositely (#3005).
+	// The reasoning lives on the type, in app/adopted_ops.go.
+	adoptedSnapshotOps adoptedOps
+
 	// snapshotFetcher fetches the daemon's authoritative session snapshot for
 	// this repo. It is a PER-home field, not a package global, precisely because
 	// fetchSnapshotCmd reads it from an off-loop tea.Cmd goroutine: a shared
@@ -501,34 +506,35 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	errBox := ui.NewErrBox()
 
 	h := &home{
-		alarmBanner:      ui.NewAlarmBanner(),
-		ctx:              ctx,
-		store:            proj,
-		menu:             menu,
-		errBox:           errBox,
-		paneWindows:      make(map[int]*ui.TabbedWindow),
-		lastPaneCapture:  make(map[int]time.Time),
-		paneJumpIntent:   make(map[int]uint64),
-		liveTerms:        make(map[int]liveTermAttachment),
-		liveKeys:         make(map[int]string),
-		automations:      ui.NewAutomationsPane(proj),
-		projects:         ui.NewProjectsPane(),
-		statusBar:        ui.NewStatusBar(menu, errBox),
-		hooksPane:        ui.NewHooksPane(),
-		configPane:       ui.NewConfigPane(),
-		ring:             layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects),
-		zones:            zones.NewRegistry(),
-		mouseClock:       time.Now,
-		snapshotFetcher:  snapshotThroughDaemon,
-		previewFetcher:   previewThroughDaemon,
-		pauseStatusPoll:  pauseStatusPollThroughDaemon,
-		resumeStatusPoll: resumeStatusPollThroughDaemon,
-		appConfig:        appConfig,
-		program:          program,
-		repoID:           repoID,
-		repoRoot:         repoRoot,
-		state:            stateDefault,
-		appState:         appState,
+		adoptedSnapshotOps: adoptedOps{},
+		alarmBanner:        ui.NewAlarmBanner(),
+		ctx:                ctx,
+		store:              proj,
+		menu:               menu,
+		errBox:             errBox,
+		paneWindows:        make(map[int]*ui.TabbedWindow),
+		lastPaneCapture:    make(map[int]time.Time),
+		paneJumpIntent:     make(map[int]uint64),
+		liveTerms:          make(map[int]liveTermAttachment),
+		liveKeys:           make(map[int]string),
+		automations:        ui.NewAutomationsPane(proj),
+		projects:           ui.NewProjectsPane(),
+		statusBar:          ui.NewStatusBar(menu, errBox),
+		hooksPane:          ui.NewHooksPane(),
+		configPane:         ui.NewConfigPane(),
+		ring:               layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects),
+		zones:              zones.NewRegistry(),
+		mouseClock:         time.Now,
+		snapshotFetcher:    snapshotThroughDaemon,
+		previewFetcher:     previewThroughDaemon,
+		pauseStatusPoll:    pauseStatusPollThroughDaemon,
+		resumeStatusPoll:   resumeStatusPollThroughDaemon,
+		appConfig:          appConfig,
+		program:            program,
+		repoID:             repoID,
+		repoRoot:           repoRoot,
+		state:              stateDefault,
+		appState:           appState,
 	}
 	h.sidebar = ui.NewSidebar(proj)
 	h.wireZoneRegistry()

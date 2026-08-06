@@ -30,6 +30,12 @@ type RemoteHooks struct {
 	// endpoint JSON (see the type doc). Invoked with --name/--repo/--branch and
 	// an optional --program flag (see docs/remote-hooks.md).
 	LaunchCmd string `json:"launch_cmd" toml:"launch_cmd"`
+	// ProvisionCmd is the ssh-host alternative to LaunchCmd (#2847): it makes a
+	// machine and prints {host, host_key, [user], [port]} — no agent-server, no
+	// bearer token, no tunnel. af reaches it with the sandbox transport and runs
+	// the workspace itself. Exactly one of provision_cmd / launch_cmd is set;
+	// Validate rejects both, since they answer the same question differently.
+	ProvisionCmd string `json:"provision_cmd,omitempty" toml:"provision_cmd,omitempty"`
 	// DeleteCmd reaps the provisioned sandbox. Invoked with --name <slug>.
 	DeleteCmd string `json:"delete_cmd" toml:"delete_cmd"`
 
@@ -71,13 +77,36 @@ func (h RemoteHooks) Validate() error {
 			"{\"url\",\"token\"}, and delete_cmd reaps it. "+
 			"Delete list_cmd/attach_cmd/terminal_cmd and follow the migration recipe in docs/remote-hooks.md", removed)
 	}
-	if strings.TrimSpace(h.LaunchCmd) == "" {
-		return fmt.Errorf("remote_hooks.launch_cmd is required")
+	launch := strings.TrimSpace(h.LaunchCmd) != ""
+	provision := strings.TrimSpace(h.ProvisionCmd) != ""
+	switch {
+	case launch && provision:
+		// Both answer "how does this session get a workspace", differently. Picking
+		// one silently would make the other's absence look like a config that
+		// works, so refuse and make the operator say which contract they are on.
+		return fmt.Errorf("remote_hooks.provision_cmd and remote_hooks.launch_cmd are alternatives, not layers — " +
+			"provision_cmd returns an ssh host and af runs the agent-server itself, launch_cmd returns an " +
+			"{\"url\",\"token\"} endpoint the script stands up. Set exactly one (see docs/remote-hooks.md)")
+	case !launch && !provision:
+		// Dotted paths, matching the delete_cmd error below and every other config
+		// message: the key is what the reader has to go edit, so it must be
+		// greppable and unambiguous. Naming BOTH keys is the point — a message that
+		// named only launch_cmd would send a provision_cmd user to fix the wrong one.
+		return fmt.Errorf("remote_hooks.provision_cmd or remote_hooks.launch_cmd is required — " +
+			"provision_cmd returns an ssh host and af runs the agent-server itself; launch_cmd returns an " +
+			"{\"url\",\"token\"} endpoint you stood up yourself (see docs/remote-hooks.md)")
 	}
 	if strings.TrimSpace(h.DeleteCmd) == "" {
 		return fmt.Errorf("remote_hooks.delete_cmd is required")
 	}
 	return nil
+}
+
+// UsesProvisionCmd reports whether this repo is on the ssh-host contract (#2847)
+// rather than the endpoint contract. Validate guarantees exactly one is set, so
+// this is the discriminator the runtime switches on.
+func (h RemoteHooks) UsesProvisionCmd() bool {
+	return strings.TrimSpace(h.ProvisionCmd) != ""
 }
 
 // removedKeyInUse returns the name of the first removed pre-PR7 hook key present
@@ -103,6 +132,7 @@ func (h RemoteHooks) removedKeyInUse() string {
 // mutated.
 func (h RemoteHooks) resolveCommandPaths(repoRoot string) *RemoteHooks {
 	h.LaunchCmd = resolveHookCommandPath(repoRoot, h.LaunchCmd)
+	h.ProvisionCmd = resolveHookCommandPath(repoRoot, h.ProvisionCmd)
 	h.DeleteCmd = resolveHookCommandPath(repoRoot, h.DeleteCmd)
 	return &h
 }
@@ -232,4 +262,11 @@ func SaveRepoConfig(repoID string, cfg *RepoConfig) error {
 		return fmt.Errorf("failed to marshal repo config: %w", err)
 	}
 	return AtomicWriteFile(path, data, 0644)
+}
+
+// ResolveCommandPathsForTest exposes resolveCommandPaths to tests in other
+// packages, which need to assert that every hook command — including
+// provision_cmd — is made absolute against the repo root before exec sees it.
+func (h RemoteHooks) ResolveCommandPathsForTest(repoRoot string) *RemoteHooks {
+	return h.resolveCommandPaths(repoRoot)
 }

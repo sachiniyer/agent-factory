@@ -12,6 +12,9 @@ import (
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
 func (t *TmuxSession) Start(workDir string) error {
+	// A fresh attempt supersedes any earlier proof: whatever an aborted Start
+	// established about this name, it is about to be re-established or replaced.
+	t.setProvenNoPane(false)
 	// Check if the session already exists. This is a POSITIVE existence gate, so
 	// it must not read the lossy bool: a wedged/timed-out has-session is NOT proof
 	// the name is taken, and ExistsOrUnknown would launder it into "already
@@ -36,6 +39,9 @@ func (t *TmuxSession) Start(workDir string) error {
 	program := t.programCmd()
 	wrappedProgram, launchEnv, importNames, envErr := t.launchEnvironment(program)
 	if envErr != nil {
+		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
+		// can exist behind it and a teardown need not gate on liveness (#2985).
+		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
@@ -43,6 +49,8 @@ func (t *TmuxSession) Start(workDir string) error {
 	args = append(args, wrappedProgram)
 	args, envErr = t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
+		// Same proof as above: still read-only, still before new-session.
+		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
 	}
 	cmd, systemdScoped := newTmuxServerCommand(args...)
@@ -138,6 +146,15 @@ func (t *TmuxSession) Start(workDir string) error {
 			// before the pane process finishes flushing. Wait for that process here,
 			// and keep the outcome unknown if it outlives the bound, so LocalBackend
 			// cannot remove the fresh worktree underneath its final writes.
+			// No occupancy scan here, deliberately (#2998). This point sits ABOVE
+			// gw.Cleanup(), which is what cancels a still-running
+			// post_worktree_command — so a scan here matches AF's own provisioning
+			// hook, whose cmd.Dir is this worktree. It also cannot see whether the
+			// worktree is EXTERNAL: for an `--here` launch this is the user's own
+			// checkout, which cleanup never removes and where the invoking shell
+			// normally sits. Both produce refusals that block a legitimate cleanup.
+			// The check belongs below, where ownership is known and the hooks are
+			// already cancelled; recorded as a residual on #2998.
 			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
 			if cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)

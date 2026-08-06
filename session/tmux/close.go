@@ -243,6 +243,28 @@ var paneExitWait = 3 * time.Second
 // which is the property daemon.KillSession needs, since it holds a per-session
 // kills-in-flight guard across this call with no deadline of its own.
 func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
+	state, _, err := t.closeAndWaitForPaneExit()
+	return state, err
+}
+
+// CloseAndWaitForPaneExitReportingBlindness is CloseAndWaitForPaneExit plus the
+// one fact a caller cannot otherwise learn: whether this session VANISHED WITH NO
+// PANE EVER OBSERVED.
+//
+// On that branch tmux has forgotten the ancestry and the AF_SESSION scan is the
+// only evidence — which is vacuous for a session that never exported a marker
+// (tmux < 3.2, or a pre-marker build). A caller about to mutate the workspace
+// needs to know it is standing on that evidence so it can look for markerless
+// occupants instead (#2998).
+//
+// It is reported rather than acted on here because the check belongs AFTER every
+// tab is closed: tabs of one instance share a worktree, so a scan run while a
+// sibling is still live reports that sibling.
+func (t *TmuxSession) CloseAndWaitForPaneExitReportingBlindness() (PaneState, bool, error) {
+	return t.closeAndWaitForPaneExit()
+}
+
+func (t *TmuxSession) closeAndWaitForPaneExit() (PaneState, bool, error) {
 	pid, pidErr := t.panePID()
 	var (
 		paneProcess proctree.Process
@@ -283,13 +305,14 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 	// attempt's lost ancestry into a clean empty and authorize deleting the
 	// worktree under a detached descendant (Codex on #2966, round 4).
 	var vanishedSurvivors error
-	if processes.captureErr != nil && sessionGoneWithNoPaneObserved(processes.captureErr, pidErr) {
+	blind := processes.captureErr != nil && sessionGoneWithNoPaneObserved(processes.captureErr, pidErr)
+	if blind {
 		vanishedSurvivors = t.sweepVanishedSessionProcesses()
 	}
 
-	refuse := func(why error) (PaneState, error) {
+	refuse := func(why error) (PaneState, bool, error) {
 		log.WarningLog.Printf("tmux session %s: %v; refusing worktree cleanup", t.sanitizedName, why)
-		return PaneStateUnknown, errors.Join(closeErr, why)
+		return PaneStateUnknown, blind, errors.Join(closeErr, why)
 	}
 	switch {
 	case closeState != PaneStateKnown || closeErr != nil:
@@ -311,17 +334,17 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		// reachable through errors.Is for callers that classify on it. Both are
 		// reachable here: the pane query can time out, and so can list-panes.
 		// errors.Join ignores nils, so the ordinary case is unchanged.
-		return PaneStateUnknown, errors.Join(closeErr, pidErr, processes.captureErr)
+		return PaneStateUnknown, blind, errors.Join(closeErr, pidErr, processes.captureErr)
 	case errors.Is(pidErr, ErrTmuxTimeout):
 		// A TIMED-OUT panePID is not "nothing to wait on" (#1917). The server never
 		// told us which process to wait for, so even with a successful kill we skip
 		// the #802 pane-exit wait and cannot know the agent stopped writing.
-		return PaneStateUnknown, errors.Join(closeErr, pidErr)
+		return PaneStateUnknown, blind, errors.Join(closeErr, pidErr)
 	case processErr != nil:
 		// We knew which PID tmux owned, but could not establish a process identity
 		// to follow across teardown. A successful kill-session is not enough to
 		// prove that process stopped writing.
-		return PaneStateUnknown, errors.Join(closeErr, processErr)
+		return PaneStateUnknown, blind, errors.Join(closeErr, processErr)
 	case vanishedSurvivors != nil:
 		// The session is gone, but the marker scan says something it spawned is
 		// not — or could not be checked at all.
@@ -356,7 +379,7 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 	// comes from Close, and the nothing-still-writing fact comes from the captured
 	// process set, which INCLUDES the pane leader. Neither depends on the PID
 	// query, so it has nothing left to tell the caller.
-	return PaneStateKnown, nil
+	return PaneStateKnown, blind, nil
 }
 
 // sessionGoneWithNoPaneObserved reports whether an unreadable pane set is

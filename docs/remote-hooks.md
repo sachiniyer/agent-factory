@@ -10,6 +10,57 @@ Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-ex
 
 > **⚠️ Breaking change (#1592 Phase 4 PR7).** The old hook contract — `launch_cmd` returning a session id, plus `list_cmd`/`attach_cmd`/`terminal_cmd` scripts for enumeration, terminal proxying, and preview capture — has been **removed**. `launch_cmd` now returns an `af agent-server` endpoint, and the only other script is `delete_cmd`. A config that still sets `list_cmd`, `attach_cmd`, or `terminal_cmd` is **rejected** with an error pointing here. See [Migrating from the old contract](#migrating-from-the-old-contract) for a copy-pasteable recipe.
 
+## Two contracts: `provision_cmd` or `launch_cmd`
+
+A remote-hook repo picks **one** of these. They answer the same question — how does this session get a workspace — in opposite ways, and setting both is rejected rather than resolved by preference.
+
+| | `provision_cmd` (#2847) | `launch_cmd` |
+|---|---|---|
+| Your script returns | an **ssh host** + its host key | an `af agent-server` **endpoint** (`{url,token}`) |
+| Who starts `af agent-server` | **af** | your script |
+| Who owns the bearer token | **af** — it never enters your script | your script: argv, stdout, logs, errors |
+| Who keeps a tunnel alive | **af** | your script |
+| Needs sshd on the target | yes | no |
+
+**Prefer `provision_cmd`.** Your script collapses to *make a machine, print how to reach it*, and the parts that have historically gone wrong stop being your problem: no token to leak, no tunnel to background, no agent-server lifecycle. Because a host address and a host **public** key are not secrets, nothing on this path needs redacting.
+
+**`launch_cmd` remains the escape hatch**, and is not deprecated. Some targets have no sshd — certain Kubernetes pods, serverless runners, WebSocket-only PaaS — and returning a URL is the only option there.
+
+### `provision_cmd`
+
+Same arguments as `launch_cmd` (`--name`, `--title`, `--repo`, and `--branch` on restore). **stdout carries one JSON object and nothing else:**
+
+```json
+{"host": "10.0.0.7", "user": "af", "port": 2222, "host_key": "ssh-ed25519 AAAAC3Nz…"}
+```
+
+- `host` (**required**) — the address af connects to. May carry the port as `host:port` instead of using `port`.
+- `host_key` (**required**) — the machine's **public** host key, in `authorized_keys` form.
+- `user`, `port` — optional.
+
+Progress goes on **stderr**; anything else on stdout fails the provision with the offending line quoted, exactly as for `launch_cmd`.
+
+#### Why `host_key` is required
+
+A machine created seconds ago has no `known_hosts` entry, and the resulting prompt is precisely what an unattended provision cannot answer. None of af's host-key postures solves it: `strict` refuses an unknown host, `accept-new` is trust-on-first-use where **every** session is a first contact (and its store later refuses a legitimate VM once an address is recycled), and `insecure` invites the man-in-the-middle who would then see the bearer token.
+
+Your script is the only party with an **authentic** channel to that key — it is talking to the provider's control plane, which af cannot reach. So it returns the key, and af writes a **per-session** `known_hosts` containing exactly it, then connects with `StrictHostKeyChecking=yes` and `GlobalKnownHostsFile=/dev/null`. That is a real verification rather than trust on sight, and it is stronger than what `backend = "ssh"` can do.
+
+Two ways to get the key, both ordinary practice:
+
+```bash
+# read it back from the provider
+aws ec2 get-console-output --instance-id "$ID" | sed -n 's/^ssh-ed25519 /ssh-ed25519 /p' | head -1
+
+# or inject one you generated, before first boot (strictly better: nothing is
+# ever trusted on sight)
+ssh-keygen -q -t ed25519 -N "" -f hostkey
+# …pass hostkey to cloud-init as /etc/ssh/ssh_host_ed25519_key…
+printf '{"host":"%s","user":"af","host_key":"%s"}\n' "$IP" "$(cat hostkey.pub)"
+```
+
+There is **no opt-out**. A record without a key is refused, because an escape hatch here would restore exactly the trust-on-sight this design removes.
+
 ## Configuration
 
 Add remote hooks to the repo's own config file at `<repo-root>/.agent-factory/config.toml` (check it into the repo so every clone gets the same backend), and select the backend:
@@ -18,13 +69,14 @@ Add remote hooks to the repo's own config file at `<repo-root>/.agent-factory/co
 backend = "hook"
 
 [remote_hooks]
-launch_cmd = "./.agent-factory/hooks/launch.sh"
+# One of provision_cmd (preferred) or launch_cmd — see above.
+provision_cmd = "./.agent-factory/hooks/provision.sh"
 delete_cmd = "./.agent-factory/hooks/delete.sh"
 ```
 
 (The in-repo file may also be named `config.json` for compatibility with older `af` versions — see [configuration.md](configuration.md#in-repo-file-name-configtoml-or-configjson). The JSON block further down this page is `launch_cmd` **output**, not config.)
 
-`launch_cmd` and `delete_cmd` are both **required** — an empty value is rejected when the backend is resolved, with an error naming the missing field (e.g. `remote_hooks.launch_cmd is required`) rather than a cryptic `exec: no command` at operation time.
+`delete_cmd` is **required**, and so is exactly one of `provision_cmd` / `launch_cmd`. An empty or missing value is rejected when the backend is resolved, with an error naming the missing field (e.g. `remote_hooks.provision_cmd or remote_hooks.launch_cmd is required`, `remote_hooks.delete_cmd is required`) rather than a cryptic `exec: no command` at operation time. Setting **both** provisioning keys is rejected too — they are alternatives, not layers.
 
 `remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.toml`. Configuring `backend = "hook"` selects the backend for that repo; you can also create a one-off hook session with `af sessions create --backend hook` or, in the TUI, press `N` for a remote session.
 

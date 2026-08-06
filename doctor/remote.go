@@ -87,6 +87,7 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 	type hook struct{ field, cmd string }
 	for _, h := range []hook{
 		{"launch_cmd", hooks.LaunchCmd},
+		{"provision_cmd", hooks.ProvisionCmd},
 		{"delete_cmd", hooks.DeleteCmd},
 	} {
 		if strings.TrimSpace(h.cmd) == "" {
@@ -156,6 +157,7 @@ func remoteHooksMentionCoder(hooks *config.RemoteHooks) bool {
 	}
 	for _, command := range []string{
 		hooks.LaunchCmd,
+		hooks.ProvisionCmd,
 		hooks.DeleteCmd,
 	} {
 		if strings.Contains(strings.ToLower(command), "coder") {

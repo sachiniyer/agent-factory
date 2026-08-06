@@ -334,7 +334,7 @@ func TestPersistKillTombstone_ConcurrentPollWrite_TombstoneSurvives(t *testing.T
 // PRE-FIX BEHAVIOR THIS REPRODUCES: ghostCleanup returns nil.
 func TestGhostCleanup_WorktreeTimeout_RetainsTheRecord(t *testing.T) {
 	prevWT, prevTmux := ghostCleanupWorktree, ghostKillTmuxByName
-	ghostKillTmuxByName = func(string) (tmux.PaneState, error) { return tmux.PaneStateKnown, nil }
+	ghostKillTmuxByName = func(string) (tmux.PaneState, bool, error) { return tmux.PaneStateKnown, false, nil }
 	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error) {
 		return git.CleanupStateUnknown, context.DeadlineExceeded
 	}
@@ -577,8 +577,8 @@ func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
 // automatically".
 func TestKillSession_GhostUnsafeTeardown_DoesNotPromiseAnAutomaticRetry(t *testing.T) {
 	prevWT, prevTmux := ghostCleanupWorktree, ghostKillTmuxByName
-	ghostKillTmuxByName = func(string) (tmux.PaneState, error) {
-		return tmux.PaneStateUnknown, fmt.Errorf("%w: wedged", tmux.ErrTmuxTimeout)
+	ghostKillTmuxByName = func(string) (tmux.PaneState, bool, error) {
+		return tmux.PaneStateUnknown, false, fmt.Errorf("%w: wedged", tmux.ErrTmuxTimeout)
 	}
 	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error) {
 		return git.CleanupSettled, nil

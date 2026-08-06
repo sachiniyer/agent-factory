@@ -186,6 +186,10 @@ func (m *home) materializeSnapshot(data []session.InstanceData) {
 			log.WarningLog.Printf("skipping session %q from snapshot: %v", d.Title, err)
 			continue
 		}
+		// A row BUILT from a snapshot can already carry a daemon-owned op, and it is
+		// just as adopted as one mirrored onto an existing row — the cold-start
+		// variant of the same corpse (#3005).
+		m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 		m.store.AddInstance(inst)()
 	}
 }
@@ -481,10 +485,22 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 			// own completion handler (instanceStartedMsg/instanceKilledMsg, which
 			// use pointer identity); swapping it here would orphan that handshake
 			// and leave two same-title rows (#808). Leave it and let the op resolve.
-			if inst.GetInFlightOp() != session.OpNone {
+			//
+			// Only a LOCAL op vetoes. An op adopted from a daemon snapshot has no
+			// completion handler waiting on it, so there is no handshake to orphan —
+			// and its release only ever arrives as a later OpNone snapshot for THIS
+			// identity, which by definition never comes once the title has been
+			// recreated. Vetoing on it left the corpse on the rail forever (#3005).
+			if m.adoptedSnapshotOps.vetoesReconcile(inst) {
 				continue
 			}
+			// Only on SUCCESS: swapInstanceFromSnapshot returns false and leaves the
+			// old row in place when the replacement cannot be built, and forgetting
+			// first would reclassify its adopted op as local — vetoing every later
+			// retry and turning a transient build failure into the permanent stale row
+			// this change exists to prevent.
 			if m.swapInstanceFromSnapshot(d) {
+				m.adoptedSnapshotOps.forget(inst)
 				changed = true
 			}
 			continue
@@ -527,15 +543,27 @@ func (m *home) reconcileSnapshot(data []session.InstanceData) bool {
 		if _, ok := snapByTitle[inst.Title]; ok {
 			continue
 		}
-		if inst.GetInFlightOp() != session.OpNone {
+		// Same distinction as the identity swap above: a local op owns its own
+		// removal through its completion handler, an adopted one does not, and the
+		// snapshot is authoritative about whether the session still exists (#3005).
+		if m.adoptedSnapshotOps.vetoesReconcile(inst) {
 			continue
 		}
 		toRemove = append(toRemove, inst)
 	}
 	for _, inst := range toRemove {
 		m.store.RemoveInstanceByTitle(inst.Title)
+		// The map is keyed by pointer, so an entry for a row that has left the store
+		// would never be read again but would keep the instance alive.
+		m.adoptedSnapshotOps.forget(inst)
 		changed = true
 	}
+	// Provenance is keyed by pointer, so an entry for a row that has left the store
+	// by ANY route — removal, swap, project switch — would leak and keep that
+	// instance reachable. Reconciling the map against the live set here covers every
+	// exit without each one having to remember this map (#3005).
+	m.adoptedSnapshotOps.pruneTo(m.store.GetInstances())
+
 	// Prune panes whose backing session can no longer render — a removed
 	// instance takes its open panes with it (#1088), and a session archived out
 	// of band (`af sessions archive` while the TUI runs, #1028) leaves its pane
@@ -588,6 +616,7 @@ func (m *home) addInstanceFromSnapshot(d session.InstanceData) bool {
 		log.WarningLog.Printf("failed to build instance %q from snapshot: %v", d.Title, err)
 		return false
 	}
+	m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 	m.store.AddInstance(inst)()
 	return true
 }
@@ -602,6 +631,11 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
 		return false
 	}
+	// The replacement can arrive already carrying a daemon-owned op, exactly like
+	// the other two snapshot builders. Recorded here so the NEW pointer starts with
+	// provenance — without it the successor inherits the original defect the moment
+	// its own identity changes (#3005).
+	m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 	// ReplaceInstance re-points any open panes at the rebuilt instance, but
 	// the recreated session's tab SET may differ from the corpse's — capture
 	// the outgoing slot→identity list so the shared pane reconcile can close
@@ -665,7 +699,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// one of those determinate outcomes arrives; the snapshot op still stays
 	// scrubbed because no daemon process owns it after the tombstone commit.
 	preserveKillRetry := tombstoned && inst.GetInFlightOp() == session.OpKilling
-	if !preserveKillRetry && reconcileSnapshotOp(inst, snapshotOp, lv) {
+	if !preserveKillRetry && m.reconcileSnapshotOp(inst, snapshotOp, lv) {
 		changed = true
 	}
 	// Mirror the usage-limit reset time (#1146) alongside the liveness. It's
@@ -756,20 +790,22 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 // outcome. Snapshot ops are transient but authoritative for daemon-side
 // archive/restore windows (#1436); terminal snapshots carry OpNone and clear
 // stale overlays through the Transition chokepoint.
-func reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
+func (m *home) reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
 	if op != session.OpNone {
-		return adoptSnapshotOp(inst, op, lv)
+		return m.adoptSnapshotOp(inst, op, lv)
 	}
 
 	switch inst.GetInFlightOp() {
 	case session.OpArchiving, session.OpKilling:
 		if lv == session.LiveArchived || lv == session.LiveLost {
 			_ = inst.Transition(session.ClearOp())
+			m.adoptedSnapshotOps.forget(inst)
 			return true
 		}
 	case session.OpRestoring:
 		if lv != session.LiveArchived {
 			_ = inst.Transition(session.ClearOp())
+			m.adoptedSnapshotOps.forget(inst)
 			return true
 		}
 	case session.OpReplacing:
@@ -777,6 +813,7 @@ func reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv sessi
 		// to OpNone, the projection must release the same fence regardless of the
 		// resulting liveness (running, limit-parked, or startup-unknown).
 		_ = inst.Transition(session.ClearOp())
+		m.adoptedSnapshotOps.forget(inst)
 		return true
 	case session.OpRespawning:
 		// Same contract for the limit-resume fence (#2997), and for the same reason:
@@ -791,8 +828,13 @@ func reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp, lv sessi
 	return false
 }
 
-func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
+func (m *home) adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.Liveness) bool {
 	if inst.GetInFlightOp() == op {
+		// Already carrying it, but provenance may not be recorded yet — a row whose
+		// op the daemon reported before this build learned to track it, or one this
+		// reconcile adopted on an earlier pass. Record it either way: the guards ask
+		// about the CURRENT op, not about who set it first.
+		m.adoptedOpsFor().note(inst, op)
 		return false
 	}
 	if inst.GetInFlightOp() != session.OpNone {
@@ -807,6 +849,7 @@ func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.L
 		err = inst.Transition(session.BeginKill())
 	case session.OpArchiving:
 		if lv == session.LiveArchived {
+			m.adoptedOpsFor().note(inst, op)
 			return true
 		}
 		err = inst.Transition(session.BeginArchive())
@@ -838,6 +881,9 @@ func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.L
 		log.WarningLog.Printf("failed to adopt snapshot op %v for %q: %v", op, inst.Title, err)
 		return false
 	}
+	// The row now carries a DAEMON-owned op with no local completion handler
+	// waiting on it. Recorded here, at the only moment the fact is known (#3005).
+	m.adoptedOpsFor().note(inst, op)
 	return true
 }
 
