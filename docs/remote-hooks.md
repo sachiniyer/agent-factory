@@ -1,6 +1,6 @@
 # Remote Hooks (bring-your-own-provisioner backend)
 
-Agent Factory ships two first-class off-box backends — [`docker` and `ssh`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bastion with exotic auth, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
+Agent Factory ships first-class off-box backends — [`docker`, `ssh`, and `sandbox`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 
 Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill — the one exception is tab management (see [Capabilities & the agent-server](#capabilities-the-agent-server)).
 

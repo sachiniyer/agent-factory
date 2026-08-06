@@ -5,14 +5,15 @@ backend exposes the same session surface — attach, preview, prompt delivery, t
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
 like a local one. The one difference is **tab management**: only a local session
 has a daemon-side worktree to spawn tabs into, so adding/closing tabs (`t`/`w`,
-`af sessions tab-create`) is local-only; docker, ssh, and hook sessions carry a
-fixed single agent tab.
+`af sessions tab-create`) is local-only; off-box sessions (docker, ssh, sandbox,
+hook) carry a fixed single agent tab.
 
 | Backend | Where the agent runs | Selected with |
 |---------|----------------------|---------------|
 | `local` (default) | a git worktree + tmux on the daemon's own machine | nothing (the default), or `backend = "local"` |
 | `docker` | a container on the daemon's Docker host | `backend = "docker"` + `docker.image` |
 | `ssh` | a remote host over SSH | `backend = "ssh"` + `ssh.host` |
+| `sandbox` | whatever the operator's own `sandbox_ssh` command reaches (free-form ssh: jump hosts, `ProxyCommand`, bastions) | `backend = "sandbox"` + global `sandbox_ssh` |
 | `hook` | wherever your provisioner scripts put it | `backend = "hook"` (see [Hook backend](#hook-backend-bring-your-own-provisioner)) |
 
 Select a backend per-repo in `.agent-factory/config.json`, or per-session on any
@@ -456,7 +457,7 @@ recipe in
 
 ## Archive & restore
 
-For the disposable sandbox backends (`docker` and `ssh`), archive and restore
+For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), archive and restore
 are **push/pull of the session branch** — the durable workspace is the branch on
 GitHub (`origin`), not the sandbox:
 
@@ -468,8 +469,8 @@ GitHub (`origin`), not the sandbox:
   clones the pushed branch back, restarts the `af agent-server`, and relaunches
   the agent. The session resumes from the pushed branch state.
 
-This is the same flow for both backends (it is written once against the runtime
-seam), and it is why `docker`/`ssh` reach full capability parity with `local` —
+This is the same flow for every off-box backend (it is written once against the runtime
+seam), and it is why `docker`/`ssh`/`sandbox` reach full capability parity with `local` —
 `Archive` and `Recover` are both supported. A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) recovers the same way: re-provision +
 clone the branch back. Unreachability alone is not death — it does not mark a
