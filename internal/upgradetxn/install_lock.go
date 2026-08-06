@@ -519,9 +519,30 @@ func lockHasInheritedACL(lock *os.File) bool {
 // reassigns it.
 // executableLockFreshWindow is how recently a still-private lock must have been
 // created for its denial to read as the creation race rather than as a legacy
-// private lock. Generous against the microseconds the real window takes, and far
-// below any age a leftover lock would have.
-const executableLockFreshWindow = 5 * time.Second
+// private lock.
+//
+// A still-private lock owned by someone else is OBSERVATIONALLY IDENTICAL in the
+// two cases that matter, and they want opposite answers:
+//
+//   - a leftover from a pre-change version, which never clears, so reporting
+//     busy defers the launch updater on every launch and silently retires
+//     auto-update;
+//   - a live creation race whose owner is merely stalled, where reporting a
+//     permission error sends the caller down the unlocked swap and lets it
+//     overlap the creator when it resumes.
+//
+// Nothing distinguishes them from here. The owner's pid is unknown, and its
+// flock cannot be probed without opening the file — which is the very thing
+// being denied. Age is the only available signal, so this is a threshold rather
+// than a decision, chosen to be wrong as rarely as possible.
+//
+// A minute is far past any create-then-fchmod pause that is not pathological —
+// those two syscalls are adjacent, and this covers a debugger, a SIGSTOP, or a
+// scheduler stall by orders of magnitude — while still far below the age of
+// anything left by a previous version. Past it, the behaviour is exactly what
+// that lock produces today without this change, so the residual case is not a
+// regression; inside it, an updater that defers costs one skipped launch.
+const executableLockFreshWindow = time.Minute
 
 var lockDenialIsTransient = executableLockDenialIsTransient
 
