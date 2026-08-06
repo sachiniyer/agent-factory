@@ -33,15 +33,18 @@ func throwawaySSHD(t *testing.T, extraConfig ...string) (port int, hostPubKey st
 	t.Helper()
 	sshdPath := "/usr/sbin/sshd"
 	if _, err := os.Stat(sshdPath); err != nil {
-		if p, lookErr := exec.LookPath("sshd"); lookErr == nil {
-			sshdPath = p
-		} else {
-			t.Skipf("no sshd available, so the connect path cannot be exercised here: %v", err)
+		p, lookErr := exec.LookPath("sshd")
+		if lookErr != nil {
+			// The ONLY skip. Anything else — a bad directive, permissions, a lost
+			// port race — must FAIL, or this whole file can go quietly inert while
+			// the required suites stay green.
+			t.Skipf("no sshd on this machine, so the connect path cannot be exercised: %v", lookErr)
 		}
+		sshdPath = p
 	}
+
 	dir := t.TempDir()
-	// sshd refuses a world-readable directory chain for authorized_keys.
-	require.NoError(t, os.Chmod(dir, 0o700))
+	require.NoError(t, os.Chmod(dir, 0o700)) // sshd refuses a loose chain for authorized_keys
 
 	hostKey := filepath.Join(dir, "host_ed25519")
 	require.NoError(t, exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", hostKey).Run())
@@ -50,7 +53,6 @@ func throwawaySSHD(t *testing.T, extraConfig ...string) (port int, hostPubKey st
 
 	pub, err := os.ReadFile(hostKey + ".pub")
 	require.NoError(t, err)
-	// known_hosts wants "<type> <base64>" without the trailing comment field.
 	fields := strings.Fields(string(pub))
 	require.GreaterOrEqual(t, len(fields), 2)
 	hostPubKey = fields[0] + " " + fields[1]
@@ -60,17 +62,21 @@ func throwawaySSHD(t *testing.T, extraConfig ...string) (port int, hostPubKey st
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(authorized, userPub, 0o600))
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port = ln.Addr().(*net.TCPAddr).Port
-	require.NoError(t, ln.Close())
+	// Selecting a port by binding :0 and closing it leaves a window in which
+	// another process can take it. Losing that race must not read as "no sshd" or
+	// as a broken assertion against a stranger's listener, so a lost bind RETRIES
+	// with a fresh port and anything else fails loudly.
+	for attempt := 1; attempt <= 5; attempt++ {
+		ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, lerr)
+		port = ln.Addr().(*net.TCPAddr).Port
+		require.NoError(t, ln.Close())
 
-	cfg := filepath.Join(dir, "sshd_config")
-	// sshd_config is FIRST-VALUE-WINS for these keywords, so a caller's overrides
-	// must come BEFORE the defaults or they are silently ignored — which is how an
-	// earlier draft of this harness offered only publickey while claiming to offer
-	// password auth, and made a BatchMode test pass vacuously.
-	body := strings.Join(extraConfig, "\n") + fmt.Sprintf(`
+		cfg := filepath.Join(dir, fmt.Sprintf("sshd_config_%d", attempt))
+		// sshd_config is FIRST-VALUE-WINS, so a caller's overrides must precede the
+		// defaults — appending them silently does nothing, which is how an earlier
+		// draft offered only publickey while claiming to offer password auth.
+		body := strings.Join(extraConfig, "\n") + fmt.Sprintf(`
 Port %d
 ListenAddress 127.0.0.1
 HostKey %s
@@ -81,36 +87,66 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 StrictModes no
 PermitUserEnvironment no
-LogLevel QUIET
+LogLevel ERROR
 `, port, hostKey, authorized, filepath.Join(dir, "sshd.pid"))
-	require.NoError(t, os.WriteFile(cfg, []byte(body), 0o600))
+		require.NoError(t, os.WriteFile(cfg, []byte(body), 0o600))
 
-	cmd := exec.Command(sshdPath, "-D", "-f", cfg)
-	if err := cmd.Start(); err != nil {
-		t.Skipf("cannot start a user-space sshd here: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+		cmd := exec.Command(sshdPath, "-D", "-e", "-f", cfg)
+		var diag strings.Builder
+		cmd.Stderr = &diag
+		require.NoError(t, cmd.Start(), "sshd is installed but could not be started")
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
-		if dialErr == nil {
-			_ = conn.Close()
-			break
+		// ONE owner of Wait, for the process's whole life: a second concurrent Wait
+		// (here and in cleanup) deadlocks.
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+
+		ready, exited := waitForSSHD(done, port)
+		if ready {
+			t.Cleanup(func() {
+				_ = cmd.Process.Kill()
+				<-done
+			})
+			t.Setenv("AF_TEST_SSH_IDENTITY", userKey)
+			return port, hostPubKey
 		}
-		if time.Now().After(deadline) {
-			t.Skipf("the throwaway sshd never came up on 127.0.0.1:%d", port)
+		_ = cmd.Process.Kill()
+		<-done
+		if exited && strings.Contains(strings.ToLower(diag.String()), "address already in use") {
+			continue // lost the bind race; try another port
+		}
+		t.Fatalf("the throwaway sshd did not come up on 127.0.0.1:%d (attempt %d): %s",
+			port, attempt, strings.TrimSpace(diag.String()))
+	}
+	t.Fatal("could not obtain a free port for the throwaway sshd after 5 attempts")
+	return 0, ""
+}
+
+// waitForSSHD reports whether OUR sshd is listening. It watches the process as
+// well as the port, so a daemon that died is distinguished from one still
+// starting — and a port answered by an unrelated listener never counts, because
+// the process must still be alive for readiness to be declared.
+func waitForSSHD(done <-chan struct{}, port int) (ready, exited bool) {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-done:
+			return false, true
+		default:
+		}
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			select {
+			case <-done:
+				return false, true // it answered, but our daemon is gone: not ours
+			default:
+				return true, false
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-
-	// The identity the composed command must use. hookProvisionSSHCommand does not
-	// choose a key — the operator's ssh does — so point ssh at ours for the test.
-	t.Setenv("AF_TEST_SSH_IDENTITY", userKey)
-	return port, hostPubKey
+	return false, false
 }
 
 // withIdentity appends the test identity to a composed command, standing in for
@@ -222,38 +258,60 @@ func TestProvisionedHostConnectsWithAnEmbeddedPort(t *testing.T) {
 // offer password auth, and give ssh an askpass it would have to invoke to
 // prompt. With BatchMode the askpass must never run.
 func TestProvisionedHostBatchModeRefusesAuthPrompts(t *testing.T) {
-	port, hostPubKey := throwawaySSHD(t, "PasswordAuthentication yes", "KbdInteractiveAuthentication yes")
+	// PermitRootLogin yes matters: OpenSSH defaults to prohibit-password, which
+	// disables password and keyboard-interactive FOR ROOT. Under a root CI runner
+	// the server would end authentication without ever reaching askpass, and this
+	// test would pass with BatchMode deleted — vacuous exactly where it must bite.
+	port, hostPubKey := throwawaySSHD(t,
+		"PermitRootLogin yes", "PasswordAuthentication yes", "KbdInteractiveAuthentication yes")
+	record := &hookProvisionRecord{Host: "127.0.0.1", Port: port, HostKey: hostPubKey}
 
+	// THE COUNTERFACTUAL, and the reason this can no longer lie. Reasoning that
+	// "the setup would prompt" is what failed twice here already, so the
+	// no-BatchMode run must ACTUALLY produce a prompt. If it cannot, the
+	// environment is unable to demonstrate the property and this fails rather
+	// than reporting a guarantee it never exercised.
+	require.True(t, runPinnedSSHAndReportPrompt(t, record, false),
+		"without BatchMode this setup must reach an interactive prompt — otherwise the assertion "+
+			"below proves nothing, which is exactly how this test passed vacuously twice")
+
+	assert.False(t, runPinnedSSHAndReportPrompt(t, record, true),
+		"BatchMode=yes must stop ssh ever asking for a credential — the askpass helper ran, so it did not")
+}
+
+// runPinnedSSHAndReportPrompt connects with the pinned host key and no usable
+// identity, reporting whether ssh reached for a credential. SSH_ASKPASS_REQUIRE
+// =force makes ssh use the helper even without a tty, so a prompt is observable
+// as a marker file.
+func runPinnedSSHAndReportPrompt(t *testing.T, record *hookProvisionRecord, batchMode bool) bool {
+	t.Helper()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "askpass-was-invoked")
 	askpass := filepath.Join(dir, "askpass.sh")
 	require.NoError(t, os.WriteFile(askpass,
 		[]byte("#!/usr/bin/env bash\ntouch "+marker+"\necho wrong-password\n"), 0o755))
 
-	record := &hookProvisionRecord{Host: "127.0.0.1", Port: port, HostKey: hostPubKey}
 	knownHosts, err := hookProvisionKnownHosts(dir, record.Host, record.Port, record.HostKey)
 	require.NoError(t, err)
+	noKey := filepath.Join(dir, "unauthorized")
+	require.NoError(t, exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", noKey).Run())
 
-	// SSH_ASKPASS_REQUIRE=force makes ssh use the helper even without a tty, so a
-	// prompt is observable in a test. No usable identity, so password auth is the
-	// only route left — which is exactly where BatchMode must slam the door.
 	t.Setenv("SSH_ASKPASS", askpass)
 	t.Setenv("SSH_ASKPASS_REQUIRE", "force")
 	t.Setenv("DISPLAY", ":0")
 
-	// The identity options must go BEFORE the destination — ssh treats anything
-	// after it as the remote command, so appending them silently does nothing.
-	// A throwaway key that is NOT in authorized_keys leaves password auth as the
-	// only route, which is where BatchMode has to slam the door.
-	noKey := filepath.Join(dir, "unauthorized")
-	require.NoError(t, exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", noKey).Run())
-	cmd := strings.Replace(hookProvisionSSHCommand(knownHosts, record), "ssh ",
-		"ssh -i "+noKey+" -o IdentitiesOnly=yes ", 1)
+	cmd := hookProvisionSSHCommand(knownHosts, record)
+	if !batchMode {
+		cmd = strings.Replace(cmd, "-o BatchMode=yes ", "", 1)
+	}
+	// Identity options BEFORE the destination — ssh treats anything after it as
+	// the remote command, so appending them silently does nothing.
+	cmd = strings.Replace(cmd, "ssh ", "ssh -i "+noKey+" -o IdentitiesOnly=yes ", 1)
+
 	sp := &sandboxProvisioner{sshCmd: cmd}
-	_, err = sp.Run(20*time.Second, "echo should-not-run", nil, true)
-	require.Error(t, err, "with no usable key and no interaction allowed, the connection must fail")
+	_, runErr := sp.Run(20*time.Second, "echo should-not-run", nil, true)
+	require.Error(t, runErr, "with no usable key the connection must fail either way")
 
 	_, statErr := os.Stat(marker)
-	assert.True(t, os.IsNotExist(statErr),
-		"BatchMode=yes must stop ssh ever asking for a credential — the askpass helper ran, so it did not")
+	return statErr == nil
 }
