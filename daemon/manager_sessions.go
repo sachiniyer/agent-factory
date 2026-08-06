@@ -138,7 +138,8 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
 	stage.set("stopping vscode editor")
 	if err := m.stopVSCodeForInstance(vscodeKey, targetID); err != nil {
-		return session.InstanceData{}, fmt.Errorf("kill of session %q could not safely stop its VS Code editor, so its tombstoned record was kept for a retry: %w", req.Title, err)
+		// Committed (#3035): the tombstone is durable, so the kill is recorded and this session is going away.
+		return session.InstanceData{}, committedFailure("kill of session %q could not safely stop its VS Code editor, so its tombstoned record was kept for a retry: %w", req.Title, err)
 	}
 
 	// Carried to the record delete below, which refuses on a non-nil teardown.
@@ -168,7 +169,8 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// row for one poll. Mirrors the create-cleanup gate in manager_create.go.
 		if teardownErr = instance.Kill(); session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
+			// Committed (#3035): recorded and auto-retried: the operation happened even though teardown has not.
+			return session.InstanceData{}, committedFailure("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")
@@ -189,7 +191,8 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 			// but the next attempt has to come from the user. Telling them otherwise
 			// would be a promise the code cannot keep, which is worse than no promise.
 			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill to try again: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
+			// Committed (#3035): the tombstone stands; re-running is safe AND the caller must know it is not starting from nothing.
+			return session.InstanceData{}, committedFailure("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
 		}
 	}
 
@@ -199,7 +202,8 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// so the poll finisher can retry by stable id.
 	stage.set("confirming vscode editor teardown")
 	if err := m.stopVSCodeForInstance(vscodeKey, targetID); err != nil {
-		return session.InstanceData{}, fmt.Errorf("kill of session %q could not confirm its VS Code editor stopped, so its tombstoned record was kept for a retry: %w", req.Title, err)
+		// Committed (#3035): same tombstone, same commit.
+		return session.InstanceData{}, committedFailure("kill of session %q could not confirm its VS Code editor stopped, so its tombstoned record was kept for a retry: %w", req.Title, err)
 	}
 
 	stage.set("deleting record from storage")
