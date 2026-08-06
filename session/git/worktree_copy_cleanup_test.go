@@ -7,9 +7,11 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestCopiedDirectoryRoutesRetainLinearAncestry(t *testing.T) {
@@ -88,12 +90,28 @@ func TestCopyTree_RejectsDestinationSymlinkReplacedBeforeTheTimestamp(t *testing
 	require.NoError(t, os.Symlink("source-target", filepath.Join(src, "link")))
 	dest := filepath.Join(t.TempDir(), "dest")
 
+	// Give the source link a deliberately distant mtime, so what follows measures
+	// the stray WRITE rather than how far apart two fixture creations happened to
+	// land. Created back to back these differ by microseconds at best and, on a
+	// filesystem whose granularity is coarser than that gap, not at all —
+	// measured here, 199 of 200 back-to-back pairs shared a timestamp exactly.
+	// Stamping the outsider with an identical value changes nothing, and the test
+	// would then report success for a race it never observed.
+	stamped := time.Date(2001, 9, 9, 1, 46, 40, 0, time.UTC)
+	sourceStamp := unix.NsecToTimespec(stamped.UnixNano())
+	require.NoError(t, unix.UtimesNanoAt(
+		unix.AT_FDCWD, filepath.Join(src, "link"),
+		[]unix.Timespec{sourceStamp, sourceStamp}, unix.AT_SYMLINK_NOFOLLOW,
+	))
+
 	// A hard link to a file OUTSIDE the copy, which is the damage that makes this
 	// worth refusing rather than tolerating: the stamp would land on it.
 	outsider := filepath.Join(t.TempDir(), "outsider")
 	require.NoError(t, os.WriteFile(outsider, []byte("not part of this archive"), 0600))
 	before, err := os.Lstat(outsider)
 	require.NoError(t, err)
+	require.NotEqual(t, stamped, before.ModTime().UTC(),
+		"fixture check: the outsider must not already carry the value the stray write would give it")
 
 	originalHook := copyTreeBeforeSymlinkStamp
 	copyTreeBeforeSymlinkStamp = func(path string) error {
@@ -120,8 +138,8 @@ func TestCopyTree_RejectsDestinationSymlinkReplacedBeforeTheTimestamp(t *testing
 	// discover it.
 	after, err := os.Lstat(outsider)
 	require.NoError(t, err)
-	require.NotEqual(t, before.ModTime(), after.ModTime(),
-		"expected the known residual: the stamp lands before the swap is detected. If this now passes unchanged, the window was closed — update this test rather than deleting it")
+	require.Equal(t, stamped, after.ModTime().UTC(),
+		"expected the known residual: the outsider carries the SOURCE link's timestamp, so the stamp landed on it before the swap was detected. If this now fails because the outsider is untouched, the window was closed — update this test rather than deleting it")
 }
 
 // TestCopyTree_PostCreateFailureCleansPartialDestination pins the manifest
