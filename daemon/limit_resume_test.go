@@ -285,9 +285,11 @@ func TestResumeFromLimit_RespawnArm_ClearsLimitDurablyOnSuccess(t *testing.T) {
 }
 
 // TestResumeFromLimit_PublishesRunningTransition pins the event-plane half of a
-// successful limit resume. The resume mutates and persists the session directly,
-// so the next status poll snapshots LiveRunning as its "before" state and cannot
-// reconstruct the missing LimitReached -> Running transition for other clients.
+// successful limit resume: the busy announcement when its fence goes up, and the
+// LimitReached -> Running transition when it lands. The resume mutates and persists
+// the session directly, so the next status poll snapshots LiveRunning as its "before"
+// state and cannot reconstruct that transition for other clients — and the fence is
+// invisible to a client that is never told about it.
 func TestResumeFromLimit_PublishesRunningTransition(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
@@ -299,9 +301,32 @@ func TestResumeFromLimit_PublishesRunningTransition(t *testing.T) {
 		t.Fatalf("resumeFromLimit returned %v, want nil", err)
 	}
 
+	// A resume now announces itself TWICE, and BOTH are contracts.
+	//
+	// First that the row is busy (#2997): clients gate their controls on the projected
+	// op and perform no optimistic update for a resume, so without this event an
+	// already-connected TUI or web client keeps offering Kill / Archive / Handoff /
+	// Retry for the whole operation — and a press then lands on a busy error or the 30s
+	// kill timeout those gates exist to prevent.
+	fenced := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
+	if fenced.InFlightOp != session.OpRespawning {
+		t.Fatalf("first session.updated in-flight op = %v, want OpRespawning (the busy announcement)", fenced.InFlightOp)
+	}
+	if fenced.Liveness != session.LiveLimitReached {
+		t.Fatalf("fenced session.updated liveness = %v, want LiveLimitReached — the fence must not disturb the liveness the resume validated against", fenced.Liveness)
+	}
+
+	// Then that it came back. This is the half that was always here and must never be
+	// traded away: the resume mutates and persists directly, so the next status poll
+	// snapshots LiveRunning as its "before" state and cannot reconstruct the missing
+	// LimitReached -> Running transition for other clients. Someone waiting out a usage
+	// limit is watching exactly this row.
 	updated := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
 	if updated.Liveness != session.LiveRunning {
 		t.Fatalf("session.updated liveness = %v, want LiveRunning", updated.Liveness)
+	}
+	if updated.InFlightOp != session.OpNone {
+		t.Fatalf("resumed session.updated in-flight op = %v, want OpNone — the fence must be released before the completion payload is built, or the row stays busy on every client", updated.InFlightOp)
 	}
 	if updated.ID != inst.ID || updated.Title != inst.Title {
 		t.Fatalf("session.updated identity = (%q, %q), want (%q, %q)", updated.ID, updated.Title, inst.ID, inst.Title)
