@@ -588,3 +588,18 @@ func livenessFromData(data InstanceData) Liveness {
 func IsArchivedData(data InstanceData) bool {
 	return livenessFromData(data) == LiveArchived
 }
+
+// EffectiveLiveness resolves the liveness a serialized record actually has,
+// applying the same rollforward IsArchivedData relies on: prefer the `liveness`
+// field, fall back to the legacy `status` int for records written before #1195.
+//
+// Exported because reading data.Liveness directly is a trap for any caller that
+// iterates records rather than live instances — a pre-#1195 record carries the
+// ZERO liveness (LivenessUnset) while its real state lives in the legacy status,
+// so a direct comparison silently misclassifies it as "not archived", "not lost",
+// and so on. IsArchivedData answers one question; this answers the general one
+// for callers that must distinguish several states (#2983's quota report needs
+// "is an agent actually running", which is four states wide).
+func EffectiveLiveness(data InstanceData) Liveness {
+	return livenessFromData(data)
+}

@@ -4832,7 +4832,18 @@ test.describe("create → kill (one session, two flows)", () => {
     // "repo default"-only placeholder the field is built with.
     await expect(backendSelect.locator("option")).not.toHaveCount(1, { timeout: 30_000 });
     await expect(backendSelect.locator("option")).toHaveText(
-      [/^Repo default \(local\)$/, "local", "docker", "ssh", "Remote sandbox · coder-launch.sh (hook)"],
+      [
+        /^Repo default \(local\)$/,
+        "local",
+        "docker",
+        "ssh",
+        // `sandbox` (#2476 PR2) reached this list with NO web change — it was added
+        // to config.SupportedBackends and registered as a runtime, and the picker
+        // read it off the daemon. That is the property this test exists to prove,
+        // so a new backend appearing here is the design working, not drift.
+        "sandbox",
+        "Remote sandbox · coder-launch.sh (hook)",
+      ],
       { timeout: 30_000 },
     );
     // The mock repo configures no docker.image. Picking docker must state the missing

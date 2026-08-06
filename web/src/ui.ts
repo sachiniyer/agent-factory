@@ -331,7 +331,7 @@ const MAX_TABS = 9;
  *  bits — the honest fix is to serialize the capability so no client re-derives
  *  it (see #1874). Until then, a NEW off-box runtime must be added here, which is
  *  what ui.test.ts pins. */
-const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "remote"]);
+const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
 
 /** Whether a session supports user tab management. Off-box sessions (docker/ssh/
  *  remote-hook) have a tab list their runtime fixes at launch — a single agent

@@ -120,6 +120,7 @@ var globalConfigReadOrder = []string{
 	"global_agent_skills",
 	"docker_mount_agent_credentials",
 	"ssh_host_key_verification",
+	"sandbox_ssh",
 	"limit_retry_interval",
 	"limit_patterns",
 	"keys",
@@ -376,6 +377,7 @@ Settable keys:
   docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable

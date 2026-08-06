@@ -139,6 +139,9 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
+	// Free-form: any ssh invocation the operator already uses. Its usability is
+	// checked at create time (BackendConfigError), like ssh.host — not here.
+	"sandbox_ssh": {kind: cfgString},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},

@@ -307,7 +307,7 @@ func (i *Instance) teardownAfterStartFailure() error {
 }
 
 // isSandboxBackendType reports whether a persisted backend Type() names a
-// disposable sandbox runtime (docker/ssh/hook) — the runtimes archive/restore
+// disposable sandbox runtime (docker/ssh/sandbox/hook) — the runtimes archive/restore
 // re-provision (#1592 Phase 4 PR6/PR7).
 func isSandboxBackendType(t string) bool {
 	_, err := backendKindForType(t)
@@ -324,6 +324,8 @@ func newInertSandboxBackend(t string) Backend {
 	switch t {
 	case "ssh":
 		return &sshBackend{}
+	case "sandbox":
+		return &sandboxBackend{}
 	case "remote":
 		return &HookBackend{}
 	default:
@@ -342,6 +344,8 @@ func backendKindForType(t string) (BackendKind, error) {
 		return BackendDocker, nil
 	case "ssh":
 		return BackendSSH, nil
+	case "sandbox":
+		return BackendSandbox, nil
 	case "remote":
 		return BackendHook, nil
 	default:

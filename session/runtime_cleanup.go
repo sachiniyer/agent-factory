@@ -21,9 +21,25 @@ import (
 // drop it in full because host names, command paths, and container ids are
 // operator-private.
 type RuntimeCleanupData struct {
-	Docker *DockerRuntimeCleanupData `json:"docker,omitempty"`
-	SSH    *SSHRuntimeCleanupData    `json:"ssh,omitempty"`
-	Hook   *HookRuntimeCleanupData   `json:"hook,omitempty"`
+	Docker  *DockerRuntimeCleanupData  `json:"docker,omitempty"`
+	SSH     *SSHRuntimeCleanupData     `json:"ssh,omitempty"`
+	Sandbox *SandboxRuntimeCleanupData `json:"sandbox,omitempty"`
+	Hook    *HookRuntimeCleanupData    `json:"hook,omitempty"`
+}
+
+// SandboxRuntimeCleanupData is the restart-safe teardown handle for the sandbox
+// runtime (#2476 PR2). Without it, the unknown-state retention in
+// sandboxProvisioner.reap would be pointless: the row is deliberately RETAINED
+// when a reap cannot prove it ran, and after a daemon restart there would be no
+// handle to retry with, so the remote agent-server and session dir would leak
+// permanently.
+//
+// SSHCommand is operator-private (it can name hosts, ports and jump hosts), so
+// it is subject to the same ForStorage scrubbing as its siblings.
+type SandboxRuntimeCleanupData struct {
+	SSHCommand string `json:"ssh_command"`
+	SessionDir string `json:"session_dir"`
+	RemotePID  string `json:"remote_pid,omitempty"`
 }
 
 type DockerRuntimeCleanupData struct {
@@ -57,6 +73,7 @@ type runtimeCleanupProvider interface {
 var (
 	_ runtimeCleanupProvider = (*dockerBackend)(nil)
 	_ runtimeCleanupProvider = (*sshBackend)(nil)
+	_ runtimeCleanupProvider = (*sandboxBackend)(nil)
 	_ runtimeCleanupProvider = (*HookBackend)(nil)
 )
 
@@ -68,6 +85,10 @@ func (d *RuntimeCleanupData) clone() *RuntimeCleanupData {
 	if d.Docker != nil {
 		v := *d.Docker
 		out.Docker = &v
+	}
+	if d.Sandbox != nil {
+		v := *d.Sandbox
+		out.Sandbox = &v
 	}
 	if d.SSH != nil {
 		v := *d.SSH
@@ -103,6 +124,14 @@ func (b *sshBackend) runtimeCleanupData() *RuntimeCleanupData {
 	return &RuntimeCleanupData{SSH: &v}
 }
 
+func (b *sandboxBackend) runtimeCleanupData() *RuntimeCleanupData {
+	if b == nil || b.cleanup == nil || b.cleanup.SessionDir == "" {
+		return nil
+	}
+	v := *b.cleanup
+	return &RuntimeCleanupData{Sandbox: &v}
+}
+
 func (b *HookBackend) runtimeCleanupData() *RuntimeCleanupData {
 	if b == nil || b.cleanup == nil || b.cleanup.DeleteCmd == "" || b.cleanup.Slug == "" {
 		return nil
@@ -125,6 +154,9 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		variants++
 	}
 	if data.SSH != nil {
+		variants++
+	}
+	if data.Sandbox != nil {
 		variants++
 	}
 	if data.Hook != nil {
@@ -175,6 +207,26 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		}
 		teardown := p.reap
 		return &sshBackend{
+			remoteAgentBackend: remoteAgentBackend{reap: teardown},
+			provisioner:        p,
+			cleanup:            &cleanup,
+		}, teardown, nil
+	case "sandbox":
+		if data.Sandbox == nil || strings.TrimSpace(data.Sandbox.SSHCommand) == "" || strings.TrimSpace(data.Sandbox.SessionDir) == "" {
+			return nil, nil, fmt.Errorf("sandbox cleanup handle is missing its ssh command or remote session directory")
+		}
+		if data.Sandbox.RemotePID != "" && !positivePID(data.Sandbox.RemotePID) {
+			return nil, nil, fmt.Errorf("sandbox cleanup handle has invalid remote pid %q", data.Sandbox.RemotePID)
+		}
+		cleanup := *data.Sandbox
+		p := &sandboxProvisioner{
+			spec:       ProvisionSpec{Title: title},
+			sshCmd:     data.Sandbox.SSHCommand,
+			sessionDir: data.Sandbox.SessionDir,
+			remotePID:  data.Sandbox.RemotePID,
+		}
+		teardown := p.reap
+		return &sandboxBackend{
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
 			cleanup:            &cleanup,

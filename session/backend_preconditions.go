@@ -71,6 +71,18 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 		if cfg == nil || cfg.SSH == nil || strings.TrimSpace(cfg.SSH.Host) == "" {
 			return fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json (the remote host the session's workspace + agent run on)")
 		}
+	case BackendSandbox:
+		// sandbox_ssh is GLOBAL-only, so this error must point at the operator's
+		// own config, NOT the repo's — a contributor reading a docker/ssh-shaped
+		// message would edit a checked-in file that can never carry this key
+		// (af executes the command on the daemon host, so a repo-settable version
+		// would be code execution from a clone; #2476).
+		if cfg == nil || strings.TrimSpace(cfg.SandboxSSH) == "" {
+			return fmt.Errorf("backend=sandbox requires sandbox_ssh to be set in the OPERATOR's global config " +
+				"(~/.agent-factory/config.toml, or `af config set sandbox_ssh '<your ssh command>'`) — the ssh " +
+				"invocation af runs to reach the sandbox host. It is global-only on purpose: af executes it on " +
+				"this machine, so a repository cannot choose it")
+		}
 	case BackendHook:
 		if cfg == nil || cfg.RemoteHooks == nil {
 			return fmt.Errorf("backend=hook requires remote_hooks to be configured in this repo's .agent-factory/config.json (the launch/delete commands that provision the session on your own infrastructure)")
@@ -107,6 +119,14 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 	case BackendSSH:
 		if originRemoteURL(repoRoot) == "" {
 			return missingOriginError(BackendSSH, repoRoot)
+		}
+	case BackendSandbox:
+		// Deliberately NO lookPath check on the command: sandbox_ssh is free-form
+		// and runs through `sh -c`, so it may be a wrapper, a function, or carry
+		// flags — probing its first word would reject working setups. GitHub is
+		// still the durable store, so origin is required exactly as for ssh.
+		if originRemoteURL(repoRoot) == "" {
+			return missingOriginError(BackendSandbox, repoRoot)
 		}
 	case BackendHook:
 		// Validate() is what create runs (via loadRemoteHooksForPath): it catches an

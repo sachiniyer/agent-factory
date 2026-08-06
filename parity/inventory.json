@@ -1362,6 +1362,25 @@
       },
       "verdict": "unclear",
       "notes": "#1904 added tab reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar). No TUI affordance. Same owner call as session.tab.rename. Not filed."
+    },
+    {
+      "id": "quota.usage-report",
+      "title": "Report usage-limit status per agent CLI",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/quotacmd.go:29"
+      },
+      "verdict": "real-gap",
+      "issue": "#2983",
+      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
     }
   ],
   "ledger": {
@@ -1400,6 +1419,7 @@
       "af projects delete": "project.delete",
       "af projects list": "project.list",
       "af projects rebind": "project.rebind",
+      "af quota": "quota.usage-report",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
       "af sessions attach": "session.attach",
@@ -1621,6 +1641,7 @@
       "af projects delete --help": "meta.discovery",
       "af projects list --help": "meta.discovery",
       "af projects rebind --help": "meta.discovery",
+      "af quota --help": "meta.discovery",
       "af reset --force": "install.reset",
       "af reset --help": "meta.discovery",
       "af reset --yes": "install.reset",
