@@ -7,7 +7,7 @@ import (
 )
 
 // Account is a per-session credential scope: exactly one of an agent's logged-in
-// identities, held as a directory the agent CLI treats as its credential root.
+// identities, held as a directory the agent CLI treats as its home.
 //
 // af never reads, stores, or forwards the secret itself. It decides which
 // directory a session can see, and the agent's own login flow put the material
@@ -15,9 +15,26 @@ import (
 type Account struct {
 	Agent string
 	Name  string
-	// Dir is the credential root handed to the agent. It must be a real path
-	// outside any temp directory — codex refuses to operate under /tmp, and an
-	// account is durable state regardless.
+	// Dir is the AGENT HOME handed to the session, not merely a credential file.
+	//
+	// This distinction is a precondition on whoever creates the directory, and
+	// getting it wrong is a silent functional regression rather than a security
+	// one. CODEX_HOME relocates codex's WHOLE home — auth, history, settings, and
+	// skills discovered under $CODEX_HOME/skills, as session/agentskill.go already
+	// documents. So an account directory holding only auth.json gives that session
+	// no history, no user skills, and none of af's managed guidance skill.
+	// CLAUDE_CONFIG_DIR behaves the same way for claude's config root.
+	//
+	// Provisioning must therefore SEED the non-credential state — share or copy it
+	// from the operator's real home — so that an account differs from the default
+	// identity in credentials alone. ApplyAccount cannot verify that: it never
+	// touches the filesystem and receives a path that may not exist yet. It is
+	// stated here because the account-creation slice is the only place it can be
+	// enforced, and a reader of this type would otherwise reasonably assume
+	// "credential directory" meant a directory of credentials (#2983 review).
+	//
+	// It must also be a real path outside any temp directory: codex refuses to
+	// operate under /tmp, and an account is durable state regardless.
 	Dir string
 }
 
@@ -100,7 +117,7 @@ func AccountAgents() []string {
 // AF_DAEMON_TOKEN, which is global by nature, and wrong for an account, which is
 // per-session by definition. An allowlist implementation passes a presence check
 // and a smoke test while giving every session the same account (#2983).
-func ApplyAccount(env []string, account Account) ([]string, error) {
+func ApplyAccount(env []string, command string, account Account) ([]string, error) {
 	configVar, ok := SupportsAccounts(account.Agent)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -110,6 +127,38 @@ func ApplyAccount(env []string, account Account) ([]string, error) {
 	if strings.TrimSpace(account.Dir) == "" {
 		return nil, fmt.Errorf("account %q for agent %q has no credential directory",
 			account.Name, account.Agent)
+	}
+
+	// A CLOUD MODE authenticates somewhere else entirely. Bedrock, Vertex and
+	// Foundry make the CLI use AWS/Google/Azure credentials, which
+	// FilterForCommand deliberately admits for exactly those modes — so the
+	// account directory stops being the session's identity while still appearing
+	// to be. Refusing is the honest answer: removing the selector instead would
+	// silently move the session off the deployment mode its operator configured,
+	// which is a different surprise rather than a smaller one (#2983 review).
+	if selectors := ResolveAuthSelectors(env, account.Agent, command); len(selectors) > 0 {
+		return nil, fmt.Errorf(
+			"account %q cannot scope agent %q while cloud mode %s is active: the session authenticates "+
+				"through that provider's credentials, not through the account directory; unset it to use accounts",
+			account.Name, account.Agent, strings.Join(selectors, ", "))
+	}
+
+	// A COMMAND-LOCAL ASSIGNMENT wins over anything injected here: the launch runs
+	// the program through `/bin/sh -c`, which applies `CODEX_HOME=... codex` after
+	// this environment is installed. program_overrides is reachable from a
+	// repository's checked-in config, so without this a repo could silently
+	// redirect whose quota a session spends. Unprovable commands fail closed —
+	// an unparsed command is not evidence of safety.
+	if overrides, provable := commandOverridesName(command, configVar); overrides || !provable {
+		if !provable {
+			return nil, fmt.Errorf(
+				"account %q cannot scope agent %q: its program could not be proven free of a %s assignment, "+
+					"and an unverifiable program is not evidence that the account would be used",
+				account.Name, account.Agent, configVar)
+		}
+		return nil, fmt.Errorf(
+			"account %q cannot scope agent %q: its program sets %s itself, which overrides the account directory",
+			account.Name, account.Agent, configVar)
 	}
 
 	denied := accountScopedNames(account.Agent, configVar)

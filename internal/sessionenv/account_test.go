@@ -36,7 +36,7 @@ func TestApplyAccount_RemovesTheAmbientIdentity(t *testing.T) {
 		"ANTHROPIC_BASE_URL=https://proxy.internal",
 	}
 
-	scoped, err := ApplyAccount(ambient, Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
+	scoped, err := ApplyAccount(ambient, "", Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
 	require.NoError(t, err)
 
 	for _, name := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"} {
@@ -64,7 +64,7 @@ func TestApplyAccount_RemovesTheAmbientIdentity(t *testing.T) {
 // which one wins is the agent's parsing order rather than af's decision.
 func TestApplyAccount_ReplacesRatherThanAppendsTheConfigDir(t *testing.T) {
 	scoped, err := ApplyAccount(
-		[]string{"CODEX_HOME=/home/op/.codex"},
+		[]string{"CODEX_HOME=/home/op/.codex"}, "",
 		Account{Agent: "codex", Name: "personal", Dir: "/afhome/accounts/codex/personal"},
 	)
 	require.NoError(t, err)
@@ -87,9 +87,9 @@ func TestApplyAccount_ReplacesRatherThanAppendsTheConfigDir(t *testing.T) {
 func TestApplyAccount_DifferentAccountsGetDifferentRoots(t *testing.T) {
 	ambient := []string{"CLAUDE_CONFIG_DIR=/home/op/.claude"}
 
-	a, err := ApplyAccount(ambient, Account{Agent: "claude", Name: "a", Dir: "/afhome/accounts/claude/a"})
+	a, err := ApplyAccount(ambient, "", Account{Agent: "claude", Name: "a", Dir: "/afhome/accounts/claude/a"})
 	require.NoError(t, err)
-	b, err := ApplyAccount(ambient, Account{Agent: "claude", Name: "b", Dir: "/afhome/accounts/claude/b"})
+	b, err := ApplyAccount(ambient, "", Account{Agent: "claude", Name: "b", Dir: "/afhome/accounts/claude/b"})
 	require.NoError(t, err)
 
 	dirA, _ := envValue(a, "CLAUDE_CONFIG_DIR")
@@ -105,7 +105,7 @@ func TestApplyAccount_DifferentAccountsGetDifferentRoots(t *testing.T) {
 // evidence.
 func TestApplyAccount_RefusesAnUnverifiedAgent(t *testing.T) {
 	for _, agent := range []string{"gemini", "amp", "aider", "opencode", "unknown"} {
-		_, err := ApplyAccount(nil, Account{Agent: agent, Name: "x", Dir: "/d"})
+		_, err := ApplyAccount(nil, "", Account{Agent: agent, Name: "x", Dir: "/d"})
 		require.Error(t, err, "agent %q must refuse rather than accept an inert account selection", agent)
 		require.Contains(t, err.Error(), "does not support multiple accounts")
 		require.Contains(t, err.Error(), "claude", "the error must name what IS supported")
@@ -115,7 +115,7 @@ func TestApplyAccount_RefusesAnUnverifiedAgent(t *testing.T) {
 // An account with no directory is a configuration error, never an empty scope
 // that silently falls back to the ambient identity.
 func TestApplyAccount_RefusesAnEmptyDirectory(t *testing.T) {
-	_, err := ApplyAccount(nil, Account{Agent: "claude", Name: "work", Dir: "   "})
+	_, err := ApplyAccount(nil, "", Account{Agent: "claude", Name: "work", Dir: "   "})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no credential directory")
 }
@@ -146,5 +146,70 @@ func TestAccountScopedNames_AlwaysDeniesTheConfigVar(t *testing.T) {
 		denied := accountScopedNames(agent, configVar)
 		_, ok := denied[configVar]
 		require.True(t, ok, "%s must be denied before it is injected for %s", configVar, agent)
+	}
+}
+
+// A CLOUD MODE authenticates somewhere else entirely, so an account cannot scope
+// it. Bedrock/Vertex/Foundry make the CLI use AWS/Google/Azure credentials —
+// which FilterForCommand deliberately admits for exactly those modes — so the
+// account directory stops being the session's identity while still looking like
+// it. Refusing beats removing the selector, which would silently move the
+// session off the deployment mode its operator configured.
+func TestApplyAccount_RefusesWhileACloudModeIsActive(t *testing.T) {
+	for _, selector := range []string{"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"} {
+		env := []string{selector + "=1", "AWS_SECRET_ACCESS_KEY=ambient"}
+		_, err := ApplyAccount(env, "", Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
+		require.Error(t, err, "%s active must refuse an account scope", selector)
+		require.Contains(t, err.Error(), "cloud mode")
+		require.Contains(t, err.Error(), selector, "the refusal must name which mode blocked it")
+	}
+
+	// With no selector set, the same agent scopes normally — so the guard cannot
+	// pass by refusing everything.
+	_, err := ApplyAccount([]string{"PATH=/usr/bin"}, "",
+		Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
+	require.NoError(t, err)
+}
+
+// A COMMAND-LOCAL ASSIGNMENT wins over the injected root, because the launch runs
+// the program through `/bin/sh -c` and the shell applies it after this
+// environment is installed. program_overrides is reachable from a repository's
+// checked-in config, so this is a repo-controlled way to redirect whose quota a
+// session spends — the exact thing account scoping exists to control.
+func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
+	cases := []string{
+		"CODEX_HOME=/other codex",
+		"CODEX_HOME=$HOME/.codex codex",
+		"env CODEX_HOME=/other codex",
+		"env -u CODEX_HOME codex",
+		"env -i codex",
+		"exec CODEX_HOME=/other codex",
+	}
+	for _, command := range cases {
+		_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
+		require.Error(t, err, "command %q must not silently override the account root", command)
+		require.Contains(t, err.Error(), "CODEX_HOME")
+	}
+
+	// An ordinary program is unaffected, so the guard is not simply refusing all
+	// account use.
+	_, err := ApplyAccount(nil, "codex", Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
+	require.NoError(t, err)
+	_, err = ApplyAccount(nil, "codex --model gpt-5", Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
+	require.NoError(t, err)
+}
+
+// A command that cannot be parsed into a single simple call is not evidence of
+// safety. Account scoping decides whose quota is spent, so an unprovable program
+// fails closed rather than being assumed harmless.
+func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
+	for _, command := range []string{
+		"codex | tee /tmp/x",
+		"(CODEX_HOME=/other codex)",
+		"codex && echo done",
+	} {
+		_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
+		require.Error(t, err, "command %q is unparseable and must not be assumed safe", command)
+		require.Contains(t, err.Error(), "could not be proven free")
 	}
 }
