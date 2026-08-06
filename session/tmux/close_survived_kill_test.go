@@ -314,25 +314,20 @@ has-session)     exit 1 ;;`)
 	}
 }
 
-// TestVanishedSessionWithASurvivingMarkedProcessRefuses is the round-4 Codex
-// finding: the determinate-empty was laundering a LOST ANCESTRY across teardown
-// attempts.
-//
-// Attempt 1 observes a pane and loses the ancestry to a racing session exit, so
-// cleanup refuses — correctly. finishUserKill then retries the tombstone, and on
-// the retry BOTH tmux reads report absence. Without an independent check the
-// retry calls that a clean empty and deletes the worktree, while a detached
-// descendant of the original pane is still writing.
-//
-// The check has to be one that does not need tmux, because tmux has forgotten
-// the session. The AF_SESSION marker outlives it: a reparented descendant still
-// carries what its pane gave it.
-func TestVanishedSessionWithASurvivingMarkedProcessRefuses(t *testing.T) {
-	const name = "af_vanished_with_survivor"
-	// A real process carrying the marker, standing in for the descendant that
-	// outlived the session — spawned, not fabricated, so the scan sees a genuine
-	// process-table entry.
-	survivor := spawnMarkedProcess(t, name)
+// The vanished-session sweep, round 5 (Codex on #2966). Round 4 answered "did
+// anything outlive this session?" with a marker scan, but matched on AF_SESSION
+// ALONE and only REPORTED what it found. Both were wrong, in opposite
+// directions, and these three cases pin the corrected split.
+
+// TestVanishedSessionReapsAnOwnedSurvivor: a descendant carrying THIS home's
+// markers is a real escaped process. Reporting it is not enough — the tombstone
+// is retried by finishUserKill, and a scan that never signals leaves the leak and
+// the stuck worktree forever. It must be reaped, and cleanup may then proceed.
+func TestVanishedSessionReapsAnOwnedSurvivor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	const name = "af_vanished_owned"
+	survivor := spawnMarkedProcess(t, name, home)
 
 	scriptedTmuxOnPath(t, `
 display-message) exit 0 ;;
@@ -340,25 +335,90 @@ list-panes)      echo "can't find session: `+name+`" >&2; exit 1 ;;
 kill-session)    exit 0 ;;
 has-session)     exit 1 ;;`)
 
-	ts := NewTmuxSessionFromSanitizedName(name, "")
-	state, err := ts.CloseAndWaitForPaneExit()
+	state, err := NewTmuxSessionFromSanitizedName(name, "").CloseAndWaitForPaneExit()
+
+	if state != PaneStateKnown || err != nil {
+		t.Fatalf("state=%v err=%v: the survivor was this home's, so the bounded reap should have "+
+			"eliminated it and authorized cleanup — refusing instead leaves the tombstone retrying "+
+			"forever without ever signalling the process", state, err)
+	}
+	if proctree.AliveSame(survivor) {
+		t.Errorf("pid %d survived the sweep; reporting a leak without reaping it is what round 4 got wrong", survivor.PID)
+	}
+}
+
+// TestVanishedSessionIgnoresAnotherHomesProcess: the same sanitized name can
+// exist under a DIFFERENT agent-factory home — a leftover from a temp or dev
+// install. Matching on AF_SESSION alone counted it as ours, refusing cleanup
+// forever over a process we must not touch.
+func TestVanishedSessionIgnoresAnotherHomesProcess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	const name = "af_vanished_foreign"
+	foreign := spawnMarkedProcess(t, name, filepath.Join(t.TempDir(), "some-other-home"))
+
+	scriptedTmuxOnPath(t, `
+display-message) exit 0 ;;
+list-panes)      echo "can't find session: `+name+`" >&2; exit 1 ;;
+kill-session)    exit 0 ;;
+has-session)     exit 1 ;;`)
+
+	state, err := NewTmuxSessionFromSanitizedName(name, "").CloseAndWaitForPaneExit()
+
+	if state != PaneStateKnown || err != nil {
+		t.Fatalf("state=%v err=%v: the marked process belongs to ANOTHER af home, so it is neither our "+
+			"survivor nor ours to reap — blocking on it strands this teardown indefinitely", state, err)
+	}
+	if !proctree.AliveSame(foreign) {
+		t.Errorf("another home's process (pid %d) was killed by this teardown", foreign.PID)
+	}
+}
+
+// TestVanishedSessionRefusesAnUnattributableProcess: a process carrying this
+// session's name but NO home marker cannot be shown to be ours OR foreign. That
+// is the one case that must still block — "I could not tell" is not "not mine".
+func TestVanishedSessionRefusesAnUnattributableProcess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	const name = "af_vanished_unattributable"
+	spawnMarkedProcess(t, name, "")
+
+	scriptedTmuxOnPath(t, `
+display-message) exit 0 ;;
+list-panes)      echo "can't find session: `+name+`" >&2; exit 1 ;;
+kill-session)    exit 0 ;;
+has-session)     exit 1 ;;`)
+
+	state, err := NewTmuxSessionFromSanitizedName(name, "").CloseAndWaitForPaneExit()
 
 	if state == PaneStateKnown {
-		t.Fatalf("CloseAndWaitForPaneExit = PaneStateKnown with err=%v: both tmux reads report absence, "+
-			"but pid %d still carries the session's %s marker — deleting the worktree now would do it "+
-			"under a live writer (#2962 round 4)", err, survivor, EnvMarkerSession)
-	}
-	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(survivor)) {
-		t.Errorf("error = %v, want it to name the surviving process %d", err, survivor)
+		t.Fatalf("state=Known err=%v: a process marking this session with no %s marker cannot be "+
+			"attributed, and an unattributable process is not an absent one", err, EnvMarkerHome)
 	}
 }
 
 // spawnMarkedProcess starts a child carrying AF_SESSION=<name> and returns its
 // pid, cleaned up by the test.
-func spawnMarkedProcess(t *testing.T, sessionName string) int {
+func spawnMarkedProcess(t *testing.T, sessionName, afHome string) proctree.Process {
 	t.Helper()
 	c := exec.Command("sleep", "300")
-	c.Env = append(os.Environ(), EnvMarkerSession+"="+sessionName)
+	// A CLEAN env, not os.Environ(). processEnvValue returns the FIRST match, and
+	// this test binary runs inside a real af session — so inheriting the ambient
+	// environment puts THAT session's AF_SESSION ahead of the one appended here,
+	// and the child reads as belonging to the developer's session instead of the
+	// fixture's. Measured: the sweep then reported live pids from the running
+	// session rather than the spawned child.
+	c.Env = []string{"PATH=" + os.Getenv("PATH"), EnvMarkerSession + "=" + sessionName}
+	if afHome != "" {
+		c.Env = append(c.Env, EnvMarkerHome+"="+afHome)
+	}
+	// Its OWN kernel session, because the sweep expands a matched process to its
+	// SID members — which is scoped in production precisely because tmux makes a
+	// pane root a session leader (see captureSessionProcessTrees). A child that
+	// merely inherits the test runner's SID is not that shape: measured, the
+	// expansion then pulled in the developer's live af session processes and the
+	// fixture indicted them instead of its own child.
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {
 		t.Fatalf("spawn marked process: %v", err)
 	}
@@ -366,16 +426,24 @@ func spawnMarkedProcess(t *testing.T, sessionName string) int {
 		_ = c.Process.Kill()
 		_, _ = c.Process.Wait()
 	})
-	// The scan reads /proc/<pid>/environ; wait until it is readable.
+	// The scan reads /proc/<pid>/environ; wait until it is readable, then take the
+	// full process IDENTITY. A bare pid is not enough for later liveness checks:
+	// AliveSame compares (PID, StartID), so a fabricated Process{PID: n} reports
+	// "not alive" for a perfectly live process — which made an earlier version of
+	// these assertions pass vacuously.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if env, err := proctree.Environ(c.Process.Pid); err == nil {
 			if v, ok := processEnvValue(env, EnvMarkerSession); ok && v == sessionName {
-				return c.Process.Pid
+				p, lookupErr := proctree.Lookup(c.Process.Pid)
+				if lookupErr != nil {
+					t.Fatalf("look up spawned pid %d: %v", c.Process.Pid, lookupErr)
+				}
+				return p
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Skipf("child %d environ never became readable; this fixture needs a marker-visible process", c.Process.Pid)
-	return 0
+	return proctree.Process{}
 }

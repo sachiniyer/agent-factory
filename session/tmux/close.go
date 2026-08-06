@@ -284,7 +284,7 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 	// worktree under a detached descendant (Codex on #2966, round 4).
 	var vanishedSurvivors error
 	if processes.captureErr != nil && sessionGoneWithNoPaneObserved(processes.captureErr, pidErr) {
-		vanishedSurvivors = t.markedProcessesOutlivingSession()
+		vanishedSurvivors = t.sweepVanishedSessionProcesses()
 	}
 
 	refuse := func(why error) (PaneState, error) {
@@ -383,29 +383,40 @@ func sessionGoneWithNoPaneObserved(captureErr, pidErr error) bool {
 		errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 }
 
-// markedProcessesOutlivingSession reports, WITHOUT asking tmux, whether any
-// process still carries this session's AF_SESSION marker — and returns nil only
-// when the scan RAN and found none.
+// sweepVanishedSessionProcesses answers "did anything this session spawned
+// outlive it?" WITHOUT asking tmux, and acts on the answer rather than merely
+// reporting it.
 //
-// The marker is what makes a vanished session still answerable: a descendant
-// that detached and was reparented to init keeps the marker its pane gave it, so
-// it is findable even though tmux has forgotten the ancestry. A scan that could
-// not run is not evidence of absence and refuses, like every other read here.
-func (t *TmuxSession) markedProcessesOutlivingSession() error {
-	survivors, err := refreshOrphanCandidates(nil, t.sanitizedName)
+// It delegates to reapVanishedSessionProcesses, the flow CleanupSessions already
+// uses for exactly this situation (#1104/#2765), because the ad-hoc scan this
+// replaces got two things wrong that the shared flow has right (Codex on #2966,
+// round 5):
+//
+//   - OWNERSHIP. Matching on AF_SESSION alone counts a same-named process from
+//     ANOTHER agent-factory home — a leftover from a temp/dev install — as this
+//     session's survivor, refusing cleanup forever over something that is not
+//     ours. markedOrphanProcesses validates AF_HOME (and uid, and process
+//     identity) and silently skips a foreign home, while an UNATTRIBUTABLE
+//     process still blocks, which is the right split.
+//   - REAPING. Only reporting a genuine SIGHUP-immune descendant leaves the
+//     tombstone retried forever: each attempt rescans, finds it again, and never
+//     signals it, so the leak and the stuck worktree both persist. The shared
+//     flow reaps with the bounded TERM→KILL escalation and reports only what
+//     SURVIVES that.
+//
+// A home we cannot resolve is not evidence of absence: it means no candidate can
+// be attributed, so the sweep refuses.
+func (t *TmuxSession) sweepVanishedSessionProcesses() error {
+	ownHome, err := afHomeDir()
 	if err != nil {
-		return fmt.Errorf("tmux session %s is gone and its surviving processes could not be checked: %w",
-			t.sanitizedName, err)
+		return fmt.Errorf("tmux session %s is gone and its surviving processes cannot be attributed to this "+
+			"agent-factory home: %w", t.sanitizedName, err)
 	}
-	if len(survivors) == 0 {
-		return nil
-	}
-	pids := make([]string, 0, len(survivors))
-	for _, p := range survivors {
-		pids = append(pids, strconv.Itoa(p.PID))
-	}
-	return fmt.Errorf("tmux session %s is gone, but process(es) %s still carry its %s marker and were "+
-		"never captured", t.sanitizedName, strings.Join(pids, ", "), EnvMarkerSession)
+	// nil candidates and nil captureErr on purpose: there is no captured tree to
+	// refresh — the marker scan IS the evidence standing in for the ancestry tmux
+	// lost, so passing the capture failure through would make it a blocker again
+	// and defeat the point.
+	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil)
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity
