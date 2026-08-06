@@ -39,6 +39,16 @@ type HTTPRoute struct {
 	// Unexported: net/json skips it (so it never leaks into the catalog) and
 	// importers cannot set it.
 	handler func(*controlServer) http.HandlerFunc
+	// sandboxAllowed opts this route into the SCOPED sandbox callback credential
+	// (#2999). Zero value false means DENIED, deliberately: a route added later is
+	// unreachable by a sandbox until someone consciously opts it in. A denylist
+	// would grant every future route by default, which is the wrong direction for
+	// a credential handed to a machine af provisioned but does not trust.
+	//
+	// DeliverPrompt is the one to keep in view when editing this: it runs
+	// instructions through every agent on the machine, so it is precisely what the
+	// operator's own token grants and a sandbox's must not.
+	sandboxAllowed bool
 	// requestType is the RPC request struct this route decodes, kept so a consumer
 	// that needs the FULL body shape can reflect it rather than re-deriving a
 	// second, driftable list. RequestFields above is computed FROM it (see
@@ -76,39 +86,44 @@ var httpRoutes = []HTTPRoute{
 
 	// Sessions.
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/CreateSession",
-		Description: "Create a new session (git worktree + agent) in a repo.",
-		requestType: reflect.TypeOf(CreateSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSession) },
+		Method:         http.MethodPost,
+		Path:           "/v1/CreateSession",
+		sandboxAllowed: true,
+		Description:    "Create a new session (git worktree + agent) in a repo.",
+		requestType:    reflect.TypeOf(CreateSessionRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSession) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ListBackends",
-		Description: "List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to.",
-		requestType: reflect.TypeOf(ListBackendsRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListBackends) },
+		Method:         http.MethodPost,
+		Path:           "/v1/ListBackends",
+		sandboxAllowed: true,
+		Description:    "List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to.",
+		requestType:    reflect.TypeOf(ListBackendsRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListBackends) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ListPrograms",
-		Description: "List the agent programs a session can be created with, and the program an unspecified create defaults to.",
-		requestType: reflect.TypeOf(ListProgramsRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListPrograms) },
+		Method:         http.MethodPost,
+		Path:           "/v1/ListPrograms",
+		sandboxAllowed: true,
+		Description:    "List the agent programs a session can be created with, and the program an unspecified create defaults to.",
+		requestType:    reflect.TypeOf(ListProgramsRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListPrograms) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/SuggestSessionName",
-		Description: "Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder.",
-		requestType: reflect.TypeOf(SuggestSessionNameRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SuggestSessionName) },
+		Method:         http.MethodPost,
+		Path:           "/v1/SuggestSessionName",
+		sandboxAllowed: true,
+		Description:    "Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder.",
+		requestType:    reflect.TypeOf(SuggestSessionNameRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SuggestSessionName) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/Snapshot",
-		Description: "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
-		requestType: reflect.TypeOf(SnapshotRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.Snapshot) },
+		Method:         http.MethodPost,
+		Path:           "/v1/Snapshot",
+		sandboxAllowed: true,
+		Description:    "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
+		requestType:    reflect.TypeOf(SnapshotRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.Snapshot) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -139,11 +154,12 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RestoreSession) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/SendPrompt",
-		Description: "Send a prompt to an existing session's agent.",
-		requestType: reflect.TypeOf(SendPromptRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendPrompt) },
+		Method:         http.MethodPost,
+		Path:           "/v1/SendPrompt",
+		sandboxAllowed: true,
+		Description:    "Send a prompt to an existing session's agent.",
+		requestType:    reflect.TypeOf(SendPromptRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SendPrompt) },
 	},
 	// Promoted out of internalHTTPRoutes in #1934 — the follow-up promised in
 	// #1592 Phase 2 PR3, which then sat unwritten while the state it exits stayed
@@ -180,11 +196,12 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterProject) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ListProjects",
-		Description: "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
-		requestType: reflect.TypeOf(ListProjectsRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProjects) },
+		Method:         http.MethodPost,
+		Path:           "/v1/ListProjects",
+		sandboxAllowed: true,
+		Description:    "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
+		requestType:    reflect.TypeOf(ListProjectsRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProjects) },
 	},
 	// The Add-project picker's read (#2788). PUBLIC, not internal: a client that
 	// cannot see the daemon host's filesystem needs it to offer anything better
@@ -192,11 +209,12 @@ var httpRoutes = []HTTPRoute{
 	// the internalHTTPRoutes note below is explicit that a verb a user could
 	// reasonably want belongs here.
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ListDirectory",
-		Description: "List the child DIRECTORIES of one directory on the daemon's filesystem, marking which are git checkouts — the read behind an Add-project picker. Resolves ~ and symlinks and answers with canonical paths; an unreadable directory is an error, never an empty list.",
-		requestType: reflect.TypeOf(ListDirectoryRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListDirectory) },
+		Method:         http.MethodPost,
+		Path:           "/v1/ListDirectory",
+		sandboxAllowed: true,
+		Description:    "List the child DIRECTORIES of one directory on the daemon's filesystem, marking which are git checkouts — the read behind an Add-project picker. Resolves ~ and symlinks and answers with canonical paths; an unreadable directory is an error, never an empty list.",
+		requestType:    reflect.TypeOf(ListDirectoryRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListDirectory) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -206,11 +224,12 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeliverPrompt) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/CreateTab",
-		Description: "Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target).",
-		requestType: reflect.TypeOf(CreateTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CreateTab) },
+		Method:         http.MethodPost,
+		Path:           "/v1/CreateTab",
+		sandboxAllowed: true,
+		Description:    "Spawn a tab in a session: a process tab (command) or shell tab in the worktree, a web tab (kind=web) that iframes a url/port (localhost is daemon-proxied, external is direct), or a VS Code tab (kind=vscode) serving the session's worktree in a daemon-managed code-server (no url/port: the worktree is the target).",
+		requestType:    reflect.TypeOf(CreateTabRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CreateTab) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -261,18 +280,20 @@ var httpRoutes = []HTTPRoute{
 
 	// Tasks.
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/ListTasks",
-		Description: "List every task across all repos.",
-		requestType: reflect.TypeOf(ListTasksRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListTasks) },
+		Method:         http.MethodPost,
+		Path:           "/v1/ListTasks",
+		sandboxAllowed: true,
+		Description:    "List every task across all repos.",
+		requestType:    reflect.TypeOf(ListTasksRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListTasks) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/AddTask",
-		Description: "Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit.",
-		requestType: reflect.TypeOf(AddTaskRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddTask) },
+		Method:         http.MethodPost,
+		Path:           "/v1/AddTask",
+		sandboxAllowed: true,
+		Description:    "Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit.",
+		requestType:    reflect.TypeOf(AddTaskRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddTask) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -351,6 +372,26 @@ var internalHTTPRoutes = []HTTPRoute{
 	},
 }
 
+// sandboxAllowedPath reports whether a sandbox callback credential may call the
+// given request path (#2999).
+//
+// Derived from the served table rather than a second list: a route's capability
+// is declared beside the route, so there is no separate inventory to fall out of
+// step with it. Anything not in the table — the WS stream planes, the
+// config-assistant, the webtab proxy, the catch-all — is denied by falling
+// through, which is the same default the table itself applies.
+func sandboxAllowedPath(path string) bool {
+	return sandboxAllowedPaths[path]
+}
+
+// sandboxAllowedPaths is the derived lookup, filled in init() rather than by a
+// var initializer. That is not style: httpRoutes' initializer transitively
+// references the auth gate, which references this, and Go rejects the resulting
+// package-variable initialization cycle. Filling it in init() — which runs after
+// variable initialization — keeps the capability declared beside its route while
+// leaving the lookup a plain map read.
+var sandboxAllowedPaths = map[string]bool{}
+
 // servedHTTPRoutes is every route newHTTPMux registers: the public catalog plus
 // the internal routes. The mux serves this union; HTTPRoutes() exposes only the
 // public half. Keeping them as one concatenation here means "what is served" has
@@ -375,6 +416,11 @@ func servedHTTPRoutes() []HTTPRoute {
 func init() {
 	fillRequestFields(httpRoutes)
 	fillRequestFields(internalHTTPRoutes)
+	for _, rt := range servedHTTPRoutes() {
+		if rt.sandboxAllowed {
+			sandboxAllowedPaths[rt.Path] = true
+		}
+	}
 }
 
 func fillRequestFields(routes []HTTPRoute) {

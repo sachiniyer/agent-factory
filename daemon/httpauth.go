@@ -70,6 +70,12 @@ type authGate struct {
 	// the daemon's web listener sets it true.
 	loopbackExempt bool
 
+	// sandboxTokens admits per-session sandbox callback credentials alongside the
+	// operator token (#2999). Nil ⇒ no sandbox credential is accepted on this
+	// listener, which is the correct default: only the daemon's own control-plane
+	// listener sets it, and the agent-server and preview gates leave it nil.
+	sandboxTokens *sandboxTokenRegistry
+
 	// presentedToken extracts the credential a request presents. Nil ⇒
 	// webTabAwareToken, the daemon/agent-server default (Authorization header, then
 	// the ?access_token= / webtab query+cookie fallbacks). The PREVIEW listener
@@ -111,7 +117,31 @@ func (g *authGate) authorize(r *http.Request) bool {
 	if extract == nil {
 		extract = webTabAwareToken
 	}
-	return ConstantTimeEqual(extract(r), want)
+	presented := extract(r)
+	if ConstantTimeEqual(presented, want) {
+		return true
+	}
+	return g.authorizeSandbox(r, presented)
+}
+
+// authorizeSandbox admits a per-session sandbox callback credential (#2999).
+//
+// Checked only AFTER the operator token fails, so the ordinary path is unchanged
+// and costs nothing extra. A sandbox credential is accepted for the routes its
+// scope opts into and refused everywhere else, so a compromised sandbox cannot
+// reach DeliverPrompt — the verb that runs instructions through every agent on
+// the machine, and the reason the operator's own token is not what gets injected.
+//
+// Nil registry (the agent-server's gate, and every test gate) means no sandbox
+// credential exists, so this is a plain false rather than a special case.
+func (g *authGate) authorizeSandbox(r *http.Request, presented string) bool {
+	if g.sandboxTokens == nil || presented == "" {
+		return false
+	}
+	if _, ok := g.sandboxTokens.sessionFor(presented); !ok {
+		return false
+	}
+	return sandboxAllowedPath(r.URL.Path)
 }
 
 // wantToken resolves the credential this request must present. A per-request

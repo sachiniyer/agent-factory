@@ -42,6 +42,12 @@ type Manager struct {
 	// NOT go through here — their handlers read live config per request.
 	webListeners *webListeners
 
+	// sandboxTokens holds the per-session callback credentials handed to
+	// provisioned sandboxes (#2999). In memory only and never persisted: a
+	// daemon restart invalidates every outstanding one, which is the correct
+	// side to fail on.
+	sandboxTokens sandboxTokenRegistry
+
 	// previewSecret is the HMAC key from which the web-tab PREVIEW listener derives
 	// a PER-TAB credential (#1856 step 3): the origin label for (sessionID, tabID) is
 	// previewTabHostLabel(previewSecret, sid, tid). It is minted once, in memory, at
