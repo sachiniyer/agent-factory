@@ -207,3 +207,63 @@ func TestRespawnFenceRefusesACompetingRuntimeAction(t *testing.T) {
 	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionHandoff),
 		"and the action comes back once the fence is down")
 }
+
+// #3004 review finding 5 (P1): the one window the epoch guard genuinely cannot
+// close. An observation landing BETWEEN the precondition check and the fence is
+// CURRENT, not stale, so nothing drops it — and the raw fence edge does not re-check
+// liveness (next test), so a validate that ran under an earlier, already-released
+// lock cannot protect it. beginRespawnFence holds i.mu across both.
+func TestBeginRespawnFenceRefusesAClobberedPrecondition(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)), "the poll's observation lands")
+
+	require.Error(t, i.beginRespawnFence(), "a session the daemon just declared Lost is not resumable")
+	require.Equal(t, OpNone, i.GetInFlightOp(), "and no fence was raised on the way out")
+}
+
+// Why that check has to live inside the fence's own critical section rather than
+// ahead of it: tkBeginRespawn is keyed on the OP axis alone, so the edge itself will
+// happily raise the fence over a clobbered liveness. This test is the reason
+// beginRespawnFence exists; if the edge is ever given a liveness precondition
+// instead, note that a legitimate loss of this race would then fire the
+// illegal-transition hook (a panic under test), which is why the guard is a
+// validating chokepoint and not an allowedFrom predicate.
+func TestTheBareRespawnEdgeDoesNotCheckLiveness(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)))
+
+	require.NoError(t, i.Transition(BeginRespawn()), "the bare edge checks only the op axis")
+	require.Equal(t, LiveLost, i.GetLiveness(), "so it fences a session with no limit to resume from")
+}
+
+// And the composite: Respawn refuses without ever reaching the backend.
+func TestRespawnDoesNotReachTheBackendOnAClobberedPrecondition(t *testing.T) {
+	probe := newRespawnProbe()
+	i := limitBlockedInstance(t, probe)
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)))
+
+	require.Error(t, i.Respawn())
+	require.Equal(t, LivenessUnset, probe.livenessDuring, "the backend must never have been called")
+	require.Equal(t, OpNone, i.GetInFlightOp())
+}
+
+// #3004 review finding 6 (P2): the #2500 defect class — a fenced row still offering
+// a verb that its own fence refuses on press. Archive is the one that applies here;
+// see lifecycleActionFor for why Kill deliberately stays available.
+func TestRespawningRowOffersNoArchiveButStaysKillable(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	i.ID = "respawn-gate-id"
+	require.Equal(t, LifecycleActionArchive, i.LifecycleAction(),
+		"a limit-parked row archives before the resume starts")
+
+	require.NoError(t, i.Transition(BeginRespawn()))
+
+	require.Equal(t, LifecycleActionNone, i.LifecycleAction(),
+		"Archive would tear down a worktree the respawn is provisioning into")
+	require.True(t, i.CanKill(),
+		"Kill must survive the fence: tkBeginKill is legal from any state, and a hung "+
+			"remote provision is exactly when a user needs the escape hatch")
+
+	i.clearRespawnFence()
+	require.Equal(t, LifecycleActionArchive, i.LifecycleAction(), "and the verb comes back")
+}

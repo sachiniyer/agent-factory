@@ -133,11 +133,21 @@ func opIsTeardown(op InFlightOp) bool {
 // Restore on the archived result) is precisely the mutation the fence exists to
 // refuse. A kill tombstone likewise admits no competing archive/restore action:
 // its only valid transition is finishing teardown. Resting rows restore; every
+// A respawning row (#2997) is inside the limit-resume fence for the same reason a
+// replacing one is: ArchiveSession would tear down and relocate a worktree the
+// respawn is provisioning into, and RuntimeActionResumeLimit refuses while an op is
+// in flight, so both verbs it could show would be refused on press — the #2500
+// defect above. It deliberately does NOT join canKillFor: tkBeginKill is allowed
+// from ANY state by explicit design ("a kill supersedes any in-flight op"), so Kill
+// genuinely works during a respawn, and a remote provision that hangs is exactly
+// when a user needs it. Hiding a control that works would remove the escape hatch.
+// Resting rows restore; every
 // other settled row archives. Kill addressability is intentionally independent
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
 func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled bool) LifecycleAction {
-	if id == "" || op == OpCreating || op == OpReplacing || opIsTeardown(op) || startupStateUnknown || userKilled {
+	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning ||
+		opIsTeardown(op) || startupStateUnknown || userKilled {
 		return LifecycleActionNone
 	}
 	switch liveness {

@@ -9657,7 +9657,9 @@ var InFlightOp = {
   Creating: 1,
   Killing: 2,
   Archiving: 3,
-  Restoring: 4
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
 };
 var Status = {
   Running: 0,
@@ -9743,7 +9745,7 @@ function isArchived(s) {
   return livenessOf(s) === Liveness.Archived;
 }
 function isLimitReached(s) {
-  return livenessOf(s) === Liveness.LimitReached;
+  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
 }
 function canHandoff(s) {
   return s.can_handoff === true;

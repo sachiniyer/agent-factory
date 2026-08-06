@@ -165,9 +165,18 @@ export function isArchived(s: SessionData): boolean {
  *  with an explanatory error otherwise (app/handle_actions.go handleLimitRetry).
  *  Reading the liveness rather than the mere presence of `limit_reset_at` is the
  *  point: a session can be limit-blocked with no parsed reset time yet, and a
- *  resumed one keeps its stale reset timestamp in the projection. */
+ *  resumed one keeps its stale reset timestamp in the projection.
+ *
+ *  An in-flight operation withholds it (#2997). A resume already running keeps the
+ *  row LiveLimitReached by design — its fence preserves liveness — so liveness alone
+ *  would advertise a Retry the daemon then refuses as busy. This gates the ACTION
+ *  only; the diamond and "[limit] resets …" prefix come from rowStatus/rowTitle and
+ *  still render the state throughout. */
 export function isLimitReached(s: SessionData): boolean {
-  return livenessOf(s) === Liveness.LimitReached;
+  return (
+    livenessOf(s) === Liveness.LimitReached &&
+    (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None
+  );
 }
 
 /** True when this session's agent can be handed off to a different one in place

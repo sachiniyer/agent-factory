@@ -516,7 +516,15 @@ func SetIllegalTransitionHook(fn func(msg string)) (restore func()) {
 func (i *Instance) Transition(ev TransitionEvent) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.transitionLocked(ev)
+}
 
+// transitionLocked is Transition's already-locked half. Caller holds i.mu for
+// writing. It exists so a chokepoint that must validate and mutate in ONE critical
+// section can do both without releasing the lock between them — see
+// lifecycleViewLocked, and beginRespawnFence for a case where the gap was a real
+// race (#2997).
+func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if ev.epochScoped && i.stateEpoch != ev.epoch {
 		// The decision behind this event was drawn from an observation that a newer
 		// authoritative transition has since superseded. Drop it — silently and

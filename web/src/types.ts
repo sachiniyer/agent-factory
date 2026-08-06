@@ -48,6 +48,8 @@ export const InFlightOp = {
   Killing: 2,
   Archiving: 3,
   Restoring: 4,
+  Replacing: 5,
+  Respawning: 6,
 } as const;
 
 /** session.LifecycleAction: the daemon-owned archive/restore verb for a row.

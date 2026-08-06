@@ -63,9 +63,6 @@ func (i *Instance) Recover() error {
 // !Lost guard rejects, but the re-spawn mechanics are identical. The caller owns
 // the precondition, enforced here before the guard-free backend core runs.
 func (i *Instance) Respawn() error {
-	if err := i.ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
-		return fmt.Errorf("respawn: %w", err)
-	}
 	// Raise the in-flight fence for the whole re-spawn (#2997). A REMOTE respawn
 	// pushes the sandbox's unpushed work and re-provisions a fresh one, which
 	// outlasts the status poll interval — and the poll's own skip is keyed on the
@@ -73,15 +70,12 @@ func (i *Instance) Respawn() error {
 	// session whose tmux is being spun up/torn down and mark it Lost"). This
 	// operation advertised nothing, so that skip never engaged: the poll observed
 	// the sandbox being torn down BY THIS CALL, read it as an independent death,
-	// and applied ObserveLiveness(LiveLost) — which is the unconditional
-	// daemon-truth edge and preserves only the op axis, so LiveLimitReached was
-	// overwritten underneath a resume that was still running. The resume then failed
-	// its own RuntimeActionResumeLimit precondition, and Lost recovery could later
-	// clear the limit without delivering the queued prompt, so the user's work
-	// silently never ran.
-	//
-	// AFTER the validation above, not before: that validation requires OpNone, so a
-	// fence raised first would reject the very call it is protecting.
+	// and applied ObserveLiveness(LiveLost) — the unconditional daemon-truth edge,
+	// which preserves only the op axis, so LiveLimitReached was overwritten
+	// underneath a resume that was still running. The resume then failed its own
+	// RuntimeActionResumeLimit precondition, and Lost recovery could later clear the
+	// limit without delivering the queued prompt, so the user's work silently never
+	// ran.
 	//
 	// Raising it also closes the window on the other side. A poll that already
 	// passed the skip captured a state epoch before this transition, and every real
@@ -91,9 +85,8 @@ func (i *Instance) Respawn() error {
 	//
 	// OpRespawning rather than OpCreating: this session is already established, and
 	// a create overlay on an established row is wrong in ways that reach past this
-	// package — see the OpRespawning doc comment. The fence needs to be an op, not a
-	// display state.
-	if err := i.Transition(BeginRespawn()); err != nil {
+	// package — see the OpRespawning doc comment.
+	if err := i.beginRespawnFence(); err != nil {
 		return fmt.Errorf("respawn: %w", err)
 	}
 	if err := i.currentBackend().Respawn(i); err != nil {
@@ -107,6 +100,25 @@ func (i *Instance) Respawn() error {
 	// returns without reaching it must not leave the fence standing either.
 	i.clearRespawnFence()
 	return nil
+}
+
+// beginRespawnFence validates the limit-resume precondition and raises the fence
+// in ONE critical section. Splitting them was a real race (#3004 review finding):
+// ValidateRuntimeAction takes the read lock and RELEASES it, so a status poll
+// could land ObserveLiveness(LiveLost) in the gap before the fence went up. That
+// observation is CURRENT, so the epoch guard cannot help — it is not a stale
+// decision — and tkBeginRespawn preserves whatever liveness it finds, so the
+// backend would have re-spawned a session the daemon had just declared Lost and
+// the failure path would have left it there, unretryable. Holding i.mu across both
+// is the fix; see lifecycleViewLocked, which documents this as the pattern, and
+// SwapAgentProgram, which already uses it.
+func (i *Instance) beginRespawnFence() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
+		return err
+	}
+	return i.transitionLocked(BeginRespawn())
 }
 
 // clearRespawnFence lowers the Respawn fence if it is still up. ClearOp is

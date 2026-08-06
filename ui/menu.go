@@ -444,7 +444,11 @@ func (m *Menu) addInstanceOptions() {
 	// actually blocked at a limit wall — c re-spawns (if the agent exited) and
 	// resumes it. Kept off the bar for every normal session so it never clutters
 	// the hints.
-	if m.instance != nil && m.instance.LimitReached() {
+	// Not while an operation owns the session (#2997): a resume already in flight
+	// keeps the row LiveLimitReached by design — the fence preserves liveness — so
+	// LimitReached() alone would keep advertising `c` for a retry that
+	// RuntimeActionResumeLimit then refuses as busy.
+	if m.instance != nil && m.instance.LimitReached() && m.instance.GetInFlightOp() == session.OpNone {
 		actionGroup = append(actionGroup, keys.KeyLimitRetry)
 		// Handoff (#2013) is the OTHER answer to a limit wall: `c` waits for this
 		// agent's window to reset, `H` continues the work under a different one.
