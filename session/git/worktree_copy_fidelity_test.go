@@ -37,7 +37,6 @@ import (
 // without removing it here and the "no longer diverges" branch fires, so the
 // inventory cannot rot into a list of things that were fixed years ago.
 var knownCrossDeviceDivergence = map[string]string{
-	"mtime.symlink":      "#2919: the link's own mtime is not set — there is no portable dirfd-relative lstat to read it from, and the TARGET's mtime is what tools actually read",
 	"hardlink.nlink":     "#2919: each entry is copied independently, so a linked pair arrives as two files",
 	"hardlink.sameInode": "#2919: same cause — the link structure is not reproduced",
 	"xattr.file":         "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
@@ -201,9 +200,10 @@ func describeFidelity(t *testing.T, root string) map[string]string {
 	for property, path := range map[string]string{
 		"mtime.file": filepath.Join(root, "plain.txt"),
 		"mtime.dir":  filepath.Join(root, "dir"),
-		// The link's OWN mtime, via Lstat. Measured even though it is not
-		// preserved: an unmeasured gap is exactly how this class kept
-		// recurring — a property nobody listed could not fail anything.
+		// The link's OWN mtime, via Lstat — not its target's. Listing it here
+		// while it was still unpreserved is what made fixing it a one-line
+		// change with a test already watching: a property nobody measures
+		// cannot fail anything, which is how this class kept recurring.
 		"mtime.symlink": filepath.Join(root, "link"),
 	} {
 		info, err := os.Lstat(path)

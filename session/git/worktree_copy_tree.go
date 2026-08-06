@@ -397,10 +397,15 @@ func copySymlinkEntry(
 	if err != nil {
 		return copiedEntry{}, err
 	}
-	current, err := identityAt(source, name)
-	if err != nil || !inspected.same(current) {
+	// One stat serves both questions: is this still the node we inspected, and
+	// what is its own mtime. Reading them separately would let the link be
+	// replaced between the two, so the timestamp written could belong to a
+	// different node than the one whose identity was confirmed.
+	sourceStat, err := statAt(source, name)
+	if err != nil || !inspected.same(identityFromStat(sourceStat)) {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while it was copied", sourcePath)
 	}
+	sourceModTime := time.Unix(sourceStat.Mtim.Unix())
 	if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to create destination symlink %s exclusively: %w", destinationPath, err)
 	}
@@ -421,6 +426,18 @@ func copySymlinkEntry(
 	confirmedIdentity, err := identityAt(destination, name)
 	if err != nil || !destinationIdentity.same(confirmedIdentity) || destinationLink != link {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while it was copied", destinationPath)
+	}
+	// The LINK's own mtime, not its target's (#2919). preserveSourceModTime
+	// passes AT_SYMLINK_NOFOLLOW, so this stamps the symlink itself; without it
+	// the copy reads "now" while the same-device rename preserves it, which is
+	// one move behaving two ways depending on which filesystem the archive root
+	// happens to sit on — the same divergence the mode and file-mtime work
+	// closed.
+	//
+	// Last, after the identity re-check, for the ordering reason the directory
+	// stamp documents: anything written to a node afterwards restamps it.
+	if err := preserveSourceModTime(int(destination.Fd()), name, sourceModTime, destinationPath, "symlink"); err != nil {
+		return created, err
 	}
 	return created, nil
 }
