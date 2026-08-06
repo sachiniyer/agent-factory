@@ -271,6 +271,22 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 	// no. Callers gate on the state and merely LOG the error
 	// (closeTabForDestructiveTeardown), so anything short of a no here is a
 	// licence to delete.
+	// When BOTH reads say the session is absent, that is a determinate empty only
+	// if nothing it spawned outlived it. tmux can no longer enumerate the
+	// ancestry — but the AF_SESSION marker SURVIVES the session, which is the
+	// same evidence CleanupSessions uses for a vanished session (#1104).
+	//
+	// Checking it here is what makes the answer independent of earlier attempts.
+	// A teardown that refused because a pane was observed and its ancestry lost
+	// gets retried (finishUserKill), and on the retry both tmux reads report
+	// absence — so without this the second attempt would launder the first
+	// attempt's lost ancestry into a clean empty and authorize deleting the
+	// worktree under a detached descendant (Codex on #2966, round 4).
+	var vanishedSurvivors error
+	if processes.captureErr != nil && sessionGoneWithNoPaneObserved(processes.captureErr, pidErr) {
+		vanishedSurvivors = t.markedProcessesOutlivingSession()
+	}
+
 	refuse := func(why error) (PaneState, error) {
 		log.WarningLog.Printf("tmux session %s: %v; refusing worktree cleanup", t.sanitizedName, why)
 		return PaneStateUnknown, errors.Join(closeErr, why)
@@ -306,6 +322,10 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 		// to follow across teardown. A successful kill-session is not enough to
 		// prove that process stopped writing.
 		return PaneStateUnknown, errors.Join(closeErr, processErr)
+	case vanishedSurvivors != nil:
+		// The session is gone, but the marker scan says something it spawned is
+		// not — or could not be checked at all.
+		return refuse(vanishedSurvivors)
 	case processes.captureErr != nil && !sessionGoneWithNoPaneObserved(processes.captureErr, pidErr):
 		// The full process set was not established. A child may already have
 		// detached/reparented and still be writing after the leader exits; leader
@@ -361,6 +381,31 @@ func sessionGoneWithNoPaneObserved(captureErr, pidErr error) bool {
 	// descendants never captured (Codex on #2966).
 	return errors.Is(pidErr, errPaneQueryFoundNoPane) &&
 		errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
+}
+
+// markedProcessesOutlivingSession reports, WITHOUT asking tmux, whether any
+// process still carries this session's AF_SESSION marker — and returns nil only
+// when the scan RAN and found none.
+//
+// The marker is what makes a vanished session still answerable: a descendant
+// that detached and was reparented to init keeps the marker its pane gave it, so
+// it is findable even though tmux has forgotten the ancestry. A scan that could
+// not run is not evidence of absence and refuses, like every other read here.
+func (t *TmuxSession) markedProcessesOutlivingSession() error {
+	survivors, err := refreshOrphanCandidates(nil, t.sanitizedName)
+	if err != nil {
+		return fmt.Errorf("tmux session %s is gone and its surviving processes could not be checked: %w",
+			t.sanitizedName, err)
+	}
+	if len(survivors) == 0 {
+		return nil
+	}
+	pids := make([]string, 0, len(survivors))
+	for _, p := range survivors {
+		pids = append(pids, strconv.Itoa(p.PID))
+	}
+	return fmt.Errorf("tmux session %s is gone, but process(es) %s still carry its %s marker and were "+
+		"never captured", t.sanitizedName, strings.Join(pids, ", "), EnvMarkerSession)
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity

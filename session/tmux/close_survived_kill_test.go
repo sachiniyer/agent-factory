@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"time"
 )
 
@@ -310,4 +312,70 @@ has-session)     exit 1 ;;`)
 	if err != nil {
 		t.Errorf("error = %v, want nil", err)
 	}
+}
+
+// TestVanishedSessionWithASurvivingMarkedProcessRefuses is the round-4 Codex
+// finding: the determinate-empty was laundering a LOST ANCESTRY across teardown
+// attempts.
+//
+// Attempt 1 observes a pane and loses the ancestry to a racing session exit, so
+// cleanup refuses — correctly. finishUserKill then retries the tombstone, and on
+// the retry BOTH tmux reads report absence. Without an independent check the
+// retry calls that a clean empty and deletes the worktree, while a detached
+// descendant of the original pane is still writing.
+//
+// The check has to be one that does not need tmux, because tmux has forgotten
+// the session. The AF_SESSION marker outlives it: a reparented descendant still
+// carries what its pane gave it.
+func TestVanishedSessionWithASurvivingMarkedProcessRefuses(t *testing.T) {
+	const name = "af_vanished_with_survivor"
+	// A real process carrying the marker, standing in for the descendant that
+	// outlived the session — spawned, not fabricated, so the scan sees a genuine
+	// process-table entry.
+	survivor := spawnMarkedProcess(t, name)
+
+	scriptedTmuxOnPath(t, `
+display-message) exit 0 ;;
+list-panes)      echo "can't find session: `+name+`" >&2; exit 1 ;;
+kill-session)    exit 0 ;;
+has-session)     exit 1 ;;`)
+
+	ts := NewTmuxSessionFromSanitizedName(name, "")
+	state, err := ts.CloseAndWaitForPaneExit()
+
+	if state == PaneStateKnown {
+		t.Fatalf("CloseAndWaitForPaneExit = PaneStateKnown with err=%v: both tmux reads report absence, "+
+			"but pid %d still carries the session's %s marker — deleting the worktree now would do it "+
+			"under a live writer (#2962 round 4)", err, survivor, EnvMarkerSession)
+	}
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(survivor)) {
+		t.Errorf("error = %v, want it to name the surviving process %d", err, survivor)
+	}
+}
+
+// spawnMarkedProcess starts a child carrying AF_SESSION=<name> and returns its
+// pid, cleaned up by the test.
+func spawnMarkedProcess(t *testing.T, sessionName string) int {
+	t.Helper()
+	c := exec.Command("sleep", "300")
+	c.Env = append(os.Environ(), EnvMarkerSession+"="+sessionName)
+	if err := c.Start(); err != nil {
+		t.Fatalf("spawn marked process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = c.Process.Kill()
+		_, _ = c.Process.Wait()
+	})
+	// The scan reads /proc/<pid>/environ; wait until it is readable.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if env, err := proctree.Environ(c.Process.Pid); err == nil {
+			if v, ok := processEnvValue(env, EnvMarkerSession); ok && v == sessionName {
+				return c.Process.Pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Skipf("child %d environ never became readable; this fixture needs a marker-visible process", c.Process.Pid)
+	return 0
 }
