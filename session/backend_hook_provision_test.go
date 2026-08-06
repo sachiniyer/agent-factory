@@ -105,6 +105,9 @@ func TestHookProvisionSSHCommandPinsVerification(t *testing.T) {
 	assert.Contains(t, cmd, "GlobalKnownHostsFile=/dev/null",
 		"or a system-wide entry for a recycled address could satisfy the check instead of our key")
 	assert.Contains(t, cmd, "BatchMode=yes", "an unattended provision must fail rather than hang on a prompt")
+	assert.Contains(t, cmd, "KnownHostsCommand=none",
+		"ssh_config KnownHostsCommand is consulted IN ADDITION to both files, so an operator's Host block "+
+			"could otherwise supply a key and satisfy verification without our pin deciding anything")
 	assert.Contains(t, cmd, "-p 2222")
 	assert.Contains(t, cmd, "'af@10.0.0.7'")
 }
@@ -179,4 +182,27 @@ func TestProvisionedSessionKeepsTheHookBackendIdentity(t *testing.T) {
 	require.NotNil(t, data.Hook, "the tombstone must carry delete_cmd, or the machine leaks after a crash")
 	assert.Equal(t, "/bin/echo", data.Hook.DeleteCmd)
 	assert.Nil(t, data.Sandbox, "and must NOT be a sandbox handle")
+}
+
+// Codex 3726241029: Validate guarantees exactly one provisioning command, so
+// probing launch_cmd unconditionally ran lookPath("") for every provision-only
+// repo and reported the hook backend unavailable — hiding the preferred contract
+// from every picker (web, TUI, `af sessions backends`).
+func TestProvisionOnlyHooksAreReportedUsable(t *testing.T) {
+	h := newHookState(t, "exit 0", "")
+	cfg := &config.ResolvedConfig{RemoteHooks: &config.RemoteHooks{
+		ProvisionCmd: h.launch, // an executable script standing in for provision_cmd
+		DeleteCmd:    h.delete,
+	}}
+	repo := t.TempDir()
+
+	err := BackendConfigError(BackendHook, cfg)
+	require.NoError(t, err, "a provision-only config is complete")
+
+	// The availability probe must inspect provision_cmd, not an empty launch_cmd.
+	reason := BackendUnusableReason(BackendHook, cfg, repo)
+	if reason != nil {
+		assert.NotContains(t, reason.Error(), "launch_cmd",
+			"a provision-only repo must never be told its (deliberately absent) launch_cmd is the problem")
+	}
 }

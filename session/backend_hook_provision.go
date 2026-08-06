@@ -154,6 +154,10 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 		"ssh",
 		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHostsPath),
 		"-o", "GlobalKnownHostsFile=/dev/null",
+		// ssh_config(5) consults KnownHostsCommand IN ADDITION to both files, so an
+		// operator's matching Host block could hand OpenSSH a different key and
+		// satisfy verification without our pin ever deciding anything.
+		"-o", "KnownHostsCommand=none",
 		"-o", "StrictHostKeyChecking=yes",
 		// The script vouches for the key, so there is nobody to ask. Refuse
 		// rather than hang forever on a prompt no unattended provision can answer.
@@ -205,6 +209,13 @@ func (p *hookProvisioner) provisionHostOrReap() (ProvisionResult, error) {
 }
 
 func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
+	// Refuse BEFORE running the script. GitHub is the durable store, so a repo
+	// with no origin cannot be cloned onto the sandbox — and running provision_cmd
+	// first would create a billable machine to serve a clone guaranteed to fail.
+	// The sandbox runtime rejects this up front for the same reason.
+	if p.spec.CloneURL == "" {
+		return ProvisionResult{}, missingOriginError(BackendHook, p.spec.RepoRoot)
+	}
 	record, err := p.runProvisionCmd()
 	if err != nil {
 		return ProvisionResult{}, err
@@ -238,7 +249,11 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 	}
 	res, err := sp.provision()
 	if err != nil {
-		return ProvisionResult{}, err
+		// sp owns LOCAL state the hook cleanup cannot touch: a tunnel child whose
+		// ssh/ProxyCommand may be alive without ever opening the forward. delete_cmd
+		// destroys the machine but not that process group, so reap it here exactly
+		// as sandboxRuntime.Provision does.
+		return ProvisionResult{}, sp.reapProvisionFailure(err)
 	}
 	// delete_cmd owns the MACHINE, so the session's teardown reaps the workspace
 	// first and then destroys the host.
@@ -256,11 +271,16 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 			sandboxErr = sandboxTeardown()
 		}
 		hookErr := p.reap()
-		_ = os.RemoveAll(dir)
 		if hookErr == nil {
-			// The machine is gone; nothing about the workspace can still be unknown.
+			// The machine is gone: nothing about the workspace can still be unknown,
+			// and the pin has nothing left to verify. Both are safe to drop.
+			_ = os.RemoveAll(dir)
 			return nil
 		}
+		// Cleanup is still retryable, so the pin MUST survive: it is embedded in the
+		// sandbox ssh command, and deleting it would make every later reap fail
+		// host-key verification before it could reach the machine — a retained row
+		// that can never recover.
 		return errors.Join(sandboxErr, hookErr)
 	}
 	res.Teardown = teardown
