@@ -631,6 +631,11 @@ func (m *home) swapInstanceFromSnapshot(d session.InstanceData) bool {
 		log.WarningLog.Printf("failed to build recreated instance %q from snapshot: %v", d.Title, err)
 		return false
 	}
+	// The replacement can arrive already carrying a daemon-owned op, exactly like
+	// the other two snapshot builders. Recorded here so the NEW pointer starts with
+	// provenance — without it the successor inherits the original defect the moment
+	// its own identity changes (#3005).
+	m.adoptedOpsFor().note(inst, inst.GetInFlightOp())
 	// ReplaceInstance re-points any open panes at the rebuilt instance, but
 	// the recreated session's tab SET may differ from the corpse's — capture
 	// the outgoing slot→identity list so the shared pane reconcile can close
