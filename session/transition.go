@@ -522,7 +522,7 @@ func (i *Instance) Transition(ev TransitionEvent) error {
 // transitionLocked is Transition's already-locked half. Caller holds i.mu for
 // writing. It exists so a chokepoint that must validate and mutate in ONE critical
 // section can do both without releasing the lock between them — see
-// lifecycleViewLocked, and beginRespawnFence for a case where the gap was a real
+// lifecycleViewLocked, and BeginLimitResume for a case where the gap was a real
 // race (#2997).
 func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if ev.epochScoped && i.stateEpoch != ev.epoch {

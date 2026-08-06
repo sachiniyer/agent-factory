@@ -565,6 +565,16 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.
 	instance.ClearLimitReached()
+	// Lower the fence HERE, before the completion payload is built (#3004 review).
+	// Every destructive phase is behind us, and the projection published below carries
+	// the op axis: on the live-stall arm nothing else lowers it — there is no Respawn
+	// and so no ConfirmLive — so the event would advertise a busy row and the deferred
+	// release would then clear it in memory with no second event to correct the
+	// clients. The web rail is event-driven, so it would keep suppressing that row's
+	// lifecycle and kill controls until an unrelated update or a reconnect. The defer
+	// above stays as the safety net for the error returns, where it is the only
+	// release; after this call it is a no-op.
+	instance.EndLimitResume()
 
 	// The cleared limit is itself durable state worth a checkpoint. On the respawn
 	// arm this is the second write; that is deliberate — the first one records the

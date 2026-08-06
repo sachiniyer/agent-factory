@@ -380,3 +380,30 @@ func TestEndLimitResumeLeavesAnotherOwnersOpAlone(t *testing.T) {
 	i.EndLimitResume()
 	require.Equal(t, OpKilling, i.GetInFlightOp(), "the kill still owns the session")
 }
+
+// #3004 review finding 13 (P1): the fence is PROJECTED, so when it is lowered
+// relative to building a completion payload is load-bearing. The daemon publishes
+// session.updated from ToInstanceData(), and the web rail is event-driven — so a
+// payload built while the fence is up advertises a busy row, and lowering the fence
+// afterwards in memory produces no second event to correct it. The row then keeps its
+// lifecycle and kill controls suppressed until an unrelated update or a reconnect.
+//
+// This asserts the projection fact the daemon's ordering depends on, so that making
+// the op unprojected (which would quietly invalidate that reasoning) fails here.
+func TestTheRespawnFenceIsProjectedSoItsReleaseOrderMatters(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	i.ID = "projected-fence-id"
+
+	require.NoError(t, i.BeginLimitResume())
+	fenced := i.ToInstanceData()
+	require.Equal(t, OpRespawning, fenced.InFlightOp,
+		"a payload built while fenced tells every client the row is busy")
+	require.Equal(t, LifecycleActionNone, fenced.LifecycleAction, "with its controls withheld")
+	require.False(t, fenced.CanKill)
+
+	i.EndLimitResume()
+	settled := i.ToInstanceData()
+	require.Equal(t, OpNone, settled.InFlightOp, "so the fence must be down BEFORE the payload is built")
+	require.Equal(t, LifecycleActionArchive, settled.LifecycleAction)
+	require.True(t, settled.CanKill)
+}

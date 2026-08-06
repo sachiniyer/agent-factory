@@ -101,6 +101,10 @@ func (i *Instance) BeginLimitResume() error {
 // session permanently busy — the poll skips it forever and every runtime action and
 // lifecycle control refuses it as in-flight — which is worse than the clobber this
 // whole mechanism exists to prevent.
+// ClearOp is unconditionally legal (it only ever moves the op axis back to None and
+// leaves liveness alone), so the OpRespawning check is not about legality: it makes
+// sure a kill or archive overlay that SUPERSEDED this fence is not cleared out from
+// under its own owner.
 func (i *Instance) EndLimitResume() {
 	if i.GetInFlightOp() != OpRespawning {
 		return
@@ -122,20 +126,6 @@ func (i *Instance) Respawn() error {
 		return fmt.Errorf("respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}
 	return i.currentBackend().Respawn(i)
-}
-
-// clearRespawnFence lowers the Respawn fence if it is still up. ClearOp is
-// unconditionally legal (it only ever moves the op axis back to None and leaves
-// liveness alone), but it is applied only when this call's own OpRespawning is still
-// present, so a concurrent kill/archive overlay that superseded it is not cleared
-// out from under its owner.
-func (i *Instance) clearRespawnFence() {
-	if i.GetInFlightOp() != OpRespawning {
-		return
-	}
-	if err := i.Transition(ClearOp()); err != nil {
-		log.WarningLog.Printf("respawn: clearing the in-flight fence for %q: %v", i.Title, err)
-	}
 }
 
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing
