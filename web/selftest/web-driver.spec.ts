@@ -1933,6 +1933,13 @@ test("#2811: typing the instant a tab opens loses nothing — type-ahead is held
   // The old failure mode was not a lost keystroke but a MANGLED command: the
   // dropped prefix left the surviving tail to reach the shell on its own and run
   // as something else. So the assertion is that the whole line arrives intact.
+  //
+  // What this test does NOT do is guarantee it exercised the hold. It types into a
+  // tab whose socket is very likely still connecting, which is the realistic path a
+  // user takes — but on a fast local daemon the socket can win the race, and then
+  // this passes through the ordinary already-open path and would pass with the hold
+  // removed. The test below is the one that proves the hold; this one covers the
+  // end-to-end shape it protects.
   const ctx = await browser.newContext();
   const p = await ctx.newPage();
 
@@ -1982,6 +1989,98 @@ test("#2811: typing the instant a tab opens loses nothing — type-ahead is held
       false,
     );
   } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
+test("#2811: type-ahead survives a socket that is not open — held, then delivered in order", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The sibling test above types into a probably-connecting tab, which is realistic but
+  // not a guarantee: a fast daemon can open the socket first, and then it proves nothing
+  // about the hold. This one removes the timing from the question entirely by making the
+  // socket deterministically NOT open, so every byte typed here MUST go through the
+  // pending queue. Delete the queue and this test fails.
+  //
+  // The gap is manufactured the way the spec already mocks a socket (#2276 above uses
+  // routeWebSocket to keep one open-but-silent): the route closes every stream attempt,
+  // so the client sits in its reconnect loop with readyState never OPEN — the same
+  // condition a fresh tab is in before its first open, which is what sendInput keys on.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  let forwardStream = false;
+
+  try {
+    await p.routeWebSocket(
+      (url) => url.pathname.includes("/stream"),
+      (ws) => {
+        if (forwardStream) {
+          ws.connectToServer();
+          return;
+        }
+        // Refuse this attempt. onclose → scheduleReconnect, so the terminal stays in
+        // "reconnecting" and every keystroke takes the held path.
+        ws.close();
+      },
+    );
+
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+
+    const main = p.locator(".af-main");
+    const host = p.locator(".af-term-host .af-pane").first();
+    // The deterministic precondition, and the whole point of this test: the socket is
+    // demonstrably NOT open before a single key is typed. A duration would only make
+    // this likely; the status seam makes it certain.
+    await expect(main, "the stream must be down before typing, or the hold is untested").toHaveAttribute(
+      "data-term-status",
+      "reconnecting",
+      { timeout: 30_000 },
+    );
+
+    const marker = "af-2811-held-then-delivered";
+    await host.click();
+    await p.keyboard.type(`printf '%s\\n' ${marker}`);
+    await p.keyboard.press("Enter");
+
+    // Nothing can have reached the shell yet — there is no socket. Let one through and
+    // the queue must deliver the whole line, in order, to a shell that then runs it.
+    forwardStream = true;
+    await expect(main, "the stream must come back so the held input can be delivered").toHaveAttribute(
+      "data-term-status",
+      "open",
+      { timeout: 45_000 },
+    );
+
+    await expect
+      .poll(
+        async () =>
+          (await host.locator(".xterm-rows > div").allInnerTexts()).filter((line) => line.trim() === marker).length,
+        {
+          message: "input typed while the socket was down must be delivered and EXECUTED, not dropped",
+          timeout: 30_000,
+        },
+      )
+      .toBeGreaterThan(0);
+
+    // And in order: a queue that delivered the bytes scrambled would leave the shell on
+    // a continuation prompt with nothing run, which is the corruption #2811 described.
+    const screen = (await host.locator(".xterm-rows > div").allInnerTexts()).map((l) => l.trimEnd());
+    const lastNonEmpty = [...screen].reverse().find((l) => l.trim() !== "") ?? "";
+    expect(
+      lastNonEmpty.trimStart().startsWith(">"),
+      `shell left at a continuation prompt: ${JSON.stringify(screen.slice(-4))}`,
+    ).toBe(false);
+  } finally {
+    forwardStream = true;
     try {
       await resetToAgentTab(p);
     } finally {
