@@ -247,10 +247,12 @@ func TestRespawnDoesNotReachTheBackendOnAClobberedPrecondition(t *testing.T) {
 	require.Equal(t, OpNone, i.GetInFlightOp())
 }
 
-// #3004 review finding 6 (P2): the #2500 defect class — a fenced row still offering
-// a verb that its own fence refuses on press. Archive is the one that applies here;
-// see lifecycleActionFor for why Kill deliberately stays available.
-func TestRespawningRowOffersNoArchiveButStaysKillable(t *testing.T) {
+// #3004 review findings 6 and 9 (P2): the #2500 defect class — a fenced row still
+// offering a verb that its own fence refuses on press. Both verbs apply. Kill looks
+// like an exception because tkBeginKill is allowedFrom-always, but the daemon cannot
+// REACH that transition during a respawn: it waits 30s for the per-session op lock
+// the resume holds and then returns errKillBusy. See canKillFor.
+func TestRespawningRowOffersNeitherArchiveNorKill(t *testing.T) {
 	i := limitBlockedInstance(t, newRespawnProbe())
 	i.ID = "respawn-gate-id"
 	require.Equal(t, LifecycleActionArchive, i.LifecycleAction(),
@@ -260,10 +262,11 @@ func TestRespawningRowOffersNoArchiveButStaysKillable(t *testing.T) {
 
 	require.Equal(t, LifecycleActionNone, i.LifecycleAction(),
 		"Archive would tear down a worktree the respawn is provisioning into")
-	require.True(t, i.CanKill(),
-		"Kill must survive the fence: tkBeginKill is legal from any state, and a hung "+
-			"remote provision is exactly when a user needs the escape hatch")
+	require.False(t, i.CanKill(),
+		"Kill cannot supersede this fence — KillSession times out on the op lock the "+
+			"resume holds, so advertising it promises a supersede it cannot perform")
 
 	i.clearRespawnFence()
 	require.Equal(t, LifecycleActionArchive, i.LifecycleAction(), "and the verb comes back")
+	require.True(t, i.CanKill(), "as does Kill")
 }

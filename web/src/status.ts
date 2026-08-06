@@ -169,9 +169,13 @@ export function isArchived(s: SessionData): boolean {
  *
  *  An in-flight operation withholds it (#2997). A resume already running keeps the
  *  row LiveLimitReached by design — its fence preserves liveness — so liveness alone
- *  would advertise a Retry the daemon then refuses as busy. This gates the ACTION
- *  only; the diamond and "[limit] resets …" prefix come from rowStatus/rowTitle and
- *  still render the state throughout. */
+ *  would advertise a Retry the daemon then refuses as busy.
+ *
+ *  This gates the action. It is NOT the whole story for display, and an earlier
+ *  version of this note claimed otherwise: rowStatus above returns WORKING for any
+ *  in-flight op, so a respawning row shows no diamond and isWorking() counts it as
+ *  working (project.ts). Only the "[limit] resets …" prefix from rowTitle survives,
+ *  because that arm keys on liveness. Consistent with every other op and #1766. */
 export function isLimitReached(s: SessionData): boolean {
   return (
     livenessOf(s) === Liveness.LimitReached &&

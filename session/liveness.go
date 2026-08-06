@@ -137,11 +137,7 @@ func opIsTeardown(op InFlightOp) bool {
 // replacing one is: ArchiveSession would tear down and relocate a worktree the
 // respawn is provisioning into, and RuntimeActionResumeLimit refuses while an op is
 // in flight, so both verbs it could show would be refused on press — the #2500
-// defect above. It deliberately does NOT join canKillFor: tkBeginKill is allowed
-// from ANY state by explicit design ("a kill supersedes any in-flight op"), so Kill
-// genuinely works during a respawn, and a remote provision that hangs is exactly
-// when a user needs it. Hiding a control that works would remove the escape hatch.
-// Resting rows restore; every
+// defect above. Resting rows restore; every
 // other settled row archives. Kill addressability is intentionally independent
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
@@ -165,8 +161,23 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStat
 // down (OpKilling/OpArchiving) has a kill/archive in flight, so a second one is
 // the "kill already in progress" refusal the fence exists to prevent (#2500); and
 // an id-less legacy row cannot address the destructive API without guessing.
+//
+// A respawning row (#2997) is excluded for a reason the transition table alone does
+// NOT show, and reading only the table gets this backwards: tkBeginKill is
+// allowedFrom-always ("a kill supersedes any in-flight op"), which looks like Kill
+// works during any op. It does not work during THIS one, because the daemon must
+// traverse a lock to reach that transition — KillSession waits opLockTimeout (30s,
+// daemon/killbound.go) for the per-session operation lock and then returns
+// errKillBusy WITHOUT applying BeginKill (daemon/manager_sessions.go), while the
+// limit resume holds that same lock for the entire respawn (daemon/limit.go). So
+// advertising Kill here promises a supersede that is really a 30-second wait
+// followed by "try again". Hiding it is honest; making it genuinely interrupt the
+// owning operation is a separate change to the kill path, and until then a hung
+// remote provision is bounded by the backend's own deadlines rather than by a user
+// gesture. The same is already true of OpCreating/OpReplacing/teardown above.
 func canKillFor(id string, op InFlightOp) bool {
-	return id != "" && op != OpCreating && op != OpReplacing && !opIsTeardown(op)
+	return id != "" && op != OpCreating && op != OpReplacing && op != OpRespawning &&
+		!opIsTeardown(op)
 }
 
 // LifecycleAction returns the shared lifecycle verb for this instance. TUI menus

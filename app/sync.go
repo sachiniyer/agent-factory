@@ -815,9 +815,15 @@ func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.L
 	case session.OpReplacing:
 		err = inst.Transition(session.BeginHandoff())
 	case session.OpRespawning:
-		// A limit resume re-spawning the runtime (#2997). Adopted for ACTION GATING,
-		// not for display: it composes to the settled liveness, so mirroring it
-		// changes no pixel. Without it this TUI's own
+		// A limit resume re-spawning the runtime (#2997). Adopted so this TUI's action
+		// gating agrees with the daemon that owns the fence. It DOES also change how
+		// the row reads, which an earlier version of this comment wrongly denied:
+		// ui/tree/render.go masks the liveness glyph for any non-None op, so a
+		// respawning row shows the blank working glyph rather than its limit diamond,
+		// and web/src/status.ts classifies it as working (project.ts counts it that
+		// way). That is consistent with every other op and with #1766 — a resume in
+		// flight IS work in flight — and the "[limit] resets …" title prefix still
+		// renders throughout, so the state is not hidden. Without adopting, this TUI's own
 		// ValidateRuntimeAction(RuntimeActionHandoff) reads OpNone and opens the
 		// picker, and the daemon then refuses the selected handoff because its
 		// authoritative instance still carries the fence — an action offered and
