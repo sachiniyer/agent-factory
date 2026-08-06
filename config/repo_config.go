@@ -30,6 +30,12 @@ type RemoteHooks struct {
 	// endpoint JSON (see the type doc). Invoked with --name/--repo/--branch and
 	// an optional --program flag (see docs/remote-hooks.md).
 	LaunchCmd string `json:"launch_cmd" toml:"launch_cmd"`
+	// ProvisionCmd is the ssh-host alternative to LaunchCmd (#2847): it makes a
+	// machine and prints {host, host_key, [user], [port]} — no agent-server, no
+	// bearer token, no tunnel. af reaches it with the sandbox transport and runs
+	// the workspace itself. Exactly one of provision_cmd / launch_cmd is set;
+	// Validate rejects both, since they answer the same question differently.
+	ProvisionCmd string `json:"provision_cmd,omitempty" toml:"provision_cmd,omitempty"`
 	// DeleteCmd reaps the provisioned sandbox. Invoked with --name <slug>.
 	DeleteCmd string `json:"delete_cmd" toml:"delete_cmd"`
 
@@ -71,13 +77,31 @@ func (h RemoteHooks) Validate() error {
 			"{\"url\",\"token\"}, and delete_cmd reaps it. "+
 			"Delete list_cmd/attach_cmd/terminal_cmd and follow the migration recipe in docs/remote-hooks.md", removed)
 	}
-	if strings.TrimSpace(h.LaunchCmd) == "" {
-		return fmt.Errorf("remote_hooks.launch_cmd is required")
+	launch := strings.TrimSpace(h.LaunchCmd) != ""
+	provision := strings.TrimSpace(h.ProvisionCmd) != ""
+	switch {
+	case launch && provision:
+		// Both answer "how does this session get a workspace", differently. Picking
+		// one silently would make the other's absence look like a config that
+		// works, so refuse and make the operator say which contract they are on.
+		return fmt.Errorf("remote_hooks sets both provision_cmd and launch_cmd; they are alternatives, not layers — " +
+			"provision_cmd returns an ssh host and af runs the agent-server itself, launch_cmd returns an " +
+			"{\"url\",\"token\"} endpoint the script stands up. Keep one (see docs/remote-hooks.md)")
+	case !launch && !provision:
+		return fmt.Errorf("remote_hooks requires provision_cmd (return an ssh host; af does the rest) " +
+			"or launch_cmd (return an {\"url\",\"token\"} endpoint you stood up yourself) — see docs/remote-hooks.md")
 	}
 	if strings.TrimSpace(h.DeleteCmd) == "" {
 		return fmt.Errorf("remote_hooks.delete_cmd is required")
 	}
 	return nil
+}
+
+// UsesProvisionCmd reports whether this repo is on the ssh-host contract (#2847)
+// rather than the endpoint contract. Validate guarantees exactly one is set, so
+// this is the discriminator the runtime switches on.
+func (h RemoteHooks) UsesProvisionCmd() bool {
+	return strings.TrimSpace(h.ProvisionCmd) != ""
 }
 
 // removedKeyInUse returns the name of the first removed pre-PR7 hook key present

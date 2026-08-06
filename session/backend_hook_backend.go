@@ -111,6 +111,12 @@ func (hookRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		slug:    Slugify(spec.Title),
 		program: config.ResolveProgram(&resolved.Config, spec.Program),
 	}
+	if hooks.UsesProvisionCmd() {
+		// The ssh-host contract (#2847): the script makes a machine and says how
+		// to reach it; af runs the agent-server itself over the sandbox transport.
+		// Teardown is still delete_cmd, so the reap path below is shared verbatim.
+		return p.provisionHostOrReap()
+	}
 	return p.provisionOrReap()
 }
 

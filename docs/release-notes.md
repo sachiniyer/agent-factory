@@ -1,5 +1,21 @@
 # Release Notes
 
+## A remote hook can return an ssh host instead of an endpoint
+
+- **New `remote_hooks.provision_cmd`.** Your script makes a machine and prints
+  `{"host","host_key"}`; af reaches it over the operator's own ssh and runs the
+  `af agent-server` itself. The bearer token never enters your script, there is
+  no tunnel to keep alive, and no agent-server lifecycle to manage — the three
+  jobs that produced most of this backend's sharp edges.
+- **`host_key` is required, and that is the point.** A machine created seconds
+  ago has no `known_hosts` entry, and no existing host-key posture can help
+  without either refusing the launch or trusting the first key it sees. Your
+  script is the only party with an authentic channel to the key, so it returns
+  it and af pins it per session. There is deliberately no opt-out.
+- **`launch_cmd` is unchanged and not deprecated** — it remains the escape hatch
+  for targets with no sshd. A repo sets one or the other; setting both is
+  rejected rather than silently resolved.
+
 ## One session's terminal history no longer shows up in another session's editor
 
 - **A confidentiality fix.** code-server is VS Code *Web*, and it keeps its integrated

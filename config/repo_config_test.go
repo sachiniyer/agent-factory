@@ -255,13 +255,32 @@ func TestRemoteHooksValidate(t *testing.T) {
 		assert.NoError(t, full().Validate())
 	})
 
+	t.Run("provision_cmd alone is a complete config", func(t *testing.T) {
+		h := full()
+		h.LaunchCmd = ""
+		h.ProvisionCmd = "./.agent-factory/hooks/provision.sh"
+		assert.NoError(t, h.Validate(), "the ssh-host contract needs no launch_cmd (#2847)")
+		assert.True(t, h.UsesProvisionCmd())
+	})
+
 	cases := []struct {
 		name    string
 		mutate  func(*RemoteHooks)
 		wantMsg string
 	}{
-		{"empty launch_cmd", func(h *RemoteHooks) { h.LaunchCmd = "" }, "remote_hooks.launch_cmd is required"},
-		{"whitespace launch_cmd", func(h *RemoteHooks) { h.LaunchCmd = "   " }, "remote_hooks.launch_cmd is required"},
+		// Since #2847 a repo may be on EITHER contract, so "no launch_cmd" is only
+		// an error when there is no provision_cmd either — and the message has to
+		// name both, or it sends a provision_cmd user to fix the wrong key.
+		{"neither command", func(h *RemoteHooks) { h.LaunchCmd = "" },
+			"remote_hooks requires provision_cmd (return an ssh host; af does the rest) or launch_cmd " +
+				"(return an {\"url\",\"token\"} endpoint you stood up yourself) — see docs/remote-hooks.md"},
+		{"whitespace launch_cmd is still neither", func(h *RemoteHooks) { h.LaunchCmd = "   " },
+			"remote_hooks requires provision_cmd (return an ssh host; af does the rest) or launch_cmd " +
+				"(return an {\"url\",\"token\"} endpoint you stood up yourself) — see docs/remote-hooks.md"},
+		{"both contracts at once", func(h *RemoteHooks) { h.ProvisionCmd = "./provision.sh" },
+			"remote_hooks sets both provision_cmd and launch_cmd; they are alternatives, not layers — " +
+				"provision_cmd returns an ssh host and af runs the agent-server itself, launch_cmd returns an " +
+				"{\"url\",\"token\"} endpoint the script stands up. Keep one (see docs/remote-hooks.md)"},
 		{"empty delete_cmd", func(h *RemoteHooks) { h.DeleteCmd = "" }, "remote_hooks.delete_cmd is required"},
 		{"whitespace delete_cmd", func(h *RemoteHooks) { h.DeleteCmd = "   " }, "remote_hooks.delete_cmd is required"},
 	}
