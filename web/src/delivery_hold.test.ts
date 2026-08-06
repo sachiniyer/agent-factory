@@ -153,3 +153,66 @@ test("delivery_hold: an empty bracketed paste creates no hold", () => {
   assert.equal(h.noteInput("\x1b[200~\x1b[201~", 0), "none");
   assert.equal(h.holding, false);
 });
+
+test("editing an existing draft with cursor keys is activity, not idleness (#3025)", () => {
+  const hold = new MidLineHold(1_000, 15_000);
+  assert.equal(hold.noteInput("ls -la", 0), "pause");
+
+  // Fifteen seconds of real editing: arrows and Delete, which xterm sends as
+  // ESC-prefixed sequences. The earlier version returned before stamping the
+  // activity clock, so this looked like a user who had walked away.
+  for (let t = 1_000; t <= 15_000; t += 1_000) {
+    hold.noteInput("\x1b[D", t);
+    hold.noteInput("\x1b[3~", t + 100);
+  }
+  // The property is that the draft SURVIVES, not that any particular tick renews:
+  // the last edit renewed at 15_100, so a tick 400ms later is simply not due yet.
+  assert.equal(hold.holding, true, "a draft under active editing must not be released as idle");
+  assert.equal(hold.tick(16_200), "pause", "and the lease keeps being extended while editing continues");
+  assert.equal(hold.holding, true);
+
+  // Only genuine idleness ends it: 15s after the LAST edit, not 15s after the
+  // last printable character.
+  assert.equal(hold.tick(31_000), "none");
+  assert.equal(hold.holding, false, "a user who walks away mid-line is released by the idle bound");
+});
+
+test("ESC input renews a hold but never starts one (#3025)", () => {
+  const hold = new MidLineHold(1_000, 15_000);
+  // Focus reports, mouse reports and query replies arrive on the same callback.
+  // With no draft anywhere they must not defer a cron delivery.
+  assert.equal(hold.noteInput("\x1b[I", 0), "none");
+  assert.equal(hold.noteInput("\x1b[<0;10;5M", 10), "none");
+  assert.equal(hold.holding, false, "merely focusing or clicking must not create a hold");
+
+  assert.equal(hold.noteInput("x", 20), "pause");
+  assert.equal(hold.noteInput("\x1b[D", 1_100), "pause", "now the same bytes renew");
+});
+
+test("a composer newline on an empty prompt starts a hold (#3025)", () => {
+  const hold = new MidLineHold(1_000, 15_000);
+  // Shift+Enter sends a bare LF: it inserts a composer line without submitting,
+  // so a draft now exists even though nothing printable was typed.
+  assert.equal(hold.noteInput("\n", 0), "pause");
+  assert.equal(hold.holding, true, "the composer holds an uncommitted line");
+
+  // And it still does not COMMIT: Enter (CR) is the only thing that does.
+  assert.equal(hold.noteInput("draft text\n", 100), "none");
+  assert.equal(hold.holding, true, "LF mid-draft must not end the hold");
+  hold.noteInput("\r", 200);
+  assert.equal(hold.holding, false, "CR commits");
+});
+
+test("a commit that was only queued does not end the hold (#3025)", () => {
+  const hold = new MidLineHold(1_000, 15_000);
+  assert.equal(hold.noteInput("deploy prod", 0), "pause");
+
+  // The stream drops and Enter is queued rather than delivered. The PTY still
+  // holds "deploy prod"; nothing has committed there.
+  assert.equal(hold.noteQueued(1_100), "pause");
+  assert.equal(hold.holding, true, "the partial line is still in the PTY — keep protecting it");
+
+  // Only a commit that actually reached the PTY ends it.
+  hold.noteInput("\r", 2_200);
+  assert.equal(hold.holding, false);
+});

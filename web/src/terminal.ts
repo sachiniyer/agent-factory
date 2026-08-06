@@ -1444,9 +1444,11 @@ export class AttachTerminal {
    *  (re)connect, so a queued resize would be a stale duplicate of a value the
    *  socket already re-announces. */
   private sendInput(text: string): void {
-    this.noteMidLine(text);
     const frame = encode(inputFrame(this.enc.encode(text)));
     if (this.send(frame)) {
+      // Noted only once the bytes are actually on the wire. A commit that never
+      // reached the PTY must not end the hold: see the queued path below.
+      this.noteMidLine(text);
       return;
     }
     if (this.stopped || this.exited) {
@@ -1455,6 +1457,14 @@ export class AttachTerminal {
       // program the user never typed at.
       return;
     }
+    // Queued rather than delivered, which changes what this input MEANS. The PTY
+    // still holds whatever was typed before the stream dropped, and this chunk —
+    // Enter included — has not reached it. Processing a commit here would end the
+    // hold over a line that is still sitting in the PTY: the lease would lapse
+    // three seconds later, an automated delivery would append to that partial
+    // line, and the queued Enter would submit the splice on reconnect. So the
+    // hold is extended and the commit is deliberately not read.
+    this.noteQueuedInput();
     if (!this.pendingInput.push(frame)) {
       // Refused by the cap — a socket that is not coming back. Say so rather than
       // losing it quietly a second time, which is the whole defect this fixes.
@@ -1495,6 +1505,16 @@ export class AttachTerminal {
       return; // this pane's owner takes no lease; do not even track
     }
     this.dispatchHold(this.midLine.noteInput(text, Date.now()));
+  }
+
+  /** Extends the hold for input that was QUEUED rather than delivered, without
+   *  reading a commit out of it. What is uncommitted is a property of the PTY, and
+   *  bytes that never arrived cannot have committed anything there. */
+  private noteQueuedInput(): void {
+    if (!this.cb.onDeliveryHold) {
+      return;
+    }
+    this.dispatchHold(this.midLine.noteQueued(Date.now()));
   }
 
   /** Applies a hold verdict: keeps the renew timer running while a line is

@@ -6951,8 +6951,12 @@ function decode(raw) {
 var COMMIT = "\r";
 var ABANDON = "";
 var ESC = "\x1B";
+var COMPOSER_NEWLINE = "\n";
 var PASTE_START = "\x1B[200~";
 var PASTE_END = "\x1B[201~";
+function startsADraft(data) {
+  return hasPrintable(data) || data.includes(COMPOSER_NEWLINE);
+}
 function hasPrintable(data) {
   for (const ch of data) {
     const code = ch.codePointAt(0) ?? 0;
@@ -7001,26 +7005,30 @@ var MidLineHold = class {
     }
     if (data.startsWith(PASTE_START)) {
       const payload = data.slice(PASTE_START.length).replace(PASTE_END, "");
-      if (!hasPrintable(payload)) {
+      if (!startsADraft(payload)) {
         return "none";
       }
       this.lastInputMs = nowMs;
       return this.beginOrRenew(nowMs);
     }
     if (data.startsWith(ESC)) {
-      return "none";
+      if (!this.uncommitted) {
+        return "none";
+      }
+      this.lastInputMs = nowMs;
+      return this.renew(nowMs);
     }
     this.lastInputMs = nowMs;
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
       const tail = data.slice(lastCommit + 1);
-      if (!hasPrintable(tail)) {
+      if (!startsADraft(tail)) {
         this.uncommitted = false;
         return "none";
       }
       return this.beginOrRenew(nowMs);
     }
-    if (!this.uncommitted && !hasPrintable(data)) {
+    if (!this.uncommitted && !startsADraft(data)) {
       return "none";
     }
     return this.beginOrRenew(nowMs);
@@ -7047,6 +7055,19 @@ var MidLineHold = class {
     }
     return "none";
   }
+  /**
+   * Records input that was QUEUED for a dropped stream rather than delivered.
+   *
+   * It starts or extends a hold and never reads a commit, because a commit is only
+   * a commit once the PTY has seen it. Enter typed against a dead socket leaves the
+   * partial line sitting in the PTY exactly as it was; treating it as committed
+   * would release the hold over a line that is still there, and the queued Enter
+   * would later submit whatever an automated delivery had appended to it.
+   */
+  noteQueued(nowMs) {
+    this.lastInputMs = nowMs;
+    return this.beginOrRenew(nowMs);
+  }
   /** Drops the hold for a teardown that makes the question moot — the pane
    *  closing, the session changing. Nothing is sent to the daemon: the lease is
    *  left to expire, because clearing it here would revoke a claim this browser
@@ -7060,6 +7081,10 @@ var MidLineHold = class {
       this.lastPauseMs = nowMs;
       return "pause";
     }
+    return this.renew(nowMs);
+  }
+  /** Extends an EXISTING hold without creating one. */
+  renew(nowMs) {
     if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
       this.lastPauseMs = nowMs;
       return "pause";
@@ -8402,14 +8427,15 @@ var AttachTerminal = class {
    *  (re)connect, so a queued resize would be a stale duplicate of a value the
    *  socket already re-announces. */
   sendInput(text) {
-    this.noteMidLine(text);
     const frame = encode(inputFrame(this.enc.encode(text)));
     if (this.send(frame)) {
+      this.noteMidLine(text);
       return;
     }
     if (this.stopped || this.exited) {
       return;
     }
+    this.noteQueuedInput();
     if (!this.pendingInput.push(frame)) {
       this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
     }
@@ -8442,6 +8468,15 @@ var AttachTerminal = class {
       return;
     }
     this.dispatchHold(this.midLine.noteInput(text, Date.now()));
+  }
+  /** Extends the hold for input that was QUEUED rather than delivered, without
+   *  reading a commit out of it. What is uncommitted is a property of the PTY, and
+   *  bytes that never arrived cannot have committed anything there. */
+  noteQueuedInput() {
+    if (!this.cb.onDeliveryHold) {
+      return;
+    }
+    this.dispatchHold(this.midLine.noteQueued(Date.now()));
   }
   /** Applies a hold verdict: keeps the renew timer running while a line is
    *  uncommitted, and hands each pause to the owner that knows which session to

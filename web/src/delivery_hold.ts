@@ -62,16 +62,31 @@ const COMMIT = "\r";
  *  buffer, so the honest answer is to keep holding and let the idle bound end it. */
 const ABANDON = "\x03";
 
-/** Anything the terminal EMITS rather than the user typing: focus reports
- *  (CSI I/O), mouse reports, replies to device queries, and the arrow/function
- *  keys. xterm's onData carries all of these alongside typed text, so a hold keyed
- *  on "any onData" would be created and renewed by merely focusing the pane,
- *  clicking, or scrolling — deferring cron and watch deliveries with no draft
- *  anywhere. Every one of them starts with ESC, and no plain typed character does.
+/** ESC-prefixed input, which is two different things that cannot be told apart
+ *  here: what the terminal EMITS (focus reports, mouse reports, replies to device
+ *  queries) and what the user TYPES (arrows, Delete as ESC[3~, Home/End, alt
+ *  chords). xterm's onData carries both.
  *
- *  Alt-chords also arrive as ESC+char and are ignored here. That is the safe
- *  direction: the cost is no hold for an alt-chord, not a spurious one. */
+ *  So it is deliberately NOT discarded, and that polarity is the fix for a whole
+ *  class of defect. An earlier version returned early here without even stamping
+ *  the activity clock, which meant a user spending fifteen seconds moving the
+ *  cursor and deleting characters looked idle: the hold was released while they
+ *  were visibly still editing, and a delivery could land in the text.
+ *
+ *  The rule is asymmetric because the two errors are not equal. ESC input RENEWS a
+ *  hold that already exists — it is at least as likely to be editing as it is to
+ *  be a report, and renewing costs one lease of extra deferral. It never STARTS
+ *  one, because merely focusing or clicking a pane must not defer a cron delivery
+ *  when there is no draft anywhere. Guessing "editing" is cheap; guessing "idle"
+ *  splices generated text into a user's half-written line. */
 const ESC = "\x1b";
+
+/** Shift+Enter's bare LF: a composer newline on the agent tab that inserts a line
+ *  without submitting (#2374). It is not printable, so the start gate below would
+ *  reject it — leaving the composer holding a draft with no lease taken, which an
+ *  automated delivery could then append to and submit. It creates a draft, so it
+ *  starts a hold; it never ends one, which is why it is absent from COMMIT. */
+const COMPOSER_NEWLINE = "\n";
 
 /** Bracketed paste. When the agent enables the mode, xterm wraps a pasted block as
  *  ESC[200~ … ESC[201~ and sends the whole thing through onData as one chunk. That
@@ -85,10 +100,16 @@ const ESC = "\x1b";
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
 
-/** True when the chunk contains something a user would recognise as typing —
- *  a printable character. Used to START a hold, so that bare control keys on an
- *  empty prompt (a stray backspace, a tab completion on nothing) do not invent a
- *  draft to protect. Once a hold exists, any input renews it. */
+/** True when the chunk contains something that leaves a draft behind: a printable
+ *  character, or the composer newline Shift+Enter sends. Used to START a hold, so
+ *  that bare control keys on an empty prompt (a stray backspace, a tab completion
+ *  on nothing) do not invent a draft to protect. Once a hold exists, any input
+ *  renews it. */
+function startsADraft(data: string): boolean {
+  return hasPrintable(data) || data.includes(COMPOSER_NEWLINE);
+}
+
+/** True when the chunk contains a printable character. */
 function hasPrintable(data: string): boolean {
   for (const ch of data) {
     const code = ch.codePointAt(0) ?? 0;
@@ -152,21 +173,28 @@ export class MidLineHold {
       // A pasted draft. Held on its content alone — no commit scan, because
       // bracketed paste makes an embedded newline literal text rather than Enter.
       const payload = data.slice(PASTE_START.length).replace(PASTE_END, "");
-      if (!hasPrintable(payload)) {
+      if (!startsADraft(payload)) {
         return "none";
       }
       this.lastInputMs = nowMs;
       return this.beginOrRenew(nowMs);
     }
     if (data.startsWith(ESC)) {
-      return "none";
+      // Renew, never start — see the note on ESC. The activity clock is stamped
+      // here too: this may well be the user editing, and treating an edit as
+      // idleness is the failure that lets a delivery land in a live draft.
+      if (!this.uncommitted) {
+        return "none";
+      }
+      this.lastInputMs = nowMs;
+      return this.renew(nowMs);
     }
     this.lastInputMs = nowMs;
 
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
       const tail = data.slice(lastCommit + 1);
-      if (!hasPrintable(tail)) {
+      if (!startsADraft(tail)) {
         // Ended on the commit: nothing of the user's is left unsent.
         this.uncommitted = false;
         return "none";
@@ -175,7 +203,7 @@ export class MidLineHold {
       return this.beginOrRenew(nowMs);
     }
 
-    if (!this.uncommitted && !hasPrintable(data)) {
+    if (!this.uncommitted && !startsADraft(data)) {
       return "none";
     }
     return this.beginOrRenew(nowMs);
@@ -204,6 +232,20 @@ export class MidLineHold {
     return "none";
   }
 
+  /**
+   * Records input that was QUEUED for a dropped stream rather than delivered.
+   *
+   * It starts or extends a hold and never reads a commit, because a commit is only
+   * a commit once the PTY has seen it. Enter typed against a dead socket leaves the
+   * partial line sitting in the PTY exactly as it was; treating it as committed
+   * would release the hold over a line that is still there, and the queued Enter
+   * would later submit whatever an automated delivery had appended to it.
+   */
+  noteQueued(nowMs: number): HoldAction {
+    this.lastInputMs = nowMs;
+    return this.beginOrRenew(nowMs);
+  }
+
   /** Drops the hold for a teardown that makes the question moot — the pane
    *  closing, the session changing. Nothing is sent to the daemon: the lease is
    *  left to expire, because clearing it here would revoke a claim this browser
@@ -218,6 +260,11 @@ export class MidLineHold {
       this.lastPauseMs = nowMs;
       return "pause";
     }
+    return this.renew(nowMs);
+  }
+
+  /** Extends an EXISTING hold without creating one. */
+  private renew(nowMs: number): HoldAction {
     if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
       this.lastPauseMs = nowMs;
       return "pause";
