@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -138,16 +139,34 @@ func (t *TmuxSession) Start(workDir string) error {
 			// before the pane process finishes flushing. Wait for that process here,
 			// and keep the outcome unknown if it outlives the bound, so LocalBackend
 			// cannot remove the fresh worktree underneath its final writes.
-			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
+			cleanupState, cleanupBlind, cleanupErr := t.CloseAndWaitForPaneExitReportingBlindness()
+			// A blind cleanup — session gone, no pane ever observed — is the ORDINARY
+			// outcome here: the session never came up, so there was never a pane to
+			// see. Blindness alone therefore proves nothing and must not withhold the
+			// classification; doing so withheld ErrSessionNotStarted on every plain
+			// timeout, so callers could no longer tell "definitely did not start" from
+			// "could not determine".
+			//
+			// What it does mean is that the AF_SESSION scan cannot answer for a
+			// markerless launch, so the answer has to come from looking: only a
+			// POSITIVE occupant in the workspace — or a scan that could not run —
+			// keeps LocalBackend from removing it (#2998).
+			occupantErr := error(nil)
+			if cleanupBlind {
+				occupantErr = markerlessOccupants(workDir)
+			}
 			if cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
+			}
+			if occupantErr != nil {
+				timeoutErr = fmt.Errorf("%v (%v)", timeoutErr, occupantErr)
 			}
 			// A successful close+pane-exit confirmation on a positive-policy name
 			// establishes that the exact launch identity is gone. The old blanket
 			// timeout classification was necessary only while a fresh title could
 			// contain spellings tmux rewrote (#2207); legacy exact names still stay
 			// on that conservative path through hasStableTmuxSpelling.
-			if cleanupState == PaneStateKnown && cleanupErr == nil && hasStableTmuxSpelling(t.sanitizedName) {
+			if cleanupState == PaneStateKnown && cleanupErr == nil && occupantErr == nil && hasStableTmuxSpelling(t.sanitizedName) {
 				return fmt.Errorf("%w: %w", timeoutErr, ErrSessionNotStarted)
 			}
 			return fmt.Errorf("%w: %w", timeoutErr, ErrTmuxTimeout)
@@ -456,4 +475,28 @@ func (t *TmuxSession) Restore(workDir string) error {
 	// reading the old pointer and mutating its fields right now (#1528).
 	t.setMonitor(newStatusMonitor())
 	return nil
+}
+
+// markerlessOccupants reports processes still working inside a workspace whose
+// session vanished without ever exporting an AF_SESSION marker (#2998).
+//
+// It is the positive half of the blind-cleanup decision. Blindness says the
+// marker scan cannot answer; only an occupant actually found here — or a scan
+// that could not run at all — makes removing the workspace unsafe. Nothing is
+// killed: LocalBackend keeps the worktree and the record, and the operator
+// decides.
+func markerlessOccupants(workDir string) error {
+	if workDir == "" {
+		return nil
+	}
+	occupants, err := proctree.OccupantsOfDir(workDir)
+	if err != nil {
+		return fmt.Errorf("cannot establish whether anything is still working inside %s: %w", workDir, err)
+	}
+	if len(occupants) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d process(es) are still working inside %s — %s; they carry no agent-factory marker, "+
+		"so ownership cannot be proven and they are reported rather than killed",
+		len(occupants), workDir, proctree.DescribeOccupants(occupants))
 }
