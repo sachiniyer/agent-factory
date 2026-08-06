@@ -71,6 +71,59 @@ func TestCopyTree_RejectsDestinationSymlinkReplacement(t *testing.T) {
 	require.Error(t, copyTree(src, dest), "a replacement symlink target must not enter the copy manifest")
 }
 
+// TestCopyTree_RejectsDestinationSymlinkReplacedBeforeTheTimestamp closes the
+// window the sibling above does not: the confirmation happens BEFORE the mtime
+// is applied, and the stamp resolves the name one more time. A racer that swaps
+// the entry in that gap gets our timestamp written onto an inode this process
+// never created — a hard link to a file outside the tree included, since
+// AT_SYMLINK_NOFOLLOW declines to follow a symlink but not to stamp a hard link.
+//
+// The write itself cannot be prevented portably (holding a symlink open needs
+// O_PATH|O_NOFOLLOW or O_SYMLINK, and stamping through it needs Linux-only
+// AT_EMPTY_PATH), so the contract is that the archive REFUSES rather than
+// commits — the same answer every other replacement check here gives.
+func TestCopyTree_RejectsDestinationSymlinkReplacedBeforeTheTimestamp(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.Symlink("source-target", filepath.Join(src, "link")))
+	dest := filepath.Join(t.TempDir(), "dest")
+
+	// A hard link to a file OUTSIDE the copy, which is the damage that makes this
+	// worth refusing rather than tolerating: the stamp would land on it.
+	outsider := filepath.Join(t.TempDir(), "outsider")
+	require.NoError(t, os.WriteFile(outsider, []byte("not part of this archive"), 0600))
+	before, err := os.Lstat(outsider)
+	require.NoError(t, err)
+
+	originalHook := copyTreeBeforeSymlinkStamp
+	copyTreeBeforeSymlinkStamp = func(path string) error {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.Link(outsider, path)
+	}
+	t.Cleanup(func() { copyTreeBeforeSymlinkStamp = originalHook })
+
+	require.Error(t, copyTree(src, dest),
+		"a destination entry swapped before the timestamp must refuse the copy, not commit it")
+
+	// The residual, asserted rather than described, so nobody reads the guard
+	// above as more than it is: the stray write ALREADY HAPPENED. The stamp
+	// resolves the name before this detection can run, so the outsider's mtime is
+	// rewritten and only the archive is refused.
+	//
+	// Prevention would need the timestamp applied through a descriptor for the
+	// verified inode, and there is no portable way to hold a symlink open
+	// (O_PATH|O_NOFOLLOW on Linux, O_SYMLINK on darwin, then Linux-only
+	// AT_EMPTY_PATH to stamp through it). Pinning it here means a future fix that
+	// closes the window has to update this expectation deliberately rather than
+	// discover it.
+	after, err := os.Lstat(outsider)
+	require.NoError(t, err)
+	require.NotEqual(t, before.ModTime(), after.ModTime(),
+		"expected the known residual: the stamp lands before the swap is detected. If this now passes unchanged, the window was closed — update this test rather than deleting it")
+}
+
 // TestCopyTree_PostCreateFailureCleansPartialDestination pins the manifest
 // contract: a destination node is recorded the moment this process creates it
 // and learns its identity, not once the whole entry succeeds. A failure after
