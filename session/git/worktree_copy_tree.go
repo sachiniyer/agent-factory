@@ -234,9 +234,9 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 
 func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) (copiedDirectory, error) {
 	root := copiedDirectory{}
-	// Source inode -> the destination-relative path its bytes first landed at.
-	// Scoped to one copy, so it can never name a path from another tree.
-	links := map[pathIdentity]string{}
+	// Source inode -> where its bytes first landed AND what inode they landed
+	// on. Scoped to one copy, so it can never name a path from another tree.
+	links := map[pathIdentity]copiedFileLink{}
 	routes := []copiedDirectoryRoute{{parent: -1, directory: &root}}
 	for index := 0; index < len(routes); index++ {
 		job := routes[index]
@@ -293,7 +293,7 @@ func copyDirectoryLevel(
 	directory *copiedDirectory,
 	destinationRoot *os.File,
 	relativeDirectory string,
-	links map[pathIdentity]string,
+	links map[pathIdentity]copiedFileLink,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -328,15 +328,21 @@ func copyDirectoryLevel(
 		case unix.S_IFLNK:
 			entry, err = copySymlinkEntry(source, destination, name, childSourcePath, childDestinationPath, inspected)
 		case unix.S_IFREG:
-			// A link count above one is the only hint that this inode may appear
-			// under another name. Everything with nlink == 1 skips the map
-			// entirely, so an ordinary worktree pays nothing for this.
-			if first, seen := links[inspected]; seen && stat.Nlink > 1 {
+			// Every successfully copied regular inode is recorded, not just the
+			// ones observed with nlink > 1. A live worktree process can hard-link
+			// an already-copied file AFTER it was seen with nlink == 1, and the
+			// later sighting would then miss the map and be copied as a separate
+			// inode — silently publishing two unrelated files while source
+			// validation passed, because pathIdentity excludes the link count.
+			if first, seen := links[inspected]; seen {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected)
-				if err == nil && stat.Nlink > 1 {
-					links[inspected] = filepath.Join(relativeDirectory, name)
+				if err == nil {
+					links[inspected] = copiedFileLink{
+						path:     filepath.Join(relativeDirectory, name),
+						identity: entry.destination,
+					}
 				}
 			}
 		default:
@@ -369,6 +375,15 @@ func relativeRoutePath(components []copiedEntry) string {
 	return filepath.Join(parts...)
 }
 
+// copiedFileLink is where a source inode's bytes first landed: the path to link
+// against, and the destination inode that path resolved to at the time. Both are
+// needed — the path to make the link, the identity to prove the link landed on
+// the right inode.
+type copiedFileLink struct {
+	path     string
+	identity pathIdentity
+}
+
 // linkCopiedFile reproduces a hard link instead of copying the bytes a second
 // time.
 //
@@ -378,30 +393,44 @@ func relativeRoutePath(components []copiedEntry) string {
 // through one path stopped showing through the other, so a restored worktree
 // behaved differently from the one that was archived.
 //
-// The link is made from the DESTINATION root descriptor to a path inside our own
-// staging tree, never from the source, so nothing a worktree process does to the
-// source between the two sightings can redirect it. flags is 0: the entry is
-// already known to be a regular file, and AT_SYMLINK_FOLLOW would be the only
-// way to end up linking something else.
+// linkat() resolves a PATHNAME, and the staging tree, while unguessably named,
+// is still reachable by a same-UID process. Such a process can rename the first
+// copied path aside, drop an unrelated file or symlink there, let this call link
+// THAT, and restore the original path afterwards. Merely recording whatever
+// inode results would make the injected one the manifest's expected identity, so
+// both later validations would agree with each other and a corrupted tree would
+// publish. The identity captured when the bytes were first written is therefore
+// compared, not just stored: a link that did not land on that exact inode is
+// refused.
+//
+// flags is 0. The entry is already known to be a regular file, and
+// AT_SYMLINK_FOLLOW would be the only way to end up linking something else.
 func linkCopiedFile(
 	destination, destinationRoot *os.File,
-	firstRelativePath, name, destinationPath string,
+	first copiedFileLink,
+	name, destinationPath string,
 	sourceIdentity pathIdentity,
 ) (copiedEntry, error) {
-	if err := unix.Linkat(int(destinationRoot.Fd()), firstRelativePath, int(destination.Fd()), name, 0); err != nil {
+	if err := unix.Linkat(int(destinationRoot.Fd()), first.path, int(destination.Fd()), name, 0); err != nil {
 		return copiedEntry{}, fmt.Errorf(
 			"cannot move worktree across filesystems: failed to reproduce the hard link at %s: %w", destinationPath, err)
 	}
 	// Named and identified before anything else can fail, exactly like every
 	// other node this copier creates — cleanup can only remove what the manifest
-	// describes.
+	// describes, so the OBSERVED identity is recorded even on the refusal below.
 	destinationIdentity, err := identityAt(destination, name)
 	if err != nil {
 		return copiedEntry{name: name, source: sourceIdentity}, fmt.Errorf(
 			"cannot move worktree across filesystems: failed to identify hard link %s after creating it: %w",
 			destinationPath, err)
 	}
-	return copiedEntry{name: name, source: sourceIdentity, destination: destinationIdentity}, nil
+	created := copiedEntry{name: name, source: sourceIdentity, destination: destinationIdentity}
+	if !first.identity.same(destinationIdentity) {
+		return created, fmt.Errorf(
+			"cannot move worktree across filesystems: hard link %s resolved to a different inode than the file it was linked from",
+			destinationPath)
+	}
+	return created, nil
 }
 
 func copyDirectoryEntry(

@@ -467,3 +467,48 @@ func allocatedBlocks(t *testing.T, path string) int64 {
 	require.NoError(t, syscall.Stat(path, &stat))
 	return stat.Blocks
 }
+
+// TestLinkCopiedFile_RefusesALinkThatLandedOnAnotherInode covers the safety
+// check behind the hard-link reuse in #2919.
+//
+// linkat() resolves a PATHNAME, and the staging tree — unguessably named but
+// still same-UID reachable — can have that name swapped between the first copy
+// and the link. Recording whatever inode results would make the injected one the
+// manifest's expected identity, so both later validations would agree with each
+// other and a corrupted tree would publish. The identity captured when the bytes
+// were first written must therefore be compared, not merely stored.
+//
+// Driven directly rather than through a raced copy: the point under test is that
+// the comparison exists and refuses, which a mismatched expectation shows without
+// having to win a race.
+func TestLinkCopiedFile_RefusesALinkThatLandedOnAnotherInode(t *testing.T) {
+	staging := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(staging, "first.txt"), []byte("first"), 0644))
+
+	root, _, err := openDirectoryPath(staging, "destination")
+	require.NoError(t, err)
+	defer root.Close()
+
+	actual, err := identityAt(root, "first.txt")
+	require.NoError(t, err)
+
+	// What a swapped pathname looks like from here: the expectation names an
+	// inode the link will not land on.
+	impostor := actual
+	impostor.inode++
+
+	entry, err := linkCopiedFile(root, root, copiedFileLink{path: "first.txt", identity: impostor},
+		"second.txt", filepath.Join(staging, "second.txt"), actual)
+	require.Error(t, err, "a link that landed on a different inode must be refused")
+	assert.Contains(t, err.Error(), "resolved to a different inode")
+	assert.Equal(t, "second.txt", entry.name,
+		"the entry must still be named so cleanup can remove what was created")
+	assert.Equal(t, actual, entry.destination,
+		"cleanup matches on the OBSERVED identity, so that is what the manifest must carry")
+
+	// And the honest control: the same call with the right expectation succeeds.
+	require.NoError(t, os.Remove(filepath.Join(staging, "second.txt")))
+	_, err = linkCopiedFile(root, root, copiedFileLink{path: "first.txt", identity: actual},
+		"third.txt", filepath.Join(staging, "third.txt"), actual)
+	require.NoError(t, err, "a link onto the recorded inode must be accepted")
+}

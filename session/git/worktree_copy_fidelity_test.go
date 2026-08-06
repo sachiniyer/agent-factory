@@ -37,9 +37,10 @@ import (
 // without removing it here and the "no longer diverges" branch fires, so the
 // inventory cannot rot into a list of things that were fixed years ago.
 var knownCrossDeviceDivergence = map[string]string{
-	"mtime.symlink": "#2919: the link's own mtime is not set — there is no portable dirfd-relative lstat to read it from, and the TARGET's mtime is what tools actually read",
-	"xattr.file":    "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
-	"xattr.dir":     "#2919: same cause, on directories",
+	"mtime.symlink":          "#2919: the link's own mtime is not set — there is no portable dirfd-relative lstat to read it from, and the TARGET's mtime is what tools actually read",
+	"hardlink.externalNlink": "#2919: an inode with one name inside the worktree and another OUTSIDE it keeps both aliases across a rename, but the copy can only create the in-tree name — there is nothing it could link the outside name to. Unfixable by construction, unlike the in-tree pair.",
+	"xattr.file":             "#2919: no xattr namespace is copied, so ACLs, capabilities and SELinux labels are dropped",
+	"xattr.dir":              "#2919: same cause, on directories",
 }
 
 // TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded is the class
@@ -116,6 +117,17 @@ func writeFidelityProbeTree(t *testing.T, root string) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "hard-a"), []byte("shared payload"), 0600))
 	require.NoError(t, os.Link(filepath.Join(root, "hard-a"), filepath.Join(root, "hard-b")))
 
+	// A second link group whose other alias lives OUTSIDE the tree being moved.
+	// Both aliases of hard-a/hard-b travel together, so the copy can reproduce
+	// that group; this one it structurally cannot, because the outside name is
+	// not its to create. Without this shape the guard would claim parity for a
+	// valid source layout that still diverges.
+	require.NoError(t, os.WriteFile(filepath.Join(root, "ext-linked.txt"), []byte("aliased outside"), 0600))
+	require.NoError(t, os.Link(
+		filepath.Join(root, "ext-linked.txt"),
+		filepath.Join(filepath.Dir(root), "ext-alias-"+filepath.Base(root)),
+	))
+
 	require.NoError(t, os.WriteFile(filepath.Join(root, "plain.txt"), []byte("plain"), 0600))
 	require.NoError(t, os.Symlink("plain.txt", filepath.Join(root, "link")))
 
@@ -169,6 +181,10 @@ func describeFidelity(t *testing.T, root string) map[string]string {
 	var hardB syscall.Stat_t
 	require.NoError(t, syscall.Stat(filepath.Join(root, "hard-b"), &hardB))
 	described["hardlink.sameInode"] = fmt.Sprintf("%t", hardA.Ino == hardB.Ino)
+
+	var external syscall.Stat_t
+	require.NoError(t, syscall.Stat(filepath.Join(root, "ext-linked.txt"), &external))
+	described["hardlink.externalNlink"] = fmt.Sprintf("%d", external.Nlink)
 
 	var sparseStat syscall.Stat_t
 	require.NoError(t, syscall.Stat(filepath.Join(root, "sparse.bin"), &sparseStat))
