@@ -497,8 +497,11 @@ func copySymlinkEntry(
 	if err != nil {
 		return copiedEntry{}, err
 	}
-	current, err := identityAt(source, name)
-	if err != nil || !inspected.same(current) {
+	// One lstat serves both the race re-check and the timestamp below: statAt is
+	// Fstatat with AT_SYMLINK_NOFOLLOW, so it reads the LINK rather than what it
+	// points at, and it is the same call identityAt was already making here.
+	sourceStat, err := statAt(source, name)
+	if err != nil || !inspected.same(identityFromStat(sourceStat)) {
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while it was copied", sourcePath)
 	}
 	if err := unix.Symlinkat(link, int(destination.Fd()), name); err != nil {
@@ -521,6 +524,16 @@ func copySymlinkEntry(
 	confirmedIdentity, err := identityAt(destination, name)
 	if err != nil || !destinationIdentity.same(confirmedIdentity) || destinationLink != link {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while it was copied", destinationPath)
+	}
+	// The link's OWN mtime, last — after the identity and target have been
+	// confirmed, so a swapped node is refused before anything is stamped.
+	// preserveSourceModTime already passes AT_SYMLINK_NOFOLLOW, so it addresses
+	// the link rather than following it to the target, and no new mechanism is
+	// needed here (#2919).
+	if err := preserveSourceModTime(
+		int(destination.Fd()), name, statModTime(sourceStat), destinationPath, "symlink",
+	); err != nil {
+		return created, err
 	}
 	return created, nil
 }
