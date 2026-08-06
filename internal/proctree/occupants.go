@@ -93,6 +93,21 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 		if !dirContains(root, filepath.Clean(cwd)) {
 			continue
 		}
+		if isTmuxServer(pid) {
+			// The tmux SERVER is shared infrastructure, not a session's descendant:
+			// one server backs every session on the box and outlives all of them, and
+			// it inherits its cwd from whichever client first started it. If that was
+			// inside a managed worktree, matching it refuses that workspace on every
+			// retry until the entire server exits — taking every other session with
+			// it. Same permanent-failure shape as the daemon self-match, one process
+			// over.
+			//
+			// Excluding is the safe direction: at worst this misses an occupant and
+			// behaves as it did before this gate existed, where including it wedges
+			// unrelated sessions. Its children are NOT excluded — those are the panes
+			// and their descendants, which is exactly what this looks for.
+			continue
+		}
 		if seen[pid] {
 			// An ancestor already matched and TreeOf walked this whole subtree. A
 			// deep worker tree that all inherited one cwd would otherwise call
@@ -156,4 +171,19 @@ func dirContains(root, p string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// isTmuxServer reports whether pid is a tmux server, POSITIVELY — from its own
+// command line, not from anything it lacks.
+//
+// A server is `tmux` invoked without a client subcommand; an unreadable command
+// line reports false, so an unknown process is treated as an ordinary candidate
+// rather than quietly excluded.
+func isTmuxServer(pid int) bool {
+	argv := Argv(pid)
+	if len(argv) == 0 {
+		return false
+	}
+	base := filepath.Base(argv[0])
+	return base == "tmux" || strings.HasPrefix(base, "tmux:")
 }

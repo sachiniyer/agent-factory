@@ -321,8 +321,16 @@ var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, bool, erro
 // is the only handle anything has on the leftovers. Report that so the caller keeps
 // it (#1917) — the third site in this PR where a bounded call failed, someone logged
 // it, and a destructive step went ahead anyway.
+// ghostWorktreeRemovable is the eligibility predicate ghostCleanupWorktree bails
+// on, named once so the occupancy gate cannot guard a workspace that the cleanup
+// would never touch. Gating a record whose cleanup is a no-op can only retain it
+// forever (#2998 review).
+func ghostWorktreeRemovable(data *session.InstanceData) bool {
+	return data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree
+}
+
 var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
-	if data.Worktree.RepoPath == "" || data.Worktree.WorktreePath == "" || data.Worktree.ExternalWorktree {
+	if !ghostWorktreeRemovable(data) {
 		return git.CleanupSettled, nil
 	}
 	// Unknown provenance means KEEP (#1953): a nil flag predates 2026-04-17 and
@@ -439,7 +447,7 @@ func ghostCleanup(data *session.InstanceData, title string) error {
 	// the workspace this is about to delete. Empty for an external record, matching
 	// ghostCleanupWorktree's own bail — that path removes nothing, so there is no
 	// destructive action to protect and the user's own checkout must not gate it.
-	if ghostBlind && !data.Worktree.ExternalWorktree {
+	if ghostBlind && ghostWorktreeRemovable(data) {
 		if err := session.CheckWorktreeOccupants(data.Worktree.WorktreePath); err != nil {
 			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
 				title, session.ErrPaneMayBeLive, err)

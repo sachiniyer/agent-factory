@@ -163,3 +163,27 @@ func TestOccupantsOfDir_ReportsEachProcessOnce(t *testing.T) {
 		seen[o.Process.PID] = true
 	}
 }
+
+// The tmux SERVER must never be reported. One server backs every session on the
+// box and outlives all of them, inheriting its cwd from whichever client first
+// started it — so matching it refuses that workspace on every retry until the
+// whole server exits, taking unrelated sessions with it.
+//
+// Driven through the real predicate rather than a stub: identification is from
+// the process's own argv, so a stub would test the stub.
+func TestIsTmuxServer_IdentifiesPositivelyFromArgv(t *testing.T) {
+	require.False(t, isTmuxServer(os.Getpid()),
+		"the test binary is not a tmux server and must not be excluded")
+
+	cmd := exec.Command("sleep", "300")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	require.False(t, isTmuxServer(cmd.Process.Pid),
+		"an ordinary process must stay a candidate: excluding on anything but a positive match would blind the gate")
+
+	// An unreadable/absent pid reports false rather than excluding silently.
+	require.False(t, isTmuxServer(-1))
+}
