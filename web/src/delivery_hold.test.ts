@@ -127,3 +127,29 @@ test("delivery_hold: release drops the hold without asking the daemon", () => {
   assert.equal(h.holding, false);
   assert.equal(h.tick(10_000), "none");
 });
+
+// #3025 review finding: with bracketed-paste mode on (agents enable it), xterm
+// wraps a paste as ESC[200~ … ESC[201~ and sends it as ONE chunk. That starts with
+// ESC, so a blanket ESC filter threw away a real pasted draft and took no lease,
+// leaving a delivery free to append to it and submit.
+test("delivery_hold: a bracketed paste is a draft, not a terminal report", () => {
+  const h = new MidLineHold();
+  assert.equal(h.noteInput("\x1b[200~deploy --to prod\x1b[201~", 0), "pause");
+  assert.equal(h.holding, true);
+});
+
+// And the reason the payload is not scanned for a commit: inside a bracketed paste
+// an embedded newline is LITERAL — the shell inserts it rather than executing — so
+// a pasted block ending in one still leaves the user mid-draft.
+test("delivery_hold: a bracketed paste ending in a newline still holds", () => {
+  const h = new MidLineHold();
+  assert.equal(h.noteInput("\x1b[200~line one\rline two\r\x1b[201~", 0), "pause");
+  assert.equal(h.holding, true, "an embedded CR inside a paste is text, not Enter");
+});
+
+// An empty paste is not a draft.
+test("delivery_hold: an empty bracketed paste creates no hold", () => {
+  const h = new MidLineHold();
+  assert.equal(h.noteInput("\x1b[200~\x1b[201~", 0), "none");
+  assert.equal(h.holding, false);
+});

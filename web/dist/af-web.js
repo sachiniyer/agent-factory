@@ -6951,6 +6951,8 @@ function decode(raw) {
 var COMMIT = "\r";
 var ABANDON = "";
 var ESC = "\x1B";
+var PASTE_START = "\x1B[200~";
+var PASTE_END = "\x1B[201~";
 function hasPrintable(data) {
   for (const ch of data) {
     const code = ch.codePointAt(0) ?? 0;
@@ -6994,7 +6996,18 @@ var MidLineHold = class {
    * the user is mid-line again.
    */
   noteInput(data, nowMs) {
-    if (data === "" || data.startsWith(ESC)) {
+    if (data === "") {
+      return "none";
+    }
+    if (data.startsWith(PASTE_START)) {
+      const payload = data.slice(PASTE_START.length).replace(PASTE_END, "");
+      if (!hasPrintable(payload)) {
+        return "none";
+      }
+      this.lastInputMs = nowMs;
+      return this.beginOrRenew(nowMs);
+    }
+    if (data.startsWith(ESC)) {
       return "none";
     }
     this.lastInputMs = nowMs;

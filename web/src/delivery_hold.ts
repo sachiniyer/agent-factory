@@ -73,6 +73,18 @@ const ABANDON = "\x03";
  *  direction: the cost is no hold for an alt-chord, not a spurious one. */
 const ESC = "\x1b";
 
+/** Bracketed paste. When the agent enables the mode, xterm wraps a pasted block as
+ *  ESC[200~ … ESC[201~ and sends the whole thing through onData as one chunk. That
+ *  begins with ESC, so the filter above would throw away a genuine pasted draft and
+ *  take no lease — leaving an automated delivery free to append to it and submit.
+ *
+ *  The payload is inspected instead, and treated as text rather than scanned for a
+ *  commit: inside a bracketed paste an embedded CR is LITERAL, which is the whole
+ *  point of the mode — the shell inserts it rather than executing the line. So a
+ *  pasted block that happens to end in a newline still leaves the user mid-draft. */
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+
 /** True when the chunk contains something a user would recognise as typing —
  *  a printable character. Used to START a hold, so that bare control keys on an
  *  empty prompt (a stray backspace, a tab completion on nothing) do not invent a
@@ -133,7 +145,20 @@ export class MidLineHold {
    * the user is mid-line again.
    */
   noteInput(data: string, nowMs: number): HoldAction {
-    if (data === "" || data.startsWith(ESC)) {
+    if (data === "") {
+      return "none";
+    }
+    if (data.startsWith(PASTE_START)) {
+      // A pasted draft. Held on its content alone — no commit scan, because
+      // bracketed paste makes an embedded newline literal text rather than Enter.
+      const payload = data.slice(PASTE_START.length).replace(PASTE_END, "");
+      if (!hasPrintable(payload)) {
+        return "none";
+      }
+      this.lastInputMs = nowMs;
+      return this.beginOrRenew(nowMs);
+    }
+    if (data.startsWith(ESC)) {
       return "none";
     }
     this.lastInputMs = nowMs;
