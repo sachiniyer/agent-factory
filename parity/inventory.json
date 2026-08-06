@@ -1362,6 +1362,25 @@
       },
       "verdict": "unclear",
       "notes": "#1904 added tab reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar). No TUI affordance. Same owner call as session.tab.rename. Not filed."
+    },
+    {
+      "id": "quota.usage-report",
+      "title": "Report usage-limit status per agent CLI",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/quotacmd.go:29"
+      },
+      "verdict": "real-gap",
+      "issue": "#2983",
+      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
     }
   ],
   "ledger": {
@@ -1400,6 +1419,7 @@
       "af projects delete": "project.delete",
       "af projects list": "project.list",
       "af projects rebind": "project.rebind",
+      "af quota": "quota.usage-report",
       "af reset": "install.reset",
       "af sessions archive": "session.archive",
       "af sessions attach": "session.attach",
@@ -1577,13 +1597,13 @@
       "af completion zsh --help": "cli.shell-completion",
       "af completion zsh --no-descriptions": "cli.shell-completion",
       "af config --help": "meta.discovery",
-      "af config get --help": "meta.discovery",
       "af config get --explain": "config.explain",
+      "af config get --help": "meta.discovery",
       "af config get --json": "cli.json-envelope",
       "af config get --project": "config.read-project",
       "af config get --repo": "config.read-project",
-      "af config list --help": "meta.discovery",
       "af config list --explain": "config.explain",
+      "af config list --help": "meta.discovery",
       "af config list --json": "cli.json-envelope",
       "af config list --project": "config.read-project",
       "af config list --repo": "config.read-project",
@@ -1621,6 +1641,7 @@
       "af projects delete --help": "meta.discovery",
       "af projects list --help": "meta.discovery",
       "af projects rebind --help": "meta.discovery",
+      "af quota --help": "meta.discovery",
       "af reset --force": "install.reset",
       "af reset --help": "meta.discovery",
       "af reset --yes": "install.reset",
@@ -1700,6 +1721,7 @@
       "af tasks add --help": "meta.discovery",
       "af tasks add --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks add --name": "task.add",
+      "af tasks add --on-complete": "task.on-complete",
       "af tasks add --program": "task.add",
       "af tasks add --prompt": "task.add",
       "af tasks add --target-session": "task.add",
@@ -1715,6 +1737,7 @@
       "af tasks update --help": "meta.discovery",
       "af tasks update --max-concurrent-runs": "task.max-concurrent-runs",
       "af tasks update --name": "task.edit",
+      "af tasks update --on-complete": "task.on-complete",
       "af tasks update --program": "task.edit",
       "af tasks update --project-path": "task.edit.project-path",
       "af tasks update --prompt": "task.edit",
@@ -1729,9 +1752,7 @@
       "af upgrade --help": "meta.discovery",
       "af upgrade --ignore-active-upgrade": "install.upgrade",
       "af upgrade --no-restart": "install.upgrade",
-      "af version --help": "meta.discovery",
-      "af tasks add --on-complete": "task.on-complete",
-      "af tasks update --on-complete": "task.on-complete"
+      "af version --help": "meta.discovery"
     }
   },
   "field_coverage": {
