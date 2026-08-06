@@ -37,6 +37,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af projects delete`](#af-projects-delete) — Delete a project, archiving its restorable sessions
 - [`af projects list`](#af-projects-list) — List registered projects
 - [`af projects rebind`](#af-projects-rebind) — Rebind a registered project after its checkout moves
+- [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af sessions archive`](#af-sessions-archive) — Finish with a session by archiving it for later restore
@@ -105,6 +106,7 @@ af [flags]
 - [`af doctor`](#af-doctor) — Diagnose setup, daemon health, and leaked session resources
 - [`af keys`](#af-keys) — Show the effective TUI key bindings (defaults plus [keys] rebinds)
 - [`af projects`](#af-projects) — Manage projects and durable registrations
+- [`af quota`](#af-quota) — Show usage-limit status for each agent CLI
 - [`af reset`](#af-reset) — Factory-reset Agent Factory: remove AF sessions, tasks, project registrations, worktrees, and state (keeps repos and config)
 - [`af sessions`](#af-sessions) — Manage sessions
 - [`af tasks`](#af-tasks) — Manage tasks
@@ -1131,6 +1133,35 @@ af projects rebind <project-id> <path>
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af quota
+
+Show usage-limit status for each agent CLI
+
+Show what af knows about each agent CLI's usage limits.
+
+Two different things, kept apart on purpose:
+
+  QUOTA     what the provider reports about the account's ceiling. af has no
+            quota API for any supported agent today, so every row reads
+            "not reported". That is af declining to guess, not a ceiling of zero.
+
+  OBSERVED  what af has seen in its OWN sessions — a session parked at a usage
+            wall, and the reset time recorded with it. Real signal even where the
+            provider exposes nothing.
+
+Read-only: it reads local session records and starts nothing.
+
+```
+af quota
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af reset
