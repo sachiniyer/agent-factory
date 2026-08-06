@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // Bounding the kill path (#1917).
@@ -187,6 +188,26 @@ func (s *killStage) get() string {
 		return v
 	}
 	return "starting"
+}
+
+// killWatchdogTabCount reports how many tabs this kill may have to tear down,
+// taken from whichever record actually exists.
+//
+// It must not dereference the instance. A title-based kill can resolve a persisted
+// session that could NOT be reconstructed — resolveActionSession deliberately
+// returns a nil instance with non-nil data, and the ghost branch later cleans the
+// record up — so reading the count off the instance would panic the daemon on
+// exactly the path that exists to tidy up after a session that no longer runs.
+// Zero is the honest answer when neither record survives: the delay floor still
+// applies, so the watchdog is never armed shorter than it used to be.
+func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData) int {
+	if instance != nil {
+		return instance.TabCount()
+	}
+	if data != nil {
+		return len(data.Tabs)
+	}
+	return 0
 }
 
 // watchKill arms a watchdog that reports the in-flight stage — and, by default,

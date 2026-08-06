@@ -1,0 +1,38 @@
+package daemon
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// TestKillWatchdogTabCount_SurvivesAGhostInstance pins the nil case, which is a
+// real path rather than defensive coding: a title-based kill can resolve a
+// persisted session that could not be reconstructed, and resolveActionSession
+// deliberately returns a nil instance with non-nil data so the ghost branch can
+// clean the record up. Reading the tab count off the instance there would panic the
+// daemon on the very path that exists to tidy up after a dead session.
+func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
+	require.NotPanics(t, func() {
+		require.Equal(t, 0, killWatchdogTabCount(nil, nil),
+			"neither record survives — zero, and the delay floor still applies")
+	})
+	require.NotPanics(t, func() {
+		data := &session.InstanceData{Tabs: []session.TabData{{Name: "agent"}, {Name: "shell-2"}}}
+		require.Equal(t, 2, killWatchdogTabCount(nil, data),
+			"a ghost still names its tabs in the persisted record")
+	})
+}
+
+// The delay must never drop below the value it had when tabs were capped at 9, so
+// no session that was legal before this change gets a shorter watchdog than it used
+// to have — and it must actually grow past that for a roster the old cap forbade.
+func TestKillWatchdogDelayFor_FloorsAtTheOldValueAndGrowsBeyondIt(t *testing.T) {
+	require.Equal(t, killWatchdogFloor, killWatchdogDelayFor(0))
+	require.Equal(t, killWatchdogFloor, killWatchdogDelayFor(9),
+		"the old cap must behave exactly as it did")
+	require.Greater(t, killWatchdogDelayFor(40), killWatchdogFloor,
+		"a roster the old cap forbade needs more than the flat budget, or the watchdog cries wolf")
+}
