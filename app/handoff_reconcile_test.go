@@ -19,9 +19,15 @@ func TestReconcileSnapshotOp_AdoptsAndSettlesHandoffFence(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
 
-	require.True(t, reconcileSnapshotOp(inst, session.OpReplacing, session.LiveRunning))
-	require.Equal(t, session.OpReplacing, inst.GetInFlightOp())
+	m := &home{adoptedSnapshotOps: adoptedOps{}}
 
-	require.True(t, reconcileSnapshotOp(inst, session.OpNone, session.LiveRunning))
+	require.True(t, m.reconcileSnapshotOp(inst, session.OpReplacing, session.LiveRunning))
+	require.Equal(t, session.OpReplacing, inst.GetInFlightOp())
+	require.True(t, m.adoptedSnapshotOps.owns(inst),
+		"an op mirrored from the daemon snapshot must be recorded as adopted (#3005)")
+
+	require.True(t, m.reconcileSnapshotOp(inst, session.OpNone, session.LiveRunning))
 	require.Equal(t, session.OpNone, inst.GetInFlightOp())
+	require.False(t, m.adoptedSnapshotOps.owns(inst),
+		"releasing the fence must release its provenance with it")
 }
