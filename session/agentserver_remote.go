@@ -255,7 +255,7 @@ func (s *remoteAgentServer) Kill() error {
 func (s *remoteAgentServer) Archive() (string, error) {
 	var resp agentArchiveResp
 	// Its own budget, not the shared control one: this call pushes a branch.
-	if err := s.rc.callWithin("/v1/agent/archive", struct{}{}, &resp, agentArchiveCallTimeout); err != nil {
+	if err := s.rc.callWithin("/v1/agent/archive", struct{}{}, &resp, AgentArchiveCallTimeout); err != nil {
 		return "", err
 	}
 	return resp.Branch, nil
@@ -573,7 +573,9 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 // perfectly healthy push was reported as a failure, and recovery refuses on a
 // failed push — so a slow sandbox became repeatedly unrestorable while its push
 // was still progressing server-side (Codex on #2923).
-const agentArchiveCallTimeout = 3 * time.Minute
+// Exported so the daemon's own pre-reap bound can be ordered ABOVE it: a caller
+// that gave up first would leave the in-sandbox git work running unbounded.
+const AgentArchiveCallTimeout = 3 * time.Minute
 
 func (c *remoteAgentClient) call(path string, req, resp any) error {
 	return c.callWithin(path, req, resp, remoteAgentCallTimeout)

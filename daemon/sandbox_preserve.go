@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -14,12 +15,20 @@ import (
 // health check, but it is BOUNDED for the same reason: recovery runs on the
 // daemon poll, and a wedged sandbox must not stall it. A push that does not
 // finish in time is treated exactly like one that failed — nothing is reaped.
-// It is deliberately below the transport's own ceiling rather than above it:
-// remoteAgentClient.call bounds every control round-trip at remoteAgentCallTimeout,
-// so a budget larger than that would advertise time the client never gives. The
-// push route is granted its own, longer client budget (agentArchiveCallTimeout)
-// precisely so a legitimate 30-60s snapshot+push is not reported as a failure.
-const sandboxPushTimeout = 2 * time.Minute
+// sandboxPushTimeout bounds the CALLER's wait on the pre-reap push.
+//
+// It must EXCEED the transport's own budget (session.AgentArchiveCallTimeout), and
+// that ordering is the whole point rather than a margin. The in-sandbox archive
+// handler takes no context, so a client that gives up does not stop the git work
+// it started — the sandbox keeps staging, committing and pushing. If this bound
+// fired first, the daemon would release the session's op lock while that work ran
+// on, and the retry loop would start a SECOND archive against the same worktree:
+// index-lock failures and two committers on one tree (Codex on #2923).
+//
+// Ordered the other way, the client's own deadline is what ends the attempt, so
+// by the time this returns the call has provably stopped trying. Recovery stays
+// bounded either way, which is what the poll needs.
+const sandboxPushTimeout = session.AgentArchiveCallTimeout + 30*time.Second
 
 // forceReapCommandFor renders the per-session escape hatch the refusals below
 // must name. A guard that blocks without naming its own release is #2917, so
@@ -161,6 +170,56 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 // already happened, and refusing would only make a recoverable session
 // unrecoverable for no gain. That arm is the one verdict the design licenses
 // unconditionally.
+// requireDurableSandboxBranch is requireKnownSandboxBranch plus the durability
+// half: the branch must be on DISK, not merely in memory.
+//
+// In-memory is not enough because a partial archive can populate it without ever
+// recording it — ArchiveSandbox sets the branch the instant its push lands, and
+// the caller persists that outcome best-effort when the teardown then fails. If
+// that write was lost, an in-memory check passes, the sandbox is destroyed, and a
+// crash before the post-recovery settlement leaves a branchless record: the next
+// recovery clones the default branch and strands the very work the archive pushed
+// (Codex on #2923).
+//
+// So an authorization to DESTROY reads the durable record. Anything less trusts
+// state that the destruction itself is about to make unrecoverable.
+func requireDurableSandboxBranch(repoID string, instance *session.Instance) error {
+	if err := requireKnownSandboxBranch(instance); err != nil {
+		return err
+	}
+	rec, err := findPersistedInstance(repoID, instance.Title)
+	if err != nil {
+		return fmt.Errorf(
+			"cannot replace the sandbox for %q: af could not read its stored record to confirm the "+
+				"branch is durable, and replacing it on a branch that exists only in memory risks "+
+				"stranding the work already pushed there: %w",
+			instance.Title, err)
+	}
+	if rec == nil || strings.TrimSpace(rec.Branch) == "" {
+		return fmt.Errorf(
+			"cannot replace the sandbox for %q: its branch %q is known only in memory — the write that "+
+				"would have recorded it did not land — so a crash after the replacement would leave nothing "+
+				"pointing at the pushed work. Retry once the record is writable; if its work is expendable, "+
+				"remove it and create a replacement: %s",
+			instance.Title, instance.GetBranch(), killSuggestionFor(instance))
+	}
+	return nil
+}
+
+// findPersistedInstance reads one session's record off disk.
+func findPersistedInstance(repoID, title string) (*session.InstanceData, error) {
+	data, err := loadRepoInstanceData(repoID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range data {
+		if data[i].Title == title {
+			return &data[i], nil
+		}
+	}
+	return nil, nil
+}
+
 func requireKnownSandboxBranch(instance *session.Instance) error {
 	if instance.GetBranch() != "" {
 		return nil

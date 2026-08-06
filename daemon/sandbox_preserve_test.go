@@ -227,3 +227,49 @@ func TestRestoreSession_ForceReapStillRefusesWhenTheBranchIsUnknown(t *testing.T
 		t.Fatalf("a refusal that force cannot release must name the alternative that ends it, got: %v", err)
 	}
 }
+
+// The pre-reap bound must sit ABOVE the transport's, not below it.
+//
+// The in-sandbox archive handler takes no context, so a client that gives up does
+// not stop the git work it started. If the daemon's wait expired first it would
+// release the session's op lock while that push was still staging and committing,
+// and the retry loop would start a SECOND archive against the same worktree.
+// Ordering them the other way makes the client's own deadline end the attempt, so
+// a return here proves the call has stopped trying.
+func TestSandboxPushTimeoutOutlastsTheTransportBudget(t *testing.T) {
+	if sandboxPushTimeout <= session.AgentArchiveCallTimeout {
+		t.Fatalf("sandboxPushTimeout (%s) must exceed the transport budget (%s): a caller that gives up "+
+			"first leaves the in-sandbox git work running unbounded, and the retry starts a second "+
+			"archive against the same worktree",
+			sandboxPushTimeout, session.AgentArchiveCallTimeout)
+	}
+}
+
+// A forced reap may not be authorized by a branch that exists only in memory.
+// A partial archive populates it without recording it (the push landed, the
+// teardown failed, the write was best-effort), and destroying the sandbox on that
+// basis means a crash before the settlement leaves nothing pointing at the pushed
+// work.
+func TestRestoreSession_ForceReapRefusesABranchThatIsNotOnDisk(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.unreachable.Store(true)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "volatile", srv.url, session.Lost)
+	// In memory only — exactly what a partial archive whose persist failed leaves.
+	manager.instances[daemonInstanceKey(repoID, "volatile")].SetSandboxBranch("af/only-in-memory")
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: "volatile", RepoID: repoID, ForceReap: true,
+	})
+
+	if err == nil {
+		t.Fatal("forced a reap on a branch that was never written to disk: a crash after the " +
+			"replacement leaves the record branchless and the pushed work stranded")
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("recover calls = %d, want 0", got)
+	}
+	if !strings.Contains(err.Error(), "only in memory") {
+		t.Fatalf("the refusal must say WHY it refused, got: %v", err)
+	}
+}

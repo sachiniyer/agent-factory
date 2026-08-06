@@ -437,7 +437,23 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// prompt below is all it needs.
 	case probeUnknown:
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
-	case probeAbsent, probeAnsweredDead:
+	case probeAnsweredDead:
+		// It ANSWERED: the agent is gone, the sandbox is not. For a REMOTE session
+		// Respawn is recoverSandbox → reprovisionRemote, which tears the sandbox down
+		// and re-clones from origin — so this is the same destructive replacement the
+		// restore paths guard, reached through a third door (#2923). Push and durably
+		// record the branch first, and refuse rather than re-spawn if that cannot be
+		// done. A local session has no sandbox to preserve and falls through.
+		if isRemoteWorkspace(instance) {
+			if err := m.preserveSandboxBeforeReap(repoID, key, instance); err != nil {
+				return resumeNotPerformed, err
+			}
+			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
+				return resumeNotPerformed, err
+			}
+		}
+		fallthrough
+	case probeAbsent:
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
 		// LimitResetAt reports (zero, false) once that has happened. Re-applying the

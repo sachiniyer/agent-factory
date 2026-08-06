@@ -144,7 +144,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// broken path, so a replacement still must not land on the default branch and
 		// strand work it had already PUSHED — which is not what the flag offered to
 		// discard. Unlike probeAbsent below, "gone" was never established here.
-		if err := requireKnownSandboxBranch(instance); err != nil {
+		if err := requireDurableSandboxBranch(repoID, instance); err != nil {
 			return "", err
 		}
 		log.WarningLog.Printf("restore of %q: --force-reap given past an indeterminate probe; af could not reach the sandbox to push it, so anything it holds unpushed is discarded", title)
@@ -170,7 +170,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			//
 			// The branch therefore has to be known already, and the guard below is what
 			// makes that a refusal rather than a default-branch clone.
-			if err := requireKnownSandboxBranch(instance); err != nil {
+			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
 				return "", err
 			}
 			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
