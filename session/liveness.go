@@ -340,11 +340,6 @@ func (i *Instance) GetLiveness() Liveness {
 	return i.liveness
 }
 
-// SetLiveness is retired (#1195 Phase 2e): the liveness axis is now written only
-// through the Transition chokepoint's ObserveLiveness edge (the daemon-truth
-// edge — sets liveness, preserves the in-flight op, never rejects), so there is
-// no direct liveness setter left to bypass it.
-
 // GetInFlightOp returns the client/executor op axis under the instance mutex.
 func (i *Instance) GetInFlightOp() InFlightOp {
 	i.mu.RLock()
@@ -466,11 +461,6 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 	i.inFlightOp = op
 	i.noteStateChangeLocked(lv, prevOp, resetAt)
 }
-
-// MarkLive is retired (#1195 Phase 2e): marking a completed create/recover live
-// is now the Transition chokepoint's ConfirmLive edge (Running + clear the
-// completing create/restore op, while yielding to an in-flight kill/archive
-// teardown). No direct "mark live" setter remains to bypass it.
 
 // tabSpawnBlockedLocked reports the error, if any, forbidding a new tab spawn.
 // Caller holds i.mu. It reads the two axes directly (the #1195 structural fold of
