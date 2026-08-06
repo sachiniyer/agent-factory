@@ -1491,17 +1491,23 @@ export class AttachTerminal {
    *  flush would be wrong twice over — it would re-note input already noted, and
    *  it would take a lease on the daemon in response to our own replay. */
   private noteMidLine(text: string): void {
+    if (!this.cb.onDeliveryHold) {
+      return; // this pane's owner takes no lease; do not even track
+    }
     this.dispatchHold(this.midLine.noteInput(text, Date.now()));
   }
 
-  /** Applies a hold verdict: runs the renew timer while a line is uncommitted and
-   *  stops it once it is not, then hands the action to the owner that knows which
-   *  session to address. */
+  /** Applies a hold verdict: keeps the renew timer running while a line is
+   *  uncommitted, and hands each pause to the owner that knows which session to
+   *  address.
+   *
+   *  There is no release verb. The lease is a single per-session expiry with no
+   *  owner (daemon/manager_status.go), so resuming from here would revoke an
+   *  attached TUI's claim, or another window's, and re-open the window #1638
+   *  closed. Ceasing to renew costs at most one lease of extra hold and cannot
+   *  revoke anyone else's protection — see delivery_hold.ts. */
   private dispatchHold(action: HoldAction): void {
-    if (action === "none") {
-      return;
-    }
-    if (action === "resume") {
+    if (!this.midLine.holding) {
       this.stopMidLineTimer();
     } else if (this.midLineTimer === null) {
       // A renew cadence, not a hold duration: the bound on how long a delivery can
@@ -1512,7 +1518,9 @@ export class AttachTerminal {
         this.dispatchHold(this.midLine.tick(Date.now()));
       }, 500);
     }
-    this.cb.onDeliveryHold?.(action);
+    if (action === "pause") {
+      this.cb.onDeliveryHold?.(action);
+    }
   }
 
   private stopMidLineTimer(): void {
@@ -1522,15 +1530,12 @@ export class AttachTerminal {
     }
   }
 
-  /** Drops any lease this terminal is holding, for a teardown that makes the
-   *  question moot. Silence here would leave the daemon's poll paused on a pane
-   *  that no longer exists until the lease expired — recoverable, since the lease
-   *  is server-bounded, but a needless blind window. */
+  /** Drops this terminal's hold for a teardown that makes the question moot.
+   *  Deliberately sends nothing: the lease is left to expire rather than cleared,
+   *  because this browser may not be its only holder. */
   private releaseMidLine(): void {
     this.stopMidLineTimer();
-    if (this.midLine.release()) {
-      this.cb.onDeliveryHold?.("resume");
-    }
+    this.midLine.release();
   }
 
   /** Copies text to the system clipboard, never silently. localhost is a secure

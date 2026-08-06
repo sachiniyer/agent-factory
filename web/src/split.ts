@@ -48,7 +48,7 @@ import {
   tabsRebound,
   validate,
 } from "./layout.js";
-import { fetchPreviewOrigin, pauseStatusPoll, probeWebTab, resumeStatusPoll } from "./api.js";
+import { fetchPreviewOrigin, pauseStatusPoll, probeWebTab } from "./api.js";
 import type { HoldAction } from "./delivery_hold.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
@@ -805,7 +805,12 @@ export class SplitView {
           {
             onStatus: (s) => this.onPaneStatus(leaf.id, s),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
-            onDeliveryHold: (action) => this.holdDeliveries(action),
+            // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
+            // the session through its agent server, so a half-typed command in an
+            // auxiliary shell has nothing to collide with — and pausing the
+            // session-wide lease for it would defer a delivery aimed at a different
+            // PTY, postponing a cron run to its next tick for no reason.
+            ...(leaf.tab === 0 ? { onDeliveryHold: (action: HoldAction) => this.holdDeliveries(action) } : {}),
           },
         );
       } else if (moved) {
@@ -1621,7 +1626,7 @@ export class SplitView {
   }
 
   /** Asks the daemon to hold automated deliveries while this session's user has a
-   *  partially typed line, and to stop holding once they do not (#3024).
+   *  partially typed line in the agent tab (#3024).
    *
    *  The verdict comes from the terminal (it is the only thing that sees the
    *  keystrokes) and the session identity from here (the terminal has none), but
@@ -1630,20 +1635,26 @@ export class SplitView {
    *  the attached TUI takes is what makes the two surfaces behave alike — one
    *  implementation, nothing to drift.
    *
+   *  TAKING ONLY. The lease is one expiry per session with no record of who holds
+   *  it, so a resume from here would clear an attached TUI's claim, or another
+   *  window's, and re-open the window #1638 closed until that holder's next
+   *  heartbeat. Letting it lapse costs at most one lease of extra hold and revokes
+   *  nobody. It also makes these requests idempotent and order-free — a pause only
+   *  pushes the expiry out — so two arriving out of order do what either would.
+   *
    *  Best-effort by the same contract the TUI's heartbeat states: a failed RPC is
    *  swallowed, and the worst case is that a delivery lands mid-line as it does
-   *  today. Reporting it would be noise about a degraded nicety, mid-keystroke.
-   *
-   *  A pane with no session id cannot address the lease and simply does not take
-   *  one — the honest no-op, matching how the daemon keys the lease by identity. */
+   *  today. Reporting it would be noise about a degraded nicety, mid-keystroke. */
   private holdDeliveries(action: HoldAction): void {
+    if (action !== "pause") {
+      return;
+    }
     const sessionID = this.sessionId;
     const token = this.token;
     if (!sessionID || token === null) {
       return;
     }
-    const rpc = action === "resume" ? resumeStatusPoll : pauseStatusPoll;
-    void rpc(sessionID, token).catch(() => {});
+    void pauseStatusPoll(sessionID, token).catch(() => {});
   }
 
   private onPaneStatus(leafId: string, status: TerminalStatus): void {

@@ -6284,9 +6284,6 @@ async function createSession(input, token2) {
 async function pauseStatusPoll(id, token2) {
   await af("PauseStatusPoll", { id, title: "", repo_id: "" }, token2);
 }
-async function resumeStatusPoll(id, token2) {
-  await af("ResumeStatusPoll", { id, title: "", repo_id: "" }, token2);
-}
 async function killSession(id, title, token2) {
   await af("KillSession", { id, title, repo_id: "" }, token2);
 }
@@ -6951,19 +6948,29 @@ function decode(raw) {
 }
 
 // src/delivery_hold.ts
-var COMMIT_BYTES = /* @__PURE__ */ new Set(["\r", "\n"]);
-var ABANDON_BYTES = /* @__PURE__ */ new Set(["", "", ""]);
+var COMMIT = "\r";
+var ABANDON = "";
+var ESC = "\x1B";
+function hasPrintable(data) {
+  for (const ch of data) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code >= 32 && code !== 127) {
+      return true;
+    }
+  }
+  return false;
+}
 var MidLineHold = class {
   /**
-   * @param renewIntervalMs how often to renew while the line stays uncommitted.
-   *   Must be comfortably below the daemon's statusPollLease; the TUI uses 1s
-   *   against a 3s lease "leaving two missed renews of slack" and this matches
-   *   deliberately. Getting it wrong is not a correctness bug on either side — a
-   *   lapsed lease just delivers, as today.
-   * @param idleReleaseMs how long a line may sit untouched before the hold is
-   *   released anyway. This is the answer to "do not hold indefinitely": a user
-   *   who walks away mid-line stops renewing, and the queued delivery lands
-   *   within this plus the daemon's own lease. Stated rather than implicit.
+   * @param renewIntervalMs how often to re-send the pause while the line stays
+   *   uncommitted. Must be comfortably below the daemon's statusPollLease; the TUI
+   *   uses 1s against a 3s lease "leaving two missed renews of slack" and this
+   *   matches deliberately. Getting it wrong is not a correctness bug on either
+   *   side — a lapsed lease just delivers, as today.
+   * @param idleReleaseMs how long a line may sit untouched before the hold ends
+   *   anyway. This is the answer to "do not hold indefinitely": a user who walks
+   *   away mid-line stops being renewed for, and the queued delivery lands within
+   *   this plus one daemon lease. Stated rather than implicit.
    */
   constructor(renewIntervalMs = 1e3, idleReleaseMs = 15e3) {
     this.renewIntervalMs = renewIntervalMs;
@@ -6971,55 +6978,43 @@ var MidLineHold = class {
   }
   uncommitted = false;
   lastInputMs = 0;
-  lastRenewMs = 0;
+  lastPauseMs = 0;
   /** True while the user is considered to have a partially typed line. */
   get holding() {
     return this.uncommitted;
   }
   /**
-   * Records one chunk of user input and returns what to do with the lease.
+   * Records one chunk of terminal input and returns whether to pause.
    *
-   * Input arrives from xterm's onData as arbitrary chunks, not keystrokes: a
-   * paste is ONE chunk that may contain a newline in the middle. Such a chunk
-   * both commits the text before the newline and leaves a partial line after it,
-   * so the answer is decided by the LAST commit/abandon byte in the chunk, not by
-   * whether one appears anywhere in it. Reading it as "contains a newline →
-   * committed" would release the hold while the user is mid-line again.
+   * Input arrives from xterm as arbitrary chunks, not keystrokes: a paste is ONE
+   * chunk that may contain newlines in the middle. Such a chunk both commits the
+   * text before the last newline and leaves a partial line after it, so the answer
+   * is decided by what FOLLOWS the last commit byte, not by whether one appears
+   * anywhere. Reading it as "contains Enter → committed" would drop the hold while
+   * the user is mid-line again.
    */
   noteInput(data, nowMs) {
-    if (data === "") {
+    if (data === "" || data.startsWith(ESC)) {
       return "none";
     }
     this.lastInputMs = nowMs;
-    let ends = null;
-    for (const ch of data) {
-      if (COMMIT_BYTES.has(ch) || ABANDON_BYTES.has(ch)) {
-        ends = true;
-      } else {
-        ends = false;
-      }
-    }
-    if (ends === true) {
-      if (!this.uncommitted) {
+    const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
+    if (lastCommit >= 0) {
+      const tail = data.slice(lastCommit + 1);
+      if (!hasPrintable(tail)) {
+        this.uncommitted = false;
         return "none";
       }
-      this.uncommitted = false;
-      return "resume";
+      return this.beginOrRenew(nowMs);
     }
-    if (!this.uncommitted) {
-      this.uncommitted = true;
-      this.lastRenewMs = nowMs;
-      return "pause";
+    if (!this.uncommitted && !hasPrintable(data)) {
+      return "none";
     }
-    if (nowMs - this.lastRenewMs >= this.renewIntervalMs) {
-      this.lastRenewMs = nowMs;
-      return "renew";
-    }
-    return "none";
+    return this.beginOrRenew(nowMs);
   }
   /**
-   * Called on a timer while holding. Renews the lease, or releases it once the
-   * line has sat untouched for idleReleaseMs.
+   * Called on a timer while holding. Re-pauses to extend the lease, or lets the
+   * hold end once the line has sat untouched for idleReleaseMs.
    *
    * The renew exists because a user composing slowly can pause longer than the
    * daemon's lease between keystrokes; without it their line would stop being
@@ -7031,24 +7026,32 @@ var MidLineHold = class {
     }
     if (nowMs - this.lastInputMs >= this.idleReleaseMs) {
       this.uncommitted = false;
-      return "resume";
+      return "none";
     }
-    if (nowMs - this.lastRenewMs >= this.renewIntervalMs) {
-      this.lastRenewMs = nowMs;
-      return "renew";
+    if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
+      this.lastPauseMs = nowMs;
+      return "pause";
     }
     return "none";
   }
-  /**
-   * Drops the hold without asking, for a teardown that makes the question moot —
-   * the pane closing, the session changing, the socket going away for good.
-   * Returns whether a lease was actually held, so a caller only sends the resume
-   * RPC when there is something to resume.
-   */
+  /** Drops the hold for a teardown that makes the question moot — the pane
+   *  closing, the session changing. Nothing is sent to the daemon: the lease is
+   *  left to expire, because clearing it here would revoke a claim this browser
+   *  may not be the only holder of. */
   release() {
-    const held = this.uncommitted;
     this.uncommitted = false;
-    return held;
+  }
+  beginOrRenew(nowMs) {
+    if (!this.uncommitted) {
+      this.uncommitted = true;
+      this.lastPauseMs = nowMs;
+      return "pause";
+    }
+    if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
+      this.lastPauseMs = nowMs;
+      return "pause";
+    }
+    return "none";
   }
 };
 
@@ -8422,23 +8425,31 @@ var AttachTerminal = class {
    *  flush would be wrong twice over — it would re-note input already noted, and
    *  it would take a lease on the daemon in response to our own replay. */
   noteMidLine(text) {
-    this.dispatchHold(this.midLine.noteInput(text, Date.now()));
-  }
-  /** Applies a hold verdict: runs the renew timer while a line is uncommitted and
-   *  stops it once it is not, then hands the action to the owner that knows which
-   *  session to address. */
-  dispatchHold(action) {
-    if (action === "none") {
+    if (!this.cb.onDeliveryHold) {
       return;
     }
-    if (action === "resume") {
+    this.dispatchHold(this.midLine.noteInput(text, Date.now()));
+  }
+  /** Applies a hold verdict: keeps the renew timer running while a line is
+   *  uncommitted, and hands each pause to the owner that knows which session to
+   *  address.
+   *
+   *  There is no release verb. The lease is a single per-session expiry with no
+   *  owner (daemon/manager_status.go), so resuming from here would revoke an
+   *  attached TUI's claim, or another window's, and re-open the window #1638
+   *  closed. Ceasing to renew costs at most one lease of extra hold and cannot
+   *  revoke anyone else's protection — see delivery_hold.ts. */
+  dispatchHold(action) {
+    if (!this.midLine.holding) {
       this.stopMidLineTimer();
     } else if (this.midLineTimer === null) {
       this.midLineTimer = window.setInterval(() => {
         this.dispatchHold(this.midLine.tick(Date.now()));
       }, 500);
     }
-    this.cb.onDeliveryHold?.(action);
+    if (action === "pause") {
+      this.cb.onDeliveryHold?.(action);
+    }
   }
   stopMidLineTimer() {
     if (this.midLineTimer !== null) {
@@ -8446,15 +8457,12 @@ var AttachTerminal = class {
       this.midLineTimer = null;
     }
   }
-  /** Drops any lease this terminal is holding, for a teardown that makes the
-   *  question moot. Silence here would leave the daemon's poll paused on a pane
-   *  that no longer exists until the lease expired — recoverable, since the lease
-   *  is server-bounded, but a needless blind window. */
+  /** Drops this terminal's hold for a teardown that makes the question moot.
+   *  Deliberately sends nothing: the lease is left to expire rather than cleared,
+   *  because this browser may not be its only holder. */
   releaseMidLine() {
     this.stopMidLineTimer();
-    if (this.midLine.release()) {
-      this.cb.onDeliveryHold?.("resume");
-    }
+    this.midLine.release();
   }
   /** Copies text to the system clipboard, never silently. localhost is a secure
    *  context, so navigator.clipboard.writeText works; but if it is missing (a
@@ -11065,7 +11073,12 @@ var SplitView = class {
           {
             onStatus: (s) => this.onPaneStatus(leaf.id, s),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
-            onDeliveryHold: (action) => this.holdDeliveries(action)
+            // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
+            // the session through its agent server, so a half-typed command in an
+            // auxiliary shell has nothing to collide with — and pausing the
+            // session-wide lease for it would defer a delivery aimed at a different
+            // PTY, postponing a cron run to its next tick for no reason.
+            ...leaf.tab === 0 ? { onDeliveryHold: (action) => this.holdDeliveries(action) } : {}
           }
         );
       } else if (moved) {
@@ -11543,7 +11556,7 @@ var SplitView = class {
     }
   }
   /** Asks the daemon to hold automated deliveries while this session's user has a
-   *  partially typed line, and to stop holding once they do not (#3024).
+   *  partially typed line in the agent tab (#3024).
    *
    *  The verdict comes from the terminal (it is the only thing that sees the
    *  keystrokes) and the session identity from here (the terminal has none), but
@@ -11552,20 +11565,26 @@ var SplitView = class {
    *  the attached TUI takes is what makes the two surfaces behave alike — one
    *  implementation, nothing to drift.
    *
+   *  TAKING ONLY. The lease is one expiry per session with no record of who holds
+   *  it, so a resume from here would clear an attached TUI's claim, or another
+   *  window's, and re-open the window #1638 closed until that holder's next
+   *  heartbeat. Letting it lapse costs at most one lease of extra hold and revokes
+   *  nobody. It also makes these requests idempotent and order-free — a pause only
+   *  pushes the expiry out — so two arriving out of order do what either would.
+   *
    *  Best-effort by the same contract the TUI's heartbeat states: a failed RPC is
    *  swallowed, and the worst case is that a delivery lands mid-line as it does
-   *  today. Reporting it would be noise about a degraded nicety, mid-keystroke.
-   *
-   *  A pane with no session id cannot address the lease and simply does not take
-   *  one — the honest no-op, matching how the daemon keys the lease by identity. */
+   *  today. Reporting it would be noise about a degraded nicety, mid-keystroke. */
   holdDeliveries(action) {
+    if (action !== "pause") {
+      return;
+    }
     const sessionID = this.sessionId;
     const token2 = this.token;
     if (!sessionID || token2 === null) {
       return;
     }
-    const rpc = action === "resume" ? resumeStatusPoll : pauseStatusPoll;
-    void rpc(sessionID, token2).catch(() => {
+    void pauseStatusPoll(sessionID, token2).catch(() => {
     });
   }
   onPaneStatus(leafId, status) {

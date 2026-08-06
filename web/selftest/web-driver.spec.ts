@@ -2091,65 +2091,55 @@ test("#2811: type-ahead survives a socket that is not open — held, then delive
   }
 });
 
-test("#3024: a partially typed line holds automated deliveries, and committing it releases them", REAL_FIXTURE, async ({
-  browser,
-}) => {
+test("#3024: a partially typed line takes the daemon's delivery-hold lease", REAL_FIXTURE, async ({ browser }) => {
   // The HOLD ITSELF is the daemon's and is already pinned there:
   // TestDeliverPrompt_DefersWhileTargetAttached asserts that an automated delivery
   // returns StatusDeferredAttached and pastes NOTHING while the status-poll pause
-  // lease is held, and lands on release. That test takes the lease by calling
+  // lease is held, and lands on release. It takes the lease by calling
   // manager.PauseStatusPoll directly rather than by attaching a TUI, so it pins the
   // rule for ANY lease holder — which is why the web gets the behaviour by taking
   // the same lease instead of reimplementing the policy.
   //
-  // What is unproven by that test, and is this change's own contribution, is the
-  // wiring: does the browser actually take the lease when the user is mid-line, and
-  // give it back when they commit? That is what this asserts, by observing the two
-  // RPCs rather than by trying to race a real delivery — a test that has to schedule
-  // an automated delivery to observe a hold would be timing-dependent about the very
-  // thing it is checking.
+  // What that test cannot cover, and this change owns, is the wiring: does the
+  // browser take the lease when the user is mid-line, and stop when they commit?
+  // Observed through the RPC rather than by racing a real delivery, which would be
+  // timing-dependent about the very thing under test.
+  //
+  // Note there is no resume to assert: releasing is "stop renewing", because the
+  // lease has one holder slot and clearing it would revoke an attached TUI's claim.
   const ctx = await browser.newContext();
   const p = await ctx.newPage();
-  const calls: string[] = [];
+  let pauses = 0;
 
   try {
-    for (const verb of ["PauseStatusPoll", "ResumeStatusPoll"]) {
-      await p.route(`**/v1/${verb}`, async (route) => {
-        calls.push(verb);
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
-      });
-    }
+    await p.route("**/v1/PauseStatusPoll", async (route) => {
+      pauses += 1;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
+    });
 
     await openTokenless(p);
     await row(p, SESSION_B).click();
     await resetToAgentTab(p);
-    const host = await typeableShellTab(p);
-    calls.length = 0; // ignore anything the setup's own typing produced
+    const host = p.locator(".af-term-host .af-pane").first();
+    await host.click();
+    pauses = 0;
 
-    // Mid-line: typed, not committed. The lease must be taken.
-    await p.keyboard.type("echo partial-line");
+    // Mid-line on the AGENT tab: the lease must be taken.
+    await p.keyboard.type("partial-line-3024");
     await expect
-      .poll(() => calls.filter((c) => c === "PauseStatusPoll").length, {
-        message: "a partially typed line must take the daemon's pause lease, so an automated delivery is held",
+      .poll(() => pauses, {
+        message: "a partially typed agent line must take the daemon's pause lease, so a delivery is held",
       })
       .toBeGreaterThan(0);
-    expect(calls.includes("ResumeStatusPoll"), "nothing is committed yet, so the lease must still be held").toBe(false);
 
-    // Committing it hands the lease back, so a held delivery lands promptly rather
-    // than waiting out the daemon's lease.
+    // Committing stops the renewals, so the lease lapses and a held delivery lands.
+    const afterTyping = pauses;
     await p.keyboard.press("Enter");
-    await expect
-      .poll(() => calls.filter((c) => c === "ResumeStatusPoll").length, {
-        message: "committing the line must release the lease so a held delivery can land",
-      })
-      .toBeGreaterThan(0);
-
-    // The user's own line is untouched by any of this — the whole point is that
-    // holding the delivery costs the user nothing.
-    await expect(host).toContainText("partial-line");
+    await p.waitForTimeout(2_000);
+    expect(pauses, "committing the line must stop renewing the lease").toBe(afterTyping);
   } finally {
     try {
-      await resetToAgentTab(p);
+      await p.keyboard.press("Escape");
     } finally {
       await ctx.close();
     }

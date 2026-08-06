@@ -416,13 +416,6 @@ export async function pauseStatusPoll(id: string, token: string): Promise<void> 
   await af("PauseStatusPoll", { id, title: "", repo_id: "" }, token);
 }
 
-/** Releases the pause lease immediately, so the daemon's poll resumes on its next
- *  tick rather than waiting the lease out — and so a delivery held behind it is
- *  delivered promptly once the user commits their line. */
-export async function resumeStatusPoll(id: string, token: string): Promise<void> {
-  await af("ResumeStatusPoll", { id, title: "", repo_id: "" }, token);
-}
-
 /** Kills a session (mirrors `af sessions kill`). The session.killed event removes
  *  its row from the rail live. */
 export async function killSession(id: string, title: string, token: string): Promise<void> {
