@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 const provisionKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIProvisionedHostKey"
@@ -139,4 +141,42 @@ func TestHookProvisionAndLaunchAreMutuallyExclusive(t *testing.T) {
 	p.hooks.ProvisionCmd = "./provision.sh"
 	require.Error(t, p.hooks.Validate())
 	assert.Contains(t, p.hooks.Validate().Error(), "alternatives, not layers")
+}
+
+// Codex 3726147295: the documented config is `provision_cmd =
+// "./.agent-factory/hooks/provision.sh"`, and the daemon runs hooks with a cwd
+// unrelated to the repo. A relative value that is not resolved fails to exec.
+func TestProvisionCmdResolvesAgainstTheRepoRoot(t *testing.T) {
+	root := t.TempDir()
+	resolved := config.RemoteHooks{
+		ProvisionCmd: "./.agent-factory/hooks/provision.sh",
+		DeleteCmd:    "./.agent-factory/hooks/delete.sh",
+	}.ResolveCommandPathsForTest(root)
+
+	assert.Equal(t, filepath.Join(root, ".agent-factory/hooks/provision.sh"), resolved.ProvisionCmd,
+		"a relative provision_cmd must resolve against the repo root, like launch_cmd and delete_cmd")
+	assert.Equal(t, filepath.Join(root, ".agent-factory/hooks/delete.sh"), resolved.DeleteCmd)
+}
+
+// Codex 3726147299: the session's identity is the HOOK's. Recording it as
+// `sandbox` would persist only SandboxRuntimeCleanupData, so archive/restore
+// would route to sandboxRuntime and demand the unrelated global sandbox_ssh
+// instead of re-running provision_cmd — and a kill tombstone restored after a
+// crash would carry no delete_cmd, leaking the provisioned machine.
+func TestProvisionedSessionKeepsTheHookBackendIdentity(t *testing.T) {
+	p := newHookProvisioner(hookState{}, "identity")
+	p.hooks.DeleteCmd = "/bin/echo"
+	p.hooks.ProvisionCmd = "/bin/echo"
+
+	backend := p.provisionedBackend(func() error { return nil })
+	assert.Equal(t, "remote", backend.Type(),
+		"a provision_cmd session must persist as a hook session, or restore looks for sandbox_ssh")
+
+	provider, ok := backend.(runtimeCleanupProvider)
+	require.True(t, ok, "a provisioned session must stage a cleanup handle, or its machine leaks after a crash")
+	data := provider.runtimeCleanupData()
+	require.NotNil(t, data)
+	require.NotNil(t, data.Hook, "the tombstone must carry delete_cmd, or the machine leaks after a crash")
+	assert.Equal(t, "/bin/echo", data.Hook.DeleteCmd)
+	assert.Nil(t, data.Sandbox, "and must NOT be a sandbox handle")
 }

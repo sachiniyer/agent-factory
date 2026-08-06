@@ -132,6 +132,7 @@ func (h RemoteHooks) removedKeyInUse() string {
 // mutated.
 func (h RemoteHooks) resolveCommandPaths(repoRoot string) *RemoteHooks {
 	h.LaunchCmd = resolveHookCommandPath(repoRoot, h.LaunchCmd)
+	h.ProvisionCmd = resolveHookCommandPath(repoRoot, h.ProvisionCmd)
 	h.DeleteCmd = resolveHookCommandPath(repoRoot, h.DeleteCmd)
 	return &h
 }
@@ -261,4 +262,11 @@ func SaveRepoConfig(repoID string, cfg *RepoConfig) error {
 		return fmt.Errorf("failed to marshal repo config: %w", err)
 	}
 	return AtomicWriteFile(path, data, 0644)
+}
+
+// ResolveCommandPathsForTest exposes resolveCommandPaths to tests in other
+// packages, which need to assert that every hook command — including
+// provision_cmd — is made absolute against the repo root before exec sees it.
+func (h RemoteHooks) ResolveCommandPathsForTest(repoRoot string) *RemoteHooks {
+	return h.resolveCommandPaths(repoRoot)
 }

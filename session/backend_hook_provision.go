@@ -240,9 +240,15 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, err
 	}
-	// delete_cmd owns the machine's life, so the session's teardown must reap the
-	// SANDBOX WORKSPACE first and then the machine. Chaining them keeps a single
-	// Teardown while neither step can be skipped.
+	// delete_cmd owns the MACHINE, so the session's teardown reaps the workspace
+	// first and then destroys the host.
+	//
+	// A successful delete_cmd is CONCLUSIVE and outranks an unknown workspace
+	// reap. The workspace lives on a machine that no longer exists, so preserving
+	// ErrWorkspaceStateUnknown there would retain a row whose later reaps can only
+	// fail against a deleted host while the latched hook reap returns nil —
+	// leaving the session stuck in cleanup forever. Only a delete_cmd that did NOT
+	// confirm can leave the outcome unknown.
 	sandboxTeardown := res.Teardown
 	teardown := func() error {
 		var sandboxErr error
@@ -251,21 +257,52 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 		}
 		hookErr := p.reap()
 		_ = os.RemoveAll(dir)
+		if hookErr == nil {
+			// The machine is gone; nothing about the workspace can still be unknown.
+			return nil
+		}
 		return errors.Join(sandboxErr, hookErr)
 	}
 	res.Teardown = teardown
-	if b, ok := res.Backend.(*sandboxBackend); ok {
-		b.remoteAgentBackend.reap = teardown
-	}
+	res.Backend = p.provisionedBackend(teardown)
 	return res, nil
+}
+
+// provisionedBackend builds the Backend a provision_cmd session is recorded as.
+//
+// Its IDENTITY is the HOOK's, not the sandbox's, and that is the whole point.
+// Recording it as `sandbox` would persist only SandboxRuntimeCleanupData, so
+// archive/restore would route to sandboxRuntime and demand the unrelated global
+// `sandbox_ssh` instead of re-running provision_cmd — and a kill tombstone
+// restored after a daemon crash would carry no delete_cmd, leaking the machine
+// this hook provisioned.
+//
+// Split out so a test drives the real constructor rather than a restatement of
+// it: asserting on a hand-built HookBackend would pass even if provisionHost
+// returned the sandbox one.
+func (p *hookProvisioner) provisionedBackend(teardown func() error) Backend {
+	return &HookBackend{
+		remoteAgentBackend: remoteAgentBackend{reap: teardown},
+		provisioner:        p,
+		cleanup:            p.cleanupData(),
+	}
 }
 
 // runProvisionCmd invokes provision_cmd with the same flags launch_cmd receives
 // and parses its one-record stdout.
 func (p *hookProvisioner) runProvisionCmd() (*hookProvisionRecord, error) {
+	// The SAME flags launch_cmd receives, because the contract says so — a
+	// provisioner that sizes a machine from --program, or delivers approved values
+	// named by --session-env, gets incomplete metadata otherwise.
 	args := []string{"--name", p.slug, "--title", p.spec.Title, "--repo", p.spec.CloneURL}
 	if branch := strings.TrimSpace(p.spec.RestoreBranch); branch != "" {
 		args = append(args, "--branch", branch)
+	}
+	if prog := strings.TrimSpace(p.environmentProgram()); prog != "" {
+		args = append(args, "--program", prog, "--program-resolved")
+	}
+	for _, name := range p.spec.SessionEnvPassthrough {
+		args = append(args, "--session-env", name)
 	}
 	out, cmd, err := runHookScriptWithResolvedEnvironment(hookLaunchTimeout, p.hooks.ProvisionCmd,
 		p.environmentAgent(), p.authSelectors, p.spec.SessionEnvPassthrough, args...)
@@ -277,6 +314,13 @@ func (p *hookProvisioner) runProvisionCmd() (*hookProvisionRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("provision_cmd failed (%s): %w%s", p.hooks.ProvisionCmd, err, hookOutputSuffix(out.Combined()))
 	}
+	// provision_cmd has EXITED successfully. Everything after this — cloning,
+	// streaming the binary, starting the server — can take minutes, and a pgid the
+	// kernel has reclaimed may be reissued to an unrelated process in that window.
+	// So the group id is spent here: a later failure must never SIGKILL a group
+	// this script no longer owns. (A failure of provision_cmd ITSELF still
+	// quiesces, because the id is still live at that point.)
+	p.launchPgid = 0
 
 	record, sawJSON, violation := parseHookProvisionRecord(string(out.Stdout))
 	if record != nil {
