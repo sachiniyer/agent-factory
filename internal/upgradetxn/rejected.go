@@ -73,9 +73,27 @@ type rejectedLedger struct {
 	Candidates    []RejectedCandidate `json:"candidates"`
 }
 
+// rejectedLedgerPath places the ledger beside the executable, RESOLVED.
+//
+// Resolution is load-bearing rather than tidiness. Prepare canonicalizes the
+// executable before storing it in the journal, so the supervisor writes the
+// ledger beside the resolved target — while a daemon started through a symlink
+// gets that symlink back from os.Executable and would look beside the LINK. The
+// reader would then find no ledger and reactivate the exact candidate a rollback
+// had just rejected. Doing it here means every caller agrees on the location by
+// construction, instead of each one remembering to resolve first (#2212 review).
+//
+// A path that cannot be resolved — it does not exist yet, or the link is broken —
+// falls back to the literal path. That is the pre-existing behaviour and is the
+// safe direction: at worst the ledger is written somewhere a resolved reader
+// also computes identically, since both sides run this same function.
 func rejectedLedgerPath(executable string) string {
-	return filepath.Join(filepath.Dir(executable),
-		"."+filepath.Base(executable)+rejectedLedgerSuffix)
+	resolved := executable
+	if real, err := filepath.EvalSymlinks(executable); err == nil {
+		resolved = real
+	}
+	return filepath.Join(filepath.Dir(resolved),
+		"."+filepath.Base(resolved)+rejectedLedgerSuffix)
 }
 
 // CandidateRejected reports whether these exact candidate bytes already reached a

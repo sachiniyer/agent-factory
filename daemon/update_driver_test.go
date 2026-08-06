@@ -987,10 +987,15 @@ func TestUpdateDriver_RefusesACandidateThisBoxAlreadyRolledBack(t *testing.T) {
 	require.NoError(t, upgradetxn.RecordRejectedCandidate(
 		home, hex.EncodeToString(sum[:]), "v1.0.300", "the candidate failed validation and was rolled back"))
 
+	// Snapshotted BEFORE the check. Both operands used to be read afterwards, so
+	// the assertion compared the file with itself and held whatever the refusal
+	// did to the shared cache — including rewriting it (#2212 review).
+	cacheBefore := h.readCacheFile(t)
+
 	require.Equal(t, updateCheckSkipped, h.driver.checkOnce(context.Background()))
 	require.Equal(t, 0, rec.activations,
 		"a candidate this box already rolled back must never be handed to the transactional path again")
-	require.Equal(t, h.readCacheFile(t), h.readCacheFile(t),
+	require.Equal(t, cacheBefore, h.readCacheFile(t),
 		"and the shared throttle window is still not consumed by a refusal")
 }
 
