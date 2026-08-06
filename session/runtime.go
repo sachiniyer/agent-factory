@@ -21,6 +21,11 @@ const (
 	BackendDocker BackendKind = config.BackendDocker
 	// BackendSSH runs the workspace + agent on a remote host over ssh (PR5).
 	BackendSSH BackendKind = config.BackendSSH
+	// BackendSandbox runs the workspace + agent on whatever the operator's own
+	// `sandbox_ssh` command reaches — the free-form sibling of BackendSSH, for
+	// targets structured ssh.host cannot express (jump hosts, ProxyCommand,
+	// bastions). #2476 PR2.
+	BackendSandbox BackendKind = config.BackendSandbox
 	// BackendHook is the remote-hook backend: the bring-your-own-provisioner
 	// escape hatch, migrated to the same provision-and-expose contract as
 	// docker/ssh (#1592 Phase 4 PR7). launch_cmd provisions the workspace on the
@@ -128,10 +133,11 @@ type Runtime interface {
 // kind up here. Keeping it a map (not a switch) also gives tests one seam for
 // substituting a runtime without changing production dispatch.
 var runtimeRegistry = map[BackendKind]func() Runtime{
-	BackendLocal:  func() Runtime { return localRuntime{} },
-	BackendHook:   func() Runtime { return hookRuntime{} },
-	BackendDocker: func() Runtime { return dockerRuntime{} },
-	BackendSSH:    func() Runtime { return sshRuntime{} },
+	BackendLocal:   func() Runtime { return localRuntime{} },
+	BackendHook:    func() Runtime { return hookRuntime{} },
+	BackendDocker:  func() Runtime { return dockerRuntime{} },
+	BackendSSH:     func() Runtime { return sshRuntime{} },
+	BackendSandbox: func() Runtime { return sandboxRuntime{} },
 }
 
 // backendProvisionsOffBox declares, per registered kind, whether the runtime
@@ -147,10 +153,11 @@ var runtimeRegistry = map[BackendKind]func() Runtime{
 // an entry here, so the next backend cannot be added without answering this. That
 // test is the mechanism; this comment is not.
 var backendProvisionsOffBox = map[BackendKind]bool{
-	BackendLocal:  false,
-	BackendDocker: true,
-	BackendSSH:    true,
-	BackendHook:   true,
+	BackendLocal:   false,
+	BackendDocker:  true,
+	BackendSSH:     true,
+	BackendSandbox: true,
+	BackendHook:    true,
 }
 
 // ProvisionsOffBox reports whether kind runs the session's workspace off the

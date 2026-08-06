@@ -412,7 +412,7 @@ var configManifest = []ManifestEntry{
 	{
 		Key:        "sandbox_ssh",
 		Type:       "string",
-		Default:    "",
+		Default:    `""`,
 		Purpose:    "The free-form ssh command the `sandbox` backend runs to reach the sandbox host (jump hosts, ProxyCommand, custom flags) · global-only: af executes it on the daemon host, so a repo selecting backend=sandbox cannot dictate what command runs — only the operator can.",
 		Tier:       TierAdvanced,
 		Settable:   true,

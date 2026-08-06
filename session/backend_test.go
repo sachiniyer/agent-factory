@@ -155,10 +155,11 @@ func TestBackendCapabilities(t *testing.T) {
 // the registry cannot dodge the matrix by being omitted here.
 func complianceBackends() map[BackendKind]Backend {
 	return map[BackendKind]Backend{
-		BackendLocal:  &LocalBackend{},
-		BackendHook:   &HookBackend{},
-		BackendDocker: &dockerBackend{},
-		BackendSSH:    &sshBackend{},
+		BackendLocal:   &LocalBackend{},
+		BackendHook:    &HookBackend{},
+		BackendDocker:  &dockerBackend{},
+		BackendSSH:     &sshBackend{},
+		BackendSandbox: &sandboxBackend{},
 	}
 }
 
