@@ -579,8 +579,8 @@ brings the tab back to life.
 
 Set [`preview_listen_addr`](configuration.md#global-config) (for example
 `127.0.0.1:8444`) and the daemon opens a **second** plain-HTTP port that serves
-**previews only — never the control API**. Each web tab is then served from its
-own origin:
+**previews and editor origins only — never the control API**. Each web tab is
+then served from its own origin:
 
 ```
 http://af<opaque-label>.localhost:8444/
