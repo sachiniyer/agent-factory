@@ -48,7 +48,8 @@ import {
   tabsRebound,
   validate,
 } from "./layout.js";
-import { fetchPreviewOrigin, probeWebTab } from "./api.js";
+import { fetchPreviewOrigin, pauseStatusPoll, probeWebTab, resumeStatusPoll } from "./api.js";
+import type { HoldAction } from "./delivery_hold.js";
 import { icon } from "./icon.js";
 // isLoopbackWebUrl is deliberately NOT imported any more: #1817 folded that test into
 // iframeIsProxied, which also answers it for a vscode tab (always proxied, and with no
@@ -804,6 +805,7 @@ export class SplitView {
           {
             onStatus: (s) => this.onPaneStatus(leaf.id, s),
             onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
+            onDeliveryHold: (action) => this.holdDeliveries(action),
           },
         );
       } else if (moved) {
@@ -1616,6 +1618,32 @@ export class SplitView {
     for (const [id, pane] of this.panes) {
       pane.container.classList.toggle("af-pane-focused", id === this.focusedId);
     }
+  }
+
+  /** Asks the daemon to hold automated deliveries while this session's user has a
+   *  partially typed line, and to stop holding once they do not (#3024).
+   *
+   *  The verdict comes from the terminal (it is the only thing that sees the
+   *  keystrokes) and the session identity from here (the terminal has none), but
+   *  the POLICY is neither of theirs: `deferWhileAttached` in daemon/delivery.go
+   *  holds exactly the sessions whose pause lease is held, so taking the same lease
+   *  the attached TUI takes is what makes the two surfaces behave alike — one
+   *  implementation, nothing to drift.
+   *
+   *  Best-effort by the same contract the TUI's heartbeat states: a failed RPC is
+   *  swallowed, and the worst case is that a delivery lands mid-line as it does
+   *  today. Reporting it would be noise about a degraded nicety, mid-keystroke.
+   *
+   *  A pane with no session id cannot address the lease and simply does not take
+   *  one — the honest no-op, matching how the daemon keys the lease by identity. */
+  private holdDeliveries(action: HoldAction): void {
+    const sessionID = this.sessionId;
+    const token = this.token;
+    if (!sessionID || token === null) {
+      return;
+    }
+    const rpc = action === "resume" ? resumeStatusPoll : pauseStatusPoll;
+    void rpc(sessionID, token).catch(() => {});
   }
 
   private onPaneStatus(leafId: string, status: TerminalStatus): void {

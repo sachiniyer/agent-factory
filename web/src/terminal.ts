@@ -41,6 +41,7 @@ import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { handleClipboardKeydown, handleTerminalCopy } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
+import { MidLineHold, type HoldAction } from "./delivery_hold.js";
 import { PendingInput } from "./pending_input.js";
 import {
   hasVisibleTerminalGeometry,
@@ -81,6 +82,12 @@ export interface TerminalCallbacks {
    *  focus/blur), so index.ts can keep its nav-vs-terminal mode (#1693) in sync
    *  with real DOM focus — e.g. a mouse click straight into the terminal. */
   onFocusChange(focused: boolean): void;
+  /** Fired when the user's mid-line state changes what should happen to the
+   *  daemon's pause lease (#3024). The terminal knows whether a line is partially
+   *  typed; only its owner knows which session to address, so the RPC lives there.
+   *  Optional: a pane with no session identity (the config assistant) simply omits
+   *  it and no lease is taken. */
+  onDeliveryHold?(action: HoldAction): void;
 }
 
 const BACKOFF_BASE_MS = 500;
@@ -129,6 +136,10 @@ export class AttachTerminal {
   // Type-ahead: what was typed while the socket was down, replayed on open
   // (#2811). Held here rather than dropped in send().
   private readonly pendingInput = new PendingInput();
+  /** Mid-line tracking for the delivery hold (#3024). See delivery_hold.ts — the
+   *  hold POLICY is the daemon's; this only reports whether a line is in progress. */
+  private readonly midLine = new MidLineHold();
+  private midLineTimer: number | null = null;
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
 
@@ -653,6 +664,8 @@ export class AttachTerminal {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose(): void {
     this.stopped = true;
+    // Hand the lease back before this pane stops existing (#3024).
+    this.releaseMidLine();
     this.pendingInput.clear();
     if (this.mouseCaptureHintTimer !== null) {
       window.clearTimeout(this.mouseCaptureHintTimer);
@@ -1431,6 +1444,7 @@ export class AttachTerminal {
    *  (re)connect, so a queued resize would be a stale duplicate of a value the
    *  socket already re-announces. */
   private sendInput(text: string): void {
+    this.noteMidLine(text);
     const frame = encode(inputFrame(this.enc.encode(text)));
     if (this.send(frame)) {
       return;
@@ -1466,6 +1480,56 @@ export class AttachTerminal {
         this.pendingInput.push(frames[j]);
       }
       return;
+    }
+  }
+
+  /** Feeds one chunk of USER input to the mid-line tracker and acts on its verdict.
+   *
+   *  Only real user input reaches here: sendInput is the single path shared by
+   *  typed keys and the Ctrl+C interrupt, and the held type-ahead flush goes
+   *  straight out through send() rather than back through this. Feeding it the
+   *  flush would be wrong twice over — it would re-note input already noted, and
+   *  it would take a lease on the daemon in response to our own replay. */
+  private noteMidLine(text: string): void {
+    this.dispatchHold(this.midLine.noteInput(text, Date.now()));
+  }
+
+  /** Applies a hold verdict: runs the renew timer while a line is uncommitted and
+   *  stops it once it is not, then hands the action to the owner that knows which
+   *  session to address. */
+  private dispatchHold(action: HoldAction): void {
+    if (action === "none") {
+      return;
+    }
+    if (action === "resume") {
+      this.stopMidLineTimer();
+    } else if (this.midLineTimer === null) {
+      // A renew cadence, not a hold duration: the bound on how long a delivery can
+      // be held belongs to the daemon's lease and to MidLineHold's idle release,
+      // never to this timer. It exists so a slowly-composed line stays protected
+      // between keystrokes.
+      this.midLineTimer = window.setInterval(() => {
+        this.dispatchHold(this.midLine.tick(Date.now()));
+      }, 500);
+    }
+    this.cb.onDeliveryHold?.(action);
+  }
+
+  private stopMidLineTimer(): void {
+    if (this.midLineTimer !== null) {
+      window.clearInterval(this.midLineTimer);
+      this.midLineTimer = null;
+    }
+  }
+
+  /** Drops any lease this terminal is holding, for a teardown that makes the
+   *  question moot. Silence here would leave the daemon's poll paused on a pane
+   *  that no longer exists until the lease expired — recoverable, since the lease
+   *  is server-bounded, but a needless blind window. */
+  private releaseMidLine(): void {
+    this.stopMidLineTimer();
+    if (this.midLine.release()) {
+      this.cb.onDeliveryHold?.("resume");
     }
   }
 

@@ -2091,6 +2091,73 @@ test("#2811: type-ahead survives a socket that is not open — held, then delive
   }
 });
 
+test("#3024: a partially typed line holds automated deliveries, and committing it releases them", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The HOLD ITSELF is the daemon's and is already pinned there:
+  // TestDeliverPrompt_DefersWhileTargetAttached asserts that an automated delivery
+  // returns StatusDeferredAttached and pastes NOTHING while the status-poll pause
+  // lease is held, and lands on release. That test takes the lease by calling
+  // manager.PauseStatusPoll directly rather than by attaching a TUI, so it pins the
+  // rule for ANY lease holder — which is why the web gets the behaviour by taking
+  // the same lease instead of reimplementing the policy.
+  //
+  // What is unproven by that test, and is this change's own contribution, is the
+  // wiring: does the browser actually take the lease when the user is mid-line, and
+  // give it back when they commit? That is what this asserts, by observing the two
+  // RPCs rather than by trying to race a real delivery — a test that has to schedule
+  // an automated delivery to observe a hold would be timing-dependent about the very
+  // thing it is checking.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  const calls: string[] = [];
+
+  try {
+    for (const verb of ["PauseStatusPoll", "ResumeStatusPoll"]) {
+      await p.route(`**/v1/${verb}`, async (route) => {
+        calls.push(verb);
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
+      });
+    }
+
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+    const host = await typeableShellTab(p);
+    calls.length = 0; // ignore anything the setup's own typing produced
+
+    // Mid-line: typed, not committed. The lease must be taken.
+    await p.keyboard.type("echo partial-line");
+    await expect
+      .poll(() => calls.filter((c) => c === "PauseStatusPoll").length, {
+        message: "a partially typed line must take the daemon's pause lease, so an automated delivery is held",
+      })
+      .toBeGreaterThan(0);
+    expect(calls.includes("ResumeStatusPoll"), "nothing is committed yet, so the lease must still be held").toBe(false);
+
+    // Committing it hands the lease back, so a held delivery lands promptly rather
+    // than waiting out the daemon's lease.
+    await p.keyboard.press("Enter");
+    await expect
+      .poll(() => calls.filter((c) => c === "ResumeStatusPoll").length, {
+        message: "committing the line must release the lease so a held delivery can land",
+      })
+      .toBeGreaterThan(0);
+
+    // The user's own line is untouched by any of this — the whole point is that
+    // holding the delivery costs the user nothing.
+    await expect(host).toContainText("partial-line");
+  } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
 test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_FIXTURE, async ({ browser }) => {
   // The defect this pins is invisible to a unit test, which is how it shipped: the
   // old unit test asserted only that our handler declined Cmd+C, under a NAME that
