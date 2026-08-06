@@ -47,11 +47,28 @@ func (i *Instance) pushBranchForArchive() (string, error) {
 // directly, like Start/Kill). It is a no-op-and-error for a session with no
 // remote runtime — a local session archives by relocating its worktree, not here.
 func (i *Instance) ArchiveSandbox() (string, error) {
+	// Ask the BACKEND whether this is a sandbox session, not the client pointer.
+	// daemon/archive.go routes here on the declared capability
+	// (Capabilities().Workspace == WorkspaceRemote); re-deriving the same fact
+	// from `remoteClient != nil` lets the two disagree, and they disagree in the
+	// states that matter: a sandbox session loaded inert from disk, or one left
+	// Lost by a failed recovery, has a remote backend and a nil client (the cases
+	// AgentServer() enumerates when it installs deadRemoteAgentServer). The old
+	// check called those "not a sandbox session", which is false — it is a
+	// sandbox session whose wiring is torn down — and sent the reader looking for
+	// a backend-detection bug (#3000, the #2924 class).
 	i.mu.RLock()
-	isRemote := i.remoteClient != nil
+	isSandbox := i.capabilitiesLocked().Workspace == WorkspaceRemote
+	hasClient := i.remoteClient != nil
 	i.mu.RUnlock()
-	if !isRemote {
+	if !isSandbox {
 		return "", fmt.Errorf("session %q is not a sandbox session; cannot archive via push/teardown", i.Title)
+	}
+	if !hasClient {
+		// Distinct from the above on purpose: same refusal, different cause, and
+		// the caller can act on this one (recover the session, then archive).
+		return "", fmt.Errorf("session %q is a sandbox session whose runtime wiring is torn down, "+
+			"so there is no live client to push its branch through; recover it before archiving", i.Title)
 	}
 
 	as := i.AgentServer()

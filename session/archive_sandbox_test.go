@@ -469,3 +469,37 @@ func TestResetRemoteRuntime(t *testing.T) {
 	assert.Nil(t, i.agentSrv)
 	assert.Equal(t, "docker", i.backend.Type(), "backend is kept for restore classification")
 }
+
+// TestArchiveSandbox_AsksTheBackendNotTheClientPointer is the #2924 class applied
+// to archive (#3000): daemon/archive.go routes here on the DECLARED capability
+// (Capabilities().Workspace == WorkspaceRemote), so this method must answer the
+// same question the same way. Deriving it from `remoteClient != nil` instead let
+// the two disagree exactly where it matters — a sandbox session whose runtime
+// wiring is torn down has a remote backend and a nil client, and the old check
+// called it "not a sandbox session", which is false.
+func TestArchiveSandbox_AsksTheBackendNotTheClientPointer(t *testing.T) {
+	// A sandbox session loaded inert from disk: remote backend, no live client.
+	// This is the shape AgentServer() installs deadRemoteAgentServer for.
+	i := &Instance{Title: "s", backend: newInertSandboxBackend("docker")}
+
+	_, err := i.ArchiveSandbox()
+
+	require.Error(t, err, "there is no client to push through, so the archive must still refuse")
+	assert.NotContains(t, err.Error(), "is not a sandbox session",
+		"it IS a sandbox session — saying otherwise sends the reader after a backend-detection bug")
+	assert.Contains(t, err.Error(), "runtime wiring is torn down", "the error must name the real cause")
+	assert.Contains(t, err.Error(), "recover it before archiving", "and what to do about it")
+}
+
+// TestArchiveSandbox_StillRefusesALocalSession keeps the other half: a session
+// whose backend declares a local worktree is genuinely not archivable this way,
+// and must keep saying so.
+func TestArchiveSandbox_StillRefusesALocalSession(t *testing.T) {
+	i := &Instance{Title: "s", backend: &LocalBackend{}}
+
+	_, err := i.ArchiveSandbox()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a sandbox session",
+		"a local-worktree session archives by relocating its worktree, not through this path")
+}
