@@ -508,6 +508,23 @@ func (i *Instance) TabAlive(idx int) bool {
 }
 
 // TabCount returns the number of tabs the instance currently holds.
+// TmuxTabCount reports how many tabs own a tmux session, which is the count that
+// predicts teardown WORK: teardownTabs only kills entries whose tab.tmux is
+// non-nil, so web and vscode tabs contribute nothing per-tab. Callers budgeting
+// time against the roster want this rather than TabCount, or a session carrying a
+// dozen iframe tabs is charged for teardown it will never perform (#3023).
+func (i *Instance) TmuxTabCount() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	n := 0
+	for _, tab := range i.Tabs {
+		if tab.tmux != nil {
+			n++
+		}
+	}
+	return n
+}
+
 func (i *Instance) TabCount() int {
 	i.mu.RLock()
 	defer i.mu.RUnlock()

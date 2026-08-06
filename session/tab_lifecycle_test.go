@@ -310,3 +310,23 @@ func TestRestartSurvival_HumanCreatedShellTab(t *testing.T) {
 		"the human-created tab must reconnect to its exact persisted tmux session")
 	assert.True(t, restored.TabAlive(2), "the restored human-created tab must be live")
 }
+
+// TestTmuxTabCount_ExcludesTabsWithNoSession pins what the kill watchdog budgets
+// against. teardownTabs kills exactly the entries whose tab.tmux is non-nil, so a
+// web tab performs no per-tab teardown — and with the nine-tab cap gone, charging
+// the whole roster would let a dozen iframe tabs push the wedge diagnostics out by
+// ten minutes for work that never happens (#3023 review).
+func TestTmuxTabCount_ExcludesTabsWithNoSession(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst := startedMockInstance(t, "af_tmux_count")
+	_, err := inst.AddShellTab()
+	require.NoError(t, err)
+	require.Equal(t, 2, inst.TmuxTabCount(), "agent + shell both own tmux sessions")
+
+	_, err = inst.AddWebTab("http://localhost:5173", "")
+	require.NoError(t, err)
+	require.Equal(t, 3, inst.TabCount(), "the web tab is on the roster")
+	require.Equal(t, 2, inst.TmuxTabCount(), "but it owns no tmux session, so it costs no teardown")
+}

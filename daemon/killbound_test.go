@@ -20,9 +20,15 @@ func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
 			"neither record survives — zero, and the delay floor still applies")
 	})
 	require.NotPanics(t, func() {
-		data := &session.InstanceData{Tabs: []session.TabData{{Name: "agent"}, {Name: "shell-2"}}}
+		data := &session.InstanceData{Tabs: []session.TabData{
+			{Name: "agent", TmuxName: "af_x"},
+			{Name: "shell-2", TmuxName: "af_x__shell"},
+			// A web tab owns no tmux session, so it costs no per-tab teardown and
+			// must not buy the watchdog extra time (#3023 review).
+			{Name: "docs", Kind: session.TabKindWeb},
+		}}
 		require.Equal(t, 2, killWatchdogTabCount(nil, data),
-			"a ghost still names its tabs in the persisted record")
+			"only tmux-bearing tabs are torn down per-tab; a ghost names them by TmuxName")
 	})
 }
 

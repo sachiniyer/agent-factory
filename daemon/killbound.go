@@ -193,6 +193,13 @@ func (s *killStage) get() string {
 // killWatchdogTabCount reports how many tabs this kill may have to tear down,
 // taken from whichever record actually exists.
 //
+// Only TMUX-BEARING tabs count. teardownTabs kills exactly the entries whose
+// tab.tmux is non-nil, so web and vscode tabs perform no per-tab teardown at all —
+// the shared vscode process is already in the fixed term. Charging the whole
+// roster was harmless while it was capped at nine; with the cap gone a session
+// carrying a dozen iframe tabs would push the watchdog out by ten minutes for work
+// it never does, delaying the wedge diagnostics this exists to produce.
+//
 // It must not dereference the instance. A title-based kill can resolve a persisted
 // session that could NOT be reconstructed — resolveActionSession deliberately
 // returns a nil instance with non-nil data, and the ghost branch later cleans the
@@ -202,10 +209,18 @@ func (s *killStage) get() string {
 // applies, so the watchdog is never armed shorter than it used to be.
 func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData) int {
 	if instance != nil {
-		return instance.TabCount()
+		return instance.TmuxTabCount()
 	}
 	if data != nil {
-		return len(data.Tabs)
+		// The persisted record's equivalent of a live tab.tmux: a tab that owns a
+		// tmux session names it, and only those are torn down per-tab.
+		n := 0
+		for _, tab := range data.Tabs {
+			if tab.TmuxName != "" {
+				n++
+			}
+		}
+		return n
 	}
 	return 0
 }
