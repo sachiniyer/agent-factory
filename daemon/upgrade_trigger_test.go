@@ -98,13 +98,15 @@ func stubTriggerEnv(t *testing.T) (string, string, []byte) {
 		adhoc   func(string) error
 		stop    func() (bool, error)
 		wait    func() error
+		refresh func(*upgradetxn.Transaction) error
 		vg      time.Duration
 		vp      time.Duration
 	}{
 		upgradeTriggerExecutableFn, upgradeTriggerVersionFn, upgradeRecoveryJobControllerFn,
 		upgradeAwaitSupervisorReadyFn, upgradeAuthorizeActivationFn, upgradeRecoveryHealthFn,
 		launchCandidateDaemonFn, releaseCandidateProbationFn, startPreviousViaUnitFn,
-		startPreviousAdHocFn, stopDaemonFn, waitForShutdownFn, upgradeValidateGrace, upgradeValidatePoll,
+		startPreviousAdHocFn, stopDaemonFn, waitForShutdownFn, upgradeRefreshMetadataFn,
+		upgradeValidateGrace, upgradeValidatePoll,
 	}
 	t.Cleanup(func() {
 		upgradeTriggerExecutableFn = restore.exe
@@ -117,6 +119,7 @@ func stubTriggerEnv(t *testing.T) (string, string, []byte) {
 		releaseCandidateProbationFn = restore.release
 		startPreviousViaUnitFn = restore.unit
 		startPreviousAdHocFn = restore.adhoc
+		upgradeRefreshMetadataFn = restore.refresh
 		stopDaemonFn = restore.stop
 		waitForShutdownFn = restore.wait
 		upgradeValidateGrace, upgradeValidatePoll = restore.vg, restore.vp
@@ -158,6 +161,15 @@ func TestTriggerUpgradeActivation_AuthorizesThenQuiescesAndExits(t *testing.T) {
 		events = append(events, "await-ready")
 		return nil
 	}
+	upgradeRefreshMetadataFn = func(*upgradetxn.Transaction) error {
+		// The snapshot is only worth refreshing if admission is already closed —
+		// that is the whole point of #2212 gate 2, so assert it here rather than
+		// trusting the call order to stay put.
+		require.Equal(t, DaemonPhaseQuiescing, lifecycle.snapshot().phase,
+			"the daemon must have stopped admitting BEFORE the metadata is re-snapshotted")
+		events = append(events, "refresh")
+		return nil
+	}
 	upgradeAuthorizeActivationFn = func(_ *upgradetxn.Transaction, id, nonce string) error {
 		require.NotEmpty(t, id)
 		require.NotEmpty(t, nonce, "the trigger must authorize with the journal's recovery nonce")
@@ -171,7 +183,8 @@ func TestTriggerUpgradeActivation_AuthorizesThenQuiescesAndExits(t *testing.T) {
 	}
 
 	require.NoError(t, triggerUpgradeActivation(context.Background(), lifecycle, requestExit, candidate, "1.0.200", ""))
-	require.Equal(t, []string{"await-ready", "authorize", "exit"}, events)
+	require.Equal(t, []string{"await-ready", "refresh", "authorize", "exit"}, events,
+		"quiesce and re-snapshot sit between proving the actor ready and authorizing it")
 	require.Equal(t, DaemonPhaseQuiescing, lifecycle.snapshot().phase)
 	require.Error(t, lifecycle.mutationAdmissionError(), "a quiescing daemon must refuse mutations")
 	require.True(t, IsDaemonQuiescingErr(lifecycle.mutationAdmissionError()))
@@ -412,4 +425,36 @@ func TestUpgradeTrigger_CapturedJournalRollsBack(t *testing.T) {
 	require.NoError(t, startPreviousDaemon(ctx, journal))
 	require.NoError(t, validatePreviousDaemon(ctx, journal), "the previous daemon must be restored")
 	require.Empty(t, state.txnID, "the restored previous daemon carries no transaction id")
+}
+
+// A failed metadata refresh must leave the daemon SERVING.
+//
+// The quiesce is taken before authorization now (#2212 gate 2), so this is a window
+// that did not previously exist: a failure between the two would strand a daemon
+// that refuses every mutation until something restarts it. A missed upgrade is a far
+// better outcome than a live daemon that has stopped admitting work, and nothing
+// else would notice — the daemon is up, answering, and rejecting everything.
+func TestTriggerUpgradeActivation_RefreshFailureResumesServing(t *testing.T) {
+	_, _, candidate := stubTriggerEnv(t)
+	lifecycle := readyLifecycle(t)
+
+	upgradeAwaitSupervisorReadyFn = func(context.Context, string, time.Time) error { return nil }
+	upgradeRefreshMetadataFn = func(*upgradetxn.Transaction) error {
+		return errors.New("could not re-snapshot the metadata")
+	}
+	authorized := false
+	upgradeAuthorizeActivationFn = func(*upgradetxn.Transaction, string, string) error {
+		authorized = true
+		return nil
+	}
+	exited := false
+
+	err := triggerUpgradeActivation(
+		context.Background(), lifecycle, func() { exited = true }, candidate, "1.0.200", "")
+	require.Error(t, err)
+	require.False(t, authorized,
+		"a snapshot that could not be brought forward must not be authorized over — that is the data loss")
+	require.False(t, exited, "and the daemon must not hand off")
+	require.Equal(t, DaemonPhaseReady, lifecycle.snapshot().phase, "the daemon must resume serving")
+	require.NoError(t, lifecycle.mutationAdmissionError(), "and must admit mutations again")
 }

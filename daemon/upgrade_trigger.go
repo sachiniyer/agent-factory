@@ -38,7 +38,8 @@ var (
 	upgradeAuthorizeActivationFn   = func(txn *upgradetxn.Transaction, transactionID, nonce string) error {
 		return txn.AuthorizeActivation(transactionID, nonce)
 	}
-	upgradeAbortPreparedFn = upgradetxn.AbortPreparedTransaction
+	upgradeAbortPreparedFn   = upgradetxn.AbortPreparedTransaction
+	upgradeRefreshMetadataFn = func(txn *upgradetxn.Transaction) error { return txn.RefreshMetadataSnapshot() }
 )
 
 // triggerUpgradeActivation is the OLD-daemon side of an upgrade activation, run
@@ -52,9 +53,12 @@ var (
 // observation, never an error being nil/non-nil: AwaitSupervisorReady proves the
 // actor took the lease AND reached supervisor_ready before AuthorizeActivation
 // consents, and an actor that never gets there is a LOUD error that leaves the
-// daemon serving — never an assumed success. Only after authorizing does the daemon
-// quiesce (stop admitting, report DaemonPhaseQuiescing so a stuck hand-off is
-// visible) and exit; the actor's StopPrevious then confirms it is gone.
+// daemon serving — never an assumed success. The daemon quiesces (stops admitting,
+// reports DaemonPhaseQuiescing so a stuck hand-off is visible) once the actor is
+// proven ready and BEFORE it authorizes, so the metadata snapshot it refreshes in
+// between describes a daemon that had already stopped writing (#2212 gate 2); any
+// failure before authorization resumes serving. It exits after authorizing, and the
+// actor's StopPrevious then confirms it is gone.
 func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, requestExit func(), candidate []byte, toVersion, expectedPreviousSHA256 string) error {
 	plan, err := captureUpgradePlan(lifecycle, candidate, toVersion, expectedPreviousSHA256)
 	if err != nil {
@@ -87,15 +91,38 @@ func triggerUpgradeActivation(ctx context.Context, lifecycle *daemonLifecycle, r
 		// wedged, and surface the failure loudly — never an assumed success.
 		return abortPrepared(fmt.Errorf("upgrade recovery actor did not reach supervisor_ready; daemon keeps serving: %w", err))
 	}
+	// Stop admitting BEFORE the snapshot is brought forward, and bring it forward
+	// before authorizing. Prepare snapshotted instances.json and tasks.json above,
+	// and everything since — InstallAndStart plus a supervisor-ready grace measured
+	// in minutes — ran on a fully live daemon. Restoring that snapshot on rollback
+	// would discard every mutation from the window (#2212 gate 2). The order here is
+	// the fix: quiesce, re-snapshot what was actually serving, then authorize.
+	//
+	// This window is the only place the re-snapshot is safe. The actor has PROVEN
+	// supervisor_ready, so it exists; it has not been authorized, so it cannot yet
+	// commit or roll back, so nothing can be reading the snapshot while it is
+	// rewritten.
+	lifecycle.markQuiescing()
+	if err := upgradeRefreshMetadataFn(txn); err != nil {
+		// Nothing is authorized, so this daemon is still the one serving. Resume
+		// admitting and abort — a daemon left quiescing here would refuse every
+		// mutation until something restarted it, which is a worse outcome than a
+		// missed upgrade.
+		lifecycle.resumeServing()
+		return abortPrepared(fmt.Errorf("refresh the upgrade metadata snapshot: %w", err))
+	}
 	if err := upgradeAuthorizeActivationFn(txn, journal.ID, journal.RecoveryNonce); err != nil {
 		// The actor is at supervisor_ready and owns the transaction; its own
 		// supervisor_ready deadline times out and aborts. Do not abort from here
-		// (abortPrepared would refuse anyway) — just surface the failure.
+		// (abortPrepared would refuse anyway) — but do resume serving, because the
+		// quiesce above was taken in anticipation of a hand-off that is not
+		// happening.
+		lifecycle.resumeServing()
 		return fmt.Errorf("authorize upgrade activation: %w", err)
 	}
-	// Authorized: the actor is greenlit to replace us. Stop admitting new work so no
-	// mutation races the hand-off, report DaemonPhaseQuiescing, then free the socket.
-	lifecycle.markQuiescing()
+	// Authorized: the actor is greenlit to replace us. Admission is already closed
+	// and the snapshot already describes a daemon that stopped writing; free the
+	// socket.
 	log.InfoLog.Printf("upgrade activation authorized for transaction %s; quiescing and exiting for the candidate", journal.ID)
 	requestExit()
 	return nil

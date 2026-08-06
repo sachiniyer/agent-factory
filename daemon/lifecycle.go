@@ -79,11 +79,18 @@ type daemonLifecycle struct {
 	// probation. It gates mutation ADMISSION; transactionID is kept for the whole
 	// boot as the supervisor's IDENTITY (#1947), so the two never conflate.
 	released bool
-	// quiescing is set when this daemon has authorized an upgrade activation and is
-	// handing off. It closes admission (the daemon is about to exit) and drives the
-	// reported DaemonPhaseQuiescing so a stuck hand-off is visible, not silent.
+	// quiescing is set when this daemon has committed to an upgrade hand-off and is
+	// closing admission. It closes admission and drives the reported
+	// DaemonPhaseQuiescing so a stuck hand-off is visible, not silent.
 	quiescing bool
-	listeners DaemonListenerStatus
+	// phaseBeforeQuiesce is what to go back to if the hand-off does not happen. The
+	// quiesce is now taken BEFORE the activation is authorized (#2212 gate 2), so a
+	// failure between the two must be able to resume rather than leave a daemon that
+	// refuses every mutation until something restarts it. Restoring the recorded
+	// phase rather than assuming DaemonPhaseReady keeps resumeServing honest if it is
+	// ever reached from another phase.
+	phaseBeforeQuiesce DaemonPhase
+	listeners          DaemonListenerStatus
 }
 
 const daemonBootIDBytes = 16
@@ -144,15 +151,43 @@ func (l *daemonLifecycle) markReady() error {
 }
 
 // markQuiescing moves a ready daemon into the upgrade hand-off: it stops admitting
-// new mutations and reports DaemonPhaseQuiescing. The activation trigger calls it
-// AFTER AuthorizeActivation and BEFORE the daemon exits to free the socket for the
-// validated candidate, so no mutation races the hand-off window and a daemon stuck
-// mid-hand-off is visible rather than reporting ready. Idempotent.
+// new mutations and reports DaemonPhaseQuiescing, so no mutation races the hand-off
+// window and a daemon stuck mid-hand-off is visible rather than reporting ready.
+// Idempotent.
+//
+// It is taken once the recovery actor has PROVEN supervisor_ready and before the
+// metadata snapshot is brought forward — not after AuthorizeActivation as it once
+// was. The snapshot the actor restores on rollback has to describe a daemon that had
+// already stopped writing, or the rollback discards every mutation admitted while
+// the hand-off was being set up (#2212 gate 2). Because this now happens before the
+// point of no return, resumeServing exists for the paths that fail after it.
 func (l *daemonLifecycle) markQuiescing() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.quiescing {
+		l.phaseBeforeQuiesce = l.phase
+	}
 	l.quiescing = true
 	l.phase = DaemonPhaseQuiescing
+}
+
+// resumeServing lifts a quiesce whose hand-off did not happen, so a daemon that
+// stopped admitting in preparation for an upgrade goes back to serving instead of
+// refusing every mutation until something restarts it.
+//
+// Only ever correct BEFORE AuthorizeActivation. Past that the actor is licensed to
+// replace this process and a daemon that resumed would be writing to a home another
+// binary is about to restore. Every caller is on a failure path that returns without
+// authorizing. Idempotent.
+func (l *daemonLifecycle) resumeServing() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.quiescing {
+		return
+	}
+	l.quiescing = false
+	l.phase = l.phaseBeforeQuiesce
+	l.phaseBeforeQuiesce = ""
 }
 
 // releaseUpgradeProbation lifts an upgrade candidate's probation once its

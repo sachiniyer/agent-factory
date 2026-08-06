@@ -22,9 +22,18 @@ var (
 )
 
 func snapshotMetadata(home, txnDir string, paths []string) ([]MetadataSnapshot, error) {
+	return snapshotMetadataInto(home, filepath.Join(txnDir, metadataDirName), paths)
+}
+
+// snapshotMetadataInto captures into a caller-chosen directory so a refresh can
+// write a NEW generation rather than overwriting the set the journal currently
+// points at. See RefreshMetadataSnapshot for why that matters: a crash midway
+// through an in-place rewrite would leave the journal naming snapshots whose bytes
+// no longer match their recorded digests, and a rollback would then refuse to
+// restore the very state it exists to protect.
+func snapshotMetadataInto(home, metadataDir string, paths []string) ([]MetadataSnapshot, error) {
 	seen := make(map[string]struct{}, len(paths))
 	snapshots := make([]MetadataSnapshot, 0, len(paths))
-	metadataDir := filepath.Join(txnDir, "metadata")
 	for index, path := range paths {
 		relative, target, err := validateMetadataPath(home, path)
 		if err != nil {
@@ -313,8 +322,7 @@ func validateJournal(home string, journal Journal) error {
 			}
 			continue
 		}
-		expectedSnapshot := filepath.Join(txnDir, "metadata", fmt.Sprintf("%04d.snapshot", index))
-		if metadata.SnapshotPath != expectedSnapshot || !validDigest(metadata.SHA256) {
+		if !validMetadataSnapshotPath(txnDir, index, metadata.SnapshotPath) || !validDigest(metadata.SHA256) {
 			return fmt.Errorf("metadata snapshot %q does not match the transaction", relative)
 		}
 		if metadata.Mode == 0 || os.FileMode(metadata.Mode)&^os.ModePerm != 0 {
