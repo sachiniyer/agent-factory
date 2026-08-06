@@ -37,8 +37,9 @@ There are two ways in, split deliberately:
 
 ## Tabs
 
-A session isn't limited to its agent. Each one can hold up to nine **tabs**, all
-running in the *same* worktree:
+A session isn't limited to its agent. Each one can hold as many **tabs** as you
+make, all running in the *same* worktree (there used to be a nine-tab cap
+matching the 1-9 jump keys; it was removed in #3023):
 
 - **`t`** opens a new-tab picker. Choose **Terminal** for a shell in the
   worktree, or **VS Code** for a browser editor on that worktree (the TUI shows

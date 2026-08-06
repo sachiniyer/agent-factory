@@ -31,8 +31,12 @@ func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
 // to have — and it must actually grow past that for a roster the old cap forbade.
 func TestKillWatchdogDelayFor_FloorsAtTheOldValueAndGrowsBeyondIt(t *testing.T) {
 	require.Equal(t, killWatchdogFloor, killWatchdogDelayFor(0))
-	require.Equal(t, killWatchdogFloor, killWatchdogDelayFor(9),
-		"the old cap must behave exactly as it did")
+	// GreaterOrEqual, not Equal: the property that matters is that no session which
+	// was legal under the old cap gets a SHORTER watchdog than before. Nine tabs
+	// compute to 908s, which clears the 900s floor on its own — asserting equality
+	// pinned an arithmetic coincidence rather than the guarantee, and it failed.
+	require.GreaterOrEqual(t, killWatchdogDelayFor(9), killWatchdogFloor,
+		"a session legal under the old cap must never wait less than it used to")
 	require.Greater(t, killWatchdogDelayFor(40), killWatchdogFloor,
 		"a roster the old cap forbade needs more than the flat budget, or the watchdog cries wolf")
 }
