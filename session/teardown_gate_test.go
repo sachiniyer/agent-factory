@@ -34,7 +34,7 @@ type gateStubMode struct {
 	stateByName      map[string]teardownState
 }
 
-func (m *gateStubMode) closeTab(_ *tmux.TmuxSession, _, tabName string) (teardownState, error) {
+func (m *gateStubMode) closeTab(_ *tmux.TmuxSession, _, _, tabName string) (teardownState, error) {
 	m.closedNames = append(m.closedNames, tabName)
 	// stateByName lets a test make ONE named session the unknown one, so a gate
 	// firing can be attributed to that session rather than to any tab in the pass.
@@ -166,7 +166,7 @@ func TestTeardownKill_ClassifiesTmuxTimeoutAsUnsafe(t *testing.T) {
 	}
 	ts := wedgedTmuxSession("wedged-kill-1917")
 
-	state, err := teardownKill{}.closeTab(ts, "guarded", "agent")
+	state, err := teardownKill{}.closeTab(ts, "", "guarded", "agent")
 	if state != stateUnknown {
 		t.Fatal("teardownKill reported a KNOWN state for a tmux TIMEOUT: the core then deletes the " +
 			"worktree of a session tmux never confirmed dead (#1917). A timeout is not an ordinary " +
