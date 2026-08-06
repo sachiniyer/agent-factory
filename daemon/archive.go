@@ -359,7 +359,17 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			// safest remaining state. Persist it best-effort and surface both
 			// failures so the operator can recover it manually.
 			m.persistInstance(repoID, instance)
-			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery", req.Title, archivedPath, perr, rbErr)
+			// Committed as well, and for the same reason as the remote branch above:
+			// the worktree is at the archive path and could not be moved home, so the
+			// side effect stands. Its SIBLING — a rollback that succeeded — is the one
+			// genuinely-clean failure here, and it stays a plain error precisely
+			// because retrying it is safe. Three outcomes, not two (#3029).
+			m.publishEvent(agentproto.EventSessionArchived, instance.ToInstanceData())
+			committedErr := &mutationCommittedError{err: fmt.Errorf(
+				"archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery",
+				req.Title, archivedPath, perr, rbErr)}
+			log.WarningLog.Printf("%v", committedErr)
+			return "", session.InstanceData{}, committedErr
 		}
 		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
 	}
@@ -516,7 +526,24 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// restart loads the session Lost and an explicit restore re-provisions it.
 		log.ErrorLog.Printf("archive of remote session %q: failed to durably record the Archived state (%v); branch %q is on origin, so the session stays restorable", title, perr, branch)
 		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, perr)
+		// The archive COMMITTED: the branch is on origin and the sandbox is reaped,
+		// both irreversible. Two things follow, and neither is optional (#3029).
+		//
+		// The event, because it is how every other client learns what happened — a
+		// TUI or web rail that never hears it keeps showing a session that is
+		// archived in fact, and nothing reconciles the divergence.
+		//
+		// The committed marker, because "failed" and "failed after committing" are
+		// the two answers that demand OPPOSITE handling. A caller that retries this
+		// is not recovering, it is re-running a partially applied change against a
+		// sandbox that no longer exists. Only a failure with nothing committed is
+		// safe to retry blindly.
+		m.publishEvent(agentproto.EventSessionArchived, instance.ToInstanceData())
+		committedErr := &mutationCommittedError{err: fmt.Errorf(
+			"archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w",
+			title, branch, perr)}
+		log.WarningLog.Printf("%v", committedErr)
+		return "", committedErr
 	}
 	log.InfoLog.Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
 	return branch, nil
