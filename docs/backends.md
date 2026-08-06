@@ -470,8 +470,10 @@ GitHub (`origin`), not the sandbox:
   the agent. The session resumes from the pushed branch state.
 
 This is the same flow for every off-box backend (it is written once against the runtime
-seam), and it is why `docker`/`ssh`/`sandbox` reach full capability parity with `local` —
-`Archive` and `Recover` are both supported. A **Lost** sandbox session (one whose
+seam), and it is why `docker`/`ssh`/`sandbox` match `local` on the lifecycle
+capabilities — `Archive` and `Recover` are both supported. Parity is not total:
+the same backends declare `TabManagement` and `Handoff` off, which is why an
+off-box session carries the fixed single agent tab described above. A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) recovers the same way: re-provision +
 clone the branch back. Unreachability alone is not death — it does not mark a
 sandbox Lost, and restore refuses to replace a sandbox it cannot reach.
