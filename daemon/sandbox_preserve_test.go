@@ -276,3 +276,47 @@ func TestRestoreSession_ForceReapRefusesABranchThatIsNotOnDisk(t *testing.T) {
 		t.Fatalf("the refusal must say WHY it refused, got: %v", err)
 	}
 }
+
+// A record on disk is not automatically a record of the CURRENT branch. The
+// partial archive this whole guard is about pushes a NEW branch, updates the
+// instance in memory, then fails its teardown and its best-effort persist — so
+// the disk can still hold an OLDER nonempty branch from a previous archive.
+//
+// Accepting non-emptiness authorizes destroying the sandbox on the strength of a
+// record pointing somewhere else: if recovery then fails, the next restore
+// returns to the stored branch and strands exactly the work the archive just
+// pushed. Which is the outcome this PR exists to prevent, reached by a different
+// road (Codex on #2967).
+func TestRestoreSession_ForceReapRefusesAStalePersistedBranch(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/session-branch")
+	srv.unreachable.Store(true)
+	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "stale", srv.url, session.Lost)
+	inst := manager.instances[daemonInstanceKey(repoID, "stale")]
+
+	// An earlier archive recorded this branch durably.
+	inst.SetSandboxBranch("af/older-archive")
+	manager.persistInstance(repoID, inst)
+	// A later archive pushed a NEW branch and updated memory, then failed before
+	// its persist landed. Disk still says af/older-archive.
+	inst.SetSandboxBranch("af/newly-pushed")
+
+	_, _, err := manager.RestoreSession(RestoreSessionRequest{
+		Title: "stale", RepoID: repoID, ForceReap: true,
+	})
+
+	if err == nil {
+		t.Fatal("forced a reap against a stale stored branch: a crash after the replacement sends the " +
+			"next restore to af/older-archive and strands the work pushed to af/newly-pushed")
+	}
+	if got := backend.recoverCalls(); got != 0 {
+		t.Fatalf("recover calls = %d, want 0", got)
+	}
+	// The refusal has to name BOTH branches, or an operator cannot tell which
+	// one holds their work and which one the restore would go back to.
+	for _, want := range []string{"af/older-archive", "af/newly-pushed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must name %q so the operator can see what diverged, got: %v", want, err)
+		}
+	}
+}

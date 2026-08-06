@@ -203,6 +203,33 @@ func requireDurableSandboxBranch(repoID string, instance *session.Instance) erro
 				"remove it and create a replacement: %s",
 			instance.Title, instance.GetBranch(), killSuggestionFor(instance))
 	}
+	// A record under this title is not necessarily a record of THIS session.
+	// Titles are reused — an archived name can be reclaimed — so a stored row
+	// belonging to a different instance says nothing about whether this
+	// sandbox's branch is durable.
+	if rec.ID != "" && instance.ID != "" && rec.ID != instance.ID {
+		return fmt.Errorf(
+			"cannot replace the sandbox for %q: the stored record under that title belongs to a "+
+				"different session, so af cannot confirm this sandbox's branch %q was ever recorded. "+
+				"Retry once its own record is written; if its work is expendable, remove it and create "+
+				"a replacement: %s",
+			instance.Title, instance.GetBranch(), killSuggestionFor(instance))
+	}
+	// Non-empty is not the question — MATCHING is. A partial archive pushes a new
+	// branch, updates the instance in memory, then fails teardown and its
+	// best-effort persist, so the disk can hold an OLDER nonempty branch. Accepting
+	// that would authorize destroying the sandbox on the strength of a record that
+	// points somewhere else: if recovery then fails, the next restore returns to
+	// the old branch and strands exactly the work the archive just pushed.
+	if strings.TrimSpace(rec.Branch) != strings.TrimSpace(instance.GetBranch()) {
+		return fmt.Errorf(
+			"cannot replace the sandbox for %q: its stored branch is %q but the sandbox is on %q — the "+
+				"write that would have recorded the current branch did not land, so a crash after the "+
+				"replacement would send the next restore back to the stored branch and strand the work "+
+				"pushed to the current one. Retry once the record is writable; if its work is expendable, "+
+				"remove it and create a replacement: %s",
+			instance.Title, rec.Branch, instance.GetBranch(), killSuggestionFor(instance))
+	}
 	return nil
 }
 
