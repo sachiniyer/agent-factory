@@ -823,6 +823,13 @@ func (m *home) reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp
 		// OpCreating, a missed release would not even show, since OpRespawning
 		// composes to the settled liveness rather than masking it as Loading.
 		_ = inst.Transition(session.ClearOp())
+		// Drop the provenance with the op, exactly as the three cases above do
+		// (#3005/#3006 landed after this case was written). Leaving it is benign only
+		// by accident — vetoesReconcile short-circuits on OpNone, so the stale entry is
+		// never read — but it survives pruneTo for as long as the row is live, and the
+		// next path that consults provenance without checking the op first would
+		// inherit a wrong answer.
+		m.adoptedSnapshotOps.forget(inst)
 		return true
 	}
 	return false
