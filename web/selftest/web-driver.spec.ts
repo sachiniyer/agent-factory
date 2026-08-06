@@ -503,11 +503,41 @@ async function resetToAgentTab(page: Page): Promise<void> {
  *  one-keystroke shell path. */
 async function createTerminalTab(page: Page): Promise<void> {
   const tabbar = page.locator(".af-tabbar");
+  // What the pane is bound to BEFORE the new tab exists, so the wait at the end is
+  // for a change of state rather than for an elapsed duration.
+  const pane = page.locator(".af-term-host .af-pane").first();
+  const boundBefore = await pane.getAttribute("data-tab-id");
+  const tabsBefore = await tabbar.locator(".af-tab").count();
+
   await tabbar.locator(".af-tab-new").click();
   const menu = tabbar.locator(".af-tab-menu");
   await expect(menu).toBeVisible();
   await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
   await expect(menu).toBeHidden();
+
+  // The menu closing says the REQUEST went out. It does not say the tab exists, nor
+  // that the pane has been rebound to it — and returning there is a race every caller
+  // inherits, because `.af-term-host` is a single PERSISTENT element (web/src/index.ts
+  // keeps it alive across renders so a focused xterm survives rail updates). Clicking
+  // it before the rebind focuses the xterm of the tab being LEFT, so keystrokes meant
+  // for a fresh shell go to the agent instead.
+  //
+  // That produces a red nobody can read. Text typed into claude still appears inside
+  // `.af-term-host`, so a toContainText assertion passes and only the "did it
+  // execute?" assertion fails, twenty lines later, looking exactly like a lost
+  // keystroke in the product (#2811/#2856) rather than a test that typed into the
+  // wrong terminal.
+  //
+  // data-tab-id is the honest signal: split.ts publishes what each pane is bound to
+  // precisely because an ordinal shifts and a name can be renamed (#1779/#1901).
+  // Waiting for it does NOT wait for the socket — the rebind happens during the UI
+  // reconcile while the new tab's WebSocket is still connecting — so a caller that
+  // means to type into a connecting terminal still can.
+  await expect(tabbar.locator(".af-tab")).toHaveCount(tabsBefore + 1, { timeout: 30_000 });
+  await expect(pane, "the pane must be bound to the new tab before anyone types into it").not.toHaveAttribute(
+    "data-tab-id",
+    boundBefore ?? "",
+  );
 }
 
 /**
@@ -1911,11 +1941,19 @@ test("#2811: typing the instant a tab opens loses nothing — type-ahead is held
     await row(p, SESSION_B).click();
     await resetToAgentTab(p);
 
-    const host = p.locator(".af-term-host");
-    // No wait for data-term-status here, on purpose: that attribute belongs to the
-    // pane and can still read "open" from the tab we just left while THIS tab's
-    // socket is connecting — which is exactly how the #2796 CI run typed into a
-    // connecting terminal and lost the front of its command.
+    // Scoped to the PANE, not to `.af-term-host`. The host is one persistent element
+    // shared by every tab, so an assertion made against it can be satisfied by the tab
+    // being LEFT — which is how this test could report the marker present but no line
+    // of output: the text had gone to the agent, where nothing executes it. The pane is
+    // what carries the tab binding, so every assertion below is about the shell this
+    // test created.
+    // Still no wait for data-term-status, on purpose: it is set on `main`
+    // (web/src/ui.ts) rather than per pane, so it can read "open" from the tab we just
+    // left while THIS tab's socket is connecting — exactly how the #2796 run typed into
+    // a connecting terminal and lost the front of its command. createTerminalTab waits
+    // for the pane REBIND instead, which is deterministic and does not wait away the
+    // window under test.
+    const host = p.locator(".af-term-host .af-pane").first();
     await createTerminalTab(p);
     await host.click();
     const marker = "af-2811-typeahead-ok";
