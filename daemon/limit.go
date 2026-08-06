@@ -430,6 +430,21 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// re-provision belongs, with its own recheck). What remains is an answered death: the
 	// sandbox answered that its agent exited while blocked — the #1786 case — and
 	// that is authoritative, so it re-spawns at once, exactly as before.
+	// Raise the resume's fence BEFORE the probe, so it covers the whole destructive
+	// sequence rather than only the re-spawn (#2997, #3004 review). The
+	// preserve-then-record phase below is a network git push and the longest part of
+	// this function; run unfenced, a status tick lands in it, observes the dead agent,
+	// and applies LiveLost while no op is in flight — after which this resume fails
+	// its own precondition and the queued prompt is never delivered.
+	//
+	// Deferred release covers every exit: it is a no-op once Respawn's ConfirmLive has
+	// cleared the op on the success path, and it is what keeps a refused or failed
+	// resume from stranding the session as permanently busy.
+	if err := instance.BeginLimitResume(); err != nil {
+		return resumeNotPerformed, fmt.Errorf("cannot resume %q: %w", requestedTitle, err)
+	}
+	defer instance.EndLimitResume()
+
 	as := instance.AgentServer()
 	switch probe := probeLiveness(instance, as); probe {
 	case probeAlive:

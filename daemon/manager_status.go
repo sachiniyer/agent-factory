@@ -258,7 +258,18 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	taskRunWasActive := instance.TaskRunActive()
-	epoch := instance.StateEpoch() // see refreshInstanceStatus (#2135)
+	// Paired with the op axis, and skipped on, for the same reason as the plain poll
+	// (#2997). This is a SECOND path out of refreshInstanceStatus and it returns
+	// before that one's paired check, so it needs its own: the op skip up there ran
+	// earlier in the tick, and a fence raised since would leave this helper reading a
+	// post-fence epoch. Its observation would then look current and be APPLIED — here
+	// that means settling LiveReady from the empty snapshot of a runtime being torn
+	// down, which ends the task run early and leaves a failed respawn unretryable.
+	op, epoch := instance.InFlightOpAndEpoch()
+	if op != session.OpNone {
+		m.clearRemoteLoss(key)
+		return
+	}
 	obs, err := instance.AgentServer().Snapshot()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)

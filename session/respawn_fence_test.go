@@ -54,6 +54,8 @@ func TestRespawn_FencesTheOperationAgainstTheStatusPoll(t *testing.T) {
 	probe.confirmLive = true
 	i := limitBlockedInstance(t, probe)
 
+	require.NoError(t, i.BeginLimitResume(), "the caller raises the fence for the whole resume")
+	defer i.EndLimitResume()
 	require.NoError(t, i.Respawn())
 
 	require.Equal(t, OpRespawning, probe.opDuring,
@@ -73,10 +75,14 @@ func TestRespawn_LowersTheFenceWhenTheBackendFails(t *testing.T) {
 	probe.err = boom
 	i := limitBlockedInstance(t, probe)
 
+	require.NoError(t, i.BeginLimitResume())
 	require.ErrorIs(t, i.Respawn(), boom)
-
 	require.Equal(t, OpRespawning, probe.opDuring, "the fence was up while the work ran")
-	require.Equal(t, OpNone, i.GetInFlightOp(), "and is down again once it failed")
+	require.Equal(t, OpRespawning, i.GetInFlightOp(),
+		"a failed Respawn leaves the fence for its owner to lower — never silently")
+
+	i.EndLimitResume()
+	require.Equal(t, OpNone, i.GetInFlightOp(), "and the owner lowers it")
 	require.Equal(t, LiveLimitReached, i.GetLiveness(),
 		"a failed respawn leaves the session where it was — still resumable")
 	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionResumeLimit),
@@ -89,7 +95,12 @@ func TestRespawn_LowersTheFenceWhenTheBackendSkipsConfirmLive(t *testing.T) {
 	probe := newRespawnProbe()
 	i := limitBlockedInstance(t, probe)
 
+	require.NoError(t, i.BeginLimitResume())
 	require.NoError(t, i.Respawn())
+
+	// EndLimitResume is deferred unconditionally by the daemon, so it has to be safe
+	// on the path where the backend never reached ConfirmLive as well.
+	i.EndLimitResume()
 	require.Equal(t, OpNone, i.GetInFlightOp())
 }
 
@@ -100,7 +111,8 @@ func TestRespawn_RefusesWhenAnotherOpAlreadyOwnsTheSession(t *testing.T) {
 	i := limitBlockedInstance(t, probe)
 	require.NoError(t, i.Transition(BeginKill()))
 
-	require.Error(t, i.Respawn(), "a session another op owns is not respawnable")
+	require.Error(t, i.BeginLimitResume(), "a session another op owns is not resumable")
+	require.Error(t, i.Respawn(), "and Respawn refuses without the fence rather than proceeding")
 	require.Equal(t, OpKilling, i.GetInFlightOp(), "and the owner's op is untouched")
 	require.Equal(t, InFlightOp(0), probe.opDuring, "the backend was never reached")
 }
@@ -145,7 +157,7 @@ func TestRespawnFenceDropsAPollObservationDecidedBeforeItWasRaised(t *testing.T)
 	require.Equal(t, LiveLimitReached, i.GetLiveness(),
 		"a stale observation must not clobber the liveness the running resume depends on")
 	require.Equal(t, OpRespawning, i.GetInFlightOp(), "and the fence still stands")
-	i.clearRespawnFence()
+	i.EndLimitResume()
 	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionResumeLimit),
 		"once the fence is down the resume can be retried")
 }
@@ -203,7 +215,7 @@ func TestRespawnFenceRefusesACompetingRuntimeAction(t *testing.T) {
 	require.Error(t, i.ValidateRuntimeAction(RuntimeActionHandoff),
 		"a session mid-respawn must refuse a handoff, on whichever side asks")
 
-	i.clearRespawnFence()
+	i.EndLimitResume()
 	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionHandoff),
 		"and the action comes back once the fence is down")
 }
@@ -212,19 +224,19 @@ func TestRespawnFenceRefusesACompetingRuntimeAction(t *testing.T) {
 // close. An observation landing BETWEEN the precondition check and the fence is
 // CURRENT, not stale, so nothing drops it — and the raw fence edge does not re-check
 // liveness (next test), so a validate that ran under an earlier, already-released
-// lock cannot protect it. beginRespawnFence holds i.mu across both.
-func TestBeginRespawnFenceRefusesAClobberedPrecondition(t *testing.T) {
+// lock cannot protect it. BeginLimitResume holds i.mu across both.
+func TestBeginLimitResumeRefusesAClobberedPrecondition(t *testing.T) {
 	i := limitBlockedInstance(t, newRespawnProbe())
 	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)), "the poll's observation lands")
 
-	require.Error(t, i.beginRespawnFence(), "a session the daemon just declared Lost is not resumable")
+	require.Error(t, i.BeginLimitResume(), "a session the daemon just declared Lost is not resumable")
 	require.Equal(t, OpNone, i.GetInFlightOp(), "and no fence was raised on the way out")
 }
 
 // Why that check has to live inside the fence's own critical section rather than
 // ahead of it: tkBeginRespawn is keyed on the OP axis alone, so the edge itself will
 // happily raise the fence over a clobbered liveness. This test is the reason
-// beginRespawnFence exists; if the edge is ever given a liveness precondition
+// BeginLimitResume exists; if the edge is ever given a liveness precondition
 // instead, note that a legitimate loss of this race would then fire the
 // illegal-transition hook (a panic under test), which is why the guard is a
 // validating chokepoint and not an allowedFrom predicate.
@@ -242,6 +254,7 @@ func TestRespawnDoesNotReachTheBackendOnAClobberedPrecondition(t *testing.T) {
 	i := limitBlockedInstance(t, probe)
 	require.NoError(t, i.Transition(ObserveLiveness(LiveLost)))
 
+	require.Error(t, i.BeginLimitResume())
 	require.Error(t, i.Respawn())
 	require.Equal(t, LivenessUnset, probe.livenessDuring, "the backend must never have been called")
 	require.Equal(t, OpNone, i.GetInFlightOp())
@@ -266,7 +279,7 @@ func TestRespawningRowOffersNeitherArchiveNorKill(t *testing.T) {
 		"Kill cannot supersede this fence — KillSession times out on the op lock the "+
 			"resume holds, so advertising it promises a supersede it cannot perform")
 
-	i.clearRespawnFence()
+	i.EndLimitResume()
 	require.Equal(t, LifecycleActionArchive, i.LifecycleAction(), "and the verb comes back")
 	require.True(t, i.CanKill(), "as does Kill")
 }
@@ -318,4 +331,52 @@ func TestInFlightOpAndEpochReportsAFenceAlreadyRaised(t *testing.T) {
 	op, epoch := i.InFlightOpAndEpoch()
 	require.Equal(t, OpRespawning, op, "the caller must skip on this")
 	require.Equal(t, i.StateEpoch(), epoch)
+}
+
+// #3004 review finding 11 (P1), and the mechanism #2997 actually described: the
+// daemon probes, then PUSHES the sandbox's unpushed work and records its branch, and
+// only then re-spawns. Fencing the backend call alone left that push — a network git
+// operation, the longest phase of the resume — unprotected. Respawn therefore
+// REQUIRES the fence rather than raising its own, so the ownership cannot silently
+// slide back to being too late.
+func TestRespawnRequiresTheFenceItsCallerOwns(t *testing.T) {
+	probe := newRespawnProbe()
+	i := limitBlockedInstance(t, probe)
+
+	err := i.Respawn()
+	require.Error(t, err, "Respawn must not raise a fence of its own — that would be after the push")
+	require.Contains(t, err.Error(), "requires the limit-resume fence")
+	require.Equal(t, LivenessUnset, probe.livenessDuring, "and it must not reach the backend")
+	require.Equal(t, OpNone, i.GetInFlightOp(), "nor leave a fence behind")
+}
+
+// The fence has to be available to a caller BEFORE any of the destructive phases,
+// and it must preserve the precondition those phases run under.
+func TestBeginLimitResumeFencesTheWholeSequenceWithoutDisturbingLiveness(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+
+	require.NoError(t, i.BeginLimitResume())
+	require.Equal(t, OpRespawning, i.GetInFlightOp(),
+		"the push and the re-provision both run behind this")
+	require.Equal(t, LiveLimitReached, i.GetLiveness(),
+		"and the precondition the resume validated against survives its own operation")
+
+	// Which is what makes the poll skip for the whole sequence, not just the tail.
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(i.StateEpoch()-1)),
+		"an observation from before the fence is dropped")
+	require.Equal(t, LiveLimitReached, i.GetLiveness())
+
+	i.EndLimitResume()
+	require.Equal(t, OpNone, i.GetInFlightOp())
+	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionResumeLimit), "still retryable")
+}
+
+// EndLimitResume must never touch an op it does not own — the daemon defers it
+// unconditionally, so a session that moved on under another owner has to be left alone.
+func TestEndLimitResumeLeavesAnotherOwnersOpAlone(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.Transition(BeginKill()))
+
+	i.EndLimitResume()
+	require.Equal(t, OpKilling, i.GetInFlightOp(), "the kill still owns the session")
 }
