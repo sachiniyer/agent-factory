@@ -138,7 +138,12 @@ func (t *TmuxSession) Start(workDir string) error {
 			// before the pane process finishes flushing. Wait for that process here,
 			// and keep the outcome unknown if it outlives the bound, so LocalBackend
 			// cannot remove the fresh worktree underneath its final writes.
-			cleanupState, cleanupErr := t.CloseAndWaitForPaneExit()
+			// Blindness is kept, not dropped: LocalBackend treats ErrSessionNotStarted
+			// as proof nothing launched and REMOVES the fresh worktree, so a session
+			// that vanished with no pane observed — whose marker sweep is vacuous for
+			// a markerless launch — must not reach that classification unchecked
+			// (#2998).
+			cleanupState, cleanupBlind, cleanupErr := t.CloseAndWaitForPaneExitReportingBlindness()
 			if cleanupErr != nil {
 				timeoutErr = fmt.Errorf("%v (cleanup error: %v)", timeoutErr, cleanupErr)
 			}
@@ -147,7 +152,7 @@ func (t *TmuxSession) Start(workDir string) error {
 			// timeout classification was necessary only while a fresh title could
 			// contain spellings tmux rewrote (#2207); legacy exact names still stay
 			// on that conservative path through hasStableTmuxSpelling.
-			if cleanupState == PaneStateKnown && cleanupErr == nil && hasStableTmuxSpelling(t.sanitizedName) {
+			if cleanupState == PaneStateKnown && cleanupErr == nil && !cleanupBlind && hasStableTmuxSpelling(t.sanitizedName) {
 				return fmt.Errorf("%w: %w", timeoutErr, ErrSessionNotStarted)
 			}
 			return fmt.Errorf("%w: %w", timeoutErr, ErrTmuxTimeout)

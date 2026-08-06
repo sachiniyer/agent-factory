@@ -81,6 +81,14 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 		if !dirContains(root, filepath.Clean(cwd)) {
 			continue
 		}
+		if seen[pid] {
+			// An ancestor already matched and TreeOf walked this whole subtree. A
+			// deep worker tree that all inherited one cwd would otherwise call
+			// TreeOf once per member, and TreeOf rebuilds its child map from the
+			// full snapshot each time — O(k*n) on a synchronous teardown gate,
+			// which is the daemon's kill/archive RPC blocking on it.
+			continue
+		}
 		// The whole subtree, because a child of a worktree-cwd'd process belongs to
 		// the same occupancy even if it chdir'd elsewhere — and it is frequently the
 		// one actually holding files open. Its membership is inherited from a

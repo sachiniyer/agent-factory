@@ -140,3 +140,26 @@ func TestDescribeOccupants_NamesPidsAndCaps(t *testing.T) {
 	require.Contains(t, out, "and 3 more", "a long list must be capped rather than flooding an operator message")
 	require.False(t, strings.Contains(out, "pid 8"), "capped entries must not be rendered")
 }
+
+// A deep tree that all inherited one cwd must be walked ONCE, not once per
+// member. TreeOf rebuilds its child map from the full snapshot on every call, so
+// re-walking is O(k*n) on a synchronous teardown gate — the daemon's kill/archive
+// RPC blocks on this.
+//
+// The observable contract is that each pid appears exactly once; the skip that
+// makes it cheap is what also makes that true without deduping after the fact.
+func TestOccupantsOfDir_ReportsEachProcessOnce(t *testing.T) {
+	worktree := t.TempDir()
+	parkedProcessIn(t, worktree)
+	parkedProcessIn(t, worktree)
+
+	occupants, err := OccupantsOfDir(worktree)
+	require.NoError(t, err)
+	require.NotEmpty(t, occupants)
+
+	seen := map[int]bool{}
+	for _, o := range occupants {
+		require.False(t, seen[o.Process.PID], "pid %d reported twice", o.Process.PID)
+		seen[o.Process.PID] = true
+	}
+}
