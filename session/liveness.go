@@ -563,6 +563,35 @@ func (i *Instance) SetLimitResetAt(resetAt time.Time) {
 // daemon poll re-resolves its real state on the next tick and the [limit] badge
 // clears (#1146). A no-op when the instance is not limit-blocked, so the resume
 // action (and PR3's scheduler) can call it unconditionally.
+// ReparkLimitUnderResumeFence restores a limit window while the caller holds the
+// resume fence. It is the transaction-owned twin of SetLimitReached, in the same
+// shape as RecordHandoffSwap is to SwapAgentProgram: the plain setter refuses while
+// ANY op is in flight, which is right for every other writer and wrong for the one
+// that owns the operation.
+//
+// The resume needs it because it re-parks BEFORE delivering its prompt (#2997). With
+// the fence held across that stretch — which is what keeps the poll from settling the
+// fresh runtime Ready and ending the task run — the plain setter would no-op and this
+// episode's reset time would be lost, leaving the auto-resume scheduler nothing to
+// schedule off. Silently, too: it reports the refusal only through a bool that path
+// had no reason to read.
+//
+// Refuses unless OpRespawning is actually held, so it cannot become a back door
+// around the guard it deliberately steps past.
+func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning {
+		return fmt.Errorf("re-parking the limit for %q requires the resume fence (in-flight op is %s)",
+			i.Title, opLabel(i.inFlightOp))
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = LiveLimitReached
+	i.limitResetAt = resetAt
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return nil
+}
+
 func (i *Instance) ClearLimitReached() {
 	i.mu.Lock()
 	defer i.mu.Unlock()

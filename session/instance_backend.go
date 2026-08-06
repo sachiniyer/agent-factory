@@ -105,13 +105,18 @@ func (i *Instance) BeginLimitResume() error {
 // leaves liveness alone), so the OpRespawning check is not about legality: it makes
 // sure a kill or archive overlay that SUPERSEDED this fence is not cleared out from
 // under its own owner.
-func (i *Instance) EndLimitResume() {
+// Reports whether it actually lowered the fence, so a caller that must announce the
+// released state to its clients can tell an effective release from a no-op and not
+// publish a duplicate settled event on the path that already published one.
+func (i *Instance) EndLimitResume() bool {
 	if i.GetInFlightOp() != OpRespawning {
-		return
+		return false
 	}
 	if err := i.Transition(ClearOp()); err != nil {
 		log.WarningLog.Printf("limit resume: clearing the in-flight fence for %q: %v", i.Title, err)
+		return false
 	}
+	return true
 }
 
 // Respawn re-spawns this session's runtime. It REQUIRES the caller to hold the

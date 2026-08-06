@@ -385,6 +385,21 @@ func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.In
 	return err
 }
 
+// publishSessionSnapshot pushes this session's current projection to clients under
+// the repo ordering lock, the same discipline the resume's completion event uses:
+// session.updated replaces a client's whole session projection, so letting one race a
+// newer tab mutation could put the client back on an older roster.
+//
+// Deliberately does NOT persist. The op axis is scrubbed before disk anyway, and these
+// are transient fence transitions — the durable checkpoints stay where they were.
+func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instance) {
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	data := instance.ToInstanceData()
+	repoStartLock.Unlock()
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+}
+
 func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string) (resumeFromLimitOutcome, error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
@@ -443,7 +458,22 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	if err := instance.BeginLimitResume(); err != nil {
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: %w", requestedTitle, err)
 	}
-	defer instance.EndLimitResume()
+	// Tell the clients. The web rail is event-driven and performs no optimistic update
+	// for a resume, so without this an already-connected client keeps the PRE-fence
+	// can_kill / lifecycle / handoff / Retry controls for the whole operation — which
+	// for a remote preserve-and-provision is a long time, and for an automatic resume
+	// is a window the user never opted into. The projection gates would then be
+	// correct and invisible, and a press would land on a busy error or the 30s kill
+	// timeout they were added to prevent.
+	m.publishSessionSnapshot(repoID, instance)
+	// The deferred release publishes too, but ONLY when it actually lowered the fence:
+	// on the success path the explicit release below has already done so and the
+	// completion event carries the settled row, so a second event here would be noise.
+	defer func() {
+		if instance.EndLimitResume() {
+			m.publishSessionSnapshot(repoID, instance)
+		}
+	}()
 
 	as := instance.AgentServer()
 	switch probe := probeLiveness(instance, as); probe {
@@ -512,7 +542,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// No hot-loop risk from re-parking: the auto-resume scheduler sets its
 		// backoff gate BEFORE firing (limitResumeAttempted), so a resume that keeps
 		// failing here backs off exponentially instead of hammering.
-		instance.SetLimitReached(resetAt)
+		// Under the resume's own fence, which is still up: ConfirmLive preserves it
+		// through prompt delivery now (#2997), and the plain SetLimitReached refuses
+		// while any op is in flight — it would no-op here and lose this episode's
+		// reset time, which the auto-resume scheduler schedules off.
+		if perr := instance.ReparkLimitUnderResumeFence(resetAt); perr != nil {
+			return resumeNotPerformed, fmt.Errorf("failed to restore the limit window for %q: %w", requestedTitle, perr)
+		}
 		// Write the respawn's durable state NOW, not at the end of the happy path
 		// (#1854). Respawn shares LocalBackend.respawn, so reaching this line can mean
 		// it rebuilt a vanished worktree — recreating the branch, flipping
@@ -574,7 +610,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// lifecycle and kill controls until an unrelated update or a reconnect. The defer
 	// above stays as the safety net for the error returns, where it is the only
 	// release; after this call it is a no-op.
-	instance.EndLimitResume()
+	_ = instance.EndLimitResume()
 
 	// The cleared limit is itself durable state worth a checkpoint. On the respawn
 	// arm this is the second write; that is deliberate — the first one records the

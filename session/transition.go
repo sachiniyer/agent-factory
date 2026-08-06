@@ -348,7 +348,19 @@ var transitionTable = map[transitionKind]edgeSpec{
 		allowedFrom: func(s stateAxes) bool {
 			return s.op == OpNone || s.op == OpCreating || s.op == OpRestoring || s.op == OpRespawning
 		},
-		target:           func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveRunning, OpNone} },
+		target: func(s stateAxes, _ TransitionEvent) stateAxes {
+			if s.op == OpRespawning {
+				// A limit resume is NOT over when its runtime comes up (#2997). It still has
+				// to re-park this episode's limit window and deliver the queued prompt, and
+				// clearing the fence here would unfence exactly that stretch: the poll would
+				// see a freshly spawned, still-idle agent, settle it Ready, and END THE TASK
+				// RUN — taskRunActive only ever goes true→false — so the prompt would land on
+				// a session no longer counted against the watch-task concurrency cap. The
+				// resume's own EndLimitResume lowers it once the prompt has landed.
+				return stateAxes{LiveRunning, OpRespawning}
+			}
+			return stateAxes{LiveRunning, OpNone}
+		},
 		yieldWhenBlocked: true,
 		// A spawn completing says the agent is up, not that its work is done. It
 		// cannot REOPEN a finished run either: the marker only ever goes true→false,

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -62,8 +63,11 @@ func TestRespawn_FencesTheOperationAgainstTheStatusPoll(t *testing.T) {
 		"the poll's skip is keyed on the instance-visible op, so a long respawn must advertise one")
 	require.Equal(t, LiveLimitReached, probe.livenessDuring,
 		"raising the fence must not disturb the liveness the resume path depends on")
-	require.Equal(t, OpNone, i.GetInFlightOp(), "ConfirmLive clears the fence on the success path")
+	require.Equal(t, OpRespawning, i.GetInFlightOp(),
+		"ConfirmLive must NOT clear it: the resume still has to re-park and deliver the prompt")
 	require.Equal(t, LiveRunning, i.GetLiveness(), "and the respawned runtime settles live")
+	require.True(t, i.EndLimitResume(), "the resume's owner lowers it when the prompt has landed")
+	require.Equal(t, OpNone, i.GetInFlightOp())
 }
 
 // The other half, and the more dangerous one to get wrong: a failed respawn must not
@@ -406,4 +410,72 @@ func TestTheRespawnFenceIsProjectedSoItsReleaseOrderMatters(t *testing.T) {
 	require.Equal(t, OpNone, settled.InFlightOp, "so the fence must be down BEFORE the payload is built")
 	require.Equal(t, LifecycleActionArchive, settled.LifecycleAction)
 	require.True(t, settled.CanKill)
+}
+
+// #3004 review finding 14 (P1): the resume is not over when its runtime comes up. It
+// still re-parks this episode's limit window and delivers the queued prompt, and the
+// poll must not settle the fresh, still-idle agent Ready in that stretch — an idle
+// observation is the one edge that ENDS a task run, and taskRunActive only ever goes
+// true→false, so the prompt would land on a session no longer counted against the
+// watch-task concurrency cap.
+func TestConfirmLiveKeepsTheResumeFenceForPromptDelivery(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.BeginLimitResume())
+
+	require.NoError(t, i.Transition(ConfirmLive()))
+	require.Equal(t, LiveRunning, i.GetLiveness(), "the runtime is up")
+	require.Equal(t, OpRespawning, i.GetInFlightOp(), "and the resume still owns the session")
+
+	require.True(t, i.EndLimitResume())
+	require.Equal(t, OpNone, i.GetInFlightOp())
+}
+
+// ConfirmLive still clears every other op — the carve-out is for the respawn fence
+// alone, not a change to what completing a create or a restore means.
+func TestConfirmLiveStillClearsACreate(t *testing.T) {
+	i := &Instance{liveness: LiveReady, Title: "creating", started: true, backend: newRespawnProbe()}
+	require.NoError(t, i.Transition(BeginCreate()))
+
+	require.NoError(t, i.Transition(ConfirmLive()))
+	require.Equal(t, OpNone, i.GetInFlightOp(), "a completed create is finished when its runtime is live")
+}
+
+// Holding the fence through delivery collides with SetLimitReached, which refuses
+// while ANY op is in flight — and refuses by returning a bool the daemon never read,
+// so following the review's advice literally would have LOST this episode's reset
+// time in silence and left the auto-resume scheduler nothing to schedule off. The
+// transaction-owned twin is what makes the longer fence safe.
+func TestReparkUnderTheFenceWhereThePlainSetterSilentlyNoOps(t *testing.T) {
+	reset := time.Now().Add(42 * time.Minute).UTC()
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.BeginLimitResume())
+	require.NoError(t, i.Transition(ConfirmLive()))
+	require.Equal(t, LiveRunning, i.GetLiveness())
+
+	// What the daemon used to call. It reports nothing to this caller and changes
+	// nothing — the failure mode the fenced twin exists to remove.
+	i.SetLimitReached(reset)
+	require.Equal(t, LiveRunning, i.GetLiveness(), "the plain setter no-ops under a fence")
+
+	require.NoError(t, i.ReparkLimitUnderResumeFence(reset))
+	require.Equal(t, LiveLimitReached, i.GetLiveness(), "the episode's window is restored")
+	got, ok := i.LimitResetAt()
+	require.True(t, ok)
+	require.WithinDuration(t, reset, got, time.Second, "with THIS episode's reset time, not a zeroed one")
+
+	// And it is not a back door: it refuses when the fence it names is not held.
+	i.ClearLimitReached()
+	require.True(t, i.EndLimitResume())
+	require.Error(t, i.ReparkLimitUnderResumeFence(reset), "no fence, no privileged re-park")
+}
+
+// #3004 review finding 15 (P2): the release has to be distinguishable from a no-op,
+// because the caller publishes a settled projection only when it actually released —
+// otherwise the success path, which already published one, emits a duplicate.
+func TestEndLimitResumeReportsWhetherItReleased(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.BeginLimitResume())
+
+	require.True(t, i.EndLimitResume(), "the first call lowered it")
+	require.False(t, i.EndLimitResume(), "the deferred second call must not re-announce")
 }
