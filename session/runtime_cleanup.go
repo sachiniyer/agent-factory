@@ -156,6 +156,9 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 	if data.SSH != nil {
 		variants++
 	}
+	if data.Sandbox != nil {
+		variants++
+	}
 	if data.Hook != nil {
 		variants++
 	}

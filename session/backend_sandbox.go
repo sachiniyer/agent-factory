@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -212,6 +215,27 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string, stdin io.Reader) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", script)
 	cmd.Stdin = stdin
+	// Its own process group, so the deadline tears down the whole tree rather
+	// than the `sh` alone. exec.CommandContext's default Cancel kills only the
+	// direct child, and WaitDelay merely closes the capture pipes — neither
+	// touches the ssh client, a ProxyCommand, or any helper it spawned. Those are
+	// exactly what this backend exists to support, so without this a timed-out
+	// clone or binary copy keeps running on the sandbox while provisioning starts
+	// cleanup, racing remote work against its own deletion and orphaning local
+	// transport processes. Same shape as boundedTmuxCommand and the hook runtime.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Negative pid targets the whole group. A group already gone (ESRCH) maps
+		// to os.ErrProcessDone, which Wait ignores rather than reporting as a
+		// command failure.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
 	// TRAP 1, with a correction the handoff's rule did not anticipate.
 	//
 	// The recorded guidance was "WaitDelay on the tunnel child, NEVER on the
@@ -285,6 +309,9 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	// unrelated process. With it, ssh exits on the failed forward and the probe
 	// times out honestly.
 	cmd := exec.Command("sh", "-c", p.sshCmd+` -o ExitOnForwardFailure=yes -N -L "$1"`, "af-sandbox", forward)
+	// Its own group so stopTunnel can kill the ssh client and any ProxyCommand
+	// helper together, not just the `sh` that launched them.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// No stdin payload here, so WaitDelay is correct and wanted: a tunnel that
 	// ignores its kill must not hold af's pipes open forever. This is the child
 	// TRAP 1 says it belongs on.
@@ -348,8 +375,16 @@ func (p *sandboxProvisioner) reap() error {
 		return nil
 	}
 
-	out, err := p.Run(sshReapTimeout, p.reapScript(), nil, true)
-	answered := strings.Contains(string(out), sandboxReapSentinel)
+	nonce, nonceErr := sandboxReapNonce()
+	if nonceErr != nil {
+		return fmt.Errorf("backend=sandbox: cannot generate a reap challenge: %w", nonceErr)
+	}
+	script, expect := p.reapScript(nonce)
+	out, err := p.Run(sshReapTimeout, script, nil, true)
+	// Only the UPPERCASED response proves the far side executed: the script
+	// carries the lowercase challenge, so a wrapper logging its argv cannot forge
+	// this.
+	answered := strings.Contains(string(out), expect)
 	if err == nil && answered {
 		p.reaped = true
 		p.reapErr = nil
@@ -389,10 +424,29 @@ func (p *sandboxProvisioner) reap() error {
 	return reapErr
 }
 
-// sandboxReapSentinel is echoed by the REMOTE shell as the reap script's last
-// act. Its presence in the output is the only positive evidence that the far
-// side ran at all — see reap's case 2.
-const sandboxReapSentinel = "__af_sandbox_reaped__"
+// The reap's proof-of-execution marker.
+//
+// A fixed string echoed verbatim does NOT work, and the first version of this
+// was wrong for exactly that reason: the marker also appears in the SCRIPT handed
+// to sandbox_ssh, so a supported wrapper that logs its argv (`set -x`, or any
+// wrapper that traces what it runs) reproduces the marker in combined output
+// while failing LOCALLY, before ssh ever runs. Matching it then latched a
+// wrapper failure as a definite remote answer — the precise bug the sentinel was
+// added to prevent.
+//
+// So the marker is CHALLENGE-RESPONSE, not a password. af generates a lowercase
+// hex nonce per reap; the remote shell must return it UPPERCASED. The script text
+// contains only the lowercase form, so a wrapper echoing its own argv can never
+// produce the uppercase answer — only actually running `tr` on the far side can.
+// `tr` is POSIX and present on every shell this backend can reach.
+const sandboxReapMarkerPrefix = "af-sandbox-reaped-"
+
+// sandboxReapChallenge returns the lowercase nonce to send and the uppercase
+// response that only genuine remote execution can produce.
+func sandboxReapChallenge(nonce string) (send, expect string) {
+	return sandboxReapMarkerPrefix + strings.ToLower(nonce),
+		strings.ToUpper(sandboxReapMarkerPrefix + nonce)
+}
 
 // reapScript kills the agent-server by IDENTITY, not by bare PID, then removes
 // the session dir and prints the sentinel.
@@ -406,14 +460,27 @@ const sandboxReapSentinel = "__af_sandbox_reaped__"
 // `kill …; rm …`, which let a FAILED signal still report a clean reap while the
 // server kept running. The rm is chained so the directory is only removed once
 // the process it belongs to is gone.
-func (p *sandboxProvisioner) reapScript() string {
+func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
+	send, expect := sandboxReapChallenge(nonce)
 	rm := "rm -rf " + shellQuoteSandbox(p.sessionDir)
-	sentinel := "echo " + sandboxReapSentinel
+	// The remote shell must TRANSFORM the challenge, so the answer never appears
+	// in the text a logging wrapper would echo.
+	respond := "printf '%s' " + shellQuoteSandbox(send) + " | tr 'a-z' 'A-Z'"
 	if p.remotePID == "" {
-		return rm + " && " + sentinel
+		return rm + " && " + respond, expect
 	}
 	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName)
-	return "{ " + kill + "; } && " + rm + " && " + sentinel
+	return "{ " + kill + "; } && " + rm + " && " + respond, expect
+}
+
+// sandboxReapNonce makes each reap's challenge unique, so a marker captured from
+// an earlier run's log cannot satisfy a later one.
+func sandboxReapNonce() (string, error) {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // isSandboxAmbiguousExit reports ssh(1)'s own 255, which cannot be told apart
@@ -427,7 +494,11 @@ func (p *sandboxProvisioner) stopTunnel() {
 	if p.tunnel == nil || p.tunnel.Process == nil {
 		return
 	}
-	_ = p.tunnel.Process.Kill()
+	// Negative pid: the whole group, so a ProxyCommand helper does not outlive
+	// the client it was opened for.
+	if err := syscall.Kill(-p.tunnel.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = p.tunnel.Process.Kill()
+	}
 	_ = p.tunnel.Wait()
 	p.tunnel = nil
 	if p.tunnelLn != nil {

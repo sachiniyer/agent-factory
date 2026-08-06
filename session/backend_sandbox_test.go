@@ -161,8 +161,9 @@ func TestSandboxReapTreatsExit255AsUndetermined(t *testing.T) {
 // A definite non-255 failure is an ANSWER: the reap completed and told us
 // something, so it latches and the record may be deleted.
 func TestSandboxReapLatchesADefiniteFailure(t *testing.T) {
-	// Echoes the sentinel — proof the remote side ran — then reports a failure.
-	ssh := stubSSH(t, "echo "+sandboxReapSentinel+"; echo 'rm: permission denied' >&2; exit 1")
+	// Answers the challenge (uppercasing it, as only real remote execution can),
+	// then reports a failure — a definite remote answer.
+	ssh := stubSSH(t, `printf '%s' "${!#}" | grep -o 'af-sandbox-reaped-[0-9a-f]*' | tr 'a-z' 'A-Z'; echo 'rm: permission denied' >&2; exit 1`)
 	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir"}
 
 	err := p.reap()
@@ -173,7 +174,7 @@ func TestSandboxReapLatchesADefiniteFailure(t *testing.T) {
 }
 
 func TestSandboxReapSucceedsAndLatches(t *testing.T) {
-	ssh := stubSSH(t, "echo "+sandboxReapSentinel+"; exit 0")
+	ssh := stubSSH(t, `printf '%s' "${!#}" | grep -o 'af-sandbox-reaped-[0-9a-f]*' | tr 'a-z' 'A-Z'; exit 0`)
 	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "77"}
 
 	require.NoError(t, p.reap())
@@ -250,20 +251,22 @@ func TestSandboxReapWithoutTheRemoteSentinelIsUndetermined(t *testing.T) {
 // host. And the kill's status must gate the rm, not be discarded by a `;`.
 func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 	p := &sandboxProvisioner{sessionDir: "/remote/af-session", remotePID: "4242"}
-	script := p.reapScript()
+	script, expect := p.reapScript("a1b2c3d4")
 
 	assert.Contains(t, script, "/proc/$pid/cmdline",
 		"the kill must verify argv[0] before signalling, not trust a bare PID")
 	assert.Contains(t, script, "/remote/af-session/af",
 		"and must compare against THIS session's unique af path")
 	assert.Contains(t, script, "} && rm -rf", "a failed kill must stop the removal, not be discarded by `;`")
-	assert.Contains(t, script, "&& echo "+sandboxReapSentinel,
-		"the sentinel is the last act, so it proves the whole script ran")
+	assert.Contains(t, script, "| tr 'a-z' 'A-Z'",
+		"the response must be COMPUTED remotely, so a wrapper echoing argv cannot forge it")
+	assert.NotContains(t, script, expect,
+		"the script must never contain the expected answer — that is what makes it unforgeable")
 
 	// With no PID there is nothing to signal, but the sentinel still gates.
-	noPID := (&sandboxProvisioner{sessionDir: "/remote/af-session"}).reapScript()
+	noPID, _ := (&sandboxProvisioner{sessionDir: "/remote/af-session"}).reapScript("a1b2c3d4")
 	assert.NotContains(t, noPID, "kill")
-	assert.Contains(t, noPID, "&& echo "+sandboxReapSentinel)
+	assert.Contains(t, noPID, "| tr 'a-z' 'A-Z'")
 }
 
 // Codex 3725079706: the local port is reserved by binding :0 and closing it, so
@@ -281,4 +284,86 @@ func TestSandboxTunnelRefusesToOutliveAFailedForward(t *testing.T) {
 	assert.Contains(t, string(src), `-o ExitOnForwardFailure=yes -N -L`,
 		"startTunnel must pass ExitOnForwardFailure so a lost bind kills the child instead of "+
 			"leaving the probe to succeed against whoever won the port")
+}
+
+// Codex 3725178152: the first sentinel was a fixed string echoed verbatim, and
+// it ALSO appeared in the script handed to sandbox_ssh — so a wrapper that logs
+// its argv (`set -x`, or any tracing wrapper) reproduced the marker in combined
+// output while failing LOCALLY, and the reap latched that as a definite remote
+// answer. The challenge is now uppercased BY the remote shell, which a wrapper
+// echoing its own arguments cannot do.
+func TestSandboxReapRejectsAWrapperEchoingTheChallenge(t *testing.T) {
+	// A wrapper that traces the command it was given (so the lowercase challenge
+	// lands in the output) and then fails locally without ever reaching ssh.
+	ssh := stubSSH(t, `set -x; echo "would run: ${!#}"; exit 127`)
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "9"}
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"a wrapper echoing the challenge has NOT proved the remote ran, so this must stay unknown-state")
+	assert.False(t, p.reaped, "and must not latch")
+}
+
+// Each reap issues a fresh challenge, so a marker captured from an earlier run's
+// log cannot satisfy a later one.
+func TestSandboxReapChallengeIsPerReap(t *testing.T) {
+	p := &sandboxProvisioner{sessionDir: "/d"}
+	a, expectA := p.reapScript("aaaaaaaa")
+	b, expectB := p.reapScript("bbbbbbbb")
+	assert.NotEqual(t, a, b)
+	assert.NotEqual(t, expectA, expectB)
+	assert.NotContains(t, a, expectA)
+}
+
+// Codex 3725178147: RuntimeCleanupData is a tagged union whose restore path
+// counts how many variants are set and refuses anything but exactly one. Adding
+// the Sandbox arm without adding it to that count made every valid sandbox
+// handle look like ZERO variants — rejected, replaced with an unavailable
+// cleanup, and never retried. That silently defeats the whole point of
+// persisting the handle, and no existing test covered the counting.
+func TestRestoreRuntimeCleanupRebuildsASandboxHandle(t *testing.T) {
+	data := &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh -J bastion.invalid sandbox.invalid",
+		SessionDir: "/remote/af-sessions/xyz",
+		RemotePID:  "4242",
+	}}
+
+	backend, teardown, err := restoreRuntimeCleanup("a session", "sandbox", data)
+	require.NoError(t, err, "a valid sandbox handle must be restorable, or its retained row can never be retried")
+	require.NotNil(t, backend)
+	require.NotNil(t, teardown)
+	assert.Equal(t, "sandbox", backend.Type())
+
+	sb, ok := backend.(*sandboxBackend)
+	require.True(t, ok, "restore must rebuild a sandboxBackend, not a stand-in")
+	require.NotNil(t, sb.provisioner)
+	assert.Equal(t, "ssh -J bastion.invalid sandbox.invalid", sb.provisioner.sshCmd,
+		"the operator's ssh command must survive the restart, or the reap cannot reach the sandbox")
+	assert.Equal(t, "/remote/af-sessions/xyz", sb.provisioner.sessionDir)
+	assert.Equal(t, "4242", sb.provisioner.remotePID)
+}
+
+// The union stays strict: a handle carrying two variants is refused rather than
+// guessed at, and the sandbox arm must not weaken that.
+func TestRestoreRuntimeCleanupRefusesAmbiguousSandboxHandle(t *testing.T) {
+	_, _, err := restoreRuntimeCleanup("a session", "sandbox", &RuntimeCleanupData{
+		Sandbox: &SandboxRuntimeCleanupData{SSHCommand: "ssh h", SessionDir: "/d"},
+		SSH:     &SSHRuntimeCleanupData{SessionDir: "/d"},
+	})
+	require.Error(t, err, "two variants is a malformed record and must be refused, not guessed")
+}
+
+// An incomplete handle cannot silently become a no-op reap either.
+func TestRestoreRuntimeCleanupRejectsIncompleteSandboxHandle(t *testing.T) {
+	for name, d := range map[string]*SandboxRuntimeCleanupData{
+		"no ssh command": {SessionDir: "/d"},
+		"no session dir": {SSHCommand: "ssh h"},
+		"bad pid":        {SSHCommand: "ssh h", SessionDir: "/d", RemotePID: "-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := restoreRuntimeCleanup("s", "sandbox", &RuntimeCleanupData{Sandbox: d})
+			require.Error(t, err)
+		})
+	}
 }
