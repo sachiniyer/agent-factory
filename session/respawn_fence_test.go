@@ -270,3 +270,52 @@ func TestRespawningRowOffersNeitherArchiveNorKill(t *testing.T) {
 	require.Equal(t, LifecycleActionArchive, i.LifecycleAction(), "and the verb comes back")
 	require.True(t, i.CanKill(), "as does Kill")
 }
+
+// #3004 review finding 10 (P1): a third distinct window, and the one my earlier test
+// structurally cannot reach — it captures the epoch BEFORE the fence, so it only ever
+// exercises a stale observation. Here the poll passes its op skip, the fence goes up,
+// and only THEN does the poll capture its epoch. The observation is now current, so
+// the epoch guard has no reason to drop it, and it clobbers the liveness of a session
+// an operation already owns.
+//
+// The fix is to read the op and the epoch together, so this test asserts the property
+// the daemon poll relies on rather than re-implementing the poll: an epoch obtained
+// alongside an OpNone reading is necessarily older than any fence raised afterwards.
+func TestInFlightOpAndEpochLeavesNoWindowBetweenTheSkipAndTheEpoch(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+
+	// What the poll used to do: skip on the op, then capture the epoch separately.
+	// The fence slips in between the two reads.
+	require.Equal(t, OpNone, i.GetInFlightOp(), "the skip passes")
+	require.NoError(t, i.Transition(BeginRespawn()))
+	staleReadEpoch := i.StateEpoch()
+
+	// That epoch is post-fence, so the observation settles as CURRENT and lands —
+	// this is the defect, asserted rather than described.
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(staleReadEpoch)))
+	require.Equal(t, LiveLost, i.GetLiveness(),
+		"reading the epoch after the fence is what let the clobber through")
+
+	// Reading both together instead: the op reading is what tells the poll to skip,
+	// and it cannot disagree with the epoch it was read beside.
+	j := limitBlockedInstance(t, newRespawnProbe())
+	op, epoch := j.InFlightOpAndEpoch()
+	require.Equal(t, OpNone, op)
+	require.NoError(t, j.Transition(BeginRespawn()), "the fence goes up after the paired read")
+
+	require.NoError(t, j.Transition(ObserveLiveness(LiveLost).AtEpoch(epoch)))
+	require.Equal(t, LiveLimitReached, j.GetLiveness(),
+		"an epoch read beside an OpNone op is older than any later fence, so the guard drops it")
+	require.Equal(t, OpRespawning, j.GetInFlightOp())
+}
+
+// And the paired read reports a fence that is already up, which is what makes the
+// caller's skip correct rather than merely well-timed.
+func TestInFlightOpAndEpochReportsAFenceAlreadyRaised(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.Transition(BeginRespawn()))
+
+	op, epoch := i.InFlightOpAndEpoch()
+	require.Equal(t, OpRespawning, op, "the caller must skip on this")
+	require.Equal(t, i.StateEpoch(), epoch)
+}

@@ -444,7 +444,19 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// the conclusion it draws from that capture is still about the state it
 	// observed — or whether a resume/kill/archive has moved the session on since
 	// (#2135). See resolveIdleLiveness and session/state_epoch.go.
-	epoch := instance.StateEpoch()
+	//
+	// Read together with the op axis, and re-check it here (#2997). The skip above
+	// ran earlier in this tick: a fence raised in between has already been passed,
+	// and the epoch captured after it would make this tick's observation look
+	// current and be APPLIED to a session an operation owns. Reading both at once
+	// makes the epoch necessarily older than any later fence, so the guard drops the
+	// observation instead. Clearing the episode matches every other skip above — a
+	// tick we did not observe cannot be part of a consecutive run (#1794).
+	op, epoch := instance.InFlightOpAndEpoch()
+	if op != session.OpNone {
+		m.clearRemoteLoss(key)
+		return
+	}
 	// Select the AgentServer only after capturing the epoch. A remote runtime swap
 	// replaces this handle; taking the handle first could pair the outgoing server
 	// with the incoming runtime's epoch and make a stale observation look current.

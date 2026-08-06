@@ -47,6 +47,27 @@ func (i *Instance) StateEpoch() uint64 {
 	return i.stateEpoch
 }
 
+// InFlightOpAndEpoch reads the op axis and the state epoch TOGETHER under one lock.
+//
+// An observer that reads them separately has a window that neither read closes on
+// its own (#2997). The daemon poll skips a session that has an op in flight and,
+// further down, captures the epoch its observation will be scoped to. If a fence
+// goes up BETWEEN those two reads, the skip has already passed and the epoch it then
+// captures is the POST-fence one — so the observation it settles minutes later looks
+// current, is applied rather than dropped, and overwrites the liveness the in-flight
+// operation depends on. That is the same clobber the fence exists to prevent,
+// reached by a path the fence cannot see.
+//
+// Reading both at once removes the window instead of narrowing it: the epoch is
+// necessarily from a moment when the op was None, so any fence raised afterwards
+// advances it and the epoch guard drops the observation. Callers must skip on a
+// non-None op here, not merely earlier.
+func (i *Instance) InFlightOpAndEpoch() (InFlightOp, uint64) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.inFlightOp, i.stateEpoch
+}
+
 // lifecycleStateLocked captures the state the epoch tracks: both axes plus the
 // usage-limit reset time. Caller holds i.mu.
 func (i *Instance) lifecycleStateLocked() (Liveness, InFlightOp, time.Time) {
