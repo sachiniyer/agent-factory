@@ -1,7 +1,6 @@
 package session
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -144,24 +143,31 @@ func TestCloseTab_RemovesAndProtectsAgent(t *testing.T) {
 	require.False(t, inst.TabAlive(1), "the closed tab's session must be gone")
 }
 
-// TestAddShellTab_SoftCapAtNine verifies new-tab is refused once the instance
-// already holds maxTabs (9) tabs — the number-key range can't address more.
-func TestAddShellTab_SoftCapAtNine(t *testing.T) {
+// TestAddShellTab_HasNoTabCountCap is the inverse of the guard it replaces, and
+// the count is chosen to matter: 12 is past the old 9-tab cap AND past the 1-9
+// number-key range that justified it. #930 PR 4 let the KEYBOARD limit the DATA —
+// a session could not hold a tenth tab because there was no tenth key to jump to
+// it with. Reaching a tab is navigation (#3021); refusing to create it is a worse
+// answer, and it is the one users hit (#3023).
+func TestAddShellTab_HasNoTabCountCap(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
 	inst := startedMockInstance(t, "af_tabs_cap")
-	// Agent tab + 8 shell tabs = 9 == maxTabs.
-	for i := 0; i < maxTabs-1; i++ {
+	// Agent tab + 11 shell tabs = 12, three past the old cap.
+	for i := 0; i < 11; i++ {
 		_, err := inst.AddShellTab()
-		require.NoError(t, err)
+		require.NoErrorf(t, err, "tab %d must be created; there is no cap", i+2)
 	}
-	require.Equal(t, maxTabs, inst.TabCount())
+	require.Equal(t, 12, inst.TabCount())
 
-	_, err := inst.AddShellTab()
-	require.Error(t, err, "the 10th tab must be refused")
-	require.Contains(t, err.Error(), fmt.Sprintf("%d", maxTabs))
-	require.Equal(t, maxTabs, inst.TabCount(), "the cap must not create a tab")
+	// Names stay unique past the old ceiling — the uniquifier used to be exercised
+	// only up to "shell-9", so two-digit suffixes are genuinely new ground.
+	names := map[string]bool{}
+	for _, tab := range inst.GetTabs() {
+		require.False(t, names[tab.Name], "duplicate tab name %q past the old cap", tab.Name)
+		names[tab.Name] = true
+	}
 }
 
 // TestAddShellTab_RejectedForUnstarted verifies AddShellTab errors when the

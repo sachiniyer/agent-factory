@@ -314,12 +314,6 @@ export interface Actions {
   setTheme(choice: ThemeChoice): void;
 }
 
-/** The soft cap on tabs per session (session/tab.go maxTabs): the agent tab plus
- *  up to eight additional tabs, matching the 1-9 number-key range. At the cap the
- *  create control becomes an explanatory note, so the web never fires a
- *  guaranteed-to-fail CreateTab. */
-const MAX_TABS = 9;
-
 /** The backend types whose workspace lives off-box (session/archive_sandbox.go
  *  backendKindForType: docker, ssh, and "remote" — the hook runtime). None of
  *  them can service tab management: every Add*Tab path needs a daemon-side git
@@ -359,9 +353,15 @@ export function canManageTabs(s: SessionData): boolean {
 
 /** A visible explanation for every state in which the tab bar cannot offer its
  *  new-tab control. Returning null means creation is available. This stays
- *  separate from canManageTabs because "archived", "runtime-fixed", and "full"
- *  have different next steps and must not collapse into one missing affordance. */
-export function tabCreationUnavailableReason(s: SessionData, tabCount = sessionTabs(s).length): string | null {
+ *  separate from canManageTabs because "archived" and "runtime-fixed" have
+ *  different next steps and must not collapse into one missing affordance.
+ *
+ *  There is no tab-COUNT state here any more (#3023). The nine-tab refusal
+ *  mirrored session/tab.go's cap, which existed only to keep every tab reachable
+ *  from the 1-9 number keys — the keyboard limiting the data. Both are gone; how
+ *  to reach the twelfth tab is navigation (#3021), not a reason to refuse to
+ *  create it. */
+export function tabCreationUnavailableReason(s: SessionData): string | null {
   const supported = supportsTabManagement(s);
   if (isArchived(s)) {
     if (!supported) {
@@ -371,9 +371,6 @@ export function tabCreationUnavailableReason(s: SessionData, tabCount = sessionT
   }
   if (!supported) {
     return `${tabRuntimeLabel(s)} sessions have a fixed tab list`;
-  }
-  if (tabCount >= MAX_TABS) {
-    return "Nine-tab limit reached";
   }
   return null;
 }
@@ -1919,7 +1916,7 @@ export class AppShell {
     const children: HTMLElement[] = tabs.map((tab, i) =>
       tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
     );
-    const unavailable = tabCreationUnavailableReason(selected, tabs.length);
+    const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
       children.push(this.newTabControl());
     } else {
@@ -2526,7 +2523,7 @@ export function tabBarSig(state: AppState): string {
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
   const canManage = canManageTabs(selected);
-  const createReason = tabCreationUnavailableReason(selected, tabs.length);
+  const createReason = tabCreationUnavailableReason(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage, createReason]);
 }

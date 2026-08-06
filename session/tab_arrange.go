@@ -142,7 +142,7 @@ func (i *Instance) reorderTabLocked(from, to int) error {
 	tab := i.Tabs[from]
 	// Build the new order into a fresh slice rather than sliding elements in
 	// place: the in-place spelling aliases i.Tabs with itself and is easy to get
-	// subtly wrong, and a roster is at most maxTabs entries.
+	// subtly wrong, and a roster is small enough that the extra slice is free.
 	rest := make([]*Tab, 0, n-1)
 	rest = append(rest, i.Tabs[:from]...)
 	rest = append(rest, i.Tabs[from+1:]...)

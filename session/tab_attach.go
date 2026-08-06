@@ -31,9 +31,6 @@ func (i *Instance) AttachVSCodeTab(name, tabID string) (*Tab, error) {
 	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil); err != nil {
 		return nil, err
 	}
-	if len(i.Tabs) >= maxTabs {
-		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
-	}
 
 	tab := newVSCodeTab()
 	tab.ID = tabID

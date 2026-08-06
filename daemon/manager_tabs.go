@@ -25,7 +25,7 @@ import (
 // daemon/af restart — Sachin's hard #930 requirement. Rejected for off-box
 // instances, which have no daemon-side worktree from which to spawn a
 // user-managed tab; also rejected for an empty command or an instance already at
-// the soft cap (maxTabs, enforced by AddProcessTab).
+// no tab-count cap since #3023.
 func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// An empty kind is the default (shell-or-process, per req.Shell), not a kind;
 	// every explicit kind resolves through session.ParseTabKindName, the shared

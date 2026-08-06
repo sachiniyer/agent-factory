@@ -82,23 +82,19 @@ func TestAddProcessTab_EmptyCommandRejected(t *testing.T) {
 	assert.Equal(t, 1, inst.TabCount(), "a rejected empty command must not create a tab")
 }
 
-// TestAddProcessTab_SoftCapAtNine verifies process-tab creation is refused once
-// the instance already holds maxTabs (9) tabs.
-func TestAddProcessTab_SoftCapAtNine(t *testing.T) {
+// TestAddProcessTab_HasNoTabCountCap — the process-tab half of #3023. Same count
+// and same reason as the shell case: 12 is past both the old 9-tab cap and the
+// 1-9 key range that was its only justification.
+func TestAddProcessTab_HasNoTabCountCap(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
 	inst := startedMockInstance(t, "af_proc_cap")
-	for i := 0; i < maxTabs-1; i++ {
+	for i := 0; i < 11; i++ {
 		_, err := inst.AddProcessTab(fmt.Sprintf("cmd%d", i), "")
-		require.NoError(t, err)
+		require.NoErrorf(t, err, "process tab %d must be created; there is no cap", i+2)
 	}
-	require.Equal(t, maxTabs, inst.TabCount())
-
-	_, err := inst.AddProcessTab("overflow", "")
-	require.Error(t, err, "the 10th tab must be refused")
-	require.Contains(t, err.Error(), fmt.Sprintf("%d", maxTabs))
-	require.Equal(t, maxTabs, inst.TabCount(), "the cap must not create a tab")
+	require.Equal(t, 12, inst.TabCount())
 }
 
 // TestAddProcessTab_RejectedForUnstarted verifies AddProcessTab errors when the

@@ -400,8 +400,10 @@ action names also include that row's title.
 
 ### Tabs
 
-Just like the TUI, a session isn't limited to its agent — each one holds up to
-**nine tabs**, all running in the *same* worktree. The tab bar shares the pane
+Just like the TUI, a session isn't limited to its agent — it can hold **as many
+tabs as you make**, all running in the *same* worktree. (There used to be a
+nine-tab cap, matching the 1-9 jump keys; it was removed in #3023 because the
+keyboard should not decide how much a session may hold.) The tab bar shares the pane
 header row with the title at every viewport width:
 
 ```
@@ -415,11 +417,11 @@ header row with the title at every viewport width:
   offers **Terminal** and **VS Code** where the resulting pane will appear.
 - **`w`** (or a tab's **`×`**) closes the active shell tab.
 - **`1`–`9`** switch to that tab (without attaching, like j/k); **clicking** a tab
-  switches *and* attaches.
+  switches *and* attaches. Past the ninth there is no number key — click, or use
+  the bar, which scrolls once the tabs outgrow the row.
 
 Tabs labelled **Agent** / **Terminal** / a process name mirror the TUI's labels. A
-failed tab op (e.g. hitting the nine-tab cap) surfaces as a brief toast rather than
-a modal. **Off-box sessions** (docker, ssh, and remote-hook) run their workspace on
+failed tab op surfaces as a brief toast rather than a modal. **Off-box sessions** (docker, ssh, and remote-hook) run their workspace on
 another host, so there is no daemon-side worktree to spawn a tab in — the tab bar
 explains that the runtime has a fixed tab list, its `×` affordances are withdrawn,
 and the `t` / `w` keys are disabled. Archived sessions similarly say to restore

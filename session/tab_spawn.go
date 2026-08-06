@@ -39,8 +39,7 @@ func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool) error {
 // within the instance ("shell",
 // then "shell-2", "shell-3", …) and its tmux session name is derived from it so
 // it is collision-free and restorable by exact name across a restart (#930 PR
-// 4). Errors when the instance is not started, has no agent session/worktree, or
-// already holds maxTabs tabs.
+// 4). Errors when the instance is not started or has no agent session/worktree.
 func (i *Instance) AddShellTab() (*Tab, error) {
 	i.mu.RLock()
 	started := i.started
@@ -57,7 +56,6 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	if agentTmux != nil {
 		tmuxName = uniqueTabTmuxName(i.Tabs, i.pendingTabCleanup, agentTmux.SanitizedName(), displayName)
 	}
-	nTabs := len(i.Tabs)
 	i.mu.RUnlock()
 
 	if spawnErr != nil {
@@ -65,9 +63,6 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	}
 	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil); err != nil {
 		return nil, err
-	}
-	if nTabs >= maxTabs {
-		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
 	}
 	worktreePath := gw.GetWorktreePath()
 	if worktreePath == "" {
@@ -124,8 +119,8 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 // from the command's basename; it is sanitized and made unique within the
 // instance ("btop", "btop-2", …) so
 // its derived tmux session name is collision-free and restorable by exact name
-// across a restart. Errors on an empty command, an instance that is not started /
-// has no worktree, or one already at maxTabs.
+// across a restart. Errors on an empty command, or an instance that is not started /
+// has no worktree.
 func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("a process tab requires a non-empty command")
@@ -142,7 +137,6 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	if agentTmux != nil {
 		tmuxName = uniqueTabTmuxName(i.Tabs, i.pendingTabCleanup, agentTmux.SanitizedName(), displayName)
 	}
-	nTabs := len(i.Tabs)
 	i.mu.RUnlock()
 
 	if spawnErr != nil {
@@ -150,9 +144,6 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	}
 	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil); err != nil {
 		return nil, err
-	}
-	if nTabs >= maxTabs {
-		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
 	}
 	worktreePath := gw.GetWorktreePath()
 	if worktreePath == "" {
@@ -257,7 +248,7 @@ func (i *Instance) appendReconciledTab(matchID, name string, tab *Tab) bool {
 // shell/process tabs: a web tab is persisted on the local instance record and
 // rebuilt from it on restart. Off-box sessions have a fixed runtime-provided tab
 // roster instead (callers reject non-TabManagement backends first). Errors when
-// the instance is not started/has no worktree or already holds maxTabs tabs.
+// the instance is not started or has no worktree.
 func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, fmt.Errorf("a web tab requires a non-empty URL")
@@ -281,9 +272,6 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil); err != nil {
 		return nil, err
 	}
-	if len(i.Tabs) >= maxTabs {
-		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
-	}
 	tab := newWebTab(url)
 	tab.Name = uniqueTabName(i.Tabs, base)
 	i.Tabs = append(i.Tabs, tab)
@@ -298,7 +286,7 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 // lazily at proxy time (see TabKindVSCode), so there is no URL to store. The
 // name is requestedName when non-empty, otherwise "vscode", made unique
 // within the instance ("vscode", "vscode-2", …). Errors when the instance is not
-// started/has no worktree or already holds maxTabs tabs.
+// started or has no worktree.
 func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	base := vscodeTabName
 	if n := sanitizeTabName(requestedName); n != "" {
@@ -312,9 +300,6 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	}
 	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil); err != nil {
 		return nil, err
-	}
-	if len(i.Tabs) >= maxTabs {
-		return nil, fmt.Errorf("max %d tabs per session", maxTabs)
 	}
 	tab := newVSCodeTab()
 	tab.Name = uniqueTabName(i.Tabs, base)

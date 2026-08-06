@@ -12656,7 +12656,6 @@ function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
 var TAB_PINNED_NOTICE = "The agent tab stays first \xB7 drag it onto a pane to split instead";
-var MAX_TABS = 9;
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
 function supportsTabManagement(s) {
   return !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
@@ -12664,7 +12663,7 @@ function supportsTabManagement(s) {
 function canManageTabs(s) {
   return supportsTabManagement(s) && !isArchived(s);
 }
-function tabCreationUnavailableReason(s, tabCount = sessionTabs(s).length) {
+function tabCreationUnavailableReason(s) {
   const supported = supportsTabManagement(s);
   if (isArchived(s)) {
     if (!supported) {
@@ -12674,9 +12673,6 @@ function tabCreationUnavailableReason(s, tabCount = sessionTabs(s).length) {
   }
   if (!supported) {
     return `${tabRuntimeLabel(s)} sessions have a fixed tab list`;
-  }
-  if (tabCount >= MAX_TABS) {
-    return "Nine-tab limit reached";
   }
   return null;
 }
@@ -13803,7 +13799,7 @@ var AppShell = class {
     const children = tabs.map(
       (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? "")
     );
-    const unavailable = tabCreationUnavailableReason(selected, tabs.length);
+    const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
       children.push(this.newTabControl());
     } else {
@@ -14216,7 +14212,7 @@ function tabBarSig(state) {
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
   const canManage = canManageTabs(selected);
-  const createReason = tabCreationUnavailableReason(selected, tabs.length);
+  const createReason = tabCreationUnavailableReason(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage, createReason]);
 }

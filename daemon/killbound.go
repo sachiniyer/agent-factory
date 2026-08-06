@@ -115,13 +115,21 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 //
 //	per tab   10s panePID + 10s list-panes + 10s kill-session + 10s has-session
 //	          + 3s pane-exit wait                                          =  43s
-//	× maxTabs (9)                                                          = 387s
+//	× the session's OWN tab count            (9 tabs, the old cap: 387s)
 //	Cleanup   5 bounded git commands × 60s (remove, list, prune,
 //	          branch -D, prune)                                            = 300s
 //	vscode    2 × (5s SIGTERM grace + 5s SIGKILL grace)                    =  20s
 //	flocks    tombstone write 10s + record delete 10s                      =  20s
 //	                                                                        ------
-//	worst-case LEGITIMATE teardown                                          ≈ 727s
+//	fixed terms                                                             = 340s
+//	worst-case LEGITIMATE teardown                              340s + 43s × tabs
+//
+// The per-tab term used to be multiplied by a constant, because tabs were capped
+// at 9 (#930). #3023 removed that cap — the keyboard should not decide how many
+// tabs a session may hold — so this had to stop being a constant too. A fixed 15
+// minutes would have been correct for 9 tabs and a false alarm for 30: the
+// watchdog would fire on a teardown that was entirely legitimate and bounded,
+// which is exactly the cry-wolf failure the paragraph above rejects.
 //
 // 45s — the old value — fired on any wedged-tmux teardown with two or more tabs,
 // all of it bounded and correct. 15 minutes clears the sum with headroom, and that
@@ -130,8 +138,33 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 // we know of is precisely the wedge worth dumping stacks for. Firing late costs
 // only a later log; firing early costs the signal itself.
 //
-// If any bound above grows, this must grow with it. A var so tests can shorten it.
-var killWatchdogDelay = 15 * time.Minute
+// If any bound above grows, these must grow with them.
+const (
+	// killWatchdogPerTab is the summed per-tab bound from the table above.
+	killWatchdogPerTab = 43 * time.Second
+	// killWatchdogFixed is every term that does not scale with the roster.
+	killWatchdogFixed = 340 * time.Second
+)
+
+// killWatchdogFloor is the shortest this watchdog will ever wait, and it is the
+// value the constant used to hold. Keeping it as a floor means no session that was
+// under the old 9-tab cap changes behaviour at all. A var so tests can shorten it.
+var killWatchdogFloor = 15 * time.Minute
+
+// killWatchdogDelayFor bounds a legitimate teardown of a session with this many
+// tabs, plus the same ~25% headroom the old flat 15 minutes gave the 9-tab sum
+// (727s → 900s). Firing late costs a later log; firing early costs the signal.
+func killWatchdogDelayFor(tabs int) time.Duration {
+	if tabs < 1 {
+		tabs = 1 // a session always has its agent tab, even if the roster is unread
+	}
+	budget := killWatchdogFixed + time.Duration(tabs)*killWatchdogPerTab
+	budget += budget / 4
+	if budget < killWatchdogFloor {
+		return killWatchdogFloor
+	}
+	return budget
+}
 
 // killStageDumpsStacks controls whether the watchdog appends goroutine stacks to
 // its report. The stacks are the evidence #1917 could not get from the field —
@@ -165,16 +198,17 @@ func (s *killStage) get() string {
 // anyway, the next field report carries the wedge point instead of the guesswork
 // #1917 had to work from. Off the hot path by construction — a kill that
 // finishes normally stops the timer having done nothing.
-func watchKill(title string, stage *killStage) (stop func()) {
+func watchKill(title string, tabs int, stage *killStage) (stop func()) {
 	done := make(chan struct{})
 	var once sync.Once
+	delay := killWatchdogDelayFor(tabs)
 	go func() {
 		select {
 		case <-done:
 			return
-		case <-time.After(killWatchdogDelay):
+		case <-time.After(delay):
 		}
-		log.WarningLog.Printf("kill of session %q has been running for over %s, stuck in stage %q; this is the #1917 wedge shape — the session cannot be killed or acted on until this returns", title, killWatchdogDelay, stage.get())
+		log.WarningLog.Printf("kill of session %q has been running for over %s, stuck in stage %q; this is the #1917 wedge shape — the session cannot be killed or acted on until this returns", title, delay, stage.get())
 		if killStageDumpsStacks {
 			log.WarningLog.Printf("kill of session %q: goroutine stacks at the wedge:\n%s", title, goroutineStacks())
 		}
