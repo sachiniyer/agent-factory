@@ -804,7 +804,7 @@ func (m *home) adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv
 		// op the daemon reported before this build learned to track it, or one this
 		// reconcile adopted on an earlier pass. Record it either way: the guards ask
 		// about the CURRENT op, not about who set it first.
-		m.adoptedSnapshotOps.note(inst, op)
+		m.adoptedOpsFor().note(inst, op)
 		return false
 	}
 	if inst.GetInFlightOp() != session.OpNone {
@@ -819,7 +819,7 @@ func (m *home) adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv
 		err = inst.Transition(session.BeginKill())
 	case session.OpArchiving:
 		if lv == session.LiveArchived {
-			m.adoptedSnapshotOps.note(inst, op)
+			m.adoptedOpsFor().note(inst, op)
 			return true
 		}
 		err = inst.Transition(session.BeginArchive())
@@ -836,7 +836,7 @@ func (m *home) adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv
 	}
 	// The row now carries a DAEMON-owned op with no local completion handler
 	// waiting on it. Recorded here, at the only moment the fact is known (#3005).
-	m.adoptedSnapshotOps.note(inst, op)
+	m.adoptedOpsFor().note(inst, op)
 	return true
 }
 

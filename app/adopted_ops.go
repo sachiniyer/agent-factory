@@ -89,3 +89,17 @@ func (a adoptedOps) vetoesReconcile(inst *session.Instance) bool {
 	}
 	return !a.owns(inst)
 }
+
+// adoptedOpsFor returns the model's provenance map, creating it on first write.
+//
+// Lazy rather than constructor-only because a `home` is built as a bare literal
+// in several places (test helpers especially), and a nil map is fine to READ from
+// but panics on assignment. Making the write path self-initializing means
+// provenance cannot depend on which constructor a row arrived through — the exact
+// kind of coupling that would make this correct in production and nil in a test.
+func (m *home) adoptedOpsFor() adoptedOps {
+	if m.adoptedSnapshotOps == nil {
+		m.adoptedSnapshotOps = adoptedOps{}
+	}
+	return m.adoptedSnapshotOps
+}
