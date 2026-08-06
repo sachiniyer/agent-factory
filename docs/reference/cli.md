@@ -579,6 +579,7 @@ Settable keys:
   docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
 Structural keys (root_agents, [theme], the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
@@ -1352,7 +1353,7 @@ af sessions create [title] [flags]
 
 | Flag | Type | Description |
 |------|------|-------------|
-| `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
+| `--backend` | `string` | Runtime to run the session on (one of: local, docker, ssh, sandbox, hook; defaults to the repo's backend config, or local). docker runs the session in a container (set docker.image in the repo config); ssh runs it on a remote host (set ssh.host in the repo config). Run "af sessions backends" for which of these this project can actually use, and why not |
 | `--here` |  | Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both) |
 | `--in-place` |  | Alias for --here |
 | `--name` | `string` | Session title (alternative to positional <title>) |
