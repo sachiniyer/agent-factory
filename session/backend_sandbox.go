@@ -153,7 +153,15 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("sandbox runtime: session %q running via %q (dir %s), agent-server tunneled at %s",
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
-		Backend:  &sandboxBackend{remoteAgentBackend: remoteAgentBackend{reap: teardown}, provisioner: p},
+		Backend: &sandboxBackend{
+			remoteAgentBackend: remoteAgentBackend{reap: teardown},
+			provisioner:        p,
+			cleanup: &SandboxRuntimeCleanupData{
+				SSHCommand: p.sshCmd,
+				SessionDir: p.sessionDir,
+				RemotePID:  p.remotePID,
+			},
+		},
 		Endpoint: endpoint,
 		Teardown: teardown,
 	}, nil
@@ -204,16 +212,25 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string, stdin io.Reader) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "sh", "-c", p.sshCmd+` "$@"`, "af-sandbox", script)
 	cmd.Stdin = stdin
-	// TRAP 1 (#2476 handoff): WaitDelay force-closes the child's pipes after the
-	// context fires. That is right for a child with no stdin payload, and WRONG
-	// when stdin is non-nil: the binary stream would be cut mid-copy, ssh would
-	// still exit 0 for the bytes it did send, and a TRUNCATED `af` would land on
-	// the sandbox reporting success — failing later somewhere that points nowhere
-	// near the copy. So it is set only when there is nothing to stream, and
-	// verifyCopiedBinary checks the copy independently.
-	if stdin == nil {
-		cmd.WaitDelay = sandboxTunnelWaitDelay
-	}
+	// TRAP 1, with a correction the handoff's rule did not anticipate.
+	//
+	// The recorded guidance was "WaitDelay on the tunnel child, NEVER on the
+	// binary-copy child", because force-closing the pipe mid-copy truncates the
+	// stream while ssh still exits 0 — a short `af` that reports success and fails
+	// much later somewhere unrelated. That reasoning holds ONLY while nothing else
+	// catches a truncated copy.
+	//
+	// Two things make bounding the right call here instead. verifyCopiedBinary now
+	// compares the byte count ON the sandbox, so a truncated copy fails AT the copy
+	// rather than silently. And a zero WaitDelay is not neutral: os/exec documents
+	// that it makes Wait block until every orphaned descriptor-holder closes, which
+	// for this backend is precisely the ProxyCommand/wrapper it exists to support —
+	// so the copy's advertised timeout would not bound provisioning at all.
+	//
+	// Once the deadline has passed the copy has already failed, so there is nothing
+	// left to protect by waiting. Bound it, and let the size check reject whatever
+	// partial result the kill leaves behind.
+	cmd.WaitDelay = sandboxTunnelWaitDelay
 	return cmd
 }
 
@@ -260,7 +277,14 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	_ = ln.Close()
 
 	forward := fmt.Sprintf("%s:%s", localAddr, remoteAddr)
-	cmd := exec.Command("sh", "-c", p.sshCmd+` -N -L "$1"`, "af-sandbox", forward)
+	// -o ExitOnForwardFailure=yes is load-bearing, not hygiene. The local port is
+	// reserved by binding :0 and closing it, so another process can win it in the
+	// gap. OpenSSH defaults this to NO (`ssh -G` confirms), which would leave this
+	// -N child alive after a FAILED bind — and the readiness probe below would then
+	// connect to whatever DID win the port and report a healthy tunnel owned by an
+	// unrelated process. With it, ssh exits on the failed forward and the probe
+	// times out honestly.
+	cmd := exec.Command("sh", "-c", p.sshCmd+` -o ExitOnForwardFailure=yes -N -L "$1"`, "af-sandbox", forward)
 	// No stdin payload here, so WaitDelay is correct and wanted: a tunnel that
 	// ignores its kill must not hold af's pipes open forever. This is the child
 	// TRAP 1 says it belongs on.
@@ -324,12 +348,9 @@ func (p *sandboxProvisioner) reap() error {
 		return nil
 	}
 
-	script := "rm -rf " + shellQuoteSandbox(p.sessionDir)
-	if p.remotePID != "" {
-		script = "kill " + p.remotePID + " 2>/dev/null; " + script
-	}
-	out, err := p.Run(sshReapTimeout, script, nil, true)
-	if err == nil {
+	out, err := p.Run(sshReapTimeout, p.reapScript(), nil, true)
+	answered := strings.Contains(string(out), sandboxReapSentinel)
+	if err == nil && answered {
 		p.reaped = true
 		p.reapErr = nil
 		return nil
@@ -337,25 +358,69 @@ func (p *sandboxProvisioner) reap() error {
 
 	reapErr := fmt.Errorf("backend=sandbox: reaping %q failed: %s: %w",
 		p.sessionDir, strings.TrimSpace(string(out)), err)
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == sshBinaryExitAmbiguous {
-		// ssh's own failure, or a remote command that exited 255 — undecidable
-		// from here. Do NOT latch: the next poll must actually retry.
-		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+
+	// A reap may latch ONLY when the remote side demonstrably ran. Three ways it
+	// may not have, all of which must retain the record and retry:
+	//
+	//  1. ssh exit 255 — its own failure ("could not connect", "host key
+	//     changed"), indistinguishable from a remote command that exits 255.
+	//  2. NO SENTINEL — sandbox_ssh is a free-form shell command, so a wrapper or
+	//     a missing prerequisite can fail LOCALLY (127 command-not-found, 126 not
+	//     executable, or any status a wrapper picks) before ssh ever runs. Its
+	//     status is then a statement about the daemon host, not the sandbox, and
+	//     latching it would retire a record whose agent-server is still running.
+	//     The sentinel is echoed by the remote shell as the script's last act, so
+	//     seeing it is positive proof the far side executed.
+	//  3. The deadline expired mid-reap.
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+	case isSandboxAmbiguousExit(err):
+	case !answered:
+	default:
+		// The remote side ran and reported a definite status: that is an ANSWER,
+		// so it latches and the record may be retired.
+		p.reaped = true
+		p.reapErr = reapErr
 		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
 		return reapErr
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
-		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
-		return reapErr
-	}
-	// The remote command ANSWERED with a definite non-255 status: the reap
-	// completed and told us something, so it latches.
-	p.reaped = true
-	p.reapErr = reapErr
+	reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
 	log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
 	return reapErr
+}
+
+// sandboxReapSentinel is echoed by the REMOTE shell as the reap script's last
+// act. Its presence in the output is the only positive evidence that the far
+// side ran at all — see reap's case 2.
+const sandboxReapSentinel = "__af_sandbox_reaped__"
+
+// reapScript kills the agent-server by IDENTITY, not by bare PID, then removes
+// the session dir and prints the sentinel.
+//
+// The identity check is shared with the ssh runtime (remotePIDIdentityKillScript):
+// a numeric PID can be recycled between provision and teardown, and a blind
+// `kill` would then signal an unrelated process on the operator's own host. It
+// verifies argv[0] is this session's unique af path before either signal.
+//
+// The kill's status is deliberately NOT discarded — an earlier draft wrote
+// `kill …; rm …`, which let a FAILED signal still report a clean reap while the
+// server kept running. The rm is chained so the directory is only removed once
+// the process it belongs to is gone.
+func (p *sandboxProvisioner) reapScript() string {
+	rm := "rm -rf " + shellQuoteSandbox(p.sessionDir)
+	sentinel := "echo " + sandboxReapSentinel
+	if p.remotePID == "" {
+		return rm + " && " + sentinel
+	}
+	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName)
+	return "{ " + kill + "; } && " + rm + " && " + sentinel
+}
+
+// isSandboxAmbiguousExit reports ssh(1)'s own 255, which cannot be told apart
+// from a remote command exiting 255.
+func isSandboxAmbiguousExit(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == sshBinaryExitAmbiguous
 }
 
 func (p *sandboxProvisioner) stopTunnel() {
@@ -379,6 +444,9 @@ func shellQuoteSandbox(s string) string {
 type sandboxBackend struct {
 	remoteAgentBackend
 	provisioner *sandboxProvisioner
+	// cleanup is the immutable teardown identity, persisted so a reap that could
+	// not prove it ran is retryable after a daemon restart.
+	cleanup *SandboxRuntimeCleanupData
 }
 
 func (b *sandboxBackend) Type() string { return "sandbox" }

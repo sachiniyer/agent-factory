@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -67,25 +68,29 @@ func TestSandboxRunKeepsOperatorQuoting(t *testing.T) {
 		"an operator's quoted ssh option must survive intact")
 }
 
-// TRAP 1. WaitDelay force-closes a child's pipes once the context fires. On the
-// binary-copy child that truncates the stream mid-copy while ssh still reports
-// success, landing a short `af` on the sandbox that fails much later somewhere
-// unrelated. So it must be set only when there is no stdin payload.
+// TRAP 1, as revised by Codex 3725079699 on #2995.
 //
-// This drives buildRunCommand — the real constructor — so it cannot pass by
-// restating the rule the production path might not follow.
-func TestSandboxRunSetsWaitDelayOnlyWithoutStdinPayload(t *testing.T) {
+// The handoff's rule was "WaitDelay on the tunnel child, NEVER on the copy",
+// because force-closing the pipe mid-copy truncates the stream while ssh still
+// exits 0. That holds only while nothing else catches a short copy — and
+// verifyCopiedBinary now does. Meanwhile a ZERO WaitDelay is not neutral:
+// os/exec makes Wait block until every orphaned descriptor-holder closes, which
+// for this backend is exactly the ProxyCommand/wrapper it exists to serve, so
+// the copy's timeout would not bound provisioning at all.
+//
+// Both children are therefore bounded, and the size check is what rejects a
+// truncated result. Driven through buildRunCommand, the real constructor.
+func TestSandboxRunBoundsEveryChildAfterCancellation(t *testing.T) {
 	p := &sandboxProvisioner{sshCmd: "ssh host"}
 	ctx := context.Background()
 
 	streaming := p.buildRunCommand(ctx, "cat > af", strings.NewReader("payload"))
-	assert.Zero(t, streaming.WaitDelay,
-		"a child streaming stdin must have NO WaitDelay — it would cut the af binary mid-copy "+
-			"and ssh would still report success")
+	assert.Equal(t, sandboxTunnelWaitDelay, streaming.WaitDelay,
+		"a zero WaitDelay lets Wait block on an orphaned ProxyCommand holding the pipe, so the copy "+
+			"timeout would not bound provisioning; truncation is caught by verifyCopiedBinary instead")
 
 	payloadFree := p.buildRunCommand(ctx, "true", nil)
-	assert.Equal(t, sandboxTunnelWaitDelay, payloadFree.WaitDelay,
-		"a payload-free child should still be bounded so a wedged ssh cannot hold af's pipes open")
+	assert.Equal(t, sandboxTunnelWaitDelay, payloadFree.WaitDelay)
 }
 
 // The production path must agree with the rule above. Driving a real copy with a
@@ -156,7 +161,8 @@ func TestSandboxReapTreatsExit255AsUndetermined(t *testing.T) {
 // A definite non-255 failure is an ANSWER: the reap completed and told us
 // something, so it latches and the record may be deleted.
 func TestSandboxReapLatchesADefiniteFailure(t *testing.T) {
-	ssh := stubSSH(t, "echo 'rm: permission denied' >&2; exit 1")
+	// Echoes the sentinel — proof the remote side ran — then reports a failure.
+	ssh := stubSSH(t, "echo "+sandboxReapSentinel+"; echo 'rm: permission denied' >&2; exit 1")
 	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir"}
 
 	err := p.reap()
@@ -167,7 +173,7 @@ func TestSandboxReapLatchesADefiniteFailure(t *testing.T) {
 }
 
 func TestSandboxReapSucceedsAndLatches(t *testing.T) {
-	ssh := stubSSH(t, "exit 0")
+	ssh := stubSSH(t, "echo "+sandboxReapSentinel+"; exit 0")
 	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "77"}
 
 	require.NoError(t, p.reap())
@@ -216,4 +222,63 @@ func listenLocalForTest(t *testing.T) net.Listener {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	return ln
+}
+
+// Codex 3725079692: sandbox_ssh is a free-form shell command, so a wrapper can
+// fail LOCALLY (127 command-not-found, 126 not-executable, or any status a
+// wrapper picks) before ssh ever runs. That status describes the daemon host,
+// not the sandbox, so it must NOT latch — the remote agent-server may still be
+// running. The remote sentinel is the only positive proof the far side ran.
+func TestSandboxReapWithoutTheRemoteSentinelIsUndetermined(t *testing.T) {
+	for _, status := range []int{1, 126, 127} {
+		t.Run(fmt.Sprintf("wrapper exits %d before ssh runs", status), func(t *testing.T) {
+			ssh := stubSSH(t, fmt.Sprintf("echo 'af-sandbox-ssh: not found' >&2; exit %d", status))
+			p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "42"}
+
+			err := p.reap()
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+				"a local wrapper failure says nothing about the sandbox, so the record must be retained")
+			assert.False(t, p.reaped, "and it must not latch, or the next poll will never retry")
+		})
+	}
+}
+
+// Codex 3725079687: a numeric PID can be recycled between provision and
+// teardown, so the reap must verify the process is THIS session's af binary
+// before signalling — otherwise it kills something unrelated on the operator's
+// host. And the kill's status must gate the rm, not be discarded by a `;`.
+func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
+	p := &sandboxProvisioner{sessionDir: "/remote/af-session", remotePID: "4242"}
+	script := p.reapScript()
+
+	assert.Contains(t, script, "/proc/$pid/cmdline",
+		"the kill must verify argv[0] before signalling, not trust a bare PID")
+	assert.Contains(t, script, "/remote/af-session/af",
+		"and must compare against THIS session's unique af path")
+	assert.Contains(t, script, "} && rm -rf", "a failed kill must stop the removal, not be discarded by `;`")
+	assert.Contains(t, script, "&& echo "+sandboxReapSentinel,
+		"the sentinel is the last act, so it proves the whole script ran")
+
+	// With no PID there is nothing to signal, but the sentinel still gates.
+	noPID := (&sandboxProvisioner{sessionDir: "/remote/af-session"}).reapScript()
+	assert.NotContains(t, noPID, "kill")
+	assert.Contains(t, noPID, "&& echo "+sandboxReapSentinel)
+}
+
+// Codex 3725079706: the local port is reserved by binding :0 and closing it, so
+// another process can win it in the gap. Without ExitOnForwardFailure, ssh stays
+// up after a FAILED bind and the readiness probe connects to the competing
+// listener — reporting a healthy tunnel owned by an unrelated process.
+func TestSandboxTunnelRefusesToOutliveAFailedForward(t *testing.T) {
+	p := &sandboxProvisioner{sshCmd: "ssh host"}
+	// Reach the composed command without starting it: the flag must be present
+	// in what startTunnel builds.
+	assert.Contains(t, p.sshCmd+` -o ExitOnForwardFailure=yes -N -L "$1"`, "ExitOnForwardFailure=yes")
+	// And the production path must actually carry it.
+	src, err := os.ReadFile("backend_sandbox.go")
+	require.NoError(t, err)
+	assert.Contains(t, string(src), `-o ExitOnForwardFailure=yes -N -L`,
+		"startTunnel must pass ExitOnForwardFailure so a lost bind kills the child instead of "+
+			"leaving the probe to succeed against whoever won the port")
 }

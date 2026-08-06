@@ -12349,7 +12349,7 @@ function isKillableSession(s) {
 }
 var TAB_PINNED_NOTICE = "The agent tab stays first \xB7 drag it onto a pane to split instead";
 var MAX_TABS = 9;
-var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "remote"]);
+var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
 function supportsTabManagement(s) {
   return !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
 }
