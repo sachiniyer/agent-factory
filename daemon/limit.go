@@ -445,7 +445,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// record the branch first, and refuse rather than re-spawn if that cannot be
 		// done. A local session has no sandbox to preserve and falls through.
 		if isRemoteWorkspace(instance) {
-			if err := m.preserveSandboxBeforeReap(repoID, key, instance); err != nil {
+			// kill, not --force-reap: RestoreSession refuses a LiveLimitReached
+			// session and ResumeFromLimitRequest has no force option, so the
+			// forced-reap hatch cannot open from this door (Codex on #2967).
+			if err := m.preserveSandboxBeforeReap(repoID, key, instance, killSuggestionFor(instance)); err != nil {
 				return resumeNotPerformed, err
 			}
 			if err := requireDurableSandboxBranch(repoID, instance); err != nil {

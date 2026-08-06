@@ -176,7 +176,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			log.WarningLog.Printf("restore of %q: --force-reap given, replacing its reachable sandbox without pushing; anything it has not pushed is discarded", title)
 			break
 		}
-		if err := m.preserveSandboxBeforeReap(repoID, key, instance); err != nil {
+		if err := m.preserveSandboxBeforeReap(repoID, key, instance, forceReapSuggestionFor(instance)); err != nil {
 			return "", err
 		}
 	}

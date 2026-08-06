@@ -97,7 +97,18 @@ func killSuggestionFor(instance *session.Instance) string {
 // Returns nil when the caller may proceed to reap. A non-nil error means REFUSE:
 // leave the session Lost and recoverable, because the alternative is destroying
 // work that nothing else has a copy of.
-func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance) error {
+// escapeSuggestion is the command a caller offers when the push refuses. It is a
+// parameter rather than a constant because the escape that works depends on the
+// door this was reached through: the restore paths can force a reap, and the
+// limit-resume path cannot — RestoreSession refuses a LiveLimitReached session
+// (it is not archived, Lost, or Dead) and ResumeFromLimitRequest has no force
+// option, so --force-reap there is a hatch that always fails.
+//
+// This file already refuses to do that in the empty-branch case, for the same
+// stated reason: an escape hatch that cannot open is the thing this guard exists
+// to avoid. Making the suggestion the caller's to name applies that rule to
+// every door instead of one (Codex on #2967).
+func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *session.Instance, escapeSuggestion string) error {
 	branch, err := archiveWithin(instance.AgentServer(), sandboxPushTimeout)
 	if err != nil {
 		// Refuse, exactly as ArchiveSandbox refuses (AbortArchiveToLost) when its
@@ -108,7 +119,7 @@ func (m *Manager) preserveSandboxBeforeReap(repoID, key string, instance *sessio
 				"and the push that would make its unpushed work durable failed (%w). "+
 				"Replacing it now would destroy any commits it holds. "+
 				"It stays recoverable and the daemon keeps retrying; if you know its work is expendable, force it with: %s",
-			instance.Title, err, forceReapSuggestionFor(instance))
+			instance.Title, err, escapeSuggestion)
 	}
 	if branch == "" {
 		// A push that reports no branch leaves recovery with the empty RestoreBranch

@@ -405,7 +405,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		// never pushed is still there — and recovery re-clones from origin, which
 		// would destroy it. Push first, and refuse to replace anything if that push
 		// does not land, exactly as ArchiveSandbox refuses via AbortArchiveToLost.
-		if err := m.preserveSandboxBeforeReap(repoID, key, inst); err != nil {
+		if err := m.preserveSandboxBeforeReap(repoID, key, inst, forceReapSuggestionFor(inst)); err != nil {
 			m.mu.Lock()
 			// Its OWN dedupe flag. remoteUnknownLogged is set by the unknown arm and
 			// never reset, so sharing it meant a sandbox that first went unreachable and
