@@ -76,7 +76,7 @@ delete_cmd = "./.agent-factory/hooks/delete.sh"
 
 (The in-repo file may also be named `config.json` for compatibility with older `af` versions — see [configuration.md](configuration.md#in-repo-file-name-configtoml-or-configjson). The JSON block further down this page is `launch_cmd` **output**, not config.)
 
-`launch_cmd` and `delete_cmd` are both **required** — an empty value is rejected when the backend is resolved, with an error naming the missing field (e.g. `remote_hooks.launch_cmd is required`) rather than a cryptic `exec: no command` at operation time.
+`delete_cmd` is **required**, and so is exactly one of `provision_cmd` / `launch_cmd`. An empty or missing value is rejected when the backend is resolved, with an error naming the missing field (e.g. `remote_hooks.provision_cmd or remote_hooks.launch_cmd is required`, `remote_hooks.delete_cmd is required`) rather than a cryptic `exec: no command` at operation time. Setting **both** provisioning keys is rejected too — they are alternatives, not layers.
 
 `remote_hooks` is an in-repo-only setting — it describes the repository, so it is not accepted in the global `~/.agent-factory/config.toml`. Configuring `backend = "hook"` selects the backend for that repo; you can also create a one-off hook session with `af sessions create --backend hook` or, in the TUI, press `N` for a remote session.
 

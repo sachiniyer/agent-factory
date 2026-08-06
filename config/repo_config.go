@@ -84,12 +84,17 @@ func (h RemoteHooks) Validate() error {
 		// Both answer "how does this session get a workspace", differently. Picking
 		// one silently would make the other's absence look like a config that
 		// works, so refuse and make the operator say which contract they are on.
-		return fmt.Errorf("remote_hooks sets both provision_cmd and launch_cmd; they are alternatives, not layers — " +
+		return fmt.Errorf("remote_hooks.provision_cmd and remote_hooks.launch_cmd are alternatives, not layers — " +
 			"provision_cmd returns an ssh host and af runs the agent-server itself, launch_cmd returns an " +
-			"{\"url\",\"token\"} endpoint the script stands up. Keep one (see docs/remote-hooks.md)")
+			"{\"url\",\"token\"} endpoint the script stands up. Set exactly one (see docs/remote-hooks.md)")
 	case !launch && !provision:
-		return fmt.Errorf("remote_hooks requires provision_cmd (return an ssh host; af does the rest) " +
-			"or launch_cmd (return an {\"url\",\"token\"} endpoint you stood up yourself) — see docs/remote-hooks.md")
+		// Dotted paths, matching the delete_cmd error below and every other config
+		// message: the key is what the reader has to go edit, so it must be
+		// greppable and unambiguous. Naming BOTH keys is the point — a message that
+		// named only launch_cmd would send a provision_cmd user to fix the wrong one.
+		return fmt.Errorf("remote_hooks.provision_cmd or remote_hooks.launch_cmd is required — " +
+			"provision_cmd returns an ssh host and af runs the agent-server itself; launch_cmd returns an " +
+			"{\"url\",\"token\"} endpoint you stood up yourself (see docs/remote-hooks.md)")
 	}
 	if strings.TrimSpace(h.DeleteCmd) == "" {
 		return fmt.Errorf("remote_hooks.delete_cmd is required")

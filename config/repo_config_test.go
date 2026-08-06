@@ -272,15 +272,17 @@ func TestRemoteHooksValidate(t *testing.T) {
 		// an error when there is no provision_cmd either — and the message has to
 		// name both, or it sends a provision_cmd user to fix the wrong key.
 		{"neither command", func(h *RemoteHooks) { h.LaunchCmd = "" },
-			"remote_hooks requires provision_cmd (return an ssh host; af does the rest) or launch_cmd " +
-				"(return an {\"url\",\"token\"} endpoint you stood up yourself) — see docs/remote-hooks.md"},
+			"remote_hooks.provision_cmd or remote_hooks.launch_cmd is required — provision_cmd returns an " +
+				"ssh host and af runs the agent-server itself; launch_cmd returns an {\"url\",\"token\"} " +
+				"endpoint you stood up yourself (see docs/remote-hooks.md)"},
 		{"whitespace launch_cmd is still neither", func(h *RemoteHooks) { h.LaunchCmd = "   " },
-			"remote_hooks requires provision_cmd (return an ssh host; af does the rest) or launch_cmd " +
-				"(return an {\"url\",\"token\"} endpoint you stood up yourself) — see docs/remote-hooks.md"},
+			"remote_hooks.provision_cmd or remote_hooks.launch_cmd is required — provision_cmd returns an " +
+				"ssh host and af runs the agent-server itself; launch_cmd returns an {\"url\",\"token\"} " +
+				"endpoint you stood up yourself (see docs/remote-hooks.md)"},
 		{"both contracts at once", func(h *RemoteHooks) { h.ProvisionCmd = "./provision.sh" },
-			"remote_hooks sets both provision_cmd and launch_cmd; they are alternatives, not layers — " +
+			"remote_hooks.provision_cmd and remote_hooks.launch_cmd are alternatives, not layers — " +
 				"provision_cmd returns an ssh host and af runs the agent-server itself, launch_cmd returns an " +
-				"{\"url\",\"token\"} endpoint the script stands up. Keep one (see docs/remote-hooks.md)"},
+				"{\"url\",\"token\"} endpoint the script stands up. Set exactly one (see docs/remote-hooks.md)"},
 		{"empty delete_cmd", func(h *RemoteHooks) { h.DeleteCmd = "" }, "remote_hooks.delete_cmd is required"},
 		{"whitespace delete_cmd", func(h *RemoteHooks) { h.DeleteCmd = "   " }, "remote_hooks.delete_cmd is required"},
 	}

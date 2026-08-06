@@ -287,7 +287,14 @@ func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state)
 	assert.Nil(t, h.namingInstance)
 	assert.Equal(t, 0, h.store.NumInstances())
+	// The fixture is still invalid under the #2847 contract — it sets neither
+	// provision_cmd nor launch_cmd — so the assertion that invalid hooks error
+	// stands unchanged. It is STRENGTHENED to require both keys be named: a repo
+	// on the ssh-host contract that is sent to fix launch_cmd would be edited in
+	// the wrong place, which is the failure an error message exists to prevent.
 	assert.Contains(t, h.errBox.FullError(), "remote_hooks.launch_cmd")
+	assert.Contains(t, h.errBox.FullError(), "remote_hooks.provision_cmd",
+		"an invalid hook config must name BOTH contracts, or a provision_cmd user is sent to the wrong key")
 }
 
 // TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
