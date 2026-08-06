@@ -73,21 +73,27 @@ func (i *Instance) Respawn() error {
 	// session whose tmux is being spun up/torn down and mark it Lost"). This
 	// operation advertised nothing, so that skip never engaged: the poll observed
 	// the sandbox being torn down BY THIS CALL, read it as an independent death,
-	// and applied ObserveLiveness(LiveLost) — which is the unconditional daemon-truth
-	// edge and preserves only the op axis, so LiveLimitReached was overwritten
-	// underneath a resume that was still running. The resume then failed its own
-	// RuntimeActionResumeLimit precondition, and Lost recovery could later clear the
-	// limit without delivering the queued prompt, so the user's work silently never
-	// ran.
+	// and applied ObserveLiveness(LiveLost) — which is the unconditional
+	// daemon-truth edge and preserves only the op axis, so LiveLimitReached was
+	// overwritten underneath a resume that was still running. The resume then failed
+	// its own RuntimeActionResumeLimit precondition, and Lost recovery could later
+	// clear the limit without delivering the queued prompt, so the user's work
+	// silently never ran.
 	//
 	// AFTER the validation above, not before: that validation requires OpNone, so a
 	// fence raised first would reject the very call it is protecting.
 	//
-	// OpCreating rather than a new op: a respawn is creating a fresh runtime, it
-	// composes to the Loading status the UI already renders for that, and — the
-	// load-bearing part — ConfirmLive is allowed from OpCreating and clears it, so
-	// the success path already ends with the fence down and needs no new edge.
-	if err := i.Transition(BeginCreate()); err != nil {
+	// Raising it also closes the window on the other side. A poll that already
+	// passed the skip captured a state epoch before this transition, and every real
+	// lifecycle change advances that epoch, so its ObserveLiveness(...).AtEpoch()
+	// is DROPPED rather than applied (#2135, session/transition.go). The fence does
+	// not merely make later polls skip.
+	//
+	// OpRespawning rather than OpCreating: this session is already established, and
+	// a create overlay on an established row is wrong in ways that reach past this
+	// package — see the OpRespawning doc comment. The fence needs to be an op, not a
+	// display state.
+	if err := i.Transition(BeginRespawn()); err != nil {
 		return fmt.Errorf("respawn: %w", err)
 	}
 	if err := i.currentBackend().Respawn(i); err != nil {
@@ -105,11 +111,11 @@ func (i *Instance) Respawn() error {
 
 // clearRespawnFence lowers the Respawn fence if it is still up. ClearOp is
 // unconditionally legal (it only ever moves the op axis back to None and leaves
-// liveness alone), but it is applied only when this call's own OpCreating is still
+// liveness alone), but it is applied only when this call's own OpRespawning is still
 // present, so a concurrent kill/archive overlay that superseded it is not cleared
 // out from under its owner.
 func (i *Instance) clearRespawnFence() {
-	if i.GetInFlightOp() != OpCreating {
+	if i.GetInFlightOp() != OpRespawning {
 		return
 	}
 	if err := i.Transition(ClearOp()); err != nil {

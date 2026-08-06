@@ -121,6 +121,12 @@ func describeWatchState(d *session.InstanceData) string {
 		// distinct pending op (session/activity.go classifies it as such), not the
 		// generic "working" the liveness fallback below would otherwise report (#2530).
 		return "being replaced"
+	case session.OpRespawning:
+		// A limit resume re-spawning the runtime (#2997). Named rather than left to
+		// the liveness fallback for the same reason as OpReplacing above: it is a
+		// distinct pending op, and "blocked on a usage limit" would describe the
+		// state the resume is in the middle of leaving.
+		return "being respawned"
 	}
 	switch d.Liveness {
 	case session.LiveRunning:

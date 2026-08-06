@@ -786,6 +786,16 @@ func adoptSnapshotOp(inst *session.Instance, op session.InFlightOp, lv session.L
 	if inst.GetInFlightOp() == op {
 		return false
 	}
+	// OpRespawning is the daemon's internal fence against its own status poll
+	// (#2997), not a client overlay: it composes to the settled liveness, so there
+	// is nothing here to mirror. Returning before the ClearOp below matters — the
+	// unrecognized-op default sits AFTER it, so falling through would drop this
+	// TUI's own in-flight overlay on the way to doing nothing, and report no change
+	// while having made one. Nothing clears an adopted OpRespawning either, because
+	// nothing adopts it.
+	if op == session.OpRespawning {
+		return false
+	}
 	if inst.GetInFlightOp() != session.OpNone {
 		_ = inst.Transition(session.ClearOp())
 	}

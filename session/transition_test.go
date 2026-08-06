@@ -55,6 +55,9 @@ func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
 		// Opening/booting the session: the run is under way.
 		tkBeginCreate: runKeep,
 		tkConfirmLive: runKeep,
+		// Re-spawning an established session's runtime after a usage limit (#2997)
+		// continues its run; it neither opens nor closes one.
+		tkBeginRespawn: runKeep,
 		// The only edge that can settle the agent idle, which is what ends a run.
 		tkObserveLiveness: runEndsOnIdleEdge,
 		// Kill overlays: revertible, so they decide nothing. The tombstone and the

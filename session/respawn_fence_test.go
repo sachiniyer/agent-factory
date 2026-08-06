@@ -56,11 +56,12 @@ func TestRespawn_FencesTheOperationAgainstTheStatusPoll(t *testing.T) {
 
 	require.NoError(t, i.Respawn())
 
-	require.Equal(t, OpCreating, probe.opDuring,
+	require.Equal(t, OpRespawning, probe.opDuring,
 		"the poll's skip is keyed on the instance-visible op, so a long respawn must advertise one")
 	require.Equal(t, LiveLimitReached, probe.livenessDuring,
 		"raising the fence must not disturb the liveness the resume path depends on")
 	require.Equal(t, OpNone, i.GetInFlightOp(), "ConfirmLive clears the fence on the success path")
+	require.Equal(t, LiveRunning, i.GetLiveness(), "and the respawned runtime settles live")
 }
 
 // The other half, and the more dangerous one to get wrong: a failed respawn must not
@@ -74,7 +75,7 @@ func TestRespawn_LowersTheFenceWhenTheBackendFails(t *testing.T) {
 
 	require.ErrorIs(t, i.Respawn(), boom)
 
-	require.Equal(t, OpCreating, probe.opDuring, "the fence was up while the work ran")
+	require.Equal(t, OpRespawning, probe.opDuring, "the fence was up while the work ran")
 	require.Equal(t, OpNone, i.GetInFlightOp(), "and is down again once it failed")
 	require.Equal(t, LiveLimitReached, i.GetLiveness(),
 		"a failed respawn leaves the session where it was — still resumable")
@@ -118,4 +119,70 @@ func TestObserveLivenessClobbersALimitBlockedSessionThatIsNotFenced(t *testing.T
 	err := i.ValidateRuntimeAction(RuntimeActionResumeLimit)
 	require.Error(t, err, "the resume's own precondition is gone")
 	require.Contains(t, err.Error(), "not blocked on a usage limit")
+}
+
+// #3004 review finding 1 claimed the fence only makes LATER polls skip, leaving a
+// window where a poll that already passed the skip applies its observation anyway.
+// It does not: the fence transition itself advances the state epoch, and the poll's
+// applies are epoch-scoped (daemon/manager_status.go:536, daemon/remoteloss.go:326
+// — both .AtEpoch(epoch) taken BEFORE the probe), so a decision drawn before the
+// fence is dropped at the chokepoint rather than applied. This is #2135 doing the
+// job it was built for; the test exists so nobody has to re-derive that.
+func TestRespawnFenceDropsAPollObservationDecidedBeforeItWasRaised(t *testing.T) {
+	probe := newRespawnProbe()
+	i := limitBlockedInstance(t, probe)
+
+	// The poll captures the epoch, then probes — slowly, against a remote sandbox.
+	pollEpoch := i.StateEpoch()
+
+	// The resume raises the fence while that probe is still in flight.
+	require.NoError(t, i.Transition(BeginRespawn()))
+	require.NotEqual(t, pollEpoch, i.StateEpoch(), "raising the fence must advance the epoch")
+
+	// The probe now comes back and settles the death it saw — which was OUR teardown.
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(pollEpoch)))
+
+	require.Equal(t, LiveLimitReached, i.GetLiveness(),
+		"a stale observation must not clobber the liveness the running resume depends on")
+	require.Equal(t, OpRespawning, i.GetInFlightOp(), "and the fence still stands")
+	i.clearRespawnFence()
+	require.NoError(t, i.ValidateRuntimeAction(RuntimeActionResumeLimit),
+		"once the fence is down the resume can be retried")
+}
+
+// The same poll observation is NOT dropped when it is genuinely current — the guard
+// is an epoch check, not a blanket refusal, so real deaths still land.
+func TestAnUnstaleObservationStillLands(t *testing.T) {
+	i := limitBlockedInstance(t, newRespawnProbe())
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(i.StateEpoch())))
+	require.Equal(t, LiveLost, i.GetLiveness())
+}
+
+// #3004 review finding 2, asserted where the harm actually happens rather than via
+// composeStatus: SaveInstances drops ordinary Loading/Deleting rows, so a fence that
+// composed to Loading would make a shutdown checkpoint erase an established
+// session's only on-disk record — and the checkpoint is wholesale per repo, so any
+// OTHER started session in the same repo triggers it.
+func TestSaveInstances_KeepsARespawningRowAlongsideStartedSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	sibling := &Instance{Title: "sibling", Path: repoPath, started: true, liveness: LiveRunning}
+	respawning := &Instance{ID: "respawn-id", Title: "respawning", Path: repoPath, Program: "claude", started: true, liveness: LiveReady}
+	require.NoError(t, respawning.Transition(ObserveLiveness(LiveLimitReached)))
+	require.NoError(t, respawning.Transition(BeginRespawn()))
+
+	storage, err := NewStorage(state, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.SaveInstances([]*Instance{sibling, respawning}))
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title == respawning.Title {
+			require.NotEqual(t, Loading, row.Status,
+				"a respawn fence must not present as Loading — that is the value the retention skip drops")
+			return
+		}
+	}
+	t.Fatal("the shutdown checkpoint dropped the respawning row; the next daemon start would orphan its workspace")
 }

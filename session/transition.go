@@ -59,6 +59,7 @@ const (
 	tkParkHandoff
 	tkAbortHandoff
 	tkClearOp
+	tkBeginRespawn
 	numTransitionKinds
 )
 
@@ -98,6 +99,8 @@ func (k transitionKind) String() string {
 		return "AbortHandoff"
 	case tkClearOp:
 		return "ClearOp"
+	case tkBeginRespawn:
+		return "BeginRespawn"
 	}
 	return fmt.Sprintf("transitionKind(%d)", int(k))
 }
@@ -126,6 +129,10 @@ func (ev TransitionEvent) AtEpoch(epoch uint64) TransitionEvent {
 	ev.epochScoped = true
 	return ev
 }
+
+// BeginRespawn raises the OpRespawning fence for a limit resume re-spawning an
+// established session's runtime (#2997). Liveness is preserved.
+func BeginRespawn() TransitionEvent { return TransitionEvent{kind: tkBeginRespawn} }
 
 // BeginCreate overlays OpCreating for an optimistic create (was SetStatus(Loading)).
 func BeginCreate() TransitionEvent { return TransitionEvent{kind: tkBeginCreate} }
@@ -320,6 +327,17 @@ type edgeSpec struct {
 // enforcement of I1–I4 lives here as a from-state predicate, not as a guard
 // scattered across the daemon/app call sites.
 var transitionTable = map[transitionKind]edgeSpec{
+	// A limit resume re-spawning an established session's runtime (#2997). It
+	// preserves liveness — the session is still the limit-blocked one the resume
+	// validated against, and the resume's own precondition must survive its own
+	// operation — and requires OpNone so it cannot start under a teardown.
+	tkBeginRespawn: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpRespawning} },
+		// Re-spawning a runtime continues the session's run; it neither opens nor
+		// closes one.
+		run: runKeep,
+	},
 	tkBeginCreate: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpNone },
 		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpCreating} },
@@ -327,7 +345,9 @@ var transitionTable = map[transitionKind]edgeSpec{
 		run: runKeep,
 	},
 	tkConfirmLive: {
-		allowedFrom:      func(s stateAxes) bool { return s.op == OpNone || s.op == OpCreating || s.op == OpRestoring },
+		allowedFrom: func(s stateAxes) bool {
+			return s.op == OpNone || s.op == OpCreating || s.op == OpRestoring || s.op == OpRespawning
+		},
 		target:           func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveRunning, OpNone} },
 		yieldWhenBlocked: true,
 		// A spawn completing says the agent is up, not that its work is done. It
@@ -614,6 +634,8 @@ func opLabel(op InFlightOp) string {
 		return "Restoring"
 	case OpReplacing:
 		return "Replacing"
+	case OpRespawning:
+		return "Respawning"
 	}
 	return fmt.Sprintf("InFlightOp(%d)", int(op))
 }

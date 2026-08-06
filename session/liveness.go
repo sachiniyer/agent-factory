@@ -79,6 +79,23 @@ const (
 	// The status poll must not observe the close/start gap or settle a result from
 	// the outgoing pane after the incoming pane has taken its place.
 	OpReplacing
+	// OpRespawning: a limit resume is re-spawning an EXISTING session's runtime —
+	// for a remote backend, pushing the old sandbox's work and provisioning a fresh
+	// one, which outlasts a poll interval (#2997). Its only job is to be an
+	// in-flight op: refreshInstanceStatus skips a session that has one, and raising
+	// it advances the state epoch so an observation the poll already decided is
+	// dropped rather than applied.
+	//
+	// Deliberately NOT a client overlay, which is what separates it from
+	// OpCreating. A respawn acts on a session that is already established, so
+	// composeStatus lets it fall through to the settled liveness instead of masking
+	// it with Loading. Masking it would be wrong twice over: SaveInstances drops
+	// ordinary Loading rows, so a shutdown checkpoint mid-respawn would erase an
+	// established session's only on-disk record and orphan its workspace; and the
+	// TUI's reconcile clears adopted overlays per-op, so a create overlay it never
+	// expected on an established row would strand it as Loading with its lifecycle
+	// actions disabled until restart. There is nothing here for a client to mirror.
+	OpRespawning
 )
 
 // LifecycleAction is the session domain's answer to which reversible lifecycle

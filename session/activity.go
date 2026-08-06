@@ -72,11 +72,11 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	if data.PendingHandoffMission != "" {
 		return ActivityPending, ""
 	}
-	// Any operation in flight (create, kill, archive, restore) means the session
+	// Any operation in flight (create, kill, archive, restore, respawn) means the session
 	// is mid-transition; wait for it to settle rather than reporting the
 	// transient composed status.
 	switch data.InFlightOp {
-	case OpCreating, OpKilling, OpArchiving, OpRestoring, OpReplacing:
+	case OpCreating, OpKilling, OpArchiving, OpRestoring, OpReplacing, OpRespawning:
 		return ActivityPending, ""
 	}
 
