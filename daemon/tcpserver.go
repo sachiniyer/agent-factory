@@ -177,6 +177,10 @@ type livePosture struct {
 	// preview listener leaves it false: its gate posture is the fixed strict zero
 	// value (previewListenerPolicy).
 	policyFromConfig bool
+	// sandboxTokens admits per-session sandbox callback credentials (#2999). Set
+	// ONLY by the control-plane web listener: the preview origin carries no
+	// control plane, so a sandbox credential must never authenticate there.
+	sandboxTokens *sandboxTokenRegistry
 	// previewOrigin marks the web-tab preview listener, which carries no control
 	// plane and whose whole path space belongs to the previewed app. It is ONE flag
 	// because it is one fact, and three consequences follow from it (all in
@@ -280,6 +284,7 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				presentedToken:          presentedToken,
 				tokenDisabled:           policy.tokenDisabled,
 				loopbackExempt:          policy.loopbackExempt,
+				sandboxTokens:           live.sandboxTokens,
 			}
 			if live.policyFromConfig {
 				// The control-plane web listener: token/loopback posture from live

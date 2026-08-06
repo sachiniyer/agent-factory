@@ -1,0 +1,161 @@
+package daemon
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/config"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// The sandbox callback credential's two non-negotiables (#2999): a sandbox never
+// holds the operator's authority, and af refuses to hand out a credential for a
+// listener that does not ask for one.
+
+func TestSandboxTokenRegistry_MintLookupRevoke(t *testing.T) {
+	var registry sandboxTokenRegistry
+
+	secret, err := registry.mint("sess-a")
+	require.NoError(t, err)
+	require.NotEmpty(t, secret)
+
+	owner, ok := registry.sessionFor(secret)
+	require.True(t, ok)
+	assert.Equal(t, "sess-a", owner)
+
+	// Revocation is what makes this per-session rather than a second master key.
+	registry.revoke("sess-a")
+	_, ok = registry.sessionFor(secret)
+	assert.False(t, ok, "a revoked credential must stop authenticating immediately")
+
+	// Idempotent: every teardown path calls this and none should fail for it.
+	registry.revoke("sess-a")
+	registry.revoke("never-existed")
+
+	// An empty presented credential must never match, or a caller sending no
+	// token at all would authenticate as whatever the zero value looked up.
+	_, ok = registry.sessionFor("")
+	assert.False(t, ok)
+}
+
+func TestSandboxTokenRegistry_ReMintRevokesThePrevious(t *testing.T) {
+	var registry sandboxTokenRegistry
+
+	first, err := registry.mint("sess-a")
+	require.NoError(t, err)
+	second, err := registry.mint("sess-a")
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "each mint must be a fresh secret")
+
+	_, ok := registry.sessionFor(first)
+	assert.False(t, ok, "re-provisioning a session must invalidate its old credential, not leave two live")
+	_, ok = registry.sessionFor(second)
+	assert.True(t, ok)
+}
+
+func TestSandboxTokenRegistry_SessionsDoNotShareCredentials(t *testing.T) {
+	var registry sandboxTokenRegistry
+	a, err := registry.mint("sess-a")
+	require.NoError(t, err)
+	b, err := registry.mint("sess-b")
+	require.NoError(t, err)
+	require.NotEqual(t, a, b)
+
+	// Revoking one must not disturb the other: teardown is per session.
+	registry.revoke("sess-a")
+	_, ok := registry.sessionFor(b)
+	assert.True(t, ok, "one session's teardown must not revoke another's credential")
+}
+
+// The scope is what stops a compromised sandbox owning the host, so the denials
+// are asserted by name rather than by counting.
+func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
+	for _, path := range []string{"/v1/CreateSession", "/v1/Snapshot", "/v1/SendPrompt", "/v1/AddTask"} {
+		assert.Truef(t, sandboxAllowedPath(path), "%s is what a remote agent is for", path)
+	}
+	for _, path := range []string{
+		// DeliverPrompt runs instructions through every agent on the machine. It is
+		// the single verb that would make a sandbox credential equivalent to the
+		// operator's, which is the whole reason this scoping exists.
+		"/v1/DeliverPrompt",
+		"/v1/SetConfigValue",
+		"/v1/DeleteProject",
+		"/v1/KillSession",
+	} {
+		assert.Falsef(t, sandboxAllowedPath(path), "%s must never be reachable with a sandbox credential", path)
+	}
+	// Default deny: a path that is not in the table at all — including the WS
+	// planes and anything added later without opting in — is refused.
+	assert.False(t, sandboxAllowedPath("/v1/events"))
+	assert.False(t, sandboxAllowedPath("/v1/NotARoute"))
+}
+
+func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
+	var registry sandboxTokenRegistry
+	secret, err := registry.mint("sess-a")
+	require.NoError(t, err)
+
+	gate := &authGate{
+		expectedToken: func() (string, error) { return "operator-token", nil },
+		sandboxTokens: &registry,
+	}
+	request := func(path, token string) *http.Request {
+		r := mustRequest(t, http.MethodPost, path)
+		r.Header.Set("Authorization", "Bearer "+token)
+		return r
+	}
+
+	assert.True(t, gate.authorize(request("/v1/CreateSession", secret)),
+		"a sandbox credential must work for a route its scope admits")
+	assert.False(t, gate.authorize(request("/v1/DeliverPrompt", secret)),
+		"a sandbox credential must NOT reach DeliverPrompt")
+
+	// The operator's own token is unaffected by any of this.
+	assert.True(t, gate.authorize(request("/v1/DeliverPrompt", "operator-token")))
+
+	// And revocation reaches the gate, not just the registry.
+	registry.revoke("sess-a")
+	assert.False(t, gate.authorize(request("/v1/CreateSession", secret)),
+		"a revoked credential must stop authorizing at the gate")
+
+	// A gate with no registry (the agent-server, the preview origin) accepts no
+	// sandbox credential at all.
+	bare := &authGate{expectedToken: func() (string, error) { return "operator-token", nil }}
+	assert.False(t, bare.authorize(request("/v1/CreateSession", secret)))
+}
+
+func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
+	m := &Manager{}
+
+	_, _, err := m.mintSandboxCallback(daemonTestConfig(false, "0.0.0.0:8443"), "sess-a")
+	require.Error(t, err, "a credential against a listener that demands none enforces nothing")
+	assert.Contains(t, err.Error(), requireTokenFixHint,
+		"the refusal must name the one-line fix, or the operator is left guessing")
+
+	// Refused BEFORE minting: nothing may be left in the registry for a provision
+	// that did not happen.
+	_, ok := m.sandboxTokens.sessionFor("")
+	assert.False(t, ok)
+	assert.Empty(t, m.sandboxTokens.bySession, "a refused mint must leave no credential behind")
+
+	// An empty listen_addr has nothing to call back to, and is refused separately
+	// so the message can say which of the two is wrong.
+	_, _, err = m.mintSandboxCallback(daemonTestConfig(true, ""), "sess-a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "listen_addr")
+
+	url, token, err := m.mintSandboxCallback(daemonTestConfig(true, "0.0.0.0:8443"), "sess-a")
+	require.NoError(t, err)
+	assert.Equal(t, "http://0.0.0.0:8443", url)
+	assert.NotEmpty(t, token)
+	owner, ok := m.sandboxTokens.sessionFor(token)
+	require.True(t, ok)
+	assert.Equal(t, "sess-a", owner)
+}
+
+// daemonTestConfig is the minimal config the refusal reads.
+func daemonTestConfig(requireToken bool, listenAddr string) *config.Config {
+	return &config.Config{RequireToken: requireToken, ListenAddr: listenAddr}
+}

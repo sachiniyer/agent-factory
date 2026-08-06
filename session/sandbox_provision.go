@@ -143,6 +143,33 @@ func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader)
 // startAgentServer launches `af agent-server` headless on the remote, detached
 // via nohup with its banner + log redirected to files, bound to 127.0.0.1:0, and
 // captures the background PID.
+// writeCallbackEnv puts the daemon URL and the per-session callback token on the
+// remote, in a file only the sandbox user can read (#2999).
+//
+// Through STDIN and a file, never the launch command. A token in argv is visible
+// to `ps` for every user on that machine, which is the leak class #2684-#2771
+// exist for; `umask 077` before the redirect means the file is 0600 from the
+// moment it exists rather than briefly world-readable.
+//
+// No-op when no credential was granted, which is every local session and also a
+// sandbox whose mint was refused — so the refusal reaches the operator as the
+// create error it already is, not as a half-written file here.
+func (w *sandboxWorkspace) writeCallbackEnv(timeout time.Duration) error {
+	if w.spec.CallbackToken == "" {
+		return nil
+	}
+	body := fmt.Sprintf("AF_DAEMON_URL=%s\nAF_DAEMON_TOKEN=%s\n",
+		shellQuote(w.spec.CallbackURL), shellQuote(w.spec.CallbackToken))
+	script := "umask 077 && cat > " + shellQuote(w.CallbackEnvPath())
+	out, err := w.shell.Run(timeout, script, strings.NewReader(body), false)
+	if err != nil {
+		// The token is NOT in this message: the script names the path, not the
+		// value, and the value only ever travelled on stdin.
+		return fmt.Errorf("writing the sandbox callback environment failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	filteredInner, err := w.agentServerCommand()
 	if err != nil {
@@ -150,6 +177,13 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	}
 	launch := fmt.Sprintf("nohup %s >%s 2>%s </dev/null & echo $!",
 		filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
+	if w.spec.CallbackToken != "" {
+		// Sourced into the shell that launches the agent-server, so the variables
+		// are in its ENVIRONMENT rather than its argv. AF_DAEMON_URL and
+		// AF_DAEMON_TOKEN are already on sessionenv's pass-through allowlist, so
+		// the filtered re-exec carries them through to the agent.
+		launch = "set -a && . " + shellQuote(w.CallbackEnvPath()) + " && set +a && " + launch
+	}
 	out, err := w.shell.Run(timeout, launch, nil, false)
 	if err != nil {
 		return fmt.Errorf("starting af agent-server on the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -215,4 +249,12 @@ func (w *sandboxWorkspace) readBanner(pollTimeout, pollInterval, stepTimeout tim
 func (w *sandboxWorkspace) WorkspacePath() string { return w.SessionDir + "/" + sshWorkspaceSubdir }
 func (w *sandboxWorkspace) AfPath() string        { return w.SessionDir + "/" + sshAfBinaryName }
 func (w *sandboxWorkspace) BannerPath() string    { return w.SessionDir + "/" + sshBannerName }
-func (w *sandboxWorkspace) LogPath() string       { return w.SessionDir + "/" + sshLogName }
+
+// CallbackEnvPath is the 0600 file holding AF_DAEMON_URL/AF_DAEMON_TOKEN. It sits
+// under SessionDir so the existing one-`rm -rf` teardown reaps the credential
+// with the rest of the session.
+func (w *sandboxWorkspace) CallbackEnvPath() string { return w.SessionDir + "/" + sshCallbackEnvName }
+
+const sshCallbackEnvName = "af-callback.env"
+
+func (w *sandboxWorkspace) LogPath() string { return w.SessionDir + "/" + sshLogName }

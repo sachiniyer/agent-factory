@@ -135,7 +135,11 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
 	closer, info, err := startTCPListenerWithListen(wl.webMux, addr, cfg, policy, withWebShell, nil,
-		&livePosture{snapshot: wl.manager.Config, policyFromConfig: true}, wl.listenTCP)
+		&livePosture{
+			snapshot:         wl.manager.Config,
+			policyFromConfig: true,
+			sandboxTokens:    &wl.manager.sandboxTokens,
+		}, wl.listenTCP)
 	if err != nil {
 		return fmt.Errorf("apply listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
 	}

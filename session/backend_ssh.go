@@ -244,6 +244,9 @@ func (p *sshProvisioner) provision() (ProvisionResult, error) {
 	if copyErr != nil {
 		return ProvisionResult{}, p.sshErr(copyErr)
 	}
+	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sshErr(err)
+	}
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sshErr(err)
 	}

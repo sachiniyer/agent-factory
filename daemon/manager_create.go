@@ -138,6 +138,12 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
+		// Invoked by the session runtime ONLY for a kind that provisions off-box
+		// (#2999), so a local create neither mints a credential nor inherits the
+		// require_token refusal that guards one.
+		SandboxCallback: func() (string, string, error) {
+			return m.mintSandboxCallback(cfg, pending.ID)
+		},
 	})
 	if err != nil {
 		return session.InstanceData{}, err

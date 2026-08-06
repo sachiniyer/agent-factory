@@ -67,6 +67,18 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
+	// CallbackURL and CallbackToken let the agent INSIDE a sandbox call back into
+	// the daemon (#2999) — the reverse of the daemon-drives-sandbox direction, and
+	// what makes a remote agent able to run `af` the way a local one does. They are
+	// AF_DAEMON_URL / AF_DAEMON_TOKEN, which apiclient already reads, so no new CLI
+	// surface exists for them.
+	//
+	// The token is per-session, scoped and revocable — never the operator's, which
+	// grants DeliverPrompt over every agent on the machine. Empty means no callback
+	// was granted, which is the normal case for a local session and also what a
+	// refusal leaves behind.
+	CallbackURL   string
+	CallbackToken string
 	// CloneURL is the git remote an off-box runtime clones the workspace from —
 	// the repo's `origin` for a real repo, or a file:// / bind-mounted path for a
 	// self-contained test. Empty for the in-process local runtime. On a fresh

@@ -32,6 +32,12 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// (by id), not the request's title. req is a value copy, so this is local.
 	req.Title = title
 	resolved := session.InstanceData{ID: resolvedID, Title: title}
+	// Revoke this session's sandbox callback credential (#2999). Before the
+	// teardown rather than after: a kill can fail partway, and a credential whose
+	// session is being destroyed must stop working at the moment the intent is
+	// known, not only if every later step succeeds. Idempotent, and a no-op for
+	// the sessions that never held one.
+	m.sandboxTokens.revoke(resolvedID)
 	targetID := killTargetStableID(instance, data)
 	// Kill destroys the session unconditionally (#1579). The old unmerged-work
 	// guard that refused kills with commits-not-on-base / a dirty worktree / a
