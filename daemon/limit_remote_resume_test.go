@@ -31,9 +31,10 @@ import (
 type mockSandbox struct {
 	srv *httptest.Server
 
-	mu      sync.Mutex
-	alive   bool
-	prompts []string
+	mu       sync.Mutex
+	alive    bool
+	prompts  []string
+	archives int
 }
 
 func newMockSandbox(t *testing.T, alive bool) *mockSandbox {
@@ -45,6 +46,16 @@ func newMockSandbox(t *testing.T, alive bool) *mockSandbox {
 		resp := map[string]any{"alive": s.alive}
 		s.mu.Unlock()
 		writeSandboxEnvelope(t, w, resp)
+	})
+	// A limit resume that finds an ANSWERED-dead agent now pushes the sandbox
+	// before replacing it (#2923), so a mock that can answer alive=false must also
+	// be able to serve that push — otherwise these tests exercise the refusal
+	// rather than the respawn they are about.
+	mux.HandleFunc("/v1/agent/archive", func(w http.ResponseWriter, _ *http.Request) {
+		s.mu.Lock()
+		s.archives++
+		s.mu.Unlock()
+		writeSandboxEnvelope(t, w, map[string]any{"branch": "af/fixture-branch"})
 	})
 	mux.HandleFunc("/v1/agent/send-prompt", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

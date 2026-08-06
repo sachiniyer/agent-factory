@@ -163,6 +163,8 @@ func TestRestoreSession_ForceReapDoesNotPushWhatItIsDiscarding(t *testing.T) {
 	// somewhere correct to land without needing the push to discover one.
 	inst := manager.instances[daemonInstanceKey(repoID, "forced")]
 	inst.SetSandboxBranch("af/known-branch")
+	// Durable, not just in memory: authorizing a reap reads the stored record.
+	manager.persistInstance(repoID, inst)
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
 		Title: "forced", RepoID: repoID, ForceReap: true,
@@ -191,6 +193,7 @@ func TestRestoreSession_ForceReapReleasesTheIndeterminateRefusal(t *testing.T) {
 	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "forced-unknown", srv.url, session.Lost)
 	inst := manager.instances[daemonInstanceKey(repoID, "forced-unknown")]
 	inst.SetSandboxBranch("af/known-branch")
+	manager.persistInstance(repoID, inst)
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{
 		Title: "forced-unknown", RepoID: repoID, ForceReap: true,
