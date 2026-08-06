@@ -39,10 +39,14 @@ import (
 // but only while the loss is LOGGED rather than silent, which is the actual
 // complaint in #2919:
 //
-//   - the destination filesystem holds no xattrs at all (EOPNOTSUPP) -> warn once and
-//     stop trying. The archive root's filesystem is not a per-file choice.
+//   - the destination filesystem holds no xattrs at all -> warn once and stop trying.
+//     The archive root's filesystem is not a per-file choice. Proven by asking the
+//     destination descriptor, never inferred from one rejected name: EOPNOTSUPP also
+//     comes back per NAMESPACE, and a destination that stores user.* fine can still
+//     refuse a security.* attribute.
 //   - one attribute is refused (EPERM/EACCES - security.capability needs CAP_SETFCAP,
-//     security.selinux needs relabel permission) -> warn naming it, keep going.
+//     security.selinux needs relabel permission; or a namespace this filesystem does
+//     not implement) -> warn naming it, keep going.
 //   - anything else -> fail the copy. E2BIG and ENOSPC are errors, not policy limits.
 //
 // trusted.* needs no special case: an unprivileged lister never sees it, so it never
@@ -63,7 +67,7 @@ var errXattrUnsupportedDestination = errors.New("destination filesystem does not
 func copySourceXattrs(sourceFD, destinationFD int, destinationPath, kind string, acl bool) error {
 	names, err := listXattrNames(sourceFD)
 	if err != nil {
-		if errors.Is(err, unix.EOPNOTSUPP) {
+		if isXattrUnsupported(err) {
 			return nil // the SOURCE filesystem has no xattrs; nothing to carry
 		}
 		return fmt.Errorf(
@@ -106,10 +110,22 @@ func copySourceXattrs(sourceFD, destinationFD int, destinationPath, kind string,
 		}
 		if err := unix.Fsetxattr(destinationFD, name, value, 0); err != nil {
 			switch {
-			case errors.Is(err, unix.EOPNOTSUPP):
+			case isXattrUnsupported(err):
+				// EOPNOTSUPP here is per-NAME, not per-filesystem: a destination that
+				// stores user.* happily can still reject a namespace it does not
+				// implement. Latching on the first one would skip every remaining
+				// attribute on this node AND on every later node, so the filesystem-wide
+				// claim has to be established independently before it is believed.
+				if !destinationRejectsAllXattrs(destinationFD) {
+					log.WarningLog.Printf(
+						"archive: extended attribute %q not reproduced on %s %s (this destination does not implement that namespace): %v",
+						name, kind, destinationPath, err,
+					)
+					continue
+				}
 				log.WarningLog.Printf(
-					"archive: %s %s cannot hold extended attributes on this filesystem; %d attribute(s) not copied",
-					kind, destinationPath, len(names),
+					"archive: %s %s cannot hold extended attributes on this filesystem; none were copied",
+					kind, destinationPath,
 				)
 				return errXattrUnsupportedDestination
 			case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):
@@ -182,12 +198,33 @@ func copyXattrPhase(support *xattrDestination, sourceFD, destinationFD int, dest
 // normalise.
 func pruneDestinationXattrs(sourceFD, destinationFD int, destinationPath, kind string) {
 	destinationNames, err := listXattrNames(destinationFD)
-	if err != nil || len(destinationNames) == 0 {
+	if err != nil {
+		// A destination that holds no attributes at all has nothing to normalise and is
+		// not worth a warning. Anything else — EIO, ENOMEM — means the check did not
+		// happen, and staying silent about that is how an inherited ACL rides along
+		// while the archive reports success.
+		if !isXattrUnsupported(err) {
+			log.WarningLog.Printf(
+				"archive: could not list extended attributes on %s %s to check for inherited ones; any the destination added are left in place: %v",
+				kind, destinationPath, err,
+			)
+		}
+		return
+	}
+	if len(destinationNames) == 0 {
 		return
 	}
 	sourceNames, err := listXattrNames(sourceFD)
-	if err != nil && !errors.Is(err, unix.EOPNOTSUPP) {
-		return // cannot tell what the source had; leave the destination alone
+	if err != nil && !isXattrUnsupported(err) {
+		// Cannot tell what the source had, so leave the destination alone rather than
+		// remove something the source may well have carried — but say so, because an
+		// inherited ACL surviving is the permission-widening case this helper exists
+		// to prevent.
+		log.WarningLog.Printf(
+			"archive: could not list the source's extended attributes while normalising %s %s; any the destination inherited are left in place: %v",
+			kind, destinationPath, err,
+		)
+		return
 	}
 	fromSource := make(map[string]struct{}, len(sourceNames))
 	for _, name := range sourceNames {
@@ -224,6 +261,35 @@ func pruneDestinationXattrs(sourceFD, destinationFD int, destinationPath, kind s
 // #2919 instead, so the limit is written down where the follow-up will look.
 func isACLXattr(name string) bool {
 	return name == "system.posix_acl_access" || name == "system.posix_acl_default"
+}
+
+// destinationRejectsAllXattrs reports whether a destination holds no extended
+// attributes AT ALL, as opposed to having refused one particular name.
+//
+// Asked of the destination descriptor itself, because that is the only thing that
+// can answer it: a listing that comes back unsupported means the filesystem does not
+// implement xattrs, while a listing that succeeds proves it does and that the refusal
+// was about the one namespace. Without this the first rejected security.* attribute
+// would convince the copier that the whole filesystem was attribute-less and make it
+// skip the user.* and ACL attributes it could have stored.
+func destinationRejectsAllXattrs(destinationFD int) bool {
+	_, err := unix.Flistxattr(destinationFD, nil)
+	return isXattrUnsupported(err)
+}
+
+// isXattrUnsupported reports whether an error means extended attributes are not
+// available here at all. Platform-split for the same reason as isXattrVanished, and
+// with a sharper consequence: darwin spells this ENOTSUP (0x2d) where Linux returns
+// EOPNOTSUPP (0x5f) and makes the two names one value, so matching only EOPNOTSUPP
+// would send every unsupported macOS destination down the "unexpected error" path and
+// fail the archive outright instead of degrading to a warning.
+func isXattrUnsupported(err error) bool {
+	for _, unsupported := range xattrUnsupportedErrnos() {
+		if errors.Is(err, unsupported) {
+			return true
+		}
+	}
+	return false
 }
 
 // isXattrVanished reports whether an error means the attribute is simply not there —

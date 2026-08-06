@@ -133,12 +133,17 @@ func mustOpen(t *testing.T, path string) *os.File {
 	return handle
 }
 
-// TestCopyTree_CopiesXattrsOntoReadOnlyNodes is the P1 from review, and the ordering
-// it pins is not cosmetic. Setting an attribute in the user namespace requires write
-// permission on the INODE — an already-open write descriptor does not satisfy it — so
-// with the mode applied first, every user.* attribute on a checked-in 0444 file
-// failed EACCES. The privilege branch then logged it as "needs privilege" and carried
-// on, so an ordinary attribute was lost silently on every read-only node in the tree.
+// TestCopyTree_CopiesXattrsOntoReadOnlyNodes is the P1 from review, and what it pins
+// is the CREATION mode, not the ordering. Setting an attribute in the user namespace
+// requires write permission on the INODE, and an already-open write descriptor does
+// not satisfy it. openat() created the destination at the source's mode, so a
+// checked-in 0444 file was read-only from the moment it existed and every user.*
+// attribute failed EACCES wherever in the sequence it was attempted — reordering the
+// call could not help, which is how the first attempt at this fix passed review while
+// changing nothing. The privilege branch then logged the EACCES as "needs privilege"
+// and carried on, losing an ordinary attribute silently on every read-only node.
+//
+// workingFileMode is the fix: create owner-writable, apply the real mode last.
 func TestCopyTree_CopiesXattrsOntoReadOnlyNodes(t *testing.T) {
 	source, destination := xattrFixture(t)
 	// Attribute FIRST, then chmod. Setting a user.* attribute needs write permission
@@ -201,4 +206,32 @@ func TestCopyTree_DropsDestinationOnlyXattrs(t *testing.T) {
 	// only what the source lacks, never what it has.
 	require.Contains(t, listAttrs(t, filepath.Join(second, "plain.txt")), "user.af_inherited")
 	require.Equal(t, []byte("yes"), readAttr(t, filepath.Join(second, "plain.txt"), "user.af_kept"))
+}
+
+// TestDestinationRejectsAllXattrs_OnlyWhenTheListingSaysSo pins the distinction the
+// latch depends on. EOPNOTSUPP comes back per NAMESPACE as well as per filesystem, so
+// "one attribute was refused" is not evidence that the destination holds none — and
+// acting on it would skip every remaining attribute on this node and on every later
+// node in the copy. The predicate must consult the destination descriptor itself.
+func TestDestinationRejectsAllXattrs_OnlyWhenTheListingSaysSo(t *testing.T) {
+	dir := xattrCapableDir(t)
+	path := filepath.Join(dir, "holder.txt")
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+	handle := mustOpen(t, path)
+
+	require.False(t, destinationRejectsAllXattrs(int(handle.Fd())),
+		"a filesystem whose listing succeeds does support attributes, whatever a single "+
+			"rejected namespace reported")
+
+	// And the errno classifier underneath it must accept the spelling THIS platform
+	// uses, not just the Linux one: darwin returns ENOTSUP (0x2d) where Linux returns
+	// EOPNOTSUPP (0x5f) and treats the two names as one value. Matching only the Linux
+	// spelling would drop an unsupported darwin destination into the "unexpected error"
+	// branch and fail the whole archive instead of warning.
+	for _, unsupported := range xattrUnsupportedErrnos() {
+		require.True(t, isXattrUnsupported(unsupported),
+			"every errno this platform reports as unsupported must classify as unsupported")
+	}
+	require.False(t, isXattrUnsupported(unix.EIO),
+		"a real I/O failure must not be mistaken for an attribute-less filesystem")
 }
