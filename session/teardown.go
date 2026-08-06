@@ -41,7 +41,10 @@ type teardownMode interface {
 	// error — kill and archive log a tmux that ANSWERED, so the record can still be
 	// dropped (#478) — but it does not get to choose whether the core learns the
 	// state is unknown.
-	closeTab(ts *tmux.TmuxSession, worktreePath, title, tabName string) (teardownState, error)
+	// The bool reports that the session VANISHED WITH NO PANE OBSERVED, so its
+	// marker evidence was vacuous and the caller must look for markerless
+	// occupants once every tab is closed (#2998).
+	closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error)
 	// handleWorktree performs the mode's worktree action once every pane is
 	// CONFIRMED exited: delete (kill), move (archive — returns the move error for
 	// the caller to roll back on), or nothing (release-PTY). gw may be nil. Not
@@ -205,15 +208,10 @@ func TeardownStateUnknown(err error) bool {
 // DEFAULT reap action and therefore runs constantly, stepped straight from a
 // wedged tmux server into MoveWorktree on a possibly-live pane (#1917 review).
 // Two copies of a safety rule is one copy of a safety rule.
-func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, worktreePath, verb, title, tabName string) (teardownState, error) {
-	// Hand the workspace to the tmux layer BEFORE the close. It is consulted only
-	// on the one branch where the marker chain is blind — a session that vanished
-	// with no pane ever observed — so an ordinary teardown never reaches it and
-	// gains no new refusal (#2998). See sweepVanishedSessionProcesses.
-	ts.SetWorktreePath(worktreePath)
-	state, err := ts.CloseAndWaitForPaneExit()
+func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string) (teardownState, bool, error) {
+	state, blind, err := ts.CloseAndWaitForPaneExitReportingBlindness()
 	if state != tmux.PaneStateKnown {
-		return stateUnknown, fmt.Errorf("%s %q: tab %q: %w", verb, title, tabName, err)
+		return stateUnknown, blind, fmt.Errorf("%s %q: tab %q: %w", verb, title, tabName, err)
 	}
 	// Unreachable by construction since #2962: CloseAndWaitForPaneExit returns
 	// KNOWN only after every gate passes, and each gate returns UNKNOWN with the
@@ -232,7 +230,7 @@ func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, worktreePath, verb, ti
 	if err != nil {
 		log.WarningLog.Printf("%s %q: tmux cleanup for tab %q failed: %v", verb, title, tabName, err)
 	}
-	return stateKnown, nil
+	return stateKnown, blind, nil
 }
 
 // teardownTabs runs the one teardown skeleton for the given mode. It snapshots
@@ -286,18 +284,10 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 
 	var errs []error
 	paneMayBeLive := false
-	for i, c := range closed {
-		// Only the LAST tab supplies the workspace. Every tab of an instance works
-		// in the SAME worktree, so a check run mid-loop sees the siblings this loop
-		// has not closed yet and reports them as occupants — refusing a teardown
-		// whose own later iterations were about to remove the very processes it
-		// objected to (Codex on #3001). By the final iteration every earlier tab is
-		// closed, which is the "after every tab" the check actually needs.
-		tabWorktree := ""
-		if i == len(closed)-1 {
-			tabWorktree = worktreePathOf(gw)
-		}
-		state, err := mode.closeTab(c.ts, tabWorktree, title, c.name)
+	anyBlind := false
+	for _, c := range closed {
+		state, blind, err := mode.closeTab(c.ts, title, c.name)
+		anyBlind = anyBlind || blind
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -306,6 +296,21 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 		// known" rather than "== unknown" so an unset/zero state — the state a
 		// future mode forgets to set — lands on the safe side (#1917).
 		if state != stateKnown {
+			paneMayBeLive = true
+		}
+	}
+	// ONE occupancy check, here — after every tab is closed, and only if some tab
+	// was blind. Both conditions are load-bearing. Inside the loop it would report
+	// siblings this loop had not closed yet; without the blind condition it would
+	// run on ordinary teardowns, where a session's own long-lived processes and the
+	// tmux server itself legitimately hold a cwd in the workspace (#2998, and the
+	// web selftest that caught exactly that).
+	//
+	// It cannot be delegated to the final tab's close: that tab usually takes the
+	// ORDINARY path, so an earlier tab's blindness would never be acted on.
+	if anyBlind && !paneMayBeLive {
+		if err := CheckWorktreeOccupants(worktreePathOf(gw)); err != nil {
+			errs = append(errs, fmt.Errorf("teardown %q: %w", title, err))
 			paneMayBeLive = true
 		}
 	}
@@ -393,8 +398,8 @@ type teardownKill struct{}
 // handleWorktree: a process still flushing state mid-shutdown races git's
 // recursive delete and leaves a half-deleted directory ("Directory not empty",
 // #802). Best-effort for anything tmux ANSWERED with; an unknown stops the core.
-func (teardownKill) closeTab(ts *tmux.TmuxSession, worktreePath, title, tabName string) (teardownState, error) {
-	return closeTabForDestructiveTeardown(ts, worktreePath, "kill", title, tabName)
+func (teardownKill) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+	return closeTabForDestructiveTeardown(ts, "kill", title, tabName)
 }
 
 func (teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
@@ -446,11 +451,11 @@ type teardownReleasePTY struct{}
 // releases what this object opened, and post-#1592-PR7 that is nothing), so there
 // is no deadline to trip and nothing to be unknown about. This mode touches no
 // worktree either way.
-func (teardownReleasePTY) closeTab(ts *tmux.TmuxSession, _, _, tabName string) (teardownState, error) {
+func (teardownReleasePTY) closeTab(ts *tmux.TmuxSession, _, tabName string) (teardownState, bool, error) {
 	if err := ts.CloseAttachOnly(); err != nil {
-		return stateKnown, fmt.Errorf("tab %q: %w", tabName, err)
+		return stateKnown, false, fmt.Errorf("tab %q: %w", tabName, err)
 	}
-	return stateKnown, nil
+	return stateKnown, false, nil
 }
 
 func (teardownReleasePTY) handleWorktree(_ *git.GitWorktree, _ string) (teardownState, error) {
@@ -495,8 +500,8 @@ type teardownArchive struct {
 // straight into moving a live agent's workspace out from under it. Archive is the
 // default reap action, so that ran far more often than the kill path did (#1917
 // review).
-func (teardownArchive) closeTab(ts *tmux.TmuxSession, worktreePath, title, tabName string) (teardownState, error) {
-	return closeTabForDestructiveTeardown(ts, worktreePath, "archive", title, tabName)
+func (teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+	return closeTabForDestructiveTeardown(ts, "archive", title, tabName)
 }
 
 func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
