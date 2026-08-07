@@ -27,9 +27,8 @@ import (
 //
 //	local  — nothing; it is always usable.
 //	docker — docker.image set, the `docker` CLI on PATH, an `origin` to clone from.
-//	ssh    — ssh.host set, an `origin` to clone from. (The transport is the Go ssh
-//	         client, so there is no ssh CLI to look for; host reachability is a
-//	         network fact this must not dial for.)
+//	ssh    — ssh.host set, the `ssh` CLI on PATH, an `origin` to clone from. (Host
+//	         reachability is a network fact this must not dial for.)
 //	hook   — remote_hooks set AND valid AND its commands actually runnable.
 //
 // What is deliberately NOT checked, because it cannot be without doing the work:
@@ -123,6 +122,14 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 			return missingOriginError(BackendDocker, repoRoot)
 		}
 	case BackendSSH:
+		// Since #3052 this backend delegates every step to OpenSSH. The in-process
+		// x/crypto client needed no binary, so this check did not exist and its
+		// absence was documented as correct; on a minimal or containerized daemon
+		// host without `ssh`, leaving it out now means the picker offers a backend
+		// whose every provision fails. Same shape as the docker check above.
+		if _, err := lookPath("ssh"); err != nil {
+			return sshCLIMissingError(err)
+		}
 		if originRemoteURL(repoRoot) == "" {
 			return missingOriginError(BackendSSH, repoRoot)
 		}
@@ -172,6 +179,15 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 // (which hits it at choose time).
 func dockerCLIMissingError(err error) error {
 	return fmt.Errorf("backend=docker: the `docker` CLI is not on PATH; install Docker or select a different backend: %w", err)
+}
+
+// sshCLIMissingError is the one wording for "the ssh CLI is absent", shared by
+// the ssh runtime (create time) and BackendUnusableReason (choose time), mirroring
+// dockerCLIMissingError. It names backend=sandbox as the alternative only in the
+// sense that both need the same binary — there is no af-side fallback, because
+// af no longer carries an ssh client of its own (#3052).
+func sshCLIMissingError(err error) error {
+	return fmt.Errorf("backend=ssh: the `ssh` CLI is not on PATH; install OpenSSH on this machine (agent-factory runs `ssh` to reach the remote host) or select a different backend: %w", err)
 }
 
 // missingOriginError is the one wording for "this repo has nothing to clone from",

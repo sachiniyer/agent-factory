@@ -216,7 +216,11 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		p := newSSHSandboxProvisioner(ProvisionSpec{Title: title}, sshCmd, "", "")
 		p.sessionDir = data.SSH.SessionDir
 		p.remotePID = data.SSH.RemotePID
-		teardown := p.reap
+		// The accept-new store is prepared inside each ATTEMPT, never here: this
+		// function composes a closure while persisted instances are being loaded,
+		// and a transiently unwritable AF home must not be captured as a permanently
+		// dead cleanup. sshCommandForConfig above is pure for the same reason.
+		teardown := sshTeardownWithStore(p.reap, legacyCfg, data.SSH.HostKeyVerification)
 		if strings.TrimSpace(data.SSH.HostKeyVerification) == "" {
 			// The ONLY way an empty posture reaches here is a record written before
 			// #2704 added the field — config defaults it to strict at parse time, so a

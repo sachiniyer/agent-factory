@@ -32,8 +32,10 @@ import (
 // What this backend still owns, and what makes it more than a `sandbox` with a
 // generated command: it OPINIONATES. `ssh.user`, `ssh.port`, `ssh.identity_file`
 // and `ssh_host_key_verification` are real settings with af-enforced meanings,
-// each pinned with `-o` so ssh_config cannot quietly override them — see
-// ssh_command.go, which documents the preservation option by option.
+// and the composed command reads NO ssh configuration file (`-F none`) so nothing
+// outside af can change them — see ssh_command.go, which measures why pinning the
+// values alone was not enough. An operator who needs ssh_config, a bastion or a
+// ProxyCommand uses `backend = "sandbox"`, which exists for that.
 //
 // Lifecycle (sshRuntime.Provision, called from the backend factory during
 // NewInstance) — every step below runs over the composed command, in
@@ -133,6 +135,13 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, missingOriginError(BackendSSH, spec.RepoRoot)
 	}
 
+	// The same precondition BackendUnusableReason checks at choose time, so a host
+	// without OpenSSH fails here with the message the picker already gave rather
+	// than deep inside a provision step.
+	if _, err := lookPath("ssh"); err != nil {
+		return ProvisionResult{}, sshCLIMissingError(err)
+	}
+
 	afBin, err := sshSelfBinary()
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=ssh: cannot locate the af binary to stream onto the remote: %w", err)
@@ -144,6 +153,11 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// handed to the same sandboxProvisioner `backend=sandbox` uses (#3052).
 	sshCmd, err := sshCommandForConfig(sshCfg, cfg.SSHHostKeyVerification)
 	if err != nil {
+		return ProvisionResult{}, err
+	}
+	// Composition is pure; the accept-new store is created HERE, immediately
+	// before the command that appends to it runs. See prepareSSHHostKeyStore.
+	if err := prepareSSHHostKeyStore(sshCfg, cfg.SSHHostKeyVerification); err != nil {
 		return ProvisionResult{}, err
 	}
 	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, config.ResolveProgram(&cfg.Config, spec.Program))
@@ -172,7 +186,15 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // the same way — a divergence between those two is how a legacy handle stops
 // being reapable (#3044).
 func newSSHSandboxProvisioner(spec ProvisionSpec, sshCmd, afBin, program string) *sandboxProvisioner {
-	return &sandboxProvisioner{spec: spec, sshCmd: sshCmd, afBin: afBin, program: program}
+	return &sandboxProvisioner{
+		spec:    spec,
+		sshCmd:  sshCmd,
+		afBin:   afBin,
+		program: program,
+		// Errors from the shared transport must name THIS backend. An operator whose
+		// ssh.host clone failed should not be sent to look up sandbox_ssh.
+		backend: string(BackendSSH),
+	}
 }
 
 // ensureKnownHostsFile creates path (and its parent directory) if absent.

@@ -73,9 +73,15 @@ func TestSSHAcceptNewWritesToAFHomeNotUserKnownHosts(t *testing.T) {
 	assert.NotContains(t, cmd, filepath.Join(userHome, ".ssh", "known_hosts"),
 		"accept-new must never be pointed at the user's shared known_hosts (#2556)")
 
-	// The store must exist before ssh runs, or the first connection fails.
+	// The store must exist before ssh runs, or the first connection fails — but
+	// creating it is NOT composition's job, because composition also runs while
+	// persisted cleanup handles are being loaded. prepareSSHHostKeyStore is the
+	// step that does it, immediately before the command runs.
 	_, statErr := os.Stat(filepath.Join(afHome, sshKnownHostsFileName))
-	assert.NoError(t, statErr, "the af-owned store must be created up front")
+	assert.True(t, os.IsNotExist(statErr), "composing the command must not create the store")
+	require.NoError(t, prepareSSHHostKeyStore(config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyAcceptNew))
+	_, statErr = os.Stat(filepath.Join(afHome, sshKnownHostsFileName))
+	assert.NoError(t, statErr, "the af-owned store must exist by the time ssh runs")
 }
 
 func TestSSHAcceptNewUsesConfiguredKnownHosts(t *testing.T) {

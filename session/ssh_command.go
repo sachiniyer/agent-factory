@@ -25,30 +25,66 @@ import (
 // authenticates or verifies would be the worst possible outcome: silent, and in
 // the security-relevant direction.
 //
-// The one DELIBERATE difference is ssh_config, and it is documented rather than
-// hidden — see sshCommandForConfig.
+// WHICH IS WHY THE COMMAND READS NO CONFIGURATION FILE — see sshNoConfigFile.
+
+// sshNoConfigFile is `-F none`: read NEITHER ~/.ssh/config NOR
+// /etc/ssh/ssh_config. It is the single most load-bearing option in this file.
+//
+// The first version of this convergence let ssh_config apply, on the reasoning
+// that af pins every setting it owns with -o so anything else is additive. The
+// pinning premise is true (`ssh -F cfg -o User=afuser -G host` does report
+// `user afuser` over a host block's `User`). The conclusion is false: ssh_config
+// injects BEHAVIOURS, not only values, and a pinned value cannot mask a behaviour
+// that has no af-owned counterpart. Three of them, all measured against
+// OpenSSH_9.6p1:
+//
+//   - RemoteCommand — af always supplies its own remote script, and ssh refuses
+//     the combination outright: "Cannot execute command-line and remote command."
+//     Every provision AND every reap fails.
+//   - SendEnv — copies the DAEMON's environment VALUES to the remote, which
+//     breaches af's name-only session_env_passthrough boundary. Not hypothetical:
+//     a stock box already reports `sendenv LANG` / `sendenv LC_*` from
+//     /etc/ssh/ssh_config, and a custom `SendEnv AWS_SECRET_ACCESS_KEY` is applied
+//     verbatim.
+//   - ProxyJump — spawns a CHILD ssh that inherits none of the -o host-key pins,
+//     so the bastion is verified under the user's posture and its key is written
+//     to ~/.ssh/known_hosts. That is exactly what #2556 forbade.
+//
+// And those are not the whole set: PermitLocalCommand/LocalCommand, ForwardAgent
+// and ControlMaster are live too, and OpenSSH adds keywords across releases. So
+// pinning the offending directives one by one is the wrong instrument — it is a
+// promise to have thought of all of them, unenforced, and false on the next
+// release. `-F none` is a REDUCTION, and it restores exact parity with the
+// x/crypto client, which never read ssh_config either. Parity is what this
+// convergence was required to preserve.
+//
+// An operator who genuinely needs a bastion, a ProxyCommand, or any transport af
+// does not model uses `backend = "sandbox"` with a free-form sandbox_ssh command
+// (#2476/#2995), which exists for precisely that. The two backends differ by WHO
+// DECIDES, not by which ssh client runs.
+const sshNoConfigFile = "none"
 
 // sshCommandForConfig builds the ssh invocation for a repo's ssh.* settings and
 // the operator's host-key posture.
 //
+// It is PURE: it composes a string and touches nothing. Callers that need the
+// accept-new store to exist on disk call prepareSSHHostKeyStore separately, at
+// the point they are about to run the command — restoreRuntimeCleanup composes a
+// teardown during storage load and must not do I/O there (a transiently
+// unwritable AF home would otherwise be captured as a permanently dead closure).
+//
 // WHAT IS PRESERVED, option by option:
 //
+//   - Configuration files: none read at all, per sshNoConfigFile above — the
+//     x/crypto client read none either.
 //   - User: always pinned with -o User=, to the configured ssh.user or else the
-//     daemon's own account — exactly what loginUser() resolved. Pinning it means
-//     an ssh_config `User` directive cannot silently change who af logs in as.
+//     daemon's own account — exactly what loginUser() resolved.
 //   - Port: from the shared resolver, so this backend and the sandbox/hook paths
 //     cannot disagree about an address (#3044).
 //   - IdentityFile: passed with -i when configured. Agent keys stay available,
 //     because the old authMethods offered identity-file keys AND agent keys —
 //     so IdentitiesOnly is deliberately NOT set.
 //   - Host keys: the configured posture, mapped below.
-//
-// WHAT CHANGES, deliberately: ~/.ssh/config now applies. The x/crypto client
-// never read it, so a `Host` block matching ssh.host had no effect; now its
-// HostName, ProxyJump, ProxyCommand and friends do. That is the capability this
-// convergence exists to deliver — a bastion is reachable without switching
-// backends — and it is the one behavioural change an existing user can notice.
-// af's own settings still win, because every one of them is pinned with -o.
 func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {
@@ -65,14 +101,18 @@ func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 
 	parts := []string{
 		"ssh",
+		// FIRST, and the reason the rest of these pins are sufficient rather than a
+		// best-effort list. See sshNoConfigFile.
+		"-F", sshNoConfigFile,
 		"-o", "User=" + shellQuoteSandbox(sshLoginUser(cfg)),
 		"-p", strconv.Itoa(port),
 		"-o", "StrictHostKeyChecking=" + strictOpt,
 		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHosts),
 		// The x/crypto client consulted ONE file and never a helper program, so
-		// both of these preserve today's semantics rather than tighten them: without
-		// them /etc/ssh/ssh_known_hosts or an ssh_config KnownHostsCommand could
-		// satisfy verification that af's own store was supposed to decide.
+		// both of these preserve today's semantics rather than tighten them.
+		// Redundant under -F none, and kept deliberately: they state the invariant
+		// at the only place a reader looks for it, and they survive someone later
+		// deciding a config file may be read after all.
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "KnownHostsCommand=none",
 		// af never had a human to ask. A prompt would hang a provision forever.
@@ -106,12 +146,11 @@ func sshHostKeyOptions(cfg config.SSHConfig, posture, host string) (knownHosts, 
 		return os.DevNull, "no", nil
 
 	case config.SSHHostKeyAcceptNew:
+		// Resolve the path only. Creating the file is I/O, and this function is on
+		// restoreRuntimeCleanup's composition path — see prepareSSHHostKeyStore.
 		path, pathErr := acceptNewKnownHostsPathFor(cfg)
 		if pathErr != nil {
 			return "", "", pathErr
-		}
-		if ensureErr := ensureKnownHostsFile(path); ensureErr != nil {
-			return "", "", fmt.Errorf("backend=ssh: cannot prepare host-key store %q for accept-new: %w", path, ensureErr)
 		}
 		return path, "accept-new", nil
 
@@ -123,6 +162,45 @@ func sshHostKeyOptions(cfg config.SSHConfig, posture, host string) (knownHosts, 
 			return "", "", pathErr
 		}
 		return path, "yes", nil
+	}
+}
+
+// prepareSSHHostKeyStore creates the accept-new store if it does not exist yet,
+// and does nothing for the other two postures (strict verifies against a file the
+// operator owns; insecure reads /dev/null). Callers run it immediately before
+// running the composed command, never while composing it.
+//
+// SPLIT OUT OF COMPOSITION ON PURPOSE. restoreRuntimeCleanup composes a teardown
+// while persisted instances are being LOADED, under a contract that the I/O
+// happens only inside the returned closure. Creating a file there means a
+// transiently read-only or unavailable AF home turns one bad moment at startup
+// into a permanently dead cleanup closure: the remote agent-server and workspace
+// leak until the daemon restarts, and making the filesystem writable again does
+// not help. Preparing per attempt costs one stat on a path that almost always
+// exists, and it heals by itself.
+func prepareSSHHostKeyStore(cfg config.SSHConfig, posture string) error {
+	if posture != config.SSHHostKeyAcceptNew {
+		return nil
+	}
+	path, err := acceptNewKnownHostsPathFor(cfg)
+	if err != nil {
+		return err
+	}
+	if err := ensureKnownHostsFile(path); err != nil {
+		return fmt.Errorf("backend=ssh: cannot prepare host-key store %q for accept-new: %w", path, err)
+	}
+	return nil
+}
+
+// sshTeardownWithStore prepares the host-key store on each ATTEMPT and then
+// reaps. A preparation failure is reported as unknown-state so the record is
+// retained and retried — the opposite of capturing the failure once, at load.
+func sshTeardownWithStore(reap func() error, cfg config.SSHConfig, posture string) func() error {
+	return func() error {
+		if err := prepareSSHHostKeyStore(cfg, posture); err != nil {
+			return fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, err)
+		}
+		return reap()
 	}
 }
 

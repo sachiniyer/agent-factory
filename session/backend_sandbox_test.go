@@ -196,7 +196,7 @@ func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
 	// Bind and release a port so it is almost certainly free, then never listen.
 	free := freeLocalAddrForTest(t)
 	start := time.Now()
-	err := waitForSandboxTunnelWithin(free, 300*time.Millisecond, 50*time.Millisecond)
+	err := waitForSandboxTunnelWithin(string(BackendSandbox), free, 300*time.Millisecond, 50*time.Millisecond)
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Contains(t, err.Error(), "never started listening")
@@ -206,7 +206,7 @@ func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
 func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {
 	ln := listenLocalForTest(t)
 	defer func() { _ = ln.Close() }()
-	require.NoError(t, waitForSandboxTunnelWithin(ln.Addr().String(), 2*time.Second, 20*time.Millisecond))
+	require.NoError(t, waitForSandboxTunnelWithin(string(BackendSandbox), ln.Addr().String(), 2*time.Second, 20*time.Millisecond))
 }
 
 func freeLocalAddrForTest(t *testing.T) string {
@@ -257,9 +257,12 @@ func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 		"the kill must verify argv[0] before signalling, not trust a bare PID")
 	assert.Contains(t, script, "/remote/af-session/af",
 		"and must compare against THIS session's unique af path")
-	assert.Contains(t, script, ") && rm -rf",
+	assert.Contains(t, script, ") && ( rm -rf",
 		"a failed kill must stop the removal — and the kill runs in a SUBSHELL, so its own `exit 0` "+
 			"when the process is already gone cannot terminate the script before the removal")
+	assert.NotContains(t, script, "rm -rf '/remote/af-session' && printf",
+		"the PROOF must not be chained to the removal: an answered rm failure has to emit the sentinel "+
+			"too, or reap can never latch a definite failure and retries it forever")
 	assert.Contains(t, script, "| tr 'a-z' 'A-Z'",
 		"the response must be COMPUTED remotely, so a wrapper echoing argv cannot forge it")
 	assert.NotContains(t, script, expect,

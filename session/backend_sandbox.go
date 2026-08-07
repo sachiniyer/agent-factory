@@ -22,25 +22,27 @@ import (
 // The sandbox runtime (#2476 PR2) — the same provision-and-expose model as the
 // ssh runtime, reached through the operator's OWN `ssh` invocation.
 //
-// WHY IT EXISTS. `backend = "ssh"` used to connect with golang.org/x/crypto/ssh
-// and never read ~/.ssh/config, so it could not express a target that needed a
-// jump host, a ProxyCommand, a bastion, or any other flag the operator already
-// relied on. `sandbox_ssh` is a free-form command line — whatever already works
-// in their terminal — and af runs the provision steps over it.
+// WHY IT EXISTS. `backend = "ssh"` reads no ssh configuration file — by design,
+// then and now — so it cannot express a target that needs a jump host, a
+// ProxyCommand, a bastion, or any other flag the operator already relies on.
+// `sandbox_ssh` is a free-form command line — whatever already works in their
+// terminal — and af runs the provision steps over it. That is still the ONLY way
+// to reach such a target, and #3052 deliberately did not change it.
 //
-// THAT GAP IS NOW CLOSED FROM THE OTHER SIDE TOO (#3052): `backend = "ssh"`
-// composes an ssh(1) command and provisions through THIS type. So the two are no
-// longer two transports; they are one transport with two ways of naming a target.
+// SINCE #3052 BOTH BACKENDS RUN ON THIS TYPE. `backend = "ssh"` composes an
+// ssh(1) command from its `ssh.*` settings and provisions through here, so there
+// is one transport instead of two that can disagree about an address (#3044).
 //
-// WHICH LEAVES A REAL DISTINCTION, and it is about who decides:
+// WHAT SEPARATES THEM IS WHO DECIDES, not which ssh client runs:
 //
-//   - `sandbox_ssh` — the operator writes the command. Their ssh_config,
+//   - `sandbox_ssh` — the OPERATOR writes the command. Their ssh_config,
 //     known_hosts and ProxyCommand are the whole authority, exactly as in their
 //     terminal, and af adds no posture of its own.
-//   - `backend = "ssh"` — af writes the command from `ssh.*` settings and pins
-//     each one with `-o`, so `ssh_host_key_verification` and friends keep their
-//     af-enforced meaning and ssh_config cannot override them (see
-//     ssh_command.go). ssh_config still supplies everything af does NOT pin.
+//   - `backend = "ssh"` — AF writes the command from `ssh.*` settings, passes
+//     `-F none` so no configuration file is read at all, and enforces
+//     `ssh_host_key_verification` itself. An external file cannot relax a posture
+//     af is responsible for; see ssh_command.go, which measures why pinning
+//     values was not enough.
 //
 // Everything above the transport is shared either way: sandboxWorkspace (#2557)
 // does the mktemp/clone/binary-stream/start-agent-server sequence against any
@@ -104,6 +106,11 @@ type sandboxProvisioner struct {
 	sshCmd  string
 	afBin   string
 	program string
+	// backend is the label the OWNING backend puts on this transport's errors.
+	// Empty means "sandbox". Since #3052 `backend = "ssh"` provisions through this
+	// same type, and an auth, host-key, clone, tunnel or cleanup failure reported
+	// as `backend=sandbox` sends the operator to a config key they never set.
+	backend string
 
 	sessionDir string
 	remotePID  string
@@ -134,7 +141,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	binary, err := os.Open(p.afBin)
 	if err != nil {
-		return ProvisionResult{}, fmt.Errorf("backend=sandbox: opening the af binary %q to stream to the sandbox failed: %w", p.afBin, err)
+		return ProvisionResult{}, fmt.Errorf("backend=%s: opening the af binary %q to stream to the sandbox failed: %w", p.label(), p.afBin, err)
 	}
 	copyErr := w.copyAfBinary(sshProvisionStepTimeout, binary)
 	_ = binary.Close()
@@ -179,8 +186,18 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}, nil
 }
 
+// label is the backend name this provisioner's errors carry. Defaulting the zero
+// value to "sandbox" keeps every existing construction site correct without a
+// flag day, while the ssh backend sets it explicitly.
+func (p *sandboxProvisioner) label() string {
+	if p.backend == "" {
+		return string(BackendSandbox)
+	}
+	return p.backend
+}
+
 func (p *sandboxProvisioner) sandboxErr(err error) error {
-	return fmt.Errorf("backend=sandbox: %w", err)
+	return fmt.Errorf("backend=%s: %w", p.label(), err)
 }
 
 // Run satisfies sandboxShell: one bounded remote command over the operator's ssh
@@ -276,19 +293,19 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 func (p *sandboxProvisioner) verifyCopiedBinary() error {
 	local, err := os.Stat(p.afBin)
 	if err != nil {
-		return fmt.Errorf("backend=sandbox: cannot stat the local af binary %q: %w", p.afBin, err)
+		return fmt.Errorf("backend=%s: cannot stat the local af binary %q: %w", p.label(), p.afBin, err)
 	}
 	remotePath := p.sessionDir + "/" + sshAfBinaryName
 	out, err := p.Run(sshShortStepTimeout, "wc -c < "+shellQuoteSandbox(remotePath), nil, false)
 	if err != nil {
-		return fmt.Errorf("backend=sandbox: cannot verify the streamed af binary on the sandbox: %w", err)
+		return fmt.Errorf("backend=%s: cannot verify the streamed af binary on the sandbox: %w", p.label(), err)
 	}
 	got := strings.TrimSpace(string(out))
 	want := fmt.Sprintf("%d", local.Size())
 	if got != want {
-		return fmt.Errorf("backend=sandbox: the af binary streamed to %s is %s bytes but the local one is %s — "+
+		return fmt.Errorf("backend=%s: the af binary streamed to %s is %s bytes but the local one is %s — "+
 			"the copy was truncated, so the sandbox holds a binary that would fail later with an unrelated error; "+
-			"retry the session", remotePath, got, want)
+			"retry the session", p.label(), remotePath, got, want)
 	}
 	return nil
 }
@@ -304,7 +321,7 @@ func (p *sandboxProvisioner) verifyCopiedBinary() error {
 func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "", fmt.Errorf("backend=sandbox: opening a local port for the tunnel failed: %w", err)
+		return "", fmt.Errorf("backend=%s: opening a local port for the tunnel failed: %w", p.label(), err)
 	}
 	localAddr := ln.Addr().String()
 	_ = ln.Close()
@@ -326,19 +343,31 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (string, error) {
 	// TRAP 1 says it belongs on.
 	cmd.WaitDelay = sandboxTunnelWaitDelay
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("backend=sandbox: starting the ssh tunnel failed: %w", err)
+		return "", fmt.Errorf("backend=%s: starting the ssh tunnel failed: %w", p.label(), err)
 	}
 	p.tunnel = cmd
 
-	if err := waitForSandboxTunnelWithin(localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
+	if err := waitForSandboxTunnelWithin(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
 		return "", err
 	}
 	return localAddr, nil
 }
 
+// sandboxTransportConfigKey names the setting that holds the ssh invocation for
+// this backend, so a transport failure points the operator at something they can
+// run by hand. The two backends reach the same transport from different config
+// surfaces, and telling an `ssh.host` user to check `sandbox_ssh` is worse than
+// saying nothing.
+func sandboxTransportConfigKey(label string) string {
+	if label == string(BackendSSH) {
+		return "ssh.host"
+	}
+	return "sandbox_ssh"
+}
+
 // waitForSandboxTunnel probes the local end until it answers. Without this the
 // provision would return an endpoint whose first request races the forward.
-func waitForSandboxTunnelWithin(localAddr string, timeout, poll time.Duration) error {
+func waitForSandboxTunnelWithin(label, localAddr string, timeout, poll time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		conn, err := net.DialTimeout("tcp", localAddr, poll)
@@ -347,9 +376,9 @@ func waitForSandboxTunnelWithin(localAddr string, timeout, poll time.Duration) e
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("backend=sandbox: the ssh tunnel to %s never started listening within %s — "+
-				"check that the sandbox_ssh command works by hand and that the sandbox permits port forwarding",
-				localAddr, timeout)
+			return fmt.Errorf("backend=%s: the ssh tunnel to %s never started listening within %s — "+
+				"check that the transport af runs for %s works by hand and that the remote permits port forwarding",
+				label, localAddr, timeout, sandboxTransportConfigKey(label))
 		}
 		time.Sleep(poll)
 	}
@@ -360,8 +389,8 @@ func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
 	if reapErr == nil {
 		return provisionErr
 	}
-	return fmt.Errorf("backend=sandbox: provisioning failed and cleanup of its partial workspace (dir %q) did not complete; inspect it before retrying: %w",
-		p.sessionDir, errors.Join(provisionErr, reapErr))
+	return fmt.Errorf("backend=%s: provisioning failed and cleanup of its partial workspace (dir %q) did not complete; inspect it before retrying: %w",
+		p.label(), p.sessionDir, errors.Join(provisionErr, reapErr))
 }
 
 // reap stops the tunnel child, kills the remote agent-server, and removes the
@@ -386,7 +415,7 @@ func (p *sandboxProvisioner) reap() error {
 
 	nonce, nonceErr := sandboxReapNonce()
 	if nonceErr != nil {
-		return fmt.Errorf("backend=sandbox: cannot generate a reap challenge: %w", nonceErr)
+		return fmt.Errorf("backend=%s: cannot generate a reap challenge: %w", p.label(), nonceErr)
 	}
 	script, expect := p.reapScript(nonce)
 	out, err := p.Run(sshReapTimeout, script, nil, true)
@@ -403,11 +432,11 @@ func (p *sandboxProvisioner) reap() error {
 	// err can be nil here: the command exited 0 but never returned the challenge,
 	// which means the far side did not run. Formatting a nil with %w renders
 	// "%!w(<nil>)", so say what actually happened instead.
-	reapErr := fmt.Errorf("backend=sandbox: reaping %q failed: %s: %w",
-		p.sessionDir, strings.TrimSpace(string(out)), err)
+	reapErr := fmt.Errorf("backend=%s: reaping %q failed: %s: %w",
+		p.label(), p.sessionDir, strings.TrimSpace(string(out)), err)
 	if err == nil {
-		reapErr = fmt.Errorf("backend=sandbox: reaping %q did not complete — the sandbox never confirmed it ran: %s",
-			p.sessionDir, strings.TrimSpace(string(out)))
+		reapErr = fmt.Errorf("backend=%s: reaping %q did not complete — the sandbox never confirmed it ran: %s",
+			p.label(), p.sessionDir, strings.TrimSpace(string(out)))
 	}
 
 	// A reap may latch ONLY when the remote side demonstrably ran. Three ways it
@@ -476,14 +505,29 @@ func sandboxReapChallenge(nonce string) (send, expect string) {
 // `kill …; rm …`, which let a FAILED signal still report a clean reap while the
 // server kept running. The rm is chained so the directory is only removed once
 // the process it belongs to is gone.
+//
+// THE PROOF IS NOT CHAINED TO THE RM, and that distinction is what makes the
+// definite-failure latch reachable. `rm && respond` looks right and is not: the
+// sentinel means "the far side executed", while rm's status means "and here is
+// what happened". Chaining them collapses the two, so an ANSWERED failure — an rm
+// that returns a real permission or filesystem status — arrives with no sentinel
+// and is read as "we never reached the sandbox". reap then reports
+// ErrWorkspaceStateUnknown and retries forever, for a cause that will answer the
+// same way every time. The old x/crypto reaper latched exactly this case, so the
+// convergence would have regressed it. Emitting the proof unconditionally after
+// the kill succeeds, and re-exporting rm's status as the script's own, keeps both
+// facts and lets reap's `default:` branch latch.
 func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	send, expect := sandboxReapChallenge(nonce)
 	rm := "rm -rf " + shellQuoteSandbox(p.sessionDir)
 	// The remote shell must TRANSFORM the challenge, so the answer never appears
 	// in the text a logging wrapper would echo.
 	respond := "printf '%s' " + shellQuoteSandbox(send) + " | tr 'a-z' 'A-Z'"
+	// A subshell so `exit "$rc"` reports rm's status as this group's status
+	// without terminating anything that might follow it.
+	removeAndConfirm := "( " + rm + "; rc=$?; " + respond + `; exit "$rc" )`
 	if p.remotePID == "" {
-		return rm + " && " + respond, expect
+		return removeAndConfirm, expect
 	}
 	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName)
 	// A SUBSHELL, not a { } group. The identity-kill script ends in `exit 0` when
@@ -493,7 +537,7 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// looked like "exited 0, never confirmed": the directory survived and the
 	// record was retained forever. A subshell contains the exit and yields it as
 	// the group's status, which is what `&&` needs.
-	return "( " + kill + " ) && " + rm + " && " + respond, expect
+	return "( " + kill + " ) && " + removeAndConfirm, expect
 }
 
 // sandboxReapNonce makes each reap's challenge unique, so a marker captured from

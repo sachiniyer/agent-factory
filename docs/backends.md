@@ -292,9 +292,9 @@ someone's session.
 With `backend = "ssh"`, a session runs on a remote host you reach over SSH — the
 built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 
-1. The daemon dials `ssh.host` with the Go SSH client (`golang.org/x/crypto/ssh`
-   — it does **not** shell out to the `ssh` binary), reusing your keys and
-   verifying the host key against `known_hosts`.
+1. The daemon runs `ssh` (the OpenSSH binary must be on the daemon host's PATH),
+   with every setting af owns passed explicitly and **no configuration file read
+   at all** — reusing your keys and verifying the host key against `known_hosts`.
 2. It creates a fresh per-session directory under `~/.af-sessions` on the remote
    and clones the repo (from the repo's `origin` remote) into `workspace/` there.
 3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
@@ -338,24 +338,20 @@ back (see [Archive & restore](#archive-restore)).
 | `ssh.identity_file` | no | Path to the private key for auth. Empty ⇒ `ssh-agent` (`SSH_AUTH_SOCK`) and the default `~/.ssh` keys are tried. `~` is expanded. |
 | `ssh.known_hosts` | no | Path to the `known_hosts` file the remote's host key is verified against (default: `~/.ssh/known_hosts`). `~` is expanded. |
 
-> **Behaviour change: your `~/.ssh/config` now applies.** The ssh backend used to
-> connect with a Go ssh client that never read `~/.ssh/config`, so a `Host` block
-> matching your `ssh.host` had no effect. It now runs the real `ssh` binary, so
-> that block's `HostName`, `ProxyJump`, `ProxyCommand` and friends **do** apply —
-> which is what makes a bastion or jump host reachable without changing backends.
+> **Your `~/.ssh/config` does not apply, and never has.** af runs `ssh` with
+> `-F none`, so neither `~/.ssh/config` nor `/etc/ssh/ssh_config` is read. Only
+> the `ssh.*` settings above, `ssh_host_key_verification`, and your keys decide
+> how af connects. This is unchanged behaviour — the backend has always ignored
+> `ssh_config` — and it is deliberate: this backend's contract is that af enforces
+> the host-key posture in code, and a `Host` block could otherwise supply
+> `ProxyJump`, `RemoteCommand`, `SendEnv` or `ForwardAgent` behaviours that no af
+> setting can override.
 >
-> **What this means for an existing setup.** If `ssh <your ssh.host>` already works
-> in your terminal, af now behaves the same way, which is usually the fix rather
-> than a surprise. The one case to check is a `Host` block that rewrites
-> `HostName` to a *different* machine than the literal `ssh.host` af used to dial
-> — there, af will now follow your ssh_config, as ssh itself always did.
->
-> **What af still controls.** Every setting af owns is passed explicitly and wins
-> over `ssh_config`: the login user (`ssh.user`, else your own account), the port,
-> the identity file, and the whole of host-key verification — including the rule
-> that `accept-new` records learned keys in an af-owned store and never your
-> shared `~/.ssh/known_hosts`. An `ssh_config` `User`, `KnownHostsCommand` or
-> global known-hosts file cannot change any of those.
+> **If you need a bastion, a `ProxyJump`, a `ProxyCommand`, or any transport af
+> does not model, use `backend = "sandbox"`** with a free-form `sandbox_ssh`
+> command — that backend exists precisely so you can express the connection
+> yourself, and there your `ssh_config` and `known_hosts` are the whole authority.
+> See the sandbox section below.
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can

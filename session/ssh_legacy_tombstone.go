@@ -126,11 +126,13 @@ func knownHostsLookupName(host string, port int) string {
 // sshCommandForConfig hands to UserKnownHostsFile, so this lookup cannot disagree
 // with the file the composed command actually reads.
 //
-// One bounded imprecision, stated rather than hidden: since the convergence,
-// ~/.ssh/config applies, so an ssh_config `HostName` could send ssh to a
-// different name than the one recorded in the handle, and this probe asks about
-// the recorded one. A legacy record predates ssh_config having any effect at all,
-// and the worst case is one retirement that a daemon restart re-attempts.
+// AND THE NAME CANNOT DISAGREE EITHER, because the composed command carries
+// `-F none`. ssh_config is what would otherwise rewrite the effective host-key
+// name out from under this probe — `HostKeyAlias` replaces the lookup name
+// outright and `HostName` changes what is dialled — so ssh could verify against a
+// name this function never asks about, and a live cleanup obligation would be
+// retired on a lookup that was simply pointed at the wrong key. With no
+// configuration file read at all, the persisted host IS the effective name.
 func lookupKnownHost(path, name string) knownHostsLookup {
 	ctx, cancel := context.WithTimeout(context.Background(), knownHostsLookupTimeout)
 	defer cancel()
