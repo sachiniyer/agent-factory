@@ -27,12 +27,17 @@ type InstanceOptions struct {
 	// a user-created session. It is what lets the daemon count a task's in-flight
 	// sessions for the watch-task concurrency limit without guessing from titles.
 	TaskID string
-	// SandboxCallback mints the per-session credential a provisioned sandbox uses
-	// to call back into the daemon (#2999). It is a FUNCTION rather than a pair of
-	// values so it runs only for off-box kinds: session cannot import daemon, and
-	// the daemon must not mint (or refuse) for a local create that will never use
-	// one. Nil ⇒ no callback, which is every non-daemon caller.
-	SandboxCallback func() (url, token string, err error)
+	// SandboxCredentials mints and revokes the per-session credential a provisioned
+	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
+	// than a pair of values so it runs only for off-box kinds — session cannot
+	// import daemon, and the daemon must not mint (or refuse) for a local create
+	// that will never use one — and rather than a bare mint function because the
+	// runtime's lifetime drives BOTH halves: a replacement sandbox mints, a reaped
+	// runtime revokes. Nil ⇒ no callback, which is every non-daemon caller.
+	//
+	// Held on the Instance too, so restore and recovery can provision a replacement
+	// through the same path as the original create (see sandbox_credentials.go).
+	SandboxCredentials SandboxCredentials
 	// Path is the path to the workspace.
 	Path string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
@@ -145,20 +150,27 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	// launch_cmd, which does the clone on the user's infra).
 	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
-		// Mint the callback credential ONLY here, for kinds that actually provision
-		// a machine to call back from. Minting unconditionally would make every
-		// local create fail whenever require_token is off, turning a sandbox-only
-		// refusal into a total outage — the credential is scoped to the feature
-		// that needs it, and so is its refusal.
-		if opts.SandboxCallback != nil && kind.InjectsSandboxCallback() {
-			url, token, err := opts.SandboxCallback()
-			if err != nil {
-				return ProvisionResult{}, err
-			}
-			spec.CallbackURL, spec.CallbackToken = url, token
-		}
 	}
-	return rt.Provision(spec)
+	// Mint through the SHARED helper, which the replacement path uses too, so the
+	// two cannot diverge on which kinds get a credential or on what a refusal
+	// means. Scoped to off-box kinds inside it: minting unconditionally would make
+	// every local create fail whenever require_token is off, turning a sandbox-only
+	// refusal into a total outage.
+	cred, err := mintForProvision(&spec, kind, opts.SandboxCredentials)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	res, err := rt.Provision(spec)
+	if err != nil {
+		return res, err
+	}
+	// Revalidate now that the sandbox exists: provisioning is the long window, and
+	// a listener move or an auth change inside it leaves the sandbox holding a
+	// credential that was revoked while it was being written in.
+	if rerr := revalidateAfterProvision(cred); rerr != nil {
+		return res, rerr
+	}
+	return res, nil
 }
 
 // resolveBackendKind decides which runtime a new session uses, in precedence
@@ -412,9 +424,10 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	return &Instance{
-		ID:     id,
-		TaskID: opts.TaskID,
-		Title:  opts.Title,
+		ID:           id,
+		sandboxCreds: opts.SandboxCredentials,
+		TaskID:       opts.TaskID,
+		Title:        opts.Title,
 		// A task delivery's run begins here and ends when the agent goes idle
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.

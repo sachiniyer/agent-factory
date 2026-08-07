@@ -265,6 +265,13 @@ type Instance struct {
 	// outer runtime's agent-server flags. Local sessions normally source the
 	// same setting from global config during Provision.
 	sessionEnvPassthrough []string
+	// sandboxCreds mints and revokes this session's callback credential (#3068).
+	// Held here because the RUNTIME's lifetime drives it: provisioning a
+	// replacement mints, and reaping a runtime revokes. Set at construction for a
+	// created session and attached by the daemon for one loaded from disk — without
+	// that second half every restore after a daemon restart would silently skip it.
+	// nil for a local session and for any instance with no daemon behind it.
+	sandboxCreds SandboxCredentials
 
 	// The below fields are initialized upon calling Start().
 

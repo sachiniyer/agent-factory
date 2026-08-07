@@ -617,6 +617,11 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	if restoreErr != nil {
 		return nil, rid, data, nil
 	}
+	// Give it the daemon-backed credential minter (#3068). A disk-loaded instance
+	// has none — FromInstanceData cannot know about the daemon — and without this
+	// a restore would provision its replacement sandbox with no callback at all,
+	// silently, which is the ordinary case after a daemon restart.
+	attachSandboxCredentials(m, instance)
 
 	// We built `instance` from disk with m.mu released, so a concurrent
 	// refresh (or another RPC) may have restored and registered the canonical

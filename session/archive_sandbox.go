@@ -192,6 +192,9 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
 	}
+	i.mu.RLock()
+	creds := i.sandboxCreds
+	i.mu.RUnlock()
 	// A failed archive/recovery can leave the old sandbox wiring live. Reap it
 	// before provisioning a replacement so bindProvisionResult never discards its
 	// only cleanup handle. An unknown outcome keeps the old wiring installed for a
@@ -199,9 +202,27 @@ func (i *Instance) reprovisionRemote() error {
 	if err := i.reapRemoteRuntimeForReplacement(); err != nil {
 		return fmt.Errorf("cannot re-provision session %q: previous sandbox cleanup state is unknown: %w", i.Title, err)
 	}
+	// Mint AFTER the reap, through the same helper the create path uses (#3068).
+	//
+	// The ordering is the load-bearing part, and it is now enforced by position
+	// rather than by care: the reap above revokes the old credential on its way out
+	// (resetRemoteRuntime), and it returns early — leaving the old wiring installed
+	// and its credential untouched — when the outcome is unknown. So a retained,
+	// possibly-live sandbox keeps working, and only a runtime that is provably gone
+	// is replaced by a fresh mint. Minting before this point severed callback from
+	// exactly that retained runtime, permanently and silently.
+	cred, err := mintForProvision(&spec, kind, creds)
+	if err != nil {
+		return fmt.Errorf("cannot re-provision session %q: its callback credential could not be re-issued, and restoring it without one would silently leave its agent unable to call af: %w", i.Title, err)
+	}
 	res, err := rt.Provision(spec)
 	if err != nil {
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
+	}
+	// Same post-provision revalidation the create path performs. Doing it in one
+	// and not the other is exactly how these two drifted the first time.
+	if rerr := revalidateAfterProvision(cred); rerr != nil {
+		return fmt.Errorf("re-provisioned sandbox for session %q, but its callback credential was invalidated while it was being provisioned: %w", i.Title, rerr)
 	}
 	if err := i.bindProvisionResult(res); err != nil {
 		// The sandbox is up but its endpoint could not be wired — reap it so a
@@ -277,7 +298,23 @@ func (i *Instance) resetRemoteRuntime() {
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
 	i.runtimeCleanupStateUnknown = false
+	creds := i.sandboxCreds
 	i.mu.Unlock()
+	// THE credential's revocation point (#3068). This function is reached only when
+	// a runtime was conclusively reaped — teardown succeeded, or failed in a way
+	// that still proves it is gone — and never when an unknown outcome retains the
+	// old wiring for a retry. So "the credential dies with the runtime it was
+	// minted for" holds by construction here, instead of being a rule each of kill,
+	// archive, restore and recover has to remember separately.
+	//
+	// It is what stops the worse of the two failure modes: a token minted for one
+	// runtime surviving into its replacement. The replacement mints its own.
+	//
+	// Called OUTSIDE i.mu — revocation takes the daemon's registry lock, and holding
+	// a session lock across another subsystem's lock is how a deadlock gets built.
+	if creds != nil {
+		creds.Revoke()
+	}
 }
 
 // markRuntimeCleanupStateUnknown makes an indeterminate reap durable without
