@@ -39,7 +39,13 @@ func (c *sandboxCredentials) Mint() (session.SandboxCredential, error) {
 	if c == nil || c.manager == nil {
 		return session.SandboxCredential{}, nil
 	}
-	grant, err := c.manager.mintSandboxCallback(c.manager.Config(), c.sessionID)
+	// Fence FIRST, then read config. An argument is evaluated before the call it is
+	// passed to, so `mint(m.Config(), …)` would read the posture outside the window
+	// and an invalidation landing in between would finish its sweep before the
+	// window opened — the fence comparing equal on both sides while the config it
+	// guards was already stale (#3065 review).
+	fence := c.manager.sandboxTokens.invalidationCount()
+	grant, err := c.manager.mintSandboxCallbackFenced(fence, c.manager.Config(), c.sessionID)
 	if err != nil {
 		return session.SandboxCredential{}, err
 	}

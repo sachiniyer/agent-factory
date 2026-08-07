@@ -201,6 +201,26 @@ func errSandboxCallbackNeedsRequireToken() error {
 // listener that does not exist. #1856 hit the same divergence for the preview
 // origin; activeWebConfigAddr is the same answer for this one.
 func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (sandboxGrant, error) {
+	return m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), cfg, sessionID)
+}
+
+// mintSandboxCallbackFenced is mintSandboxCallback with the fence sampled by the
+// CALLER, for a caller that reads an input of its own first.
+//
+// The daemon's live minter reads m.Config() before calling in, and an argument is
+// evaluated before the function it is passed to runs — so sampling the fence in
+// here would leave that config read outside the window, and an invalidation
+// landing between the two would complete its sweep before the window opened
+// (#3065 review). The fence would then compare equal on both sides and the mint
+// would proceed on config that was already stale when it was read.
+//
+// This is the third time this exact boundary has moved: first the fence was
+// sampled after the address read, then after the config read moved out to the
+// caller. The rule that survives all three is the one stated below — every input
+// the credential depends on must be read INSIDE the window — and the only way to
+// keep it true when a caller acquires an input is to let the caller open the
+// window.
+func (m *Manager) mintSandboxCallbackFenced(fence uint64, cfg *config.Config, sessionID string) (sandboxGrant, error) {
 	if cfg == nil {
 		return sandboxGrant{}, errSandboxCallbackNeedsRequireToken()
 	}
@@ -216,7 +236,6 @@ func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (san
 	// revokes every credential without touching a socket, so the generation stayed
 	// put and a mint in flight across it survived the sweep — provisioning a sandbox
 	// against a daemon that had just stopped authenticating anyone.
-	fence := m.sandboxTokens.invalidationCount()
 	active := m.activeWebConfigAddr(cfg.ListenAddr)
 	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
 		return sandboxGrant{}, fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix listen_addr", cfg.ListenAddr)
