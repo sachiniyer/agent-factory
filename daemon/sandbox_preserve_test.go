@@ -47,6 +47,16 @@ func newSandboxProbeServer(t *testing.T, branch string) *sandboxProbeServer {
 			// Answered, agent gone: reachable. The sandbox is still there.
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
 		case "/v1/agent/kill":
+			// REFUSE until the push has run. The fixture enforcing the order is the
+			// only thing that makes "push before releasing the runtime" testable
+			// here: accepting a kill unconditionally would let a regression that
+			// reaped FIRST still leave both counters at one and every branch
+			// assertion passing, while the workspace whose branch was being made
+			// durable had already been destroyed (#3037).
+			if s.archiveCalls.Load() == 0 {
+				http.Error(w, "kill before archive: the sandbox holding the unpushed work would be destroyed", http.StatusPreconditionFailed)
+				return
+			}
 			// The teardown half. A fixture that serves the push but not this one makes
 			// ArchiveSandbox report "pushed the branch but failed to tear the sandbox
 			// down", so any test driving a SUCCESSFUL archive through it is really
