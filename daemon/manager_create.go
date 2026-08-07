@@ -182,6 +182,19 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely — its workspace may still be on disk at %s and could not be recorded, so it must be inspected and cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, keepErr))
 			}
+			// A COMMITTED outcome, not an abandonment (#3012 review). The whole point
+			// of this branch is that the runtime may still be alive — that is why no
+			// cleanup runs — so revoking its callback credential would sever a
+			// possibly-running agent from the daemon while deliberately keeping its
+			// session for inspection and later lifecycle operations. KillSession and
+			// archive own its revocation now, exactly as for a clean start.
+			//
+			// Deliberately NOT applied to the keepFailedCreate branch below: there
+			// cleanup has been attempted and the daemon keeps retrying it, so that
+			// session is on its way out and its credential should go with it. And not
+			// applied when keepUncertainCreate FAILS, because a credential with no
+			// durable record is one no operator surface could ever revoke.
+			createCommitted = true
 			settleRetainedCreate(instance)
 			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely, so its workspace was left in place; the session is recorded for inspection and no automatic cleanup will run: %w",
 				title, serr)

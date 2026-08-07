@@ -204,8 +204,19 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 		"0.0.0.0:8443", ":8443", "[::]:8443", "[0:0:0:0:0:0:0:0]:8443", "[::ffff:0.0.0.0]:8443",
 		// Port zero, four ways. All resolve to 0 and mean "kernel picks".
 		"10.0.0.5:0", "10.0.0.5:", "10.0.0.5:00", "10.0.0.5:000",
-		// Loopback, three ways.
+		// Loopback, three ways — the third is a NAME, and names are the reason the
+		// host must now be a literal IP at all.
 		"127.0.0.1:8443", "[::1]:8443", "localhost:8443",
+		// Loopback aliases: unbounded as a set (any /etc/hosts entry), which is why
+		// the rule is "literal IP" rather than a list of names to reject.
+		"ip6-localhost:8443", "localhost.localdomain:8443",
+		// A hostname is resolved by the SANDBOX, not by this daemon, so af cannot
+		// know what it points at over there — refused even when it looks routable.
+		"af-host.internal:8443",
+		// A zone identifier names an interface on the DAEMON's host, and its raw "%"
+		// is an invalid escape to Go's URL parser. net.ParseIP refuses it, so the
+		// literal-IP rule covers this too.
+		"[fe80::1234%eth0]:8443",
 	} {
 		_, _, err = m.mintSandboxCallback(daemonTestConfig(true, addr), "sess-a")
 		require.Errorf(t, err, "listen_addr %q is not dialable from a sandbox", addr)

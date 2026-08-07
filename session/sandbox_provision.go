@@ -182,7 +182,19 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 		// are in its ENVIRONMENT rather than its argv. AF_DAEMON_URL and
 		// AF_DAEMON_TOKEN are already on sessionenv's pass-through allowlist, so
 		// the filtered re-exec carries them through to the agent.
-		launch = "set -a && . " + shellQuote(w.CallbackEnvPath()) + " && set +a && " + launch
+		//
+		// SEPARATED BY ";" AND NOT "&&", which is load-bearing (#3012 review).
+		// `launch` ends in "... & echo $!", and `&` is a list separator that
+		// backgrounds everything to its LEFT in the AND-list — so chaining the setup
+		// with && made the whole chain one asynchronous job and `$!` reported the
+		// subshell instead of the agent-server. Teardown then compares that PID's
+		// argv against the session's af path, sees a shell (or a process already
+		// gone), treats it as reused/absent, removes the session directory, and
+		// leaves the real agent-server running. Measured: under bash the reported
+		// PID's comm is a process that has already exited; dash happens to optimise
+		// the tail call and reports the right PID, which is why this survives a
+		// casual test. `|| exit 1` keeps the abort-on-failure that && provided.
+		launch = "set -a && . " + shellQuote(w.CallbackEnvPath()) + " && set +a || exit 1; " + launch
 	}
 	out, err := w.shell.Run(timeout, launch, nil, false)
 	if err != nil {

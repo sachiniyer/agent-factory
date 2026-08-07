@@ -272,34 +272,33 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 	// Refused rather than guessed. Rewriting a wildcard into some interface address
 	// would invent a fact about the operator's network, and a wrong guess points the
 	// agent at whatever answers there — far worse to debug than a named refusal.
-	// Tested by PARSING, not by spelling (#3012 review). An unspecified address has
-	// many valid textual forms — "0.0.0.0", "::", the expanded "0:0:0:0:0:0:0:0",
-	// the v4-mapped "::ffff:0.0.0.0" — and net.Listen binds every one of them the
-	// same way, so a check against two literals recognised two of them and passed
-	// the rest through. net.IP.IsUnspecified answers the question the literals were
-	// approximating. An empty host is the same case with nothing to parse.
-	if host == "" {
+	// ONE predicate for the host, because the previous three rounds of this review
+	// each found another spelling the last one missed: a wildcard, then the expanded
+	// and v4-mapped unspecified forms, then loopback, then loopback ALIASES like
+	// ip6-localhost, then zone-scoped addresses. Enumerating spellings loses.
+	//
+	// The host must be a LITERAL IP. That is not a convenience — it is the only form
+	// whose meaning does not depend on who resolves it, and the resolver that matters
+	// here is the SANDBOX'S, not this daemon's. "ip6-localhost" was the visible case
+	// of a general fact: af cannot know what a name denotes on the other side of the
+	// network, so it must not put one in a callback URL. Requiring a literal also
+	// rejects zone-scoped addresses (net.ParseIP refuses "fe80::1234%eth0") — which
+	// is right twice over, since a zone names an interface on the DAEMON'S host and
+	// would additionally emit a raw "%" that Go's URL parser reads as a bad escape.
+	//
+	// With the host guaranteed to be an IP, the two undialable classes are semantic
+	// questions with exact answers, rather than string comparisons:
+	//   - IsUnspecified — binds every interface, so it names the SANDBOX.
+	//   - IsLoopback — names the sandbox ITSELF, and nothing forwards a callback back
+	//     (the ssh runtime tunnels daemon→sandbox only).
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q does not name a literal IP address, and a hostname is resolved by the SANDBOX rather than by this daemon — af cannot know what it points at over there. Set listen_addr to a literal IP the sandbox can reach", addr)
+	}
+	if ip.IsUnspecified() {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set listen_addr to an address the sandbox can reach", addr)
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set listen_addr to an address the sandbox can reach", addr)
-	}
-	// Loopback is the same failure as the wildcard above, and refusing it is the
-	// correction to an earlier version of this function that let it through on the
-	// reasoning that a sandbox "will simply fail to connect, which is a diagnosable
-	// outcome" (#3012 review). It is not diagnosable — it is silently wrong.
-	// 127.0.0.1 resolves INSIDE the sandbox, so the agent reaches its own loopback
-	// and finds whatever is listening there, which is not this daemon.
-	//
-	// There is no tunnel to make it work, and that is a property of the design
-	// rather than a gap: the ssh runtime opens a LOCAL forward, daemon → the remote
-	// agent-server, so the daemon can drive the sandbox. Nothing forwards the other
-	// way, and a callback is by definition the other way.
-	//
-	// Refusing here also removes the trap where the posture check told an operator
-	// to set require_loopback_token — a key that would have bought them a
-	// well-enforced credential for an address their sandbox can never dial.
-	if config.IsLoopbackListenAddr(addr) {
+	if ip.IsLoopback() {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q is loopback, so a sandbox dialling it reaches ITSELF rather than this daemon — and nothing forwards the other way (the ssh runtime tunnels daemon→sandbox only). Set listen_addr to an address the sandbox can reach", addr)
 	}
 	// The port is RESOLVED rather than string-matched, for the same reason as the
