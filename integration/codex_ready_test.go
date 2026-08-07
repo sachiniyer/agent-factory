@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,14 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// errHangGuardExpired marks the harness giving up on the CLI, as distinct from
+// the CLI reporting a failure. They are different outcomes and only one of them
+// is a verdict on the contract under test: af returning an error means af
+// decided, while this means af never got to. Collapsing them is how a slow box
+// gets reported as a readiness regression (#2879), which is the bug these tests
+// had — so the distinction is a sentinel rather than a comment.
+var errHangGuardExpired = errors.New("hang guard expired before the CLI answered")
 
 // TestCLICreateCodexSessionBecomesReady is the regression test for
 // sachiniyer/agent-factory#714. Before isReadyContent became agent-aware, a
@@ -106,7 +115,7 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 		cmd.Stderr = &stderr
 		err := cmd.Run()
 		if ctx.Err() == context.DeadlineExceeded {
-			return stdout.String(), fmt.Errorf("timed out; stderr=%s", stderr.String())
+			return stdout.String(), fmt.Errorf("%w after %s; stderr=%s", errHangGuardExpired, limit, stderr.String())
 		}
 		if err != nil {
 			return stdout.String(), fmt.Errorf("%w; stderr=%s", err, stderr.String())
@@ -139,10 +148,20 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 		t.Fatalf("the fake codex wrapper never launched, so this run says nothing about whether af "+
 			"recognizes the codex prompt — fixture or environment problem, NOT #714: create err=%v\n%s", err, out)
 	}
+	if errors.Is(err, errHangGuardExpired) {
+		// af never rendered a verdict, so this is not one either. This is the
+		// "af was never allowed to answer" outcome — the ORIGINAL bug in this
+		// test — and labelling it #714 would be that bug wearing the new
+		// diagnostics. af self-bounds at 60s, so reaching a 4-minute guard means
+		// something wedged, not that a prompt went unrecognized.
+		t.Fatalf("the create never returned within the %s hang guard, so af rendered no readiness "+
+			"verdict — a hang or environment failure, NOT #714 (the fake codex launched %d time(s)): %v\n%s",
+			createHangGuard, launches, err, out)
+	}
 	if err != nil {
-		// The count proves the wrapper LAUNCHED. It does not prove what reached the
-		// pane, so this says only that — af's own error text below is what names
-		// the pane content it actually saw.
+		// A real answer from af. The count proves the wrapper LAUNCHED; it does not
+		// prove what reached the pane, so this says only that, and af's own error
+		// text names the pane content it actually saw.
 		t.Fatalf("regression #714: the fake codex launched %d time(s), but the create did not "+
 			"report the session ready: %v\n%s", launches, err, out)
 	}
@@ -196,10 +215,16 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 		t.Fatalf("mkdir wrapper dir: %v", err)
 	}
 	wrapper := filepath.Join(wrapperDir, "codex")
+	// promptLog records the instant BEFORE the real prompt is exposed, and it
+	// replaces the wall-clock discriminator this test used to rely on (#2879).
+	// The hold below is the OPPORTUNITY for the bug to appear, not the
+	// measurement: load can only make that window longer, never shorter.
+	promptLog := filepath.Join(home, "codex-prompt.log")
 	writeFile(t, wrapper,
 		"#!/bin/sh\n"+
 			"printf 'OpenAI Codex (vX)\\nDo you trust this folder?\\n> 1. Yes\\n'\n"+
 			"sleep 12\n"+
+			"printf 'prompt\\n' >> '"+promptLog+"'\n"+
 			"printf '\\342\\200\\272 '\n"+ // U+203A "›" in octal-escaped UTF-8
 			"exec cat\n",
 		0755)
@@ -225,7 +250,7 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 		cmd.Stderr = &stderr
 		err := cmd.Run()
 		if ctx.Err() == context.DeadlineExceeded {
-			return stdout.String(), fmt.Errorf("timed out; stderr=%s", stderr.String())
+			return stdout.String(), fmt.Errorf("%w after %s; stderr=%s", errHangGuardExpired, limit, stderr.String())
 		}
 		if err != nil {
 			return stdout.String(), fmt.Errorf("%w; stderr=%s", err, stderr.String())
@@ -238,29 +263,38 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 		killDaemonFromHome(home)
 	})
 
-	// Same hang guard as the sibling test, and for the same reason. This test's
-	// real assertion is the LOWER bound below, which is load-safe: a busy box
-	// makes the create slower, which can only push elapsed further ABOVE
-	// minElapsed. The upper ceiling was not load-safe — a healthy run here needs
-	// trustHold (12s) plus session startup, and a 30s cap left little margin on a
-	// loaded runner, so this carried the same latent flake as the sibling (#2879).
+	// A hang guard, not an expectation — see the sibling test.
 	const createHangGuard = 4 * time.Minute
 
 	start := time.Now()
 	out, err := runAFWithin(createHangGuard, "sessions", "--repo", repo, "create", "--name", "codex-trust", "--program", tmux.ProgramCodex)
 	elapsed := time.Since(start)
+	if errors.Is(err, errHangGuardExpired) {
+		t.Fatalf("the create never returned within the %s hang guard, so af rendered no verdict — "+
+			"a hang or environment failure, NOT #729: %v\n%s", createHangGuard, err, out)
+	}
 	if err != nil {
 		t.Fatalf("create codex session failed: %v\n%s", err, out)
 	}
 
-	// With the #729 regression, the trust dialog counted as ready and the
-	// create returned at startup time (~6s) — before the wrapper emitted the
-	// "›" prompt at trustHold. The fix makes waitForReady block past the trust
-	// dialog, so the create cannot finish before the prompt appears. The
-	// threshold sits comfortably above startup overhead and below trustHold.
-	const minElapsed = trustHold - 3*time.Second
-	if elapsed < minElapsed {
-		t.Fatalf("create returned in %s (< %s), before the codex prompt appeared at ~%s: the trust dialog was treated as ready (#729 regression)", elapsed, minElapsed, trustHold)
+	// The #729 discriminator, as an EVENT rather than a duration.
+	//
+	// It used to require elapsed >= trustHold-3s. That reads as load-safe — a slow
+	// box only makes elapsed larger — but elapsed includes SESSION STARTUP, which
+	// is not part of what is being measured. On a runner where startup alone
+	// reaches the threshold, a create that returned the instant the trust dialog
+	// appeared would still clear the bound, and the regression would pass. Raising
+	// the ceiling to four minutes made that worse, not better: it gave slow
+	// startups room to finish green instead of timing out.
+	//
+	// The wrapper records this marker immediately BEFORE emitting the real "›", so
+	// the ordering settles it with no clock at all. With the regression, the create
+	// returns while the wrapper is still holding the dialog and the marker does not
+	// exist yet. With the fix, af cannot have matched "›" without the marker
+	// already being written.
+	if prompts := countFileLines(t, promptLog); prompts == 0 {
+		t.Fatalf("#729 regression: the create reported the session ready in %s, before the wrapper "+
+			"ever emitted its › prompt — the trust dialog was treated as ready\n%s", elapsed, out)
 	}
 
 	var data instanceData
