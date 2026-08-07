@@ -21,7 +21,19 @@ type committedTaskRPC struct{}
 
 func (committedTaskRPC) AddTask(_ AddTaskRequest, resp *AddTaskResponse) error {
 	resp.OK = true
-	return &mutationCommittedError{err: errors.New(taskAddCommittedErrorPrefix + " simulated")}
+	// Mirrors the real handler since #3036: a committed mutation answers OK and
+	// reports itself in the response envelope, because net/rpc would strip a
+	// concrete error down to its string.
+	resp.record(&mutationCommittedError{err: errors.New(taskAddCommittedErrorPrefix + " simulated")})
+	return nil
+}
+
+// cleanTaskRPC is the negative control: a server that fails with NOTHING
+// committed. The client must not promote it.
+type cleanTaskRPC struct{}
+
+func (cleanTaskRPC) AddTask(_ AddTaskRequest, _ *AddTaskResponse) error {
+	return errors.New("task add failed before commit")
 }
 
 // TestControlClientPreservesMutationCommittedOutcome crosses a real isolated
@@ -53,22 +65,31 @@ func TestControlClientPreservesMutationCommittedOutcome(t *testing.T) {
 	require.True(t, errors.As(err, &outcome) && outcome.MutationCommitted(),
 		"the control client must preserve the server's definite committed outcome: %T: %v", err, err)
 
-	for _, tc := range []struct {
-		name   string
-		method string
-		err    error
-	}{
-		{"wrong method", "UpdateTask", rpc.ServerError(taskAddCommittedErrorPrefix + " simulated")},
-		{"wrong prefix", "AddTask", rpc.ServerError("task add failed before commit")},
-		{"non-server error", "AddTask", errors.New(taskAddCommittedErrorPrefix + " simulated")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := classifyTaskMutationRPCError(tc.method, tc.err)
-			var classified committedOutcome
-			assert.False(t, errors.As(got, &classified),
-				"an unknown outcome must not be promoted to committed: %T: %v", got, got)
-		})
-	}
+	// The other half, and the reason the old prefix-matching classifier existed:
+	// the client must not INVENT a committed outcome. Under the envelope that is
+	// no longer a string-matching question — a server that fails with nothing
+	// committed leaves Committed false, and its error must stay an ordinary one.
+	t.Run("a failure with nothing committed is not promoted", func(t *testing.T) {
+		listener2, lerr := net.Listen("unix", filepath.Join(testguard.SocketTempDir(t), "clean.sock"))
+		require.NoError(t, lerr)
+		defer listener2.Close()
+		t.Setenv("AF_DAEMON_SOCKET", listener2.Addr().String())
+
+		server2 := rpc.NewServer()
+		require.NoError(t, server2.RegisterName(controlServiceName, cleanTaskRPC{}))
+		go func() {
+			conn, acceptErr := listener2.Accept()
+			if acceptErr == nil {
+				server2.ServeConn(conn)
+			}
+		}()
+
+		cleanErr := callDaemonNoEnsure("AddTask", AddTaskRequest{}, &AddTaskResponse{})
+		require.Error(t, cleanErr)
+		var promoted committedOutcome
+		assert.False(t, errors.As(cleanErr, &promoted),
+			"an outcome with nothing committed must not be promoted: %T: %v", cleanErr, cleanErr)
+	})
 }
 
 // The control socket is net/rpc with gob encoding, and gob ELIDES zero-valued

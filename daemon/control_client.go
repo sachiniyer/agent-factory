@@ -296,34 +296,22 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	}
 	client := rpc.NewClient(conn)
 	defer client.Close()
-	return classifyTaskMutationRPCError(method, client.Call(controlServiceName+"."+method, req, resp))
-}
-
-// classifyTaskMutationRPCError restores the one machine-readable outcome that
-// net/rpc drops: rpc.ServerError carries only Error(), not the concrete server
-// type. Classification is deliberately narrow — both the RPC method and the
-// exact server-owned prefix must match — so a transport failure or an arbitrary
-// application error remains unknown rather than being promoted to committed.
-func classifyTaskMutationRPCError(method string, err error) error {
-	if err == nil {
-		return nil
-	}
-	var prefix string
-	switch method {
-	case "AddTask":
-		prefix = taskAddCommittedErrorPrefix
-	case "UpdateTask":
-		prefix = taskUpdateCommittedErrorPrefix
-	case "RemoveTask":
-		prefix = taskRemoveCommittedErrorPrefix
-	default:
+	if err := client.Call(controlServiceName+"."+method, req, resp); err != nil {
 		return err
 	}
-	var serverErr rpc.ServerError
-	if !errors.As(err, &serverErr) || !strings.HasPrefix(serverErr.Error(), prefix+" ") {
-		return err
+	// A committed mutation answers OK and reports itself in the response
+	// envelope: net/rpc reduces a concrete error to rpc.ServerError and keeps
+	// only its string, so the marker cannot ride in the error. Read once,
+	// generically, for any response embedding MutationOutcome — which replaced
+	// reconstructing it from per-method message prefixes (#3036).
+	if carrier, ok := resp.(interface {
+		committedOutcome() (bool, string)
+	}); ok {
+		if committed, warning := carrier.committedOutcome(); committed {
+			return &rpcMutationCommittedError{err: errors.New(warning)}
+		}
 	}
-	return &rpcMutationCommittedError{err: err}
+	return nil
 }
 
 type rpcMutationCommittedError struct{ err error }

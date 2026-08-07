@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/rpc"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -29,26 +27,11 @@ type controlServer struct {
 	shutdownOnce sync.Once
 }
 
-// mutationCommittedError preserves the otherwise-ambiguous outcome of a
-// durable mutation whose non-transactional follow-up failed. HTTP exposes its
-// code additively; net/rpc carries the server-owned prefix that the control
-// client narrowly restores to the same three-valued marker.
-type mutationCommittedError struct {
-	err error
-}
-
 const (
 	taskAddCommittedErrorPrefix    = "task add committed, but failed to reload task schedules:"
 	taskUpdateCommittedErrorPrefix = "task update committed, but failed to reload task schedules:"
 	taskRemoveCommittedErrorPrefix = "task removal committed, but failed to reload task schedules:"
 )
-
-func (e *mutationCommittedError) Error() string           { return e.err.Error() }
-func (e *mutationCommittedError) Unwrap() error           { return e.err }
-func (e *mutationCommittedError) MutationCommitted() bool { return true }
-func (e *mutationCommittedError) APIErrorCode() string {
-	return apiproto.ErrorCodeMutationCommitted
-}
 
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
@@ -343,8 +326,11 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 	// stale when that follow-up fails.
 	s.manager.publishEvent(agentproto.EventTaskCreated, created)
 	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
-		return &mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskAddCommittedErrorPrefix, reloadErr)}
+		// Committed: the task change is durable, only the schedule reload
+		// failed. Reported in the envelope so net/rpc cannot strip it (#3036).
+		resp.record(&mutationCommittedError{err: fmt.Errorf(
+			"%s %w", taskAddCommittedErrorPrefix, reloadErr)})
+		return nil
 	}
 	return nil
 }
@@ -433,8 +419,11 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	if reloadErr == nil {
 		return nil
 	}
-	return &mutationCommittedError{err: fmt.Errorf(
-		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)}
+	// Committed: the update is durable, only the schedule reload failed.
+	// Reported in the envelope so net/rpc cannot strip it (#3036).
+	resp.record(&mutationCommittedError{err: fmt.Errorf(
+		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)})
+	return nil
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
@@ -454,8 +443,11 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	// the scheduler/watch reload cannot apply it in-process.
 	s.manager.publishEvent(agentproto.EventTaskRemoved, task.Task{ID: req.ID})
 	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
-		return &mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskRemoveCommittedErrorPrefix, reloadErr)}
+		// Committed: the task change is durable, only the schedule reload
+		// failed. Reported in the envelope so net/rpc cannot strip it (#3036).
+		resp.record(&mutationCommittedError{err: fmt.Errorf(
+			"%s %w", taskRemoveCommittedErrorPrefix, reloadErr)})
+		return nil
 	}
 	return nil
 }
@@ -674,7 +666,7 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
 	killed, err := s.manager.KillSession(req)
-	if err != nil {
+	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
@@ -693,14 +685,11 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
 	archivedPath, _, err := s.manager.ArchiveSession(req)
-	if err != nil && !isMutationCommitted(err) {
+	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
-	if err != nil {
-		resp.Warning = err.Error()
-	}
 	return nil
 }
 
@@ -712,7 +701,7 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 		return err
 	}
 	worktreePath, restored, err := s.manager.RestoreArchived(req)
-	if err != nil {
+	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
@@ -732,7 +721,7 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 		return err
 	}
 	worktreePath, restored, err := s.manager.RestoreSession(req)
-	if err != nil {
+	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
@@ -786,14 +775,6 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	resp.Deregistered = result.Deregistered
 	resp.Warning = strings.Join(result.Warnings, "\n")
 	return nil
-}
-
-func isMutationCommitted(err error) bool {
-	type committed interface {
-		MutationCommitted() bool
-	}
-	var outcome committed
-	return errors.As(err, &outcome) && outcome.MutationCommitted()
 }
 
 // RegisterProject records a git checkout as a durable, sessionless project in

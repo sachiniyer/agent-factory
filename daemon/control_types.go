@@ -140,8 +140,38 @@ type KillSessionRequest struct {
 	// restorable instead.
 }
 
+// MutationOutcome is the control socket's answer to a question its transport
+// could not previously express: did the side effect land?
+//
+// A mutating operation has THREE outcomes — succeeded, failed with nothing
+// committed, and failed AFTER something irreversible landed — and only the third
+// is unsafe to retry. The HTTP API already carries that distinction structurally
+// (apiproto.ErrorCodeMutationCommitted, reconstituted in apiclient/skew.go), but
+// the control socket is net/rpc, which reduces any concrete error to
+// rpc.ServerError and keeps only its string. Rebuilding the marker from that
+// string is what classifyTaskMutationRPCError did, and why it could only ever
+// cover the three task RPCs whose message prefixes were fixed.
+//
+// Embedding it in the RESPONSE puts the answer somewhere the transport cannot
+// drop: gob encodes struct fields, so no prefix matching, no per-method casing,
+// and a new mutating RPC inherits the channel by embedding rather than by
+// remembering (#3036).
+//
+// VALUE TYPES ONLY — never pointers. gob elides zero values (see
+// control_expect_gob_test.go and #1700), so a *bool would arrive nil at false
+// and be indistinguishable from "never set", silently turning a committed
+// outcome back into a clean failure: exactly the bug this exists to prevent.
+type MutationOutcome struct {
+	// Committed reports that the mutation's irreversible step landed. A caller
+	// that retries this is re-running a partially applied change.
+	Committed bool `json:"committed,omitempty"`
+	// Warning is why the follow-up failed, when Committed is true.
+	Warning string `json:"warning,omitempty"`
+}
+
 type KillSessionResponse struct {
 	OK bool `json:"ok"`
+	MutationOutcome
 }
 
 // ArchiveSessionRequest asks the daemon to archive a session (#1028): tear down
@@ -163,10 +193,10 @@ type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
-	// Warning reports a failed operator hook after the archive itself committed.
-	// The response remains successful so every transport retains ArchivedPath and
-	// clients can reconcile the completed lifecycle transition without retrying.
-	Warning string `json:"warning,omitempty"`
+	// The response stays successful on a committed failure so every transport
+	// retains ArchivedPath and clients reconcile the completed transition
+	// without retrying.
+	MutationOutcome
 }
 
 // RestoreArchivedRequest asks the daemon to restore an archived session (#1028):
@@ -186,6 +216,7 @@ type RestoreArchivedResponse struct {
 	OK bool `json:"ok"`
 	// WorktreePath is the on-disk location the worktree was restored to.
 	WorktreePath string `json:"worktree_path"`
+	MutationOutcome
 }
 
 // RestoreSessionRequest asks the daemon to restore a restorable session:
@@ -214,6 +245,7 @@ type RestoreSessionResponse struct {
 	OK bool `json:"ok"`
 	// WorktreePath is the on-disk location of the restored/recovered worktree.
 	WorktreePath string `json:"worktree_path"`
+	MutationOutcome
 }
 
 // DeleteProjectRequest asks the daemon to delete a project — a repo grouping of
@@ -706,6 +738,7 @@ type AddTaskRequest struct {
 }
 type AddTaskResponse struct {
 	OK bool `json:"ok"`
+	MutationOutcome
 }
 
 // UpdateTaskRequest carries a FIELD-LEVEL patch (#1700): the ID of the task to
@@ -732,6 +765,7 @@ type UpdateTaskRequest struct {
 type UpdateTaskResponse struct {
 	OK   bool      `json:"ok"`
 	Task task.Task `json:"task"`
+	MutationOutcome
 }
 
 // Expect optionally carries the project the caller authorized the id against,
@@ -742,6 +776,7 @@ type RemoveTaskRequest struct {
 }
 type RemoveTaskResponse struct {
 	OK bool `json:"ok"`
+	MutationOutcome
 }
 
 // RestartTaskRequest asks the daemon to stop and replace one enabled watch
