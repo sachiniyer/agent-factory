@@ -186,7 +186,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// row for one poll. Mirrors the create-cleanup gate in manager_create.go.
 		if teardownErr = instance.Kill(); session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")
@@ -207,7 +207,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 			// but the next attempt has to come from the user. Telling them otherwise
 			// would be a promise the code cannot keep, which is worse than no promise.
 			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill to try again: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
 		}
 	}
 
