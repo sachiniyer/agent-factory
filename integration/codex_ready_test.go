@@ -69,8 +69,18 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 	// at all" used to be the same `t.Fatalf`, and only the first means the #714
 	// contract broke. A count also has no granularity and no clock, so load
 	// cannot change it.
+	//
+	// The append comes BEFORE the prompt is printed, and the order is the whole
+	// point. Printed first, the wrapper could be descheduled between the two
+	// writes: tmux exposes the "›", af matches it and the create returns green,
+	// all before the append lands — and the test would then read an empty log and
+	// report a fixture failure on a run where the readiness path worked. That is
+	// the same load-dependent shape this change exists to remove, so the marker
+	// has to be durable before anything af can observe exists. Recording first
+	// makes "af saw a ready prompt" imply "the marker is already written"; the
+	// reverse ordering only implies it eventually.
 	launchLog := filepath.Join(home, "codex-launches.log")
-	writeFile(t, wrapper, "#!/bin/sh\nprintf 'OpenAI Codex (vX)\\npermissions: YOLO mode\\n› '\nprintf 'launched\\n' >> '"+launchLog+"'\nexec cat\n", 0755)
+	writeFile(t, wrapper, "#!/bin/sh\nprintf 'launched\\n' >> '"+launchLog+"'\nprintf 'OpenAI Codex (vX)\\npermissions: YOLO mode\\n› '\nexec cat\n", 0755)
 
 	cfg := testConfig()
 	cfg.DefaultProgram = tmux.ProgramCodex
