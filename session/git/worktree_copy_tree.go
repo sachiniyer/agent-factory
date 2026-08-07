@@ -339,7 +339,19 @@ func copyDirectoryLevel(
 			// later sighting would then miss the map and be copied as a separate
 			// inode — silently publishing two unrelated files while source
 			// validation passed, because pathIdentity excludes the link count.
-			if first, seen := links[inspected]; seen {
+			// A hit means the same inode was already copied. It does NOT mean the
+			// inode still holds what that copy captured: a rewrite in place keeps
+			// device/inode/type, so linking here would reproduce the earlier
+			// sighting's bytes at this path. Compare what actually changes with
+			// content, and when it has moved, copy afresh instead.
+			//
+			// Falling back rather than failing is deliberate. A concurrent write is
+			// benign and must not fail the archive; a fresh copy costs disk and the
+			// link semantics for this one pair, which is strictly better than an
+			// archive holding bytes that never existed at that path. Hard-linking
+			// is an optimisation, and one that can corrupt content is not worth its
+			// saving (#3046).
+			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity, inspected) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
@@ -389,27 +401,6 @@ type copiedFileLink struct {
 	identity pathIdentity
 }
 
-// linkCopiedFile reproduces a hard link instead of copying the bytes a second
-// time.
-//
-// Each directory entry used to be copied independently, so a linked pair arrived
-// as two unrelated files (#2919). That costs disk twice over — the archive root
-// is shared by every session — but the sharper problem is semantic: writing
-// through one path stopped showing through the other, so a restored worktree
-// behaved differently from the one that was archived.
-//
-// linkat() resolves a PATHNAME, and the staging tree, while unguessably named,
-// is still reachable by a same-UID process. Such a process can rename the first
-// copied path aside, drop an unrelated file or symlink there, let this call link
-// THAT, and restore the original path afterwards. Merely recording whatever
-// inode results would make the injected one the manifest's expected identity, so
-// both later validations would agree with each other and a corrupted tree would
-// publish. The identity captured when the bytes were first written is therefore
-// compared, not just stored: a link that did not land on that exact inode is
-// refused.
-//
-// flags is 0. The entry is already known to be a regular file, and
-// AT_SYMLINK_FOLLOW would be the only way to end up linking something else.
 func linkCopiedFile(
 	destination, destinationRoot *os.File,
 	first copiedFileLink,
