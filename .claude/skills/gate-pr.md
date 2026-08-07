@@ -389,8 +389,19 @@ defects the review had caught (#2822).
 
 The check above is the cheapest necessary condition: a fix for a finding filed
 at time T cannot exist in a commit made before T. It does not prove the fix is
-*correct*, only that something was pushed after the finding. `auto-gate.js` now
-applies the same check (#2881); the hand gate and the auto gate agree here.
+*correct*, only that something was pushed after the finding. `auto-gate.js`
+applies this same push check since #2881, so the two gates no longer disagree
+about a bare `RESOLVED`.
+
+They are still not identical, and the difference runs in the safe direction.
+`auto-gate.js` lets an explicit no-change override win: a reply containing
+`ACCEPTED` or `[gate-ack]` exempts the finding from the push check even when an
+earlier reply said `RESOLVED` (`claimedNoChange` is subtracted after
+`claimedFixed`). The jq above does not subtract it — any matching `RESOLVED`
+reply keeps the finding in `$claimed` — so a finding answered `RESOLVED` and
+then `ACCEPTED` blocks here while auto-gate passes it. That is the hand gate
+being **stricter**, which is fine; if it ever blocks you on that path, push the
+fix or drop the `RESOLVED` reply rather than loosening this query.
 
 Read from the captured file rather than piping `gh api … --jq` into `jq`, and
 check that file first. Two reasons, and the first is the one that bites:
