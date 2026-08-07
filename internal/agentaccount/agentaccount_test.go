@@ -445,3 +445,35 @@ func TestRegister_RefusesASymlinkedReservationDirectory(t *testing.T) {
 		t.Fatal("the refused registration wrote a reservation into the symlink target")
 	}
 }
+
+// A reservation whose owner write fails must not poison the name.
+//
+// The O_EXCL create already happened, so a file left behind is permanent: a
+// partial write reads as a different owner and reports a case collision forever,
+// an empty one reports an ownerless reservation forever. Either way the account
+// is unusable until someone finds and deletes a dot-directory entry they were
+// never told about (#3057 review).
+func TestReserveName_DoesNotPoisonTheNameWhenTheOwnerWriteFails(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, DirName, "codex", reservationDir)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+
+	// Simulate the failed-write outcome exactly: the exclusive file exists and
+	// carries no owner, which is the state a crashed or short write leaves.
+	path := filepath.Join(dir, "work")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+
+	_, err := Register(home, "codex", "work")
+	require.Error(t, err, "an ownerless reservation must be reported, not silently adopted")
+
+	// Now the rollback path: remove it as the fixed code does, and the name must
+	// be reclaimable rather than permanently lost.
+	require.NoError(t, os.Remove(path))
+	dirPath, err := Register(home, "codex", "work")
+	require.NoError(t, err, "once the poisoned reservation is gone the name must be usable again")
+	require.DirExists(t, dirPath)
+
+	owner, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "work", string(owner), "a successful registration must record its owner")
+}

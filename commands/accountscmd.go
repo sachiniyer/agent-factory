@@ -62,19 +62,27 @@ type accountEntry struct {
 // invalid invocation, and the caller's intent to receive JSON is unambiguous, so
 // reporting that failure as JSON is the answer they can act on.
 func accountsJSONRequested(args []string) bool {
+	// The LAST occurrence wins, not the first. pflag calls Value.Set for every
+	// occurrence in order, so `--json=false --json=true` is true by the time it
+	// reaches a later bad flag. Returning on the first match read that as false
+	// and emitted human text to a caller that had asked for JSON — the same
+	// mistake as matching one spelling, one level up: I modelled a single
+	// occurrence of a flag that pflag lets repeat (#3057 review).
+	requested := false
 	for _, arg := range args {
 		if arg == "--" {
-			return false
+			break
 		}
 		if arg == "--json" {
-			return true
+			requested = true
+			continue
 		}
 		if value, ok := strings.CutPrefix(arg, "--json="); ok {
 			parsed, err := strconv.ParseBool(value)
-			return err != nil || parsed
+			requested = err != nil || parsed
 		}
 	}
-	return false
+	return requested
 }
 
 // accountsFlagError routes a flag-parse failure through the same {data,error}

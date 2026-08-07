@@ -266,8 +266,19 @@ func reserveName(home, agent, name string) (string, error) {
 
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err == nil {
-		defer func() { _ = file.Close() }()
 		if _, err := file.WriteString(name); err != nil {
+			// Remove the file THIS call created. Left behind, it poisons the name
+			// permanently: a partial write reads as a different owner and reports a
+			// case collision forever, and an empty one reports an ownerless
+			// reservation forever. Either way the account is unusable until someone
+			// finds and deletes a dot-directory entry they were never told about —
+			// a failed registration must not cost the name (#3057 review).
+			_ = file.Close()
+			_ = os.Remove(path)
+			return "", fmt.Errorf("record account reservation %s: %w", path, err)
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
 			return "", fmt.Errorf("record account reservation %s: %w", path, err)
 		}
 		return name, nil
