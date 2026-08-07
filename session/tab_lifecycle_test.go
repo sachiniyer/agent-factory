@@ -367,8 +367,10 @@ func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 		seen := map[string]bool{}
 		for _, a := range allowances {
 			seen[a.Kind] = true
-			kind, ok := ParseTabKindName(a.Kind)
-			require.Truef(t, ok, "%q must be a name the CLI accepts", a.Kind)
+			// The projection's vocabulary is the CLI's PLUS "process", which has no
+			// --kind spelling but is creatable through the default CreateTab.
+			kind, ok := parseTabKindNameForProjection(a.Kind)
+			require.Truef(t, ok, "%q must be a name the projection can resolve", a.Kind)
 
 			// The assertion that matters:each entry equals what RefuseTabKind says now.
 			err := caps.RefuseTabKind(kind, "")
@@ -382,5 +384,32 @@ func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 		}
 		require.False(t, seen["agent"],
 			"the agent tab is not creatable, so offering it would be a control with no call behind it")
+	}
+}
+
+// The projection is derived from the backend on every snapshot, so persisting it
+// would store a stale answer — and it carries long, versioned refusal prose that
+// an older binary would read back as fact.
+func TestTabKindProjection_IsNotPersisted(t *testing.T) {
+	data := InstanceData{
+		Title:            "s",
+		TabKinds:         []TabKindAllowance{{Kind: "web", Allowed: false, Reason: "some long versioned reason"}},
+		TabRosterMutable: true,
+	}
+	stored := data.ForStorage()
+	require.Nil(t, stored.TabKinds, "a derived verdict must not reach instances.json")
+	require.False(t, stored.TabRosterMutable)
+	require.Equal(t, "s", stored.Title, "and the real record survives")
+}
+
+// A process tab has no --kind spelling but IS creatable, so a per-kind projection
+// that omitted it would under-report what a session can do.
+func TestTabKindAllowances_IncludesTheProcessKind(t *testing.T) {
+	kinds := map[string]bool{}
+	for _, a := range tabKindAllowances(Capabilities{Workspace: WorkspaceLocalWorktree}) {
+		kinds[a.Kind] = true
+	}
+	for _, want := range []string{"shell", "process", "web", "vscode"} {
+		require.Truef(t, kinds[want], "every creatable kind must be projected; %q was missing", want)
 	}
 }

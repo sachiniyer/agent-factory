@@ -389,6 +389,21 @@ export function canManageTabs(s: SessionData): boolean {
   return supportsTabManagement(s) && !isArchived(s);
 }
 
+/** Whether the web may RENAME or REORDER this session's tabs.
+ *
+ *  A third question, and it has a third answer. The daemon's tabMutationTarget
+ *  gates roster mutation on Capabilities.TabManagement, which is not the same as
+ *  "may create this kind" or "may close a tab" — so as soon as a metadata-only kind
+ *  becomes creatable off-box (#3062), reusing the create verdict here would enable
+ *  a rename the daemon rejects. Falls back to the create answer only for a
+ *  pre-#3060 daemon, where the two genuinely were one bit. */
+export function canMutateTabRoster(s: SessionData): boolean {
+  if (s.tab_roster_mutable !== undefined) {
+    return s.tab_roster_mutable && !isArchived(s);
+  }
+  return canManageTabs(s);
+}
+
 /** Whether the web may offer to CLOSE a tab on this session.
  *
  *  Separate from canManageTabs on purpose. The daemon's CloseTab has no backend
@@ -415,6 +430,19 @@ export function canCloseTabs(s: SessionData): boolean {
  *  to reach the twelfth tab is navigation (#3021), not a reason to refuse to
  *  create it. */
 export function tabCreationUnavailableReason(s: SessionData): string | null {
+  // The daemon's own reason wins over anything derived here. It names the
+  // requirement that is actually unmet — which a client cannot know — and it is why
+  // the projection carries prose at all (#3060).
+  const projected = s.tab_kinds;
+  if (projected && projected.length > 0 && !isArchived(s)) {
+    if (projected.some((k) => k.allowed)) {
+      return null;
+    }
+    const explained = projected.find((k) => k.reason);
+    if (explained?.reason) {
+      return explained.reason;
+    }
+  }
   const supported = supportsTabManagement(s);
   if (isArchived(s)) {
     if (!supported) {
@@ -1955,7 +1983,8 @@ export class AppShell {
     // (`done`) when the edit was already settled by Enter/Escape.
     this.settleTabEdit();
     const tabs = sessionTabs(selected);
-    const canManage = canManageTabs(selected);
+    const canRename = canMutateTabRoster(selected);
+    const canClose = canCloseTabs(selected);
     // The active index is clamped: a resync that shrank the list must not leave the
     // highlight (and the streamed tab) pointing past the end.
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
@@ -1967,7 +1996,7 @@ export class AppShell {
     // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
+      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
@@ -2575,10 +2604,21 @@ export function tabBarSig(state: AppState): string {
   }
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-  const canManage = canManageTabs(selected);
+  // Every verdict that changes what the bar renders belongs in the sig, or a
+  // session whose close-ability changed keeps a stale bar (#1809's lesson).
+  const canRename = canMutateTabRoster(selected);
+  const canClose = canCloseTabs(selected);
   const createReason = tabCreationUnavailableReason(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
-  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage, createReason]);
+  return JSON.stringify([
+    selected.id ?? "",
+    tabs.map((t) => [t.kind, t.name]),
+    active,
+    shown,
+    canRename,
+    canClose,
+    createReason,
+  ]);
 }
 
 /** The bar's tab buttons in render order. Excludes the + button and the insertion
@@ -2619,7 +2659,8 @@ function tabButton(
   index: number,
   active: boolean,
   shown: boolean,
-  canManage: boolean,
+  canRename: boolean,
+  canClose: boolean,
   actions: Actions,
   /** This tab's identity as of the LATEST snapshot — see AppShell.liveTabIdentity.
    *  A getter rather than a value because this button outlives the render that built
@@ -2653,7 +2694,10 @@ function tabButton(
   // only appear to work (see isRenameableTab). A tab-managed session is required for
   // the same reason the + / × are: an archived/remote session's tab list is not the
   // web's to mutate.
-  const renameable = canManage && isRenameableTab(tab.kind);
+  // Rename is roster mutation; the × below is a close. Two daemon rules, two
+  // parameters — one bool here is what stranded closable tabs behind a create
+  // verdict (#3060).
+  const renameable = canRename && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} — double-click to rename` : tabDisplayLabel(tab);
   if (renameable) {
     tabRenameIntents.set(btn, {
@@ -2667,7 +2711,7 @@ function tabButton(
     });
   }
   // The agent tab (index 0) is unclosable — killing the session tears it down.
-  if (index > 0 && canManage) {
+  if (index > 0 && canClose) {
     const close = h("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {

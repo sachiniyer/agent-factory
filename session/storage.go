@@ -179,6 +179,12 @@ type InstanceData struct {
 	// one, because a user told "not supported" cannot tell a kind that could work
 	// from one that genuinely cannot.
 	TabKinds []TabKindAllowance `json:"tab_kinds,omitempty"`
+	// TabRosterMutable is Capabilities.TabManagement projected: whether this
+	// session's tab ROSTER may be mutated (rename, reorder). It is a different
+	// question from either creating a kind or closing a tab, and it has a different
+	// answer — tabMutationTarget still gates on TabManagement — so a client that
+	// reuses a create-or-close verdict for it offers controls the daemon refuses.
+	TabRosterMutable bool `json:"tab_roster_mutable,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not
@@ -227,6 +233,12 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.CurrentAgent = ""
 	d.IsRoot = false
 	d.ModelChange = nil
+	// Derived from the backend on every snapshot, exactly like CanKill above, so
+	// persisting them stores a stale answer that a restart would recompute anyway —
+	// and these carry long, versioned refusal PROSE, which would sit in every
+	// instances.json row and be read back as fact by an older binary.
+	d.TabKinds = nil
+	d.TabRosterMutable = false
 	switch {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown

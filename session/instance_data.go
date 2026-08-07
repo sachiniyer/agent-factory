@@ -67,6 +67,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// from BackendType (#3060). Computed here, on the snapshot every surface
 		// reads, so the TUI, the web UI and the API all get the same answer.
 		data.TabKinds = tabKindAllowances(i.backend.Capabilities())
+		data.TabRosterMutable = i.backend.Capabilities().TabManagement
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
 			// ForStorage publishes it only when UserKilled or an unknown cleanup

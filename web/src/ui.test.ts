@@ -19,6 +19,7 @@ import {
   usesCondensedSessionChrome,
   canCreateTabKind,
   canCloseTabs,
+  canMutateTabRoster,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
@@ -329,4 +330,57 @@ test("closing is gated separately from creating (#3060)", () => {
   assert.equal(canCloseTabs(offBox), true, "but closes fine");
   // Archived is the one case the daemon genuinely refuses.
   assert.equal(canCloseTabs(sess({ backend_type: "local", liveness: Liveness.Archived })), false);
+});
+
+test("each affordance asks its OWN daemon verdict (#3060)", () => {
+  // The shared cause of the review round: one bool stood in for four different
+  // daemon rules — create (per kind), close (no backend gate), and roster mutation
+  // (Capabilities.TabManagement). A session can legitimately answer these
+  // differently, and every combination below is one the daemon can produce.
+  const createsNothingButHasTabs = sess({
+    backend_type: "ssh",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "needs a local worktree" },
+      { kind: "web", allowed: false, reason: "not restored on the sandbox path" },
+    ],
+    tab_roster_mutable: false,
+  });
+  assert.equal(supportsTabManagement(createsNothingButHasTabs), false);
+  assert.equal(canCloseTabs(createsNothingButHasTabs), true, "an existing tab is still closable");
+  assert.equal(canMutateTabRoster(createsNothingButHasTabs), false, "but its roster is fixed");
+
+  // A metadata kind opening up must NOT drag rename/reorder open with it: those
+  // still enter tabMutationTarget, which gates on TabManagement.
+  const webAllowedOffBox = sess({
+    backend_type: "ssh",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "needs a local worktree" },
+      { kind: "web", allowed: true },
+    ],
+    tab_roster_mutable: false,
+  });
+  assert.equal(canCreateTabKind(webAllowedOffBox, "web"), true);
+  assert.equal(canCreateTabKind(webAllowedOffBox, "shell"), false);
+  assert.equal(
+    canMutateTabRoster(webAllowedOffBox),
+    false,
+    "rename/reorder still hit tabMutationTarget, which the daemon refuses here",
+  );
+});
+
+test("the create refusal is the daemon's own text, not a backend guess (#3060)", () => {
+  const refused = sess({
+    backend_type: "local",
+    tab_kinds: [{ kind: "web", allowed: false, reason: "see #3062: not restored on the sandbox recovery path" }],
+  });
+  assert.equal(
+    tabCreationUnavailableReason(refused),
+    "see #3062: not restored on the sandbox recovery path",
+    "the daemon names the requirement actually unmet; a client cannot know it",
+  );
+  // Archived still wins: the daemon refuses creation there for its own reason.
+  assert.match(
+    tabCreationUnavailableReason(sess({ backend_type: "local", liveness: Liveness.Archived })) ?? "",
+    /Restore this session/,
+  );
 });

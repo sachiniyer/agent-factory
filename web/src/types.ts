@@ -142,6 +142,12 @@ export interface SessionData {
    *  needs no change here at all. Absent on a pre-#3060 daemon — see
    *  allowedTabKinds for how that degrades. */
   tab_kinds?: TabKindAllowance[];
+  /** Capabilities.TabManagement projected: may this session's tab ROSTER be
+   *  mutated (rename, reorder)? A different daemon rule from creating a kind or
+   *  closing a tab, with a different answer — `tabMutationTarget` still gates on
+   *  it — so reusing either of those verdicts here offers controls the daemon
+   *  refuses (#3060). */
+  tab_roster_mutable?: boolean;
   /** Worktree metadata; the rail reads `repo_path` (the session's repo root) to
    *  derive the new-session modal's project picker, exactly as the TUI does from
    *  InstanceData.Worktree.RepoPath (app/switch_project.go buildProjectListFrom). */

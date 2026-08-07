@@ -12672,13 +12672,32 @@ var LEGACY_TAB_KINDS = ["shell", "process", "web", "vscode"];
 function supportsTabManagement(s) {
   return allowedTabKinds(s).some((k) => k.allowed);
 }
+function canCreateTabKind(s, kind) {
+  return allowedTabKinds(s).some((k) => k.kind === kind && k.allowed);
+}
 function canManageTabs(s) {
   return supportsTabManagement(s) && !isArchived(s);
+}
+function canMutateTabRoster(s) {
+  if (s.tab_roster_mutable !== void 0) {
+    return s.tab_roster_mutable && !isArchived(s);
+  }
+  return canManageTabs(s);
 }
 function canCloseTabs(s) {
   return !isArchived(s);
 }
 function tabCreationUnavailableReason(s) {
+  const projected = s.tab_kinds;
+  if (projected && projected.length > 0 && !isArchived(s)) {
+    if (projected.some((k) => k.allowed)) {
+      return null;
+    }
+    const explained = projected.find((k) => k.reason);
+    if (explained?.reason) {
+      return explained.reason;
+    }
+  }
   const supported = supportsTabManagement(s);
   if (isArchived(s)) {
     if (!supported) {
@@ -13808,11 +13827,12 @@ var AppShell = class {
     }
     this.settleTabEdit();
     const tabs = sessionTabs(selected);
-    const canManage = canManageTabs(selected);
+    const canRename = canMutateTabRoster(selected);
+    const canClose = canCloseTabs(selected);
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
     const shown = new Set(state.shownTabs);
     const children = tabs.map(
-      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? "")
+      (tab, i) => tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? "")
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
@@ -14226,10 +14246,19 @@ function tabBarSig(state) {
   }
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-  const canManage = canManageTabs(selected);
+  const canRename = canMutateTabRoster(selected);
+  const canClose = canCloseTabs(selected);
   const createReason = tabCreationUnavailableReason(selected);
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
-  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage, createReason]);
+  return JSON.stringify([
+    selected.id ?? "",
+    tabs.map((t) => [t.kind, t.name]),
+    active,
+    shown,
+    canRename,
+    canClose,
+    createReason
+  ]);
 }
 function barTabs(bar) {
   return [...bar.querySelectorAll(".af-tab")];
@@ -14241,7 +14270,7 @@ function tabCenters(bar) {
     return r.left + r.width / 2;
   });
 }
-function tabButton(tab, index, active, shown, canManage, actions2, liveIdentity, selectedSessionId) {
+function tabButton(tab, index, active, shown, canRename, canClose, actions2, liveIdentity, selectedSessionId) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h2("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
@@ -14249,7 +14278,7 @@ function tabButton(tab, index, active, shown, canManage, actions2, liveIdentity,
   btn.dataset.tabIndex = String(index);
   btn.append(icon(tabIcon(tab.kind), "af-tab-glyph"), h2("span", { class: "af-tab-label" }, tabLabel(tab)));
   btn.addEventListener("click", () => actions2.openTab(index));
-  const renameable = canManage && isRenameableTab(tab.kind);
+  const renameable = canRename && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} \u2014 double-click to rename` : tabDisplayLabel(tab);
   if (renameable) {
     tabRenameIntents.set(btn, {
@@ -14259,7 +14288,7 @@ function tabButton(tab, index, active, shown, canManage, actions2, liveIdentity,
       }
     });
   }
-  if (index > 0 && canManage) {
+  if (index > 0 && canClose) {
     const close = h2("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {
@@ -14795,7 +14824,7 @@ function guardedTabRebind(selId, run, resolve, attach) {
 function createSessionTab(kind = "shell") {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !canManageTabs(sel)) {
+  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
     return;
   }
   clearTabError();
@@ -14823,7 +14852,7 @@ function createSessionTab(kind = "shell") {
 function closeSessionTab(index) {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || index <= 0 || !canManageTabs(sel)) {
+  if (!sel || tok === null || index <= 0 || !canCloseTabs(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
@@ -14850,7 +14879,7 @@ function closeSessionTab(index) {
 function renameSessionTab(id, name, editedSessionId) {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !canManageTabs(sel)) {
+  if (!sel || tok === null || !canMutateTabRoster(sel)) {
     return;
   }
   if ((sel.id ?? "") !== editedSessionId) {
@@ -14873,7 +14902,7 @@ function renameSessionTab(id, name, editedSessionId) {
 function reorderSessionTab(from, to) {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !canManageTabs(sel)) {
+  if (!sel || tok === null || !canMutateTabRoster(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
