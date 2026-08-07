@@ -167,6 +167,7 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	go func() {
 		<-info.done
 		wl.mu.Lock()
+		revoked := 0
 		if wl.webGen == gen {
 			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearTCPBound()
@@ -175,8 +176,25 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 				wl.webClose = nil
 			}
 			wl.webConfigAddr = ""
+			// The listener is gone whether or not anyone asked for it to be, so an
+			// UNEXPECTED death has to advance the same state a rebind or a teardown
+			// does (#3012 review). Without this, a listener that dies under
+			// http.Server left credentials registered against an endpoint that no
+			// longer accepts — contradicting the invariant this file states — and
+			// left webGen unchanged, so a create racing the failure passed its
+			// post-mint revalidation and shipped a URL nothing answers.
+			//
+			// This is the third path that had to learn the same rule. Rebind and
+			// teardown were the two I wrote by hand; the listener simply dying was
+			// the one I did not think of, which is the argument for the rule being
+			// stated on the state itself rather than remembered at each site.
+			wl.webGen++
+			revoked = wl.manager.sandboxTokens.revokeAll()
 		}
 		wl.mu.Unlock()
+		if revoked > 0 {
+			log.WarningLog.Printf("the control listener on %s is no longer accepting: revoked %d sandbox callback credential(s) issued against it; those sessions lose callback until the listener is restored and they are re-provisioned", addr, revoked)
+		}
 	}()
 	if old != nil {
 		_ = old()

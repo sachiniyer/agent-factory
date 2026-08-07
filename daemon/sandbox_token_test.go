@@ -72,12 +72,16 @@ func TestSandboxTokenRegistry_SessionsDoNotShareCredentials(t *testing.T) {
 // The scope is what stops a compromised sandbox owning the host, so the denials
 // are asserted by name rather than by counting.
 func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
-	// What the scope IS, and it is deliberately one route: SuggestSessionName takes
-	// no arguments and returns a random unused name, so there is nothing for a
-	// caller to aim it at. Everything else worth having is parameterised by a host
-	// path or a session id and must wait for owner-binding (#2999).
-	assert.True(t, sandboxAllowedPath("/v1/SuggestSessionName"),
-		"the scope must not be empty, or the credential authorizes nothing and the gate path is untested")
+	// The scope is EMPTY, and that is the result rather than an oversight (#3012
+	// review). Asserted explicitly so nobody reads the absence as an accident and
+	// "restores" an entry without doing the owner-binding work first.
+	assert.Empty(t, sandboxAllowedPaths,
+		"no route may be admitted until the credential is bound to its owning session: the parameterised routes "+
+			"cannot be constrained to the caller's own repo/session by a route-level flag, and the parameterless "+
+			"ones answer from global state (SuggestSessionName avoids live titles across ALL repos, which a "+
+			"sandbox holding the finite wordlist can sample into an activity oracle)")
+	assert.False(t, sandboxAllowedPath("/v1/SuggestSessionName"),
+		"the last admitted route was withdrawn as a cross-repo collision oracle; re-admitting it needs owner-binding, not a smaller wordlist")
 	for _, path := range []string{
 		// DeliverPrompt runs instructions through every agent on the machine.
 		"/v1/DeliverPrompt",
@@ -111,6 +115,10 @@ func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
 		// carved into the rule for convenience.
 		"/v1/ListBackends",
 		"/v1/ListPrograms",
+		// Parameterless, and still an oracle: it avoids live titles across ALL
+		// repos, and the sandbox holds the finite wordlist in the af binary af put
+		// there, so sampling reveals which combinations are persistently taken.
+		"/v1/SuggestSessionName",
 		"/v1/SetConfigValue",
 		"/v1/DeleteProject",
 		"/v1/KillSession",
@@ -138,8 +146,17 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 		return r
 	}
 
-	assert.True(t, gate.authorize(request("/v1/SuggestSessionName", secret)),
-		"a sandbox credential must work for the one route its scope admits")
+	// The shipped table admits NOTHING, so the gate's admit path is exercised
+	// against a temporary entry. Without this the positive branch would be dead and
+	// the revocation assertion below would pass for the wrong reason — every route
+	// is refused anyway.
+	sandboxAllowedPaths["/v1/TestOnlyAdmitted"] = true
+	t.Cleanup(func() { delete(sandboxAllowedPaths, "/v1/TestOnlyAdmitted") })
+
+	assert.True(t, gate.authorize(request("/v1/TestOnlyAdmitted", secret)),
+		"a sandbox credential must authorize a route its scope admits")
+	assert.False(t, gate.authorize(request("/v1/SuggestSessionName", secret)),
+		"and must not authorize the route withdrawn as an activity oracle")
 	assert.False(t, gate.authorize(request("/v1/DeliverPrompt", secret)),
 		"a sandbox credential must NOT reach DeliverPrompt")
 	assert.False(t, gate.authorize(request("/v1/SendPrompt", secret)),
@@ -156,13 +173,13 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 	// one ADMITTED route: checking a denied route here would pass whether or not
 	// revocation did anything.
 	registry.revoke("sess-a")
-	assert.False(t, gate.authorize(request("/v1/SuggestSessionName", secret)),
+	assert.False(t, gate.authorize(request("/v1/TestOnlyAdmitted", secret)),
 		"a revoked credential must stop authorizing at the gate")
 
 	// A gate with no registry (the agent-server, the preview origin) accepts no
 	// sandbox credential at all.
 	bare := &authGate{expectedToken: func() (string, error) { return "operator-token", nil }}
-	assert.False(t, bare.authorize(request("/v1/SuggestSessionName", secret)))
+	assert.False(t, bare.authorize(request("/v1/TestOnlyAdmitted", secret)))
 }
 
 func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
