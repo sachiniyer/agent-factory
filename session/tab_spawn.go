@@ -35,6 +35,12 @@ func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool, kind TabKind) e
 	case TabNeedsMetadataOnly:
 		return nil
 	case TabNeedsLocalWorktreeRead:
+		// Accurate for THIS layer, which asks only what the instance can offer the
+		// daemon-local editor: that editor is rooted at a daemon-host directory,
+		// and an off-box instance has none. It is not the whole reason a vscode
+		// tab cannot work off-box — af runs no editor in the workspace at all —
+		// which Capabilities.RefuseTabKind states and #3054 carries the evidence
+		// for. Do not "fix" this by pointing the daemon's editor at a remote path.
 		if !hasWorktree {
 			return fmt.Errorf("cannot add a vscode tab to this session: its editor is rooted at the session's worktree on the daemon host, and this workspace runs off-box, so there is no worktree for the daemon to open (#3054)")
 		}
