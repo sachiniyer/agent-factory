@@ -162,6 +162,10 @@ func TestAccountsJSONNotRequestedWhenPflagNeverAcceptedIt(t *testing.T) {
 		{"json after the failure", []string{"add", "codex", "work", "--bogus", "--json"}},
 		// pflag REJECTS the value, so --json is not on either.
 		{"value pflag rejects", []string{"add", "codex", "work", "--json=zzz"}},
+		// The `accounts` group binds no --json at all, so the parse fails ON it.
+		// Human text is also the more useful answer here: the usage block lists
+		// the subcommands, which is what the caller actually needed.
+		{"group command binds no json flag", []string{"--json"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, stderr, err := runAccounts(t, tc.args...)
