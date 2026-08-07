@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -190,26 +189,22 @@ var newHookSandboxProvisioner = func(spec ProvisionSpec, sshCmd, afBin, program 
 // values. Extracted so the connection tests traverse THIS handoff rather than
 // repeating the assignment — a test that restates it would pass even if
 // provisionHost stopped doing it.
-func hookProvisionPinnedRecord(record *hookProvisionRecord) (pinned hookProvisionRecord, host string, port int) {
-	host, port = hookProvisionHostPort(record)
+func hookProvisionPinnedRecord(record *hookProvisionRecord) (pinned hookProvisionRecord, host string, port int, err error) {
+	host, port, err = hookProvisionHostPort(record)
+	if err != nil {
+		return hookProvisionRecord{}, "", 0, err
+	}
 	pinned = *record
 	pinned.Host, pinned.Port = host, port
-	return pinned, host, port
+	return pinned, host, port, nil
 }
 
-// hookProvisionHostPort splits a "host:port" Host value so a record may spell the
-// port either way. An address with no port is returned unchanged.
-func hookProvisionHostPort(record *hookProvisionRecord) (string, int) {
-	host := strings.TrimSpace(record.Host)
-	if record.Port != 0 {
-		return host, record.Port
-	}
-	if h, p, err := net.SplitHostPort(host); err == nil {
-		if port, convErr := strconv.Atoi(p); convErr == nil {
-			return h, port
-		}
-	}
-	return host, 0
+// hookProvisionHostPort resolves a record's address through the SHARED resolver —
+// the same one backend=ssh uses — so a record cannot reach a different port
+// depending on which backend read it (#3044). Port 0 means unspecified, which
+// leaves the choice to the ssh binary.
+func hookProvisionHostPort(record *hookProvisionRecord) (string, int, error) {
+	return resolveSSHHostPort(record.Host, record.Port)
 }
 
 // provisionHostOrReap runs the ssh-host contract end to end, reaping via
@@ -244,7 +239,10 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 		return ProvisionResult{}, err
 	}
 
-	pinned, host, port := hookProvisionPinnedRecord(record)
+	pinned, host, port, err := hookProvisionPinnedRecord(record)
+	if err != nil {
+		return ProvisionResult{}, fmt.Errorf("backend=hook: provision_cmd returned an unusable address: %w", err)
+	}
 	dir, err := hookProvisionSessionDir(p.slug)
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)

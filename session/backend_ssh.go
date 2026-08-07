@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -291,7 +292,10 @@ func (p *sshProvisioner) dial() error {
 	if err != nil {
 		return err
 	}
-	host, port := p.hostPort()
+	host, port, err := p.hostPort()
+	if err != nil {
+		return err
+	}
 	clientCfg := &ssh.ClientConfig{
 		User:            p.loginUser(),
 		Auth:            auth,
@@ -542,18 +546,19 @@ func ensureKnownHostsFile(path string) error {
 	return f.Close()
 }
 
-// hostPort splits ssh.host into host + port. A port embedded in ssh.host wins;
-// otherwise ssh.port, otherwise the default 22.
-func (p *sshProvisioner) hostPort() (string, string) {
-	host := strings.TrimSpace(p.cfg.Host)
-	if h, port, err := net.SplitHostPort(host); err == nil && port != "" {
-		return h, port
+// hostPort splits ssh.host into host + port through the SHARED resolver, so this
+// runtime and hook provisioning cannot disagree about the same address (#3044).
+// An unspecified port becomes the ssh default of 22 here; a conflict between an
+// embedded port and ssh.port is refused by the resolver rather than ranked.
+func (p *sshProvisioner) hostPort() (string, string, error) {
+	host, port, err := resolveSSHHostPort(p.cfg.Host, p.cfg.Port)
+	if err != nil {
+		return "", "", fmt.Errorf("backend=ssh: %w", err)
 	}
-	port := sshDefaultPort
-	if p.cfg.Port > 0 {
-		port = p.cfg.Port
+	if port == 0 {
+		port = sshDefaultPort
 	}
-	return host, fmt.Sprintf("%d", port)
+	return host, strconv.Itoa(port), nil
 }
 
 // loginUser resolves the ssh login user: ssh.user, else the current OS user.
