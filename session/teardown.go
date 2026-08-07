@@ -258,6 +258,32 @@ func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName s
 	return stateKnown, blind, nil
 }
 
+// TmuxTeardownCount reports how many tmux sessions a teardown of this instance
+// would have to close, which is the count that predicts teardown WORK.
+//
+// Two contributions, because teardownTabs closes both through one sequential loop:
+// live tabs whose tab.tmux is non-nil — web and vscode tabs own none and cost
+// nothing per-tab — and the PENDING CLEANUP handles of tabs already removed from
+// the roster whose kill was never confirmed (#2669). Omitting either direction
+// gets a caller budgeting against this wrong: counting the whole roster charges a
+// session for iframe tabs it never tears down, while ignoring the pending handles
+// under-budgets a session that has accumulated them.
+//
+// The pending handles are counted unconditionally even though only a destructive
+// mode reaps them. A budget should bound the worst case: over-counting delays a
+// watchdog, under-counting fires one on healthy work (#3023).
+func (i *Instance) TmuxTeardownCount() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	n := len(i.pendingTabCleanup)
+	for _, tab := range i.Tabs {
+		if tab.tmux != nil {
+			n++
+		}
+	}
+	return n
+}
+
 // teardownTabs runs the one teardown skeleton for the given mode. It snapshots
 // each tab's tmux under i.mu, tears them down OUTSIDE the lock (closing under
 // i.mu would stall every reader while a pane drains), performs the mode's
