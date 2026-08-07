@@ -82,3 +82,81 @@ func TestCopyTree_StillLinksWhenTheSourceIsUnchanged(t *testing.T) {
 	require.True(t, os.SameFile(firstInfo, secondInfo),
 		"an unchanged shared inode must still be reproduced as one inode: the fix must not be 'stop linking'")
 }
+
+// Adding a hard link moves the inode's ctime WITHOUT changing its bytes, and
+// that is the live-worktree case the link map exists to support. A guard keyed on
+// timestamps read it as a rewrite and split one inode into two destination
+// inodes; comparing content does not (#3046 review).
+func TestCopyTree_LinkAddedMidWalkStillReproducesOneInode(t *testing.T) {
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "copy")
+
+	firstPath := filepath.Join(source, "a.txt")
+	secondPath := filepath.Join(source, "b.txt")
+	require.NoError(t, os.WriteFile(firstPath, []byte("SHARED"), 0o644))
+	require.NoError(t, os.Link(firstPath, secondPath))
+
+	originalHook := copyTreeAfterSourceInspect
+	t.Cleanup(func() { copyTreeAfterSourceInspect = originalHook })
+	copyTreeAfterSourceInspect = func(path string) error {
+		if strings.HasSuffix(path, "b.txt") {
+			// A third name for the same inode: ctime moves, content does not.
+			return os.Link(firstPath, filepath.Join(source, "c.txt"))
+		}
+		return nil
+	}
+
+	require.NoError(t, copyTree(source, destination))
+
+	firstInfo, err := os.Stat(filepath.Join(destination, "a.txt"))
+	require.NoError(t, err)
+	secondInfo, err := os.Stat(filepath.Join(destination, "b.txt"))
+	require.NoError(t, err)
+	require.True(t, os.SameFile(firstInfo, secondInfo),
+		"adding a link changes ctime but not content, so the paths must still be reproduced as one inode")
+}
+
+// The stale-content guard must not depend on timestamps moving. A same-size
+// rewrite with mtime restored can leave a (size, mtime, ctime) stamp identical on
+// a coarse-timestamp filesystem, which would relink the first sighting's bytes.
+// Content comparison is unaffected.
+func TestCopyTree_SameSizeRewriteWithRestoredMtimeIsNotLinked(t *testing.T) {
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "copy")
+
+	firstPath := filepath.Join(source, "a.txt")
+	secondPath := filepath.Join(source, "b.txt")
+	require.NoError(t, os.WriteFile(firstPath, []byte("AAAAAAAA"), 0o644))
+	require.NoError(t, os.Link(firstPath, secondPath))
+	original, err := os.Stat(firstPath)
+	require.NoError(t, err)
+
+	originalHook := copyTreeAfterSourceInspect
+	t.Cleanup(func() { copyTreeAfterSourceInspect = originalHook })
+	copyTreeAfterSourceInspect = func(path string) error {
+		if strings.HasSuffix(path, "b.txt") {
+			file, err := os.OpenFile(firstPath, os.O_WRONLY|os.O_TRUNC, 0o644)
+			if err != nil {
+				return err
+			}
+			// Same length, so size cannot betray it.
+			if _, err := file.Write([]byte("BBBBBBBB")); err != nil {
+				file.Close()
+				return err
+			}
+			file.Close()
+			// And the writer puts mtime back, as a build tool restoring timestamps
+			// would.
+			return os.Chtimes(firstPath, original.ModTime(), original.ModTime())
+		}
+		return nil
+	}
+
+	require.NoError(t, copyTree(source, destination))
+
+	archived, err := os.ReadFile(filepath.Join(destination, "b.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "BBBBBBBB", string(archived),
+		"a same-size rewrite with mtime restored must not be linked to the first sighting's bytes: "+
+			"timestamps are not a content version")
+}

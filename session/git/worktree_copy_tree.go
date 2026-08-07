@@ -351,15 +351,14 @@ func copyDirectoryLevel(
 			// archive holding bytes that never existed at that path. Hard-linking
 			// is an optimisation, and one that can corrupt content is not worth its
 			// saving (#3046).
-			if first, seen := links[inspected]; seen && sourceStillHoldsCopiedContent(source, name, first.sourceStamp) {
+			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
 				if err == nil {
 					links[inspected] = copiedFileLink{
-						path:        filepath.Join(relativeDirectory, name),
-						identity:    entry.destination,
-						sourceStamp: stampFromStat(stat),
+						path:     filepath.Join(relativeDirectory, name),
+						identity: entry.destination,
 					}
 				}
 			}
@@ -400,14 +399,6 @@ func relativeRoutePath(components []copiedEntry) string {
 type copiedFileLink struct {
 	path     string
 	identity pathIdentity
-	// sourceStamp is what the SOURCE looked like when its bytes were captured.
-	//
-	// pathIdentity is {device, inode, fileType} and deliberately excludes size and
-	// times, so a file rewritten in place keeps the same identity: the map hits on
-	// the second sighting and the link reproduces the FIRST sighting's content.
-	// The archive then holds bytes that never existed at that path — and because
-	// the two paths share an inode, they cannot diverge on restore either (#3046).
-	sourceStamp contentStamp
 }
 
 // contentStamp is the part of a stat that changes when a file's CONTENT does.
@@ -431,63 +422,6 @@ type contentStamp struct {
 // for the reason symlinkModTime documents: x/sys/unix spells these Mtim on
 // Linux, darwin AND the BSDs, and Timespec's field widths vary by platform, so
 // Sec/Nsec arithmetic is what broke the macOS build last time.
-// sourceStillHoldsCopiedContent re-reads the source at LINK time and compares it
-// with what was captured when the first copy was made.
-//
-// Read here, not from the stat the walker already took at inspect time. That
-// earlier stat is taken before the type switch runs, so a write landing in
-// between would be invisible to it — and that gap is not hypothetical: it is the
-// exact window copyTreeAfterSourceInspect exists to exercise, and a comparison
-// against the earlier stat still fails the #3046 reproduction.
-//
-// Anchored on the directory descriptor, never on a rebuilt pathname: this copier
-// is descriptor-relative throughout so a renamed or substituted parent cannot
-// redirect it, and re-resolving a path here would give that back.
-//
-// A window remains between this stat and the linkat, and it is harmless by
-// construction: linkat reproduces the DESTINATION copy already on disk and never
-// reads the source again, so a later write cannot change what this path gets. It
-// only means the archive holds slightly older bytes for that path, which is
-// inherent in copying a live tree and is what the non-link path does too.
-func sourceStillHoldsCopiedContent(source *os.File, name string, copied contentStamp) bool {
-	stat, err := statAt(source, name)
-	if err != nil {
-		// Could not establish it: fall back to a fresh copy rather than link on an
-		// unknown. Correct and slower beats fast and possibly wrong.
-		return false
-	}
-	return stampFromStat(stat) == copied
-}
-
-func stampFromStat(stat *unix.Stat_t) contentStamp {
-	return contentStamp{
-		sizeBytes: stat.Size,
-		mtimeNsec: unix.TimespecToNsec(stat.Mtim),
-		ctimeNsec: unix.TimespecToNsec(stat.Ctim),
-	}
-}
-
-// linkCopiedFile reproduces a hard link instead of copying the bytes a second
-// time.
-//
-// Each directory entry used to be copied independently, so a linked pair arrived
-// as two unrelated files (#2919). That costs disk twice over — the archive root
-// is shared by every session — but the sharper problem is semantic: writing
-// through one path stopped showing through the other, so a restored worktree
-// behaved differently from the one that was archived.
-//
-// linkat() resolves a PATHNAME, and the staging tree, while unguessably named,
-// is still reachable by a same-UID process. Such a process can rename the first
-// copied path aside, drop an unrelated file or symlink there, let this call link
-// THAT, and restore the original path afterwards. Merely recording whatever
-// inode results would make the injected one the manifest's expected identity, so
-// both later validations would agree with each other and a corrupted tree would
-// publish. The identity captured when the bytes were first written is therefore
-// compared, not just stored: a link that did not land on that exact inode is
-// refused.
-//
-// flags is 0. The entry is already known to be a regular file, and
-// AT_SYMLINK_FOLLOW would be the only way to end up linking something else.
 func linkCopiedFile(
 	destination, destinationRoot *os.File,
 	first copiedFileLink,
