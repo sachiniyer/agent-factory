@@ -32,6 +32,17 @@ import (
 // the PUBLIC host key a provision_cmd would have vouched for.
 func throwawaySSHD(t *testing.T, extraConfig ...string) (port int, hostPubKey string) {
 	t.Helper()
+	// These start real daemons and do real handshakes, which is exactly what the
+	// non-native matrix cells run `-short` to avoid repeating.
+	if testing.Short() {
+		t.Skip("skipping the real-sshd provision E2E in short mode")
+	}
+	// ssh-keyscan proves socket ownership below. Without it every readiness probe
+	// would read as "not our listener" and five tests would blame a healthy sshd
+	// for failing to start — a misdiagnosis worse than an honest skip.
+	if _, err := exec.LookPath("ssh-keyscan"); err != nil {
+		t.Skipf("ssh-keyscan is absent, so sshd socket ownership cannot be established: %v", err)
+	}
 	sshdPath := "/usr/sbin/sshd"
 	if _, err := os.Stat(sshdPath); err != nil {
 		p, lookErr := exec.LookPath("sshd")
@@ -109,6 +120,15 @@ LogLevel ERROR
 				<-done
 			})
 			t.Setenv("AF_TEST_SSH_IDENTITY", userKey)
+			// A correct key is not enough: sshd refuses a LOCKED account (common for
+			// root and service users in containers) before it ever consults
+			// authorized_keys, and PermitRootLogin does not unlock one. Probe once
+			// with the known-good identity so that state is reported as an honest
+			// skip rather than as five failing provision assertions.
+			if !fixtureLoginWorks(t, port, hostPubKey, userKey) {
+				t.Skip("this account cannot log in over ssh (locked or otherwise unusable), " +
+					"so the provision transport cannot be exercised here")
+			}
 			return port, hostPubKey
 		}
 		_ = cmd.Process.Kill()
@@ -177,9 +197,36 @@ func sshdOwnsPort(port int, wantHostKey string) bool {
 // the operator's own ssh_config/agent in production.
 func withIdentity(cmd string) string {
 	if key := os.Getenv("AF_TEST_SSH_IDENTITY"); key != "" {
-		return strings.Replace(cmd, "ssh ", "ssh -i "+key+" -o IdentitiesOnly=yes ", 1)
+		return strings.Replace(cmd, "ssh ", "ssh "+fixtureSSHOptions(key), 1)
 	}
 	return cmd
+}
+
+// fixtureSSHOptions is the isolation every fixture connection needs.
+//
+// `-F none` is the load-bearing one: ssh reads the user's ~/.ssh/config unless
+// told otherwise, so a runner with `Host *` or `Host 127.0.0.1` setting User,
+// HostName, ProxyCommand or ProxyJump could redirect or invalidate these
+// connections — making positive tests fail and negative tests "pass" for reasons
+// that have nothing to do with host-key pinning.
+//
+// Generated paths are shell-quoted because they come from t.TempDir(), which
+// honours TMPDIR: whitespace or a metacharacter there would otherwise split the
+// argument and hand ssh something other than one identity file.
+func fixtureSSHOptions(identity string) string {
+	return "-F none -i " + shellQuoteSandbox(identity) + " -o IdentitiesOnly=yes "
+}
+
+// fixtureLoginWorks reports whether the calling account can actually authenticate
+// to the fixture daemon with the key it was given.
+func fixtureLoginWorks(t *testing.T, port int, hostPubKey, userKey string) bool {
+	t.Helper()
+	record := &hookProvisionRecord{Host: "127.0.0.1", Port: port, HostKey: hostPubKey}
+	kh, err := hookProvisionKnownHosts(t.TempDir(), record.Host, record.Port, record.HostKey)
+	require.NoError(t, err)
+	cmd := strings.Replace(hookProvisionSSHCommand(kh, record), "ssh ", "ssh "+fixtureSSHOptions(userKey), 1)
+	_, runErr := (&sandboxProvisioner{sshCmd: cmd}).Run(20*time.Second, "true", nil, true)
+	return runErr == nil
 }
 
 // THE end-to-end claim: a record from provision_cmd produces a command that
@@ -330,7 +377,7 @@ func runPinnedSSHAndReportPrompt(t *testing.T, record *hookProvisionRecord, batc
 	}
 	// Identity options BEFORE the destination — ssh treats anything after it as
 	// the remote command, so appending them silently does nothing.
-	cmd = strings.Replace(cmd, "ssh ", "ssh -i "+noKey+" -o IdentitiesOnly=yes ", 1)
+	cmd = strings.Replace(cmd, "ssh ", "ssh "+fixtureSSHOptions(noKey), 1)
 
 	sp := &sandboxProvisioner{sshCmd: cmd}
 	_, runErr := sp.Run(20*time.Second, "echo should-not-run", nil, true)
