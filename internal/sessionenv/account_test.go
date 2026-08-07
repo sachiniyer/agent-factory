@@ -260,6 +260,11 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		// Case-sensitive hosts: CODEX is a different executable from codex.
 		"CODEX",
 		"env CODEX",
+		// An ignored signal disposition SURVIVES exec: the agent could outlive
+		// teardown while holding the account.
+		"env --ignore-signal=HUP,TERM codex",
+		"env --block-signal=TERM codex",
+		"env --default-signal codex",
 		"ENV codex",
 		// A CROSS-AGENT override: the account scopes codex, the command runs
 		// claude, which ignores CODEX_HOME entirely and uses its own default home.

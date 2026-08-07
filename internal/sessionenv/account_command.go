@@ -184,7 +184,15 @@ func envOverridesName(args []*syntax.Word, agent string, names map[string]struct
 	// operand let `env codex -c 'cli_auth_credentials_store="keyring"'` through,
 	// which makes Codex ignore the account's auth.json — the exact bypass the
 	// direct branch already refuses, reached one wrapper over (#2983 review).
-	if invocation.CommandIndex != len(literals)-1 {
+	// NOTHING between `env` and the command, and nothing after it. Requiring the
+	// command to be the only operand closes the whole option surface rather than
+	// the options I happen to have modelled: --ignore-signal is accepted by Parse
+	// without becoming a Mutation, and an ignored disposition SURVIVES exec — so
+	// the agent could ignore teardown signals and keep running with the selected
+	// account after af and tmux believe the session ended. Enumerating signal
+	// options would be the fifth grammar this guard tried to enumerate; this is
+	// the last one it needs (#2983 review).
+	if invocation.CommandIndex != 0 || len(literals) != 1 {
 		return false, false
 	}
 	if executableIsAgent(literals[invocation.CommandIndex], agent) {
