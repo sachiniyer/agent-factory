@@ -103,6 +103,31 @@ func (r *sandboxTokenRegistry) revoke(sessionID string) {
 	delete(r.bySession, sessionID)
 }
 
+// revokeAll drops every outstanding sandbox credential and reports how many it
+// dropped, for the caller's log line.
+//
+// The control listener rebinding is the one event that calls this (#3012 review).
+// A callback credential is inseparable from the endpoint it was minted for: the
+// URL is baked into the sandbox's environment file at provision time and nothing
+// rewrites it, so when bindWebLocked moves the listener and closes the old one,
+// every already-running sandbox is left calling an address that no longer answers
+// while its token stays valid. Leaving it valid buys nothing — the sandbox cannot
+// reach the daemon to use it — and costs the ability to say what happened.
+//
+// This is the same rule the registry already documents for a daemon restart:
+// credentials do not survive the listener they were issued against. Revoking makes
+// the capability's disappearance explicit and logged, instead of a silent
+// connection failure inside a sandbox nobody is watching. It is a MITIGATION, not
+// the fix — the fix is a stable advertised callback endpoint that a rebind does not
+// move, which is recorded on #2999.
+func (r *sandboxTokenRegistry) revokeAll() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := len(r.bySession)
+	r.bySecret, r.bySession = nil, nil
+	return n
+}
+
 // requireTokenFixHint is the one-line fix named by the refusal below. Kept beside
 // the refusal so the message and the key cannot drift.
 const requireTokenFixHint = "af config set require_token true"
@@ -156,11 +181,15 @@ func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url
 	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
 		return "", "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix listen_addr", cfg.ListenAddr)
 	}
-	if err := sandboxCallbackPostureOK(cfg, active); err != nil {
-		return "", "", err
-	}
+	// Dialability first, posture second. Both refuse before any secret exists, but
+	// the ORDER decides which message an operator reads, and a loopback listen_addr
+	// used to answer "enable require_loopback_token" — advice that would have led
+	// them to a well-enforced credential their sandbox still could not use.
 	url, err = sandboxCallbackURL(active)
 	if err != nil {
+		return "", "", err
+	}
+	if err := sandboxCallbackPostureOK(cfg); err != nil {
 		return "", "", err
 	}
 	token, err = m.sandboxTokens.mint(sessionID)
@@ -181,14 +210,15 @@ func (m *Manager) activeWebConfigAddr(requested string) string {
 	return m.webListeners.webConfigAddress()
 }
 
-// sandboxCallbackURL renders listen_addr as a URL a sandbox can dial, or "" when
-// there is nothing to dial.
+// sandboxCallbackURL renders listen_addr as a URL a sandbox can dial, or refuses.
 //
-// A loopback listen_addr is returned unchanged rather than rewritten to something
-// routable. Guessing an externally-reachable address here would be inventing a
-// fact about the operator's network — the sandbox will simply fail to connect,
-// which is a diagnosable outcome, whereas a wrong guess silently points the agent
-// at whatever answers that address on ITS side of the network.
+// It never rewrites an address into something routable: guessing an
+// externally-reachable one would invent a fact about the operator's network, and a
+// wrong guess points the agent at whatever answers there — far worse to debug than
+// a named refusal. So every address that is not dialable FROM A SANDBOX is refused,
+// and the three ways an address can fail that test are one rule, not three special
+// cases: the address must name the daemon when resolved on the sandbox's side of
+// the network, and must name a fixed port.
 func sandboxCallbackURL(listenAddr string) (string, error) {
 	addr := strings.TrimSpace(listenAddr)
 	if addr == "" {
@@ -208,6 +238,24 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 	// agent at whatever answers there — far worse to debug than a named refusal.
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set listen_addr to an address the sandbox can reach", addr)
+	}
+	// Loopback is the same failure as the wildcard above, and refusing it is the
+	// correction to an earlier version of this function that let it through on the
+	// reasoning that a sandbox "will simply fail to connect, which is a diagnosable
+	// outcome" (#3012 review). It is not diagnosable — it is silently wrong.
+	// 127.0.0.1 resolves INSIDE the sandbox, so the agent reaches its own loopback
+	// and finds whatever is listening there, which is not this daemon.
+	//
+	// There is no tunnel to make it work, and that is a property of the design
+	// rather than a gap: the ssh runtime opens a LOCAL forward, daemon → the remote
+	// agent-server, so the daemon can drive the sandbox. Nothing forwards the other
+	// way, and a callback is by definition the other way.
+	//
+	// Refusing here also removes the trap where the posture check told an operator
+	// to set require_loopback_token — a key that would have bought them a
+	// well-enforced credential for an address their sandbox can never dial.
+	if config.IsLoopbackListenAddr(addr) {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q is loopback, so a sandbox dialling it reaches ITSELF rather than this daemon — and nothing forwards the other way (the ssh runtime tunnels daemon→sandbox only). Set listen_addr to an address the sandbox can reach", addr)
 	}
 	if port == "0" {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q asks the kernel to choose a port, so no fixed callback URL exists. Set an explicit port", addr)
@@ -229,19 +277,15 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 // The predicate is "will this request be authenticated", not "is a config key
 // set", which is why it mirrors the gate's own terms rather than restating them.
 //
-// activeAddr is the address of the listener actually accepting, NOT cfg.ListenAddr:
-// the loopback exemption is decided by the listener a callback really reaches, so
-// judging it against an address that failed to bind would clear the posture for a
-// listener that does not exist (#3012 review).
-func sandboxCallbackPostureOK(cfg *config.Config, activeAddr string) error {
+// It no longer carries a require_loopback_token branch. That check existed because
+// authGate exempts loopback peers before examining any token, so a loopback
+// listener would have enforced no scope — but sandboxCallbackURL now refuses every
+// loopback address outright, as undialable from a sandbox, so this is only ever
+// reached for an address the exemption cannot apply to. One rule, stated once,
+// beats the same rule half-stated in two places (#3012 review).
+func sandboxCallbackPostureOK(cfg *config.Config) error {
 	if !cfg.RequireToken {
 		return errSandboxCallbackNeedsRequireToken()
 	}
-	if config.IsLoopbackListenAddr(activeAddr) && !cfg.RequireLoopbackToken {
-		return fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is loopback and require_loopback_token is false, so the gate exempts same-host callers before it checks any token and the credential's scope would enforce nothing. Enable it: %s", requireLoopbackTokenFixHint)
-	}
 	return nil
 }
-
-// requireLoopbackTokenFixHint is the one-line fix for the loopback posture.
-const requireLoopbackTokenFixHint = "af config set require_loopback_token true"

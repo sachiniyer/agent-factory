@@ -170,6 +170,18 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	if old != nil {
 		_ = old()
 	}
+	// The listener moved, so every sandbox callback credential minted against the
+	// old one now points at a closed address (#3012 review). Each sandbox has the
+	// URL baked into the environment file written at provision time and nothing
+	// rewrites it, so those tokens can no longer be used by the sandboxes holding
+	// them. Revoke rather than leave live credentials aimed at nothing, and SAY so:
+	// otherwise the capability vanishes silently inside sandboxes nobody is
+	// watching. Same rule the registry already applies across a daemon restart —
+	// a credential does not outlive the listener it was issued against. Affected
+	// sessions regain callback when they are re-provisioned.
+	if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
+		log.WarningLog.Printf("listen_addr moved to %s: revoked %d sandbox callback credential(s) minted against the previous listener; those sessions lose callback until they are re-provisioned", addr, n)
+	}
 	// The enable banner + posture, logged once per bind (initial and rebind). The
 	// bearer-token line is the operator's only channel to a network listener's
 	// credential; the posture switch and the exposure notice explain who may connect

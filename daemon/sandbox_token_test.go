@@ -185,19 +185,24 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listen_addr")
 
-	// A loopback listener with require_loopback_token off is exempted by the gate
-	// BEFORE any token is examined, so a credential there enforces nothing.
-	loopback := daemonTestConfig(true, "127.0.0.1:8443")
-	_, _, err = m.mintSandboxCallback(loopback, "sess-a")
-	require.Error(t, err, "the gate exempts loopback, so the scope would not be enforced")
-	assert.Contains(t, err.Error(), requireLoopbackTokenFixHint)
-
-	// A BIND address is not a dialable one: from inside a sandbox a wildcard names
-	// the sandbox, and port 0 names nothing fixed at all.
-	for _, addr := range []string{"0.0.0.0:8443", ":8443", "10.0.0.5:0"} {
+	// A BIND address is not a dialable one, and every way it can fail that test is
+	// refused (#3012 review). From inside a sandbox a wildcard names the SANDBOX;
+	// so does loopback, even more definitively — and nothing forwards a callback
+	// the other way, since the ssh runtime tunnels daemon→sandbox only. Port 0
+	// names nothing fixed at all.
+	for _, addr := range []string{"0.0.0.0:8443", ":8443", "[::]:8443", "10.0.0.5:0", "127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
 		_, _, err = m.mintSandboxCallback(daemonTestConfig(true, addr), "sess-a")
 		require.Errorf(t, err, "listen_addr %q is not dialable from a sandbox", addr)
+		assert.Emptyf(t, m.sandboxTokens.bySession, "a refused mint must leave no credential behind (%s)", addr)
 	}
+
+	// Loopback must be refused for being UNDIALABLE, not for the posture: telling
+	// an operator to set require_loopback_token would send them to a key that buys
+	// a well-enforced credential their sandbox still cannot use.
+	_, _, err = m.mintSandboxCallback(daemonTestConfig(true, "127.0.0.1:8443"), "sess-a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reaches ITSELF")
+	assert.NotContains(t, err.Error(), "require_loopback_token")
 
 	url, token, err := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:8443"), "sess-a")
 	require.NoError(t, err)
@@ -211,4 +216,34 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 // daemonTestConfig is the minimal config the refusal reads.
 func daemonTestConfig(requireToken bool, listenAddr string) *config.Config {
 	return &config.Config{RequireToken: requireToken, ListenAddr: listenAddr}
+}
+
+// A credential does not outlive the listener it was minted against (#3012 review).
+//
+// The callback URL is written into the sandbox's environment file at provision
+// time and nothing rewrites it, so a live listen_addr change leaves every running
+// sandbox calling a closed address. Leaving the token valid buys nothing — the
+// sandbox cannot reach the daemon to use it — and hides the fact that the
+// capability is gone.
+func TestSandboxTokenRegistry_RevokeAllDropsEveryCredential(t *testing.T) {
+	var registry sandboxTokenRegistry
+	a, err := registry.mint("sess-a")
+	require.NoError(t, err)
+	b, err := registry.mint("sess-b")
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, registry.revokeAll(), "the count is what the rebind log reports; a wrong one misreports the blast radius")
+	for _, secret := range []string{a, b} {
+		_, ok := registry.sessionFor(secret)
+		assert.False(t, ok, "a credential minted against the previous listener must not survive the rebind")
+	}
+
+	// Idempotent, and the registry must still be usable afterwards — the daemon
+	// keeps running and the next provision mints against the NEW listener.
+	assert.Equal(t, 0, registry.revokeAll())
+	fresh, err := registry.mint("sess-c")
+	require.NoError(t, err)
+	owner, ok := registry.sessionFor(fresh)
+	require.True(t, ok, "revokeAll must clear the registry, not break it")
+	assert.Equal(t, "sess-c", owner)
 }
