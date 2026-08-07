@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The half the first attempt missed: an instance materialized from DISK has no
@@ -18,42 +20,59 @@ import (
 // the ordinary restore, not an edge case, which is why the first fix looked like
 // it worked and did nothing.
 //
-// Driven through a REAL restart — persist, then a second Manager that loads from
-// disk — because that is the situation. Seeding a row and refreshing in place does
-// not reproduce it: my first version of this test did that, and the row never
-// materialized at all, so it asserted nothing.
-func TestRestoreInstances_AttachesCredentialsToDiskLoadedInstances(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	installInstantBackend(t)
-	repoPath := setupControlRepo(t)
-	repo, err := config.RepoFromPath(repoPath)
-	require.NoError(t, err)
+// Driven through fromInstanceDataForRefresh, the seam that exists so a test can
+// "observe (or substitute) the call". Two earlier versions of this test tried to
+// get a real row to materialize — seeding disk and refreshing, then persisting and
+// restarting — and in both the row never loaded, so the test asserted nothing
+// while looking like coverage. Substituting the materializer removes the fixture
+// from the question entirely: what is under test is whether the manager attaches
+// credentials to whatever it loads, not whether a particular row is loadable.
+func TestRefresh_AttachesCredentialsToDiskLoadedInstances(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	seedDiskInstanceWithID(t, repoID, "sess-restored", "restored", repoPath)
 
-	manager, err := NewManager(config.DefaultConfig())
-	require.NoError(t, err)
-	data, err := createForTask(manager, repoPath, "task1", "restored", 1)
-	require.NoError(t, err)
+	restore := fromInstanceDataForRefresh
+	t.Cleanup(func() { fromInstanceDataForRefresh = restore })
+
+	// Stands in for a disk-materialized instance: built with no SandboxCredentials,
+	// exactly as FromInstanceData leaves one.
+	bornWithout := false
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		inst, err := session.NewInstance(session.InstanceOptions{ID: d.ID, Title: d.Title, Path: d.Path, Program: "claude"})
+		if err != nil {
+			return nil, err
+		}
+		// Anti-vacuous: if it arrived already attached, the assertion below would
+		// pass without the manager having done anything.
+		bornWithout = !inst.SandboxCredentialsAttached()
+		return inst, nil
+	}
 
 	manager.mu.Lock()
-	inst := manager.instances[daemonInstanceKey(repo.ID, data.Title)]
+	err := manager.refreshLocked()
 	manager.mu.Unlock()
-	require.NotNil(t, inst)
-	require.True(t, inst.SandboxCredentialsAttached(), "a created instance gets its minter through InstanceOptions")
-	manager.persistInstance(repo.ID, inst)
-
-	// The restart. This manager has never seen the session; it builds it from disk.
-	restarted, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
-	require.NoError(t, restarted.RestoreInstances())
+	require.True(t, bornWithout, "the substitute must produce an UNATTACHED instance, or this test proves nothing")
 
-	restarted.mu.Lock()
-	loaded := restarted.instances[daemonInstanceKey(repo.ID, data.Title)]
-	restarted.mu.Unlock()
-	require.NotNil(t, loaded, "the persisted row must load, or this test asserts nothing")
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(repoID, "restored")]
+	manager.mu.Unlock()
+	require.NotNil(t, inst, "the seeded row must materialize through the substitute")
 
-	assert.True(t, loaded.SandboxCredentialsAttached(),
+	assert.True(t, inst.SandboxCredentialsAttached(),
 		"a disk-loaded instance reached the manager with no credential minter: restoring it would provision a "+
 			"replacement sandbox with no callback and report success")
+}
+
+// seedDiskInstanceWithID is seedDiskInstance with a stable id, which the
+// credential attach keys on.
+func seedDiskInstanceWithID(t *testing.T, repoID, id, title, repoPath string) {
+	t.Helper()
+	seeded, err := json.Marshal([]session.InstanceData{
+		{ID: id, Title: title, Path: repoPath, Status: session.Running},
+	})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
 }
 
 // The minter reads LIVE config, never a snapshot captured when it was built.
