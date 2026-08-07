@@ -21,8 +21,9 @@ import (
 // It stands up a throwaway sshd container as the ssh target (a real ssh server +
 // git + tmux, no external host and no dependency on the box's own sshd), sets a
 // repo's config to backend=ssh pointing at it, and creates a session through the
-// ordinary NewInstance path — so the ssh runtime dials the host with the Go
-// x/crypto/ssh client (key auth + known_hosts verification), clones the workspace
+// ordinary NewInstance path — so the ssh runtime composes an ssh(1) command from
+// the repo's ssh.* settings (key auth + known_hosts verification, each pinned with
+// -o) and provisions over it (#3052), cloning the workspace
 // into a per-session dir, streams a static `af` binary onto the remote, starts an
 // `af agent-server` bound to remote loopback behind a bearer token, and exposes its
 // http:// URL through an ssh local-forward tunnel. The daemon-side Instance then
