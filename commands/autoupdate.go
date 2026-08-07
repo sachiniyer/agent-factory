@@ -195,7 +195,7 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 			return nil
 		}
 
-		if err := writeExecutableInPlaceWaiting(resolvedPath, binary, false, "", false); err != nil {
+		if err := writeExecutableInPlaceWaiting(resolvedPath, binary, false, "", false, false); err != nil {
 			// A busy install lock is a deferral, not a failure: nothing was
 			// attempted, so leaving the window open lets the next launch install
 			// once the other writer is done. Recording it would suppress the next

@@ -259,7 +259,7 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 		}
 	}
 
-	if err := writeExecutableInPlace(resolvedPath, binary, upgradeIgnoreActiveUpgrade, "--"+ignoreActiveUpgradeFlag); err != nil {
+	if err := writeExecutableInPlaceAllowing(resolvedPath, binary, upgradeIgnoreActiveUpgrade, "--"+ignoreActiveUpgradeFlag, upgradeAllowRejected); err != nil {
 		var blocked *blockedInPlaceInstallError
 		if errors.As(err, &blocked) {
 			return err
