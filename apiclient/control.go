@@ -44,13 +44,13 @@ func (c *Client) KillSession(ctx context.Context, req daemon.KillSessionRequest)
 // relocated worktree's new path.
 func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {
 	var resp daemon.ArchiveSessionResponse
-	if err := c.call("ArchiveSession", req, &resp); err != nil {
+	err := c.call("ArchiveSession", req, &resp)
+	// call() classifies a committed outcome generically; this only keeps the
+	// payload, which a committed archive still needs to report where it landed.
+	if err != nil && !IsMutationCommitted(err) {
 		return "", err
 	}
-	if resp.Warning != "" {
-		return resp.ArchivedPath, &mutationCommittedError{detail: resp.Warning}
-	}
-	return resp.ArchivedPath, nil
+	return resp.ArchivedPath, err
 }
 
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
@@ -67,13 +67,11 @@ func (c *Client) RestoreSession(req daemon.RestoreSessionRequest) (string, error
 // opt-in. Returns the daemon's response (archived/killed counts).
 func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeleteProjectResponse, error) {
 	var resp daemon.DeleteProjectResponse
-	if err := c.call("DeleteProject", req, &resp); err != nil {
+	err := c.call("DeleteProject", req, &resp)
+	if err != nil && !IsMutationCommitted(err) {
 		return daemon.DeleteProjectResponse{}, err
 	}
-	if resp.Warning != "" {
-		return resp, &mutationCommittedError{detail: resp.Warning}
-	}
-	return resp, nil
+	return resp, err
 }
 
 // ResumeFromLimit asks the daemon to resume a usage-limit-blocked session

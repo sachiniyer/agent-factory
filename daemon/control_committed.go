@@ -41,17 +41,10 @@ func (o *MutationOutcome) record(err error) (ok bool) {
 	case err == nil:
 		return true
 	case isMutationCommitted(err):
-		o.Committed = true
+		o.Code = apiproto.ErrorCodeMutationCommitted
 		o.Warning = err.Error()
 		return true
 	default:
 		return false
 	}
-}
-
-// committedOutcome exposes the envelope generically. Promoted to every response
-// embedding MutationOutcome, which is what lets the client read it without
-// knowing the concrete type.
-func (o MutationOutcome) committedOutcome() (committed bool, warning string) {
-	return o.Committed, o.Warning
 }

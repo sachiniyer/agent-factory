@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -162,11 +163,22 @@ type KillSessionRequest struct {
 // and be indistinguishable from "never set", silently turning a committed
 // outcome back into a clean failure: exactly the bug this exists to prevent.
 type MutationOutcome struct {
-	// Committed reports that the mutation's irreversible step landed. A caller
-	// that retries this is re-running a partially applied change.
-	Committed bool `json:"committed,omitempty"`
-	// Warning is why the follow-up failed, when Committed is true.
+	// Code carries apiproto.ErrorCodeMutationCommitted when the mutation
+	// committed, and is empty otherwise. It SHARES the HTTP envelope's code
+	// rather than paralleling it with a second boolean: one vocabulary means a
+	// client asks both transports the same question, and a new signal would be
+	// one more thing that can disagree.
+	Code string `json:"code,omitempty"`
+	// Warning is why the follow-up failed, when Code says it committed.
 	Warning string `json:"warning,omitempty"`
+}
+
+// CommittedOutcome reports whether the mutation committed and why its follow-up
+// failed. Exported because BOTH clients read it — daemon's control client and
+// apiclient — generically, off the embedded struct, so a response type opts in
+// by embedding rather than by each client growing a per-method branch.
+func (o MutationOutcome) CommittedOutcome() (committed bool, warning string) {
+	return o.Code == apiproto.ErrorCodeMutationCommitted, o.Warning
 }
 
 type KillSessionResponse struct {

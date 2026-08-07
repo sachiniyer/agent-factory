@@ -305,9 +305,9 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	// generically, for any response embedding MutationOutcome — which replaced
 	// reconstructing it from per-method message prefixes (#3036).
 	if carrier, ok := resp.(interface {
-		committedOutcome() (bool, string)
+		CommittedOutcome() (bool, string)
 	}); ok {
-		if committed, warning := carrier.committedOutcome(); committed {
+		if committed, warning := carrier.CommittedOutcome(); committed {
 			return &rpcMutationCommittedError{err: errors.New(warning)}
 		}
 	}

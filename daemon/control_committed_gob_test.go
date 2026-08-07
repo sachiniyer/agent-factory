@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,7 +20,7 @@ import (
 func TestMutationOutcomeSurvivesGobRoundTrip(t *testing.T) {
 	t.Run("committed outcome arrives intact", func(t *testing.T) {
 		sent := KillSessionResponse{OK: true}
-		sent.Committed = true
+		sent.Code = apiproto.ErrorCodeMutationCommitted
 		sent.Warning = "kill committed, but teardown failed"
 
 		var got KillSessionResponse
@@ -27,7 +28,8 @@ func TestMutationOutcomeSurvivesGobRoundTrip(t *testing.T) {
 		require.NoError(t, gob.NewEncoder(&buf).Encode(sent))
 		require.NoError(t, gob.NewDecoder(&buf).Decode(&got))
 
-		require.True(t, got.Committed,
+		committed, _ := got.CommittedOutcome()
+		require.True(t, committed,
 			"a committed kill that decodes as not-committed tells the caller to retry an applied change")
 		require.Equal(t, "kill committed, but teardown failed", got.Warning)
 	})
@@ -41,7 +43,8 @@ func TestMutationOutcomeSurvivesGobRoundTrip(t *testing.T) {
 		require.NoError(t, gob.NewEncoder(&buf).Encode(KillSessionResponse{OK: true}))
 		require.NoError(t, gob.NewDecoder(&buf).Decode(&got))
 
-		require.False(t, got.Committed, "a clean kill must never read as committed")
+		committed, _ := got.CommittedOutcome()
+		require.False(t, committed, "a clean kill must never read as committed")
 		require.Empty(t, got.Warning)
 	})
 
@@ -57,8 +60,37 @@ func TestMutationOutcomeSurvivesGobRoundTrip(t *testing.T) {
 			"UpdateTask":      &UpdateTaskResponse{},
 			"RemoveTask":      &RemoveTaskResponse{},
 		} {
-			_, ok := resp.(interface{ committedOutcome() (bool, string) })
+			_, ok := resp.(interface{ CommittedOutcome() (bool, string) })
 			require.True(t, ok, "%s response must embed MutationOutcome, or the client cannot read its outcome", name)
 		}
 	})
+}
+
+// The GENERAL case, and the property the deleted per-RPC classifier never had:
+// a response type that no client, list, or switch has ever heard of still
+// round-trips a committed outcome, purely by embedding MutationOutcome. If this
+// ever needs a per-method branch to pass, the mechanism has regressed to what
+// #3032 was closed for.
+type unlistedMutationResponse struct {
+	OK bool
+	MutationOutcome
+}
+
+func TestUnlistedResponseTypeStillRoundTripsCommitted(t *testing.T) {
+	sent := unlistedMutationResponse{OK: true}
+	sent.Code = apiproto.ErrorCodeMutationCommitted
+	sent.Warning = "committed, follow-up failed"
+
+	var got unlistedMutationResponse
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(sent))
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&got))
+
+	// Read exactly as the control client reads it: through the exported accessor
+	// on the embedded struct, with no knowledge of this type.
+	carrier, ok := any(&got).(interface{ CommittedOutcome() (bool, string) })
+	require.True(t, ok, "embedding MutationOutcome must be all a response needs to opt in")
+	committed, warning := carrier.CommittedOutcome()
+	require.True(t, committed, "an unlisted response type must still report its committed outcome")
+	require.Equal(t, "committed, follow-up failed", warning)
 }
