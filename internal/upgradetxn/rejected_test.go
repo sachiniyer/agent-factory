@@ -406,3 +406,22 @@ func TestRejectedLedgerRefusesAHardLinkedInode(t *testing.T) {
 	require.Error(t, err, "an inode another path still names is not trustworthy evidence")
 	require.Contains(t, err.Error(), "hard link")
 }
+
+// #3011 review: the realign must not chmod through a hard link. If the ledger path
+// is a second name for the EXECUTABLE's inode, a path-based chmod turns the binary
+// 0755 -> 0600 and breaks the installation this code exists to protect.
+func TestRejectedLedgerRealignNeverRestylesALinkedExecutable(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	path := rejectedLedgerPath(executable)
+	require.NoError(t, os.Link(executable, path), "the ledger path is a second name for the executable")
+	require.NoError(t, os.Chmod(dir, 0o750))
+
+	alignRejectedLedgerWithDirectoryWriters(path)
+
+	info, err := os.Stat(executable)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(),
+		"the executable must still be executable; a chmod through the link would have bricked it")
+}

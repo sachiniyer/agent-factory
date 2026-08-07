@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 const (
@@ -599,8 +601,19 @@ func (t *Transaction) restoreLocked() error {
 	// nothing ever sets it. The bytes on disk are the ground truth, and this is the
 	// last moment they exist.
 	if !t.journal.CandidateInstalled {
-		if installed, err := os.ReadFile(t.journal.ExecutablePath); err == nil &&
-			digest(installed) == t.journal.CandidateSHA256 {
+		installed, readErr := os.ReadFile(t.journal.ExecutablePath)
+		switch {
+		case readErr != nil:
+			// "I could not read it" is not "it was never installed" (#3011 review).
+			// Silently treating a read failure as evidence of absence would let a
+			// candidate that really did run escape disqualification, which is the one
+			// outcome this marker exists to prevent. Reported rather than assumed —
+			// and NOT returned, because the restore below is what gets the box back to
+			// a known-good binary and must not be blocked by a diagnostic.
+			log.WarningLog.Printf(
+				"could not read %s to confirm whether the candidate had been installed before restoring it; the rollback will proceed and the candidate may not be disqualified: %v",
+				t.journal.ExecutablePath, readErr)
+		case digest(installed) == t.journal.CandidateSHA256:
 			journal := t.journal
 			journal.CandidateInstalled = true
 			if err := t.persistJournalLocked(journal); err != nil {

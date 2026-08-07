@@ -224,7 +224,18 @@ func recordRejectedCandidateLocked(executable, sha256, version, reason string) e
 	}
 	path := rejectedLedgerPath(executable)
 	mode := rejectedLedgerMode
-	gid, shared := directoryWriterGroup(filepath.Dir(path))
+	dir := filepath.Dir(path)
+	gid, shared := directoryWriterGroup(dir)
+	if !shared && !directorySharednessIsKnowable(dir) {
+		// Sharedness is unknowable here (macOS), so "not shared" is "cannot tell" and
+		// imposing the private mode would narrow a genuinely shared ledger on every
+		// write — locking out the other authorized writers this widening exists for.
+		// Keep whatever the existing ledger already carries; a brand-new one gets the
+		// private default, which is the same conservative answer as before #3011.
+		if existing, statErr := os.Lstat(path); statErr == nil && existing.Mode().IsRegular() {
+			mode = existing.Mode().Perm()
+		}
+	}
 	if !shared {
 		if err := durableAtomicWriteFile(path, encoded, mode); err != nil {
 			return fmt.Errorf("write the rejected-candidate ledger: %w", err)
@@ -280,43 +291,40 @@ func recordRejectedCandidateLocked(executable, sha256, version, reason string) e
 // readable and the caller proceeds, because refusing to read it would fail every
 // upgrade closed over a permission bit.
 func alignRejectedLedgerWithDirectoryWriters(path string) {
-	// Lstat, and refuse a symlink outright (#3011 review). A group writer can replace
-	// the ledger with a link before an administrator tightens the directory; chmod
-	// through it would then restyle whatever it points at — with this process's
-	// privileges, on a path the attacker chose. Nothing here is worth that, and the
-	// reader below fails on the contents anyway.
-	info, err := os.Lstat(path)
+	dir := filepath.Dir(path)
+	if !directorySharednessIsKnowable(dir) {
+		// Not knowing is a reason to touch nothing, in BOTH directions. See
+		// directorySharednessIsKnowable.
+		return
+	}
+	// Every mode and group change goes through an OPENED, VERIFIED handle (#3011
+	// review). A path-based chmod here is not safe even after an Lstat: if the ledger
+	// path is a hard link to the EXECUTABLE, the mode change lands on that shared
+	// inode and turns the binary 0755 -> 0600, which breaks the installation this
+	// code exists to protect. verifyLedgerInode refuses a non-regular file, a
+	// multiply-linked inode and a foreign owner, and fchmod/fchown then act on the
+	// handle that was verified rather than on a name that can be re-pointed.
+	handle, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		log.WarningLog.Printf("rejected-candidate ledger %s is a symlink; refusing to adjust its mode", path)
+	defer func() { _ = handle.Close() }()
+	if err := verifyLedgerInode(path, handle); err != nil {
+		log.WarningLog.Printf("refusing to adjust the rejected-candidate ledger %s: %v", path, err)
 		return
 	}
-	dir := filepath.Dir(path)
+	info, err := handle.Stat()
+	if err != nil {
+		return
+	}
 	gid, shared := directoryWriterGroup(dir)
-	if !shared && !directorySharednessIsKnowable(dir) {
-		// On macOS and other platforms without readable ACLs, directoryWriterGroup
-		// reports NOT shared when it cannot tell — deliberately, so nothing is widened
-		// on a guess. Narrowing on that same "no" would be the opposite error: it
-		// would revoke a genuinely shared ledger's access and fail every other
-		// authorized writer's updater closed, which is the harm the widening exists to
-		// prevent. Not knowing is a reason to leave it alone, in both directions.
-		return
-	}
 	want := rejectedLedgerMode
 	if shared {
 		want = rejectedLedgerSharedMode
-		// The group, not just the mode (#3011 review). A private installation that
-		// becomes shared — or one moved to a DIFFERENT collaboration group — leaves
-		// the ledger under its creator's primary group, so 0660 widens it to the
-		// wrong audience: still unreadable by the directory's writers, now writable
-		// by an unrelated group. Group before mode, because chown clears setuid and
-		// setgid bits and would undo a mode set first; and if the chown fails the
-		// mode is left alone rather than widened to the wrong group, which is the
-		// same rule alignLockWithDirectoryWriters follows.
+		// Group before mode: chown clears setgid and would undo a mode set first, and
+		// if it fails the mode is left alone rather than widened to the wrong group.
 		if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Gid) != gid {
-			if err := os.Chown(path, -1, gid); err != nil {
+			if err := handle.Chown(-1, gid); err != nil {
 				log.WarningLog.Printf("rejected-candidate ledger %s could not be given its directory's group %d, leaving its mode alone: %v", path, gid, err)
 				return
 			}
@@ -325,40 +333,12 @@ func alignRejectedLedgerWithDirectoryWriters(path string) {
 	if info.Mode().Perm() == want {
 		return
 	}
-	// Both directions, not just narrowing. An installation that BECOMES shared leaves
-	// a pre-existing 0600 ledger owner-only, and every other authorized writer's
-	// updater then fails closed on every release — the exact harm the widening was
-	// introduced to prevent, reached by a different route.
-	if err := os.Chmod(path, want); err != nil {
-		// Reported, not silent. A revoke that fails is the interesting case: the
-		// directory has been tightened and the ledger is still group-writable, so
-		// somebody who can no longer replace the binary can still rewrite the record
-		// that decides which binaries get installed. The caller proceeds — refusing
-		// to read would fail every upgrade closed over a permission bit — but this
-		// must not pass unmentioned.
+	if err := handle.Chmod(want); err != nil {
 		log.WarningLog.Printf("rejected-candidate ledger %s could not be set to mode %v (its directory is shared=%v): %v",
 			path, want, shared, err)
 	}
 }
 
-// verifyLedgerInode refuses anything that is not a plain, trustworthy ledger file.
-//
-// Two questions, both asked of the OPENED handle rather than the path, so the answer
-// cannot change between the check and the read:
-//
-//   - Is it a regular file? A FIFO, device or directory here is not a ledger, and
-//     reading one ranges from meaningless to hanging.
-//   - On an UNSHARED directory, is it owned by the directory's owner? Narrowing the
-//     mode does not revoke a former group writer who OWNS the file: as its owner they
-//     can chmod it back and rewrite it whenever they like, and the installation owner
-//     may not even be able to read it. A ledger left behind by someone who can no
-//     longer replace the binary is not evidence, so it is refused rather than
-//     trusted. On a SHARED directory any group member owning it is the DESIGNED case
-//     and must not be refused.
-//
-// Refusal is an error, and an error fails closed at every caller — which is the right
-// direction: "somebody else owns the record of what is disqualified" is not "nothing
-// is disqualified".
 // directorySharednessIsKnowable reports whether "not shared" is a FACT here rather
 // than a refusal to guess. hasExtendedACL answers true both for a directory that
 // really carries an ACL and for every non-Linux platform, where the ACL state cannot
