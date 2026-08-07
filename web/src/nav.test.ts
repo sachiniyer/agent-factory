@@ -22,6 +22,7 @@ function ctx(over: Partial<NavContext> = {}): NavContext {
     tabCount: 1,
     activeTab: 0,
     tabManagement: true,
+    shellCreatable: true,
     tabClosable: true,
     ...over,
   };
@@ -154,7 +155,7 @@ test("nav mode: a session that can create nothing can still CLOSE what it has (#
   // CreateTab consults Capabilities.RefuseTabKind; CloseTab consults nothing but
   // "is this the agent tab". Tying the × to the create rule stranded agent-created
   // web tabs in an off-box session's bar with no way to remove them.
-  const remote = ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 0 });
+  const remote = ctx({ tabManagement: false, shellCreatable: false, tabClosable: true, tabCount: 2, activeTab: 0 });
   assert.deepEqual(decideKey("t", remote), { kind: "none" }, "no kind is creatable here, so no new tab");
   assert.deepEqual(
     decideKey("w", ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 1 })),
@@ -230,4 +231,15 @@ test("non-sessions views: the session keys pass through, only view switching is 
   assert.deepEqual(decideKey("Enter", configView), { kind: "none" }, "Enter attaches only in the sessions view");
   assert.deepEqual(decideKey("t", configView), { kind: "none" }, "no tab management outside the sessions view");
   assert.deepEqual(decideKey("]", configView), { kind: "switchView", view: "sessions" });
+});
+
+test("the t shortcut asks the SHELL verdict, not 'any offerable kind' (#3060)", () => {
+  // vscode creatable, shell refused: the menu correctly offers VS Code, but `t`
+  // makes a shell — consuming the key here would swallow it for a create that
+  // createSessionTab then silently rejects.
+  const vscodeOnly = ctx({ tabManagement: true, shellCreatable: false, tabCount: 1, activeTab: 0 });
+  assert.deepEqual(decideKey("t", vscodeOnly), { kind: "none" }, "t must fall through when a shell is refused");
+
+  const shellOK = ctx({ tabManagement: true, shellCreatable: true, tabCount: 1, activeTab: 0 });
+  assert.deepEqual(decideKey("t", shellOK), { kind: "newTab" });
 });

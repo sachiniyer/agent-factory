@@ -9877,7 +9877,7 @@ function decideKey(key, ctx, mods = {}) {
       return { kind: "none" };
     }
     if (key === "t") {
-      return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
+      return ctx.shellCreatable ? { kind: "newTab" } : { kind: "none" };
     }
     if (key === "w") {
       return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
@@ -15395,6 +15395,8 @@ function onKeydown(e) {
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      // `t` opens a shell specifically, so it asks the shell verdict (#3060).
+      shellCreatable: actionableSelected ? canCreateTabKind(actionableSelected, "shell") : false,
       // Closing is gated on the session being live, NOT on it being able to create
       // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
       // is still excluded — the daemon does refuse that one (#1809).
