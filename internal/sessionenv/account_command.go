@@ -1,6 +1,9 @@
 package sessionenv
 
 import (
+	"path/filepath"
+	"strings"
+
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
@@ -30,7 +33,7 @@ import (
 // agent, and a modelled `env` wrapper around one — and reports everything else
 // as UNPROVABLE. New syntax then arrives as a refusal to scope rather than as a
 // silent bypass, which is the direction this repo can afford to be wrong in.
-func commandOverridesName(command, name string) (overrides, provable bool) {
+func commandOverridesName(command, agent string, names map[string]struct{}) (overrides, provable bool) {
 	if command == "" {
 		return false, true
 	}
@@ -38,16 +41,19 @@ func commandOverridesName(command, name string) (overrides, provable bool) {
 	if !ok {
 		return false, false
 	}
-	return callOverridesName(call, name, 0)
+	return callOverridesName(call, agent, names, 0)
 }
 
-func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides, provable bool) {
+func callOverridesName(call *syntax.CallExpr, agent string, names map[string]struct{}, depth int) (overrides, provable bool) {
 	if depth > maxNestedProgramDepth {
 		return false, false
 	}
 	// Shell-parsed assignment prefixes: `CODEX_HOME=/other codex`.
 	for _, assign := range call.Assigns {
-		if assign != nil && assign.Name != nil && assign.Name.Value == name {
+		if assign == nil || assign.Name == nil {
+			continue
+		}
+		if _, refused := names[assign.Name.Value]; refused {
 			return true, true
 		}
 	}
@@ -69,7 +75,7 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 		if !ok {
 			break
 		}
-		if assigned == name {
+		if _, refused := names[assigned]; refused {
 			return true, true
 		}
 	}
@@ -81,11 +87,11 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 		if !ok {
 			return false, false
 		}
-		return callOverridesName(inner, name, depth+1)
+		return callOverridesName(inner, agent, names, depth+1)
 	}
 
 	if wordBaseEquals(words[0], "env") {
-		return envOverridesName(words[1:], name)
+		return envOverridesName(words[1:], agent, names)
 	}
 
 	// Anything else is unprovable, and that includes commands that look
@@ -96,7 +102,7 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 	//
 	// A DIRECT invocation of a known agent is the one provable case: it consumes
 	// its arguments itself and starts no second program construction.
-	if base, ok := literalShellWord(words[0]); ok && AgentForCommand(base) != "" {
+	if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, agent) {
 		return false, true
 	}
 	return false, false
@@ -111,7 +117,7 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 // and a second implementation of the same grammar is a second thing to keep in
 // step. Anything Parse rejects is unprovable by definition, because Parse's own
 // contract is to refuse rather than silently model a different environment.
-func envOverridesName(args []*syntax.Word, name string) (overrides, provable bool) {
+func envOverridesName(args []*syntax.Word, agent string, names map[string]struct{}) (overrides, provable bool) {
 	literals, ok := literalCommandArgs(args)
 	if !ok {
 		return false, false
@@ -126,7 +132,7 @@ func envOverridesName(args []*syntax.Word, name string) (overrides, provable boo
 		return true, true
 	}
 	for _, mutation := range invocation.Mutations {
-		if mutation.Name == name {
+		if _, refused := names[mutation.Name]; refused {
 			// Set to something else, or unset outright — either way the injected
 			// value is not what the agent will see.
 			return true, true
@@ -137,8 +143,26 @@ func envOverridesName(args []*syntax.Word, name string) (overrides, provable boo
 		return false, true
 	}
 	// env leaves the root alone, so the decision belongs to whatever it runs.
-	if AgentForCommand(literals[invocation.CommandIndex]) != "" {
+	if executableIsAgent(literals[invocation.CommandIndex], agent) {
 		return false, true
 	}
 	return false, false
+}
+
+// executableIsAgent reports whether an already-tokenized executable operand IS
+// the account's agent.
+//
+// Two things it deliberately does not do. It does not re-parse the operand as a
+// command string: `env './codex wrapper'` yields ONE executable path whose name
+// contains a space, and handing that to a command parser splits it and reports
+// `./codex` — while the shell runs a repository-provided file called
+// `codex wrapper`. And it does not accept just any known agent: a cross-agent
+// override (`account.Agent` claude, command `codex`) would otherwise be called
+// provable, after which the injected CLAUDE_CONFIG_DIR means nothing to codex and
+// it authenticates from its own default home (#2983 review).
+func executableIsAgent(executable, agent string) bool {
+	if executable == "" || agent == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Base(executable), agent)
 }

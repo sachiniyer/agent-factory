@@ -149,16 +149,32 @@ func ApplyAccount(env []string, command string, account Account) ([]string, erro
 	// repository's checked-in config, so without this a repo could silently
 	// redirect whose quota a session spends. Unprovable commands fail closed —
 	// an unparsed command is not evidence of safety.
-	if overrides, provable := commandOverridesName(command, configVar); overrides || !provable {
+	// EVERY identity-bearing name, not just the config root. Subtraction removed
+	// the ambient copies, but `/bin/sh -c` applies a command-local assignment
+	// afterwards — so `OPENAI_API_KEY=sk-other codex` RECREATES an identity that
+	// outranks the account directory, and the guard would have called it safe
+	// because it only watched CODEX_HOME.
+	//
+	// The guarded cloud selectors are in the set too. A selector assignment whose
+	// value the parser cannot evaluate (`CLAUDE_CODE_USE_BEDROCK=$HOME claude`)
+	// reads as DISABLED to ResolveAuthSelectors, so the cloud-mode refusal above
+	// never fires while the shell expands it to a non-empty string and Claude
+	// authenticates through ~/.aws instead. Refusing any command-local assignment
+	// to a selector removes the need to evaluate it (#2983 review).
+	refused := accountScopedNames(account.Agent, configVar)
+	for _, selector := range GuardedSelectors() {
+		refused[selector] = struct{}{}
+	}
+	if overrides, provable := commandOverridesName(command, account.Agent, refused); overrides || !provable {
 		if !provable {
 			return nil, fmt.Errorf(
-				"account %q cannot scope agent %q: its program could not be proven free of a %s assignment, "+
-					"and an unverifiable program is not evidence that the account would be used",
-				account.Name, account.Agent, configVar)
+				"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+
+					"identity assignments, and an unverifiable program is not evidence that the account would be used",
+				account.Name, account.Agent, account.Agent)
 		}
 		return nil, fmt.Errorf(
-			"account %q cannot scope agent %q: its program sets %s itself, which overrides the account directory",
-			account.Name, account.Agent, configVar)
+			"account %q cannot scope agent %q: its program sets an identity variable itself, which overrides the account directory",
+			account.Name, account.Agent)
 	}
 
 	denied := accountScopedNames(account.Agent, configVar)

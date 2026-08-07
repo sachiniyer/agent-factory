@@ -186,6 +186,15 @@ func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
 		// Sets the variable AND wraps a shell: the assignment is the stronger,
 		// definite answer, so this is an override rather than merely unprovable.
 		"env CODEX_HOME=/other sh -c codex",
+		// Any identity-bearing name, not just the config root: subtraction removed
+		// the ambient copy, and the shell recreates it afterwards.
+		"OPENAI_API_KEY=sk-other codex",
+		"CODEX_API_KEY=other codex",
+		"env OPENAI_API_KEY=sk-other codex",
+		// A cloud selector whose value the parser cannot evaluate reads as
+		// DISABLED, so the cloud-mode refusal never fires while the shell expands
+		// it to a non-empty string.
+		"CLAUDE_CODE_USE_BEDROCK=$HOME codex",
 		"CODEX_HOME=$HOME/.codex codex",
 		"env CODEX_HOME=/other codex",
 		"env -u CODEX_HOME codex",
@@ -195,7 +204,7 @@ func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
 	for _, command := range cases {
 		_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
 		require.Error(t, err, "command %q must not silently override the account root", command)
-		require.Contains(t, err.Error(), "CODEX_HOME")
+		require.Contains(t, err.Error(), "identity variable")
 	}
 
 	// An ordinary program is unaffected, so the guard is not simply refusing all
@@ -220,9 +229,16 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		"bash -lc codex",
 		// Any binary whose behaviour is not modelled here.
 		"/usr/local/bin/wrapper codex",
+		// A CROSS-AGENT override: the account scopes codex, the command runs
+		// claude, which ignores CODEX_HOME entirely and uses its own default home.
+		"claude",
+		// One executable operand whose NAME contains a space. Re-parsing it as a
+		// command string would split it and see "./codex"; the shell runs a
+		// repository-provided file called "codex wrapper".
+		"env './codex wrapper'",
 	} {
 		_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
 		require.Error(t, err, "command %q is unparseable and must not be assumed safe", command)
-		require.Contains(t, err.Error(), "could not be proven free")
+		require.Contains(t, err.Error(), "could not be proven")
 	}
 }
