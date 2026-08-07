@@ -190,10 +190,13 @@ func TestCommittedWarningSurvivesEveryDecodePath(t *testing.T) {
 	current := ArchiveSessionResponse{OK: true, ArchivedPath: "/archived/here"}
 	current.record(&mutationCommittedError{err: errors.New("on-archive hook failed")})
 
+	// The tags are the point: the pre-#3036 response carried exactly these, so a
+	// fixture without them models a wire that never shipped. gob matches by Go
+	// field name and passed either way; json does not.
 	type legacyWire struct {
-		OK           bool
-		ArchivedPath string
-		Warning      string
+		OK           bool   `json:"ok"`
+		ArchivedPath string `json:"archived_path"`
+		Warning      string `json:"warning,omitempty"`
 	}
 	legacy := legacyWire{OK: true, ArchivedPath: "/archived/here", Warning: "legacy hook failed"}
 
@@ -259,9 +262,9 @@ func TestNewDaemonWarningReachesOlderClient(t *testing.T) {
 	current.record(&mutationCommittedError{err: errors.New("on-archive hook failed")})
 
 	type olderClientWire struct {
-		OK           bool
-		ArchivedPath string
-		Warning      string
+		OK           bool   `json:"ok"`
+		ArchivedPath string `json:"archived_path"`
+		Warning      string `json:"warning,omitempty"`
 	}
 	var buf bytes.Buffer
 	require.NoError(t, gob.NewEncoder(&buf).Encode(current))
