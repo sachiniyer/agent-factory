@@ -124,7 +124,7 @@ func TestRestoreSession_ReachableSandboxIsNotReplacedWhenThePushFails(t *testing
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	srv.archiveFails.Store(true)
-	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "push-fails", srv.url, session.Lost)
+	_, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "push-fails", srv.url, session.Lost)
 
 	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "push-fails", RepoID: repoID})
 
@@ -135,6 +135,7 @@ func TestRestoreSession_ReachableSandboxIsNotReplacedWhenThePushFails(t *testing
 	if got := backend.recoverCalls(); got != 0 {
 		t.Fatalf("recover calls = %d, want 0: nothing may be replaced when the push did not land", got)
 	}
+	requireSandboxSurvived(t, reap, "its push failed, so it holds the only copy of this session's work")
 	if !strings.Contains(err.Error(), "--force-reap") {
 		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
 	}
@@ -151,7 +152,7 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	srv.unreachable.Store(true)
-	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "indeterminate", srv.url, session.Lost)
+	_, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "indeterminate", srv.url, session.Lost)
 
 	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "indeterminate", RepoID: repoID})
 
@@ -165,6 +166,7 @@ func TestRestoreSession_IndeterminateSandboxIsNotReplaced(t *testing.T) {
 	if got := srv.archiveCalls.Load(); got != 0 {
 		t.Fatalf("archive calls = %d, want 0: there is nothing to push to when the sandbox cannot be reached", got)
 	}
+	requireSandboxSurvived(t, reap, "unreachable is not gone — it may be live behind a broken network path, still holding work")
 	if !strings.Contains(err.Error(), "--force-reap") {
 		t.Fatalf("the refusal must name the command that releases it (#2917), got: %v", err)
 	}
@@ -231,7 +233,7 @@ func TestRestoreSession_ForceReapStillRefusesWhenTheBranchIsUnknown(t *testing.T
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "")
 	srv.unreachable.Store(true)
-	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "no-branch", srv.url, session.Lost)
+	_, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "no-branch", srv.url, session.Lost)
 
 	_, _, err := manager.RestoreSession(RestoreSessionRequest{
 		Title: "no-branch", RepoID: repoID, ForceReap: true,
@@ -244,6 +246,7 @@ func TestRestoreSession_ForceReapStillRefusesWhenTheBranchIsUnknown(t *testing.T
 	if got := backend.recoverCalls(); got != 0 {
 		t.Fatalf("recover calls = %d, want 0", got)
 	}
+	requireSandboxSurvived(t, reap, "--force-reap cannot release this refusal, so nothing is authorized to touch the runtime")
 	if !strings.Contains(err.Error(), "af sessions kill") {
 		t.Fatalf("a refusal that force cannot release must name the alternative that ends it, got: %v", err)
 	}
@@ -275,7 +278,7 @@ func TestRestoreSession_ForceReapRefusesABranchThatIsNotOnDisk(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	srv.unreachable.Store(true)
-	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "volatile", srv.url, session.Lost)
+	_, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "volatile", srv.url, session.Lost)
 	// In memory only — exactly what a partial archive whose persist failed leaves.
 	manager.instances[daemonInstanceKey(repoID, "volatile")].SetSandboxBranch("af/only-in-memory")
 
@@ -290,6 +293,7 @@ func TestRestoreSession_ForceReapRefusesABranchThatIsNotOnDisk(t *testing.T) {
 	if got := backend.recoverCalls(); got != 0 {
 		t.Fatalf("recover calls = %d, want 0", got)
 	}
+	requireSandboxSurvived(t, reap, "the branch authorizing the reap was never written to disk")
 	if !strings.Contains(err.Error(), "only in memory") {
 		t.Fatalf("the refusal must say WHY it refused, got: %v", err)
 	}
@@ -309,7 +313,7 @@ func TestRestoreSession_ForceReapRefusesAStalePersistedBranch(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/session-branch")
 	srv.unreachable.Store(true)
-	_, backend := registerStartedRemote(t, manager, repoID, repoPath, "stale", srv.url, session.Lost)
+	_, backend, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "stale", srv.url, session.Lost)
 	inst := manager.instances[daemonInstanceKey(repoID, "stale")]
 
 	// An earlier archive recorded this branch durably.
@@ -330,12 +334,45 @@ func TestRestoreSession_ForceReapRefusesAStalePersistedBranch(t *testing.T) {
 	if got := backend.recoverCalls(); got != 0 {
 		t.Fatalf("recover calls = %d, want 0", got)
 	}
+	requireSandboxSurvived(t, reap, "the stored branch points somewhere other than the work this sandbox holds")
 	// The refusal has to name BOTH branches, or an operator cannot tell which
 	// one holds their work and which one the restore would go back to.
 	for _, want := range []string{"af/older-archive", "af/newly-pushed"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the refusal must name %q so the operator can see what diverged, got: %v", want, err)
 		}
+	}
+}
+
+// requireSandboxSurvived asserts the PHYSICAL runtime was never released (#3042).
+//
+// Every refusal in this file exists because the sandbox may be the only place some
+// of the user's work exists, and "af refused" is a claim about the sandbox, not
+// about the error string. The message assertions below it check that the refusal
+// SAYS the right thing and names its escape; this one checks the thing the message
+// is a claim about.
+//
+// Paired with the recoverCalls()==0 check rather than replacing it, and the pair is
+// what makes the guarantee complete at this layer: recoverCalls()==0 says the
+// daemon did not authorize the layer that reaps (backend.Recover, which is
+// recoverSandbox in production), and this says the daemon did not reap the runtime
+// itself from some other path. Neither alone rules out both.
+//
+// The BOUNDARY, stated so a reader does not over-read it: this observes the reap
+// the DAEMON can reach. On the recovery path the physical reap lives inside
+// recoverSandbox -> reprovisionRemote -> reapRemoteRuntimeForReplacement, one layer
+// down, and the fake backend's Recover stubs that out — so the positive force-reap
+// arms deliberately do NOT assert a reap here, because a zero there would be
+// asserting the fixture's limit rather than production's behaviour. That reap is
+// covered in session (archive_sandbox_test.go, archive_sandbox_reprovision_test.go);
+// driving it end-to-end from the daemon needs the faithful Runtime double tracked
+// on #2999.
+func requireSandboxSurvived(t *testing.T, reap *sandboxReap, why string) {
+	t.Helper()
+	if got := reap.count(); got != 0 {
+		t.Fatalf("the sandbox was physically REAPED %d times despite the refusal — %s. A refusal that "+
+			"destroys the runtime anyway is the data loss this guard exists to prevent, and it reports "+
+			"success-shaped words while doing it", got, why)
 	}
 }
 

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,16 +28,21 @@ import (
 func TestArchiveRemoteSession_RecordsThePushedBranchAndReapsOnce(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	srv := newSandboxProbeServer(t, "af/pushed-branch")
-	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-worker", srv.url, session.Running)
+	inst, _, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "remote-worker", srv.url, session.Running)
 
 	// The PHYSICAL reap, installed through the same field a sandbox runtime
 	// populates. Counting the /v1/agent/kill request instead would pass for a
 	// regression that sent the message and left the container running (#3042).
-	var reaps atomic.Int32
-	session.SetRuntimeTeardownForTest(inst, func() error {
-		reaps.Add(1)
-		return nil
-	})
+	//
+	// The witness samples the push count AT THE MOMENT OF THE REAP, which is what
+	// makes "push before release" an assertion about ordering rather than about two
+	// totals. The fixture refusing /v1/agent/kill before /v1/agent/archive already
+	// orders the two REST calls, but the reap is a separate act from the call that
+	// triggers it: a regression that reaped inside the kill handler's error path, or
+	// from any site that runs before the push, leaves both REST counters at one and
+	// every branch assertion passing while the workspace being made durable is
+	// already destroyed.
+	reap.observe(srv.archiveCalls.Load)
 
 	require.Empty(t, inst.GetBranch(),
 		"precondition: a never-archived sandbox session has no branch recorded")
@@ -59,13 +63,17 @@ func TestArchiveRemoteSession_RecordsThePushedBranchAndReapsOnce(t *testing.T) {
 		assert.Equal(t, session.LiveArchived, rec.Liveness)
 	}
 
-	assert.Equal(t, int32(1), reaps.Load(),
+	assert.Equal(t, 1, reap.count(),
 		"the sandbox runtime must actually be RELEASED exactly once — a kill that reports success "+
 			"while the container keeps running leaves a VM billing with no session record pointing "+
 			"at it, so nothing will ever reap it")
+	assert.Equal(t, int32(1), reap.witnessedAtFirstReap(),
+		"and the release must happen with the push ALREADY DONE: the reap read 0 pushes from its own "+
+			"vantage point, so the sandbox holding the only copy of this work was destroyed before the "+
+			"work was made durable (#2923/#2925/#2959)")
 	assert.Equal(t, int32(1), srv.killCalls.Load(),
-		"and the request that triggers it is sent once; the fixture refuses it before the push, so "+
-			"this also pins that the release came AFTER the work was made durable")
+		"the request that triggers the reap is sent once too — a second one means two paths each "+
+			"believe they own this runtime's lifetime")
 	assert.Equal(t, int32(1), srv.archiveCalls.Load(),
 		"the push runs exactly once: twice would mean the sandbox was archived again after its "+
 			"branch was already durable")

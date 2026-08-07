@@ -35,10 +35,9 @@ func TestKillSession_RemoteReapSucceededDeletesRowWithoutMisleadingError(t *test
 	// The in-sandbox agent-server is dead: /v1/agent/kill answers with the error
 	// envelope the real agent-server returns for a failed op, so
 	// remoteAgentServer.Kill's killErr is a PLAIN REST error, not
-	// ErrPaneMayBeLive/ErrWorkspaceStateUnknown. runtimeTeardown is nil in this
-	// harness, so the joined error reduces to exactly killErr — the identical shape
-	// errors.Join(killErr, teardown()) collapses to when the sandbox reap SUCCEEDS
-	// (teardown() == nil). That is the input KillSession misclassified.
+	// ErrPaneMayBeLive/ErrWorkspaceStateUnknown. The sandbox reap SUCCEEDS, so
+	// errors.Join(killErr, teardown()) collapses to exactly killErr. That is the
+	// input KillSession misclassified.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/agent/kill" {
@@ -52,7 +51,15 @@ func TestKillSession_RemoteReapSucceededDeletesRowWithoutMisleadingError(t *test
 	defer srv.Close()
 
 	manager, repoID, repoPath := newStatusTestManager(t)
-	registerStartedRemote(t, manager, repoID, repoPath, "remote-reaped", srv.URL, session.Running)
+	// The reap is INSTALLED, and that is the #3042 fix to this test rather than a
+	// convenience. Every assertion below is about a session whose sandbox "WAS
+	// reaped" — the name says so, the error message it rejects says so — and with a
+	// nil teardown none of them could see it. A regression that stopped reaping on
+	// the kill path kept this green while leaving a container running for every
+	// remote session the user ever killed. Installing it also makes the premise
+	// above true by construction instead of by absence: the joined error collapses
+	// to killErr because the reap SUCCEEDED, not because there was none.
+	_, _, reap := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "remote-reaped", srv.URL, session.Running)
 	key := daemonInstanceKey(repoID, "remote-reaped")
 
 	killed, err := manager.KillSession(KillSessionRequest{Title: "remote-reaped", RepoID: repoID})
@@ -64,6 +71,22 @@ func TestKillSession_RemoteReapSucceededDeletesRowWithoutMisleadingError(t *test
 	}
 	if killed.Title != "remote-reaped" {
 		t.Fatalf("killed event resolved the wrong session: got %q, want %q", killed.Title, "remote-reaped")
+	}
+
+	// THE EFFECT, asserted before anything about records or messages: the sandbox is
+	// physically gone. This runs through the same ProvisionResult.Teardown field
+	// docker populates with `docker rm -f`, so it is the reap production performs and
+	// not a restatement of the REST call that triggers it (#3042).
+	//
+	// Exactly once. A second release is not harmless here even though the runtimes
+	// make teardown idempotent: it means two code paths each believe they own this
+	// runtime's lifetime, and the next one to be given a REPLACEMENT sandbox's handle
+	// reaps that instead — which is how a live session's container disappears under it.
+	if got := reap.count(); got != 1 {
+		t.Fatalf("physical sandbox reaps = %d, want exactly 1: the /v1/agent/kill REST call failing is "+
+			"precisely when the reap matters most (the container must not leak because its agent-server "+
+			"was already down), and a sandbox left alive is a VM still billing that no session record "+
+			"points at, so nothing will ever clean it up", got)
 	}
 
 	// The row MUST be gone with no one-poll flicker: a KNOWN-state teardown (dead

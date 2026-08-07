@@ -94,9 +94,20 @@ func (i *Instance) GetBranch() string {
 // Deliberately narrow: it installs the callback and nothing else, so a test asserts
 // the EFFECT through the same field production populates rather than through a
 // better-chosen proxy. A better proxy is still a proxy.
+//
+// It clears the derived agentSrv cache in the SAME i.mu section, which every
+// production writer of this field already does (bindProvisionResult,
+// retainProvisionResultCleanup, resetRemoteRuntime) and which #1729 is about.
+// remoteAgentServer captures teardown BY VALUE at build time, so without this a
+// reap installed while the cache is warm — after any poll, preview or probe — is
+// never invoked: the fixture observes zero reaps whatever production does, and a
+// test asserting "nothing was reaped" passes unconditionally. That is #3042's own
+// blind spot reproduced inside the helper meant to close it, and leaving it to
+// call order across thirty-odd fixture call sites is not a guarantee.
 func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.agentSrv = nil
 	i.runtimeTeardown = teardown
 }
 
