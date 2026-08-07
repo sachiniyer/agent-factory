@@ -265,23 +265,6 @@ type Instance struct {
 	// outer runtime's agent-server flags. Local sessions normally source the
 	// same setting from global config during Provision.
 	sessionEnvPassthrough []string
-	// sandboxCallback re-mints this session's callback credential (#2999). Kept on
-	// the instance because RE-PROVISIONING needs it: reprovisionRemote builds a
-	// fresh ProvisionSpec for a restored or recovered sandbox, and without this it
-	// built one with no credential at all — so a routine archive/restore silently
-	// ended callback for that session, permanently, since archiving also revokes the
-	// old credential (#3065 review).
-	//
-	// Calling it again is the correct operation rather than a workaround: a mint
-	// REPLACES the session's previous credential, so the replacement sandbox gets a
-	// fresh one and the old secret — which the dead sandbox may still hold — stops
-	// authenticating. Set once at construction and never mutated, so reading it does
-	// not need i.mu; it is read under the lock anyway because the spec around it is.
-	//
-	// nil for a local session, and for any instance built without a daemon behind it
-	// (tests, the agent-server's own in-sandbox instances) — reprovision then keeps
-	// today's behaviour of provisioning without a callback.
-	sandboxCallback func() (url, token string, err error)
 
 	// The below fields are initialized upon calling Start().
 
