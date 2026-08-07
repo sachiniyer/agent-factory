@@ -12685,7 +12685,7 @@ function canMutateTabRoster(s) {
   return canManageTabs(s);
 }
 function canCloseTabs(s) {
-  return !isArchived(s);
+  return canMutateTabRoster(s);
 }
 function tabCreationUnavailableReason(s) {
   const projected = s.tab_kinds;
@@ -13627,7 +13627,7 @@ var AppShell = class {
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
    *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
-  newTabControl() {
+  newTabControl(selected) {
     const wrap = h2("div", { class: "af-tab-new-wrap" });
     const trigger = h2(
       "button",
@@ -13697,7 +13697,16 @@ var AppShell = class {
       });
       return b;
     };
-    menu.append(item("Terminal", "shell"), item("VS Code", "vscode"));
+    const offered = [];
+    for (const [label, kind] of [
+      ["Terminal", "shell"],
+      ["VS Code", "vscode"]
+    ]) {
+      if (!selected || canCreateTabKind(selected, kind)) {
+        offered.push(item(label, kind));
+      }
+    }
+    menu.append(...offered);
     trigger.addEventListener("click", (e) => {
       e.stopPropagation();
       if (menu.hidden) {
@@ -13836,7 +13845,7 @@ var AppShell = class {
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
-      children.push(this.newTabControl());
+      children.push(this.newTabControl(selected));
     } else {
       const reason = h2("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
       reason.setAttribute("aria-label", `New tab unavailable \xB7 ${unavailable}`);

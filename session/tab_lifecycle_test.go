@@ -368,10 +368,8 @@ func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 		seen := map[string]bool{}
 		for _, a := range allowances {
 			seen[a.Kind] = true
-			// The projection's vocabulary is the CLI's PLUS "process", which has no
-			// --kind spelling but is creatable through the default CreateTab.
-			kind, ok := parseTabKindNameForProjection(a.Kind)
-			require.Truef(t, ok, "%q must be a name the projection can resolve", a.Kind)
+			kind, ok := ParseTabKindName(a.Kind)
+			require.Truef(t, ok, "%q must be a name the CLI accepts", a.Kind)
 
 			// The assertion that matters:each entry equals what RefuseTabKind says now.
 			err := caps.RefuseTabKind(kind, "")
@@ -404,16 +402,26 @@ func TestTabKindProjection_IsNotPersisted(t *testing.T) {
 	require.Equal(t, "s", stored.Title, "and the real record survives")
 }
 
-// A process tab has no --kind spelling but IS creatable, so a per-kind projection
-// that omitted it would under-report what a session can do.
-func TestTabKindAllowances_IncludesTheProcessKind(t *testing.T) {
+// Every projected Kind must be SUBMIT-READY — a value a client can put straight
+// into CreateTabRequest.Kind. "process" is deliberately absent: it has no --kind
+// spelling, so projecting it would hand clients an identifier ParseTabKindName
+// rejects. Nothing is under-reported, because shell and process classify
+// identically and a client reads the shell entry for both.
+func TestTabKindAllowances_ProjectsOnlySubmittableKinds(t *testing.T) {
 	kinds := map[string]bool{}
 	for _, a := range tabKindAllowances(Capabilities{Workspace: WorkspaceLocalWorktree}) {
+		_, ok := ParseTabKindName(a.Kind)
+		require.Truef(t, ok, "%q must be accepted by ParseTabKindName, or a client cannot submit it", a.Kind)
 		kinds[a.Kind] = true
 	}
-	for _, want := range []string{"shell", "process", "web", "vscode"} {
-		require.Truef(t, kinds[want], "every creatable kind must be projected; %q was missing", want)
+	for _, want := range []string{"shell", "web", "vscode"} {
+		require.Truef(t, kinds[want], "every submittable kind must be projected; %q was missing", want)
 	}
+	require.False(t, kinds["process"], "process has no --kind spelling and must not be offered as one")
+
+	// The property that makes the omission safe rather than convenient.
+	require.Equal(t, TabKindRequires(TabKindShell), TabKindRequires(TabKindProcess),
+		"shell and process must classify identically, or reading the shell entry for a process tab is wrong")
 }
 
 // TestTabRosterMutable_FalseSurvivesSerialization is the forward-compatibility

@@ -522,20 +522,20 @@ func defaultShell() string {
 // The call itself still re-asks with the real target, so nothing is decided here
 // that the create path does not check again.
 func tabKindAllowances(c Capabilities) []TabKindAllowance {
-	// TabKindNameList carries only the EXPLICIT --kind spellings, and a process tab
-	// has none: it is created by the default CreateTab request carrying a command.
-	// Projecting only the explicit list would silently omit a creatable kind, so the
-	// process kind is added back here rather than left to a client to remember.
-	names := append(TabKindNameList(), tabKindProcessName)
-	sort.Strings(names)
+	// Every Kind here must be SUBMIT-READY: a value a client can put straight into
+	// CreateTabRequest.Kind. That rules out "process", which has no --kind spelling
+	// — a process tab is what the default request makes when given a command — so
+	// projecting it would hand clients an identifier ParseTabKindName rejects.
+	//
+	// Nothing is under-reported by leaving it out. TabKindRequires classifies shell
+	// and process identically (TabNeedsLocalProcess), so their verdicts are equal by
+	// construction, and a client deciding whether it may create a process tab reads
+	// the shell entry. That is a property of the classification rather than a
+	// convenience, so it cannot quietly stop being true.
+	names := TabKindNameList()
 	out := make([]TabKindAllowance, 0, len(names))
-	seen := map[string]bool{}
 	for _, name := range names {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		kind, ok := parseTabKindNameForProjection(name)
+		kind, ok := ParseTabKindName(name)
 		if !ok || kind == TabKindAgent {
 			continue
 		}
@@ -547,19 +547,4 @@ func tabKindAllowances(c Capabilities) []TabKindAllowance {
 		out = append(out, allowance)
 	}
 	return out
-}
-
-// tabKindProcessName is the projection's name for TabKindProcess. It is not in
-// TabKindNameList because there is no `--kind process` spelling — a process tab is
-// what the default CreateTab makes when given a command — but it IS creatable, so
-// a per-kind projection that omitted it would under-report what a session can do.
-const tabKindProcessName = "process"
-
-// parseTabKindNameForProjection resolves the projection's vocabulary, which is the
-// CLI's plus the process kind that has no --kind spelling.
-func parseTabKindNameForProjection(name string) (TabKind, bool) {
-	if name == tabKindProcessName {
-		return TabKindProcess, true
-	}
-	return ParseTabKindName(name)
 }

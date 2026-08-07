@@ -322,12 +322,16 @@ test("a pre-#3060 daemon falls back to the backend_type rule it actually enforce
   assert.equal(supportsTabManagement(sess({})), true, "a legacy row must not lose tab management");
 });
 
-test("closing is gated separately from creating (#3060)", () => {
+test("closing follows the roster verdict, which is what the daemon actually enforces (#3060)", () => {
   // An off-box session that can create nothing can still close a tab it already
   // has — the daemon's CloseTab refuses only the agent tab.
   const offBox = sess({ backend_type: "ssh" });
   assert.equal(supportsTabManagement(offBox), false, "creates nothing");
-  assert.equal(canCloseTabs(offBox), true, "but closes fine");
+  assert.equal(
+    canCloseTabs(offBox),
+    false,
+    "and cannot close either: CloseTab opens with tabMutationTarget, which refuses TabManagement=false",
+  );
   // Archived is the one case the daemon genuinely refuses.
   assert.equal(canCloseTabs(sess({ backend_type: "local", liveness: Liveness.Archived })), false);
 });
@@ -346,7 +350,11 @@ test("each affordance asks its OWN daemon verdict (#3060)", () => {
     tab_roster_mutable: false,
   });
   assert.equal(supportsTabManagement(createsNothingButHasTabs), false);
-  assert.equal(canCloseTabs(createsNothingButHasTabs), true, "an existing tab is still closable");
+  assert.equal(
+    canCloseTabs(createsNothingButHasTabs),
+    false,
+    "closing is the ROSTER verdict: CloseTab delegates to tabMutationTarget, which this session fails",
+  );
   assert.equal(canMutateTabRoster(createsNothingButHasTabs), false, "but its roster is fixed");
 
   // A metadata kind opening up must NOT drag rename/reorder open with it: those

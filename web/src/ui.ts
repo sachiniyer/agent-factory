@@ -406,17 +406,24 @@ export function canMutateTabRoster(s: SessionData): boolean {
 
 /** Whether the web may offer to CLOSE a tab on this session.
  *
- *  Separate from canManageTabs on purpose. The daemon's CloseTab has no backend
- *  capability gate — it refuses only the agent tab — so an off-box session whose
- *  roster already holds a web tab can close it, even though it may not create a new
- *  one. Gating the × on the CREATE rule stranded those tabs in the bar with no way
- *  to remove them from the UI (#3060); they could only be removed with
- *  `af sessions tab-delete`.
+ *  This is the ROSTER verdict, not a looser one, and getting that wrong is worth
+ *  recording: an earlier revision of this file claimed CloseTab had no backend gate
+ *  because its own body checks only "is this the agent tab". It does not — it opens
+ *  with `tabMutationTarget`, which refuses every backend whose
+ *  Capabilities.TabManagement is false (daemon/manager_tabs_arrange.go). Reading
+ *  the function and not the helper it delegates to produced a × the daemon rejects,
+ *  which is the guaranteed-to-fail affordance this whole PR exists to prevent.
  *
- *  Archived is still excluded, because the daemon genuinely does refuse a close
- *  there and the × would try to strip the web-tab URL archive preserved (#1809). */
+ *  So closing a metadata tab on an off-box session is NOT fixable from the client:
+ *  `af sessions tab-delete` goes through the same CloseTab and is refused too. That
+ *  stranding is a daemon-side gap and belongs with #3062, which is the change that
+ *  admits such a tab in the first place.
+ *
+ *  Kept as its own function rather than folded into canMutateTabRoster because the
+ *  two answer different questions and will diverge when #3062 lands; today they
+ *  agree because one gate serves both. */
 export function canCloseTabs(s: SessionData): boolean {
-  return !isArchived(s);
+  return canMutateTabRoster(s);
 }
 
 /** A visible explanation for every state in which the tab bar cannot offer its
@@ -1686,7 +1693,7 @@ export class AppShell {
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
    *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
-  private newTabControl(): HTMLElement {
+  private newTabControl(selected: SessionData | null): HTMLElement {
     const wrap = h("div", { class: "af-tab-new-wrap" });
     const trigger = h(
       "button",
@@ -1774,7 +1781,19 @@ export class AppShell {
       });
       return b;
     };
-    menu.append(item("Terminal", "shell"), item("VS Code", "vscode"));
+    // Offer only kinds the daemon would accept. The control itself is shown when
+    // ANY kind is creatable, so without this a session allowing only `web` would
+    // render a menu whose every entry createSessionTab silently rejects (#3060).
+    const offered: HTMLElement[] = [];
+    for (const [label, kind] of [
+      ["Terminal", "shell"],
+      ["VS Code", "vscode"],
+    ] as [string, NewTabKind][]) {
+      if (!selected || canCreateTabKind(selected, kind)) {
+        offered.push(item(label, kind));
+      }
+    }
+    menu.append(...offered);
 
     trigger.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -2000,7 +2019,7 @@ export class AppShell {
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
-      children.push(this.newTabControl());
+      children.push(this.newTabControl(selected));
     } else {
       const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
       reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
