@@ -191,26 +191,28 @@ func TestSourceMatchesCopiedFile_UsesARetainedDescriptorWhenTheModeDeniesRead(t 
 	// copier does before preserveSourceMode narrows the mode.
 	retained, err := openAtForCompare(root, "dst")
 	require.NoError(t, err)
+	dstIdentity, err := identityFromFile(retained)
+	require.NoError(t, err)
 	defer retained.Close()
 	require.NoError(t, os.Chmod(filepath.Join(dir, "dst"), 0o000))
 
 	_, err = os.Open(filepath.Join(dir, "dst"))
 	require.Error(t, err, "precondition: the destination must be unopenable by its own owner")
 
-	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", nil),
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", nil, dstIdentity),
 		"without the retained descriptor the comparison cannot read the destination at all, "+
 			"which is the bug: the link relationship is dropped for a permission reason, not a content one")
-	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained),
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained, dstIdentity),
 		"with a descriptor opened before the mode narrowed, identical content must still compare equal")
 
 	// A SECOND sighting must also match. The retained descriptor sits at EOF after
 	// the first comparison, so without a rewind it would compare against nothing
 	// and report a mismatch — turning the fix into a one-shot.
-	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained),
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained, dstIdentity),
 		"a repeat sighting must rewind the retained descriptor rather than read from EOF")
 
 	// And it must still be a real comparison, not "always true when retained".
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "src"), []byte("CHANGED"), 0o600))
-	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained),
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained, dstIdentity),
 		"a retained descriptor must not turn the comparison into an unconditional yes")
 }

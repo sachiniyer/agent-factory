@@ -32,7 +32,7 @@ import (
 //
 // Both sides are opened relative to a directory descriptor, never by rebuilt
 // path, keeping the copier descriptor-anchored throughout.
-func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, retained *os.File) bool {
+func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, retained *os.File, expected pathIdentity) bool {
 	current, err := openAtForCompare(source, name)
 	if err != nil {
 		return false
@@ -57,6 +57,18 @@ func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.F
 		defer opened.Close()
 		copied = opened
 	} else if _, err := copied.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+
+	// The descriptor must BE the inode the first copy landed on, not merely a file
+	// holding the same bytes. Without this, a same-UID process can swap copiedPath
+	// for an impostor carrying the current source bytes, pass this comparison, and
+	// restore the recorded inode before the linkat — so linkCopiedFile's own
+	// post-link identity check also passes and stale bytes get published. That is
+	// the staging-path substitution race linkCopiedFile already guards; comparing
+	// content alone reopened it one step earlier (#3049 review).
+	copiedIdentity, err := identityFromFile(copied)
+	if err != nil || !expected.same(copiedIdentity) {
 		return false
 	}
 
