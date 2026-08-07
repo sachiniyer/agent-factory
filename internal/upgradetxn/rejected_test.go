@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"syscall"
 )
 
 // TestCandidateRejected_SurvivesARestart is the whole point of the ledger. #2908's
@@ -348,4 +349,31 @@ func TestRejectedLedgerRefusesToFollowASymlink(t *testing.T) {
 
 	_, _, err = CandidateRejected(executable, candidate)
 	require.Error(t, err, "following the link would re-arm every disqualified release, silently")
+}
+
+// #3011 review: a FIFO at the ledger path would make a blocking open wait forever
+// for a writer — hanging launch-time updates after the download, and hanging Prepare
+// WHILE IT HOLDS THE EXECUTABLE LOCK. A wrong answer would be bad; a hang holding a
+// lock is worse. The read must refuse promptly instead.
+func TestRejectedLedgerRefusesAFifoRatherThanBlocking(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	path := rejectedLedgerPath(executable)
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("cannot create a FIFO here: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := CandidateRejected(executable, []byte("any candidate"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.Error(t, err, "a FIFO is not a ledger; it must fail closed, not be read")
+		require.Contains(t, err.Error(), "not a regular file")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read blocked on a FIFO — this is the hang that would freeze Prepare while it holds the executable lock")
+	}
 }

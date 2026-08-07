@@ -331,6 +331,50 @@ func alignRejectedLedgerWithDirectoryWriters(path string) {
 	}
 }
 
+// verifyLedgerInode refuses anything that is not a plain, trustworthy ledger file.
+//
+// Two questions, both asked of the OPENED handle rather than the path, so the answer
+// cannot change between the check and the read:
+//
+//   - Is it a regular file? A FIFO, device or directory here is not a ledger, and
+//     reading one ranges from meaningless to hanging.
+//   - On an UNSHARED directory, is it owned by the directory's owner? Narrowing the
+//     mode does not revoke a former group writer who OWNS the file: as its owner they
+//     can chmod it back and rewrite it whenever they like, and the installation owner
+//     may not even be able to read it. A ledger left behind by someone who can no
+//     longer replace the binary is not evidence, so it is refused rather than
+//     trusted. On a SHARED directory any group member owning it is the DESIGNED case
+//     and must not be refused.
+//
+// Refusal is an error, and an error fails closed at every caller — which is the right
+// direction: "somebody else owns the record of what is disqualified" is not "nothing
+// is disqualified".
+func verifyLedgerInode(path string, handle *os.File) error {
+	info, err := handle.Stat()
+	if err != nil {
+		return fmt.Errorf("stat the rejected-candidate ledger at %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("the rejected-candidate ledger at %s is not a regular file (mode %v)", path, info.Mode())
+	}
+	dir := filepath.Dir(path)
+	if _, shared := directoryWriterGroup(dir); shared {
+		return nil
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		return nil // cannot compare; the mode narrowing above is the remaining guard
+	}
+	dirStat, dirOK := dirInfo.Sys().(*syscall.Stat_t)
+	fileStat, fileOK := info.Sys().(*syscall.Stat_t)
+	if !dirOK || !fileOK || dirStat.Uid == fileStat.Uid {
+		return nil
+	}
+	return fmt.Errorf(
+		"the rejected-candidate ledger at %s is owned by uid %d but its directory by uid %d, and the directory is no longer group-writable; refusing to trust a ledger left by a writer who can no longer replace the binary",
+		path, fileStat.Uid, dirStat.Uid)
+}
+
 func readRejectedLedger(executable string) (rejectedLedger, error) {
 	path := rejectedLedgerPath(executable)
 	alignRejectedLedgerWithDirectoryWriters(path)
@@ -341,9 +385,17 @@ func readRejectedLedger(executable string) (rejectedLedger, error) {
 	// corrupt-bytes path below cannot catch that: there is nothing corrupt about it.
 	// Refusing to follow the link turns a silent re-arm into a read error, and a read
 	// error fails closed at every caller.
-	handle, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK as well, and then verify the opened inode. A FIFO at this path —
+	// an accident, or planted while the directory was group-writable — would make a
+	// blocking open wait forever for a writer: launch-time updates would hang the TUI
+	// after downloading, and Prepare would hang WHILE HOLDING THE EXECUTABLE LOCK,
+	// which is worse than any wrong answer this function could give. Non-blocking
+	// turns that into a refusal, and the fstat is what makes the refusal principled
+	// rather than incidental.
+	handle, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err == nil {
 		defer func() { _ = handle.Close() }()
+		err = verifyLedgerInode(path, handle)
 	}
 	var data []byte
 	if err == nil {
