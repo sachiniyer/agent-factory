@@ -1,9 +1,11 @@
 package agentaccount
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -324,4 +326,117 @@ func TestLoginCommand_IsPerAgentAndNotGuessed(t *testing.T) {
 	// An unknown agent yields nothing rather than a guess.
 	_, ok = LoginCommand("gemini")
 	require.False(t, ok, "an agent with no verified login command must report none, not a guess")
+}
+
+// Concurrent registration of case-variant names must not produce two accounts.
+//
+// refuseCaseCollision is check-then-act, so two processes registering `work` and
+// `Work` could both pass it before either created anything. On a
+// case-insensitive filesystem that is the P1 outcome reached through a race: one
+// directory, two names, a shared identity. The fix makes the LEAF's creation the
+// serialization point — os.Mkdir is atomic and returns EEXIST for a case-variant
+// there — so the loser re-checks against committed state (#3057 review).
+//
+// On a case-SENSITIVE filesystem the two names are genuinely distinct
+// directories with distinct credentials, so there is no shared identity to
+// prevent and both may legitimately succeed. This asserts the invariant that
+// holds on BOTH: every accepted registration owns a directory no other accepted
+// registration shares.
+func TestRegister_ConcurrentCaseVariantsNeverShareADirectory(t *testing.T) {
+	home := t.TempDir()
+
+	const pairs = 64
+	type result struct {
+		dir string
+		err error
+	}
+	results := make(chan result, pairs*2)
+	var start sync.WaitGroup
+	start.Add(1)
+	var done sync.WaitGroup
+
+	for i := 0; i < pairs; i++ {
+		for _, name := range []string{fmt.Sprintf("acct%d", i), fmt.Sprintf("ACCT%d", i)} {
+			done.Add(1)
+			go func(name string) {
+				defer done.Done()
+				start.Wait()
+				dir, err := Register(home, "codex", name)
+				results <- result{dir: dir, err: err}
+			}(name)
+		}
+	}
+	start.Done()
+	done.Wait()
+	close(results)
+
+	// The invariant: no two ACCEPTED registrations resolved to the same directory.
+	// A shared directory is precisely the shared-credential outcome.
+	owners := map[string]int{}
+	accepted := 0
+	for r := range results {
+		if r.err != nil {
+			continue
+		}
+		accepted++
+		owners[r.dir]++
+	}
+	if accepted == 0 {
+		t.Fatal("every concurrent registration failed; the test proves nothing")
+	}
+	for dir, n := range owners {
+		if n > 1 {
+			t.Fatalf("%d accepted registrations share the credential directory %s: "+
+				"those accounts authenticate as the same identity", n, dir)
+		}
+	}
+
+	// And the registry must agree: one entry per real directory, never a
+	// case-variant pair addressing one.
+	names, err := List(home, "codex")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != accepted {
+		t.Fatalf("registry holds %d accounts but %d registrations were accepted", len(names), accepted)
+	}
+
+	// The stronger assertion — no case-variant PAIR survives — is only true where
+	// the harm exists. On a case-insensitive filesystem the two names address one
+	// directory, so accepting both is the shared-identity bug and os.Mkdir's
+	// EEXIST is what prevents it. On a case-sensitive one they are two distinct
+	// directories holding distinct credentials, and accepting both is merely a
+	// portability-hygiene miss under a rare race, not a safety failure.
+	//
+	// Asserting it unconditionally would be asserting the CLAIM rather than the
+	// behaviour: it fails on Linux for a reason that is not a defect. CI runs this
+	// on macOS too, which is where the real check happens.
+	if !filesystemIsCaseInsensitive(t, home) {
+		t.Logf("case-sensitive filesystem: %d accounts, shared-directory invariant held", len(names))
+		return
+	}
+	seen := map[string]string{}
+	for _, name := range names {
+		key := strings.ToLower(name)
+		if other, dup := seen[key]; dup {
+			t.Fatalf("case-insensitive filesystem accepted case-variant accounts %q and %q: "+
+				"they address one directory and authenticate as one identity", other, name)
+		}
+		seen[key] = name
+	}
+}
+
+// filesystemIsCaseInsensitive reports what the filesystem under dir actually
+// does, rather than guessing from runtime.GOOS — macOS can be formatted
+// case-sensitively and Linux can mount a case-insensitive filesystem, and the
+// assertion above depends on the real behaviour, not the usual one.
+func filesystemIsCaseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "CaseProbe")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		t.Fatalf("case probe: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(probe) }()
+	_, err := os.Stat(filepath.Join(dir, "caseprobe"))
+	return err == nil
 }

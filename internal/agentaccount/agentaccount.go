@@ -114,8 +114,34 @@ func Register(home, agent, name string) (string, error) {
 	if err := refuseSymlinkedAncestor(home, dir); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, dirMode); err != nil {
+	// Parents with MkdirAll, the LEAF with a bare Mkdir — because the leaf's
+	// creation is what serializes two concurrent registrations.
+	//
+	// refuseCaseCollision above is check-then-act: two processes registering
+	// `work` and `Work` can both pass it before either creates anything, and both
+	// then succeed. On a case-insensitive filesystem that is the P1 outcome
+	// arriving through a race — one directory, two names, a shared identity.
+	//
+	// os.Mkdir is atomic and, on exactly the filesystems where the harm exists,
+	// fails with EEXIST for a case-variant of an existing directory. So the
+	// re-check below runs against COMMITTED state rather than a snapshot, and the
+	// loser of the race is refused rather than silently joined to the winner's
+	// credentials. MkdirAll cannot do this: it treats an existing directory as
+	// success and reports nothing (#3057 review).
+	if err := os.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
 		return "", fmt.Errorf("create account directory %s: %w", dir, err)
+	}
+	if err := os.Mkdir(dir, dirMode); err != nil {
+		if !os.IsExist(err) {
+			return "", fmt.Errorf("create account directory %s: %w", dir, err)
+		}
+		// EEXIST is ambiguous: re-registering this exact account (idempotent, the
+		// ordinary case) or colliding with a case-variant that now exists on disk.
+		// The collision check distinguishes them, and this time it reads state that
+		// is already committed.
+		if err := refuseCaseCollision(home, agent, name); err != nil {
+			return "", err
+		}
 	}
 	// And AFTER, because the pre-check can only inspect components that already
 	// existed. This pass covers everything MkdirAll just created, plus anything
