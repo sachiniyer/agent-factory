@@ -161,6 +161,14 @@ func envOverridesName(args []*syntax.Word, agent string, names map[string]struct
 	if len(invocation.Mutations) > 0 {
 		return true, true
 	}
+	// A chdir is a PATH mutation in disguise. `env -C attacker codex` changes the
+	// working directory before command lookup, so a preserved relative PATH entry
+	// resolves `attacker/bin/codex` — an arbitrary repository executable handed
+	// the selected root. Same effect as rewriting PATH, which this already
+	// refuses (#2983 review).
+	if invocation.Chdir != "" {
+		return true, true
+	}
 	_ = names
 	if invocation.CommandIndex < 0 || invocation.CommandIndex >= len(literals) {
 		// env with no command to run: nothing launches, so nothing is redirected.

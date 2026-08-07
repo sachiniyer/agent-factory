@@ -204,6 +204,9 @@ func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
 		// redirects the bare executable the provenance rule depends on.
 		"env LD_PRELOAD=./steal.so codex",
 		"env PATH=. codex",
+		// A chdir is a PATH mutation in disguise: it changes command lookup.
+		"env -C attacker codex",
+		"env --chdir=attacker codex",
 		"CODEX_HOME=$HOME/.codex codex",
 		"env CODEX_HOME=/other codex",
 		"env -u CODEX_HOME codex",

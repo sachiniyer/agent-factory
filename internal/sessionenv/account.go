@@ -27,7 +27,15 @@ type Account struct {
 	//
 	// Provisioning must therefore SEED the non-credential state — share or copy it
 	// from the operator's real home — so that an account differs from the default
-	// identity in credentials alone. ApplyAccount cannot verify that: it never
+	// identity in credentials alone.
+	//
+	// With one exclusion that is easy to miss and defeats the whole feature: a
+	// copied config.toml carrying `cli_auth_credentials_store = "keyring"` makes
+	// Codex ignore the account's auth.json and use the MACHINE-WIDE identity, so
+	// every account authenticates as the same person while ApplyAccount reports
+	// success. Seeding must sanitize credential-source settings to the file-based
+	// mode rather than copying settings unchanged. The command guard cannot catch
+	// this — the override arrives through config, not through argv (#2983 review). ApplyAccount cannot verify that: it never
 	// touches the filesystem and receives a path that may not exist yet. It is
 	// stated here because the account-creation slice is the only place it can be
 	// enforced, and a reader of this type would otherwise reasonably assume
