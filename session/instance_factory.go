@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -421,6 +422,26 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 	opts.ProvisionSessionEnvPassthrough = normalizedProvisionEnv
 
+	// An account-scoped session must run LOCALLY, for now.
+	//
+	// The off-box backends provision and start agent-server before the account is
+	// applied, and ProvisionSpec does not carry it — so a docker, ssh, sandbox or
+	// hook session would run on the sandbox's ambient credentials while the
+	// instance recorded the requested account. That is the silent wrong-identity
+	// outcome this feature exists to prevent, reached through a backend instead of
+	// through the environment, and it is worse than not offering the combination.
+	//
+	// Refusing is the first slice deliberately: threading the account through
+	// provisioning and the headless launch is real work, and until it is done an
+	// honest error beats a session that reports one identity and spends another
+	// (#3051, #3076).
+	if err := refuseOffBoxAccount(opts); err != nil {
+		return nil, err
+	}
+	if err := refuseUnsupportedAccountAgent(opts); err != nil {
+		return nil, err
+	}
+
 	res, err := backendFactory(opts, absPath)
 	if err != nil {
 		return nil, err
@@ -495,4 +516,55 @@ func resolvedProgramMarker(opts InstanceOptions) string {
 		return opts.Program
 	}
 	return ""
+}
+
+// refuseOffBoxAccount rejects an account-scoped session on a backend that cannot
+// yet carry the account.
+//
+// It gates on the backend being NOT local rather than on a list of remote kinds:
+// a backend added later is off-box until someone proves otherwise, so the
+// default for anything new is refusal rather than silent ambient credentials.
+func refuseOffBoxAccount(opts InstanceOptions) error {
+	if strings.TrimSpace(opts.Account) == "" {
+		return nil
+	}
+	kind := opts.Backend
+	if kind == "" {
+		kind = BackendLocal
+	}
+	if kind == BackendLocal {
+		return nil
+	}
+	return fmt.Errorf(
+		"account %q cannot be used with the %s backend: af cannot yet carry a credential account into an "+
+			"off-box session, and running it there would use that host's ambient credentials while reporting "+
+			"the account you asked for; create this session on the local backend, or omit --account",
+		opts.Account, kind)
+}
+
+// refuseUnsupportedAccountAgent rejects an account on an agent whose launch af
+// rewrites before the boundary sees it.
+//
+// claude is the case today. The local launch appends --session-id and usually
+// --plugin-dir, and the boundary's command guard accepts only a bare,
+// argument-free invocation — so the pane exits 127 with a generic message. A
+// clear refusal at create time is strictly better than a session that starts and
+// dies for a reason nothing explains.
+//
+// This is deliberately an ALLOWLIST of agents known to work, not a denylist of
+// broken ones: an agent added later is unsupported until someone proves the
+// boundary accepts its launch, which fails in the safe direction (#3051, #3077).
+func refuseUnsupportedAccountAgent(opts InstanceOptions) error {
+	if strings.TrimSpace(opts.Account) == "" {
+		return nil
+	}
+	agent := sessionenv.AgentForCommand(opts.Program)
+	if agent == "codex" {
+		return nil
+	}
+	return fmt.Errorf(
+		"account %q cannot be used with %s yet: af rewrites that agent's launch command (--session-id, "+
+			"--plugin-dir) and the account boundary only accepts an unmodified invocation, so the session "+
+			"would start and immediately exit; account scoping currently supports codex",
+		opts.Account, agent)
 }

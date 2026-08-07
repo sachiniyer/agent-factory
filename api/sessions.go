@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"fmt"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"os/exec"
 	"strings"
 
@@ -388,6 +390,21 @@ pointing at one).`,
 		if local {
 			if err := preflightLocalSession(&cfg.Config, program); err != nil {
 				return jsonError(err)
+			}
+		}
+
+		// Validate the account BEFORE the daemon makes a worktree and starts tmux.
+		// The shim lookup stays as the fail-closed final check, but it runs in the
+		// pane and deliberately prints only a generic message, so a typo'd account
+		// would otherwise fail after mutation with nothing naming the cause or the
+		// fix (#3051 review).
+		if createAccountFlag != "" {
+			home, herr := config.GetConfigDir()
+			if herr != nil {
+				return jsonError(herr)
+			}
+			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag, ""); aerr != nil {
+				return jsonError(aerr)
 			}
 		}
 

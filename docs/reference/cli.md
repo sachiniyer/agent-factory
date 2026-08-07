@@ -143,19 +143,22 @@ Register an account, then log in with the agent pointed at that directory:
   af accounts add codex work
   CODEX_HOME=$(af accounts add codex work) codex login
 
-Selecting an account for a session is not available yet — see issue #3051. These
-two subcommands prepare the directories and nothing reads them at session start,
-so a session started today still runs on whatever credentials it inherits from
-the environment.
+Select an account for a session with:
 
-When selection arrives it will both inject that directory and remove every other
-identity-bearing variable for the agent. The removal is what will make the
-selection real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the
-config directory, so without it a session would authenticate as whoever that key
-belongs to while every visible signal reported the selected account.
+  af sessions create --account work
 
-af will never switch accounts on its own — not on a rate limit, not on a
-failure. A session will run as the account it was started with.
+That both injects the account's directory and removes every other
+identity-bearing variable for the agent. The removal is what makes the selection
+real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
+directory, so without it a session would authenticate as whoever that key belongs
+to while every visible signal reported the selected account.
+
+Account-scoped sessions require the local backend and tmux 3.2 or newer. af
+refuses rather than falling back, because a fallback would run on the ambient
+account while reporting the one you asked for.
+
+af never switches accounts on its own — not on a rate limit, not on a failure.
+A session runs as the account it was started with.
 
 ```
 af accounts
