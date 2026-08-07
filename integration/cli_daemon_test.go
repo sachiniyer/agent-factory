@@ -476,6 +476,32 @@ func writeFile(t *testing.T, path, body string, mode os.FileMode) {
 	}
 }
 
+// countFileLines counts non-empty lines in path, treating a missing file as
+// zero. It is the counting half of the #2879 pattern: a fixture appends one line
+// per event, and the test waits on or asserts the COUNT rather than on elapsed
+// time, so a loaded box makes the test slower instead of wrong.
+//
+// A missing file is deliberately zero rather than a fatal: "the fixture never
+// ran" is one of the outcomes callers need to tell apart, so it has to be a
+// value they can branch on, not a failure raised from in here.
+func countFileLines(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read %s: %v", path, err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
 func readJSONFile(t *testing.T, path string, dst interface{}) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
