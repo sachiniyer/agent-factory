@@ -145,6 +145,12 @@ const (
 	killWatchdogPerTab = 43 * time.Second
 	// killWatchdogFixed is every term that does not scale with the roster.
 	killWatchdogFixed = 340 * time.Second
+	// killWatchdogCountAttempts and killWatchdogCountRetryDelay bound how long the
+	// arming path will try to read a contended roster. The total is deliberately
+	// tiny — this runs while the kill holds its locks — and exists only to ride out
+	// ordinary contention, never to wait out a wedge.
+	killWatchdogCountAttempts   = 4
+	killWatchdogCountRetryDelay = 250 * time.Microsecond
 )
 
 // killWatchdogFloor is the shortest this watchdog will ever wait, and it is the
@@ -213,23 +219,41 @@ func (s *killStage) get() string {
 // Zero is the honest answer when neither record survives: the delay floor still
 // applies, so the watchdog is never armed shorter than it used to be.
 func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData) int {
-	// Non-blocking on purpose. The argument to a deferred call is evaluated AT the
-	// defer statement, so this runs while the kill already holds killsInFlight and
-	// the operation lock. Waiting on the instance lock here would stall the arming
-	// on exactly the stuck-lock wedge the watchdog exists to report — the session
-	// would be undeletable and the diagnostics would never fire (#3023 review).
+	// Never BLOCKS, but does retry briefly, and the two together are the point. The
+	// argument to a deferred call is evaluated AT the defer statement, so this runs
+	// while the kill already holds killsInFlight and the operation lock: waiting on
+	// the instance lock would stall the arming on exactly the stuck-lock wedge the
+	// watchdog exists to report. But giving up on the first contended read loses the
+	// roster scale for a TRACKED session — resolveActionSession returns no persisted
+	// record for one — and a >9-tab teardown would then be judged against the bare
+	// floor and reported as a false wedge.
+	//
+	// A bounded retry separates those without having to tell them apart: ordinary
+	// contention clears in microseconds, and a wedge never clears at all.
 	if instance != nil {
-		if n, ok := instance.TryTmuxTeardownCount(); ok {
-			return n
+		for attempt := 0; attempt < killWatchdogCountAttempts; attempt++ {
+			if n, ok := instance.TryTmuxTeardownCount(); ok {
+				return n
+			}
+			if attempt < killWatchdogCountAttempts-1 {
+				time.Sleep(killWatchdogCountRetryDelay)
+			}
 		}
-		// The roster is locked by whatever is wedging this kill. Fall through to the
-		// persisted record, which needs no lock and names the same sessions.
+		// Genuinely stuck. Arm on the floor rather than wait: a watchdog that fires
+		// somewhat early on a huge roster is still a watchdog, and one that never
+		// arms at all is not.
+		return 0
 	}
 	if data != nil {
-		// The persisted record's spelling of the same two contributions: a tab that
-		// owns a tmux session names it, and every pending cleanup handle is one more
-		// session the same loop closes.
-		n := len(data.PendingTabCleanup)
+		// The GHOST path tears down exactly what ghostTmuxNames collects — the
+		// session's own tmux session plus each tab's — and it does NOT reap
+		// PendingTabCleanup. Counting those handles here would buy ~54s of delay
+		// apiece for work this path never performs, which on a record that has
+		// accumulated them turns the watchdog from minutes into hours.
+		n := 0
+		if data.TmuxName != "" {
+			n++
+		}
 		for _, tab := range data.Tabs {
 			if tab.TmuxName != "" {
 				n++

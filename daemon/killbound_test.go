@@ -30,11 +30,17 @@ func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
 		require.Equal(t, 2, killWatchdogTabCount(nil, data),
 			"only tmux-bearing tabs are torn down per-tab; a ghost names them by TmuxName")
 
-		// Pending cleanup handles go through the same close loop, so a ghost that
-		// accumulated them must budget for them too.
+		// Pending handles are NOT budgeted on the ghost path: ghostTmuxNames collects
+		// data.TmuxName and data.Tabs only, so ghostCleanup never reaps them, and each
+		// one would buy ~54s of delay for work this path does not do.
 		data.PendingTabCleanup = []session.TabCleanupData{{TabID: "t9", TmuxName: "af_x__stuck"}}
+		require.Equal(t, 2, killWatchdogTabCount(nil, data),
+			"a ghost budgets only what ghostCleanup actually tears down")
+
+		// The session's OWN tmux session is the first thing ghostTmuxNames collects.
+		data.TmuxName = "af_x"
 		require.Equal(t, 3, killWatchdogTabCount(nil, data),
-			"a pending cleanup handle is one more session the teardown closes")
+			"the ghost's own tmux session is teardown work too")
 	})
 }
 
