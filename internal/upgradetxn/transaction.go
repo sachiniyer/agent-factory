@@ -233,7 +233,15 @@ type Journal struct {
 	RecoveryJob          RecoveryJob        `json:"recovery_job"`
 	Metadata             []MetadataSnapshot `json:"metadata"`
 	RollbackProgress     RollbackProgress   `json:"rollback_progress,omitempty"`
-	UpdatedAt            time.Time          `json:"updated_at"`
+	// CandidateInstalled records that the candidate's BYTES actually reached the
+	// executable (#3011 review). A rollback can happen without that: an actor lost
+	// after PhaseDaemonStopping, or an install error before the rename, both roll
+	// back a candidate that was never installed and never validated. Disqualifying
+	// such a release would block an upgrade the box never actually tried — a
+	// permanent block earned by an interruption rather than by bad bytes, which is
+	// the unoverridable shape #2859 was bitten by.
+	CandidateInstalled bool      `json:"candidate_installed,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // Transaction is a loaded, validated journal. The mutex only protects callers
@@ -463,7 +471,13 @@ func (t *Transaction) installCandidate() error {
 	default:
 		return errors.New("installed executable matches neither the previous nor candidate binary")
 	}
-	return t.persistPhaseLocked(PhaseCandidateInstalled)
+	// Durable, and written with the phase it belongs to: the bytes are on disk now,
+	// so a later rollback can tell "this candidate was tried and failed" from "this
+	// candidate never ran".
+	journal := t.journal
+	journal.CandidateInstalled = true
+	journal.Phase = PhaseCandidateInstalled
+	return t.persistJournalLocked(journal)
 }
 
 func (t *Transaction) verifyInstalledCandidateLocked() error {

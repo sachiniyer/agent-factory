@@ -448,11 +448,20 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			// retries. Carrying on would leave the box healthy now and certain to
 			// reinstall the same broken binary. What changed is that the daemon is
 			// already up while that retry happens.
-			if err := RecordRejectedCandidate(
-				journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
-				"the candidate failed validation and was rolled back",
-			); err != nil {
-				return fmt.Errorf("record the rolled-back candidate as rejected: %w", err)
+			//
+			// Only a candidate that was actually INSTALLED is disqualified (#3011
+			// review). A rollback does not imply the bytes ever ran: an actor lost
+			// after PhaseDaemonStopping, or an install error before the rename, both
+			// arrive here having restored a previous binary that was never replaced.
+			// Recording those would permanently block a release the box never tried,
+			// which is a block earned by an interruption rather than by bad bytes.
+			if txn.Journal().CandidateInstalled {
+				if err := RecordRejectedCandidate(
+					journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
+					"the candidate failed validation and was rolled back",
+				); err != nil {
+					return fmt.Errorf("record the rolled-back candidate as rejected: %w", err)
+				}
 			}
 			if err := s.Operations.DisableRecoveryJob(ctx, journal); err != nil {
 				return fmt.Errorf("disable rolled-back recovery job: %w", err)

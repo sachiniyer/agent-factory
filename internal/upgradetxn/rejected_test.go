@@ -207,3 +207,51 @@ func TestRecordRejectedCandidate_KeepsInsertionOrderUnderABackwardClock(t *testi
 	require.True(t, rejected,
 		"the rejection just recorded must survive the cap even when every other entry is stamped later than it")
 }
+
+// TestRejectedLedgerNarrowsWhenTheDirectoryStopsBeingShared is #3011 review: the
+// 0660 widening is justified only while the install directory is group-writable,
+// because the audience is exactly the set that can already replace the binary. Once
+// the directory is tightened, former group writers keep SEARCH permission and can
+// still rewrite the ledger — publishing a valid empty one makes the owner's
+// unattended updater reinstall the bytes it had disqualified.
+func TestRejectedLedgerNarrowsWhenTheDirectoryStopsBeingShared(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	path := rejectedLedgerPath(executable)
+	require.NoError(t, os.WriteFile(path, []byte(`{"schema_version":1}`), rejectedLedgerSharedMode))
+
+	// The directory is NOT group-writable, so the widened ledger no longer has a
+	// justification: reading it must re-narrow it.
+	require.NoError(t, os.Chmod(dir, 0o750))
+	_, err := readRejectedLedger(executable)
+	require.NoError(t, err)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, rejectedLedgerMode, info.Mode().Perm(),
+		"a ledger left group-writable after its directory narrowed can be rewritten by users who can no longer replace the binary")
+}
+
+// The mirror case: while the directory IS shared the widened mode must survive, or
+// the widening would undo itself on the first read and every other authorized
+// writer's updater would fail closed again.
+func TestRejectedLedgerKeepsItsSharedModeWhileTheDirectoryIsShared(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	path := rejectedLedgerPath(executable)
+	require.NoError(t, os.WriteFile(path, []byte(`{"schema_version":1}`), rejectedLedgerSharedMode))
+	require.NoError(t, os.Chmod(dir, 0o770))
+
+	if _, shared := directoryWriterGroup(dir); !shared {
+		t.Skip("this filesystem/uid does not present the directory as group-writable")
+	}
+	_, err := readRejectedLedger(executable)
+	require.NoError(t, err)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, rejectedLedgerSharedMode, info.Mode().Perm(),
+		"narrowing a ledger whose directory is still shared would lock out the other authorized writers")
+}

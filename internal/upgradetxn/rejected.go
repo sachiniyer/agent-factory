@@ -225,8 +225,38 @@ func RecordRejectedCandidate(executable, sha256, version, reason string) error {
 // — a truncated write, a full disk — is also a moment when the box is least able to
 // survive re-installing a broken binary. The ledger is written atomically, so a
 // partial file means something outside this code touched it.
+// alignRejectedLedgerWithDirectoryWriters re-narrows an existing ledger whose
+// directory has since been tightened (#3011 review).
+//
+// The widening to 0660 is justified only while the directory is group-writable:
+// the audience is exactly the set that can already REPLACE the binary the ledger is
+// about. Tighten the directory from 0770 to 0750 and that stops being true, but the
+// ledger keeps its mode — and former group writers retain SEARCH permission on the
+// directory, so they can still rewrite it. Publishing a valid empty ledger there
+// makes the owner's unattended updater reinstall the very bytes it disqualified.
+//
+// So the mode is realigned where the ledger is consulted, which is the same place
+// and the same reasoning as alignLockWithDirectoryWriters: a shared directory
+// widens, an unshared one narrows. Best-effort — a failure leaves the ledger
+// readable and the caller proceeds, because refusing to read it would fail every
+// upgrade closed over a permission bit.
+func alignRejectedLedgerWithDirectoryWriters(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if _, shared := directoryWriterGroup(filepath.Dir(path)); shared {
+		return // still shared: the widened mode is still the right one
+	}
+	if info.Mode().Perm()&0o077 == 0 {
+		return // already private
+	}
+	_ = os.Chmod(path, rejectedLedgerMode)
+}
+
 func readRejectedLedger(executable string) (rejectedLedger, error) {
 	path := rejectedLedgerPath(executable)
+	alignRejectedLedgerWithDirectoryWriters(path)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return rejectedLedger{SchemaVersion: journalSchemaVersion}, nil
