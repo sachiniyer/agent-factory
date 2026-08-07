@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
@@ -131,17 +132,26 @@ func Register(home, agent, name string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(dir), dirMode); err != nil {
 		return "", fmt.Errorf("create account directory %s: %w", dir, err)
 	}
-	if err := os.Mkdir(dir, dirMode); err != nil {
-		if !os.IsExist(err) {
-			return "", fmt.Errorf("create account directory %s: %w", dir, err)
-		}
-		// EEXIST is ambiguous: re-registering this exact account (idempotent, the
-		// ordinary case) or colliding with a case-variant that now exists on disk.
-		// The collision check distinguishes them, and this time it reads state that
-		// is already committed.
-		if err := refuseCaseCollision(home, agent, name); err != nil {
-			return "", err
-		}
+	// The RESERVATION is the serialization point, not the account directory.
+	//
+	// os.Mkdir on the account directory only serializes where the filesystem folds
+	// case, so on Linux both `work` and `Work` succeeded and the uniform rule this
+	// package documents was not actually uniform. The reservation is named for the
+	// CASE-FOLDED account, so the same O_EXCL create collides on every filesystem
+	// (#3057 review).
+	owner, err := reserveName(home, agent, name)
+	if err != nil {
+		return "", err
+	}
+	if owner != name {
+		return "", fmt.Errorf(
+			"account %q collides with existing account %q for %s: account names must differ by more than case, "+
+				"because macOS and Windows filesystems treat them as one directory and both accounts would share "+
+				"a single identity",
+			name, owner, agent)
+	}
+	if err := os.Mkdir(dir, dirMode); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create account directory %s: %w", dir, err)
 	}
 	// And AFTER, because the pre-check can only inspect components that already
 	// existed. This pass covers everything MkdirAll just created, plus anything
@@ -220,6 +230,63 @@ func Register(home, agent, name string) (string, error) {
 //
 // A component that does not exist yet is fine — it is about to be created as a
 // real directory. Only what is actually there is inspected.
+// reservationDir holds one file per case-folded account name, recording the
+// spelling that owns it. It is a dot-directory so ValidateName rejects it and
+// List therefore skips it without needing a special case.
+const reservationDir = ".names"
+
+// reserveName claims an account name's CASE-FOLDED form and returns the spelling
+// that owns it — this call's own name when the claim succeeded, or the existing
+// owner's when it did not.
+//
+// This is what makes the rule uniform. Creating the account directory only
+// collides where the filesystem folds case; creating a file named for the folded
+// form collides everywhere, so `work` and `Work` contend for one O_EXCL create
+// on Linux exactly as they do on macOS.
+//
+// The reservation is never removed. It is the record of which spelling owns the
+// name, and deleting it on unregister would let a differently-cased account take
+// the same directory later — the collision the reservation exists to prevent,
+// merely deferred.
+func reserveName(home, agent, name string) (string, error) {
+	dir := filepath.Join(home, DirName, agent, reservationDir)
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		return "", fmt.Errorf("create account reservation directory %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, strings.ToLower(name))
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err == nil {
+		defer func() { _ = file.Close() }()
+		if _, err := file.WriteString(name); err != nil {
+			return "", fmt.Errorf("record account reservation %s: %w", path, err)
+		}
+		return name, nil
+	}
+	if !os.IsExist(err) {
+		return "", fmt.Errorf("reserve account name %s: %w", path, err)
+	}
+
+	// Someone else holds it. Read the owning spelling — retrying briefly, because
+	// the winner creates the file before writing to it, so a loser arriving inside
+	// that window sees an empty file rather than the owner's name. Treating empty
+	// as "no owner" would let both registrations through, which is the race this
+	// whole mechanism exists to close.
+	for attempt := 0; attempt < 50; attempt++ {
+		recorded, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read account reservation %s: %w", path, err)
+		}
+		if owner := strings.TrimSpace(string(recorded)); owner != "" {
+			return owner, nil
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return "", fmt.Errorf(
+		"account reservation %s was created but never recorded an owner; remove it if no account of that name exists",
+		path)
+}
+
 func refuseSymlinkedAncestor(home, dir string) error {
 	relative, err := filepath.Rel(home, dir)
 	if err != nil {

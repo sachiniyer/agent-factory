@@ -401,42 +401,21 @@ func TestRegister_ConcurrentCaseVariantsNeverShareADirectory(t *testing.T) {
 		t.Fatalf("registry holds %d accounts but %d registrations were accepted", len(names), accepted)
 	}
 
-	// The stronger assertion — no case-variant PAIR survives — is only true where
-	// the harm exists. On a case-insensitive filesystem the two names address one
-	// directory, so accepting both is the shared-identity bug and os.Mkdir's
-	// EEXIST is what prevents it. On a case-sensitive one they are two distinct
-	// directories holding distinct credentials, and accepting both is merely a
-	// portability-hygiene miss under a rare race, not a safety failure.
+	// No case-variant PAIR survives — asserted UNCONDITIONALLY now.
 	//
-	// Asserting it unconditionally would be asserting the CLAIM rather than the
-	// behaviour: it fails on Linux for a reason that is not a defect. CI runs this
-	// on macOS too, which is where the real check happens.
-	if !filesystemIsCaseInsensitive(t, home) {
-		t.Logf("case-sensitive filesystem: %d accounts, shared-directory invariant held", len(names))
-		return
-	}
+	// This used to be gated on the filesystem folding case, because os.Mkdir only
+	// serializes where it does, so on Linux both variants landed. That gate was
+	// the test agreeing with a weaker implementation instead of holding it to the
+	// rule refuseCaseCollision documents. The case-folded reservation collides on
+	// every filesystem, so the rule is now genuinely uniform and the test says so
+	// on every platform rather than only on macOS (#3057 review).
 	seen := map[string]string{}
 	for _, name := range names {
 		key := strings.ToLower(name)
 		if other, dup := seen[key]; dup {
-			t.Fatalf("case-insensitive filesystem accepted case-variant accounts %q and %q: "+
-				"they address one directory and authenticate as one identity", other, name)
+			t.Fatalf("accepted case-variant accounts %q and %q for one agent: the rule is "+
+				"documented as uniform across platforms and must hold under concurrency too", other, name)
 		}
 		seen[key] = name
 	}
-}
-
-// filesystemIsCaseInsensitive reports what the filesystem under dir actually
-// does, rather than guessing from runtime.GOOS — macOS can be formatted
-// case-sensitively and Linux can mount a case-insensitive filesystem, and the
-// assertion above depends on the real behaviour, not the usual one.
-func filesystemIsCaseInsensitive(t *testing.T, dir string) bool {
-	t.Helper()
-	probe := filepath.Join(dir, "CaseProbe")
-	if err := os.Mkdir(probe, 0o700); err != nil {
-		t.Fatalf("case probe: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(probe) }()
-	_, err := os.Stat(filepath.Join(dir, "caseprobe"))
-	return err == nil
 }
