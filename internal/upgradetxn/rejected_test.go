@@ -260,3 +260,48 @@ func TestRejectedLedgerKeepsItsSharedModeWhileTheDirectoryIsShared(t *testing.T)
 	require.Equal(t, rejectedLedgerSharedMode, info.Mode().Perm(),
 		"narrowing a ledger whose directory is still shared would lock out the other authorized writers")
 }
+
+// TestPrepareRefusesACandidateRejectedAfterTheCallersCheck is the #3043 sibling in
+// the daemon's path: another home sharing this executable can be rolling back the
+// same candidate, record the rejection, and CLEAN UP before this transaction reaches
+// Prepare. Its artifacts are gone by then, so the foreign-transaction check cannot
+// see it — and the executable fingerprint cannot either, because a rollback restores
+// the same baseline bytes it started from. Only the ledger remembers, so only a read
+// under the preparation lock is serialised against the write that put it there.
+//
+// Written in order rather than raced, so it is a regression test and not a timing
+// experiment: the caller's check passes, the rejection lands, Prepare runs.
+func TestPrepareRefusesACandidateRejectedAfterTheCallersCheck(t *testing.T) {
+	home := t.TempDir()
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(executable, []byte("running binary"), 0o755))
+	candidate := []byte("candidate binary")
+
+	plan := Plan{
+		ID:             "upgrade-3043",
+		HomeDir:        home,
+		ExecutablePath: executable,
+		FromVersion:    "v1.0.0",
+		ToVersion:      "v9.9.9",
+		Candidate:      candidate,
+		RecoveryJob:    RecoveryJob{Kind: RecoveryJobDetached},
+	}
+
+	// The caller's own check, before the lock: clean.
+	rejected, _, err := CandidateRejected(executable, candidate)
+	require.NoError(t, err)
+	require.False(t, rejected, "precondition: nothing is disqualified yet")
+
+	// The window: a peer transaction disqualifies exactly these bytes and cleans up.
+	require.NoError(t, RecordRejectedCandidate(executable, digest(candidate), "v9.9.9",
+		"the candidate failed validation and was rolled back"))
+
+	txn, err := Prepare(plan)
+	if txn != nil {
+		t.Cleanup(func() { _ = txn.abort() })
+	}
+	require.Error(t, err, "Prepare must refuse a candidate the ledger disqualified after the caller looked")
+	require.Contains(t, err.Error(), "rolled back")
+	require.Nil(t, txn, "no transaction may be published for disqualified bytes")
+}

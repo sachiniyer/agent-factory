@@ -90,6 +90,32 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 	if digest(previousBinary) == digest(stablePlan.Candidate) {
 		return nil, errors.New("candidate binary is byte-identical to the previous binary")
 	}
+	// The rejected-candidate ledger, read HERE, under the preparation lock (#3043).
+	//
+	// Every caller checks earlier too, and should — the daemon skips a download and
+	// gives a better reason. But an earlier read is a decision about state that can
+	// change before it is used: another home sharing this executable can be rolling
+	// back the same candidate, record the rejection, and clean up before this
+	// transaction reaches Prepare. Its artifacts are gone by then, so the
+	// foreign-transaction check cannot see it, and the fingerprint cannot either
+	// because a rollback restores the same baseline bytes it started from. Only the
+	// ledger remembers, and only a read under this lock is serialised against the
+	// write that put it there.
+	//
+	// Refused rather than overridable: this is the daemon's unattended path, and an
+	// operator who genuinely wants disqualified bytes has `af upgrade
+	// --allow-rejected`, which does not come through here.
+	rejected, entry, err := CandidateRejected(executable, stablePlan.Candidate)
+	if err != nil {
+		// Fail closed, matching CandidateRejected's contract: "I could not tell" is
+		// not "it is fine".
+		return nil, fmt.Errorf("cannot read the rejected-candidate ledger for %s: %w", executable, err)
+	}
+	if rejected {
+		return nil, fmt.Errorf(
+			"candidate %s is byte-for-byte the build this machine rolled back at %s (%s); refusing to prepare an upgrade to it",
+			entry.Version, entry.RejectedAt.Format(time.RFC3339), entry.Reason)
+	}
 	// The caller's expectation, checked against the bytes actually about to be
 	// preserved, under the locks. This is the only place the check means
 	// anything: everywhere else it is a time-of-check-to-time-of-use window an
