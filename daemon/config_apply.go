@@ -103,6 +103,28 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 //
 // NOTE: the config was already written to disk by the caller (a save surface).
 // ApplyConfig only makes the running daemon reflect it.
+// withoutKeys returns keys minus drop, preserving order. Small n (at most the two
+// listener keys), so a linear scan beats building a set.
+func withoutKeys(keys, drop []string) []string {
+	if len(drop) == 0 {
+		return keys
+	}
+	kept := keys[:0]
+	for _, k := range keys {
+		remove := false
+		for _, d := range drop {
+			if k == d {
+				remove = true
+				break
+			}
+		}
+		if !remove {
+			kept = append(kept, k)
+		}
+	}
+	return kept
+}
+
 func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	newCfg, err := config.LoadConfig()
 	if err != nil {
@@ -167,6 +189,18 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 		if failed, rerr := m.webListeners.reconcile(newCfg); rerr != nil {
 			result.Warnings = append(result.Warnings, rerr.Error())
 			result.FailedListenerKeys = append(result.FailedListenerKeys, failed...)
+			// And take them OUT of Applied (#3030). Applied is populated by effect
+			// CLASS, before the rebind is attempted, so a key that failed to bind was
+			// still being reported as live — the one field an operator reads to answer
+			// "did my change take effect" saying yes while the daemon serves the old
+			// address.
+			//
+			// Reporting it in Warnings and FailedListenerKeys is not a substitute:
+			// a consumer that renders Applied is rendering a claim, and a claim that
+			// contradicts the two fields beside it is worse than one that is merely
+			// incomplete. Three outcomes, not two — applied, deferred to the next
+			// start, and attempted-but-not-in-effect, which is what these keys are.
+			result.Applied = withoutKeys(result.Applied, failed)
 		}
 	}
 	// The tokenless-network exposure notice, surfaced at SAVE time so a user who
