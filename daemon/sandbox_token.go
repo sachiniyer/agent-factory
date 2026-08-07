@@ -20,13 +20,14 @@ import (
 // What a sandbox gets instead is a token that is:
 //
 //   - PER SESSION, so it can be revoked with that session and names who used it;
-//   - SCOPED to capability DISCOVERY — which backends and programs this daemon
-//     offers, and a free session name — with every other route denied unless it
-//     opts in (see HTTPRoute.sandboxAllowed, which carries the rule and the
-//     reasoning for each denial). Notably NOT creating a session: that names no
-//     session and still starts an agent on the host with a caller-supplied
-//     repo_path, program and prompt (#3012 review). Widening the scope waits on
-//     binding the credential to its owning session;
+//   - SCOPED, and at present to a single route — SuggestSessionName — with every
+//     other route denied unless it opts in (see HTTPRoute.sandboxAllowed, which
+//     carries the rule and the reasoning for each denial). Notably NOT creating a
+//     session: that names no session and still starts an agent on the host with a
+//     caller-supplied repo_path, program and prompt (#3012 review). The scope is
+//     this small because every route worth giving a sandbox is parameterised by a
+//     host path or a session id, which route-level allowlisting cannot constrain
+//     to the caller's own; that waits on binding the credential to its session;
 //   - IN MEMORY ONLY, so a daemon restart invalidates every outstanding sandbox
 //     credential. A long-running sandbox loses callback until it is
 //     re-provisioned, which is the right side to fail on: a restart is exactly

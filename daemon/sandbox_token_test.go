@@ -72,11 +72,12 @@ func TestSandboxTokenRegistry_SessionsDoNotShareCredentials(t *testing.T) {
 // The scope is what stops a compromised sandbox owning the host, so the denials
 // are asserted by name rather than by counting.
 func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
-	// What the scope IS: capability discovery — what this daemon could offer.
-	// None of these names a session, starts anything, or reveals a host path.
-	for _, path := range []string{"/v1/ListBackends", "/v1/ListPrograms", "/v1/SuggestSessionName"} {
-		assert.Truef(t, sandboxAllowedPath(path), "%s only describes what the daemon offers", path)
-	}
+	// What the scope IS, and it is deliberately one route: SuggestSessionName takes
+	// no arguments and returns a random unused name, so there is nothing for a
+	// caller to aim it at. Everything else worth having is parameterised by a host
+	// path or a session id and must wait for owner-binding (#2999).
+	assert.True(t, sandboxAllowedPath("/v1/SuggestSessionName"),
+		"the scope must not be empty, or the credential authorizes nothing and the gate path is untested")
 	for _, path := range []string{
 		// DeliverPrompt runs instructions through every agent on the machine.
 		"/v1/DeliverPrompt",
@@ -102,6 +103,14 @@ func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
 		// token, so denying it here costs nothing that works today.
 		"/v1/ListProjects",
 		"/v1/ListDirectory",
+		// The same oracle, quieter: both take a caller-supplied repo_path and
+		// answer through config.RepoFromPath, which wraps git's own stderr — so a
+		// guessed path comes back distinguishable as missing, permission-denied,
+		// or not-a-repo. Confirming a path is weaker than enumerating one; it is
+		// still the operator's layout, and admitting it would be an exception
+		// carved into the rule for convenience.
+		"/v1/ListBackends",
+		"/v1/ListPrograms",
 		"/v1/SetConfigValue",
 		"/v1/DeleteProject",
 		"/v1/KillSession",
@@ -129,27 +138,31 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 		return r
 	}
 
-	assert.True(t, gate.authorize(request("/v1/ListBackends", secret)),
-		"a sandbox credential must work for a route its scope admits")
+	assert.True(t, gate.authorize(request("/v1/SuggestSessionName", secret)),
+		"a sandbox credential must work for the one route its scope admits")
 	assert.False(t, gate.authorize(request("/v1/DeliverPrompt", secret)),
 		"a sandbox credential must NOT reach DeliverPrompt")
 	assert.False(t, gate.authorize(request("/v1/SendPrompt", secret)),
 		"nor SendPrompt, which names a session and so reaches the same authority one agent at a time")
 	assert.False(t, gate.authorize(request("/v1/CreateSession", secret)),
 		"nor CreateSession, which names no session and starts one on the host anyway")
+	assert.False(t, gate.authorize(request("/v1/ListBackends", secret)),
+		"nor ListBackends, whose caller-supplied repo_path is a host path oracle")
 
 	// The operator's own token is unaffected by any of this.
 	assert.True(t, gate.authorize(request("/v1/DeliverPrompt", "operator-token")))
 
-	// And revocation reaches the gate, not just the registry.
+	// And revocation reaches the gate, not just the registry. Asserted against the
+	// one ADMITTED route: checking a denied route here would pass whether or not
+	// revocation did anything.
 	registry.revoke("sess-a")
-	assert.False(t, gate.authorize(request("/v1/CreateSession", secret)),
+	assert.False(t, gate.authorize(request("/v1/SuggestSessionName", secret)),
 		"a revoked credential must stop authorizing at the gate")
 
 	// A gate with no registry (the agent-server, the preview origin) accepts no
 	// sandbox credential at all.
 	bare := &authGate{expectedToken: func() (string, error) { return "operator-token", nil }}
-	assert.False(t, bare.authorize(request("/v1/ListBackends", secret)))
+	assert.False(t, bare.authorize(request("/v1/SuggestSessionName", secret)))
 }
 
 func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {

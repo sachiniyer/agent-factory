@@ -74,12 +74,12 @@ type ProvisionSpec struct {
 	//
 	// The token is per-session, scoped and revocable — never the operator's, which
 	// grants DeliverPrompt over every agent on the machine. The scope it currently
-	// carries is capability DISCOVERY only (which backends and programs this daemon
-	// offers, and a free session name); it deliberately does not include creating a
-	// session, which would start an agent on the host with a caller-supplied program
-	// (#3012 review). See HTTPRoute.sandboxAllowed for the rule and what widening it
-	// waits on. Empty means no callback was granted, which is the normal case for a
-	// local session and also what a refusal leaves behind.
+	// carries is deliberately one route (SuggestSessionName): it does not include
+	// creating a session, which would start an agent on the host with a
+	// caller-supplied program, nor the repo/path reads, whose caller-supplied paths
+	// are a host oracle (#3012 review). See HTTPRoute.sandboxAllowed for the rule
+	// and what widening it waits on. Empty means no callback was granted, which is
+	// the normal case for a local session and also what a refusal leaves behind.
 	CallbackURL   string
 	CallbackToken string
 	// CloneURL is the git remote an off-box runtime clones the workspace from —

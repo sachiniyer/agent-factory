@@ -70,11 +70,25 @@ type HTTPRoute struct {
 	//     precursor, and a sandbox has no use for the HOST's tree: the picker
 	//     that consumes ListDirectory (#2788) is the operator's own client,
 	//     holding the operator's own token.
+	//   - ListBackends, ListPrograms — the same oracle in a quieter form, and the
+	//     reason this list is shorter than it looks like it should be. Both take a
+	//     caller-supplied repo_path and answer through config.RepoFromPath, which
+	//     wraps git's own stderr: a caller learns "No such file or directory" vs
+	//     "Permission denied" vs "not a git repository" for any path it guesses,
+	//     and on success learns where the enclosing git root is. Confirming a
+	//     guessed path is weaker than enumerating one, but it is the same class,
+	//     and a rule that admits it is a rule with an exception carved for
+	//     convenience.
 	//
-	// They stay out until the credential is bound to its owning session and
-	// session-targeted operations are enforced against that owner. Route-level
-	// scoping alone cannot express "this session only" or "isolated like its
-	// parent", so it must not be asked to.
+	// That leaves a deliberately near-empty scope: SuggestSessionName, which takes
+	// no arguments and returns a random unused name. This is honest rather than
+	// useful, and the shape of the gap is the point — every route actually worth
+	// giving a sandbox is parameterised by a host path or a session id, so what it
+	// needs is "the caller's OWN repo/session", which a route-level flag cannot
+	// express. The credential must be bound to its owning session first, and those
+	// routes must enforce against that owner; then this list grows. Widening it by
+	// relaxing the rule instead would produce a boundary that reads as enforced and
+	// is not. Tracked on #2999.
 	sandboxAllowed bool
 	// requestType is the RPC request struct this route decodes, kept so a consumer
 	// that needs the FULL body shape can reflect it rather than re-deriving a
@@ -120,20 +134,18 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSession) },
 	},
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/ListBackends",
-		sandboxAllowed: true,
-		Description:    "List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to.",
-		requestType:    reflect.TypeOf(ListBackendsRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListBackends) },
+		Method:      http.MethodPost,
+		Path:        "/v1/ListBackends",
+		Description: "List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to.",
+		requestType: reflect.TypeOf(ListBackendsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListBackends) },
 	},
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/ListPrograms",
-		sandboxAllowed: true,
-		Description:    "List the agent programs a session can be created with, and the program an unspecified create defaults to.",
-		requestType:    reflect.TypeOf(ListProgramsRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListPrograms) },
+		Method:      http.MethodPost,
+		Path:        "/v1/ListPrograms",
+		Description: "List the agent programs a session can be created with, and the program an unspecified create defaults to.",
+		requestType: reflect.TypeOf(ListProgramsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListPrograms) },
 	},
 	{
 		Method:         http.MethodPost,
