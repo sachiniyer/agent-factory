@@ -245,21 +245,16 @@ func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData
 		return 0
 	}
 	if data != nil {
-		// The GHOST path tears down exactly what ghostTmuxNames collects — the
-		// session's own tmux session plus each tab's — and it does NOT reap
-		// PendingTabCleanup. Counting those handles here would buy ~54s of delay
-		// apiece for work this path never performs, which on a record that has
-		// accumulated them turns the watchdog from minutes into hours.
-		n := 0
-		if data.TmuxName != "" {
-			n++
-		}
-		for _, tab := range data.Tabs {
-			if tab.TmuxName != "" {
-				n++
-			}
-		}
-		return n
+		// Asked of the SAME function the ghost teardown iterates, rather than
+		// reconstructed from the same fields. ghostCleanup loops over
+		// ghostTmuxNames(data), which collects the session's own tmux session plus
+		// each tab's, DEDUPLICATES them, and does not reap PendingTabCleanup — and
+		// every one of those three properties has to hold here too. Rebuilding the
+		// set by hand got the last two wrong: pending handles bought ~54s apiece for
+		// work this path never does, and a post-#953 record stores the agent's name
+		// in both data.TmuxName and data.Tabs[0].TmuxName, so it was counted twice.
+		// Calling the real thing cannot drift from it.
+		return len(ghostTmuxNames(data))
 	}
 	return 0
 }

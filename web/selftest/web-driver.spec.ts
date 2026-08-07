@@ -481,12 +481,20 @@ async function dragTabToPane(page: Page, tabText: string, edge: "left" | "right"
  * pointing at the wrong subject, which is exactly what makes a red suite hard to read
  * (#1897). Asserting the state you need is cheaper than inheriting it.
  *
- * The agent tab (index 0) renders no ×, so closing every × converges on it. Bounded by
- * af's 9-tab-per-session ceiling.
+ * The agent tab (index 0) renders no ×, so closing every × converges on it.
+ *
+ * The loop converges on "no close control remains" rather than on a tab count. It
+ * used to stop after nine iterations because that was af's per-session ceiling;
+ * with the cap removed (#3023) a fixture holding ten or more closable tabs would
+ * have exited still dirty and then failed its own postcondition — cascading one
+ * test's state into every later serial test, with the failure surfacing somewhere
+ * else entirely. The remaining bound is a runaway guard, deliberately not the old
+ * product limit, so it cannot quietly become a cap again.
  */
 async function resetToAgentTab(page: Page): Promise<void> {
   const tabbar = page.locator(".af-tabbar");
-  for (let guard = 0; guard < 9; guard++) {
+  const runawayGuard = 200;
+  for (let guard = 0; guard < runawayGuard; guard++) {
     const closable = tabbar.locator(".af-tab-close");
     if ((await closable.count()) === 0) {
       break;

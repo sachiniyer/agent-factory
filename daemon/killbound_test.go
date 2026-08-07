@@ -37,10 +37,17 @@ func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
 		require.Equal(t, 2, killWatchdogTabCount(nil, data),
 			"a ghost budgets only what ghostCleanup actually tears down")
 
-		// The session's OWN tmux session is the first thing ghostTmuxNames collects.
+		// A post-#953 record stores the agent's tmux name in BOTH data.TmuxName and
+		// data.Tabs[0].TmuxName. ghostTmuxNames deduplicates them, so the budget must
+		// not count the agent twice — nine real sessions budgeted as ten postpones
+		// the wedge diagnostics by ~54s.
 		data.TmuxName = "af_x"
-		require.Equal(t, 3, killWatchdogTabCount(nil, data),
-			"the ghost's own tmux session is teardown work too")
+		require.Equal(t, 2, killWatchdogTabCount(nil, data),
+			"the agent's name appears twice in the record but is ONE tmux session")
+
+		// A genuinely distinct session does add to it.
+		data.Tabs = append(data.Tabs, session.TabData{Name: "shell-3", TmuxName: "af_x__shell3"})
+		require.Equal(t, 3, killWatchdogTabCount(nil, data))
 	})
 }
 
