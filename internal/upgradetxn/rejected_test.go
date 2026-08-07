@@ -220,6 +220,10 @@ func TestRejectedLedgerNarrowsWhenTheDirectoryStopsBeingShared(t *testing.T) {
 	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
 	path := rejectedLedgerPath(executable)
 	require.NoError(t, os.WriteFile(path, []byte(`{"schema_version":1}`), rejectedLedgerSharedMode))
+	// chmod, not the WriteFile mode: os.WriteFile applies the process UMASK, so on a
+	// 022 runner the file lands 0640 and the fixture is not the widened ledger this
+	// test is about.
+	require.NoError(t, os.Chmod(path, rejectedLedgerSharedMode))
 
 	// The directory is NOT group-writable, so the widened ledger no longer has a
 	// justification: reading it must re-narrow it.
@@ -242,6 +246,7 @@ func TestRejectedLedgerKeepsItsSharedModeWhileTheDirectoryIsShared(t *testing.T)
 	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
 	path := rejectedLedgerPath(executable)
 	require.NoError(t, os.WriteFile(path, []byte(`{"schema_version":1}`), rejectedLedgerSharedMode))
+	require.NoError(t, os.Chmod(path, rejectedLedgerSharedMode)) // umask-proof; see above
 	require.NoError(t, os.Chmod(dir, 0o770))
 
 	if _, shared := directoryWriterGroup(dir); !shared {
