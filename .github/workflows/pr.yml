@@ -76,7 +76,17 @@ jobs:
           go install golang.org/x/tools/cmd/deadcode@v0.48.0
           out=$("$(go env GOPATH)/bin/deadcode" -test ./...)
           if [ -n "$out" ]; then
-            echo "::warning::Dead code detected (reported, not blocking — see #3014):"
+            # A workflow command is ONE line: a bare `echo "$out"` after it is an
+            # ordinary log record, not part of the annotation, so the annotation
+            # would read "Dead code detected" and name nothing. Newlines must be
+            # %0A-escaped into the command itself. Escape % FIRST or the escapes
+            # inserted below get double-escaped.
+            encoded=$(printf '%s' "$out" \
+              | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
+              | awk 'BEGIN{ORS=""} {print (NR>1 ? "%0A" : "") $0}')
+            echo "::warning::Dead code detected (reported, not blocking — see #3014):%0A${encoded}"
+            # Kept as plain log output too: the annotation is for the reviewer, this
+            # is what stays greppable in the raw log.
             echo "$out"
             {
               echo "### Dead code — reported, not blocking"
