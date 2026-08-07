@@ -343,6 +343,26 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 
 		case PhaseRollbackFailed:
+			// Restartable, and it runs BEFORE recovery is disabled. If the record on
+			// the way in did not land — a transient write failure, or an actor that
+			// died between persisting this phase and recording — disabling the job
+			// here would strand the candidate un-disqualified with nothing left to
+			// retry it, and the same bytes would be installable again the moment the
+			// transaction was repaired. Idempotent on the digest, so re-entry after a
+			// successful record only refreshes it.
+			// Gated on installation for the same reason as the PhaseRolledBack arm
+			// (#3011 review): a rollback that failed does not mean the candidate's
+			// bytes ever ran, and disqualifying a release the box never installed is
+			// a permanent block earned by an interruption.
+			if txn.Journal().CandidateInstalled {
+				if err := RecordRejectedCandidate(
+					journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
+					"the candidate was rolled back and the rollback did not complete",
+				); err != nil {
+					return errors.Join(ErrRollbackRecoveryFailed,
+						fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+				}
+			}
 			if err := s.Operations.DisableRecoveryJob(ctx, journal); err != nil {
 				return errors.Join(
 					ErrRollbackRecoveryFailed,
@@ -401,9 +421,15 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 
 		case PhaseRolledBack:
-			// The terminal rollback verdict proves the previous daemon was
-			// healthy at the boundary, not that it survived the actor crash that
-			// may have followed. Re-establish that invariant before cleanup.
+			// Get the KNOWN-GOOD daemon back first (#3011 review). The terminal
+			// rollback verdict proves the previous daemon was healthy at the
+			// boundary, not that it survived the actor crash that may have
+			// followed, so re-establish that invariant before anything else here.
+			//
+			// Ordering matters because the rejection record below can fail: an
+			// unreadable or unwritable ledger used to return before this ran, so
+			// recovery looped on bookkeeping while the box had NO daemon at all.
+			// Restoring service is never the thing to postpone for a permission bit.
 			if !previousValidatedThisRun {
 				if err := s.Operations.StartPrevious(ctx, journal); err != nil {
 					return s.finishFailedRollback(
@@ -414,6 +440,33 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 					return s.finishFailedRollback(
 						ctx, txn, lease, fmt.Errorf("revalidate rolled-back previous daemon: %w", err),
 					)
+				}
+			}
+			// Now disqualify the candidate, still BEFORE cleanup removes the journal
+			// that names it. A candidate that had to be rolled back must never be
+			// activated again on any later boot: the six-hour check would otherwise
+			// find the same release, and an unattended box would re-break itself on
+			// a loop. Idempotent on the digest, so re-entry after an actor crash
+			// refreshes rather than duplicates.
+			//
+			// A failure here is still RETURNED rather than logged past, and cleanup
+			// is still withheld: the transaction stays recoverable and re-entry
+			// retries. Carrying on would leave the box healthy now and certain to
+			// reinstall the same broken binary. What changed is that the daemon is
+			// already up while that retry happens.
+			//
+			// Only a candidate that was actually INSTALLED is disqualified (#3011
+			// review). A rollback does not imply the bytes ever ran: an actor lost
+			// after PhaseDaemonStopping, or an install error before the rename, both
+			// arrive here having restored a previous binary that was never replaced.
+			// Recording those would permanently block a release the box never tried,
+			// which is a block earned by an interruption rather than by bad bytes.
+			if txn.Journal().CandidateInstalled {
+				if err := RecordRejectedCandidate(
+					journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
+					"the candidate failed validation and was rolled back",
+				); err != nil {
+					return fmt.Errorf("record the rolled-back candidate as rejected: %w", err)
 				}
 			}
 			if err := s.Operations.DisableRecoveryJob(ctx, journal); err != nil {
@@ -470,6 +523,28 @@ func (s Supervisor) finishFailedRollback(
 		// Do not disable the persistent actor unless the terminal circuit-breaker
 		// is durable. A later takeover must still have a chance to finish it.
 		return errors.Join(cause, fmt.Errorf("persist rollback failure: %w", err))
+	}
+	// A candidate whose rollback FAILED is at least as disqualified as one whose
+	// rollback succeeded — the box is in a worse state, not a better one.
+	//
+	// Returning here rather than joining and carrying on is what makes the failure
+	// recoverable: the recovery job stays ENABLED, so a resumed supervisor re-enters
+	// the PhaseRollbackFailed branch above and retries the rejection. Disabling
+	// recovery with the candidate still un-disqualified would leave nothing to retry
+	// it, and the same broken bytes would be installable again once the transaction
+	// was cleared.
+	journal := txn.Journal()
+	// Only a candidate whose bytes actually reached the executable is disqualified
+	// (#3011 review). A takeover from PhaseDaemonStopping, or an install error before
+	// the rename, can reach a failed rollback having never installed anything.
+	if journal.CandidateInstalled {
+		if err := RecordRejectedCandidate(
+			journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
+			"the candidate was rolled back and the rollback did not complete",
+		); err != nil {
+			return errors.Join(ErrRollbackRecoveryFailed, cause,
+				fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+		}
 	}
 	if err := s.Operations.DisableRecoveryJob(ctx, txn.Journal()); err != nil {
 		return errors.Join(

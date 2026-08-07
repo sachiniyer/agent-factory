@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
@@ -43,6 +44,9 @@ import (
 // ignores rather than a bare --force, so the thing being overridden is visible
 // in the command the user types.
 const ignoreActiveUpgradeFlag = "ignore-active-upgrade"
+
+// allowRejectedFlag overrides the rejected-candidate ledger on the manual path.
+const allowRejectedFlag = "allow-rejected"
 
 // upgradeIgnoreActiveUpgrade is that flag's value. A package var, like
 // upgradeAllowDowngrade, so adding it churns no runUpgrade call site.
@@ -239,7 +243,20 @@ func foreignUpgradeStagingOver(resolvedPath, ownID string) *activeUpgrade {
 // override is the caller's explicit "install anyway"; it is honoured, and logged,
 // because an unoverridable auto-upgrade safeguard is its own hazard.
 func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, flag string) error {
-	return writeExecutableInPlaceWaiting(resolvedPath, binary, override, flag, true)
+	return writeExecutableInPlaceAllowing(resolvedPath, binary, override, flag, false)
+}
+
+// writeExecutableInPlaceAllowing is the guarded swap with the REJECTED-CANDIDATE
+// override made explicit and separate from the interlock's.
+//
+// Separate on purpose (#3043). Folding it into `override` would make
+// --ignore-active-upgrade silently also bypass the rejected-candidate ledger — two
+// unrelated safeguards behind one flag, and the kind of conflation that looks like a
+// one-line simplification later. A caller must say which one it means.
+func writeExecutableInPlaceAllowing(
+	resolvedPath string, binary []byte, override bool, flag string, allowRejected bool,
+) error {
+	return writeExecutableInPlaceWaiting(resolvedPath, binary, override, flag, true, allowRejected)
 }
 
 // writeExecutableInPlaceWaiting is the guarded swap with the lock-wait policy
@@ -248,8 +265,37 @@ func writeExecutableInPlace(resolvedPath string, binary []byte, override bool, f
 // holds the preparation lock for as long as it takes to copy and fsync a
 // preserved binary, and stalling a launch behind that is the one thing this path
 // may never do. `af upgrade` was asked for explicitly and waits.
-func writeExecutableInPlaceWaiting(resolvedPath string, binary []byte, override bool, flag string, mayWait bool) error {
+func writeExecutableInPlaceWaiting(
+	resolvedPath string, binary []byte, override bool, flag string, mayWait bool, allowRejected bool,
+) error {
 	swap := func() error {
+		// The rejected-candidate ledger is consulted HERE, inside the lock that
+		// serialises the swap, and this read is the one that decides (#3043).
+		//
+		// `af upgrade` also checks at its entrypoint, and that check stays — it gives
+		// a better message and skips a pointless download. But it cannot be the
+		// guard: it runs before this lock, so a daemon transaction that rolls back
+		// and records a rejection in between is invisible to a check that already
+		// passed, and the disqualified bytes land underneath it. That is the same
+		// check-then-act window the interlock comment below describes for the
+		// journal, and the same one #2859 closed by taking the snapshot inside
+		// whichever lock serialises the swap. A re-check after the fact would only
+		// move the window; the read has to happen where the mutation is serialised.
+		if !allowRejected {
+			rejected, entry, err := upgradetxn.CandidateRejected(resolvedPath, binary)
+			if err != nil {
+				// Fail CLOSED, matching CandidateRejected's own contract — "I could
+				// not tell" is not "it is fine" — and both existing callers.
+				return fmt.Errorf(
+					"cannot read the rejected-candidate ledger, so this release is not safe to install (use --%s to install anyway): %w",
+					allowRejectedFlag, err)
+			}
+			if rejected {
+				return fmt.Errorf(
+					"this release (%s) is byte-for-byte the build this machine rolled back at %s (%s); it failed validation here. Publish a corrected build, or pass --%s to install it anyway",
+					entry.Version, entry.RejectedAt.Format(time.RFC3339), entry.Reason, allowRejectedFlag)
+			}
+		}
 		active, ownID := activeUpgradeOwningExecutableWithID()
 		if active == nil {
 			// Nothing blocking in THIS home. The executable is shared across

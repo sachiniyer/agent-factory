@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 const (
@@ -233,7 +235,15 @@ type Journal struct {
 	RecoveryJob          RecoveryJob        `json:"recovery_job"`
 	Metadata             []MetadataSnapshot `json:"metadata"`
 	RollbackProgress     RollbackProgress   `json:"rollback_progress,omitempty"`
-	UpdatedAt            time.Time          `json:"updated_at"`
+	// CandidateInstalled records that the candidate's BYTES actually reached the
+	// executable (#3011 review). A rollback can happen without that: an actor lost
+	// after PhaseDaemonStopping, or an install error before the rename, both roll
+	// back a candidate that was never installed and never validated. Disqualifying
+	// such a release would block an upgrade the box never actually tried — a
+	// permanent block earned by an interruption rather than by bad bytes, which is
+	// the unoverridable shape #2859 was bitten by.
+	CandidateInstalled bool      `json:"candidate_installed,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // Transaction is a loaded, validated journal. The mutex only protects callers
@@ -300,7 +310,29 @@ func Load(homeDir string) (*Transaction, error) {
 	if err := validateJournal(home, journal); err != nil {
 		return nil, fmt.Errorf("validate active upgrade journal: %w", err)
 	}
+	journal.CandidateInstalled = journal.CandidateInstalled || phaseImpliesCandidateInstalled(journal.Phase)
 	return &Transaction{journal: journal}, nil
+}
+
+// phaseImpliesCandidateInstalled derives CandidateInstalled for a journal written
+// before the field existed (#3011 review).
+//
+// The field is omitempty and the schema version did not change, so a transaction
+// left in flight by the PREVIOUS release decodes with it false. Resumed by this
+// binary it would roll back without disqualifying a candidate whose bytes really
+// did run — the safety mechanism silently skipped for exactly one upgrade, which is
+// the boundary nobody tests by hand.
+//
+// Derived at LOAD, while the phase can still answer the question. These three
+// phases are reached only after the bytes are on disk; PhaseRolledBack cannot be
+// read this way, which is why the inference has to happen before the transaction
+// moves on. From here the value is carried in the journal like any other.
+func phaseImpliesCandidateInstalled(phase Phase) bool {
+	switch phase {
+	case PhaseCandidateInstalled, PhaseCandidateStarting, PhaseCandidateValidating:
+		return true
+	}
+	return false
 }
 
 // ReadRecoveryStatus validates the live actor's diagnostic handshake. It does
@@ -463,7 +495,13 @@ func (t *Transaction) installCandidate() error {
 	default:
 		return errors.New("installed executable matches neither the previous nor candidate binary")
 	}
-	return t.persistPhaseLocked(PhaseCandidateInstalled)
+	// Durable, and written with the phase it belongs to: the bytes are on disk now,
+	// so a later rollback can tell "this candidate was tried and failed" from "this
+	// candidate never ran".
+	journal := t.journal
+	journal.CandidateInstalled = true
+	journal.Phase = PhaseCandidateInstalled
+	return t.persistJournalLocked(journal)
 }
 
 func (t *Transaction) verifyInstalledCandidateLocked() error {
@@ -556,6 +594,33 @@ func (t *Transaction) rollback() error {
 }
 
 func (t *Transaction) restoreLocked() error {
+	// Ask the executable whether the candidate ran, BEFORE overwriting the evidence
+	// (#3011 review). The marker is normally written with PhaseCandidateInstalled,
+	// but the rename can succeed and that journal write fail — and a takeover from
+	// the phase BEFORE install rolls back without re-entering InstallCandidate, so
+	// nothing ever sets it. The bytes on disk are the ground truth, and this is the
+	// last moment they exist.
+	if !t.journal.CandidateInstalled {
+		installed, readErr := os.ReadFile(t.journal.ExecutablePath)
+		switch {
+		case readErr != nil:
+			// "I could not read it" is not "it was never installed" (#3011 review).
+			// Silently treating a read failure as evidence of absence would let a
+			// candidate that really did run escape disqualification, which is the one
+			// outcome this marker exists to prevent. Reported rather than assumed —
+			// and NOT returned, because the restore below is what gets the box back to
+			// a known-good binary and must not be blocked by a diagnostic.
+			log.WarningLog.Printf(
+				"could not read %s to confirm whether the candidate had been installed before restoring it; the rollback will proceed and the candidate may not be disqualified: %v",
+				t.journal.ExecutablePath, readErr)
+		case digest(installed) == t.journal.CandidateSHA256:
+			journal := t.journal
+			journal.CandidateInstalled = true
+			if err := t.persistJournalLocked(journal); err != nil {
+				return fmt.Errorf("checkpoint that the candidate had been installed: %w", err)
+			}
+		}
+	}
 	if !t.journal.RollbackProgress.BinaryRestored {
 		previous, err := readAndVerify(t.journal.PreviousBinaryPath, t.journal.PreviousBinarySHA256)
 		if err != nil {

@@ -693,47 +693,6 @@ func persistJournal(path string, journal Journal) error {
 	return durableAtomicWriteFile(path, data, journalFileMode)
 }
 
-func durableAtomicWriteFile(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := validateDirectoryNoSymlink(dir); err != nil {
-		return fmt.Errorf("validate durable write directory %s: %w", dir, err)
-	}
-	temporary, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
-	if err != nil {
-		return fmt.Errorf("create durable temporary file: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	renamed := false
-	defer func() {
-		if !renamed {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("write durable temporary file: %w", err)
-	}
-	if err := temporary.Chmod(mode); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("set durable temporary file mode: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return fmt.Errorf("sync durable temporary file: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close durable temporary file: %w", err)
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("install durable file %s: %w", path, err)
-	}
-	renamed = true
-	if err := syncTransactionDirectory(dir); err != nil {
-		return fmt.Errorf("sync durable file directory %s: %w", dir, err)
-	}
-	return nil
-}
-
 func removeDurableFile(path string) error {
 	if err := validateDirectoryNoSymlink(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("validate file removal directory: %w", err)

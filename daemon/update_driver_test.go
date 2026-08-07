@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,6 +64,12 @@ func newDriverHarness(t *testing.T) *driverHarness {
 		now:                func() time.Time { return h.now },
 		executableIdentity: func() (string, error) { return "stable-identity", nil },
 		baselineExecutable: "stable-identity",
+		// A box that has never rolled a candidate back. The real ledger is exercised
+		// by TestUpdateDriver_RefusesACandidateThisBoxAlreadyRolledBack; every other
+		// test here predates it and must not start depending on one.
+		candidateRejected: func([]byte) (bool, upgradetxn.RejectedCandidate, error) {
+			return false, upgradetxn.RejectedCandidate{}, nil
+		},
 		discover: func(channel string, _ time.Duration) (string, error) {
 			h.mu.Lock()
 			h.channels = append(h.channels, channel)
@@ -957,4 +966,59 @@ func TestUpdateDriver_ShutdownDuringTheFingerprintAbandonsTheUpgrade(t *testing.
 	require.Equal(t, updateCheckSkipped, h.driver.checkOnce(ctx))
 	require.Equal(t, 1, rec.downloads)
 	require.Zero(t, rec.activations, "a stopping daemon must not publish a transaction")
+}
+
+// TestUpdateDriver_RefusesACandidateThisBoxAlreadyRolledBack closes the loop the
+// ledger exists for: without it the six-hour check finds the same broken release on
+// every boot and an unattended box re-breaks itself forever. Driven through the REAL
+// ledger rather than a stub, because the failure this guards against is the write and
+// the read disagreeing about a candidate's identity.
+func TestUpdateDriver_RefusesACandidateThisBoxAlreadyRolledBack(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+	home := filepath.Dir(h.cachePath)
+	h.driver.candidateRejected = func(candidate []byte) (bool, upgradetxn.RejectedCandidate, error) {
+		return upgradetxn.CandidateRejected(home, candidate)
+	}
+
+	// Exactly the bytes enableActivation serves, disqualified as if a rollback had
+	// just recorded them.
+	sum := sha256.Sum256([]byte("candidate-af-binary"))
+	require.NoError(t, upgradetxn.RecordRejectedCandidate(
+		home, hex.EncodeToString(sum[:]), "v1.0.300", "the candidate failed validation and was rolled back"))
+
+	// Snapshotted BEFORE the check. Both operands used to be read afterwards, so
+	// the assertion compared the file with itself and held whatever the refusal
+	// did to the shared cache — including rewriting it (#2212 review).
+	cacheBefore := h.readCacheFile(t)
+
+	require.Equal(t, updateCheckSkipped, h.driver.checkOnce(context.Background()))
+	require.Equal(t, 0, rec.activations,
+		"a candidate this box already rolled back must never be handed to the transactional path again")
+	require.Equal(t, cacheBefore, h.readCacheFile(t),
+		"and the shared throttle window is still not consumed by a refusal")
+}
+
+// An unreadable ledger must REFUSE, not proceed. "I could not tell" is not "it is
+// fine": activating there reinstalls the binary that broke the box, and nobody is
+// watching an unattended one.
+func TestUpdateDriver_UnreadableLedgerRefusesActivation(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+	h.driver.candidateRejected = func([]byte) (bool, upgradetxn.RejectedCandidate, error) {
+		return false, upgradetxn.RejectedCandidate{}, errors.New("ledger unreadable")
+	}
+
+	require.Equal(t, updateCheckFailed, h.driver.checkOnce(context.Background()))
+	require.Equal(t, 0, rec.activations, "an unverifiable candidate must not be activated")
+}
+
+// A driver with no ledger reachable at all is the same answer for the same reason.
+func TestUpdateDriver_MissingLedgerCheckerRefusesActivation(t *testing.T) {
+	h := newDriverHarness(t)
+	rec := enableActivation(h, true)
+	h.driver.candidateRejected = nil
+
+	require.Equal(t, updateCheckFailed, h.driver.checkOnce(context.Background()))
+	require.Equal(t, 0, rec.activations)
 }

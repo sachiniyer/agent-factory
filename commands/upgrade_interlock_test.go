@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -646,4 +648,69 @@ func TestUpgradeOwningThisExecutable_InconclusiveExecutableDoesNotBlock(t *testi
 	t.Cleanup(func() { osExecutableFn = originalExec })
 
 	require.Nil(t, upgradeOwningThisExecutable())
+}
+
+// TestWriteExecutableInPlace_RefusesACandidateRejectedAfterTheEntrypointRead is
+// #3043: `af upgrade` consulted the rejected-candidate ledger BEFORE taking the
+// lock that serialises the swap, so a daemon rollback landing in that window was
+// invisible to a check that had already passed — and the binary it had just
+// disqualified got installed anyway.
+//
+// The interleaving is written out in order rather than raced, because that is what
+// makes it a regression test rather than a timing experiment:
+//
+//  1. the entrypoint check reads the ledger and finds nothing
+//  2. a daemon transaction rolls back and records the rejection  ← the window
+//  3. the install proceeds
+//
+// Step 3 must refuse. The read that DECIDES has to happen inside the lock; a read
+// taken before it is a decision about state that can change before it is used.
+func TestWriteExecutableInPlace_RefusesACandidateRejectedAfterTheEntrypointRead(t *testing.T) {
+	upgradeHome(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+	candidate := []byte("new binary")
+
+	// 1. What upgrade.go does at its entrypoint: the ledger is clean here.
+	rejected, _, err := upgradetxn.CandidateRejected(target, candidate)
+	require.NoError(t, err)
+	require.False(t, rejected, "precondition: nothing is disqualified yet")
+
+	// 2. The window: a daemon rollback disqualifies exactly these bytes.
+	require.NoError(t, upgradetxn.RecordRejectedCandidate(
+		target, fmt.Sprintf("%x", sha256.Sum256(candidate)), "v9.9.9",
+		"the candidate failed validation and was rolled back"))
+
+	// 3. The install must now refuse, on the ledger read taken under the lock.
+	err = writeExecutableInPlace(target, candidate, false, "--"+ignoreActiveUpgradeFlag)
+	require.Error(t, err, "a candidate disqualified after the entrypoint read must still be refused")
+	require.Contains(t, err.Error(), "rolled back")
+
+	installed, readErr := os.ReadFile(target)
+	require.NoError(t, readErr)
+	require.Equal(t, "old binary", string(installed), "the rejected bytes must not have landed")
+}
+
+// The override still works, because an unoverridable safeguard is its own hazard —
+// and it is a SEPARATE flag from the interlock override, so --ignore-active-upgrade
+// cannot silently also bypass the ledger.
+func TestWriteExecutableInPlace_AllowRejectedInstallsAnyway(t *testing.T) {
+	upgradeHome(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(target, []byte("old binary"), 0o755))
+	candidate := []byte("new binary")
+	require.NoError(t, upgradetxn.RecordRejectedCandidate(
+		target, fmt.Sprintf("%x", sha256.Sum256(candidate)), "v9.9.9", "rolled back"))
+
+	// The INTERLOCK override alone must not admit it.
+	err := writeExecutableInPlaceAllowing(target, candidate, true, "--"+ignoreActiveUpgradeFlag, false)
+	require.Error(t, err, "--ignore-active-upgrade must not double as --allow-rejected")
+
+	// The ledger override does.
+	require.NoError(t, writeExecutableInPlaceAllowing(target, candidate, false, "--"+ignoreActiveUpgradeFlag, true))
+	installed, readErr := os.ReadFile(target)
+	require.NoError(t, readErr)
+	require.Equal(t, "new binary", string(installed))
 }

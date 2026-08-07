@@ -161,7 +161,41 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		// practice autoUpdateOnLaunch has already stood down before we get this
 		// far; this is the backstop that makes the interlock a property of the
 		// write rather than of remembering to check.
-		if err := writeExecutableInPlaceWaiting(resolvedPath, binary, false, "", false); err != nil {
+		// A candidate this box already installed and ROLLED BACK must not be put
+		// back by this path either (#2212). Checked against the RESOLVED executable,
+		// because the ledger is scoped to the binary rather than to a home: one
+		// installation can serve several AGENT_FACTORY_HOMEs, and this is the
+		// updater with no supervisor attached — it swaps in place, outside probation
+		// and outside any rollback that could undo it. Without this the next TUI
+		// launch would reinstall the broken bytes over the binary a rollback had
+		// just recovered.
+		//
+		// Every uncertain answer skips the install rather than proceeding: refusing
+		// to update costs a stale binary, guessing wrong costs the working one.
+		if rejected, entry, ledgerErr := upgradetxn.CandidateRejected(resolvedPath, binary); ledgerErr != nil {
+			log.WarningLog.Printf("auto-update: cannot read the rejected-candidate ledger, so %s is not safe to install: %v", latestVersion, ledgerErr)
+			// COMPLETED, not deferred — the same reasoning as the rejected branch
+			// below, and it applies here for a sharper reason. A ledger that cannot
+			// be read or parsed does not fix itself, and the candidate's identity is
+			// only known AFTER the archive is downloaded: without this, every
+			// interactive launch pays the full download budget in front of the TUI
+			// and then hits the identical permanent error.
+			throttleFailure(latestTag)
+			return nil
+		} else if rejected {
+			log.WarningLog.Printf(
+				"auto-update: %s is byte-for-byte the candidate this box rolled back at %s (%s); not installing it again — publish a corrected build to move past it",
+				latestVersion, entry.RejectedAt.Format(time.RFC3339), entry.Reason)
+			autoUpdateNotice("Skipping v%s — this build was rolled back on this machine.\n", latestVersion)
+			// Close the window. This is a COMPLETED outcome, not a deferral: the
+			// answer will not change while this release is latest, so leaving the
+			// window open would re-download the same archive on every launch and
+			// pay the full download budget in front of the TUI each time.
+			throttleFailure(latestTag)
+			return nil
+		}
+
+		if err := writeExecutableInPlaceWaiting(resolvedPath, binary, false, "", false, false); err != nil {
 			// A busy install lock is a deferral, not a failure: nothing was
 			// attempted, so leaving the window open lets the next launch install
 			// once the other writer is done. Recording it would suppress the next
