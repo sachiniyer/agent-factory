@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -37,6 +38,38 @@ type accountEntry struct {
 	Agent string `json:"agent"`
 	Name  string `json:"name"`
 	Dir   string `json:"dir"`
+}
+
+// accountsJSONRequested reads the JSON intent from the RAW arguments, because a
+// flag-parse failure means the bound variable was never set.
+//
+// cobra parses flags before RunE, so `af accounts add --json --bogus` fails
+// while accountsJSONFlag is still false — the caller asked for JSON and the
+// bound flag cannot say so. Scanning argv is the only source of that intent at
+// this point. `--` ends flag parsing, so anything after it is an operand and
+// must not be read as a request (#3057 review).
+func accountsJSONRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--json" || arg == "--json=true" {
+			return true
+		}
+	}
+	return false
+}
+
+// accountsFlagError routes a flag-parse failure through the same {data,error}
+// envelope as every other failure in this group.
+//
+// Without it, the one input class an automation caller is most likely to get
+// wrong — a mistyped flag — was the one class it could not parse, because cobra
+// returns before RunE and prints human `Error:` plus usage. ArbitraryArgs moved
+// argument-COUNT validation into RunE but cannot reach flag parsing, which
+// happens earlier still.
+func accountsFlagError(cmd *cobra.Command, err error) error {
+	return jsonWrapError(cmd, accountsJSONRequested(os.Args), err)
 }
 
 var accountsCmd = &cobra.Command{
@@ -241,6 +274,9 @@ func joinAgents(agents []string) string {
 func init() {
 	accountsAddCmd.Flags().BoolVar(&accountsJSONFlag, "json", false, "Output the {data,error} JSON envelope")
 	accountsListCmd.Flags().BoolVar(&accountsJSONFlag, "json", false, "Output the {data,error} JSON envelope")
+	accountsAddCmd.SetFlagErrorFunc(accountsFlagError)
+	accountsListCmd.SetFlagErrorFunc(accountsFlagError)
+	accountsCmd.SetFlagErrorFunc(accountsFlagError)
 	accountsCmd.AddCommand(accountsAddCmd)
 	accountsCmd.AddCommand(accountsListCmd)
 }
