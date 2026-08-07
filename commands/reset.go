@@ -50,6 +50,15 @@ const worktreesResidueDir = "worktrees"
 //     is user configuration, not session state.
 //   - daemon-token, daemon-tls.* — daemon runtime IDENTITY; wiping it would
 //     needlessly break already-configured remote clients.
+//   - accounts/ — agent credential directories (#3051). af creates the
+//     directory but never writes what is inside it: the agent's own login flow
+//     does, and af never reads the material. Wiping them would destroy
+//     credentials af did not create and force a re-login to every account, which
+//     is not what a reset of AF's session state should cost. Same reasoning as
+//     daemon-token — it is identity, not session state. printResetPlan and
+//     printResetSummary name it EXPLICITLY, because "removes all AF state" would
+//     otherwise let someone reset expecting their logins to be gone (#3057
+//     review).
 //
 // The daemon SOCKETS are not listed here but are still removed — in runReset,
 // not this list. They are ORDERED, not unordered: they may only be unlinked
@@ -958,6 +967,7 @@ func printResetPlan(out io.Writer, plan *resetPlan) {
 	fmt.Fprintln(out, "WILL KEEP:")
 	fmt.Fprintln(out, "  • your git repositories (working tree, .git, and your own branches)")
 	fmt.Fprintln(out, "  • daemon config: config.toml (listen_addr, defaults, root_agents, update_channel) and per-repo config")
+	fmt.Fprintln(out, "  • registered agent accounts and their credentials (accounts/) — log out with the agent's own CLI to remove those")
 }
 
 func printResetSummary(out io.Writer, s *resetSummary) {
@@ -979,6 +989,6 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 			"they are locked. Each was left in place, along with its branch and its session record. "+
 			"Run the recovery command shown with each one below, then re-run `af reset` to finish.\n", s.blocked)
 	}
-	fmt.Fprintln(out, "Preserved: your git repositories and daemon config (config.toml).")
+	fmt.Fprintln(out, "Preserved: your git repositories, daemon config (config.toml), and registered agent accounts (accounts/).")
 	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task/project-registration state and the same config.")
 }

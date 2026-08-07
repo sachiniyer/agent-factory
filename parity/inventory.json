@@ -18,155 +18,26 @@
   ],
   "capabilities": [
     {
-      "id": "session.create",
-      "title": "Create a session",
+      "id": "backend.list",
+      "title": "Discover which backends are available for a repo (with availability + reason)",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:145 (n) -> app/handle_input.go:181"
+        "pointer": "app/backend_picker.go openBackendPicker -> apiclient/control.go ListBackends -> the naming form's backend field renders label + status + reason"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:251 createSession"
+        "pointer": "web/src/api.ts:260 ListBackends -> web/src/backends.ts renders the picker"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:245 sessionsCreateCmd"
+        "pointer": "api/sessions_backends.go:19 sessionsBackendsCmd -> daemon/control_client.go:332 ListBackends"
       },
       "verdict": "parity",
-      "notes": "The verb is at parity; the OPTIONS are not. See the session.create.opt.* rows — no surface is a superset of another."
+      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED by #2584: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it), so the surfaces cannot describe a repo's backends differently and a backend added server-side reaches all of them with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it. TUI half CLOSED by #1933's create-form backend field, which is exactly the flip #2584's note anticipated ('this cell flips to yes with that picker, not before'): the TUI reaches the same catalog over apiclient.ListBackends and renders the daemon's labels/statuses/reasons rather than deriving availability locally — which would answer about the CLIENT's host, since apiclient.NewTargeted may point at a REMOTE daemon. Note what 'yes' means uniformly here: on both UIs this capability IS the create-time picker rendering availability, not a standalone catalog view — a catalog with no way to act on it would be a dead-end read. The CLI's standalone verb is the shape that fits a scripting surface. Three surfaces, one catalog, one implementation: parity."
     },
     {
-      "id": "session.create.opt.title",
-      "title": "Set the new session's title",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/handle_input.go:135-158 (typed during stateNew)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/modals.ts:148 titleInput"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:584 --name (required)"
-      },
-      "verdict": "parity",
-      "notes": "TUI/web send title_base so the daemon auto-suffixes collisions; the CLI sends title and errors on collision instead."
-    },
-    {
-      "id": "session.create.opt.program",
-      "title": "Choose the agent program at create time",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/handle_input.go:119-134 (Tab -> stateSelectProgram)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/modals.ts:170-175 programSelect"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:586 --program"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "session.create.opt.prompt",
-      "title": "Send an initial prompt with the new session",
-      "tui": {
-        "status": "yes",
-        "pointer": "shift+tab during naming -> app/handle_overlay.go handleStateInitialPrompt -> app/handle_input.go sessionStartRequest.Prompt"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/modals.ts:177 promptArea -> web/src/api.ts:258"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:585 --prompt"
-      },
-      "verdict": "parity",
-      "issue": "#1936",
-      "notes": "Closed by #1936: the naming form grew an initial-prompt field on shift+tab (a textarea overlay, so multi-line prompts and pastes survive), populating the sessionStartRequest.Prompt that was already plumbed to the daemon. Was an inverted gap — the TUI was the short surface, with the field dead at its only construction site."
-    },
-    {
-      "id": "session.create.opt.backend",
-      "title": "Choose the session's backend (local/docker/ssh/hook) per session",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go KeySetBackend (ctrl+r) -> app/backend_picker.go openBackendPicker + handleStateSelectBackend -> app/session_control.go sessionStartRequest.Backend"
-      },
-      "web": {
-        "status": "partial",
-        "pointer": "web/src/api.ts:265 createSession sends `backend` when picked (via ListBackends), built as a body variable"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook"
-      },
-      "verdict": "real-gap",
-      "issue": "#1933",
-      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/surface-parity.md 'reachable != user-settable'."
-    },
-    {
-      "id": "session.create.opt.remote",
-      "title": "Force a session onto the remote hook backend",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:153 (N) -> app/handle_input.go ForceRemote; PLUS the naming form's backend field (ctrl+r) reaching backend='hook' — app/backend_picker.go"
-      },
-      "web": {
-        "status": "partial",
-        "pointer": "web/src/api.ts createSession sends backend='hook' via the #1968 ListBackends picker — the SAME BackendHook force_remote selects (session/instance_factory.go resolveBackendKind)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:589 --backend hook"
-      },
-      "verdict": "real-gap",
-      "issue": "#1933",
-      "notes": "TUI is now 'yes': `N` still resolves to the hook backend ONLY (session/instance_factory.go resolveBackendKind), but the naming form's backend field reaches backend='hook' explicitly, by the same STRONGER path described below for the web — and the TUI additionally sends the dedicated force_remote field, so it is a superset of both other surfaces here. The web is 'partial', not 'no': the hook backend is reachable from the browser via the #1968 backend picker (backend='hook'), which resolveBackendKind routes to the same BackendHook by a STRONGER path than force_remote — an explicit backend wins over ForceRemote, and both override the repo's backend config, so the picker's 'hook' is strictly more capable than the legacy selector. The dedicated force_remote FIELD is deliberately NOT sent by the web (it stays a field_coverage gap): it adds no capability over the picker, and an ungated 'remote hooks' checkbox reintroduces the 'offered then fails at provision' trap the picker's backendSelectable gate closes (#2406 was closed in favor of this ledger correction). Same unproven-provisioning caveat as session.create.opt.backend: reachable != proven to create a WORKING remote session from the browser (#1968)."
-    },
-    {
-      "id": "session.create.opt.inplace",
-      "title": "Attach a session to the repo's existing working tree (--here)",
-      "tui": {
-        "status": "no",
-        "pointer": "no InPlace assignment anywhere in app/ (grep-verified)"
-      },
-      "web": {
-        "status": "no",
-        "pointer": "web/src/api.ts:251-264 never sends in_place"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:587-588 --here / --in-place"
-      },
-      "verdict": "unclear",
-      "notes": "CLI-only. Plausibly deliberate: --here is a scripting affordance for 'run an agent right here in my checkout', and the TUI/web are worktree-oriented session managers. Needs an owner call before filing."
-    },
-    {
-      "id": "session.list",
-      "title": "List sessions",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/sidebar rail (always rendered)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:179 fetchSnapshot"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:186 sessionsListCmd"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "session.get",
-      "title": "Get one session's record",
+      "id": "cli.argshape.session-title",
+      "title": "Name a session the same way across the sessions verbs",
       "tui": {
         "status": "n/a",
         "pointer": ""
@@ -177,269 +48,33 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:204 sessionsGetCmd"
+        "pointer": "api/sessions.go sessionsCreateCmd accepts create [title] and the existing --name alias"
+      },
+      "verdict": "parity",
+      "issue": "#1972",
+      "notes": "Closed additively: `af sessions create <title>` now shares the positional title shape and vocabulary of its ten sibling verbs, while `--name <title>` remains an alias so existing scripts do not break. Both forms resolve once, before dispatch, into the same CreateSessionRequest.Title path. tui/web are n/a: this is about CLI argument shape, and neither UI has arguments."
+    },
+    {
+      "id": "cli.json-envelope",
+      "title": "Machine-readable {data,error} envelope output",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:580-581 --json (persistent on sessions/tasks/projects); per-command on config/token/daemon/api/bug-report"
       },
       "verdict": "deliberate",
-      "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue — the row is already on screen."
+      "notes": "An output FORMAT for scripts consuming stdout, not a product capability. The UIs render the same data as pixels; there is nothing for --json to mean there."
     },
     {
-      "id": "session.send-prompt",
-      "title": "Send a prompt to an existing session",
-      "tui": {
-        "status": "yes",
-        "pointer": "interactive mode types straight into the pane (app/interactive.go:147)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/terminal.ts:225 onData + :233 attachCustomKeyEventHandler"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:346 sendPromptCmd"
-      },
-      "verdict": "parity",
-      "notes": "The TUI and web reach this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport. In the agent tab, the web maps bare Shift+Enter to LF/Ctrl+J for a multiline composer while plain Enter remains the submitting CR; shell/process tabs retain xterm's native Enter handling."
-    },
-    {
-      "id": "session.send-prompt.broadcast",
-      "title": "Broadcast one prompt to many sessions (--all/--all-repos)",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:594-596 --all/--all-repos/--include-root"
-      },
-      "verdict": "deliberate",
-      "notes": "A fan-out scripting verb with no interactive analogue: broadcasting to every live session is a batch operation, and both UIs are single-selection by construction."
-    },
-    {
-      "id": "session.kill",
-      "title": "Permanently destroy a session",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:146 (D) -> app/handle_actions.go:149"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:281 killSession"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:703 sessionsKillCmd"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "session.archive",
-      "title": "Archive a session (restorable)",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:147 (a) -> app/handle_actions.go:305"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:287 archiveSession"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:741 sessionsArchiveCmd"
-      },
-      "verdict": "parity",
-      "notes": "Reachable everywhere. Restorable everywhere too as of #1932 — see session.restore, which closed the web's archive-only one-way door."
-    },
-    {
-      "id": "session.restore",
-      "title": "Restore an archived, Lost, or Dead session",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:148 (r) -> app/session_control.go:172"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts restoreSession -> RestoreSession; the selected rail row's Archive slot becomes Restore on an archived row (web/src/ui.ts selectedRowActions/patchMainHead)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:823 sessionsRestoreCmd"
-      },
-      "verdict": "parity",
-      "notes": "Reachable everywhere as of #1932, which closed the archive-only one-way door. The retained TUI and web actions send RestoreSession's stable id so a confirmation/background command cannot retarget a same-title replacement; the one-shot CLI deliberately keeps its repo-scoped title contract. RestoreSession also recovers Lost/Dead rows, giving every surface the same recovery off-ramp."
-    },
-    {
-      "id": "session.limit-retry",
-      "title": "Resume a session blocked at a usage-limit wall",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:169 (c) -> app/handle_actions.go:482 handleLimitRetry -> app/session_control.go:197"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/ui.ts Retry action -> web/src/api.ts resumeFromLimit (shown only on a LimitReached selection)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_limit_retry.go (af sessions retry-limit <title>)"
-      },
-      "verdict": "parity",
-      "issue": "#1934",
-      "notes": "Closed across all three surfaces. #1934 promoted ResumeFromLimit into the public catalog and added the web Retry action; `af sessions retry-limit <title>` closes the remaining CLI half using the same daemon controlServer and Manager.resumeFromLimit action. The CLI follows the established repo-scoped title contract and leaves stable-id addressing to the all-project web client (wire.id-addressing). Every surface therefore shares the daemon-owned respawn, pending-prompt delivery, and durable liveness transition instead of implementing recovery client-side."
-    },
-    {
-      "id": "session.handoff",
-      "title": "Continue a session under a different agent, in place",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go (F, handoff) -> app/handle_handoff.go -> app/session_control.go handoffSessionThroughDaemon"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts handoffSession -> HandoffSession; web/src/ui.ts Handoff action (shown on a handoff-capable selection via canHandoff); picker web/src/modals.ts handoffModal"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_handoff.go (af sessions handoff <title> --to <agent>)"
-      },
-      "verdict": "parity",
-      "issue": "#2013",
-      "notes": "Closed across all three surfaces. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web now calls the existing HandoffSession public route through the same daemon path the TUI/CLI use — no parallel recovery logic — and renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSession.brief)."
-    },
-    {
-      "id": "session.attach",
-      "title": "Attach to a session's terminal",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:143 (o) -> app/handle_actions.go:712"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/terminal.ts:205-223 (WS /v1/sessions/{id}/stream)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:854 sessionsAttachCmd"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "session.preview",
-      "title": "Read a session's terminal content without attaching",
-      "tui": {
-        "status": "yes",
-        "pointer": "the rail renders live pane previews continuously"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/terminal.ts (xterm renders the live stream)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:640 sessionsPreviewCmd"
-      },
-      "verdict": "parity",
-      "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream."
-    },
-    {
-      "id": "session.preview-tab",
-      "title": "Preview a specific tab (by ordinal or stable id)",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/live_stream.go:35 sends Tab + TabID"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/terminal.ts:205-223 streams any tab via tab_id"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go sessionsPreviewCmd --tab/--tab-name/--tab-id"
-      },
-      "verdict": "parity",
-      "notes": "Closed by #1948. PreviewRequest always carried Tab and TabID and the CLI sent neither, so `af sessions preview` could only ever see tab 0 — it could CREATE a tab and then had no way to read it. The CLI now sends all three selectors and gained --tab-name, the handle a person actually has; the id/name/ordinal precedence is session.ResolveTabIndex, shared with every other tab verb rather than restated per surface."
-    },
-    {
-      "id": "session.preview-full",
-      "title": "Preview a tab's full scrollback rather than the visible screen",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/live_stream.go:35 sends Full"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/terminal.ts (xterm holds its own scrollback)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go sessionsPreviewCmd --full"
-      },
-      "verdict": "parity",
-      "notes": "Closed by #1948. --full selects PreviewFullHistory over the visible capture, so the CLI can read scrollback instead of only the visible screen."
-    },
-    {
-      "id": "session.tab.create.options",
-      "title": "Choose a new tab's command, name, or kind at create time",
-      "tui": {
-        "status": "partial",
-        "pointer": "app/handle_tabs.go showNewTabPicker chooses Terminal/VS Code; app/session_control.go sends Shell or Kind"
-      },
-      "web": {
-        "status": "partial",
-        "pointer": "web/src/api.ts:339,355 sets shell/kind but never command/name"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_tabs.go:112 sends Command, Name, Kind, URL, Port"
-      },
-      "verdict": "unclear",
-      "notes": "#2077 added the no-input kind choice (Terminal / VS Code) to `t`. The TUI still cannot name a tab or supply a process command; those input-bearing options remain CLI/API surface. Distinct from session.tab.create.web, which is a deliberate omission."
-    },
-    {
-      "id": "session.tab.create.shell",
-      "title": "Spawn a bare $SHELL tab with no command",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/session_action_target.go:111 Shell:true"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:563 shell:true"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_tabs.go:148 normalizes --kind shell to Shell:true"
-      },
-      "verdict": "parity",
-      "notes": "Closed by #2619: `shell` is the canonical explicit kind, and the CLI normalizes `--kind shell` to the same Shell:true request the TUI/web send. That reaches Manager.CreateTab's single AddShellTab path, so it is a real bare $SHELL tab (TabKindShell), not the different `--command $SHELL` process-tab workaround. `Terminal` remains the presentation-only UI label, consistent with the tab identifier rule."
-    },
-    {
-      "id": "wire.id-addressing",
-      "title": "Address a session by its stable id rather than by title",
-      "tui": {
-        "status": "partial",
-        "pointer": "app/session_action_target.go captures stable identity and constructs kill/archive/restore/limit/handoff/tab requests; retained handlers resolve completions by that identity"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:281 et al send id"
-      },
-      "cli": {
-        "status": "no",
-        "pointer": "api/sessions.go:733 et al send {Title, RepoID}"
-      },
-      "verdict": "real-gap",
-      "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
-    },
-    {
-      "id": "session.watch",
-      "title": "Block until a session goes idle, or until any session in the fleet changes state",
+      "id": "cli.shell-completion",
+      "title": "Generate a shell completion script",
       "tui": {
         "status": "n/a",
         "pointer": ""
@@ -450,125 +85,17 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_watch.go sessionsWatchCmd; api/sessions_watch_fleet.go fleetWatcher"
+        "pointer": "cobra's InitDefaultCompletionCmd (af completion bash|zsh|fish|powershell)"
       },
       "verdict": "deliberate",
-      "notes": "A blocking scripting primitive for automation. Both UIs show liveness continuously, so 'block until idle' is meaningless there — you just look. The fleet form (#3009, no title or --all) is edge-triggered and exists for an automated driver rather than a person: it returns when any session TRANSITIONS, which is not something a UI can offer by rendering state, so it stays CLI-only for the same reason."
+      "notes": "A shell integration emitted for the user's shell rc. There is nothing to complete in a TUI or a browser, so the other surfaces have no analogue. Added by cobra lazily at Execute() time, which is why the derivation must init cobra's defaults before walking the tree — otherwise this surface exists and the inventory cannot see it."
     },
     {
-      "id": "session.whoami",
-      "title": "Identify the current session from inside it",
-      "tui": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "web": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go:911 sessionsWhoamiCmd"
-      },
-      "verdict": "deliberate",
-      "notes": "Only meaningful to an agent running INSIDE a session's shell. Neither UI runs inside a session."
-    },
-    {
-      "id": "session.tab.create",
-      "title": "Spawn a shell/process tab in a session",
+      "id": "config-agent",
+      "title": "Open the config agent (the default agent, briefed to help configure af)",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go KeyNewTab -> app/handle_tabs.go showNewTabPicker"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:339 createTab (shell)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_tabs.go:39 tab-create"
-      },
-      "verdict": "parity",
-      "notes": "All three gate off-box backends. The web keeps a visible explanation where the create control would be, while its close controls stay withdrawn; the TUI refuses before opening the picker. Both mirror the daemon's Capabilities().TabManagement."
-    },
-    {
-      "id": "session.tab.create.vscode",
-      "title": "Spawn a VS Code tab",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/handle_tabs.go showNewTabPicker -> createNewTab(TabKindVSCode)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:355 createVSCodeTab"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_tabs.go:27 --kind vscode"
-      },
-      "verdict": "parity",
-      "notes": "Closed by #2077. The TUI creates Kind:vscode through the same daemon CreateTab RPC as `af sessions tab-create --kind vscode`; its pane shows the existing web-UI placeholder because a terminal cannot render the editor. The web exposes the choice from a labelled New tab menu."
-    },
-    {
-      "id": "session.tab.create.web",
-      "title": "Spawn a web tab (URL/port iframe)",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": "web/src/ui.ts:41-43 NewTabKind deliberately excludes 'web'"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_tabs.go:27-29 --kind web --url/--port"
-      },
-      "verdict": "deliberate",
-      "notes": "Documented in code: 'A web tab is deliberately absent: its target comes from whatever an agent is running, so it stays CLI/API-created' (web/src/ui.ts:41-43, docs/web.md). Both UIs RENDER existing web tabs; only creation is CLI/API-scoped."
-    },
-    {
-      "id": "session.tab.close",
-      "title": "Close a tab",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:157 (w) -> app/handle_actions.go:869"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:368 closeTab"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions_tabs.go:129 tab-delete"
-      },
-      "verdict": "parity",
-      "notes": "The agent tab (index 0) is refused on every surface."
-    },
-    {
-      "id": "session.pr.set",
-      "title": "Record a session's GitHub PR info",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/session_control.go:308 (auto-fetched on sync, not a user verb)"
-      },
-      "web": {
-        "status": "no",
-        "pointer": "no SetPRInfo call in web/src"
-      },
-      "cli": {
-        "status": "no",
-        "pointer": "no PR verb in the cobra tree (derived)"
-      },
-      "verdict": "unclear",
-      "notes": "Public route, but the TUI's use is background sync (it fetches PR info from git and records it) rather than a user action. Whether the web should also sync PR info — or whether this should be daemon-side for every client — is an owner call, not a filed gap."
-    },
-    {
-      "id": "session.pr.open",
-      "title": "Open / copy a session's PR URL",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:169-170 (p, y)"
+        "pointer": "keys/keys.go:186 (C) -> app/config_agent.go:87 handleConfigAgent"
       },
       "web": {
         "status": "no",
@@ -579,86 +106,11 @@
         "pointer": ""
       },
       "verdict": "unclear",
-      "notes": "Depends on session.pr.set: no other surface records PR info, so there is nothing for them to open. Triage together."
+      "notes": "A TUI affordance (C) that spawns the user's default agent to help set up config. TUI-only today. Whether a config-helper agent belongs on the web/CLI, or is inherently an interactive TUI flow, is an owner call. Its lifecycle reap is the internal ReapConfigAgent RPC (not a public route). Not filed."
     },
     {
-      "id": "project.list",
-      "title": "See the list of durable projects",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/switch_project.go buildProjectListFrom unions config.ListProjects() (registry) with derived sessions + root_agents"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts listProjects → project.ts projectSummaries/pickerProjects ∪ registeredProjects; web/src/ui.ts project switcher"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/projects.go projectsListCmd (config.ListProjects)"
-      },
-      "verdict": "parity",
-      "issue": "#2478",
-      "notes": "The CLI, TUI, and web all now surface the durable registry (#2216 identity slice, read via config.ListProjects / the daemon's ListProjects RPC). #2456 added the read half (ListProjects RPC, POST /v1/ListProjects) and unioned it into both switchers: derived (live sessions + tasks) ∪ registry ∪ root_agents, so a registered-but-sessionless project appears everywhere and is creatable-into. This closes the #2478 gap (the TUI/web switchers previously derived only from sessions + legacy root_agents). The web reads over HTTP; the two Go surfaces read config.ListProjects() in-process (a read of on-disk config the daemon writes needs no round trip)."
-    },
-    {
-      "id": "project.delete",
-      "title": "Delete a project (archive its sessions, drop the grouping)",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:162 (D on projects focus) -> app/switch_project.go:223"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:304 deleteProject"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/projects.go:25 projectsDeleteCmd"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "project.add",
-      "title": "Register a new project",
-      "tui": {
-        "status": "yes",
-        "pointer": "app/switch_project.go handleAddProject → registerProjectThroughDaemon (apiclient RegisterProject RPC)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/ui.ts renderProjectSwitch '+ Add project' → web/src/modals.ts addProjectModal → api.ts registerProject (RegisterProject RPC)"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/projects.go newProjectsAddCmd (af projects add, register alias) → daemon RegisterProject RPC"
-      },
-      "verdict": "parity",
-      "issue": "#2456",
-      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
-    },
-    {
-      "id": "project.browse",
-      "title": "Browse the daemon host's directories to find a repo to add",
-      "tui": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/dirpicker.ts directoryPicker → web/src/modals.ts addProjectModal; web/src/api.ts listDirectory (ListDirectory RPC)"
-      },
-      "cli": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "issue": "#2788",
-      "notes": "#2788 adds the daemon ListDirectory RPC (POST /v1/ListDirectory) and the web Add-project picker that reads it. It is deliberately web-only, and the reason is the same for both other surfaces: they already run WHERE the filesystem is, next to a shell. `af projects add` is typed at a prompt that has $PWD, tab-completion and `ls`, so a browser inside the CLI would reimplement the shell badly; the TUI's '+ Add project…' overlay sits in a terminal on that same host, one keystroke from the same shell. The web is the only surface with no such access — a phone, or any browser away from the daemon host, cannot see the paths it is being asked to type — which is why the affordance exists there and nowhere else. All three keep the free-text path as the input the submit actually reads (project.add), so nothing the picker can reach is reachable ONLY through it. Re-open this only if the TUI overlay grows the same complaint; the RPC is surface-agnostic and would serve it unchanged."
-    },
-    {
-      "id": "project.rebind",
-      "title": "Rebind a stable project identity to a replacement checkout",
+      "id": "config.explain",
+      "title": "Explain which config layers supplied an effective value",
       "tui": {
         "status": "no",
         "pointer": ""
@@ -669,173 +121,11 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsRebindCmd"
+        "pointer": "commands/configexplain.go:53-127; commands/configcmd.go:181-190,233-241 --explain"
       },
       "verdict": "real-gap",
       "issue": "#2216",
-      "notes": "The CLI exposes the explicit repair required after a reclone. TUI/web status and repair actions remain part of the later #2216 project-identity integration."
-    },
-    {
-      "id": "project.switch",
-      "title": "Scope the view to one project",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:172 (ctrl+p)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/ui.ts:1047 switchProject"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:572 --repo (per-invocation scoping)"
-      },
-      "verdict": "parity",
-      "notes": "The CLI expresses this as per-command --repo scoping rather than sticky state."
-    },
-    {
-      "id": "task.list",
-      "title": "List tasks",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:159 (m) -> app/handle_overlay.go:221"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:391 listTasks"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/tasks.go:75 tasksListCmd"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "task.add",
-      "title": "Add a task",
-      "tui": {
-        "status": "yes",
-        "pointer": "ui/task_pane.go:370 (n inside the tasks overlay)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/tasks.ts:286-319 -> api.ts:409 addTask"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/tasks.go:121 tasksAddCmd"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "task.edit",
-      "title": "Edit an existing task's name/prompt/trigger/target/program",
-      "tui": {
-        "status": "yes",
-        "pointer": "ui/task_pane.go:362 (enter) -> ui/task_pane_edit.go form"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/tasks.ts editTaskModal (seeded from the task) -> web/src/index.ts openEditTask sends a field-level TaskUpdate patch via api.ts updateTask"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/tasks.go:270 tasksUpdateCmd (7 fields)"
-      },
-      "verdict": "parity",
-      "notes": "Closed by #1935: the Edit action opens the add-task form seeded from the task and submits the changed fields to UpdateTask. project_path is now in the web TS TaskUpdate (web/src/types.ts) and sent by the edit call site, so every field the create form collects is editable."
-    },
-    {
-      "id": "task.toggle",
-      "title": "Enable / disable a task",
-      "tui": {
-        "status": "yes",
-        "pointer": "ui/task_pane.go:356 (x)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/index.ts:854-865 toggleTask"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:649 --enabled"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "task.remove",
-      "title": "Remove a task",
-      "tui": {
-        "status": "yes",
-        "pointer": "ui/task_pane.go:359 (D)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:436 removeTask"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/tasks.go:196 tasksRemoveCmd"
-      },
-      "verdict": "parity",
-      "notes": ""
-    },
-    {
-      "id": "task.restart",
-      "title": "Restart an enabled watch task after editing its script",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/tasks.go:368 tasksRestartCmd"
-      },
-      "verdict": "deliberate",
-      "notes": "This is an operator workflow after editing an external script file, which neither UI owns. Both task UIs already expose the enabled toggle; its daemon update is synchronous and therefore remains a safe manual cycle. The dedicated one-command restart belongs in the scripting CLI."
-    },
-    {
-      "id": "task.trigger",
-      "title": "Trigger a task now",
-      "tui": {
-        "status": "yes",
-        "pointer": "ui/task_pane.go:367-369 (r)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/api.ts:429 triggerTask"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/tasks.go:237 tasksRunCmd"
-      },
-      "verdict": "parity",
-      "notes": "All three refuse watch-backed tasks; the web additionally hides the button (web/src/tasks.ts:92-94)."
-    },
-    {
-      "id": "task.get",
-      "title": "Get one task's record",
-      "tui": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "web": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/tasks.go:216 tasksGetCmd"
-      },
-      "verdict": "deliberate",
-      "notes": "Scripting read-verb; both UIs render the task list continuously."
+      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation."
     },
     {
       "id": "config.read",
@@ -873,25 +163,6 @@
       "verdict": "real-gap",
       "issue": "#2216",
       "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. TUI/web exposure is tracked by #2216."
-    },
-    {
-      "id": "config.explain",
-      "title": "Explain which config layers supplied an effective value",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "commands/configexplain.go:53-127; commands/configcmd.go:181-190,233-241 --explain"
-      },
-      "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation."
     },
     {
       "id": "config.validate",
@@ -949,24 +220,6 @@
       "notes": "Stage 5 of #2216 adds CLI per-project writes: `af config set <key> --project <id-or-path>` and `af config unset <key> --project`. The value lands in the project's machine-local ~/.agent-factory/.agent-factory-projects/<id>/config.toml, above the checked-in in-repo layer, and only for the preference keys the manifest admits per project. TUI/web target selection, source badge, and Clear-override are intentionally scheduled for #2216 stage 7 after the durable project model and personal layers exist."
     },
     {
-      "id": "worktree.hooks.edit",
-      "title": "Edit a repo's post-worktree hooks",
-      "tui": {
-        "status": "yes",
-        "pointer": "keys/keys.go:171 (e) -> app/handle_overlay.go:291"
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "unclear",
-      "notes": "TUI-only editor over in-repo config. Same question as config.write: is editing repo config a UI concern at all?"
-    },
-    {
       "id": "daemon.lifecycle",
       "title": "Install / uninstall / restart / status / adopt the daemon",
       "tui": {
@@ -983,6 +236,24 @@
       },
       "verdict": "deliberate",
       "notes": "Both UIs are clients OF the daemon: the web is served BY it (a web button to stop the daemon would kill the page), and the TUI needs it running to render. Host-lifecycle control belongs to the CLI."
+    },
+    {
+      "id": "daemon.remote-access",
+      "title": "Point a client at a remote daemon (URL + bearer token)",
+      "tui": {
+        "status": "yes",
+        "pointer": "commands/root.go:267,274 persistent --daemon-url/--token (inherited by the TUI launch)"
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/root.go:267,274 --daemon-url/--token"
+      },
+      "verdict": "deliberate",
+      "notes": "The web is SERVED BY the daemon it talks to, so it has no 'point me elsewhere' knob by construction — it is already at the only daemon it can reach. The TUI and CLI are separate processes that must be told where the daemon is, so the flags are persistent on root for both."
     },
     {
       "id": "daemon.token",
@@ -1003,6 +274,42 @@
       "notes": "A credential-bootstrap verb: the web must already HAVE the token to talk to the daemon, so it cannot be where you go to get it. Rotating from the web would sever the rotating client."
     },
     {
+      "id": "enum.agent-programs",
+      "title": "Offer the full set of agent programs af supports",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/handle_input.go:121-123 reads tmux.SupportedPrograms"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/programs.ts renders the served ListPrograms catalog (modals.ts + tasks.ts pickers)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/root.go:246 + api/api.go:586 advertise tmux.SupportedProgramsString()"
+      },
+      "verdict": "parity",
+      "notes": "RESOLVED by #1970. A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go); the web kept its own copy in two pickers, so adding an agent server-side would have left the web silently offering the old set with every field-level check green. The fix is structural rather than a re-sync: the daemon SERVES the enum (POST /v1/ListPrograms, daemon/programs.go) and the web renders the response (web/src/programs.ts), so a seventh agent reaches the web with no edit under web/src — the acceptance criterion, pinned by TestListPrograms_NewProgramReachesClientsWithNoClientChange and its web twin. TestWebProgramEnumMatchesWire (the interim 'is the copy current?' guard) is replaced by TestWebHardcodesNoAgentEnum, which asserts the stronger property that NO copy exists. The reported default comes from the same decision function the create path uses (defaultProgramFor), so the picker's 'repo default' label cannot disagree with the program a real create picks."
+    },
+    {
+      "id": "install.bug-report",
+      "title": "Bundle a bug report",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/bugreportcmd.go:35"
+      },
+      "verdict": "deliberate",
+      "notes": "Collects host-side logs and redacted state; must work when af is too broken to render a UI."
+    },
+    {
       "id": "install.doctor",
       "title": "Diagnose setup and leaked resources",
       "tui": {
@@ -1019,24 +326,6 @@
       },
       "verdict": "deliberate",
       "notes": "Diagnoses the host install, including the case where the daemon is down — exactly when neither UI can run."
-    },
-    {
-      "id": "install.upgrade",
-      "title": "Upgrade af",
-      "tui": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "web": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "commands/upgrade.go:105"
-      },
-      "verdict": "deliberate",
-      "notes": "Replaces the running binary; cannot be driven from a client the binary is serving."
     },
     {
       "id": "install.reset",
@@ -1057,8 +346,8 @@
       "notes": "Destroys the state both UIs are rendering, daemon included. Owner-locked as a typed-confirmation CLI op (#1736)."
     },
     {
-      "id": "install.bug-report",
-      "title": "Bundle a bug report",
+      "id": "install.upgrade",
+      "title": "Upgrade af",
       "tui": {
         "status": "n/a",
         "pointer": ""
@@ -1069,10 +358,10 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/bugreportcmd.go:35"
+        "pointer": "commands/upgrade.go:105"
       },
       "verdict": "deliberate",
-      "notes": "Collects host-side logs and redacted state; must work when af is too broken to render a UI."
+      "notes": "Replaces the running binary; cannot be driven from a client the binary is serving."
     },
     {
       "id": "meta.discovery",
@@ -1111,98 +400,323 @@
       "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
-      "id": "tui.navigation",
-      "title": "Move around the TUI (cursor, focus, sections, scroll, search, help, quit)",
+      "id": "project.add",
+      "title": "Register a new project",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:136-176 (up/down/collapse/expand/focus/sections/scroll/search/help/quit)"
+        "pointer": "app/switch_project.go handleAddProject → registerProjectThroughDaemon (apiclient RegisterProject RPC)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/ui.ts renderProjectSwitch '+ Add project' → web/src/modals.ts addProjectModal → api.ts registerProject (RegisterProject RPC)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects.go newProjectsAddCmd (af projects add, register alias) → daemon RegisterProject RPC"
+      },
+      "verdict": "parity",
+      "issue": "#2456",
+      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
+    },
+    {
+      "id": "project.browse",
+      "title": "Browse the daemon host's directories to find a repo to add",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/dirpicker.ts directoryPicker → web/src/modals.ts addProjectModal; web/src/api.ts listDirectory (ListDirectory RPC)"
+      },
+      "cli": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "verdict": "deliberate",
+      "issue": "#2788",
+      "notes": "#2788 adds the daemon ListDirectory RPC (POST /v1/ListDirectory) and the web Add-project picker that reads it. It is deliberately web-only, and the reason is the same for both other surfaces: they already run WHERE the filesystem is, next to a shell. `af projects add` is typed at a prompt that has $PWD, tab-completion and `ls`, so a browser inside the CLI would reimplement the shell badly; the TUI's '+ Add project…' overlay sits in a terminal on that same host, one keystroke from the same shell. The web is the only surface with no such access — a phone, or any browser away from the daemon host, cannot see the paths it is being asked to type — which is why the affordance exists there and nowhere else. All three keep the free-text path as the input the submit actually reads (project.add), so nothing the picker can reach is reachable ONLY through it. Re-open this only if the TUI overlay grows the same complaint; the RPC is surface-agnostic and would serve it unchanged."
+    },
+    {
+      "id": "project.delete",
+      "title": "Delete a project (archive its sessions, drop the grouping)",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:162 (D on projects focus) -> app/switch_project.go:223"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:304 deleteProject"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects.go:25 projectsDeleteCmd"
+      },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "project.list",
+      "title": "See the list of durable projects",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/switch_project.go buildProjectListFrom unions config.ListProjects() (registry) with derived sessions + root_agents"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts listProjects → project.ts projectSummaries/pickerProjects ∪ registeredProjects; web/src/ui.ts project switcher"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects.go projectsListCmd (config.ListProjects)"
+      },
+      "verdict": "parity",
+      "issue": "#2478",
+      "notes": "The CLI, TUI, and web all now surface the durable registry (#2216 identity slice, read via config.ListProjects / the daemon's ListProjects RPC). #2456 added the read half (ListProjects RPC, POST /v1/ListProjects) and unioned it into both switchers: derived (live sessions + tasks) ∪ registry ∪ root_agents, so a registered-but-sessionless project appears everywhere and is creatable-into. This closes the #2478 gap (the TUI/web switchers previously derived only from sessions + legacy root_agents). The web reads over HTTP; the two Go surfaces read config.ListProjects() in-process (a read of on-disk config the daemon writes needs no round trip)."
+    },
+    {
+      "id": "project.rebind",
+      "title": "Rebind a stable project identity to a replacement checkout",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/projects.go projectsRebindCmd"
+      },
+      "verdict": "real-gap",
+      "issue": "#2216",
+      "notes": "The CLI exposes the explicit repair required after a reclone. TUI/web status and repair actions remain part of the later #2216 project-identity integration."
+    },
+    {
+      "id": "project.switch",
+      "title": "Scope the view to one project",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:172 (ctrl+p)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/ui.ts:1047 switchProject"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:572 --repo (per-invocation scoping)"
+      },
+      "verdict": "parity",
+      "notes": "The CLI expresses this as per-command --repo scoping rather than sticky state."
+    },
+    {
+      "id": "quota.usage-report",
+      "title": "Report usage-limit status per agent CLI",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/quotacmd.go:29"
+      },
+      "verdict": "real-gap",
+      "issue": "#2983",
+      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
+    },
+    {
+      "id": "session.accounts",
+      "title": "Register and select per-session agent credential accounts",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "partial",
+        "pointer": "commands/accountscmd.go accountsAddCmd/accountsListCmd; internal/agentaccount/agentaccount.go Register/List/Selected"
+      },
+      "verdict": "real-gap",
+      "issue": "#3051",
+      "notes": "Registration and listing are CLI-only so far (#3051). An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret, so `add` makes a place and the agent's own login flow fills it. Selecting an account for a session, and showing the selected account in the TUI and web, are the remaining slices — which is why cli is partial and the UIs are no rather than n/a."
+    },
+    {
+      "id": "session.archive",
+      "title": "Archive a session (restorable)",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:147 (a) -> app/handle_actions.go:305"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:287 archiveSession"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:741 sessionsArchiveCmd"
+      },
+      "verdict": "parity",
+      "notes": "Reachable everywhere. Restorable everywhere too as of #1932 — see session.restore, which closed the web's archive-only one-way door."
+    },
+    {
+      "id": "session.attach",
+      "title": "Attach to a session's terminal",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:143 (o) -> app/handle_actions.go:712"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/terminal.ts:205-223 (WS /v1/sessions/{id}/stream)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:854 sessionsAttachCmd"
+      },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "session.create",
+      "title": "Create a session",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:145 (n) -> app/handle_input.go:181"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:251 createSession"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:245 sessionsCreateCmd"
+      },
+      "verdict": "parity",
+      "notes": "The verb is at parity; the OPTIONS are not. See the session.create.opt.* rows — no surface is a superset of another."
+    },
+    {
+      "id": "session.create.opt.backend",
+      "title": "Choose the session's backend (local/docker/ssh/hook) per session",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go KeySetBackend (ctrl+r) -> app/backend_picker.go openBackendPicker + handleStateSelectBackend -> app/session_control.go sessionStartRequest.Backend"
       },
       "web": {
         "status": "partial",
-        "pointer": "web/src/nav.ts:109-200 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
+        "pointer": "web/src/api.ts:265 createSession sends `backend` when picked (via ListBackends), built as a body variable"
       },
       "cli": {
-        "status": "n/a",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook"
       },
-      "verdict": "deliberate",
-      "notes": "Navigation is per-surface chrome, not a product capability: each UI navigates its own layout idiomatically and a CLI has nothing to navigate. Deliberately NOT held to key-for-key parity — see docs/surface-parity.md."
+      "verdict": "real-gap",
+      "issue": "#1933",
+      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/surface-parity.md 'reachable != user-settable'."
     },
     {
-      "id": "tui.panes",
-      "title": "Open / split / hide / focus workspace panes",
+      "id": "session.create.opt.inplace",
+      "title": "Attach a session to the repo's existing working tree (--here)",
+      "tui": {
+        "status": "no",
+        "pointer": "no InPlace assignment anywhere in app/ (grep-verified)"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "web/src/api.ts:251-264 never sends in_place"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:587-588 --here / --in-place"
+      },
+      "verdict": "unclear",
+      "notes": "CLI-only. Plausibly deliberate: --here is a scripting affordance for 'run an agent right here in my checkout', and the TUI/web are worktree-oriented session managers. Needs an owner call before filing."
+    },
+    {
+      "id": "session.create.opt.program",
+      "title": "Choose the agent program at create time",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:163-167 (s, S, x, left/right)"
+        "pointer": "app/handle_input.go:119-134 (Tab -> stateSelectProgram)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/split.ts (drag-to-split, divider resize, Alt+j/k/w)"
-      },
-      "cli": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Both UIs have a pane workspace with surface-idiomatic gestures (the web adds mouse drag-and-drop the TUI cannot express; the TUI has keyboard splits the web reaches via Alt-chords). Layout is client-local and never hits the daemon."
-    },
-    {
-      "id": "daemon.remote-access",
-      "title": "Point a client at a remote daemon (URL + bearer token)",
-      "tui": {
-        "status": "yes",
-        "pointer": "commands/root.go:267,274 persistent --daemon-url/--token (inherited by the TUI launch)"
-      },
-      "web": {
-        "status": "n/a",
-        "pointer": ""
+        "pointer": "web/src/modals.ts:170-175 programSelect"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/root.go:267,274 --daemon-url/--token"
-      },
-      "verdict": "deliberate",
-      "notes": "The web is SERVED BY the daemon it talks to, so it has no 'point me elsewhere' knob by construction — it is already at the only daemon it can reach. The TUI and CLI are separate processes that must be told where the daemon is, so the flags are persistent on root for both."
-    },
-    {
-      "id": "cli.json-envelope",
-      "title": "Machine-readable {data,error} envelope output",
-      "tui": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "web": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:580-581 --json (persistent on sessions/tasks/projects); per-command on config/token/daemon/api/bug-report"
-      },
-      "verdict": "deliberate",
-      "notes": "An output FORMAT for scripts consuming stdout, not a product capability. The UIs render the same data as pixels; there is nothing for --json to mean there."
-    },
-    {
-      "id": "task.edit.project-path",
-      "title": "Change which project a task belongs to",
-      "tui": {
-        "status": "yes",
-        "pointer": "ui/task_pane_edit.go:135 edits ProjectPath; the patch is task.DiffTask over the edited task.Task (ui/task_pane_state.go:91)"
-      },
-      "web": {
-        "status": "yes",
-        "pointer": "web/src/tasks.ts editTaskModal project picker (seeded, editable) -> web/src/index.ts openEditTask sends update.project_path"
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> daemonUpdateTask"
+        "pointer": "api/api.go:586 --program"
       },
       "verdict": "parity",
-      "notes": "The web half was subsumed by #1935: its seeded project picker sends update.project_path. The CLI now sends the same TaskUpdate.ProjectPath patch with `af tasks update --project-path`; `--repo` remains the authorization scope for the task's current project, so `--repo old --project-path new` is unambiguous. This also supplies a repair path for the wrong-project automation incident in #1891 without duplicating the daemon's rebind and RepoID logic."
+      "notes": ""
     },
     {
-      "id": "cli.shell-completion",
-      "title": "Generate a shell completion script",
+      "id": "session.create.opt.prompt",
+      "title": "Send an initial prompt with the new session",
+      "tui": {
+        "status": "yes",
+        "pointer": "shift+tab during naming -> app/handle_overlay.go handleStateInitialPrompt -> app/handle_input.go sessionStartRequest.Prompt"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/modals.ts:177 promptArea -> web/src/api.ts:258"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:585 --prompt"
+      },
+      "verdict": "parity",
+      "issue": "#1936",
+      "notes": "Closed by #1936: the naming form grew an initial-prompt field on shift+tab (a textarea overlay, so multi-line prompts and pastes survive), populating the sessionStartRequest.Prompt that was already plumbed to the daemon. Was an inverted gap — the TUI was the short surface, with the field dead at its only construction site."
+    },
+    {
+      "id": "session.create.opt.remote",
+      "title": "Force a session onto the remote hook backend",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:153 (N) -> app/handle_input.go ForceRemote; PLUS the naming form's backend field (ctrl+r) reaching backend='hook' — app/backend_picker.go"
+      },
+      "web": {
+        "status": "partial",
+        "pointer": "web/src/api.ts createSession sends backend='hook' via the #1968 ListBackends picker — the SAME BackendHook force_remote selects (session/instance_factory.go resolveBackendKind)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:589 --backend hook"
+      },
+      "verdict": "real-gap",
+      "issue": "#1933",
+      "notes": "TUI is now 'yes': `N` still resolves to the hook backend ONLY (session/instance_factory.go resolveBackendKind), but the naming form's backend field reaches backend='hook' explicitly, by the same STRONGER path described below for the web — and the TUI additionally sends the dedicated force_remote field, so it is a superset of both other surfaces here. The web is 'partial', not 'no': the hook backend is reachable from the browser via the #1968 backend picker (backend='hook'), which resolveBackendKind routes to the same BackendHook by a STRONGER path than force_remote — an explicit backend wins over ForceRemote, and both override the repo's backend config, so the picker's 'hook' is strictly more capable than the legacy selector. The dedicated force_remote FIELD is deliberately NOT sent by the web (it stays a field_coverage gap): it adds no capability over the picker, and an ungated 'remote hooks' checkbox reintroduces the 'offered then fails at provision' trap the picker's backendSelectable gate closes (#2406 was closed in favor of this ledger correction). Same unproven-provisioning caveat as session.create.opt.backend: reachable != proven to create a WORKING remote session from the browser (#1968)."
+    },
+    {
+      "id": "session.create.opt.title",
+      "title": "Set the new session's title",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/handle_input.go:135-158 (typed during stateNew)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/modals.ts:148 titleInput"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:584 --name (required)"
+      },
+      "verdict": "parity",
+      "notes": "TUI/web send title_base so the daemon auto-suffixes collisions; the CLI sends title and errors on collision instead."
+    },
+    {
+      "id": "session.get",
+      "title": "Get one session's record",
       "tui": {
         "status": "n/a",
         "pointer": ""
@@ -1213,72 +727,91 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "cobra's InitDefaultCompletionCmd (af completion bash|zsh|fish|powershell)"
+        "pointer": "api/sessions.go:204 sessionsGetCmd"
       },
       "verdict": "deliberate",
-      "notes": "A shell integration emitted for the user's shell rc. There is nothing to complete in a TUI or a browser, so the other surfaces have no analogue. Added by cobra lazily at Execute() time, which is why the derivation must init cobra's defaults before walking the tree — otherwise this surface exists and the inventory cannot see it."
+      "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue — the row is already on screen."
     },
     {
-      "id": "enum.agent-programs",
-      "title": "Offer the full set of agent programs af supports",
+      "id": "session.handoff",
+      "title": "Continue a session under a different agent, in place",
       "tui": {
         "status": "yes",
-        "pointer": "app/handle_input.go:121-123 reads tmux.SupportedPrograms"
+        "pointer": "keys/keys.go (F, handoff) -> app/handle_handoff.go -> app/session_control.go handoffSessionThroughDaemon"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/programs.ts renders the served ListPrograms catalog (modals.ts + tasks.ts pickers)"
+        "pointer": "web/src/api.ts handoffSession -> HandoffSession; web/src/ui.ts Handoff action (shown on a handoff-capable selection via canHandoff); picker web/src/modals.ts handoffModal"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/root.go:246 + api/api.go:586 advertise tmux.SupportedProgramsString()"
+        "pointer": "api/sessions_handoff.go (af sessions handoff <title> --to <agent>)"
       },
       "verdict": "parity",
-      "notes": "RESOLVED by #1970. A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go); the web kept its own copy in two pickers, so adding an agent server-side would have left the web silently offering the old set with every field-level check green. The fix is structural rather than a re-sync: the daemon SERVES the enum (POST /v1/ListPrograms, daemon/programs.go) and the web renders the response (web/src/programs.ts), so a seventh agent reaches the web with no edit under web/src — the acceptance criterion, pinned by TestListPrograms_NewProgramReachesClientsWithNoClientChange and its web twin. TestWebProgramEnumMatchesWire (the interim 'is the copy current?' guard) is replaced by TestWebHardcodesNoAgentEnum, which asserts the stronger property that NO copy exists. The reported default comes from the same decision function the create path uses (defaultProgramFor), so the picker's 'repo default' label cannot disagree with the program a real create picks."
+      "issue": "#2013",
+      "notes": "Closed across all three surfaces. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web now calls the existing HandoffSession public route through the same daemon path the TUI/CLI use — no parallel recovery logic — and renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSession.brief)."
     },
     {
-      "id": "cli.argshape.session-title",
-      "title": "Name a session the same way across the sessions verbs",
-      "tui": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "web": {
-        "status": "n/a",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "yes",
-        "pointer": "api/sessions.go sessionsCreateCmd accepts create [title] and the existing --name alias"
-      },
-      "verdict": "parity",
-      "issue": "#1972",
-      "notes": "Closed additively: `af sessions create <title>` now shares the positional title shape and vocabulary of its ten sibling verbs, while `--name <title>` remains an alias so existing scripts do not break. Both forms resolve once, before dispatch, into the same CreateSessionRequest.Title path. tui/web are n/a: this is about CLI argument shape, and neither UI has arguments."
-    },
-    {
-      "id": "backend.list",
-      "title": "Discover which backends are available for a repo (with availability + reason)",
+      "id": "session.kill",
+      "title": "Permanently destroy a session",
       "tui": {
         "status": "yes",
-        "pointer": "app/backend_picker.go openBackendPicker -> apiclient/control.go ListBackends -> the naming form's backend field renders label + status + reason"
+        "pointer": "keys/keys.go:146 (D) -> app/handle_actions.go:149"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:260 ListBackends -> web/src/backends.ts renders the picker"
+        "pointer": "web/src/api.ts:281 killSession"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_backends.go:19 sessionsBackendsCmd -> daemon/control_client.go:332 ListBackends"
+        "pointer": "api/sessions.go:703 sessionsKillCmd"
       },
       "verdict": "parity",
-      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED by #2584: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it), so the surfaces cannot describe a repo's backends differently and a backend added server-side reaches all of them with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it. TUI half CLOSED by #1933's create-form backend field, which is exactly the flip #2584's note anticipated ('this cell flips to yes with that picker, not before'): the TUI reaches the same catalog over apiclient.ListBackends and renders the daemon's labels/statuses/reasons rather than deriving availability locally — which would answer about the CLIENT's host, since apiclient.NewTargeted may point at a REMOTE daemon. Note what 'yes' means uniformly here: on both UIs this capability IS the create-time picker rendering availability, not a standalone catalog view — a catalog with no way to act on it would be a dead-end read. The CLI's standalone verb is the shape that fits a scripting surface. Three surfaces, one catalog, one implementation: parity."
+      "notes": ""
     },
     {
-      "id": "config-agent",
-      "title": "Open the config agent (the default agent, briefed to help configure af)",
+      "id": "session.limit-retry",
+      "title": "Resume a session blocked at a usage-limit wall",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:186 (C) -> app/config_agent.go:87 handleConfigAgent"
+        "pointer": "keys/keys.go:169 (c) -> app/handle_actions.go:482 handleLimitRetry -> app/session_control.go:197"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/ui.ts Retry action -> web/src/api.ts resumeFromLimit (shown only on a LimitReached selection)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_limit_retry.go (af sessions retry-limit <title>)"
+      },
+      "verdict": "parity",
+      "issue": "#1934",
+      "notes": "Closed across all three surfaces. #1934 promoted ResumeFromLimit into the public catalog and added the web Retry action; `af sessions retry-limit <title>` closes the remaining CLI half using the same daemon controlServer and Manager.resumeFromLimit action. The CLI follows the established repo-scoped title contract and leaves stable-id addressing to the all-project web client (wire.id-addressing). Every surface therefore shares the daemon-owned respawn, pending-prompt delivery, and durable liveness transition instead of implementing recovery client-side."
+    },
+    {
+      "id": "session.list",
+      "title": "List sessions",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/sidebar rail (always rendered)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:179 fetchSnapshot"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:186 sessionsListCmd"
+      },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "session.pr.open",
+      "title": "Open / copy a session's PR URL",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:169-170 (p, y)"
       },
       "web": {
         "status": "no",
@@ -1289,11 +822,119 @@
         "pointer": ""
       },
       "verdict": "unclear",
-      "notes": "A TUI affordance (C) that spawns the user's default agent to help set up config. TUI-only today. Whether a config-helper agent belongs on the web/CLI, or is inherently an interactive TUI flow, is an owner call. Its lifecycle reap is the internal ReapConfigAgent RPC (not a public route). Not filed."
+      "notes": "Depends on session.pr.set: no other surface records PR info, so there is nothing for them to open. Triage together."
     },
     {
-      "id": "task.max-concurrent-runs",
-      "title": "Cap a watch task's in-flight session count",
+      "id": "session.pr.set",
+      "title": "Record a session's GitHub PR info",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/session_control.go:308 (auto-fetched on sync, not a user verb)"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "no SetPRInfo call in web/src"
+      },
+      "cli": {
+        "status": "no",
+        "pointer": "no PR verb in the cobra tree (derived)"
+      },
+      "verdict": "unclear",
+      "notes": "Public route, but the TUI's use is background sync (it fetches PR info from git and records it) rather than a user action. Whether the web should also sync PR info — or whether this should be daemon-side for every client — is an owner call, not a filed gap."
+    },
+    {
+      "id": "session.preview",
+      "title": "Read a session's terminal content without attaching",
+      "tui": {
+        "status": "yes",
+        "pointer": "the rail renders live pane previews continuously"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/terminal.ts (xterm renders the live stream)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:640 sessionsPreviewCmd"
+      },
+      "verdict": "parity",
+      "notes": "The CLI uses the internal Preview RPC; the UIs get the same content off the live stream."
+    },
+    {
+      "id": "session.preview-full",
+      "title": "Preview a tab's full scrollback rather than the visible screen",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/live_stream.go:35 sends Full"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/terminal.ts (xterm holds its own scrollback)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsPreviewCmd --full"
+      },
+      "verdict": "parity",
+      "notes": "Closed by #1948. --full selects PreviewFullHistory over the visible capture, so the CLI can read scrollback instead of only the visible screen."
+    },
+    {
+      "id": "session.preview-tab",
+      "title": "Preview a specific tab (by ordinal or stable id)",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/live_stream.go:35 sends Tab + TabID"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/terminal.ts:205-223 streams any tab via tab_id"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsPreviewCmd --tab/--tab-name/--tab-id"
+      },
+      "verdict": "parity",
+      "notes": "Closed by #1948. PreviewRequest always carried Tab and TabID and the CLI sent neither, so `af sessions preview` could only ever see tab 0 — it could CREATE a tab and then had no way to read it. The CLI now sends all three selectors and gained --tab-name, the handle a person actually has; the id/name/ordinal precedence is session.ResolveTabIndex, shared with every other tab verb rather than restated per surface."
+    },
+    {
+      "id": "session.restore",
+      "title": "Restore an archived, Lost, or Dead session",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:148 (r) -> app/session_control.go:172"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts restoreSession -> RestoreSession; the selected rail row's Archive slot becomes Restore on an archived row (web/src/ui.ts selectedRowActions/patchMainHead)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:823 sessionsRestoreCmd"
+      },
+      "verdict": "parity",
+      "notes": "Reachable everywhere as of #1932, which closed the archive-only one-way door. The retained TUI and web actions send RestoreSession's stable id so a confirmation/background command cannot retarget a same-title replacement; the one-shot CLI deliberately keeps its repo-scoped title contract. RestoreSession also recovers Lost/Dead rows, giving every surface the same recovery off-ramp."
+    },
+    {
+      "id": "session.send-prompt",
+      "title": "Send a prompt to an existing session",
+      "tui": {
+        "status": "yes",
+        "pointer": "interactive mode types straight into the pane (app/interactive.go:147)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/terminal.ts:225 onData + :233 attachCustomKeyEventHandler"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:346 sendPromptCmd"
+      },
+      "verdict": "parity",
+      "notes": "The TUI and web reach this by typing into the live terminal rather than via the SendPrompt RPC; same user capability, different transport. In the agent tab, the web maps bare Shift+Enter to LF/Ctrl+J for a multiline composer while plain Enter remains the submitting CR; shell/process tabs retain xterm's native Enter handling."
+    },
+    {
+      "id": "session.send-prompt.broadcast",
+      "title": "Broadcast one prompt to many sessions (--all/--all-repos)",
       "tui": {
         "status": "no",
         "pointer": ""
@@ -1304,28 +945,118 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:645 af tasks add/update --max-concurrent-runs"
+        "pointer": "api/api.go:594-596 --all/--all-repos/--include-root"
       },
-      "verdict": "unclear",
-      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
+      "verdict": "deliberate",
+      "notes": "A fan-out scripting verb with no interactive analogue: broadcasting to every live session is a batch operation, and both UIs are single-selection by construction."
     },
     {
-      "id": "task.on-complete",
-      "title": "Declare what happens to a task run's session when it finishes",
+      "id": "session.tab.close",
+      "title": "Close a tab",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:157 (w) -> app/handle_actions.go:869"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:368 closeTab"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:129 tab-delete"
+      },
+      "verdict": "parity",
+      "notes": "The agent tab (index 0) is refused on every surface."
+    },
+    {
+      "id": "session.tab.create",
+      "title": "Spawn a shell/process tab in a session",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go KeyNewTab -> app/handle_tabs.go showNewTabPicker"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:339 createTab (shell)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:39 tab-create"
+      },
+      "verdict": "parity",
+      "notes": "All three gate off-box backends. The web keeps a visible explanation where the create control would be, while its close controls stay withdrawn; the TUI refuses before opening the picker. Both mirror the daemon's Capabilities().TabManagement."
+    },
+    {
+      "id": "session.tab.create.options",
+      "title": "Choose a new tab's command, name, or kind at create time",
+      "tui": {
+        "status": "partial",
+        "pointer": "app/handle_tabs.go showNewTabPicker chooses Terminal/VS Code; app/session_control.go sends Shell or Kind"
+      },
+      "web": {
+        "status": "partial",
+        "pointer": "web/src/api.ts:339,355 sets shell/kind but never command/name"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:112 sends Command, Name, Kind, URL, Port"
+      },
+      "verdict": "unclear",
+      "notes": "#2077 added the no-input kind choice (Terminal / VS Code) to `t`. The TUI still cannot name a tab or supply a process command; those input-bearing options remain CLI/API surface. Distinct from session.tab.create.web, which is a deliberate omission."
+    },
+    {
+      "id": "session.tab.create.shell",
+      "title": "Spawn a bare $SHELL tab with no command",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/session_action_target.go:111 Shell:true"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:563 shell:true"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:148 normalizes --kind shell to Shell:true"
+      },
+      "verdict": "parity",
+      "notes": "Closed by #2619: `shell` is the canonical explicit kind, and the CLI normalizes `--kind shell` to the same Shell:true request the TUI/web send. That reaches Manager.CreateTab's single AddShellTab path, so it is a real bare $SHELL tab (TabKindShell), not the different `--command $SHELL` process-tab workaround. `Terminal` remains the presentation-only UI label, consistent with the tab identifier rule."
+    },
+    {
+      "id": "session.tab.create.vscode",
+      "title": "Spawn a VS Code tab",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/handle_tabs.go showNewTabPicker -> createNewTab(TabKindVSCode)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:355 createVSCodeTab"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_tabs.go:27 --kind vscode"
+      },
+      "verdict": "parity",
+      "notes": "Closed by #2077. The TUI creates Kind:vscode through the same daemon CreateTab RPC as `af sessions tab-create --kind vscode`; its pane shows the existing web-UI placeholder because a terminal cannot render the editor. The web exposes the choice from a labelled New tab menu."
+    },
+    {
+      "id": "session.tab.create.web",
+      "title": "Spawn a web tab (URL/port iframe)",
       "tui": {
         "status": "no",
         "pointer": ""
       },
       "web": {
         "status": "no",
-        "pointer": ""
+        "pointer": "web/src/ui.ts:41-43 NewTabKind deliberately excludes 'web'"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go af tasks add/update --on-complete"
+        "pointer": "api/sessions_tabs.go:27-29 --kind web --url/--port"
       },
-      "verdict": "unclear",
-      "notes": "The spawned-session lifecycle verb (task.Task/TaskUpdate.OnComplete, #2595): keep/archive/kill applied when a run finishes. The CLI sets it via --on-complete; the TUI task form and web do not expose it. Exactly the task.max-concurrent-runs shape — the TUI can edit tasks so this is a missing FIELD (#1935-adjacent), and the web cannot edit tasks at all (#1935). Whether the UIs should surface it is the same owner call, so it is recorded here rather than filed. The DEFAULT (keep) is the historical behavior, so a surface that cannot set it still produces correct tasks — which is why this is a field gap and not a broken create."
+      "verdict": "deliberate",
+      "notes": "Documented in code: 'A web tab is deliberately absent: its target comes from whatever an agent is running, so it stays CLI/API-created' (web/src/ui.ts:41-43, docs/web.md). Both UIs RENDER existing web tabs; only creation is CLI/API-scoped."
     },
     {
       "id": "session.tab.rename",
@@ -1364,8 +1095,134 @@
       "notes": "#1904 added tab reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar). No TUI affordance. Same owner call as session.tab.rename. Not filed."
     },
     {
-      "id": "quota.usage-report",
-      "title": "Report usage-limit status per agent CLI",
+      "id": "session.watch",
+      "title": "Block until a session goes idle, or until any session in the fleet changes state",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_watch.go sessionsWatchCmd; api/sessions_watch_fleet.go fleetWatcher"
+      },
+      "verdict": "deliberate",
+      "notes": "A blocking scripting primitive for automation. Both UIs show liveness continuously, so 'block until idle' is meaningless there — you just look. The fleet form (#3009, no title or --all) is edge-triggered and exists for an automated driver rather than a person: it returns when any session TRANSITIONS, which is not something a UI can offer by rendering state, so it stays CLI-only for the same reason."
+    },
+    {
+      "id": "session.whoami",
+      "title": "Identify the current session from inside it",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go:911 sessionsWhoamiCmd"
+      },
+      "verdict": "deliberate",
+      "notes": "Only meaningful to an agent running INSIDE a session's shell. Neither UI runs inside a session."
+    },
+    {
+      "id": "task.add",
+      "title": "Add a task",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/task_pane.go:370 (n inside the tasks overlay)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/tasks.ts:286-319 -> api.ts:409 addTask"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:121 tasksAddCmd"
+      },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.edit",
+      "title": "Edit an existing task's name/prompt/trigger/target/program",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/task_pane.go:362 (enter) -> ui/task_pane_edit.go form"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/tasks.ts editTaskModal (seeded from the task) -> web/src/index.ts openEditTask sends a field-level TaskUpdate patch via api.ts updateTask"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:270 tasksUpdateCmd (7 fields)"
+      },
+      "verdict": "parity",
+      "notes": "Closed by #1935: the Edit action opens the add-task form seeded from the task and submits the changed fields to UpdateTask. project_path is now in the web TS TaskUpdate (web/src/types.ts) and sent by the edit call site, so every field the create form collects is editable."
+    },
+    {
+      "id": "task.edit.project-path",
+      "title": "Change which project a task belongs to",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/task_pane_edit.go:135 edits ProjectPath; the patch is task.DiffTask over the edited task.Task (ui/task_pane_state.go:91)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/tasks.ts editTaskModal project picker (seeded, editable) -> web/src/index.ts openEditTask sends update.project_path"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:722 --project-path -> api/tasks.go:576 patch.ProjectPath = strPtr(absPath) -> daemonUpdateTask"
+      },
+      "verdict": "parity",
+      "notes": "The web half was subsumed by #1935: its seeded project picker sends update.project_path. The CLI now sends the same TaskUpdate.ProjectPath patch with `af tasks update --project-path`; `--repo` remains the authorization scope for the task's current project, so `--repo old --project-path new` is unambiguous. This also supplies a repair path for the wrong-project automation incident in #1891 without duplicating the daemon's rebind and RepoID logic."
+    },
+    {
+      "id": "task.get",
+      "title": "Get one task's record",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:216 tasksGetCmd"
+      },
+      "verdict": "deliberate",
+      "notes": "Scripting read-verb; both UIs render the task list continuously."
+    },
+    {
+      "id": "task.list",
+      "title": "List tasks",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:159 (m) -> app/handle_overlay.go:221"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:391 listTasks"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:75 tasksListCmd"
+      },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.max-concurrent-runs",
+      "title": "Cap a watch task's in-flight session count",
       "tui": {
         "status": "no",
         "pointer": ""
@@ -1376,11 +1233,173 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/quotacmd.go:29"
+        "pointer": "api/api.go:645 af tasks add/update --max-concurrent-runs"
+      },
+      "verdict": "unclear",
+      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
+    },
+    {
+      "id": "task.on-complete",
+      "title": "Declare what happens to a task run's session when it finishes",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go af tasks add/update --on-complete"
+      },
+      "verdict": "unclear",
+      "notes": "The spawned-session lifecycle verb (task.Task/TaskUpdate.OnComplete, #2595): keep/archive/kill applied when a run finishes. The CLI sets it via --on-complete; the TUI task form and web do not expose it. Exactly the task.max-concurrent-runs shape — the TUI can edit tasks so this is a missing FIELD (#1935-adjacent), and the web cannot edit tasks at all (#1935). Whether the UIs should surface it is the same owner call, so it is recorded here rather than filed. The DEFAULT (keep) is the historical behavior, so a surface that cannot set it still produces correct tasks — which is why this is a field gap and not a broken create."
+    },
+    {
+      "id": "task.remove",
+      "title": "Remove a task",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/task_pane.go:359 (D)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:436 removeTask"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:196 tasksRemoveCmd"
+      },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.restart",
+      "title": "Restart an enabled watch task after editing its script",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:368 tasksRestartCmd"
+      },
+      "verdict": "deliberate",
+      "notes": "This is an operator workflow after editing an external script file, which neither UI owns. Both task UIs already expose the enabled toggle; its daemon update is synchronous and therefore remains a safe manual cycle. The dedicated one-command restart belongs in the scripting CLI."
+    },
+    {
+      "id": "task.toggle",
+      "title": "Enable / disable a task",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/task_pane.go:356 (x)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/index.ts:854-865 toggleTask"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/api.go:649 --enabled"
+      },
+      "verdict": "parity",
+      "notes": ""
+    },
+    {
+      "id": "task.trigger",
+      "title": "Trigger a task now",
+      "tui": {
+        "status": "yes",
+        "pointer": "ui/task_pane.go:367-369 (r)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:429 triggerTask"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks.go:237 tasksRunCmd"
+      },
+      "verdict": "parity",
+      "notes": "All three refuse watch-backed tasks; the web additionally hides the button (web/src/tasks.ts:92-94)."
+    },
+    {
+      "id": "tui.navigation",
+      "title": "Move around the TUI (cursor, focus, sections, scroll, search, help, quit)",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:136-176 (up/down/collapse/expand/focus/sections/scroll/search/help/quit)"
+      },
+      "web": {
+        "status": "partial",
+        "pointer": "web/src/nav.ts:109-200 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
+      },
+      "cli": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "verdict": "deliberate",
+      "notes": "Navigation is per-surface chrome, not a product capability: each UI navigates its own layout idiomatically and a CLI has nothing to navigate. Deliberately NOT held to key-for-key parity — see docs/surface-parity.md."
+    },
+    {
+      "id": "tui.panes",
+      "title": "Open / split / hide / focus workspace panes",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:163-167 (s, S, x, left/right)"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/split.ts (drag-to-split, divider resize, Alt+j/k/w)"
+      },
+      "cli": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "verdict": "deliberate",
+      "notes": "Both UIs have a pane workspace with surface-idiomatic gestures (the web adds mouse drag-and-drop the TUI cannot express; the TUI has keyboard splits the web reaches via Alt-chords). Layout is client-local and never hits the daemon."
+    },
+    {
+      "id": "wire.id-addressing",
+      "title": "Address a session by its stable id rather than by title",
+      "tui": {
+        "status": "partial",
+        "pointer": "app/session_action_target.go captures stable identity and constructs kill/archive/restore/limit/handoff/tab requests; retained handlers resolve completions by that identity"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:281 et al send id"
+      },
+      "cli": {
+        "status": "no",
+        "pointer": "api/sessions.go:733 et al send {Title, RepoID}"
       },
       "verdict": "real-gap",
-      "issue": "#2983",
-      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
+      "issue": "#2358",
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
+    },
+    {
+      "id": "worktree.hooks.edit",
+      "title": "Edit a repo's post-worktree hooks",
+      "tui": {
+        "status": "yes",
+        "pointer": "keys/keys.go:171 (e) -> app/handle_overlay.go:291"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "no",
+        "pointer": ""
+      },
+      "verdict": "unclear",
+      "notes": "TUI-only editor over in-repo config. Same question as config.write: is editing repo config a UI concern at all?"
     }
   ],
   "ledger": {
@@ -1392,6 +1411,8 @@
     ],
     "cli_verbs": {
       "af": "meta.discovery",
+      "af accounts add": "session.accounts",
+      "af accounts list": "session.accounts",
       "af agent-server": "meta.internal",
       "af api": "meta.discovery",
       "af bug-report": "install.bug-report",
@@ -1576,6 +1597,11 @@
       "af --token": "daemon.remote-access",
       "af --upgrade-transaction": "meta.internal",
       "af --version": "meta.discovery",
+      "af accounts --help": "meta.discovery",
+      "af accounts add --help": "meta.discovery",
+      "af accounts add --json": "cli.json-envelope",
+      "af accounts list --help": "meta.discovery",
+      "af accounts list --json": "cli.json-envelope",
       "af agent-server --help": "meta.discovery",
       "af agent-server --listen": "meta.internal",
       "af agent-server --program": "meta.internal",

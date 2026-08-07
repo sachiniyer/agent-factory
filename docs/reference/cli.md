@@ -9,6 +9,9 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 ## Commands
 
 - [`af`](#af) — Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.
+- [`af accounts`](#af-accounts) — Manage per-session agent credential directories
+- [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
+- [`af accounts list`](#af-accounts-list) — List registered agent accounts
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
@@ -96,6 +99,7 @@ af [flags]
 
 **Subcommands**
 
+- [`af accounts`](#af-accounts) — Manage per-session agent credential directories
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
 - [`af api`](#af-api) — Show the daemon-hosted HTTP/JSON API catalog
 - [`af bug-report`](#af-bug-report) — Bundle logs, versions, tasks, and redacted state for a bug report
@@ -120,6 +124,110 @@ af [flags]
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `-p`, `--program` | `string` | Program to run in new sessions (one of: claude, codex, aider, gemini, amp, opencode, devin) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts
+
+Manage per-session agent credential directories
+
+Prepare the credential directories a session can later be scoped to.
+
+An account is one of an agent's logged-in identities, held as a directory the
+agent CLI treats as its home. af never reads, stores, or forwards the credential
+itself — it decides which directory a session sees, and the agent's own login
+flow puts the material there.
+
+add creates that directory and prints its path · list shows what is registered.
+Register an account, then log in with the agent pointed at that directory:
+
+  af accounts add codex work
+  CODEX_HOME=$(af accounts add codex work) codex login
+
+Selecting an account for a session is not available yet — see issue #3051. These
+two subcommands prepare the directories and nothing reads them at session start,
+so a session started today still runs on whatever credentials it inherits from
+the environment.
+
+When selection arrives it will both inject that directory and remove every other
+identity-bearing variable for the agent. The removal is what will make the
+selection real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the
+config directory, so without it a session would authenticate as whoever that key
+belongs to while every visible signal reported the selected account.
+
+af will never switch accounts on its own — not on a rate limit, not on a
+failure. A session will run as the account it was started with.
+
+```
+af accounts
+```
+
+**Subcommands**
+
+- [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
+- [`af accounts list`](#af-accounts-list) — List registered agent accounts
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts add
+
+Register a credential directory for an agent account
+
+Create the credential directory for an account and print its path.
+
+This makes a place; it does not log in. Run the agent's own login flow against
+the printed directory to put credentials there.
+
+Registration is idempotent — running it again on an existing account reports the
+same directory and touches nothing inside it.
+
+```
+af accounts add <agent> <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts list
+
+List registered agent accounts
+
+List the registered accounts, for one agent or for every agent that
+supports account scoping.
+
+An agent absent from this list is one whose credential relocation af has not
+verified, not one that is merely unconfigured — af reports unsupported rather
+than accepting a selection that would silently do nothing.
+
+```
+af accounts list [agent] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
 
 ## af agent-server
