@@ -421,6 +421,25 @@ pointing at one).`,
 			return jsonError(err)
 		}
 
+		// An OLDER daemon does not know the account field and drops it silently,
+		// so the session it created runs on the ambient identity while this command
+		// would otherwise report success with the account the user asked for. That
+		// is the silent wrong-account outcome the whole feature exists to prevent,
+		// arriving through version skew instead of through the environment.
+		//
+		// The daemon is the authority on what it stored, so this checks what came
+		// BACK rather than what was sent. Reported as a failure, and it names the
+		// session, because one now exists that must be removed rather than used
+		// (#3075 review).
+		if createAccountFlag != "" && data.Account != createAccountFlag {
+			return jsonError(fmt.Errorf(
+				"session %q was created but the daemon did not apply account %q — it is running on the ambient "+
+					"identity, not that account. The running daemon predates account support; upgrade it "+
+					"(af daemon restart after an upgrade) and recreate. Remove the unscoped session with "+
+					"`af sessions kill %s`",
+				data.Title, createAccountFlag, data.Title))
+		}
+
 		return jsonOut(data)
 	},
 }
