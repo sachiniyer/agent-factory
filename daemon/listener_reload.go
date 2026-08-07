@@ -126,6 +126,17 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			}
 		}
 		wl.webConfigAddr = ""
+		// Tearing the listener DOWN is a listener change like any other, and this
+		// early return used to skip both consequences of that (#3012 review): the
+		// generation did not advance, so mintSandboxCallback's revalidation compared
+		// equal and let a racing create finish against a listener that had just
+		// closed; and no sweep ran, so credentials outlived the listener entirely.
+		// The opt-out is the MOST complete form of "the endpoint is gone", so it
+		// cannot be the one path that reports nothing.
+		wl.webGen++
+		if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
+			log.WarningLog.Printf("listen_addr is now empty: revoked %d sandbox callback credential(s) — the control listener is closed, so nothing can call back until it is re-enabled and those sessions are re-provisioned", n)
+		}
 		return nil
 	}
 	cfg := wl.manager.Config()
