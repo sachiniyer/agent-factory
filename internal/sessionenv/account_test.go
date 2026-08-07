@@ -220,8 +220,6 @@ func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
 	// account use.
 	_, err := ApplyAccount(nil, "codex", Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
 	require.NoError(t, err)
-	_, err = ApplyAccount(nil, "codex --model gpt-5", Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
-	require.NoError(t, err)
 }
 
 // A command that cannot be parsed into a single simple call is not evidence of
@@ -245,6 +243,14 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		// that would receive the selected root.
 		"./codex",
 		"bin/codex",
+		// A repository file that merely SHARES a name with a modelled wrapper.
+		"./env codex",
+		"./af agent-server --program codex --program-resolved",
+		// An agent's own flags redirect its identity as effectively as the
+		// environment: codex -c cli_auth_credentials_store="keyring" ignores the
+		// account directory's auth.json entirely.
+		"codex -c cli_auth_credentials_store=\"keyring\"",
+		"codex --model gpt-5",
 		// A CROSS-AGENT override: the account scopes codex, the command runs
 		// claude, which ignores CODEX_HOME entirely and uses its own default home.
 		"claude",

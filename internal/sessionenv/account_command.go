@@ -85,7 +85,7 @@ func callOverridesName(call *syntax.CallExpr, agent string, names map[string]str
 
 	// A nested agent-server program carries its own command, and is the one
 	// wrapper this package already models.
-	if nested, ok := literalAgentServerProgram(call); ok {
+	if nested, ok := literalAgentServerProgram(call); ok && isBareName(words[0], "af") {
 		inner, ok := singleSimpleCall(nested)
 		if !ok {
 			return false, false
@@ -93,7 +93,7 @@ func callOverridesName(call *syntax.CallExpr, agent string, names map[string]str
 		return callOverridesName(inner, agent, names, depth+1)
 	}
 
-	if wordBaseEquals(words[0], "env") {
+	if isBareName(words[0], "env") {
 		return envOverridesName(words[1:], agent, names)
 	}
 
@@ -112,8 +112,17 @@ func callOverridesName(call *syntax.CallExpr, agent string, names map[string]str
 	if !callIsLiteral(call) {
 		return false, false
 	}
-	if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, agent) {
-		return false, true
+	// Bare name, and NO ARGUMENTS. An agent's own flags can redirect its identity
+	// as effectively as the environment can: codex documents
+	// `-c cli_auth_credentials_store="keyring"`, which makes it ignore the account
+	// directory's auth.json and use the machine-wide keyring instead, and claude's
+	// help points at --settings for auth. Enumerating those per agent is the same
+	// losing game as enumerating shell forms, one layer down, so a scoped
+	// invocation carries no arguments at all (#2983 review).
+	if len(words) == 1 {
+		if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, agent) {
+			return false, true
+		}
 	}
 	return false, false
 }
@@ -189,4 +198,19 @@ func executableIsAgent(executable, agent string) bool {
 		return false
 	}
 	return strings.EqualFold(executable, agent)
+}
+
+// isBareName reports whether a word is exactly the given command name with no
+// path component.
+//
+// A basename match is not provenance: `./env` and `./af` share a name with the
+// tools this models and are arbitrary repository-provided executables that would
+// receive the selected account root. Requiring a bare name puts PATH resolution —
+// the operator's configuration — in charge of which binary runs.
+func isBareName(word *syntax.Word, want string) bool {
+	value, ok := literalShellWord(word)
+	if !ok || strings.Contains(value, "/") {
+		return false
+	}
+	return strings.EqualFold(value, want)
 }
