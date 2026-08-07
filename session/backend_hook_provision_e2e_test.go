@@ -251,7 +251,8 @@ func TestProvisionedHostActuallyConnects(t *testing.T) {
 	port, hostPubKey := throwawaySSHD(t)
 
 	record := &hookProvisionRecord{Host: "127.0.0.1", Port: port, HostKey: hostPubKey}
-	host, p := hookProvisionHostPort(record)
+	host, p, hpErr := hookProvisionHostPort(record)
+	require.NoError(t, hpErr)
 	knownHosts, err := hookProvisionKnownHosts(t.TempDir(), host, p, record.HostKey)
 	require.NoError(t, err)
 
@@ -277,7 +278,8 @@ func TestProvisionedHostRefusesAWrongPinnedKey(t *testing.T) {
 	wrong := fields[0] + " " + fields[1]
 
 	record := &hookProvisionRecord{Host: "127.0.0.1", Port: port, HostKey: wrong}
-	host, p := hookProvisionHostPort(record)
+	host, p, hpErr := hookProvisionHostPort(record)
+	require.NoError(t, hpErr)
 	knownHosts, err := hookProvisionKnownHosts(t.TempDir(), host, p, record.HostKey)
 	require.NoError(t, err)
 

@@ -122,15 +122,18 @@ func TestHookProvisionSSHCommandMinimalRecord(t *testing.T) {
 
 // A record may spell the port either way; both must reach the same pin.
 func TestHookProvisionHostPortAcceptsEitherSpelling(t *testing.T) {
-	h, p := hookProvisionHostPort(&hookProvisionRecord{Host: "10.0.0.7:2222"})
+	h, p, err := hookProvisionHostPort(&hookProvisionRecord{Host: "10.0.0.7:2222"})
+	require.NoError(t, err)
 	assert.Equal(t, "10.0.0.7", h)
 	assert.Equal(t, 2222, p)
 
-	h, p = hookProvisionHostPort(&hookProvisionRecord{Host: "10.0.0.7", Port: 2222})
+	h, p, err = hookProvisionHostPort(&hookProvisionRecord{Host: "10.0.0.7", Port: 2222})
+	require.NoError(t, err)
 	assert.Equal(t, "10.0.0.7", h)
 	assert.Equal(t, 2222, p)
 
-	h, p = hookProvisionHostPort(&hookProvisionRecord{Host: "10.0.0.7"})
+	h, p, err = hookProvisionHostPort(&hookProvisionRecord{Host: "10.0.0.7"})
+	require.NoError(t, err)
 	assert.Equal(t, "10.0.0.7", h)
 	assert.Zero(t, p)
 }

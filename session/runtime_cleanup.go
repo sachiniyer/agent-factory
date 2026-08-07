@@ -198,9 +198,15 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			return nil, nil, fmt.Errorf("ssh cleanup handle has invalid remote pid %q", data.SSH.RemotePID)
 		}
 		cleanup := *data.SSH
+		// A handle persisted before #3044 may embed one port and carry another.
+		// Normalize it with the precedence it was written against, so the reap can
+		// still reach the machine: refusing a TEARDOWN over an ambiguous address
+		// protects nothing and leaks the workspace it was meant to remove.
+		legacyCfg := data.SSH.Config
+		legacyCfg.Host, legacyCfg.Port = normalizeLegacySSHAddress(legacyCfg.Host, legacyCfg.Port)
 		p := &sshProvisioner{
 			spec:                ProvisionSpec{Title: title},
-			cfg:                 data.SSH.Config,
+			cfg:                 legacyCfg,
 			hostKeyVerification: data.SSH.HostKeyVerification,
 			sessionDir:          data.SSH.SessionDir,
 			remotePID:           data.SSH.RemotePID,

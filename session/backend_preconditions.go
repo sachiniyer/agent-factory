@@ -71,6 +71,12 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 		if cfg == nil || cfg.SSH == nil || strings.TrimSpace(cfg.SSH.Host) == "" {
 			return fmt.Errorf("backend=ssh requires ssh.host to be set in this repo's .agent-factory/config.json (the remote host the session's workspace + agent run on)")
 		}
+		// The address is a local, side-effect-free fact, so the picker must reflect
+		// it rather than offering a backend whose every create fails in the
+		// resolver (#3044).
+		if _, _, err := resolveSSHHostPort(cfg.SSH.Host, cfg.SSH.Port); err != nil {
+			return fmt.Errorf("backend=ssh: %w", err)
+		}
 	case BackendSandbox:
 		// sandbox_ssh is GLOBAL-only, so this error must point at the operator's
 		// own config, NOT the repo's — a contributor reading a docker/ssh-shaped
