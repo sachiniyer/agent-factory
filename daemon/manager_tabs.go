@@ -127,7 +127,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	case isShell:
 		effectiveKind = session.TabKindShell
 	}
-	if err := instance.Capabilities().RefuseTabKind(effectiveKind); err != nil {
+	if err := instance.Capabilities().RefuseTabKind(effectiveKind, webURL); err != nil {
 		return CreateTabResponse{}, fmt.Errorf("cannot create a tab on session %q: %w", title, err)
 	}
 

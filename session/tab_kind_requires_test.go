@@ -42,9 +42,9 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 	require.False(t, remoteCaps().TabManagement,
 		"fixture drifted: the off-box row is supposed to lack TabManagement")
 
-	web := remoteCaps().RefuseTabKind(TabKindWeb)
-	vscode := remoteCaps().RefuseTabKind(TabKindVSCode)
-	shell := remoteCaps().RefuseTabKind(TabKindShell)
+	web := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
+	vscode := remoteCaps().RefuseTabKind(TabKindVSCode, "")
+	shell := remoteCaps().RefuseTabKind(TabKindShell, "")
 	require.Error(t, web, "a web tab cannot be SERVED off-box yet (#3062)")
 	require.Error(t, vscode)
 	require.Error(t, shell)
@@ -66,12 +66,40 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 	assert.Contains(t, msgs["web"], "3062", "the web refusal must point at the work that lifts it")
 }
 
+// TestWebRefusalNamesOnlyTheBlockersThatApply is this PR's own thesis applied to
+// its own message. Only LOOPBACK targets are reverse-proxied, so citing the
+// daemon-host routing gap for an external URL states a requirement that tab does
+// not have — the same defect one level down. Both targets are refused, for
+// different and individually true reasons.
+func TestWebRefusalNamesOnlyTheBlockersThatApply(t *testing.T) {
+	loopback := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
+	external := remoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
+	require.Error(t, loopback)
+	require.Error(t, external, "an off-box web tab is still not restored across a restart, whatever it points at")
+
+	assert.Contains(t, strings.ToLower(loopback.Error()), "proxied",
+		"a loopback target IS reverse-proxied from the daemon host; the refusal must say so")
+	assert.NotContains(t, strings.ToLower(external.Error()), "proxied",
+		"an external URL is iframed directly and never proxied; claiming otherwise is the #3053 defect recreated")
+
+	// The blocker they DO share is the one that is unconditionally true.
+	for name, err := range map[string]error{"loopback": loopback, "external": external} {
+		assert.Contains(t, strings.ToLower(err.Error()), "restored",
+			"%s refusal must name the restore gap, which applies to every off-box web tab", name)
+		assert.Contains(t, err.Error(), "3062", "%s refusal must point at the work that lifts it", name)
+	}
+
+	// A local session takes neither branch.
+	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000"))
+	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "https://example.com"))
+}
+
 // TestRefuseTabKindNamesTheUnmetRequirement is the other half of #3053: a
 // refusal that survives must say what it actually is. "Not supported on this
 // backend" cannot be told apart from a kind that could have worked.
 func TestRefuseTabKindNamesTheUnmetRequirement(t *testing.T) {
 	t.Run("vscode names the editor, not a spawn", func(t *testing.T) {
-		err := remoteCaps().RefuseTabKind(TabKindVSCode)
+		err := remoteCaps().RefuseTabKind(TabKindVSCode, "")
 		require.Error(t, err, "an off-box session must still refuse a vscode tab")
 		msg := strings.ToLower(err.Error())
 		assert.Contains(t, msg, "editor", "the refusal must name the editor requirement")
@@ -81,7 +109,7 @@ func TestRefuseTabKindNamesTheUnmetRequirement(t *testing.T) {
 
 	t.Run("process names the spawn", func(t *testing.T) {
 		for _, kind := range []TabKind{TabKindShell, TabKindProcess} {
-			err := remoteCaps().RefuseTabKind(kind)
+			err := remoteCaps().RefuseTabKind(kind, "")
 			require.Error(t, err)
 			assert.Contains(t, strings.ToLower(err.Error()), "spawn",
 				"a process-backed refusal must name the spawn it cannot do")
@@ -90,7 +118,7 @@ func TestRefuseTabKindNamesTheUnmetRequirement(t *testing.T) {
 
 	t.Run("local admits every kind", func(t *testing.T) {
 		for _, kind := range []TabKind{TabKindWeb, TabKindVSCode, TabKindShell, TabKindProcess} {
-			require.NoError(t, localCaps().RefuseTabKind(kind), "kind %v refused on a local backend", kind)
+			require.NoError(t, localCaps().RefuseTabKind(kind, ""), "kind %v refused on a local backend", kind)
 		}
 	})
 }
@@ -139,7 +167,7 @@ func TestTabSpawnPreconditionIsPerKind(t *testing.T) {
 // make the vscode proxy route reachable off-box: its editor is served by the
 // daemon from a local worktree path, and an off-box session has none.
 func TestOffBoxRefusalsStayClosed(t *testing.T) {
-	require.Error(t, remoteCaps().RefuseTabKind(TabKindVSCode),
+	require.Error(t, remoteCaps().RefuseTabKind(TabKindVSCode, ""),
 		"#3054 would be live: an off-box session may not create a vscode tab until the editor is served from inside the workspace")
 	require.NotEqual(t, WorkspaceLocalWorktree, remoteCaps().Workspace,
 		"fixture drifted: the off-box row must not claim a local worktree")

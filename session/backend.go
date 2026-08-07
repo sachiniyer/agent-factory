@@ -68,30 +68,34 @@ type Capabilities struct {
 // the old form refused every kind on off-box sessions and explained each refusal
 // as a missing worktree, which is untrue of a tab that spawns nothing.
 //
+// target is the web tab's resolved URL and is ignored for every other kind. It
+// is a parameter because a web tab's blockers depend on WHERE it points: only a
+// loopback target is reverse-proxied, so only a loopback target is affected by
+// the daemon-host routing gap. Naming that blocker for an external URL would
+// state a requirement the caller's tab does not have — the exact defect this
+// function exists to remove, one level down.
+//
 // Each refusal names the requirement that is actually unmet, because a user told
-// "not supported on this backend" for a tab kind that could work cannot tell
-// that from one that genuinely cannot.
-func (c Capabilities) RefuseTabKind(kind TabKind) error {
+// "not supported on this backend" cannot tell that from a kind that could work.
+func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 	switch TabKindRequires(kind) {
 	case TabNeedsMetadataOnly:
 		// A web tab spawns nothing and reads nothing, so the KIND needs nothing
-		// from the workspace — but the daemon cannot yet SERVE one off-box, and
-		// that is a different question from what the kind requires. Two reasons,
-		// both measured (#3062): a loopback target is proxied over the daemon's
-		// own TCP stack, so `--port 3000` reaches the daemon host rather than the
-		// workspace and can surface an unrelated daemon-local service; and
-		// FromInstanceData restores tabs only on its local branch, so a persisted
-		// web tab disappears at the next daemon restart.
-		//
-		// This is deliberately NOT the old blanket refusal wearing new words. The
-		// old one claimed there was no worktree to spawn in, which is not a
-		// requirement a web tab has; this one names what is actually missing, and
-		// it is the only kind whose refusal will lift without new worktree
-		// semantics.
-		if c.Workspace != WorkspaceLocalWorktree {
-			return fmt.Errorf("this session cannot open a web tab yet: its target would be proxied from the daemon host rather than from the session's off-box workspace, and a persisted web tab is not restored on the sandbox recovery path — see #3062")
+		// from the workspace. What the daemon cannot yet do is SERVE one off-box,
+		// and that is a different question with two different answers (#3062).
+		if c.Workspace == WorkspaceLocalWorktree {
+			return nil
 		}
-		return nil
+		// True of every off-box web tab: the sandbox branch of FromInstanceData
+		// rebuilds an inert backend with an empty roster, so the persisted row
+		// does not come back.
+		const notRestored = "a persisted web tab is not restored on the sandbox recovery path"
+		if IsLoopbackWebTarget(target) {
+			// Additionally true only here: loopback targets are the ones the
+			// daemon reverse-proxies, and it proxies them from its OWN host.
+			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, and %s — see #3062", target, notRestored)
+		}
+		return fmt.Errorf("this session cannot open a web tab yet: %s, so it would disappear at the next daemon restart — see #3062", notRestored)
 	case TabNeedsLocalWorktreeRead:
 		if c.Workspace != WorkspaceLocalWorktree {
 			return fmt.Errorf("this session cannot open a vscode tab: its editor is served by the daemon from the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so the daemon has no worktree to open — see #3054")

@@ -101,7 +101,7 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 			webTab, webErr := newInst().AddWebTab("http://localhost:3000", "")
 			require.NoError(t, webErr,
 				"AddWebTab must serve a worktree-less sandbox instance: a web tab needs no worktree (#3053)")
-			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb),
+			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, ""),
 				"the capability layer must still refuse a web tab off-box until #3062 lands")
 			require.NotNil(t, webTab)
 			assert.Equal(t, TabKindWeb, webTab.Kind)
