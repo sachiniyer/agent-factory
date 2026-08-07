@@ -145,6 +145,48 @@ func (k TabKind) HasTmux() bool {
 	}
 }
 
+// TabKindNeed states what a tab kind needs from the session's WORKSPACE. It is
+// the predicate the tab gates test, replacing "is this session off-box?" — that
+// question has the wrong shape, because it refuses tab kinds that need nothing
+// from the workspace and it explains every refusal in terms of a worktree some
+// kinds never touch (#3053).
+//
+// Keeping the classification in one exported place is what stops the gates from
+// drifting apart, the same reason TabKindRenameable exists. A NEW tab kind is
+// classified here once and every gate follows; the default is the conservative
+// one, so a kind nobody classified is treated as spawning a process rather than
+// silently admitted everywhere.
+type TabKindNeed int
+
+const (
+	// TabNeedsMetadataOnly: the tab is a name and at most a URL. It spawns
+	// nothing and reads nothing, so it works on every backend.
+	TabNeedsMetadataOnly TabKindNeed = iota
+	// TabNeedsLocalWorktreeRead: no process, but the DAEMON must be able to read
+	// the workspace on its own filesystem — the vscode tab's editor is rooted at
+	// the worktree path. Off-box workspaces cannot serve this yet (#3054).
+	TabNeedsLocalWorktreeRead
+	// TabNeedsLocalProcess: the tab runs a process behind a PTY in the local
+	// worktree, which an off-box workspace has no way to provide.
+	TabNeedsLocalProcess
+)
+
+// TabKindRequires classifies a tab kind by what it needs from the workspace.
+//
+// An unrecognized kind answers TabNeedsLocalProcess: refusing a tab that might
+// have worked is recoverable, while admitting one that needs a worktree it does
+// not have fails later and further from the cause.
+func TabKindRequires(kind TabKind) TabKindNeed {
+	switch kind {
+	case TabKindWeb:
+		return TabNeedsMetadataOnly
+	case TabKindVSCode:
+		return TabNeedsLocalWorktreeRead
+	default:
+		return TabNeedsLocalProcess
+	}
+}
+
 // Tab is one process running in an instance's worktree, backed by a single tmux
 // session. It is an internal wrapper introduced in PR 1 of #930: an instance
 // holds exactly one Agent tab that wraps today's single tmux session, and the

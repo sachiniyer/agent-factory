@@ -1,6 +1,9 @@
 package session
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // WorkspaceKind describes where a backend's workspace physically lives, so
 // callers reason about locality without asking "is this the remote type"
@@ -39,7 +42,12 @@ type Capabilities struct {
 	Archive bool
 	// Recover: a Lost session can be reconnected / re-spawned in place.
 	Recover bool
-	// TabManagement: the user can add/close arbitrary tabs (new process tab).
+	// TabManagement: the user can add/close tabs that RUN A PROCESS — a shell or
+	// process tab, which needs a PTY in the daemon-side worktree. It does not
+	// govern metadata-only tabs (a web tab is a name and a URL): those spawn
+	// nothing, so gating them on this bit refused them for a reason that did not
+	// apply to them (#3053). Ask TabKindRequires what a kind needs, and
+	// RefuseTabKind whether this backend can serve it.
 	TabManagement bool
 	// TerminalTab: an interactive terminal surface is available. Off-box runtimes
 	// provide it through their AgentServer stream rather than a daemon-local tmux.
@@ -52,6 +60,33 @@ type Capabilities struct {
 	// backend would have to re-launch the agent inside the provisioned sandbox
 	// rather than re-provision it, which is a separate lifecycle.
 	Handoff bool
+}
+
+// RefuseTabKind reports why this backend cannot serve a tab of this kind, or nil
+// if it can. It is the single gate for "may this session gain THIS tab", and it
+// asks what the KIND needs rather than whether the session is off-box (#3053):
+// the old form refused every kind on off-box sessions and explained each refusal
+// as a missing worktree, which is untrue of a tab that spawns nothing.
+//
+// Each refusal names the requirement that is actually unmet, because a user told
+// "not supported on this backend" for a tab kind that could work cannot tell
+// that from one that genuinely cannot.
+func (c Capabilities) RefuseTabKind(kind TabKind) error {
+	switch TabKindRequires(kind) {
+	case TabNeedsMetadataOnly:
+		// A name and a URL. Nothing to spawn, nothing to read: every backend.
+		return nil
+	case TabNeedsLocalWorktreeRead:
+		if c.Workspace != WorkspaceLocalWorktree {
+			return fmt.Errorf("this session cannot open a vscode tab: its editor is served by the daemon from the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so the daemon has no worktree to open — see #3054")
+		}
+		return nil
+	default:
+		if !c.TabManagement {
+			return fmt.Errorf("this session cannot open a shell or process tab: it runs a process in the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so there is no local worktree to spawn it in")
+		}
+		return nil
+	}
 }
 
 // ErrHandoffUnsupported is returned when an agent handoff (#2013) is requested

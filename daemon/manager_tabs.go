@@ -109,11 +109,26 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	if instance == nil {
 		return CreateTabResponse{}, fmt.Errorf("failed to restore instance %q", title)
 	}
-	// The message names the real reason rather than the old
+	// Ask what THIS KIND needs, not whether the session is off-box (#3053). The
+	// blanket form refused all four kinds and explained every refusal as a
+	// missing worktree, so a web tab — a name and a URL, spawning nothing — was
+	// turned away for a requirement it does not have. RefuseTabKind names the
+	// requirement that is actually unmet, or admits the tab.
+	//
+	// The message still names the real reason rather than the old
 	// remote_hooks.terminal_cmd knob, which #1592 Phase 4 PR7 deleted — pointing a
 	// user at a setting that no longer exists is worse than no advice (#1874).
-	if !instance.Capabilities().TabManagement {
-		return CreateTabResponse{}, fmt.Errorf("cannot create a tab on session %q: only local sessions support user-managed tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in", title)
+	effectiveKind := session.TabKindProcess
+	switch {
+	case isWeb:
+		effectiveKind = session.TabKindWeb
+	case isVSCode:
+		effectiveKind = session.TabKindVSCode
+	case isShell:
+		effectiveKind = session.TabKindShell
+	}
+	if err := instance.Capabilities().RefuseTabKind(effectiveKind); err != nil {
+		return CreateTabResponse{}, fmt.Errorf("cannot create a tab on session %q: %w", title, err)
 	}
 
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for

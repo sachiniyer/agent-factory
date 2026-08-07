@@ -22,14 +22,29 @@ import (
 // Callers reject backends without the TabManagement capability first
 // (daemon/manager_tabs.go), so a user normally sees that gate's message instead;
 // this is the defense-in-depth check for a direct caller, written to stand alone.
-func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool) error {
+func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool, kind TabKind) error {
 	if !started {
 		return fmt.Errorf("cannot add a tab to a session that is not started")
 	}
-	if !hasWorktree || !hasTmux {
-		return fmt.Errorf("cannot add a tab to a session with no local workspace: its workspace runs off-box, so there is no worktree to spawn the tab in")
+	// Per KIND, not per session (#3053). The old form demanded a local worktree
+	// and tmux for every kind and explained the refusal as "no worktree to spawn
+	// the tab in" — untrue of a web tab, which spawns nothing and reads nothing,
+	// and imprecise for a vscode tab, which needs the worktree to READ rather
+	// than to spawn in. Each branch now refuses for its own reason or not at all.
+	switch TabKindRequires(kind) {
+	case TabNeedsMetadataOnly:
+		return nil
+	case TabNeedsLocalWorktreeRead:
+		if !hasWorktree {
+			return fmt.Errorf("cannot add a vscode tab to this session: its editor is rooted at the session's worktree on the daemon host, and this workspace runs off-box, so there is no worktree for the daemon to open (#3054)")
+		}
+		return nil
+	default:
+		if !hasWorktree || !hasTmux {
+			return fmt.Errorf("cannot add this tab to the session: a shell or process tab runs a process in the session's worktree, and this workspace runs off-box, so there is no local worktree to spawn it in")
+		}
+		return nil
 	}
-	return nil
 }
 
 // AddShellTab spawns a new Shell-kind tab running $SHELL in the instance's
@@ -61,7 +76,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	if spawnErr != nil {
 		return nil, spawnErr
 	}
-	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil); err != nil {
+	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil, TabKindShell); err != nil {
 		return nil, err
 	}
 	worktreePath := gw.GetWorktreePath()
@@ -142,7 +157,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	if spawnErr != nil {
 		return nil, spawnErr
 	}
-	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil); err != nil {
+	if err := tabSpawnPreconditionErr(started, agentTmux != nil, gw != nil, TabKindProcess); err != nil {
 		return nil, err
 	}
 	worktreePath := gw.GetWorktreePath()
@@ -269,7 +284,7 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
 		return nil, spawnErr
 	}
-	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil); err != nil {
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindWeb); err != nil {
 		return nil, err
 	}
 	tab := newWebTab(url)
@@ -298,7 +313,7 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
 		return nil, spawnErr
 	}
-	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil); err != nil {
+	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindVSCode); err != nil {
 		return nil, err
 	}
 	tab := newVSCodeTab()
