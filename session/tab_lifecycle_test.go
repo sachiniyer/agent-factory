@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -391,14 +392,15 @@ func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 // would store a stale answer — and it carries long, versioned refusal prose that
 // an older binary would read back as fact.
 func TestTabKindProjection_IsNotPersisted(t *testing.T) {
+	mutable := true
 	data := InstanceData{
 		Title:            "s",
 		TabKinds:         []TabKindAllowance{{Kind: "web", Allowed: false, Reason: "some long versioned reason"}},
-		TabRosterMutable: true,
+		TabRosterMutable: &mutable,
 	}
 	stored := data.ForStorage()
 	require.Nil(t, stored.TabKinds, "a derived verdict must not reach instances.json")
-	require.False(t, stored.TabRosterMutable)
+	require.Nil(t, stored.TabRosterMutable, "and the roster verdict is not persisted either")
 	require.Equal(t, "s", stored.Title, "and the real record survives")
 }
 
@@ -412,4 +414,28 @@ func TestTabKindAllowances_IncludesTheProcessKind(t *testing.T) {
 	for _, want := range []string{"shell", "process", "web", "vscode"} {
 		require.Truef(t, kinds[want], "every creatable kind must be projected; %q was missing", want)
 	}
+}
+
+// TestTabRosterMutable_FalseSurvivesSerialization is the forward-compatibility
+// case this projection exists for (#3062): a backend that allows a metadata-only
+// kind while keeping TabManagement false. With a plain bool, omitempty erased that
+// verdict, and a client cannot tell "the daemon said no" from "the daemon is too
+// old to say" — so it falls back to the create verdict, which is TRUE there, and
+// offers a rename tabMutationTarget rejects.
+func TestTabRosterMutable_FalseSurvivesSerialization(t *testing.T) {
+	no := false
+	encoded, err := json.Marshal(InstanceData{Title: "s", TabRosterMutable: &no})
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"tab_roster_mutable":false`,
+		"a false verdict must reach the client; omitempty on a plain bool erased it")
+
+	var back InstanceData
+	require.NoError(t, json.Unmarshal(encoded, &back))
+	require.NotNil(t, back.TabRosterMutable, "and it must decode as PRESENT, not as a legacy absence")
+	require.False(t, *back.TabRosterMutable)
+
+	// An unprojected record stays absent, which is what a pre-#3060 daemon sends.
+	absent, err := json.Marshal(InstanceData{Title: "s"})
+	require.NoError(t, err)
+	require.NotContains(t, string(absent), "tab_roster_mutable")
 }

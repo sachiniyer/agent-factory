@@ -184,7 +184,15 @@ type InstanceData struct {
 	// question from either creating a kind or closing a tab, and it has a different
 	// answer — tabMutationTarget still gates on TabManagement — so a client that
 	// reuses a create-or-close verdict for it offers controls the daemon refuses.
-	TabRosterMutable bool `json:"tab_roster_mutable,omitempty"`
+	// A POINTER so that false survives the wire. With a plain bool, omitempty
+	// erased exactly the verdict that matters: a backend allowing a metadata-only
+	// kind while keeping TabManagement false — the forward-compatibility case this
+	// projection exists for (#3062) — serialized to nothing, and a client cannot
+	// tell "the daemon said no" from "the daemon is too old to say", so it falls
+	// back to the create verdict and offers a rename tabMutationTarget rejects.
+	// nil therefore means only "not projected", and ForStorage sets it back to nil
+	// so a derived verdict still never reaches instances.json.
+	TabRosterMutable *bool `json:"tab_roster_mutable,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not
@@ -238,7 +246,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	// and these carry long, versioned refusal PROSE, which would sit in every
 	// instances.json row and be read back as fact by an older binary.
 	d.TabKinds = nil
-	d.TabRosterMutable = false
+	d.TabRosterMutable = nil
 	switch {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown
