@@ -199,6 +199,11 @@ func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
 		// what the executable DOES.
 		"LD_PRELOAD=./steal.so codex",
 		"DYLD_INSERT_LIBRARIES=./steal.dylib codex",
+		// The env wrapper must express the same rule as a shell assignment: a
+		// scoped program mutates nothing. PATH is the sharpest of these — it
+		// redirects the bare executable the provenance rule depends on.
+		"env LD_PRELOAD=./steal.so codex",
+		"env PATH=. codex",
 		"CODEX_HOME=$HOME/.codex codex",
 		"env CODEX_HOME=/other codex",
 		"env -u CODEX_HOME codex",

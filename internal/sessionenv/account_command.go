@@ -141,13 +141,18 @@ func envOverridesName(args []*syntax.Word, agent string, names map[string]struct
 	if invocation.ClearEnvironment {
 		return true, true
 	}
-	for _, mutation := range invocation.Mutations {
-		if _, refused := names[mutation.Name]; refused {
-			// Set to something else, or unset outright — either way the injected
-			// value is not what the agent will see.
-			return true, true
-		}
+	// ANY mutation, exactly as the shell-assignment branch does. Restricting this
+	// to the identity names left the same hole that branch had: `env
+	// LD_PRELOAD=./steal.so codex` loads repository code into the agent before it
+	// reads the injected root, and `env PATH=. codex` redirects the bare
+	// executable this guard requires — turning the provenance rule into a
+	// redirection of the operator's PATH by the repository (#2983 review).
+	//
+	// The two branches now express one rule: a scoped program mutates nothing.
+	if len(invocation.Mutations) > 0 {
+		return true, true
 	}
+	_ = names
 	if invocation.CommandIndex < 0 || invocation.CommandIndex >= len(literals) {
 		// env with no command to run: nothing launches, so nothing is redirected.
 		return false, true
