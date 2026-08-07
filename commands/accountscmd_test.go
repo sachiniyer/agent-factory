@@ -11,11 +11,12 @@ import (
 )
 
 // `af accounts` had no test file at all while its --json failure path was
-// rewritten three times by review (#3057). Each rewrite hand-modelled a piece of
-// pflag's behaviour — first-occurrence, then boolean spellings, then repeats —
-// and each was wrong in a way no test could catch, because there were none. These
-// drive the real cobra command so the envelope contract is pinned to observable
-// output rather than to a helper's internal logic.
+// rewritten three times by review (#3057). Each rewrite hand-modelled one more
+// piece of pflag's behaviour — first occurrence, then boolean spellings, then
+// repeats — and each shipped on a manual check against the built binary, because
+// the logic read os.Args and so could not be reached from an in-process test at
+// all. These drive the real cobra command instead, pinning the envelope contract
+// to what a caller observes on stdout and stderr.
 
 // accountsEnvelope is the shared {data,error} envelope, decoded loosely: these
 // tests care whether the output IS the envelope, not about the payload's shape.
