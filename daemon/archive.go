@@ -341,6 +341,29 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// persist-error cause this issue reports is fully closed.)
 	_ = instance.Transition(session.CommitArchive())
 	archivedPath := instance.GetWorktreePath()
+	// Revocation of this session's sandbox callback credential (#2999) follows the
+	// COMMITTED STATE, not any one exit path (#3012 review).
+	//
+	// Armed here, at the commit, and disarmed only where a rollback genuinely
+	// succeeded and left the session Lost — a Lost session is still drivable, so it
+	// keeps its credential. Every other return below leaves the archive committed
+	// and the runtime reaped, including the two that could not move the worktree
+	// home and persist the committed archive best-effort; those returned above the
+	// revocation when it was a single statement, so a token copied out of the
+	// sandbox kept authenticating for an inert session until the daemon restarted.
+	//
+	// Deliberately a defer rather than a third call site. This is the third place in
+	// this PR where revocation had to be anchored to a commit point, and the first
+	// two were fixed by moving a statement — which is exactly the shape that breaks
+	// again the next time someone adds an exit. Armed-and-disarmed fails CLOSED for
+	// any return added later, matching how the create path already handles a mint
+	// that is abandoned.
+	archiveCommitted := true
+	defer func() {
+		if archiveCommitted {
+			m.sandboxTokens.revoke(instance.ID)
+		}
+	}()
 	if stopErr := m.stopVSCodeForInstance(vscodeKey, instance.ID); stopErr != nil {
 		log.ErrorLog.Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
@@ -350,6 +373,8 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			m.persistInstance(repoID, instance)
 			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but could not confirm its final VS Code editor teardown (%v) and could not roll the worktree back (%v); it may need manual recovery", req.Title, archivedPath, stopErr, rbErr)
 		}
+		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
+		archiveCommitted = false
 		return "", session.InstanceData{}, fmt.Errorf("could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w", req.Title, stopErr)
 	}
 	if perr := archivePersist(m, repoID, instance); perr != nil {
@@ -361,6 +386,8 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			m.persistInstance(repoID, instance)
 			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery", req.Title, archivedPath, perr, rbErr)
 		}
+		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
+		archiveCommitted = false
 		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
 	}
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
@@ -368,14 +395,6 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// Still inside opLock: lifecycle event order must match committed operation
 	// order. Publishing after this method returns lets an immediate restore finish
 	// and publish before this older Archived projection (#2680 Codex review).
-	// The archive COMMITTED, so the sandbox holding this session's callback
-	// credential is inert — its branch is pushed and its
-	// runtime reaped (#3012 review). Revoke here, not only in KillSession: a
-	// token copied out of the sandbox before the archive would otherwise keep
-	// authenticating until the daemon restarted.
-	// Placed after the commit, so a teardown that FAILED and
-	// left the session Lost keeps its credential and can still be driven.
-	m.sandboxTokens.revoke(archived.ID)
 	m.publishEvent(agentproto.EventSessionArchived, archived)
 	if hookErr != nil {
 		committedErr := &mutationCommittedError{err: fmt.Errorf(
@@ -516,6 +535,21 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 	// Success: branch is durable on origin, sandbox reaped. Commit the inert
 	// Archived state (started=false, op cleared) and persist it durably.
 	_ = instance.Transition(session.CommitArchive())
+	// THIS is the archive path that matters for the sandbox callback credential
+	// (#2999), and the one the first fix missed. BackendKind.InjectsSandboxCallback
+	// is ssh and sandbox only, and both are WorkspaceRemote — so every session that
+	// can hold a credential archives through HERE, while the revocation added for
+	// the earlier review round sat in the local-worktree body, past a branch that
+	// returns at the call site above. It never fired for a single credential-holding
+	// session.
+	//
+	// Armed at the commit, with no disarm: unlike the local body there is nothing to
+	// roll back here — the sandbox is already reaped and the branch is already on
+	// origin — so every return below this line leaves the session committed and
+	// inert, including the durability failure. The rollback that keeps a credential
+	// is the ArchiveSandbox failure above, which aborts to Lost before this point
+	// and so never arms.
+	defer m.sandboxTokens.revoke(instance.ID)
 	if perr := archivePersist(m, repoID, instance); perr != nil {
 		// The sandbox is already reaped and the branch is on origin, so there is
 		// nothing to undo — the Archived record is recoverable from origin either

@@ -264,6 +264,17 @@ func (wl *webListeners) previewConfigAddress() string {
 	return wl.previewConfigAddr
 }
 
+// webConfigAddress is previewConfigAddress for the control-plane listener: the
+// CONFIG address that produced the listener currently accepting, not the one
+// config merely asks for. Same divergence, same cause — a live rebind that failed
+// leaves the old listener serving while ApplyConfig has already stored the new
+// address. "" when nothing is bound.
+func (wl *webListeners) webConfigAddress() string {
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	return wl.webConfigAddr
+}
+
 // close tears down both listeners (daemon shutdown). Errors are joined so one
 // listener's close failure does not hide the other's.
 func (wl *webListeners) close() error {

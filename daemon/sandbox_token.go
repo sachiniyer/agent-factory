@@ -137,16 +137,29 @@ func errSandboxCallbackNeedsRequireToken() error {
 // mintSandboxCallback returns the credential and daemon URL to inject into a
 // sandbox, or refuses.
 //
-// Order matters: the posture is checked BEFORE a secret is generated, so a
-// refused provision never leaves an unusable credential in the registry.
+// Order matters twice over. The posture is checked BEFORE a secret is generated,
+// so a refused provision never leaves an unusable credential in the registry. And
+// every address decision reads the listener that is ACTUALLY ACCEPTING rather than
+// cfg.ListenAddr (#3012 review): the two diverge exactly when a live rebind failed,
+// because ApplyConfig stores the new address while bindWebLocked deliberately
+// leaves the old listener serving rather than making the daemon unreachable
+// through the very API an operator would use to fix it. Reading config there would
+// hand every sandbox a URL for an address nothing is bound to — a callback that
+// silently never connects — and would judge the loopback posture against a
+// listener that does not exist. #1856 hit the same divergence for the preview
+// origin; activeWebConfigAddr is the same answer for this one.
 func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url, token string, err error) {
 	if cfg == nil {
 		return "", "", errSandboxCallbackNeedsRequireToken()
 	}
-	if err := sandboxCallbackPostureOK(cfg); err != nil {
+	active := m.activeWebConfigAddr(cfg.ListenAddr)
+	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
+		return "", "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix listen_addr", cfg.ListenAddr)
+	}
+	if err := sandboxCallbackPostureOK(cfg, active); err != nil {
 		return "", "", err
 	}
-	url, err = sandboxCallbackURL(cfg.ListenAddr)
+	url, err = sandboxCallbackURL(active)
 	if err != nil {
 		return "", "", err
 	}
@@ -155,6 +168,17 @@ func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url
 		return "", "", err
 	}
 	return url, token, nil
+}
+
+// activeWebConfigAddr is the config address behind the control-plane listener that
+// is actually serving. It falls back to requested — the caller's own config value —
+// only when there is no listener owner at all (a bare Manager, as tests construct),
+// where the two cannot disagree because nothing has bound.
+func (m *Manager) activeWebConfigAddr(requested string) string {
+	if m.webListeners == nil {
+		return requested
+	}
+	return m.webListeners.webConfigAddress()
 }
 
 // sandboxCallbackURL renders listen_addr as a URL a sandbox can dial, or "" when
@@ -204,11 +228,16 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 //
 // The predicate is "will this request be authenticated", not "is a config key
 // set", which is why it mirrors the gate's own terms rather than restating them.
-func sandboxCallbackPostureOK(cfg *config.Config) error {
+//
+// activeAddr is the address of the listener actually accepting, NOT cfg.ListenAddr:
+// the loopback exemption is decided by the listener a callback really reaches, so
+// judging it against an address that failed to bind would clear the posture for a
+// listener that does not exist (#3012 review).
+func sandboxCallbackPostureOK(cfg *config.Config, activeAddr string) error {
 	if !cfg.RequireToken {
 		return errSandboxCallbackNeedsRequireToken()
 	}
-	if config.IsLoopbackListenAddr(cfg.ListenAddr) && !cfg.RequireLoopbackToken {
+	if config.IsLoopbackListenAddr(activeAddr) && !cfg.RequireLoopbackToken {
 		return fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is loopback and require_loopback_token is false, so the gate exempts same-host callers before it checks any token and the credential's scope would enforce nothing. Enable it: %s", requireLoopbackTokenFixHint)
 	}
 	return nil
