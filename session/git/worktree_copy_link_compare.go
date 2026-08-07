@@ -4,6 +4,7 @@ package git
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"io"
 	"os"
 
@@ -32,41 +33,39 @@ import (
 //
 // Both sides are opened relative to a directory descriptor, never by rebuilt
 // path, keeping the copier descriptor-anchored throughout.
-func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, retained *os.File, expected pathIdentity) bool {
+func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, digest []byte, expected pathIdentity) bool {
 	current, err := openAtForCompare(source, name)
 	if err != nil {
 		return false
 	}
 	defer current.Close()
 
-	// A retained descriptor is used INSTEAD of reopening, because the reason it
-	// exists is that reopening cannot work: the destination's own mode denies the
-	// copier read, and owner bits take precedence, so the process that created the
-	// file cannot open it. Reading from the descriptor it opened before the mode
-	// narrowed is the only way to compare at all (#3063).
+	// A recorded digest is used INSTEAD of reopening, because the reason it exists
+	// is that reopening cannot work: the destination's own mode denies the copier
+	// read, and owner bits take precedence, so the process that created the file
+	// cannot open it (#3063).
 	//
-	// It is rewound rather than reopened, since a previous comparison against the
-	// same inode left the offset at EOF and a second sighting would otherwise
-	// compare against nothing and call it a mismatch.
-	copied := retained
-	if copied == nil {
-		opened, err := openAtForCompare(destinationRoot, copiedPath)
+	// Identity is still checked, by fstatat rather than by reading — stat needs no
+	// read permission. Without it a same-UID process could swap copiedPath for an
+	// impostor holding the current bytes and restore the recorded inode before the
+	// linkat, defeating linkCopiedFile's own post-link check (#3049 review).
+	if digest != nil {
+		copiedIdentity, err := identityAt(destinationRoot, copiedPath)
+		if err != nil || !expected.same(copiedIdentity) {
+			return false
+		}
+		currentDigest, err := digestOpenFile(current)
 		if err != nil {
 			return false
 		}
-		defer opened.Close()
-		copied = opened
-	} else if _, err := copied.Seek(0, io.SeekStart); err != nil {
-		return false
+		return bytes.Equal(currentDigest, digest)
 	}
 
-	// The descriptor must BE the inode the first copy landed on, not merely a file
-	// holding the same bytes. Without this, a same-UID process can swap copiedPath
-	// for an impostor carrying the current source bytes, pass this comparison, and
-	// restore the recorded inode before the linkat — so linkCopiedFile's own
-	// post-link identity check also passes and stale bytes get published. That is
-	// the staging-path substitution race linkCopiedFile already guards; comparing
-	// content alone reopened it one step earlier (#3049 review).
+	copied, err := openAtForCompare(destinationRoot, copiedPath)
+	if err != nil {
+		return false
+	}
+	defer copied.Close()
 	copiedIdentity, err := identityFromFile(copied)
 	if err != nil || !expected.same(copiedIdentity) {
 		return false
@@ -112,4 +111,21 @@ func openAtForCompare(parent *os.File, name string) (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), name), nil
+}
+
+// digestOpenFile hashes an open file from its start, leaving the offset at EOF.
+//
+// SHA-256 rather than a cheaper hash because a collision here publishes the
+// WRONG BYTES at a path — the exact outcome #3046 exists to prevent — and this
+// runs only for the rare files whose mode locks the copier out, so its cost is
+// not on the ordinary archive path.
+func digestOpenFile(file *os.File) ([]byte, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, file); err != nil {
+		return nil, err
+	}
+	return sum.Sum(nil), nil
 }

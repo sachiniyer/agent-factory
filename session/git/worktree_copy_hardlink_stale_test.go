@@ -175,7 +175,7 @@ func TestCopyTree_SameSizeRewriteWithRestoredMtimeIsNotLinked(t *testing.T) {
 //
 // So this exercises the mechanism directly: a destination the process cannot
 // reopen, and a retained descriptor that was opened before the mode narrowed.
-func TestSourceMatchesCopiedFile_UsesARetainedDescriptorWhenTheModeDeniesRead(t *testing.T) {
+func TestSourceMatchesCopiedFile_UsesARecordedDigestWhenTheModeDeniesRead(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses mode bits, so an unreadable destination cannot arise")
 	}
@@ -189,11 +189,13 @@ func TestSourceMatchesCopiedFile_UsesARetainedDescriptorWhenTheModeDeniesRead(t 
 
 	// Retain the descriptor while the file is still readable, exactly as the
 	// copier does before preserveSourceMode narrows the mode.
-	retained, err := openAtForCompare(root, "dst")
+	dstIdentity, err := identityAt(root, "dst")
 	require.NoError(t, err)
-	dstIdentity, err := identityFromFile(retained)
+	srcFile, err := openAtForCompare(root, "src")
 	require.NoError(t, err)
-	defer retained.Close()
+	digest, err := digestOpenFile(srcFile)
+	require.NoError(t, err)
+	require.NoError(t, srcFile.Close())
 	require.NoError(t, os.Chmod(filepath.Join(dir, "dst"), 0o000))
 
 	_, err = os.Open(filepath.Join(dir, "dst"))
@@ -202,17 +204,35 @@ func TestSourceMatchesCopiedFile_UsesARetainedDescriptorWhenTheModeDeniesRead(t 
 	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", nil, dstIdentity),
 		"without the retained descriptor the comparison cannot read the destination at all, "+
 			"which is the bug: the link relationship is dropped for a permission reason, not a content one")
-	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained, dstIdentity),
-		"with a descriptor opened before the mode narrowed, identical content must still compare equal")
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", digest, dstIdentity),
+		"with a digest recorded before the mode narrowed, identical content must still compare equal")
 
 	// A SECOND sighting must also match. The retained descriptor sits at EOF after
 	// the first comparison, so without a rewind it would compare against nothing
 	// and report a mismatch — turning the fix into a one-shot.
-	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained, dstIdentity),
-		"a repeat sighting must rewind the retained descriptor rather than read from EOF")
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", digest, dstIdentity),
+		"a repeat sighting must still match: a recorded digest is reusable, unlike a descriptor at EOF")
 
 	// And it must still be a real comparison, not "always true when retained".
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "src"), []byte("CHANGED"), 0o600))
-	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained, dstIdentity),
-		"a retained descriptor must not turn the comparison into an unconditional yes")
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", digest, dstIdentity),
+		"a recorded digest must not turn the comparison into an unconditional yes")
+
+	// Identity, not just content. A same-UID process can swap the destination for
+	// an IMPOSTOR holding exactly the right bytes; if the comparison checks only
+	// the digest it passes, and restoring the recorded inode before the linkat
+	// then satisfies linkCopiedFile's own post-link check too, publishing stale
+	// bytes. So a matching digest on the WRONG inode must still be rejected
+	// (#3049 review).
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src"), []byte("SHARED"), 0o600))
+	// A DISTINCT path, so the impostor is guaranteed to be a different inode.
+	// Remove-and-recreate is not: tmpfs reuses the inode number, which made the
+	// precondition fail rather than the assertion.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "impostor"), []byte("SHARED"), 0o600))
+	impostor, err := identityAt(root, "impostor")
+	require.NoError(t, err)
+	require.NotEqual(t, dstIdentity, impostor, "precondition: the impostor must be a different inode")
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "impostor", digest, dstIdentity),
+		"content equality on a substituted inode must not be accepted: that is the staging-path "+
+			"substitution race linkCopiedFile already guards")
 }
