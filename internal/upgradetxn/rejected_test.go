@@ -227,13 +227,22 @@ func TestRejectedLedgerNarrowsWhenTheDirectoryStopsBeingShared(t *testing.T) {
 	require.NoError(t, os.Chmod(path, rejectedLedgerSharedMode))
 
 	// The directory is NOT group-writable, so the widened ledger no longer has a
-	// justification: reading it must re-narrow it.
+	// justification.
 	require.NoError(t, os.Chmod(dir, 0o750))
 	_, err := readRejectedLedger(executable)
 	require.NoError(t, err)
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
+	if !directorySharednessIsKnowable(dir) {
+		// macOS and anything else without readable ACL state. "Not shared" there is
+		// "cannot tell", and narrowing on a guess would revoke a genuinely shared
+		// ledger — so the contract is to leave it ALONE, and that is what this
+		// asserts rather than skipping and testing nothing (#3011 review).
+		require.Equal(t, rejectedLedgerSharedMode, info.Mode().Perm(),
+			"sharedness is unknowable here, so the mode must be left untouched in both directions")
+		return
+	}
 	require.Equal(t, rejectedLedgerMode, info.Mode().Perm(),
 		"a ledger left group-writable after its directory narrowed can be rewritten by users who can no longer replace the binary")
 }
