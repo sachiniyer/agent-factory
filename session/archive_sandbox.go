@@ -172,6 +172,7 @@ func recoverSandbox(i *Instance) error {
 func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	backend := i.backend
+	mintCallback := i.sandboxCallback
 	spec := ProvisionSpec{
 		RepoRoot:              i.Path,
 		Title:                 i.Title,
@@ -191,6 +192,26 @@ func (i *Instance) reprovisionRemote() error {
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+	}
+	// Re-mint the callback credential for the REPLACEMENT sandbox (#3065 review).
+	// Without this, every restored or recovered ssh/sandbox session came back with
+	// no AF_DAEMON_URL/AF_DAEMON_TOKEN at all — and because archiving revokes the
+	// old credential, a routine archive-then-restore ended that session's callback
+	// permanently while reporting success.
+	//
+	// Called OUTSIDE i.mu: minting takes the daemon's registry lock, and holding a
+	// session lock across another subsystem's lock is how a deadlock gets built.
+	//
+	// A refusal FAILS the re-provision rather than continuing without a credential.
+	// The mint refuses exactly when a credential could not be enforced or could not
+	// be dialled, and silently restoring a session whose callback will never work —
+	// after it had one — is the outcome this whole feature keeps arguing against.
+	if mintCallback != nil && kind.InjectsSandboxCallback() {
+		url, token, mintErr := mintCallback()
+		if mintErr != nil {
+			return fmt.Errorf("cannot re-provision session %q: %w", i.Title, mintErr)
+		}
+		spec.CallbackURL, spec.CallbackToken = url, token
 	}
 	// A failed archive/recovery can leave the old sandbox wiring live. Reap it
 	// before provisioning a replacement so bindProvisionResult never discards its

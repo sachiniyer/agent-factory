@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -167,4 +168,99 @@ func TestSnapshot_SandboxCredentialSeesOnlyItsOwnSession(t *testing.T) {
 	}
 	assert.Empty(t, own.DeliveryAlarms,
 		"delivery alarms name their target by TITLE, so they are withheld from a sandbox entirely rather than filtered by an id-to-title mapping")
+}
+
+// The owner's OWN row must still not describe the daemon host (#3065 review).
+//
+// Reflective rather than a list of field assertions, and that is the point: the
+// projection is default-deny by construction, so this walks every field of the
+// result and fails on any populated one that has not been consciously allowed.
+// A field ADDED to InstanceData later is caught the moment it starts arriving —
+// which a hand-written "assert Path is empty" would never do.
+func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *testing.T) {
+	allowed := map[string]bool{
+		"ID": true, "TaskID": true, "Title": true, "Branch": true, "Status": true,
+		"Liveness": true, "InFlightOp": true, "LifecycleAction": true,
+		"CurrentAgent": true, "Program": true, "BackendType": true,
+		"TaskRunActive": true, "LimitResetAt": true, "CreatedAt": true, "UpdatedAt": true,
+	}
+
+	// Populate EVERY field with a non-zero value, so anything that survives the
+	// projection is visible. Strings and bools are enough to make the point; the
+	// struct/slice fields are set to non-nil so they too show up as populated.
+	full := session.InstanceData{
+		ID: "sess-a", TaskID: "task-1", Title: "mine", Branch: "af/mine",
+		Status: session.Ready, CurrentAgent: "claude", Program: "claude",
+		BackendType: "ssh", TaskRunActive: true, CanKill: true, CanHandoff: true,
+		IsRoot: true, UserKilled: true, StartupStateUnknown: true,
+		Height: 40, Width: 120,
+		Path:                  "/home/operator/private/repo",
+		TmuxName:              "af-mine",
+		Prompt:                "the operator's prompt text",
+		PendingHandoffMission: "mission",
+		Tabs:                  []session.TabData{{Name: "shell"}},
+	}
+	full.Worktree.RepoPath = "/home/operator/private/repo"
+	full.Worktree.WorktreePath = "/home/operator/private/repo/.af/worktrees/mine"
+
+	got := sandboxSafeInstanceData(full)
+
+	v := reflect.ValueOf(got)
+	typ := v.Type()
+	require.Greater(t, typ.NumField(), 20, "InstanceData shrank unexpectedly; this guard assumes the wide struct it is protecting")
+	var leaked []string
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		if allowed[name] {
+			continue
+		}
+		if !v.Field(i).IsZero() {
+			leaked = append(leaked, name)
+		}
+	}
+	assert.Emptyf(t, leaked,
+		"sandboxSafeInstanceData passed through %v, which is not in the allowed set. If a new field is genuinely safe "+
+			"for a sandbox to learn about its own session, add it to the projection AND to this test's allowed set — "+
+			"deliberately. Fields describing the daemon HOST (Path, Worktree, TmuxName) must never be added.", leaked)
+
+	// And the allowed ones actually survive, or the projection would "pass" by
+	// returning an empty struct.
+	assert.Equal(t, "sess-a", got.ID)
+	assert.Equal(t, "mine", got.Title)
+	assert.Equal(t, "af/mine", got.Branch)
+	assert.Equal(t, session.Ready, got.Status)
+	assert.Empty(t, got.Path, "the host's absolute repo root is the field this projection exists for")
+	assert.Empty(t, got.Worktree.WorktreePath, "the worktree carries host paths too, so the whole struct is withheld")
+}
+
+// An invalidation anywhere — listener OR auth posture — must fence a mint in
+// flight (#3065 review). The listener generation this replaced could not see an
+// auth-only change.
+func TestSandboxTokenRegistry_InvalidationCountFencesEveryGlobalRevoke(t *testing.T) {
+	var r sandboxTokenRegistry
+	start := r.invalidationCount()
+
+	// Advances even with an EMPTY registry: a sweep that finds nothing still means
+	// an invalidating event happened, and the mint racing it has not registered its
+	// token yet — exactly the case a count gated on "something was dropped" misses.
+	require.Equal(t, 0, r.revokeAll())
+	assert.Equal(t, start+1, r.invalidationCount(),
+		"an invalidation with nothing outstanding must still advance the fence, or a mint racing it survives")
+
+	_, err := r.mint("sess-a")
+	require.NoError(t, err)
+	afterMint := r.invalidationCount()
+	assert.Equal(t, start+1, afterMint, "minting is not an invalidation and must not move the fence")
+
+	require.Equal(t, 1, r.revokeAll())
+	assert.Equal(t, start+2, r.invalidationCount())
+
+	// A TARGETED revoke is not a global invalidation: one session ending must not
+	// fence every other session's in-flight create.
+	_, err = r.mint("sess-b")
+	require.NoError(t, err)
+	before := r.invalidationCount()
+	r.revoke("sess-b")
+	assert.Equal(t, before, r.invalidationCount(),
+		"revoking one session must not advance the global fence, or every teardown would fail unrelated creates")
 }

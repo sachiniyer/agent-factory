@@ -100,12 +100,18 @@ func (s *controlServer) Snapshot(req SnapshotRequest, resp *SnapshotResponse) er
 // is worth anything, it has to hold here. An agent reading its OWN session's state
 // is also the most obviously legitimate thing a remote agent does.
 //
-// Two narrowings, and the second is the one that is easy to forget:
+// THREE narrowings. The first is the obvious one; the other two are each a
+// finding, because "show only the caller's own row" is not the same as "show only
+// what the caller may see":
 //
 //   - Instances is filtered to the owner's own id. Not to its repo, and not to a
 //     title match: the id is the stable identity (#1195), and titles are unique
 //     only per repo, so matching on one would let a same-titled session in another
 //     repo through.
+//   - Each surviving row is PROJECTED (sandboxSafeInstanceData). The owner's own
+//     row still carries the daemon host's layout — Path is the absolute repo root
+//     on the host — so narrowing alone handed back the operator layout that the
+//     path-oracle routes were withdrawn from this scope for (#3065 review).
 //   - DeliveryAlarms is emptied outright. An alarm names its target by TITLE, so
 //     filtering it would mean mapping the owner's id to a title and comparing —
 //     an identity conversion in the one place that must not get identity wrong.
@@ -141,8 +147,50 @@ func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []sessio
 	owned := make([]session.InstanceData, 0, 1)
 	for _, d := range instances {
 		if d.ID != "" && d.ID == owner {
-			owned = append(owned, d)
+			owned = append(owned, sandboxSafeInstanceData(d))
 		}
 	}
 	return owned
+}
+
+// sandboxSafeInstanceData projects one session row down to what a sandbox may
+// learn about ITSELF (#3065 review).
+//
+// Narrowing to the owner's row is not sufficient, which is the finding: the row
+// itself carries the DAEMON HOST's layout. InstanceData.Path is the absolute
+// repository root on the host, Worktree carries host paths, TmuxName names a host
+// tmux session — none of which exist inside the sandbox, and all of which are
+// exactly the operator layout that ListDirectory and the repo-path routes were
+// withdrawn from the scope for. A credential correctly restricted to its own row
+// still read them.
+//
+// Built by CONSTRUCTION, not by blanking. Copying d and clearing a denylist would
+// leak every field added to InstanceData afterwards, silently, at the moment
+// someone else adds one — and this struct has thirty-odd fields and grows. Listing
+// what may go out means a new field is withheld until somebody decides otherwise,
+// which is the same default-deny the route scope uses. A test walks the projection
+// reflectively so a newly populated field has to be an explicit decision.
+//
+// What is included is the agent's own operational state: who it is, what it is
+// running, what state it is in. What is excluded is anything describing the HOST,
+// anything about other sessions, and the conversation/prompt payloads a sandbox
+// already has locally and does not need served back.
+func sandboxSafeInstanceData(d session.InstanceData) session.InstanceData {
+	return session.InstanceData{
+		ID:              d.ID,
+		TaskID:          d.TaskID,
+		Title:           d.Title,
+		Branch:          d.Branch,
+		Status:          d.Status,
+		Liveness:        d.Liveness,
+		InFlightOp:      d.InFlightOp,
+		LifecycleAction: d.LifecycleAction,
+		CurrentAgent:    d.CurrentAgent,
+		Program:         d.Program,
+		BackendType:     d.BackendType,
+		TaskRunActive:   d.TaskRunActive,
+		LimitResetAt:    d.LimitResetAt,
+		CreatedAt:       d.CreatedAt,
+		UpdatedAt:       d.UpdatedAt,
+	}
 }

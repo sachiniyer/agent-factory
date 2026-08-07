@@ -187,7 +187,7 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	m := &Manager{}
 
-	_, _, err := m.mintSandboxCallback(daemonTestConfig(false, "10.0.0.5:8443"), "sess-a")
+	_, err := m.mintSandboxCallback(daemonTestConfig(false, "10.0.0.5:8443"), "sess-a")
 	require.Error(t, err, "a credential against a listener that demands none enforces nothing")
 	assert.Contains(t, err.Error(), requireTokenFixHint,
 		"the refusal must name the one-line fix, or the operator is left guessing")
@@ -200,7 +200,7 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 
 	// An empty listen_addr has nothing to call back to, and is refused separately
 	// so the message can say which of the two is wrong.
-	_, _, err = m.mintSandboxCallback(daemonTestConfig(true, ""), "sess-a")
+	_, err = m.mintSandboxCallback(daemonTestConfig(true, ""), "sess-a")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listen_addr")
 
@@ -237,7 +237,7 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 		// literal-IP rule covers this too.
 		"[fe80::1234%eth0]:8443",
 	} {
-		_, _, err = m.mintSandboxCallback(daemonTestConfig(true, addr), "sess-a")
+		_, err = m.mintSandboxCallback(daemonTestConfig(true, addr), "sess-a")
 		require.Errorf(t, err, "listen_addr %q is not dialable from a sandbox", addr)
 		assert.Emptyf(t, m.sandboxTokens.bySession, "a refused mint must leave no credential behind (%s)", addr)
 	}
@@ -245,22 +245,22 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	// Loopback must be refused for being UNDIALABLE, not for the posture: telling
 	// an operator to set require_loopback_token would send them to a key that buys
 	// a well-enforced credential their sandbox still cannot use.
-	_, _, err = m.mintSandboxCallback(daemonTestConfig(true, "127.0.0.1:8443"), "sess-a")
+	_, err = m.mintSandboxCallback(daemonTestConfig(true, "127.0.0.1:8443"), "sess-a")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reaches ITSELF")
 	assert.NotContains(t, err.Error(), "require_loopback_token")
 
-	url, token, err := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:8443"), "sess-a")
+	grant, err := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:8443"), "sess-a")
 	require.NoError(t, err)
-	assert.Equal(t, "http://10.0.0.5:8443", url)
+	assert.Equal(t, "http://10.0.0.5:8443", grant.URL)
 
 	// A service-name port resolves into the URL as a NUMBER, because an HTTP client
 	// inside the sandbox dials a port, not an /etc/services entry.
-	namedPort, _, nerr := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:http"), "sess-b")
+	namedGrant, nerr := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:http"), "sess-b")
 	require.NoError(t, nerr)
-	assert.Equal(t, "http://10.0.0.5:80", namedPort)
-	assert.NotEmpty(t, token)
-	owner, ok := m.sandboxTokens.sessionFor(token)
+	assert.Equal(t, "http://10.0.0.5:80", namedGrant.URL)
+	assert.NotEmpty(t, grant.Token)
+	owner, ok := m.sandboxTokens.sessionFor(grant.Token)
 	require.True(t, ok)
 	assert.Equal(t, "sess-a", owner)
 }

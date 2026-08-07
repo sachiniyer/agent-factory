@@ -124,6 +124,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// own config.LoadConfig() here, so a raw hand-edit of session_env_passthrough
 	// was picked up on the next create; now it applies on save/ApplyConfig like
 	// every other key — a deliberate, uniform change (see the #2480 release note).
+	// Captured by the SandboxCallback closure below, read after NewInstance returns.
+	var grant sandboxGrant
+	var granted bool
 	instance, err := session.NewInstance(session.InstanceOptions{
 		ID:                             pending.ID,
 		CreatedAt:                      pending.CreatedAt,
@@ -140,9 +143,16 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 		// Invoked by the session runtime ONLY for a kind that provisions off-box
 		// (#2999), so a local create neither mints a credential nor inherits the
-		// require_token refusal that guards one.
+		// require_token refusal that guards one. The grant is captured so the create
+		// can revalidate it AFTER provisioning (#3065 review) — minting can only
+		// fence its own window, and provisioning is the long one.
 		SandboxCallback: func() (string, string, error) {
-			return m.mintSandboxCallback(cfg, pending.ID)
+			g, err := m.mintSandboxCallback(cfg, pending.ID)
+			if err != nil {
+				return "", "", err
+			}
+			grant, granted = g, true
+			return g.URL, g.Token, nil
 		},
 	})
 	// A create that does not finish must not leave a live credential behind
@@ -167,7 +177,26 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// InPlace only changes WHICH worktree that is — the repo's own working tree,
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
-	conversationCapture, startErr := task.StartAndSendPromptWithConversationCapture(ctx, instance, req.Prompt)
+	// Revalidate the callback grant now that provisioning is DONE (#3065 review).
+	// The mint fences its own window, but provisioning is the slow part — an ssh
+	// clone and a binary copy — and a listener rebind or a require_token=false
+	// landing inside it revokes the credential and closes its URL while the sandbox
+	// has already had the stale pair written into it. The create would otherwise
+	// commit a session whose callback silently never connects.
+	//
+	// Routed through startErr rather than handled here on purpose: the discard path
+	// below is #1917's, with its teardown-state classification and its
+	// keepFailedCreate fallback, and a second hand-written copy of that is how the
+	// two drift. Passing this as the start failure reuses all of it, and skips
+	// starting the agent at all — there is no point prompting a session that is
+	// about to be torn down.
+	var conversationCapture session.ConversationCaptureSnapshot
+	var startErr error
+	if granted && !grant.stillValid(&m.sandboxTokens) {
+		startErr = errSandboxCallbackInvalidated(grant.URL)
+	} else {
+		conversationCapture, startErr = task.StartAndSendPromptWithConversationCapture(ctx, instance, req.Prompt)
+	}
 	if serr := finishCreateStart(instance, req.Prompt, startErr); serr != nil {
 		// An unknown startup outcome is already a teardown boundary. Launch may have
 		// failed because the name it probed is not the name tmux stored; asking Kill

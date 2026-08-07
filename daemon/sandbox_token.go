@@ -42,6 +42,18 @@ import (
 // them. Zero value is usable.
 type sandboxTokenRegistry struct {
 	mu sync.RWMutex
+	// invalidations counts events that voided EVERY outstanding credential at once
+	// — a listener rebind, a teardown, an unexpected listener death, or an auth
+	// posture relaxed to tokenless. It is the fence a mint checks across its whole
+	// window (#3065 review).
+	//
+	// It lives here rather than on the listener, and that IS the fix: the counter it
+	// replaces was the listener's binding generation, so it advanced for socket
+	// changes and stayed put for an auth-only change like require_token going false
+	// — and a mint in flight across that change survived the sweep meant to catch
+	// it. Every invalidation routes through revokeAll, so counting revokeAll counts
+	// invalidations by construction, whatever causes the next one.
+	invalidations uint64
 	// bySecret is the authorization lookup: presented credential -> session id.
 	bySecret map[string]string
 	// bySession is the revocation index, so ending a session drops its
@@ -126,7 +138,21 @@ func (r *sandboxTokenRegistry) revokeAll() int {
 	defer r.mu.Unlock()
 	n := len(r.bySession)
 	r.bySecret, r.bySession = nil, nil
+	// Advanced on every CALL, not only when something was dropped. A sweep that
+	// finds the registry empty still means an invalidating event happened, and the
+	// mint racing it has not registered its token yet — exactly the case a count
+	// gated on n > 0 would miss.
+	r.invalidations++
 	return n
+}
+
+// invalidationCount is the fence a mint compares across its window. A change
+// between two reads means every credential outstanding at any point in between was
+// voided, including one registered mid-window.
+func (r *sandboxTokenRegistry) invalidationCount() uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.invalidations
 }
 
 // requireTokenFixHint is the one-line fix named by the refusal below. Kept beside
@@ -174,65 +200,81 @@ func errSandboxCallbackNeedsRequireToken() error {
 // silently never connects — and would judge the loopback posture against a
 // listener that does not exist. #1856 hit the same divergence for the preview
 // origin; activeWebConfigAddr is the same answer for this one.
-func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url, token string, err error) {
+func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (sandboxGrant, error) {
 	if cfg == nil {
-		return "", "", errSandboxCallbackNeedsRequireToken()
+		return sandboxGrant{}, errSandboxCallbackNeedsRequireToken()
 	}
-	// The generation is sampled BEFORE the address is read, not just before the mint
-	// (#3012 review). Sampling it after left the address read itself outside the
-	// window: a rebind landing in between would close the old listener, complete its
-	// revokeAll, and then be recorded as the "starting" generation — so the final
-	// comparison matched and the create finished with a live token paired to a
-	// closed URL. Everything the credential depends on must be read inside the
-	// window, and the address is the first of those reads.
-	gen := m.webBindGeneration()
+	// The fence is sampled BEFORE the address is read, not merely before the mint
+	// (#3012 review): an invalidation landing between the read and the sample would
+	// complete its sweep and then be recorded as the STARTING value, so the final
+	// comparison matched and the create finished with a live token paired to a dead
+	// endpoint. Everything the credential depends on is read inside the window, and
+	// the address is the first of those reads.
+	//
+	// It counts INVALIDATIONS, not listener rebinds (#3065 review). The listener
+	// generation could not see an auth-only change: require_token going false
+	// revokes every credential without touching a socket, so the generation stayed
+	// put and a mint in flight across it survived the sweep — provisioning a sandbox
+	// against a daemon that had just stopped authenticating anyone.
+	fence := m.sandboxTokens.invalidationCount()
 	active := m.activeWebConfigAddr(cfg.ListenAddr)
 	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
-		return "", "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix listen_addr", cfg.ListenAddr)
+		return sandboxGrant{}, fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix listen_addr", cfg.ListenAddr)
 	}
 	// Dialability first, posture second. Both refuse before any secret exists, but
 	// the ORDER decides which message an operator reads, and a loopback listen_addr
 	// used to answer "enable require_loopback_token" — advice that would have led
 	// them to a well-enforced credential their sandbox still could not use.
-	url, err = sandboxCallbackURL(active)
+	url, err := sandboxCallbackURL(active)
 	if err != nil {
-		return "", "", err
+		return sandboxGrant{}, err
 	}
 	if err := sandboxCallbackPostureOK(cfg); err != nil {
-		return "", "", err
+		return sandboxGrant{}, err
 	}
-	// Snapshot the listener generation BEFORE minting and revalidate after, because
-	// nothing holds webListeners.mu across the mint (#3012 review). A listen_addr
-	// change racing this create would otherwise complete its rebind — including the
-	// revokeAll sweep — in the window between reading the address and registering
-	// the token, leaving a credential that survived the sweep while carrying the
-	// URL of the listener the sweep just closed.
-	//
 	// Revalidate-and-refuse rather than lock, deliberately. Holding the listener
 	// lock across a mint inverts the order bindWebLocked already uses (listener lock
 	// -> revokeAll -> registry lock) and is a deadlock waiting to happen. Refusing
-	// costs a create that the operator can retry against the new listener; the retry
-	// is honest, and the alternative is a session that looks provisioned and has a
-	// callback that never connects.
-	token, err = m.sandboxTokens.mint(sessionID)
+	// costs a create the operator can retry; the alternative is a session that looks
+	// provisioned with a callback that never connects.
+	token, err := m.sandboxTokens.mint(sessionID)
 	if err != nil {
-		return "", "", err
+		return sandboxGrant{}, err
 	}
-	if m.webBindGeneration() != gen {
+	if m.sandboxTokens.invalidationCount() != fence {
 		m.sandboxTokens.revoke(sessionID)
-		return "", "", fmt.Errorf("refusing to give this sandbox a callback credential: the control listener rebound while this session was being provisioned, so the callback address %q is already closed. Retry the create", url)
+		return sandboxGrant{}, errSandboxCallbackInvalidated(url)
 	}
-	return url, token, nil
+	return sandboxGrant{URL: url, Token: token, fence: fence}, nil
 }
 
-// webBindGeneration counts control-listener bindings, so a caller can tell whether
-// the listener moved underneath it. 0 when there is no listener owner (a bare
-// Manager, as tests construct), where nothing can rebind.
-func (m *Manager) webBindGeneration() uint64 {
-	if m.webListeners == nil {
-		return 0
-	}
-	return m.webListeners.bindGeneration()
+// sandboxGrant is an issued callback credential plus the fence it was issued
+// under, so the CALLER can revalidate later — after provisioning, which is the
+// slow part and therefore the widest window (#3065 review). Minting revalidates
+// its own window; only the create knows when provisioning finished.
+type sandboxGrant struct {
+	URL   string
+	Token string
+	// fence is the registry's invalidation count at the moment this grant's inputs
+	// were first read. Unexported: it is meaningless outside a comparison against
+	// invalidationCount(), and nothing should serialize or log it.
+	fence uint64
+}
+
+// stillValid reports whether nothing has invalidated outstanding credentials since
+// this grant was issued.
+func (g sandboxGrant) stillValid(r *sandboxTokenRegistry) bool {
+	return r.invalidationCount() == g.fence
+}
+
+// errSandboxCallbackInvalidated refuses a credential whose premises changed while
+// it was being issued, or while the sandbox it was issued for was provisioned.
+//
+// One message for both windows on purpose: from the operator's side they are the
+// same event — something voided every outstanding credential while this create was
+// in flight — and the same action answers both.
+func errSandboxCallbackInvalidated(url string) error {
+	return fmt.Errorf("refusing to give this sandbox a callback credential: the daemon's callback posture changed while this session was being provisioned — the control listener moved or closed, or require_token was disabled — so the callback address %q may already be dead. Retry the create", url)
 }
 
 // activeWebConfigAddr is the config address behind the control-plane listener that

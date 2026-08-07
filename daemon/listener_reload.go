@@ -127,12 +127,16 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		}
 		wl.webConfigAddr = ""
 		// Tearing the listener DOWN is a listener change like any other, and this
-		// early return used to skip both consequences of that (#3012 review): the
-		// generation did not advance, so mintSandboxCallback's revalidation compared
-		// equal and let a racing create finish against a listener that had just
-		// closed; and no sweep ran, so credentials outlived the listener entirely.
-		// The opt-out is the MOST complete form of "the endpoint is gone", so it
-		// cannot be the one path that reports nothing.
+		// early return used to skip both consequences of that (#3012 review): no
+		// sweep ran, so credentials outlived the listener entirely, and the
+		// generation did not advance. The opt-out is the MOST complete form of "the
+		// endpoint is gone", so it cannot be the one path that reports nothing.
+		//
+		// The generation bump no longer feeds a mint check — that fence moved onto
+		// the registry in #3065, because a listener counter could not see an
+		// auth-only invalidation. It stays because it still retires THIS generation:
+		// the done-watcher below clears listener state only while its own generation
+		// is current, and a torn-down listener must not have its state cleared twice.
 		wl.webGen++
 		if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
 			log.WarningLog.Printf("listen_addr is now empty: revoked %d sandbox callback credential(s) — the control listener is closed, so nothing can call back until it is re-enabled and those sessions are re-provisioned", n)
@@ -314,16 +318,6 @@ func (wl *webListeners) webConfigAddress() string {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
 	return wl.webConfigAddr
-}
-
-// bindGeneration is the control listener's binding counter, incremented on every
-// successful (re)bind. A caller that read the listener address without holding
-// wl.mu can compare it before and after to learn whether the listener moved in
-// between — see mintSandboxCallback, which cannot hold this lock across a mint.
-func (wl *webListeners) bindGeneration() uint64 {
-	wl.mu.Lock()
-	defer wl.mu.Unlock()
-	return wl.webGen
 }
 
 // close tears down both listeners (daemon shutdown). Errors are joined so one
