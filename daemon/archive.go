@@ -369,7 +369,11 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 				"archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery",
 				req.Title, archivedPath, perr, rbErr)
 			log.WarningLog.Printf("%v", committedErr)
-			return "", session.InstanceData{}, committedErr
+			// Same reason as the remote path: the worktree IS at archivedPath, so a
+			// committed outcome must carry it and the projection. An empty path and a
+			// zero InstanceData reach the handler as a successful response describing
+			// nothing, and DeleteProject appends that zero record to its results.
+			return archivedPath, instance.ToInstanceData(), committedErr
 		}
 		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
 	}
@@ -542,7 +546,11 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 			"archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w",
 			title, branch, perr)
 		log.WarningLog.Printf("%v", committedErr)
-		return "", committedErr
+		// Carry the branch. The handler turns a committed error into a SUCCESSFUL
+		// response and copies this value into the caller's result, so returning ""
+		// here hands clients the warning while losing the only location the
+		// committed archive can be reached from (#3029).
+		return branch, committedErr
 	}
 	log.InfoLog.Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
 	return branch, nil

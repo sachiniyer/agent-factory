@@ -142,6 +142,13 @@ type KillSessionRequest struct {
 
 type KillSessionResponse struct {
 	OK bool `json:"ok"`
+	// Warning reports a kill that COMMITTED — the tombstone is durable and the
+	// teardown may have landed — but whose follow-up failed. The response stays
+	// successful for the same reason ArchiveSessionResponse's does: net/rpc
+	// flattens a concrete error to rpc.ServerError, so a committed outcome
+	// returned as an error reaches every client as an ordinary failure and
+	// invites a retry of something already applied (#3029).
+	Warning string `json:"warning,omitempty"`
 }
 
 // ArchiveSessionRequest asks the daemon to archive a session (#1028): tear down
@@ -186,6 +193,9 @@ type RestoreArchivedResponse struct {
 	OK bool `json:"ok"`
 	// WorktreePath is the on-disk location the worktree was restored to.
 	WorktreePath string `json:"worktree_path"`
+	// Warning reports a restore that COMMITTED but whose follow-up failed. See
+	// RestoreSessionResponse.Warning.
+	Warning string `json:"warning,omitempty"`
 }
 
 // RestoreSessionRequest asks the daemon to restore a restorable session:
@@ -214,6 +224,10 @@ type RestoreSessionResponse struct {
 	OK bool `json:"ok"`
 	// WorktreePath is the on-disk location of the restored/recovered worktree.
 	WorktreePath string `json:"worktree_path"`
+	// Warning reports a restore that COMMITTED — the worktree has moved — but
+	// whose follow-up failed. Successful for the same reason as archive's: an
+	// error would be flattened by net/rpc and read as "nothing happened".
+	Warning string `json:"warning,omitempty"`
 }
 
 // DeleteProjectRequest asks the daemon to delete a project — a repo grouping of

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/rpc"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -27,44 +25,6 @@ type controlServer struct {
 	watchers     *watcherSupervisor
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
-}
-
-// mutationCommittedError preserves the otherwise-ambiguous outcome of a
-// durable mutation whose non-transactional follow-up failed. HTTP exposes its
-// code additively; net/rpc carries the server-owned prefix that the control
-// client narrowly restores to the same three-valued marker.
-type mutationCommittedError struct {
-	err error
-}
-
-const (
-	taskAddCommittedErrorPrefix    = "task add committed, but failed to reload task schedules:"
-	taskUpdateCommittedErrorPrefix = "task update committed, but failed to reload task schedules:"
-	taskRemoveCommittedErrorPrefix = "task removal committed, but failed to reload task schedules:"
-)
-
-func (e *mutationCommittedError) Error() string           { return e.err.Error() }
-func (e *mutationCommittedError) Unwrap() error           { return e.err }
-func (e *mutationCommittedError) MutationCommitted() bool { return true }
-
-// committedFailure marks a failure whose SIDE EFFECTS ALREADY LANDED.
-//
-// It exists so the marker is one call rather than a three-line literal each site
-// re-derives. Three outcomes must be distinguishable on every mutating path, not
-// two: succeeded, failed with nothing committed, and failed with the work already
-// done. Only the middle is safe to retry blindly — a retry of the third is not
-// recovery, it re-runs a partially applied change.
-//
-// The rule for choosing it: ask what survives if the caller does nothing. If the
-// answer is "the operation happened", this is the constructor to use, and the
-// event announcing what happened belongs immediately before it — every other
-// client learns the truth from that event, not from the error.
-func committedFailure(format string, args ...any) error {
-	return &mutationCommittedError{err: fmt.Errorf(format, args...)}
-}
-
-func (e *mutationCommittedError) APIErrorCode() string {
-	return apiproto.ErrorCodeMutationCommitted
 }
 
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
@@ -691,10 +651,12 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
 	killed, err := s.manager.KillSession(req)
-	if err != nil {
+	warning, ok := commitWarning(err)
+	if !ok {
 		return err
 	}
 	resp.OK = true
+	resp.Warning = warning
 	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: killed.ID, Title: killed.Title})
 	return nil
 }
@@ -710,14 +672,13 @@ func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveS
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
 	archivedPath, _, err := s.manager.ArchiveSession(req)
-	if err != nil && !isMutationCommitted(err) {
+	warning, ok := commitWarning(err)
+	if !ok {
 		return err
 	}
 	resp.OK = true
 	resp.ArchivedPath = archivedPath
-	if err != nil {
-		resp.Warning = err.Error()
-	}
+	resp.Warning = warning
 	return nil
 }
 
@@ -729,11 +690,13 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 		return err
 	}
 	worktreePath, restored, err := s.manager.RestoreArchived(req)
-	if err != nil {
+	warning, ok := commitWarning(err)
+	if !ok {
 		return err
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
+	resp.Warning = warning
 	// Publish the identity the manager actually resolved, not the request's
 	// potentially stale title/repo pair. This is the same one-shot resolution the
 	// restore body used, so the event cannot name a same-title sibling.
@@ -749,11 +712,13 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 		return err
 	}
 	worktreePath, restored, err := s.manager.RestoreSession(req)
-	if err != nil {
+	warning, ok := commitWarning(err)
+	if !ok {
 		return err
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
+	resp.Warning = warning
 	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
 	return nil
 }
@@ -803,14 +768,6 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	resp.Deregistered = result.Deregistered
 	resp.Warning = strings.Join(result.Warnings, "\n")
 	return nil
-}
-
-func isMutationCommitted(err error) bool {
-	type committed interface {
-		MutationCommitted() bool
-	}
-	var outcome committed
-	return errors.As(err, &outcome) && outcome.MutationCommitted()
 }
 
 // RegisterProject records a git checkout as a durable, sessionless project in
