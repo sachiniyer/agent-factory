@@ -213,8 +213,17 @@ func (s *killStage) get() string {
 // Zero is the honest answer when neither record survives: the delay floor still
 // applies, so the watchdog is never armed shorter than it used to be.
 func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData) int {
+	// Non-blocking on purpose. The argument to a deferred call is evaluated AT the
+	// defer statement, so this runs while the kill already holds killsInFlight and
+	// the operation lock. Waiting on the instance lock here would stall the arming
+	// on exactly the stuck-lock wedge the watchdog exists to report — the session
+	// would be undeletable and the diagnostics would never fire (#3023 review).
 	if instance != nil {
-		return instance.TmuxTeardownCount()
+		if n, ok := instance.TryTmuxTeardownCount(); ok {
+			return n
+		}
+		// The roster is locked by whatever is wedging this kill. Fall through to the
+		// persisted record, which needs no lock and names the same sessions.
 	}
 	if data != nil {
 		// The persisted record's spelling of the same two contributions: a tab that

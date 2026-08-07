@@ -323,12 +323,16 @@ func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
 	inst := startedMockInstance(t, "af_tmux_count")
 	_, err := inst.AddShellTab()
 	require.NoError(t, err)
-	require.Equal(t, 2, inst.TmuxTeardownCount(), "agent + shell both own tmux sessions")
+	n, ok := inst.TryTmuxTeardownCount()
+	require.True(t, ok)
+	require.Equal(t, 2, n, "agent + shell both own tmux sessions")
 
 	_, err = inst.AddWebTab("http://localhost:5173", "")
 	require.NoError(t, err)
 	require.Equal(t, 3, inst.TabCount(), "the web tab is on the roster")
-	require.Equal(t, 2, inst.TmuxTeardownCount(), "but it owns no tmux session, so it costs no teardown")
+	n, ok = inst.TryTmuxTeardownCount()
+	require.True(t, ok)
+	require.Equal(t, 2, n, "but it owns no tmux session, so it costs no teardown")
 
 	// A tab closed without a confirmed kill leaves a pending handle, and
 	// teardownTabs appends every one of them to the SAME sequential close loop —
@@ -337,7 +341,15 @@ func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
 	inst.mu.Lock()
 	inst.pendingTabCleanup = append(inst.pendingTabCleanup, TabCleanupData{TabID: "t9", TmuxName: "af_x__stuck"})
 	inst.mu.Unlock()
-	require.Equal(t, 3, inst.TmuxTeardownCount(),
-		"a pending cleanup handle is one more tmux session the teardown must close")
+	n, ok = inst.TryTmuxTeardownCount()
+	require.True(t, ok)
+	require.Equal(t, 3, n, "a pending cleanup handle is one more tmux session the teardown must close")
 	require.Equal(t, 3, inst.TabCount(), "and it is not on the roster")
+
+	// Held lock: the budget must degrade rather than wait, or arming the kill
+	// watchdog would block on the very wedge it exists to diagnose.
+	inst.mu.Lock()
+	_, ok = inst.TryTmuxTeardownCount()
+	inst.mu.Unlock()
+	require.False(t, ok, "a locked roster must report unavailable, never block")
 }
