@@ -239,3 +239,33 @@ func TestRegister_RefusesASymlinkedAccountPath(t *testing.T) {
 		t.Fatal("Selected must refuse a symlinked account, matching List which cannot see it")
 	}
 }
+
+// A symlink ANYWHERE below the AF home must be refused, not just the final
+// component. Checking only the leaf left the boundary bypassable one level up:
+// with `accounts/codex` a symlink, MkdirAll follows it and creates `work` inside
+// the target as a perfectly ordinary directory, so a leaf-only Lstat sees
+// nothing wrong and accepts the registration (#3057 review).
+func TestRegister_RefusesASymlinkedAncestor(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+
+	// accounts/codex is a symlink; the account name below it would be real.
+	agentLink := filepath.Join(home, DirName, "codex")
+	if err := os.MkdirAll(filepath.Dir(agentLink), 0o700); err != nil {
+		t.Fatalf("mkdir accounts: %v", err)
+	}
+	if err := os.Symlink(elsewhere, agentLink); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	if _, err := Register(home, "codex", "work"); err == nil {
+		t.Fatal("a symlinked ANCESTOR must be refused: MkdirAll follows it and the " +
+			"account lands in the link target while the leaf looks like a real directory")
+	}
+
+	// Nothing may have been created inside the link target — the refusal has to
+	// happen before MkdirAll, not merely be reported after it.
+	if _, err := os.Stat(filepath.Join(elsewhere, "work")); err == nil {
+		t.Fatal("the refused registration created the account inside the symlink target")
+	}
+}

@@ -81,8 +81,19 @@ func Register(home, agent, name string) (string, error) {
 	if err := refuseCaseCollision(home, agent, name); err != nil {
 		return "", err
 	}
+	// BEFORE MkdirAll, which follows an ancestor symlink silently and would create
+	// the account inside its target before any check below could object.
+	if err := refuseSymlinkedAncestor(home, dir); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return "", fmt.Errorf("create account directory %s: %w", dir, err)
+	}
+	// And AFTER, because the pre-check can only inspect components that already
+	// existed. This pass covers everything MkdirAll just created, plus anything
+	// swapped in between the two.
+	if err := refuseSymlinkedAncestor(home, dir); err != nil {
+		return "", err
 	}
 	// Lstat AFTER MkdirAll, which succeeds on an existing symlink-to-directory
 	// without reporting that it followed one. Chmod would then follow it too and
@@ -136,6 +147,51 @@ func Register(home, agent, name string) (string, error) {
 // Refusing rather than lowercasing is deliberate too: silently folding `Work`
 // into `work` would hand back an EXISTING account's directory from a command the
 // operator issued to create a new one.
+// refuseSymlinkedAncestor rejects a symlink anywhere between the AF home and the
+// account directory, exclusive of the home itself.
+//
+// Checking only the final component was not enough, and the gap is the whole
+// point of the guard: if `accounts/codex` is a symlink, MkdirAll follows it and
+// creates `work` inside the target, where `work` is a perfectly ordinary
+// directory. A final-component Lstat sees nothing wrong and the registration is
+// accepted, so the boundary is bypassed one level up — af then chmods and
+// authenticates through a location chosen by whoever made the link, and both
+// List and Selected report it as a valid account (#3057 review).
+//
+// The AF home itself is deliberately NOT checked. An operator symlinking their
+// own ~/.agent-factory somewhere is an ordinary, deliberate arrangement, and
+// af's other state trees already live behind it; refusing that would reject a
+// working install for a property this package has no business policing. What is
+// policed is everything af creates BELOW it.
+//
+// A component that does not exist yet is fine — it is about to be created as a
+// real directory. Only what is actually there is inspected.
+func refuseSymlinkedAncestor(home, dir string) error {
+	relative, err := filepath.Rel(home, dir)
+	if err != nil {
+		return fmt.Errorf("locate account directory %s under %s: %w", dir, home, err)
+	}
+	current := home
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			// Not created yet; MkdirAll will make a real directory here.
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect account path %s: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf(
+				"account path component %s is a symlink; accounts must live in real directories under the "+
+					"agent-factory home so af never re-permissions or authenticates through a path chosen elsewhere",
+				current)
+		}
+	}
+	return nil
+}
+
 func refuseCaseCollision(home, agent, name string) error {
 	existing, err := List(home, agent)
 	if err != nil {

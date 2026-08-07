@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
@@ -77,6 +78,20 @@ same directory and touches nothing inside it.`,
 		log.Initialize(false)
 		defer log.Close()
 
+		// --daemon-url / AF_DAEMON_URL promises to target a REMOTE daemon, and this
+		// command writes to the LOCAL AF home. Honouring the flag by ignoring it
+		// hands the operator a valid-looking directory on the wrong machine — and
+		// then invites them to log real credentials into it, for an account the
+		// targeted daemon can never see. A credential in the wrong place is a worse
+		// outcome than a refusal, so refuse. Same seam and same reasoning as
+		// `af quota` (#3057 review).
+		if apiclient.IsRemoteTarget() {
+			return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf(
+				"af accounts manages credential directories in this machine's agent-factory home and cannot "+
+					"manage them on a remote daemon; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
+					"or run af accounts on the daemon's host"))
+		}
+
 		agent, name := args[0], args[1]
 		home, err := config.GetConfigDir()
 		if err != nil {
@@ -122,6 +137,18 @@ than accepting a selection that would silently do nothing.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		// --daemon-url / AF_DAEMON_URL promises to target a REMOTE daemon, and this
+		// command reads the LOCAL AF home. Ignoring the flag would report this
+		// machine's accounts as though they were the remote daemon's, which is how
+		// an operator concludes an account exists there and starts a session
+		// against it. Same seam and same reasoning as `af quota` (#3057 review).
+		if apiclient.IsRemoteTarget() {
+			return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf(
+				"af accounts manages credential directories in this machine's agent-factory home and cannot "+
+					"manage them on a remote daemon; unset --daemon-url/AF_DAEMON_URL to act on this host, "+
+					"or run af accounts on the daemon's host"))
+		}
 
 		home, err := config.GetConfigDir()
 		if err != nil {
