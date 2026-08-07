@@ -229,15 +229,26 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: its callback credential could not be re-issued, and restoring it without one would silently leave its agent unable to call af: %w", i.Title, err)
 	}
-	res, err := rt.Provision(spec)
-	if err != nil {
-		// The credential was minted for a sandbox that does not exist. Unlike the
-		// create path there is no session-level cleanup behind this — the old
-		// runtime was already reaped above — so leaving it registered strands a
-		// live token on nothing (#3065 review).
-		if creds != nil {
+	// ARMED HERE, disarmed only once the replacement is bound and live (#3065
+	// review). Every exit below this line abandons a credential minted for a
+	// sandbox that either does not exist or cannot be used, and unlike the create
+	// path there is no session-level cleanup behind them — the old runtime was
+	// already reaped above — so an abandoned credential strands a live token on
+	// nothing.
+	//
+	// Deferred rather than repeated at each return, because repeating it is what
+	// this review kept catching: provision-failure, revalidation-failure and
+	// bind-failure each needed the same line, and each was added only after a
+	// finding named it. A fourth exit added later gets it for free, and gets it
+	// FAIL-CLOSED, which is the direction an auth credential should default in.
+	replacementLive := false
+	defer func() {
+		if !replacementLive && cred.Granted() && creds != nil {
 			creds.Revoke()
 		}
+	}()
+	res, err := rt.Provision(spec)
+	if err != nil {
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
 	// Same post-provision revalidation the create path performs. Doing it in one
@@ -267,6 +278,10 @@ func (i *Instance) reprovisionRemote() error {
 		}
 		return fmt.Errorf("failed to bind re-provisioned sandbox for session %q: %w", i.Title, err)
 	}
+	// The replacement is bound and live, so its credential belongs to it now. From
+	// here the runtime's own lifetime owns revocation again — resetRemoteRuntime on
+	// the next reap, revokeSandboxCredential on a known archive teardown failure.
+	replacementLive = true
 	return nil
 }
 
