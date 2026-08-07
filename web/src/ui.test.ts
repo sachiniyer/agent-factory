@@ -392,3 +392,41 @@ test("the create refusal is the daemon's own text, not a backend guess (#3060)",
     /Restore this session/,
   );
 });
+
+test("the tab-bar sig changes when WHICH kind is creatable changes (#3060)", () => {
+  // Both snapshots allow something, so createReason is null in each and every other
+  // value in the signature is equal. Only the SET differs. Without it in the sig the
+  // bar does not rebuild, and the menu keeps offering the kind that just became
+  // refused while omitting the one that just became available.
+  const shellOnly = state({
+    sessions: [
+      sess({
+        id: "a",
+        tabs: [{ name: "agent", kind: 0 }],
+        tab_kinds: [
+          { kind: "shell", allowed: true },
+          { kind: "vscode", allowed: false, reason: "no worktree to read" },
+        ],
+      }),
+    ],
+  });
+  const vscodeOnly = state({
+    sessions: [
+      sess({
+        id: "a",
+        tabs: [{ name: "agent", kind: 0 }],
+        tab_kinds: [
+          { kind: "shell", allowed: false, reason: "no worktree to spawn in" },
+          { kind: "vscode", allowed: true },
+        ],
+      }),
+    ],
+  });
+
+  assert.equal(
+    tabCreationUnavailableReason(vscodeOnly.sessions[0]),
+    tabCreationUnavailableReason(shellOnly.sessions[0]),
+    "premise: creation is available in both, so the reason cannot distinguish them",
+  );
+  assert.notEqual(tabBarSig(shellOnly), tabBarSig(vscodeOnly), "the bar must rebuild when the menu's kinds change");
+});

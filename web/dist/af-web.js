@@ -12678,6 +12678,11 @@ function canCreateTabKind(s, kind) {
 function canManageTabs(s) {
   return supportsTabManagement(s) && !isArchived(s);
 }
+var NEW_TAB_MENU_ITEMS = [
+  ["Terminal", "shell"],
+  ["VS Code", "vscode"]
+];
+var NEW_TAB_MENU_KINDS = NEW_TAB_MENU_ITEMS.map(([, kind]) => kind);
 function canMutateTabRoster(s) {
   if (s.tab_roster_mutable !== void 0) {
     return s.tab_roster_mutable && !isArchived(s);
@@ -13698,10 +13703,7 @@ var AppShell = class {
       return b;
     };
     const offered = [];
-    for (const [label, kind] of [
-      ["Terminal", "shell"],
-      ["VS Code", "vscode"]
-    ]) {
+    for (const [label, kind] of NEW_TAB_MENU_ITEMS) {
       if (!selected || canCreateTabKind(selected, kind)) {
         offered.push(item(label, kind));
       }
@@ -14258,6 +14260,7 @@ function tabBarSig(state) {
   const canRename = canMutateTabRoster(selected);
   const canClose = canCloseTabs(selected);
   const createReason = tabCreationUnavailableReason(selected);
+  const creatable = NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(selected, kind));
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([
     selected.id ?? "",
@@ -14266,7 +14269,8 @@ function tabBarSig(state) {
     shown,
     canRename,
     canClose,
-    createReason
+    createReason,
+    creatable
   ]);
 }
 function barTabs(bar) {

@@ -389,6 +389,16 @@ export function canManageTabs(s: SessionData): boolean {
   return supportsTabManagement(s) && !isArchived(s);
 }
 
+/** The kinds the new-tab menu can offer, and their labels. One list so the menu
+ *  and the tab-bar signature cannot disagree about which kinds are on offer —
+ *  a signature that omitted one left the menu stale when that kind's verdict
+ *  changed (#3060). */
+const NEW_TAB_MENU_ITEMS: [string, NewTabKind][] = [
+  ["Terminal", "shell"],
+  ["VS Code", "vscode"],
+];
+const NEW_TAB_MENU_KINDS: NewTabKind[] = NEW_TAB_MENU_ITEMS.map(([, kind]) => kind);
+
 /** Whether the web may RENAME or REORDER this session's tabs.
  *
  *  A third question, and it has a third answer. The daemon's tabMutationTarget
@@ -1785,10 +1795,7 @@ export class AppShell {
     // ANY kind is creatable, so without this a session allowing only `web` would
     // render a menu whose every entry createSessionTab silently rejects (#3060).
     const offered: HTMLElement[] = [];
-    for (const [label, kind] of [
-      ["Terminal", "shell"],
-      ["VS Code", "vscode"],
-    ] as [string, NewTabKind][]) {
+    for (const [label, kind] of NEW_TAB_MENU_ITEMS) {
       if (!selected || canCreateTabKind(selected, kind)) {
         offered.push(item(label, kind));
       }
@@ -2628,6 +2635,12 @@ export function tabBarSig(state: AppState): string {
   const canRename = canMutateTabRoster(selected);
   const canClose = canCloseTabs(selected);
   const createReason = tabCreationUnavailableReason(selected);
+  // The MENU's kinds, not just whether creation is available at all. Two snapshots
+  // can both allow something — so createReason is null in each — while swapping
+  // WHICH kind is allowed, and every other value here stays equal. The bar would
+  // then not rebuild and the menu would keep offering the kind that just became
+  // refused while omitting the one that just became available.
+  const creatable = NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(selected, kind));
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
   return JSON.stringify([
     selected.id ?? "",
@@ -2637,6 +2650,7 @@ export function tabBarSig(state: AppState): string {
     canRename,
     canClose,
     createReason,
+    creatable,
   ]);
 }
 
