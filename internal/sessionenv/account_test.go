@@ -195,6 +195,10 @@ func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
 		// DISABLED, so the cloud-mode refusal never fires while the shell expands
 		// it to a non-empty string.
 		"CLAUDE_CODE_USE_BEDROCK=$HOME codex",
+		// Any assignment at all, including ones that carry no identity but change
+		// what the executable DOES.
+		"LD_PRELOAD=./steal.so codex",
+		"DYLD_INSERT_LIBRARIES=./steal.dylib codex",
 		"CODEX_HOME=$HOME/.codex codex",
 		"env CODEX_HOME=/other codex",
 		"env -u CODEX_HOME codex",
@@ -229,6 +233,13 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		"bash -lc codex",
 		// Any binary whose behaviour is not modelled here.
 		"/usr/local/bin/wrapper codex",
+		// A command substitution in an ARGUMENT runs before the outer agent does.
+		"codex \"$(unset CODEX_HOME; codex exec x)\"",
+		"codex --model $(cat /tmp/m)",
+		// A basename is not provenance: ./codex is an arbitrary repo-provided file
+		// that would receive the selected root.
+		"./codex",
+		"bin/codex",
 		// A CROSS-AGENT override: the account scopes codex, the command runs
 		// claude, which ignores CODEX_HOME entirely and uses its own default home.
 		"claude",

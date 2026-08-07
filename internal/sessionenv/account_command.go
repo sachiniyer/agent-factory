@@ -50,12 +50,16 @@ func callOverridesName(call *syntax.CallExpr, agent string, names map[string]str
 	}
 	// Shell-parsed assignment prefixes: `CODEX_HOME=/other codex`.
 	for _, assign := range call.Assigns {
-		if assign == nil || assign.Name == nil {
-			continue
-		}
-		if _, refused := names[assign.Name.Value]; refused {
+		// ANY assignment, not only the identity names. LD_PRELOAD=./steal.so codex
+		// loads repository-controlled code into the real agent before it reads the
+		// injected root, so it can read the account's credentials without ever
+		// touching a variable this package classifies. An allowlist of "harmless"
+		// variables is another standing promise to have thought of every one; a
+		// scoped session's program simply carries no assignments (#2983 review).
+		if assign != nil && assign.Name != nil {
 			return true, true
 		}
+		_ = names
 	}
 
 	words := call.Args
@@ -75,9 +79,8 @@ func callOverridesName(call *syntax.CallExpr, agent string, names map[string]str
 		if !ok {
 			break
 		}
-		if _, refused := names[assigned]; refused {
-			return true, true
-		}
+		_ = assigned
+		return true, true
 	}
 
 	// A nested agent-server program carries its own command, and is the one
@@ -102,6 +105,13 @@ func callOverridesName(call *syntax.CallExpr, agent string, names map[string]str
 	//
 	// A DIRECT invocation of a known agent is the one provable case: it consumes
 	// its arguments itself and starts no second program construction.
+	// The WHOLE call must be literal, not just the executable word. A command
+	// substitution in an argument — `codex "$(unset CODEX_HOME; codex exec …)"` —
+	// is evaluated by /bin/sh BEFORE the outer agent starts, so checking only
+	// words[0] proves nothing about what runs first.
+	if !callIsLiteral(call) {
+		return false, false
+	}
 	if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, agent) {
 		return false, true
 	}
@@ -164,5 +174,14 @@ func executableIsAgent(executable, agent string) bool {
 	if executable == "" || agent == "" {
 		return false
 	}
-	return strings.EqualFold(filepath.Base(executable), agent)
+	// A BARE name only. `./codex` shares a basename with the real CLI and is an
+	// arbitrary repository-provided file: the shell would hand it the selected
+	// root, letting it read the account's credentials or unset the variable and
+	// then exec the real agent. A basename is not provenance. Requiring no path
+	// separator makes PATH resolution the thing that picks the binary, which is
+	// the operator's configuration rather than the repository's (#2983 review).
+	if strings.ContainsRune(executable, filepath.Separator) || strings.Contains(executable, "/") {
+		return false
+	}
+	return strings.EqualFold(executable, agent)
 }
