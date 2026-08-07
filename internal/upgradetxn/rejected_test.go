@@ -377,3 +377,23 @@ func TestRejectedLedgerRefusesAFifoRatherThanBlocking(t *testing.T) {
 		t.Fatal("the read blocked on a FIFO — this is the hang that would freeze Prepare while it holds the executable lock")
 	}
 }
+
+// #3011 review: a hard link passes Lstat AND IsRegular — it IS a regular file, just
+// a second name for an inode somebody else still controls. One planted while the
+// directory was group-writable outlives the tightening, because narrowing the
+// directory does not touch the other name.
+func TestRejectedLedgerRefusesAHardLinkedInode(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	candidate := []byte("bad candidate")
+	require.NoError(t, RecordRejectedCandidate(executable, digest(candidate), "v9.9.9", "rolled back"))
+
+	path := rejectedLedgerPath(executable)
+	require.NoError(t, os.Link(path, filepath.Join(dir, "attacker-handle.json")),
+		"a second name for the same inode")
+
+	_, _, err := CandidateRejected(executable, candidate)
+	require.Error(t, err, "an inode another path still names is not trustworthy evidence")
+	require.Contains(t, err.Error(), "hard link")
+}

@@ -293,7 +293,17 @@ func alignRejectedLedgerWithDirectoryWriters(path string) {
 		log.WarningLog.Printf("rejected-candidate ledger %s is a symlink; refusing to adjust its mode", path)
 		return
 	}
-	gid, shared := directoryWriterGroup(filepath.Dir(path))
+	dir := filepath.Dir(path)
+	gid, shared := directoryWriterGroup(dir)
+	if !shared && !directorySharednessIsKnowable(dir) {
+		// On macOS and other platforms without readable ACLs, directoryWriterGroup
+		// reports NOT shared when it cannot tell — deliberately, so nothing is widened
+		// on a guess. Narrowing on that same "no" would be the opposite error: it
+		// would revoke a genuinely shared ledger's access and fail every other
+		// authorized writer's updater closed, which is the harm the widening exists to
+		// prevent. Not knowing is a reason to leave it alone, in both directions.
+		return
+	}
 	want := rejectedLedgerMode
 	if shared {
 		want = rejectedLedgerSharedMode
@@ -349,6 +359,15 @@ func alignRejectedLedgerWithDirectoryWriters(path string) {
 // Refusal is an error, and an error fails closed at every caller — which is the right
 // direction: "somebody else owns the record of what is disqualified" is not "nothing
 // is disqualified".
+// directorySharednessIsKnowable reports whether "not shared" is a FACT here rather
+// than a refusal to guess. hasExtendedACL answers true both for a directory that
+// really carries an ACL and for every non-Linux platform, where the ACL state cannot
+// be read at all — so a "not shared" derived from it is "cannot tell", and must not
+// be acted on in the narrowing direction.
+func directorySharednessIsKnowable(dir string) bool {
+	return !hasExtendedACL(dir)
+}
+
 func verifyLedgerInode(path string, handle *os.File) error {
 	info, err := handle.Stat()
 	if err != nil {
@@ -356,6 +375,15 @@ func verifyLedgerInode(path string, handle *os.File) error {
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("the rejected-candidate ledger at %s is not a regular file (mode %v)", path, info.Mode())
+	}
+	// A hard link passes Lstat AND IsRegular — it IS a regular file, just a second
+	// name for an inode somebody else still controls. One planted while the directory
+	// was group-writable outlives the tightening, because narrowing the directory
+	// does not touch the other name. A ledger nobody else holds a handle to has
+	// exactly one link.
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink > 1 {
+		return fmt.Errorf("the rejected-candidate ledger at %s has %d hard links; refusing to trust an inode another path still names",
+			path, stat.Nlink)
 	}
 	dir := filepath.Dir(path)
 	if _, shared := directoryWriterGroup(dir); shared {

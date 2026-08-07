@@ -592,6 +592,22 @@ func (t *Transaction) rollback() error {
 }
 
 func (t *Transaction) restoreLocked() error {
+	// Ask the executable whether the candidate ran, BEFORE overwriting the evidence
+	// (#3011 review). The marker is normally written with PhaseCandidateInstalled,
+	// but the rename can succeed and that journal write fail — and a takeover from
+	// the phase BEFORE install rolls back without re-entering InstallCandidate, so
+	// nothing ever sets it. The bytes on disk are the ground truth, and this is the
+	// last moment they exist.
+	if !t.journal.CandidateInstalled {
+		if installed, err := os.ReadFile(t.journal.ExecutablePath); err == nil &&
+			digest(installed) == t.journal.CandidateSHA256 {
+			journal := t.journal
+			journal.CandidateInstalled = true
+			if err := t.persistJournalLocked(journal); err != nil {
+				return fmt.Errorf("checkpoint that the candidate had been installed: %w", err)
+			}
+		}
+	}
 	if !t.journal.RollbackProgress.BinaryRestored {
 		previous, err := readAndVerify(t.journal.PreviousBinaryPath, t.journal.PreviousBinarySHA256)
 		if err != nil {
