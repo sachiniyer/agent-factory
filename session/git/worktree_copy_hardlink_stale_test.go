@@ -214,3 +214,42 @@ func TestSourceMatchesCopiedFile_UsesARetainedDescriptorWhenTheModeDeniesRead(t 
 	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained),
 		"a retained descriptor must not turn the comparison into an unconditional yes")
 }
+
+// An unreadable source file must not fail the whole archive, and the skip must
+// be RECORDED durably (#3066).
+//
+// Archive is the safe action in this product — the one users are told to prefer
+// over kill because it is restorable — so one file the copier cannot read must
+// not block it and push people toward the destructive alternative.
+//
+// The assertion is deliberately not merely "does not error". An archive that
+// quietly drops a file the user believes is preserved is WORSE than one that
+// refuses, because the loss surfaces at restore time with the original already
+// gone. So this also asserts the skipped path is named, in the archive itself.
+func TestCopyTree_UnreadableSourceIsSkippedAndReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses mode bits, so no file is unreadable")
+	}
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "copy")
+
+	require.NoError(t, os.WriteFile(filepath.Join(source, "readable.txt"), []byte("KEPT"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(source, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "nested", "locked.secret"), []byte("SECRET"), 0o600))
+	require.NoError(t, os.Chmod(filepath.Join(source, "nested", "locked.secret"), 0o000))
+
+	var unreadable []string
+	require.NoError(t, copyTreeCollectingUnreadable(source, destination, &unreadable),
+		"one unreadable file must not fail the archive: archive is the restorable alternative to kill")
+
+	// The readable content is all there.
+	kept, err := os.ReadFile(filepath.Join(destination, "readable.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "KEPT", string(kept))
+
+	// The unreadable one is absent, and NAMED.
+	_, err = os.Lstat(filepath.Join(destination, "nested", "locked.secret"))
+	require.True(t, os.IsNotExist(err), "the unreadable file cannot have been copied")
+	require.Equal(t, []string{filepath.Join("nested", "locked.secret")}, unreadable,
+		"the skipped path must be reported by its path relative to the copy root")
+}
