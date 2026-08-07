@@ -217,12 +217,24 @@ func (i *Instance) reprovisionRemote() error {
 	}
 	res, err := rt.Provision(spec)
 	if err != nil {
+		// The credential was minted for a sandbox that does not exist. Unlike the
+		// create path there is no session-level cleanup behind this — the old
+		// runtime was already reaped above — so leaving it registered strands a
+		// live token on nothing (#3065 review).
+		if creds != nil {
+			creds.Revoke()
+		}
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
 	// Same post-provision revalidation the create path performs. Doing it in one
-	// and not the other is exactly how these two drifted the first time.
+	// and not the other is exactly how these two drifted the first time — and so is
+	// the cleanup: this reaps the replacement and revokes its credential through
+	// the same helper, because the previous runtime was already reset, so nothing
+	// else holds a handle and the next restore would see nothing to reap and
+	// provision a second sandbox alongside this orphan.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		return fmt.Errorf("re-provisioned sandbox for session %q, but its callback credential was invalidated while it was being provisioned: %w", i.Title, rerr)
+		return fmt.Errorf("re-provisioned sandbox for session %q, but its callback credential was invalidated while it was being provisioned: %w",
+			i.Title, discardUnusableSandbox(res, creds, rerr))
 	}
 	if err := i.bindProvisionResult(res); err != nil {
 		// The sandbox is up but its endpoint could not be wired — reap it so a
