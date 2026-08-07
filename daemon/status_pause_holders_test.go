@@ -149,3 +149,47 @@ func TestPauseStatusPoll_AnExpiredHolderDoesNotHoldThePause(t *testing.T) {
 		t.Fatal("the only holder's lease expired; a crashed client must not blind the daemon")
 	}
 }
+
+// #3028 review: a session can be held under TWO namespaces at once — an ID-bearing
+// client keys the lease by stable id, a legacy one by title, and isPollPaused treats
+// either as an active pause. Judging the backstop by "this key is now empty" would
+// disarm it while the other namespace still holds the session, and the next paused
+// refresh would rearm it from scratch, delaying task-run completion (and the
+// concurrency slot it releases) by another full taskRunPollBackstop.
+func TestResumeStatusPoll_BackstopSurvivesAHolderInTheOtherNamespace(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerStarted(t, manager, repoID, repoPath, "shared", session.NewFakeBackend(), true, session.Running)
+	inst := manager.instances[daemonInstanceKey(repoID, "shared")]
+	probeKey := stableSessionKey(repoID, inst)
+
+	// An ID-bearing client and a legacy ID-less one, holding the same session under
+	// different keys.
+	manager.PauseStatusPollFor(repoID, "shared", inst.ID, "modern")
+	manager.PauseStatusPollFor(repoID, "shared", "", "legacy")
+	manager.pausedMu.Lock()
+	manager.taskRunProbeDue[probeKey] = nowFunc().Add(taskRunPollBackstop)
+	manager.pausedMu.Unlock()
+
+	// The ID-bearing one leaves. Its key is now empty, but the session is still
+	// paused by the legacy holder.
+	manager.ResumeStatusPollFor(repoID, "shared", inst.ID, "modern")
+
+	if !manager.isPollPaused(repoID, "shared", inst.ID) {
+		t.Fatal("the legacy holder still holds the pause")
+	}
+	manager.pausedMu.Lock()
+	_, armed := manager.taskRunProbeDue[probeKey]
+	manager.pausedMu.Unlock()
+	if !armed {
+		t.Fatal("the backstop was disarmed while the session is still paused, leaving that pause unbounded")
+	}
+
+	// Only when the last namespace releases does the backstop go with it.
+	manager.ResumeStatusPollFor(repoID, "shared", "", "legacy")
+	manager.pausedMu.Lock()
+	_, stillArmed := manager.taskRunProbeDue[probeKey]
+	manager.pausedMu.Unlock()
+	if stillArmed {
+		t.Fatal("no holder remains; the backstop entry must be reclaimed with the pause")
+	}
+}

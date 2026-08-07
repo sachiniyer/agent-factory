@@ -113,17 +113,24 @@ func (m *Manager) ResumeStatusPollFor(repoID, title, id, holder string) {
 	m.pausedMu.Lock()
 	holders := m.pausedPolls[key]
 	delete(holders, holder)
-	last := len(holders) == 0
-	if last {
+	if len(holders) == 0 {
 		delete(m.pausedPolls, key)
-		// The backstop entry belongs to the PAUSE, not to any one holder: it is
-		// armed while the session is paused and exists to bound how long that pause
-		// may hide a task run's completion (#1892). Dropping it while another holder
-		// still has the session paused would disarm the backstop for a pause that is
-		// still in effect — the same one-slot mistake this change fixes, one map over.
-		if probeKey != "" {
-			delete(m.taskRunProbeDue, probeKey)
-		}
+	}
+	// The backstop entry belongs to the PAUSE, not to any one holder: it is armed
+	// while the session is paused and exists to bound how long that pause may hide a
+	// task run's completion (#1892). Dropping it while the session is still paused
+	// would disarm the backstop for a pause still in effect — the same one-slot
+	// mistake this change fixes, one map over.
+	//
+	// Asked of the PAUSE rather than of this key, because a session can be held
+	// under two namespaces at once: an ID-bearing client keys by stable id and a
+	// legacy one by title, and isPollPaused treats EITHER as an active pause. Judging
+	// by "this key is now empty" would disarm the backstop while the other namespace
+	// still holds the session, and the next paused refresh would rearm it from
+	// scratch — delaying task-run completion, and the concurrency slot it releases,
+	// by another full taskRunPollBackstop.
+	if probeKey != "" && !m.pollLeaseActiveLocked(repoID, title, id, nowFunc()) {
+		delete(m.taskRunProbeDue, probeKey)
 	}
 	m.pausedMu.Unlock()
 }
