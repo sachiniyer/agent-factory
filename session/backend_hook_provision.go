@@ -174,6 +174,18 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 	return strings.Join(parts, " ")
 }
 
+// hookProvisionPinnedRecord normalizes a record for pinning: the port is split
+// out of Host when it was spelled there, and the returned copy carries the split
+// values. Extracted so the connection tests traverse THIS handoff rather than
+// repeating the assignment — a test that restates it would pass even if
+// provisionHost stopped doing it.
+func hookProvisionPinnedRecord(record *hookProvisionRecord) (pinned hookProvisionRecord, host string, port int) {
+	host, port = hookProvisionHostPort(record)
+	pinned = *record
+	pinned.Host, pinned.Port = host, port
+	return pinned, host, port
+}
+
 // hookProvisionHostPort splits a "host:port" Host value so a record may spell the
 // port either way. An address with no port is returned unchanged.
 func hookProvisionHostPort(record *hookProvisionRecord) (string, int) {
@@ -221,7 +233,7 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 		return ProvisionResult{}, err
 	}
 
-	host, port := hookProvisionHostPort(record)
+	pinned, host, port := hookProvisionPinnedRecord(record)
 	dir, err := hookProvisionSessionDir(p.slug)
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
@@ -230,9 +242,6 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
 	}
-	pinned := *record
-	pinned.Host, pinned.Port = host, port
-
 	afBin, err := sshSelfBinary()
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: cannot locate the af binary to stream onto the sandbox: %w", err)

@@ -91,9 +91,9 @@ func throwawaySSHD(t *testing.T, extraConfig ...string) (port int, hostPubKey st
 		body := strings.Join(extraConfig, "\n") + fmt.Sprintf(`
 Port %d
 ListenAddress 127.0.0.1
-HostKey %s
-AuthorizedKeysFile %s
-PidFile %s
+HostKey %q
+AuthorizedKeysFile %q
+PidFile %q
 UsePAM no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -217,16 +217,30 @@ func fixtureSSHOptions(identity string) string {
 	return "-F none -i " + shellQuoteSandbox(identity) + " -o IdentitiesOnly=yes "
 }
 
-// fixtureLoginWorks reports whether the calling account can actually authenticate
-// to the fixture daemon with the key it was given.
+// fixtureLoginWorks reports whether the calling account can authenticate to the
+// fixture daemon at all.
+//
+// It deliberately uses an INDEPENDENT ssh invocation rather than
+// hookProvisionKnownHosts/hookProvisionSSHCommand. Probing with the code under
+// test would map any regression in those helpers — a dropped -p, a wrong
+// non-default-port host entry — to "the environment cannot log in", and every
+// E2E test would SKIP instead of exposing the defect it exists to catch. A probe
+// must not be able to disarm the suite.
 func fixtureLoginWorks(t *testing.T, port int, hostPubKey, userKey string) bool {
 	t.Helper()
-	record := &hookProvisionRecord{Host: "127.0.0.1", Port: port, HostKey: hostPubKey}
-	kh, err := hookProvisionKnownHosts(t.TempDir(), record.Host, record.Port, record.HostKey)
-	require.NoError(t, err)
-	cmd := strings.Replace(hookProvisionSSHCommand(kh, record), "ssh ", "ssh "+fixtureSSHOptions(userKey), 1)
-	_, runErr := (&sandboxProvisioner{sshCmd: cmd}).Run(20*time.Second, "true", nil, true)
-	return runErr == nil
+	kh := filepath.Join(t.TempDir(), "probe_known_hosts")
+	require.NoError(t, os.WriteFile(kh,
+		[]byte(fmt.Sprintf("[127.0.0.1]:%d %s\n", port, hostPubKey)), 0o600))
+	probe := exec.Command("ssh",
+		"-F", "none",
+		"-i", userKey,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "UserKnownHostsFile="+kh,
+		"-o", "GlobalKnownHostsFile=/dev/null",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "BatchMode=yes",
+		"-p", strconv.Itoa(port), "127.0.0.1", "true")
+	return probe.Run() == nil
 }
 
 // THE end-to-end claim: a record from provision_cmd produces a command that
@@ -301,14 +315,14 @@ func TestProvisionedHostConnectsWithAnEmbeddedPort(t *testing.T) {
 	port, hostPubKey := throwawaySSHD(t)
 
 	record := &hookProvisionRecord{Host: fmt.Sprintf("127.0.0.1:%d", port), HostKey: hostPubKey}
-	host, p := hookProvisionHostPort(record)
+	// THE PRODUCTION HANDOFF, not a restatement of it: provisionHost composes from
+	// this same helper, so deleting the normalization there fails this test.
+	pinned, host, p := hookProvisionPinnedRecord(record)
 	require.Equal(t, "127.0.0.1", host, "the embedded port must be split off the destination")
 	require.Equal(t, port, p)
 
 	knownHosts, err := hookProvisionKnownHosts(t.TempDir(), host, p, record.HostKey)
 	require.NoError(t, err)
-	pinned := *record
-	pinned.Host, pinned.Port = host, p
 
 	cmd := hookProvisionSSHCommand(knownHosts, &pinned)
 	assert.NotContains(t, cmd, "127.0.0.1:"+fmt.Sprint(port),
@@ -360,7 +374,7 @@ func runPinnedSSHAndReportPrompt(t *testing.T, record *hookProvisionRecord, batc
 	marker := filepath.Join(dir, "askpass-was-invoked")
 	askpass := filepath.Join(dir, "askpass.sh")
 	require.NoError(t, os.WriteFile(askpass,
-		[]byte("#!/usr/bin/env bash\ntouch "+marker+"\necho wrong-password\n"), 0o755))
+		[]byte("#!/usr/bin/env bash\ntouch "+shellQuoteSandbox(marker)+"\necho wrong-password\n"), 0o755))
 
 	knownHosts, err := hookProvisionKnownHosts(dir, record.Host, record.Port, record.HostKey)
 	require.NoError(t, err)
