@@ -167,7 +167,14 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 		// session disappearing, a worktree or daemon failure. Blaming #714 for
 		// those is the same mislabelling this test was fixed to stop, one branch
 		// over. af names its own failure, so read it instead of assuming.
-		if strings.Contains(err.Error(), "did not become ready") {
+		//
+		// Match the readiness-TIMEOUT verdict, not the wrapper around it.
+		// ErrAgentReadiness reads "agent did not become ready" and wraps several
+		// distinct failures, including "session died while waiting for agent to
+		// start" — a dead pane, which is not a prompt-recognition regression. Only
+		// formatWaitForReadyTimeoutError's text means af actually polled to the end
+		// of its budget and never recognized the prompt, which is #714.
+		if strings.Contains(err.Error(), "timed out waiting for program to start") {
 			t.Fatalf("regression #714: the fake codex launched %d time(s) and af polled the pane until "+
 				"its readiness budget expired without recognizing the codex prompt: %v\n%s",
 				launches, err, out)
