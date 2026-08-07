@@ -251,6 +251,13 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		// account directory's auth.json entirely.
 		"codex -c cli_auth_credentials_store=\"keyring\"",
 		"codex --model gpt-5",
+		// The no-argument rule must hold through the env wrapper too.
+		"env codex -c cli_auth_credentials_store=keyring",
+		"env codex --model gpt-5",
+		// Case-sensitive hosts: CODEX is a different executable from codex.
+		"CODEX",
+		"env CODEX",
+		"ENV codex",
 		// A CROSS-AGENT override: the account scopes codex, the command runs
 		// claude, which ignores CODEX_HOME entirely and uses its own default home.
 		"claude",

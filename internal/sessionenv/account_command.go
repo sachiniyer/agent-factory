@@ -167,6 +167,13 @@ func envOverridesName(args []*syntax.Word, agent string, names map[string]struct
 		return false, true
 	}
 	// env leaves the root alone, so the decision belongs to whatever it runs.
+	// The SAME no-argument rule as a direct invocation. Checking only the command
+	// operand let `env codex -c 'cli_auth_credentials_store="keyring"'` through,
+	// which makes Codex ignore the account's auth.json — the exact bypass the
+	// direct branch already refuses, reached one wrapper over (#2983 review).
+	if invocation.CommandIndex != len(literals)-1 {
+		return false, false
+	}
 	if executableIsAgent(literals[invocation.CommandIndex], agent) {
 		return false, true
 	}
@@ -197,7 +204,12 @@ func executableIsAgent(executable, agent string) bool {
 	if strings.ContainsRune(executable, filepath.Separator) || strings.Contains(executable, "/") {
 		return false
 	}
-	return strings.EqualFold(executable, agent)
+	// EXACT, not case-folded. On a case-sensitive filesystem `CODEX` is a
+	// different executable from `codex`, and if PATH holds one, /bin/sh runs it
+	// with the injected root — an unrelated repository-chosen binary handed the
+	// account's credentials. Matching the shell's own name semantics is the only
+	// comparison that means anything here.
+	return executable == agent
 }
 
 // isBareName reports whether a word is exactly the given command name with no
@@ -212,5 +224,5 @@ func isBareName(word *syntax.Word, want string) bool {
 	if !ok || strings.Contains(value, "/") {
 		return false
 	}
-	return strings.EqualFold(value, want)
+	return value == want
 }
