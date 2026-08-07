@@ -648,6 +648,8 @@ func init() {
 
 	sessionsWatchCmd.Flags().DurationVar(&watchTimeoutFlag, "timeout", 30*time.Minute, "Give up and exit non-zero if the session is not idle within this window (0 = wait forever)")
 	sessionsWatchCmd.Flags().DurationVar(&watchIntervalFlag, "interval", 2*time.Second, "How often to poll the session's status")
+	sessionsWatchCmd.Flags().BoolVar(&watchAllFlag, "all", false, "Watch every session in scope and return when the first one changes state (the default when no title is given)")
+	sessionsWatchCmd.Flags().BoolVar(&watchIncludeCurrentFlag, "include-current", false, "Fleet form: also report sessions that are already stopped at the first poll, instead of only transitions")
 
 	// The tab-* verbs and their tabs {create,delete,rename,reorder} aliases
 	// (#1192) share the same flag globals via these binders, so the two spellings

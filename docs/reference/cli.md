@@ -61,7 +61,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
-- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
+- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle, or until any session in the fleet changes state
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 - [`af tasks`](#af-tasks) — Manage tasks
 - [`af tasks add`](#af-tasks-add) — Add a new task bound to the current project
@@ -1239,7 +1239,7 @@ af sessions
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
-- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle (ready for review)
+- [`af sessions watch`](#af-sessions-watch) — Block until a session goes idle, or until any session in the fleet changes state
 - [`af sessions whoami`](#af-sessions-whoami) — Identify the current Agent Factory session
 
 **Flags**
@@ -2016,7 +2016,7 @@ af sessions tabs reorder <title> [flags]
 
 ## af sessions watch
 
-Block until a session goes idle (ready for review)
+Block until a session goes idle, or until any session in the fleet changes state
 
 Watch a session and return when its agent finishes working: exit 0 the moment
 the session goes IDLE (the agent stopped working and is awaiting input), so an
@@ -2033,14 +2033,31 @@ keep the watch waiting.
 By default prints a concise line on transition; with --json emits the final
 session record. Honors --repo to scope the title lookup to one repository.
 
+With NO title (or --all) it watches every session in scope and returns when the
+first one CHANGES STATE, printing which and why. That form is edge-triggered: the
+first poll establishes a baseline and reports nothing, so a session that was
+already idle before you called does not fire. Pass --include-current to report
+those too, for a driver that wants a starting snapshot; that snapshot omits
+archived sessions, which are inert by construction and cannot change on their own
+(a session archived WHILE you watch is still reported).
+
+Each reported session carries a reason a driver can act on: idle, usage-limited
+(af resumes it automatically — do not prompt it), lost, dead, archived, killed,
+gone, or unknown. "idle" covers both "finished its work" and "waiting on input":
+af records both as the same state and does not distinguish them, so neither does
+this. A session af cannot classify reports "unknown" and is never reported as
+idle, because an idle report tells a driver to act.
+
 ```
-af sessions watch <title> [flags]
+af sessions watch [title] [flags]
 ```
 
 **Flags**
 
 | Flag | Type | Description |
 |------|------|-------------|
+| `--all` |  | Watch every session in scope and return when the first one changes state (the default when no title is given) |
+| `--include-current` |  | Fleet form: also report sessions that are already stopped at the first poll, instead of only transitions |
 | `--interval` | `duration` | How often to poll the session's status (default `2s`) |
 | `--timeout` | `duration` | Give up and exit non-zero if the session is not idle within this window (0 = wait forever) (default `30m0s`) |
 
