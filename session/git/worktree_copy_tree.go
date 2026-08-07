@@ -401,27 +401,6 @@ type copiedFileLink struct {
 	identity pathIdentity
 }
 
-// contentStamp is the part of a stat that changes when a file's CONTENT does.
-//
-// Separate from pathIdentity on purpose: identity answers "is this the same
-// inode", which is what hard-link reproduction keys on, and it must keep
-// excluding times so that a metadata touch does not split one inode into two
-// copies. This answers the different question the link path also needs — "is it
-// still holding what we copied".
-//
-// ctime is included alongside mtime because mtime is settable: a writer that
-// rewrites a file and restores its mtime leaves ctime moved, and a same-size
-// same-mtime rewrite is otherwise invisible here.
-type contentStamp struct {
-	sizeBytes int64
-	mtimeNsec int64
-	ctimeNsec int64
-}
-
-// stampFromStat reads the portable spellings. Mtim/Ctim through TimespecToNsec,
-// for the reason symlinkModTime documents: x/sys/unix spells these Mtim on
-// Linux, darwin AND the BSDs, and Timespec's field widths vary by platform, so
-// Sec/Nsec arithmetic is what broke the macOS build last time.
 func linkCopiedFile(
 	destination, destinationRoot *os.File,
 	first copiedFileLink,
