@@ -173,7 +173,7 @@ The TUI Tasks pane shows each watch task's supervision state, derived from the p
 
 - **watching** — enabled, script supervised by the daemon
 - **stopped** — script exited 0 (or the task is disabled)
-- **errored** — crash-loop breaker tripped; check `~/.agent-factory/logs/task-<id>.log`
+- **errored** — crash-loop breaker tripped, or arming refused the task because its target relationship is unsafe (e.g. the target session is archived). The full `last_run_status`, shown on the row's detail line, says which; for a crash loop, check `~/.agent-factory/logs/task-<id>.log`
 
 ## Daemon lifecycle
 
