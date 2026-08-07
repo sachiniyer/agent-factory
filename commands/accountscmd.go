@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -47,14 +48,30 @@ type accountEntry struct {
 // while accountsJSONFlag is still false — the caller asked for JSON and the
 // bound flag cannot say so. Scanning argv is the only source of that intent at
 // this point. `--` ends flag parsing, so anything after it is an operand and
-// must not be read as a request (#3057 review).
+// must not be read as a request.
+//
+// The VALUE goes through strconv.ParseBool rather than a list of spellings,
+// because that is the function pflag's own boolean setter calls. Matching only
+// `--json=true` missed `--json=1`, `--json=t`, `--json=T`, `--json=TRUE` and
+// `--json=True`, every one of which pflag accepts — so automation using a legal
+// spelling got human error text. Enumerating the accepted forms is a promise to
+// have thought of all of them; deferring to the same parser is not (#3057
+// review).
+//
+// A value pflag would REJECT still counts as a request. `--json=zzz` is an
+// invalid invocation, and the caller's intent to receive JSON is unambiguous, so
+// reporting that failure as JSON is the answer they can act on.
 func accountsJSONRequested(args []string) bool {
 	for _, arg := range args {
 		if arg == "--" {
 			return false
 		}
-		if arg == "--json" || arg == "--json=true" {
+		if arg == "--json" {
 			return true
+		}
+		if value, ok := strings.CutPrefix(arg, "--json="); ok {
+			parsed, err := strconv.ParseBool(value)
+			return err != nil || parsed
 		}
 	}
 	return false
