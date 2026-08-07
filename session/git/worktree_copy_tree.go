@@ -339,14 +339,27 @@ func copyDirectoryLevel(
 			// later sighting would then miss the map and be copied as a separate
 			// inode — silently publishing two unrelated files while source
 			// validation passed, because pathIdentity excludes the link count.
-			if first, seen := links[inspected]; seen {
+			// A hit means the same inode was already copied. It does NOT mean the
+			// inode still holds what that copy captured: a rewrite in place keeps
+			// device/inode/type, so linking here would reproduce the earlier
+			// sighting's bytes at this path. Compare what actually changes with
+			// content, and when it has moved, copy afresh instead.
+			//
+			// Falling back rather than failing is deliberate. A concurrent write is
+			// benign and must not fail the archive; a fresh copy costs disk and the
+			// link semantics for this one pair, which is strictly better than an
+			// archive holding bytes that never existed at that path. Hard-linking
+			// is an optimisation, and one that can corrupt content is not worth its
+			// saving (#3046).
+			if first, seen := links[inspected]; seen && sourceStillHoldsCopiedContent(source, name, first.sourceStamp) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
 				if err == nil {
 					links[inspected] = copiedFileLink{
-						path:     filepath.Join(relativeDirectory, name),
-						identity: entry.destination,
+						path:        filepath.Join(relativeDirectory, name),
+						identity:    entry.destination,
+						sourceStamp: stampFromStat(stat),
 					}
 				}
 			}
@@ -387,6 +400,71 @@ func relativeRoutePath(components []copiedEntry) string {
 type copiedFileLink struct {
 	path     string
 	identity pathIdentity
+	// sourceStamp is what the SOURCE looked like when its bytes were captured.
+	//
+	// pathIdentity is {device, inode, fileType} and deliberately excludes size and
+	// times, so a file rewritten in place keeps the same identity: the map hits on
+	// the second sighting and the link reproduces the FIRST sighting's content.
+	// The archive then holds bytes that never existed at that path — and because
+	// the two paths share an inode, they cannot diverge on restore either (#3046).
+	sourceStamp contentStamp
+}
+
+// contentStamp is the part of a stat that changes when a file's CONTENT does.
+//
+// Separate from pathIdentity on purpose: identity answers "is this the same
+// inode", which is what hard-link reproduction keys on, and it must keep
+// excluding times so that a metadata touch does not split one inode into two
+// copies. This answers the different question the link path also needs — "is it
+// still holding what we copied".
+//
+// ctime is included alongside mtime because mtime is settable: a writer that
+// rewrites a file and restores its mtime leaves ctime moved, and a same-size
+// same-mtime rewrite is otherwise invisible here.
+type contentStamp struct {
+	sizeBytes int64
+	mtimeNsec int64
+	ctimeNsec int64
+}
+
+// stampFromStat reads the portable spellings. Mtim/Ctim through TimespecToNsec,
+// for the reason symlinkModTime documents: x/sys/unix spells these Mtim on
+// Linux, darwin AND the BSDs, and Timespec's field widths vary by platform, so
+// Sec/Nsec arithmetic is what broke the macOS build last time.
+// sourceStillHoldsCopiedContent re-reads the source at LINK time and compares it
+// with what was captured when the first copy was made.
+//
+// Read here, not from the stat the walker already took at inspect time. That
+// earlier stat is taken before the type switch runs, so a write landing in
+// between would be invisible to it — and that gap is not hypothetical: it is the
+// exact window copyTreeAfterSourceInspect exists to exercise, and a comparison
+// against the earlier stat still fails the #3046 reproduction.
+//
+// Anchored on the directory descriptor, never on a rebuilt pathname: this copier
+// is descriptor-relative throughout so a renamed or substituted parent cannot
+// redirect it, and re-resolving a path here would give that back.
+//
+// A window remains between this stat and the linkat, and it is harmless by
+// construction: linkat reproduces the DESTINATION copy already on disk and never
+// reads the source again, so a later write cannot change what this path gets. It
+// only means the archive holds slightly older bytes for that path, which is
+// inherent in copying a live tree and is what the non-link path does too.
+func sourceStillHoldsCopiedContent(source *os.File, name string, copied contentStamp) bool {
+	stat, err := statAt(source, name)
+	if err != nil {
+		// Could not establish it: fall back to a fresh copy rather than link on an
+		// unknown. Correct and slower beats fast and possibly wrong.
+		return false
+	}
+	return stampFromStat(stat) == copied
+}
+
+func stampFromStat(stat *unix.Stat_t) contentStamp {
+	return contentStamp{
+		sizeBytes: stat.Size,
+		mtimeNsec: unix.TimespecToNsec(stat.Mtim),
+		ctimeNsec: unix.TimespecToNsec(stat.Ctim),
+	}
 }
 
 // linkCopiedFile reproduces a hard link instead of copying the bytes a second
