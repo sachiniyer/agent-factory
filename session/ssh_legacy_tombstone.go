@@ -35,14 +35,24 @@ import (
 //     command reads, and handles hashed entries, wildcards and markers exactly as
 //     ssh does — which is why nothing here parses known_hosts by hand.
 //
-// DELIBERATE DIFFERENCE from the old path, and it is a widening. The old test
-// fired only when the connection failed AND that failure was specifically an
-// unknown-host-key error, so a legacy record whose host was merely DOWN kept
-// retrying. A store lookup does not care why this attempt failed: if the host is
-// absent from the strict store, the reap cannot succeed when the host comes back
-// either, so continuing to retry buys nothing. Retirement is not permanent —
-// CleanupRetry state is in-memory, so a daemon restart re-attempts a retired
-// record once, which is what makes "the operator added the key meanwhile"
+// DELIBERATE DIFFERENCE from the old path. The old test fired only when the
+// connection failed AND that failure was specifically an unknown-host-key error;
+// this one does not care why the attempt failed, only whether the host is in the
+// store. That reads like a widening, and the "host merely DOWN" case is the one
+// worth checking — but it cannot fire here, for a reason worth stating:
+//
+//	posture "" restores as STRICT, and sshCommandForConfig pins
+//	StrictHostKeyChecking=yes against that one store, with
+//	GlobalKnownHostsFile=/dev/null and KnownHostsCommand=none. So reaching the
+//	remote at all REQUIRES the host to be in that file. A down-but-known host
+//	therefore answers "present" and is retained; a host that answers "absent"
+//	could not have been reaped on any past attempt and cannot be on any future
+//	one, whatever this particular failure was.
+//
+// So the predicate is sound rather than merely more convenient: it reaches the
+// old conclusion without classifying an error string. And retirement is not
+// permanent — CleanupRetry state is in-memory, so a daemon restart re-attempts a
+// retired record once, which is what makes "the operator added the key meanwhile"
 // recover on its own.
 //
 // A FAILED LOOKUP IS NOT AN ABSENCE. ssh-keygen missing, un-runnable, timing out,
