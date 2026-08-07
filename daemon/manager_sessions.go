@@ -123,6 +123,24 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; nothing was changed — retry the kill: %w", req.Title, err)
 	}
 
+	// Revoke this session's sandbox callback credential (#2999), anchored to the
+	// commit point immediately above rather than to the top of the function
+	// (#3012 review). Still before teardown, so the credential dies with the
+	// session — but only once the kill is real.
+	//
+	// It used to sit above the op-lock wait, on the reasoning that intent alone
+	// should stop a credential. That reasoning is wrong here, because revocation
+	// is NOT reversible on this path: the registry mints only at provision time,
+	// so a kill that aborts early — the op-lock timeout, a failed tombstone, or
+	// the identity-changed skip, all of which return leaving the session
+	// bit-for-bit unchanged and ask the caller to retry — left a still-running
+	// sandbox permanently unable to call back. An operation that promises "nothing
+	// was changed" must not have changed anything.
+	//
+	// This is the same rule the archive path already follows; the two placements
+	// disagreed and the archive one was right.
+	m.sandboxTokens.revoke(resolvedID)
+
 	// Stop this session's VS Code editor before the worktree goes away: it is
 	// daemon-owned infrastructure rather than a tab, so no tab teardown covers it,
 	// and a killed session's editor would otherwise linger rooted at a directory

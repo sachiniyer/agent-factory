@@ -27,6 +27,12 @@ type InstanceOptions struct {
 	// a user-created session. It is what lets the daemon count a task's in-flight
 	// sessions for the watch-task concurrency limit without guessing from titles.
 	TaskID string
+	// SandboxCallback mints the per-session credential a provisioned sandbox uses
+	// to call back into the daemon (#2999). It is a FUNCTION rather than a pair of
+	// values so it runs only for off-box kinds: session cannot import daemon, and
+	// the daemon must not mint (or refuse) for a local create that will never use
+	// one. Nil ⇒ no callback, which is every non-daemon caller.
+	SandboxCallback func() (url, token string, err error)
 	// Path is the path to the workspace.
 	Path string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
@@ -139,6 +145,18 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	// launch_cmd, which does the clone on the user's infra).
 	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
+		// Mint the callback credential ONLY here, for kinds that actually provision
+		// a machine to call back from. Minting unconditionally would make every
+		// local create fail whenever require_token is off, turning a sandbox-only
+		// refusal into a total outage — the credential is scoped to the feature
+		// that needs it, and so is its refusal.
+		if opts.SandboxCallback != nil && kind.InjectsSandboxCallback() {
+			url, token, err := opts.SandboxCallback()
+			if err != nil {
+				return ProvisionResult{}, err
+			}
+			spec.CallbackURL, spec.CallbackToken = url, token
+		}
 	}
 	return rt.Provision(spec)
 }

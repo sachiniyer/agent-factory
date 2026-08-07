@@ -1,15 +1,21 @@
 package daemon
 
 import (
+	"context"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// Snapshot RPC types and the delivery-failure alarm projection (#960 PR 3,
-// #1238). Extracted from control.go so that file stays under its length ceiling
-// (#1145). The controlServer.Snapshot handler lives in control.go alongside the
-// other RPCs; this file owns the wire shapes and the alarm assembly.
+// Snapshot RPC types, the delivery-failure alarm projection, and the Snapshot
+// handler itself (#960 PR 3, #1238). Extracted from control.go so that file stays
+// under its length ceiling (#1145).
+//
+// The HANDLER moved here from control_server.go in #3056, when the owner
+// constraint pushed that file back over the limit — so this file now owns the
+// wire shapes, the alarm assembly, and the read that produces both. That is the
+// right grouping anyway: the constraint below decides what goes into these types,
+// and splitting the two across files is how they drift.
 //
 // The TUI's SnapshotWithAlarms read moved onto the HTTP apiclient in #1592 Phase
 // 2 PR3 (apiclient.Client.SnapshotWithAlarms), so the net/rpc SnapshotWithAlarms
@@ -68,4 +74,75 @@ func (s *controlServer) deliveryAlarms(repoID string) []DeliveryAlarm {
 		return nil
 	}
 	return s.watchers.deliveryAlarms(repoID, time.Now())
+}
+
+// It keeps the two-argument shape net/rpc requires by reflection, and passes a
+// bare context — so this path is never narrowed to a sandbox owner.
+//
+// That is correct rather than a bypass, and worth stating because it does not
+// look it: net/rpc is registered on the UNIX SOCKET only (0600, chmod'd at
+// creation), which is trusted transport and carries the operator's authority by
+// construction. A sandbox never reaches it — its callback dials the HTTP listener,
+// where servePosture binds the owner and the route below narrows. If net/rpc is
+// ever exposed on a network listener, this wrapper becomes the hole, and the fix
+// is to thread a real context rather than to widen the constraint.
+func (s *controlServer) Snapshot(req SnapshotRequest, resp *SnapshotResponse) error {
+	return s.snapshot(context.Background(), req, resp)
+}
+
+// snapshot is Snapshot with the request context, so it can see whether the caller
+// is a SANDBOX and narrow the answer to that sandbox's own session (#3056).
+//
+// This is the first route admitted to the sandbox callback scope, and it carries
+// the constraint that admission requires. Snapshot is a deliberate choice rather
+// than a convenient one: it is the enumeration that made every other route
+// aimable — #3012 denied it for exactly that reason — so if the owner constraint
+// is worth anything, it has to hold here. An agent reading its OWN session's state
+// is also the most obviously legitimate thing a remote agent does.
+//
+// Two narrowings, and the second is the one that is easy to forget:
+//
+//   - Instances is filtered to the owner's own id. Not to its repo, and not to a
+//     title match: the id is the stable identity (#1195), and titles are unique
+//     only per repo, so matching on one would let a same-titled session in another
+//     repo through.
+//   - DeliveryAlarms is emptied outright. An alarm names its target by TITLE, so
+//     filtering it would mean mapping the owner's id to a title and comparing —
+//     an identity conversion in the one place that must not get identity wrong.
+//     A sandbox has no use for watch-task delivery diagnostics anyway, so the
+//     honest answer is none rather than a mapping that could be off by one repo.
+//
+// The operator's own callers (unix socket, operator token) are untouched: they
+// carry no sandbox owner, so neither narrowing applies.
+func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp *SnapshotResponse) error {
+	if err := s.requireManagerReady(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	instances := s.manager.Snapshot(req.RepoID)
+	alarms := s.deliveryAlarms(req.RepoID)
+	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
+		instances = onlyOwnedBySandbox(instances, owner)
+		alarms = nil
+	}
+	resp.Instances = instances
+	resp.DeliveryAlarms = alarms
+	return nil
+}
+
+// onlyOwnedBySandbox keeps just the caller's own session.
+//
+// Returns an EMPTY slice rather than nil when nothing matches, and never returns
+// the input unfiltered: an owner whose session has been archived or killed sees
+// nothing, which is correct, and is also the direction a bug here should fail in.
+func onlyOwnedBySandbox(instances []session.InstanceData, owner string) []session.InstanceData {
+	owned := make([]session.InstanceData, 0, 1)
+	for _, d := range instances {
+		if d.ID != "" && d.ID == owner {
+			owned = append(owned, d)
+		}
+	}
+	return owned
 }

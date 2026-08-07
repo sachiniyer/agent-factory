@@ -690,3 +690,43 @@ func TestArchiveSession_RejectsRemote(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "remote")
 }
+
+// A remote archive that FAILS must leave the session's sandbox callback
+// credential alone (#2999, #3012 review).
+//
+// This is the half of the revocation rule that pins WHERE the defer is armed. The
+// remote body commits only after ArchiveSandbox succeeds; a failure aborts the
+// fence back to Lost, and a Lost sandbox session is still recoverable and still
+// drivable, so severing its callback would break a session the operator was told
+// to retry. Arming revocation any earlier than the commit — at entry, or at the
+// fence — passes every "successful archive revokes" test and breaks exactly here.
+//
+// The success half is NOT covered: no daemon test drives a successful remote
+// archive, because that needs a live agent-server endpoint to push a branch
+// through. That gap is real and is recorded on #2999 rather than papered over — it
+// is the reason the missing revocation on this path survived a review round.
+func TestArchiveRemoteSession_FailedArchiveKeepsTheCallbackCredential(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "faraway", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(fakeRemoteBackend{session.NewFakeBackend()})
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Ready)
+	seedDiskInstance(t, repoID, "faraway", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "faraway")] = inst
+	manager.mu.Unlock()
+
+	callback, err := manager.sandboxTokens.mint(inst.ID)
+	require.NoError(t, err)
+
+	// No remote client is wired, so ArchiveSandbox refuses before anything is
+	// pushed or reaped — the archive never commits.
+	_, aerr := manager.archiveRemoteSession(repoID, inst, "faraway")
+	require.Error(t, aerr, "an archive with no live client must fail rather than commit")
+
+	owner, ok := manager.sandboxTokens.sessionFor(callback)
+	assert.True(t, ok, "a FAILED remote archive revoked the session's callback credential: "+
+		"the session is Lost, still recoverable and still drivable, and its credential cannot be re-minted without re-provisioning")
+	assert.Equal(t, inst.ID, owner)
+}

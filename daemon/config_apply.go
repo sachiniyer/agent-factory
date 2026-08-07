@@ -203,6 +203,34 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 			result.Applied = withoutKeys(result.Applied, failed)
 		}
 	}
+	// Turning require_token OFF voids the premise every outstanding sandbox callback
+	// credential was issued under (#3012 review).
+	//
+	// mintSandboxCallback REFUSES to issue one while require_token is false, on the
+	// grounds that a scoped credential against a listener that authenticates nobody
+	// "manufactures the appearance of a boundary that nothing enforces". That check
+	// runs once, at provision time — and per the block above, an auth key applies
+	// live with no rebind, so this relaxation silently converts every already-issued
+	// credential into exactly the thing that refusal exists to prevent: authGate
+	// short-circuits on the tokenless posture before it ever consults the registry,
+	// so the scope stops being enforced for callers that had one.
+	//
+	// Revoked and WARNED rather than refused. Refusing would make an operator's own
+	// config unwritable because of sessions they may not remember provisioning, and
+	// this repo does not hold a config key hostage to runtime state. But af must
+	// also stop claiming a scope it is no longer enforcing, so the credentials go
+	// and the operator is told what they just widened.
+	//
+	// This does NOT restore the boundary, and the warning says so: with require_token
+	// false the control plane answers every caller anonymously, so a sandbox does not
+	// need a credential to reach it. Only re-enabling the key restores it.
+	if old.RequireToken && !newCfg.RequireToken {
+		if n := m.sandboxTokens.revokeAll(); n > 0 {
+			warning := fmt.Sprintf("require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. NOTE: this does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable require_token to restore the boundary", n)
+			log.WarningLog.Printf("%s", warning)
+			result.Warnings = append(result.Warnings, warning)
+		}
+	}
 	// The tokenless-network exposure notice, surfaced at SAVE time so a user who
 	// makes the control API reachable without a token is told once — warned, never
 	// refused (#2168 Phase 0 / config/authposture.go).

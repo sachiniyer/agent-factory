@@ -228,5 +228,5 @@ func TestTCPListener_DefaultConfigServesNetworkPeersTokenless(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	req.RemoteAddr = "192.168.1.50:54321" // a genuine off-host peer
 	require.False(t, gate.authRequired(req), "a network peer needs no token under the default")
-	require.True(t, gate.authorize(req), "and is therefore authorized without one")
+	require.True(t, admits(gate, req), "and is therefore authorized without one")
 }

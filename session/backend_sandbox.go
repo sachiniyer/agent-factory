@@ -138,6 +138,9 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := p.verifyCopiedBinary(); err != nil {
 		return ProvisionResult{}, err
 	}
+	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
 	if err := w.startAgentServer(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
