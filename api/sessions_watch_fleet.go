@@ -143,6 +143,18 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 		return watchStopArchived, "archived and inert; restore it before sending work"
 	}
 
+	// Anything else on the liveness axis is a value this build has no name for —
+	// a newer daemon's. It fails closed HERE rather than falling through, because
+	// the legacy fallback below is only valid for a record that has no liveness
+	// axis at all. A record that HAS one this client cannot read is not a legacy
+	// record, and consulting its compatibility Status could emit `idle` for a state
+	// the client does not understand — the fail-closed guarantee inverted, on the
+	// one path where an automated driver acts immediately.
+	if d.Liveness != session.LivenessUnset {
+		return watchStopUnknown,
+			"this session reports a state a newer daemon understands and this af build does not; upgrade af to act on it"
+	}
+
 	// LivenessUnset: a pre-#1195 record read off disk when no daemon is reachable,
 	// or one from an older daemon. Its real state is on the legacy Status axis, and
 	// the NON-ZERO values there are unambiguous — Ready, Loading and Deleting each
@@ -157,10 +169,22 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	switch d.Status {
 	case session.Ready:
 		return watchStopIdle, "the agent stopped and is awaiting input (from this record's legacy status)"
-	case session.Loading:
+	case session.Loading, session.Deleting:
+		// In motion, matching classifyActivityByStatus. A delete in progress resolves
+		// into a `gone` event when the record leaves the snapshot, which is the
+		// outcome a driver acts on — reporting it as a stop first would wake one for
+		// a session that is on its way out anyway.
 		return watchWorking, ""
-	case session.Deleting:
-		return watchStopKilled, "being deleted (from this record's legacy status)"
+	case session.Lost:
+		return watchStopLost, "its backing tmux/worktree vanished; recover it with 'af sessions restore' (from this record's legacy status)"
+	case session.Dead:
+		// Rolled forward to `lost`, not reported as its own reason. Status: Dead is
+		// legacy — deaths have recorded as Lost since #1108 — and `lost` is the
+		// reason that carries the recovery instruction, so a driver reading an old
+		// record gets the same actionable answer as one reading a current one.
+		return watchStopLost, "its backing runtime is gone; recover it with 'af sessions restore' (from this record's legacy status)"
+	case session.Archived:
+		return watchStopArchived, "archived and inert; restore it before sending work (from this record's legacy status)"
 	}
 	return watchStopUnknown, "af cannot determine this session's state from its record"
 }
@@ -282,7 +306,20 @@ func (w *fleetWatcher) observe(snapshot []session.InstanceData) []watchEvent {
 	}
 
 	w.primed = true
-	sort.SliceStable(events, func(i, j int) bool { return events[i].Title < events[j].Title })
+	// Title, then identity. The `gone` events above are appended while ranging a
+	// MAP, so their relative order is randomised — and same-titled sessions from
+	// different projects compare equal on title alone, leaving SliceStable to
+	// preserve that randomness. A driver reading the first line would then get a
+	// different answer run to run for an output documented as deterministic.
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].Title != events[j].Title {
+			return events[i].Title < events[j].Title
+		}
+		if events[i].ID != events[j].ID {
+			return events[i].ID < events[j].ID
+		}
+		return events[i].Path < events[j].Path
+	})
 	return events
 }
 
@@ -321,7 +358,10 @@ func describeWatchEvent(e watchEvent, qualify bool) string {
 // fleetWatchDeps are the injectable dependencies of the fleet loop, so its
 // timeout and polling behaviour are testable without a daemon or a wall clock.
 type fleetWatchDeps struct {
-	list     func() ([]session.InstanceData, error)
+	// list returns a snapshot AND the source it came from. The source is part of
+	// the contract because comparing two sources is worse than not polling at all
+	// — see watchFleet.
+	list     func() ([]session.InstanceData, watchSource, error)
 	interval time.Duration
 	timeout  time.Duration
 	now      func() time.Time
@@ -339,10 +379,31 @@ type fleetWatchDeps struct {
 func watchFleet(d fleetWatchDeps, includeCurrent bool) ([]watchEvent, error) {
 	watcher := newFleetWatcher(includeCurrent)
 	start := d.now()
+	baseline := watchSourceNone
 	for {
-		snapshot, err := d.list()
+		snapshot, source, err := d.list()
 		if err != nil {
 			return nil, err
+		}
+		// The baseline pins the SOURCE, not just the state. listSessionsInScope falls
+		// back to a disk scan when the daemon read fails, and the two projections are
+		// legitimately different views of the same fleet — a pending create exists in
+		// the daemon's memory and not yet on disk. Feeding both into one watcher
+		// compares them as consecutive states of one fleet, so a transient daemon
+		// failure would manufacture `gone` events for every in-memory-only session
+		// and `idle`/arrival events when it came back. Those are fabricated
+		// transitions, and a driver acts on them immediately.
+		//
+		// So a switch ends the watch with an error instead. The caller re-runs and
+		// gets a fresh, coherent baseline; reporting nothing is recoverable, while
+		// reporting a session as gone when it is mid-create is not.
+		if baseline == watchSourceNone {
+			baseline = source
+		} else if source != baseline {
+			return nil, fmt.Errorf(
+				"stopped watching: the session snapshot switched from the %s to the %s mid-watch, "+
+					"and comparing the two would report transitions that did not happen — re-run to start a fresh baseline",
+				baseline, source)
 		}
 		if events := watcher.observe(snapshot); len(events) > 0 {
 			return events, nil
@@ -365,6 +426,16 @@ func watchFleet(d fleetWatchDeps, includeCurrent bool) ([]watchEvent, error) {
 	}
 }
 
+// watchSource names which projection a snapshot came from. Two sources cannot be
+// compared as consecutive states of one fleet — see watchFleet.
+type watchSource string
+
+const (
+	watchSourceNone   watchSource = ""
+	watchSourceDaemon watchSource = "daemon snapshot"
+	watchSourceDisk   watchSource = "on-disk session records"
+)
+
 var (
 	watchAllFlag            bool
 	watchIncludeCurrentFlag bool
@@ -381,7 +452,7 @@ func runFleetWatch() error {
 	}
 
 	events, err := watchFleet(fleetWatchDeps{
-		list:     func() ([]session.InstanceData, error) { return listSessionsInScope(repoID) },
+		list:     func() ([]session.InstanceData, watchSource, error) { return listSessionsInScope(repoID) },
 		interval: watchIntervalFlag,
 		timeout:  watchTimeoutFlag,
 		now:      time.Now,
@@ -407,16 +478,20 @@ func runFleetWatch() error {
 // scoped disk scan when no daemon is reachable — the same read path and the same
 // fallback rule the single-title form uses, so the two cannot disagree about what
 // "in scope" means.
-func listSessionsInScope(repoID string) ([]session.InstanceData, error) {
+func listSessionsInScope(repoID string) ([]session.InstanceData, watchSource, error) {
 	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
 	if err != nil {
 		// A remote target has no local disk to fall back to; surfacing the daemon's
 		// error beats masking it as an empty fleet, which would look like "nothing
 		// is happening" and park a driver until its timeout (#1679).
 		if !fallBack {
-			return nil, err
+			return nil, watchSourceNone, err
 		}
-		return diskListSessions(repoID)
+		data, err = diskListSessions(repoID)
+		if err != nil {
+			return nil, watchSourceNone, err
+		}
+		return data, watchSourceDisk, nil
 	}
-	return data, nil
+	return data, watchSourceDaemon, nil
 }

@@ -242,12 +242,12 @@ func TestFleetWatcher_MultipleTransitionsAreOrdered(t *testing.T) {
 func TestWatchFleet_BlocksUntilSomethingChanges(t *testing.T) {
 	polls := 0
 	deps := fleetWatchDeps{
-		list: func() ([]session.InstanceData, error) {
+		list: func() ([]session.InstanceData, watchSource, error) {
 			polls++
 			if polls < 4 {
-				return []session.InstanceData{fleetRunning("alpha"), withLiveness("bravo", session.LiveReady)}, nil
+				return []session.InstanceData{fleetRunning("alpha"), withLiveness("bravo", session.LiveReady)}, watchSourceDaemon, nil
 			}
-			return []session.InstanceData{withLiveness("alpha", session.LiveReady), withLiveness("bravo", session.LiveReady)}, nil
+			return []session.InstanceData{withLiveness("alpha", session.LiveReady), withLiveness("bravo", session.LiveReady)}, watchSourceDaemon, nil
 		},
 		interval: time.Second,
 		timeout:  time.Hour,
@@ -269,16 +269,16 @@ func TestWatchFleet_BlocksUntilSomethingChanges(t *testing.T) {
 func TestWatchFleet_ReturnsEveryEventFromThePollThatFired(t *testing.T) {
 	polls := 0
 	deps := fleetWatchDeps{
-		list: func() ([]session.InstanceData, error) {
+		list: func() ([]session.InstanceData, watchSource, error) {
 			polls++
 			if polls == 1 {
-				return []session.InstanceData{fleetRunning("alpha"), fleetRunning("bravo"), fleetRunning("charlie")}, nil
+				return []session.InstanceData{fleetRunning("alpha"), fleetRunning("bravo"), fleetRunning("charlie")}, watchSourceDaemon, nil
 			}
 			return []session.InstanceData{
 				withLiveness("alpha", session.LiveReady),
 				withLiveness("bravo", session.LiveLimitReached),
 				fleetRunning("charlie"),
-			}, nil
+			}, watchSourceDaemon, nil
 		},
 		interval: time.Second, timeout: time.Hour,
 		now:   func() time.Time { return time.Unix(0, 0) },
@@ -296,7 +296,9 @@ func TestWatchFleet_ReturnsEveryEventFromThePollThatFired(t *testing.T) {
 func TestWatchFleet_TimesOutRatherThanBlockingForever(t *testing.T) {
 	clock := time.Unix(0, 0)
 	deps := fleetWatchDeps{
-		list:     func() ([]session.InstanceData, error) { return []session.InstanceData{fleetRunning("alpha")}, nil },
+		list: func() ([]session.InstanceData, watchSource, error) {
+			return []session.InstanceData{fleetRunning("alpha")}, watchSourceDaemon, nil
+		},
 		interval: time.Second,
 		timeout:  10 * time.Second,
 		now:      func() time.Time { return clock },
@@ -312,7 +314,9 @@ func TestWatchFleet_TimesOutRatherThanBlockingForever(t *testing.T) {
 // like "nothing is happening" and parks a driver until its timeout.
 func TestWatchFleet_SurfacesAReadFailure(t *testing.T) {
 	deps := fleetWatchDeps{
-		list:     func() ([]session.InstanceData, error) { return nil, errors.New("daemon unreachable") },
+		list: func() ([]session.InstanceData, watchSource, error) {
+			return nil, watchSourceNone, errors.New("daemon unreachable")
+		},
 		interval: time.Second, timeout: time.Hour,
 		now:   func() time.Time { return time.Unix(0, 0) },
 		sleep: func(time.Duration) {},
@@ -411,7 +415,9 @@ func TestWatchFleet_NeverSleepsPastTheDeadline(t *testing.T) {
 	clock := time.Unix(0, 0)
 	var slept []time.Duration
 	deps := fleetWatchDeps{
-		list:     func() ([]session.InstanceData, error) { return []session.InstanceData{fleetRunning("alpha")}, nil },
+		list: func() ([]session.InstanceData, watchSource, error) {
+			return []session.InstanceData{fleetRunning("alpha")}, watchSourceDaemon, nil
+		},
 		interval: time.Hour,
 		timeout:  5 * time.Second,
 		now:      func() time.Time { return clock },
@@ -429,4 +435,89 @@ func TestDescribeWatchEvent_QualifiesOnlyWhenTitlesCanCollide(t *testing.T) {
 		"a single-project fleet has unique titles and stays short")
 	require.Equal(t, "worker\t/w/proj-a/worker\tidle\td", describeWatchEvent(e, true),
 		"an all-project fleet can hold two 'worker's, so the path says which")
+}
+
+// A newer daemon's Liveness value must fail closed, not fall through to the legacy
+// Status axis. That fallback is only valid for a record with NO liveness axis; a
+// record that HAS one this build cannot read is not a legacy record, and reading
+// its compatibility status could emit `idle` for a state the client does not
+// understand.
+func TestClassifyWatchStop_UnknownLivenessDoesNotUseTheLegacyFallback(t *testing.T) {
+	d := session.InstanceData{ID: "x", Title: "s", Path: "/w/s",
+		Liveness: session.Liveness(9999), // from a future daemon
+		Status:   session.Ready,          // compatibility value that would say "idle"
+	}
+	reason, detail := classifyWatchStop(d)
+	require.Equal(t, watchStopUnknown, reason,
+		"an unreadable liveness must not be rescued by a Status field that says idle")
+	require.Contains(t, detail, "upgrade af")
+}
+
+// A pre-#1195 record read off disk can carry its terminal state only on the legacy
+// axis. Reporting those as `unknown` loses an answer af actually has.
+func TestClassifyWatchStop_LegacyTerminalStatuses(t *testing.T) {
+	legacy := func(st session.Status) session.InstanceData {
+		return session.InstanceData{ID: "x", Title: "s", Path: "/w/s", Status: st}
+	}
+	lost, _ := classifyWatchStop(legacy(session.Lost))
+	require.Equal(t, watchStopLost, lost)
+
+	// Dead rolls forward to lost: deaths have recorded as Lost since #1108, and
+	// `lost` is the reason carrying the recovery instruction.
+	dead, detail := classifyWatchStop(legacy(session.Dead))
+	require.Equal(t, watchStopLost, dead)
+	require.Contains(t, detail, "restore")
+
+	archived, _ := classifyWatchStop(legacy(session.Archived))
+	require.Equal(t, watchStopArchived, archived)
+
+	// A delete in progress is motion, matching classifyActivityByStatus; its
+	// outcome arrives as a `gone` event.
+	deleting, _ := classifyWatchStop(legacy(session.Deleting))
+	require.Equal(t, watchWorking, deleting)
+}
+
+// Switching projections mid-watch would manufacture transitions: a pending create
+// lives in the daemon's memory and not on disk, so a daemon->disk fallback reads as
+// every such session vanishing, and the return trip as them arriving.
+func TestWatchFleet_RefusesToCompareTwoSnapshotSources(t *testing.T) {
+	polls := 0
+	deps := fleetWatchDeps{
+		list: func() ([]session.InstanceData, watchSource, error) {
+			polls++
+			if polls == 1 {
+				return []session.InstanceData{fleetRunning("alpha"), fleetRunning("mid-create")}, watchSourceDaemon, nil
+			}
+			// The daemon read failed and the disk projection does not know about the
+			// in-memory create.
+			return []session.InstanceData{fleetRunning("alpha")}, watchSourceDisk, nil
+		},
+		interval: time.Second, timeout: time.Hour,
+		now:   func() time.Time { return time.Unix(0, 0) },
+		sleep: func(time.Duration) {},
+	}
+
+	events, err := watchFleet(deps, false)
+	require.Error(t, err, "it must stop rather than report a create-in-flight as gone")
+	require.Empty(t, events)
+	require.Contains(t, err.Error(), "switched from")
+	require.Contains(t, err.Error(), "re-run")
+}
+
+// Same-titled sessions in different projects vanishing in one poll are appended
+// while ranging a MAP, so title alone leaves their order randomised.
+func TestFleetWatcher_OrderingBreaksTiesOnIdentity(t *testing.T) {
+	first := session.InstanceData{ID: "id-a", Title: "worker", Path: "/w/proj-a", Liveness: session.LiveRunning}
+	second := session.InstanceData{ID: "id-b", Title: "worker", Path: "/w/proj-b", Liveness: session.LiveRunning}
+
+	// Run it repeatedly: a title-only comparator passes this by luck roughly half
+	// the time, so one iteration would not catch the regression.
+	for attempt := 0; attempt < 50; attempt++ {
+		w := newFleetWatcher(false)
+		require.Empty(t, w.observe([]session.InstanceData{first, second}))
+		events := w.observe(nil)
+		require.Len(t, events, 2)
+		require.Equalf(t, []string{"id-a", "id-b"}, []string{events[0].ID, events[1].ID},
+			"attempt %d: same-titled sessions must order deterministically", attempt)
+	}
 }
