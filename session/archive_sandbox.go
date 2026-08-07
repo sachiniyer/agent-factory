@@ -101,7 +101,21 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	if err := as.Kill(); err != nil {
 		if TeardownStateUnknown(err) {
 			i.markRuntimeCleanupStateUnknown()
+			return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)
 		}
+		// A KNOWN failure here still means the runtime is gone: remoteAgentServer.Kill
+		// tears the in-sandbox workspace down over REST and then reaps the sandbox,
+		// and it returns the REST error even when the reap SUCCEEDED — the same
+		// asymmetry manager_create.go documents for a failed remote create. So the
+		// credential must go with it (#3065 review).
+		//
+		// The runtime wiring is deliberately NOT reset here, unlike the success path
+		// below: the archive aborts to Lost and the retry machinery owns what happens
+		// to that wiring. Only the credential is settled, because "the runtime that
+		// owned it is gone" is already answered, and leaving it live means a copied
+		// token keeps authenticating until a recovery happens to replace it — or
+		// until the daemon restarts, if none ever does.
+		i.revokeSandboxCredential()
 		return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)
 	}
 	// 4. Drop the dead remote wiring so the instance is an inert archived record
@@ -310,7 +324,6 @@ func (i *Instance) resetRemoteRuntime() {
 	i.remoteClient = nil
 	i.runtimeTeardown = nil
 	i.runtimeCleanupStateUnknown = false
-	creds := i.sandboxCreds
 	i.mu.Unlock()
 	// THE credential's revocation point (#3068). This function is reached only when
 	// a runtime was conclusively reaped — teardown succeeded, or failed in a way
@@ -324,6 +337,24 @@ func (i *Instance) resetRemoteRuntime() {
 	//
 	// Called OUTSIDE i.mu — revocation takes the daemon's registry lock, and holding
 	// a session lock across another subsystem's lock is how a deadlock gets built.
+	i.revokeSandboxCredential()
+}
+
+// revokeSandboxCredential drops this session's callback credential without
+// touching the runtime wiring.
+//
+// Separate from resetRemoteRuntime because the two are not always the same
+// event: an archive whose sandbox reap SUCCEEDED but whose in-sandbox REST kill
+// errored leaves the runtime gone while the wiring is deliberately retained for
+// the abort-to-Lost retry path. The credential is settled there; the wiring is
+// not (#3065 review).
+//
+// Called OUTSIDE i.mu — revocation takes the daemon's registry lock, and holding
+// a session lock across another subsystem's lock is how a deadlock gets built.
+func (i *Instance) revokeSandboxCredential() {
+	i.mu.RLock()
+	creds := i.sandboxCreds
+	i.mu.RUnlock()
 	if creds != nil {
 		creds.Revoke()
 	}

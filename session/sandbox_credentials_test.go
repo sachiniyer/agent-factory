@@ -110,3 +110,32 @@ func TestResetRemoteRuntime_RevokesTheCredential(t *testing.T) {
 	bare := &Instance{Title: "local"}
 	assert.NotPanics(t, func() { bare.resetRemoteRuntime() })
 }
+
+// A KNOWN teardown failure still means the runtime is gone, so the credential
+// goes with it — while the runtime WIRING is deliberately left for the retry
+// path (#3065 review).
+//
+// remoteAgentServer.Kill tears the in-sandbox workspace down over REST and then
+// reaps the sandbox, and returns the REST error even when the reap succeeded. The
+// success path's revocation is therefore not reachable on that branch, and
+// leaving the credential live means a copied token keeps authenticating until
+// some later recovery happens to replace it.
+func TestRevokeSandboxCredential_IsSeparableFromResettingTheRuntime(t *testing.T) {
+	creds := &fakeCreds{}
+	i := &Instance{Title: "worker"}
+	i.SetSandboxCredentials(creds)
+
+	// Revoking alone must not disturb the wiring the retry path still needs.
+	i.runtimeTeardown = func() error { return nil }
+	i.revokeSandboxCredential()
+	assert.Equal(t, 1, creds.revokes)
+	assert.NotNil(t, i.runtimeTeardown, "settling the credential must not clear the wiring the abort-to-Lost retry owns")
+
+	// And the full reset still revokes, so the two agree on the common path.
+	i.resetRemoteRuntime()
+	assert.Equal(t, 2, creds.revokes)
+	assert.Nil(t, i.runtimeTeardown)
+
+	bare := &Instance{Title: "local"}
+	assert.NotPanics(t, func() { bare.revokeSandboxCredential() })
+}
