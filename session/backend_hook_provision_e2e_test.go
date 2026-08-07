@@ -314,23 +314,38 @@ func TestProvisionedHostFailsFastRatherThanPrompting(t *testing.T) {
 func TestProvisionedHostConnectsWithAnEmbeddedPort(t *testing.T) {
 	port, hostPubKey := throwawaySSHD(t)
 
-	record := &hookProvisionRecord{Host: fmt.Sprintf("127.0.0.1:%d", port), HostKey: hostPubKey}
-	// THE PRODUCTION HANDOFF, not a restatement of it: provisionHost composes from
-	// this same helper, so deleting the normalization there fails this test.
-	pinned, host, p := hookProvisionPinnedRecord(record)
-	require.Equal(t, "127.0.0.1", host, "the embedded port must be split off the destination")
-	require.Equal(t, port, p)
+	// Drives the REAL provisionHost, so the assertion cannot be satisfied by
+	// restating its normalization: the seam captures whatever command
+	// provisionHost actually composed, and the connection below uses THAT.
+	var composed string
+	prev := newHookSandboxProvisioner
+	newHookSandboxProvisioner = func(spec ProvisionSpec, sshCmd, afBin, program string) *sandboxProvisioner {
+		composed = sshCmd
+		return prev(spec, sshCmd, afBin, program)
+	}
+	t.Cleanup(func() { newHookSandboxProvisioner = prev })
 
-	knownHosts, err := hookProvisionKnownHosts(t.TempDir(), host, p, record.HostKey)
-	require.NoError(t, err)
+	// A provision_cmd returning the port INSIDE host, the form whose
+	// normalization is under test.
+	record := fmt.Sprintf(`{"host":"127.0.0.1:%d","host_key":%q}`, port, hostPubKey)
+	h := newHookState(t, "printf '%s' '"+record+"'\nexit 0\n", "")
+	p := newHookProvisioner(h, "embedded port")
+	p.hooks.ProvisionCmd = h.launch
+	p.spec.CloneURL = "https://example.invalid/repo.git"
 
-	cmd := hookProvisionSSHCommand(knownHosts, &pinned)
-	assert.NotContains(t, cmd, "127.0.0.1:"+fmt.Sprint(port),
-		"the colon-bearing value must never reach ssh as the destination")
+	// It will fail later (no real workspace to clone), which is fine: the
+	// composed command is what this test is about, and it is captured before then.
+	_, _ = p.provisionHost()
+	require.NotEmpty(t, composed, "provisionHost must have composed an ssh command")
 
-	sp := &sandboxProvisioner{sshCmd: withIdentity(cmd)}
+	assert.NotContains(t, composed, fmt.Sprintf("127.0.0.1:%d", port),
+		"the colon-bearing value must never reach ssh as the destination — provisionHost must normalize it")
+	assert.Contains(t, composed, fmt.Sprintf("-p %d", port), "the port must be passed with -p")
+
+	// And the command provisionHost built must actually connect.
+	sp := &sandboxProvisioner{sshCmd: withIdentity(composed)}
 	out, err := sp.Run(30*time.Second, "echo embedded-port-connected", nil, true)
-	require.NoError(t, err, "the embedded-port form must connect too; output: %s", out)
+	require.NoError(t, err, "the command provisionHost composed must connect; output: %s", out)
 	assert.Contains(t, string(out), "embedded-port-connected")
 }
 
