@@ -56,6 +56,28 @@ type Account struct {
 	// Only an EXACT match is honoured — never a basename — so a repository file
 	// that merely shares the name is still refused (#2983 review).
 	TrustedWrapper string
+	// GeneratedArgs are the argument words af's OWN launcher appended to this
+	// session's program, in order, unquoted.
+	//
+	// This is the same shape of claim as TrustedWrapper, for the same reason. The
+	// local launch rewrites a bare `claude` into `claude --session-id <uuid>
+	// --plugin-dir <dir>` before the pane shim sees it, so the guard's no-arguments
+	// rule refused af's OWN output and the pane exited 127 (#3083). No amount of
+	// inspecting the string recovers "af wrote these"; the launcher knows, so it
+	// says so.
+	//
+	// It is deliberately NOT a list of permitted flags. The guard exists because
+	// enumerating unsafe forms failed across four grammars, and its rule is to prove
+	// good shapes rather than hunt bad ones — so an allowlist of `--session-id` and
+	// `--plugin-dir` would rebuild that mistake one layer in, and the next generated
+	// flag would reopen it. These are VALUES the launcher produced on this launch:
+	// the uuid and the directory are compared whole and positionally, so nothing a
+	// repository can write into program_overrides matches them, and a flag af did
+	// not generate is still refused however harmless it looks.
+	//
+	// Empty means af appended nothing, which is every non-claude agent today and
+	// the only behaviour before this field existed.
+	GeneratedArgs []string
 }
 
 // accountConfigVars maps an agent to the variable that relocates its credential
@@ -185,7 +207,13 @@ func ApplyAccount(env []string, command string, account Account) ([]string, erro
 	for _, selector := range GuardedSelectors() {
 		refused[selector] = struct{}{}
 	}
-	if overrides, provable := commandOverridesName(command, account.Agent, account.TrustedWrapper, refused); overrides || !provable {
+	proof := commandProof{
+		agent:          account.Agent,
+		trustedWrapper: account.TrustedWrapper,
+		generated:      account.GeneratedArgs,
+		names:          refused,
+	}
+	if overrides, provable := commandOverridesName(command, proof); overrides || !provable {
 		if !provable {
 			return nil, fmt.Errorf(
 				"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+
