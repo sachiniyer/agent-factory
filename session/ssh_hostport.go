@@ -95,7 +95,17 @@ func splitEmbeddedPort(address string) (host string, port int, err error) {
 	}
 	parsed, convErr := strconv.Atoi(p)
 	if convErr != nil {
-		return "", 0, fmt.Errorf("ssh address %q has a non-numeric port %q", address, p)
+		// A SERVICE NAME, not a mistake. `ssh.Dial` handed "host:ssh" to the
+		// standard resolver, which reads /etc/services and yields 22, so configs
+		// spelling the port that way worked — including ones now living only in a
+		// persisted cleanup handle, where refusing would leak the workspace. Resolve
+		// it the same way rather than inventing a stricter rule than the code this
+		// replaced.
+		service, lookupErr := net.LookupPort("tcp", p)
+		if lookupErr != nil {
+			return "", 0, fmt.Errorf("ssh address %q has port %q, which is neither a number nor a known service name", address, p)
+		}
+		parsed = service
 	}
 	if parsed <= 0 || parsed > 65535 {
 		return "", 0, fmt.Errorf("ssh address %q has port %d, which is out of range", address, parsed)

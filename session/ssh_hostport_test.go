@@ -33,6 +33,10 @@ func TestSSHAndHookResolveTheSameAddressIdentically(t *testing.T) {
 		{"neither", "10.0.0.7", 0, "10.0.0.7", 0},
 		{"bracketed ipv6 with port", "[::1]:2222", 0, "::1", 2222},
 		{"bare ipv6 is not host:port", "::1", 0, "::1", 0},
+		// A SERVICE NAME is what ssh.Dial already accepted via /etc/services, so
+		// both backends must keep accepting it — refusing would break working
+		// configs and, worse, strand their cleanup handles.
+		{"service-name port", "10.0.0.7:ssh", 0, "10.0.0.7", 22},
 	}
 
 	for _, tc := range cases {
@@ -86,8 +90,8 @@ func TestConflictingPortsAreRefusedByBothBackends(t *testing.T) {
 // later as an address problem.
 func TestMalformedEmbeddedPortIsRejected(t *testing.T) {
 	for name, address := range map[string]string{
-		"non-numeric":  "10.0.0.7:ssh",
-		"out of range": "10.0.0.7:99999",
+		"unknown service name": "10.0.0.7:definitelynotaservice",
+		"out of range":         "10.0.0.7:99999",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := resolveSSHHostPort(address, 0)
@@ -148,8 +152,8 @@ func TestSSHDialReportsTheAddressConflictNotALocalKeyProblem(t *testing.T) {
 // Codex 3734417518: a backend whose address cannot resolve must not be offered.
 func TestUnresolvableSSHAddressMakesTheBackendUnavailable(t *testing.T) {
 	for name, sshCfg := range map[string]config.SSHConfig{
-		"conflicting ports": {Host: "10.0.0.7:2222", Port: 3333},
-		"non-numeric port":  {Host: "10.0.0.7:ssh"},
+		"conflicting ports":    {Host: "10.0.0.7:2222", Port: 3333},
+		"unknown service name": {Host: "10.0.0.7:definitelynotaservice"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfgCopy := sshCfg
@@ -158,4 +162,29 @@ func TestUnresolvableSSHAddressMakesTheBackendUnavailable(t *testing.T) {
 			assert.Contains(t, err.Error(), "backend=ssh")
 		})
 	}
+}
+
+// Codex 3734483402 (P1): a handle persisted before #3044 may spell its port as a
+// SERVICE NAME ("server:ssh"). ssh.Dial resolved that through /etc/services, so
+// such configs worked — and refusing them now would strand the cleanup handle,
+// leaking the remote process and workspace on every retry.
+//
+// Broader than the reap path: those configs also worked at CREATE time, so
+// rejecting a service name would have been a plain regression.
+func TestLegacyServiceNamePortStillReaps(t *testing.T) {
+	data := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+		Config:     config.SSHConfig{Host: "server.invalid:ssh"},
+		SessionDir: "/remote/.af-sessions/xyz",
+	}}
+
+	backend, teardown, err := restoreRuntimeCleanup("legacy service name", "ssh", data)
+	require.NoError(t, err, "a service-name port must not strand a teardown handle")
+	require.NotNil(t, teardown)
+
+	sb, ok := backend.(*sshBackend)
+	require.True(t, ok)
+	host, port, err := sb.provisioner.hostPort()
+	require.NoError(t, err)
+	assert.Equal(t, "server.invalid", host)
+	assert.Equal(t, "22", port, "resolved through /etc/services, exactly as ssh.Dial did")
 }
