@@ -103,7 +103,7 @@ func (s *controlServer) PauseStatusPoll(req PauseStatusPollRequest, resp *PauseS
 		return err
 	}
 	if s.manager != nil {
-		s.manager.PauseStatusPoll(req.RepoID, req.Title, req.ID)
+		s.manager.PauseStatusPollFor(req.RepoID, req.Title, req.ID, req.Holder)
 	}
 	resp.OK = true
 	return nil
@@ -116,7 +116,7 @@ func (s *controlServer) ResumeStatusPoll(req ResumeStatusPollRequest, resp *Resu
 		return err
 	}
 	if s.manager != nil {
-		s.manager.ResumeStatusPoll(req.RepoID, req.Title, req.ID)
+		s.manager.ResumeStatusPollFor(req.RepoID, req.Title, req.ID, req.Holder)
 	}
 	resp.OK = true
 	return nil

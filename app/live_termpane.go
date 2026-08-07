@@ -2,6 +2,8 @@ package app
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -227,6 +229,41 @@ func (m *home) paneIsPreviewing(p *store.OpenPane) bool {
 // on the event loop. Full-screen attach owns its own heartbeat and closes the
 // embedded attachments (dropping interactive mode), so this yields while
 // m.attached is set. Event-loop only.
+// interactiveLeaseMu serialises the interactive path's pause/resume RPCs and drops
+// any intent an newer one has superseded (#3028 review).
+//
+// These are returned as tea.Cmds and dispatched through tea.Batch, which gives no
+// ordering: with a slow pause RPC the four calls of a lifecycle swap can execute as
+// old resume, new pause, old pause, new resume. Per-lifecycle holders make that
+// safe in the dangerous direction — the final resume removes the new holder, so no
+// live draft is left unprotected — but the late OLD pause stays in the map, keeping
+// the poll and automated delivery suppressed for the rest of its lease after
+// interactive mode has ended.
+//
+// Each dispatch takes a sequence number ON THE EVENT LOOP, where the intents are
+// already correctly ordered, and the executor applies only the newest it has seen.
+// A superseded intent is dropped rather than queued: it describes a state the user
+// has already left, and every hold it might have skipped is lease-bounded anyway.
+// This is the same "wait for the in-flight pause before resuming" guarantee the
+// full-screen attach gets from runStatusPollResume, expressed for a path whose
+// calls are not confined to one goroutine.
+var (
+	interactiveLeaseMu      sync.Mutex
+	interactiveLeaseApplied uint64
+	interactiveLeaseSeq     atomic.Uint64
+)
+
+// runInteractiveLease applies one lease intent unless a newer one already has.
+func runInteractiveLease(seq uint64, apply func()) {
+	interactiveLeaseMu.Lock()
+	defer interactiveLeaseMu.Unlock()
+	if seq <= interactiveLeaseApplied {
+		return // superseded on the event loop before this goroutine got the lock
+	}
+	interactiveLeaseApplied = seq
+	apply()
+}
+
 func (m *home) interactivePollPauseCmd() tea.Cmd {
 	// The session the user is actively typing into in-pane, if any. Interactive
 	// mode is only ever true while the FOCUSED pane has a live attachment, whose
@@ -252,11 +289,13 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		}
 		// Interactive ended (or focus left the pane): release the lease now so the
 		// daemon resumes delivering into the session immediately.
-		release := m.interactivePauseTarget.resumeStatusPollRequest()
+		release := m.interactivePauseTarget.resumeStatusPollRequestAs(m.interactivePauseHolder)
 		m.interactivePauseTarget = sessionActionTarget{}
+		m.interactivePauseHolder = ""
 		m.interactivePauseAt = time.Time{}
+		seq := interactiveLeaseSeq.Add(1)
 		return func() tea.Msg {
-			_ = resume(release)
+			runInteractiveLease(seq, func() { _ = resume(release) })
 			return nil
 		}
 	}
@@ -265,13 +304,26 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		// Newly interactive on this session (or the focused session changed): release
 		// any previous hold and pause the new target.
 		prev := m.interactivePauseTarget
+		// The OUTGOING lifecycle's holder travels with its resume, and the incoming
+		// one gets a freshly minted id (#3028 review). These commands run through
+		// tea.Batch, so a resume for the previous lifecycle can land AFTER the new
+		// pause; sharing one id would make that late resume delete the lease the new
+		// lifecycle just took, resuming the poll and automated delivery while the
+		// user types. Distinct ids make the stale resume address a holder nobody
+		// holds — a no-op — which is the same reason each attach mints its own.
+		prevHolder := m.interactivePauseHolder
+		holder := newStatusPollHolder("preview")
 		m.interactivePauseTarget = want
+		m.interactivePauseHolder = holder
 		m.interactivePauseAt = time.Now()
+		seq := interactiveLeaseSeq.Add(1)
 		return func() tea.Msg {
-			if !prev.isZero() {
-				_ = resume(prev.resumeStatusPollRequest())
-			}
-			_ = pause(want.pauseStatusPollRequest())
+			runInteractiveLease(seq, func() {
+				if !prev.isZero() {
+					_ = resume(prev.resumeStatusPollRequestAs(prevHolder))
+				}
+				_ = pause(want.pauseStatusPollRequestAs(holder))
+			})
 			return nil
 		}
 	}
@@ -282,8 +334,10 @@ func (m *home) interactivePollPauseCmd() tea.Cmd {
 		return nil
 	}
 	m.interactivePauseAt = time.Now()
+	holder := m.interactivePauseHolder
+	seq := interactiveLeaseSeq.Add(1)
 	return func() tea.Msg {
-		_ = pause(want.pauseStatusPollRequest())
+		runInteractiveLease(seq, func() { _ = pause(want.pauseStatusPollRequestAs(holder)) })
 		return nil
 	}
 }

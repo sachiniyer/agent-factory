@@ -67,9 +67,29 @@ func statusPollLeaseKey(repoID, title, id string) string {
 // heartbeat) just pushes the expiry out; the pause is per stable identity, so a
 // same-title successor never inherits the old attach's lease (#2358).
 func (m *Manager) PauseStatusPoll(repoID, title, id string) {
+	m.PauseStatusPollFor(repoID, title, id, "")
+}
+
+// PauseStatusPollFor is PauseStatusPoll for a client that identifies itself, so a
+// release only lifts the pause when the LAST holder leaves (#3027).
+//
+// A holder is required because the obvious alternative does not work: counting
+// pauses and resumes would treat the attached TUI's once-a-second heartbeat as a
+// new acquisition and the count would climb forever. Keyed by holder, a renewal is
+// an overwrite of that holder's expiry — which is what a heartbeat means.
+//
+// An empty holder is the legacy shared slot. Clients that omit it share one entry
+// among themselves, which is exactly the pre-#3027 behaviour, so nothing that
+// exists today changes until it starts sending one.
+func (m *Manager) PauseStatusPollFor(repoID, title, id, holder string) {
 	key := statusPollLeaseKey(repoID, title, id)
 	m.pausedMu.Lock()
-	m.pausedPolls[key] = nowFunc().Add(statusPollLease)
+	holders := m.pausedPolls[key]
+	if holders == nil {
+		holders = make(map[string]time.Time)
+		m.pausedPolls[key] = holders
+	}
+	holders[holder] = nowFunc().Add(statusPollLease)
 	m.pausedMu.Unlock()
 }
 
@@ -82,11 +102,34 @@ func (m *Manager) PauseStatusPoll(repoID, title, id string) {
 // sweepPausedPollState reclaims any entry this cannot (a crashed TUI that never
 // resumes, a session torn down mid-pause), so a lookup miss here is harmless.
 func (m *Manager) ResumeStatusPoll(repoID, title, id string) {
+	m.ResumeStatusPollFor(repoID, title, id, "")
+}
+
+// ResumeStatusPollFor is ResumeStatusPoll for an identified holder; see
+// PauseStatusPollFor.
+func (m *Manager) ResumeStatusPollFor(repoID, title, id, holder string) {
 	key := statusPollLeaseKey(repoID, title, id)
 	probeKey := m.taskRunProbeKey(repoID, title, id)
 	m.pausedMu.Lock()
-	delete(m.pausedPolls, key)
-	if probeKey != "" {
+	holders := m.pausedPolls[key]
+	delete(holders, holder)
+	if len(holders) == 0 {
+		delete(m.pausedPolls, key)
+	}
+	// The backstop entry belongs to the PAUSE, not to any one holder: it is armed
+	// while the session is paused and exists to bound how long that pause may hide a
+	// task run's completion (#1892). Dropping it while the session is still paused
+	// would disarm the backstop for a pause still in effect — the same one-slot
+	// mistake this change fixes, one map over.
+	//
+	// Asked of the PAUSE rather than of this key, because a session can be held
+	// under two namespaces at once: an ID-bearing client keys by stable id and a
+	// legacy one by title, and isPollPaused treats EITHER as an active pause. Judging
+	// by "this key is now empty" would disarm the backstop while the other namespace
+	// still holds the session, and the next paused refresh would rearm it from
+	// scratch — delaying task-run completion, and the concurrency slot it releases,
+	// by another full taskRunPollBackstop.
+	if probeKey != "" && !m.pollLeaseActiveLocked(repoID, title, id, nowFunc()) {
 		delete(m.taskRunProbeDue, probeKey)
 	}
 	m.pausedMu.Unlock()
@@ -152,8 +195,13 @@ func (m *Manager) sweepPausedPollState() {
 	// Stable IDs make lease ownership safe under title reuse, but they also make
 	// every session lifetime a distinct map key. Reclaim expired leases even when
 	// their session was deleted and will never call isPollPaused again.
-	for key, expiry := range m.pausedPolls {
-		if !now.Before(expiry) {
+	for key, holders := range m.pausedPolls {
+		for holder, expiry := range holders {
+			if !now.Before(expiry) {
+				delete(holders, holder)
+			}
+		}
+		if len(holders) == 0 {
 			delete(m.pausedPolls, key)
 		}
 	}
@@ -218,11 +266,21 @@ func (m *Manager) pollLeaseActiveLocked(repoID, title, id string, now time.Time)
 		keys = append([]string{statusPollIDKey(id)}, keys...)
 	}
 	for _, key := range keys {
-		expiry, ok := m.pausedPolls[key]
+		holders, ok := m.pausedPolls[key]
 		if !ok {
 			continue
 		}
-		if now.Before(expiry) {
+		// ANY unexpired holder keeps the pause in effect; expired ones are reclaimed
+		// lazily, exactly as the single-entry version did.
+		live := false
+		for holder, expiry := range holders {
+			if now.Before(expiry) {
+				live = true
+				continue
+			}
+			delete(holders, holder)
+		}
+		if live {
 			return true
 		}
 		delete(m.pausedPolls, key)

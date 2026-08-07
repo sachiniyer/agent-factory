@@ -332,6 +332,7 @@ type home struct {
 	// interactivePauseAt throttles the renew to statusPollRenewInterval.
 	// Event-loop only.
 	interactivePauseTarget sessionActionTarget
+	interactivePauseHolder string // per-lifecycle lease holder; see interactivePollPauseCmd (#3027)
 	interactivePauseAt     time.Time
 
 	// initialPaneOpened latches the one-time startup auto-open: the first

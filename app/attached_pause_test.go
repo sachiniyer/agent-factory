@@ -227,7 +227,11 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 		t.Fatal("PauseStatusPoll was not called before detach — the daemon poll must pause on attach")
 	}
 	mu.Lock()
-	require.Equal(t, target.pauseStatusPollRequest(), pausedRequest,
+	// The holder is minted per ATTACH (#3027), so it cannot be reconstructed here —
+	// which is the point: it must be non-empty, or this attach falls back to the
+	// legacy shared slot and gets none of the multi-holder protection.
+	require.NotEmpty(t, pausedRequest.Holder, "each attach must take the lease under its own holder identity")
+	require.Equal(t, target.pauseStatusPollRequestAs(pausedRequest.Holder), pausedRequest,
 		"pause must retain the attached session's stable identity")
 	require.Positive(t, pauseCount, "pause must fire on attach")
 	require.Zero(t, resumeCount, "resume must not fire while still attached")
@@ -244,7 +248,12 @@ func TestAttachOverlayCallback_PausesAndResumesDaemonPoll(t *testing.T) {
 		return resumeCount > 0
 	}, time.Second, time.Millisecond, "ResumeStatusPoll must fire on detach")
 	mu.Lock()
-	assert.Equal(t, target.resumeStatusPollRequest(), resumedRequest,
+	// Stronger than the identity check it replaces, and the property #3028's review
+	// asked for: a resume that carried a DIFFERENT holder would revoke somebody
+	// else's claim and leave this attach's own lease standing.
+	assert.Equal(t, pausedRequest.Holder, resumedRequest.Holder,
+		"resume must release the same holder the attach acquired, not another's")
+	assert.Equal(t, target.resumeStatusPollRequestAs(pausedRequest.Holder), resumedRequest,
 		"resume must release the exact stable lease acquired on attach")
 	mu.Unlock()
 

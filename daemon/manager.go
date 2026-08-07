@@ -339,8 +339,16 @@ type Manager struct {
 	// release avoids. Each entry is lease-bounded (statusPollLease): a crashed
 	// TUI that never sends Resume auto-resumes within one lease, so the pause
 	// can never permanently blind the daemon.
+	// Keyed leaseKey -> HOLDER -> expiry (#3027). The inner map is what makes a
+	// release safe: two clients attached to one session are both admitted (unlike
+	// killsInFlight, where a second acquirer is refused), so a single expiry per
+	// session meant the first release revoked the other's claim and left it
+	// believing it held a pause that was no longer in effect. A holder's renewal
+	// overwrites its own entry, which is why this is keyed rather than counted —
+	// the attached TUI heartbeats once a second and a count would never fall to
+	// zero. "" is the legacy shared holder for clients that send none.
 	pausedMu    sync.Mutex
-	pausedPolls map[string]time.Time
+	pausedPolls map[string]map[string]time.Time
 	// taskRunProbeDue schedules the backstop observation for a PAUSED session whose
 	// task run is still in flight (#1892). Guarded by pausedMu (the same lock as
 	// pausedPolls) but keyed by stableSessionKey — the stable instance ID — rather
@@ -478,7 +486,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		settleOwed:             make(map[string]settleOwedEntry),
 		remoteLossStates:       make(map[string]*remoteLossState),
 		instanceOpLocks:        make(map[string]*sync.Mutex),
-		pausedPolls:            make(map[string]time.Time),
+		pausedPolls:            make(map[string]map[string]time.Time),
 		taskRunProbeDue:        make(map[string]time.Time),
 		events:                 newEventsHub(),
 		vscode:                 vscode,
