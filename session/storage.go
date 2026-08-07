@@ -121,6 +121,12 @@ type InstanceData struct {
 	PendingHandoffMission string `json:"pending_handoff_mission,omitempty"`
 
 	Program string `json:"program"`
+	// Account is the credential account this session runs its agent as (#3051).
+	// Persisted because the identity a session runs as must survive a daemon
+	// restart and an archive/restore: a session that silently reverted to the
+	// ambient account would spend the wrong quota while still displaying the
+	// account it was created with.
+	Account string `json:"account,omitempty"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by
 	// Manager.KillSession before teardown begins. Present only in the crash
 	// window between tombstone write and record deletion — a surviving

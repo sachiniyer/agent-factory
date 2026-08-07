@@ -18,7 +18,10 @@ type CreateSessionRequest struct {
 	TitleBase string `json:"title_base"`
 	RepoPath  string `json:"repo_path"`
 	Program   string `json:"program"`
-	Prompt    string `json:"prompt"`
+	// Account scopes the session to one of the agent's registered credential
+	// accounts (#3051). Empty leaves it on the ambient identity.
+	Account string `json:"account,omitempty"`
+	Prompt  string `json:"prompt"`
 	// TaskID records which task's delivery spawned this session, and
 	// MaxConcurrentRuns carries that task's cap so the manager can decide
 	// admission under its own lock — the only place a burst cannot race the check

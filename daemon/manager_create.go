@@ -131,6 +131,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		TaskID:                         req.TaskID,
 		Path:                           repo.Root,
 		Program:                        req.Program,
+		Account:                        req.Account,
 		InPlace:                        req.InPlace,
 		ForceRemote:                    req.ForceRemote,
 		Backend:                        session.BackendKind(req.Backend),

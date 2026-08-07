@@ -27,16 +27,39 @@ func (t *TmuxSession) SetEnvPassthrough(names []string) error {
 	return nil
 }
 
+// SetAccount selects the credential account this session's agent runs as. An
+// empty name leaves the session on the ambient identity, exactly as before this
+// feature existed.
+func (t *TmuxSession) SetAccount(name string) {
+	t.programMu.Lock()
+	t.account = name
+	t.programMu.Unlock()
+}
+
 func (t *TmuxSession) launchEnvironment(program string) (string, []string, []string, error) {
 	t.programMu.RLock()
 	extra := append([]string(nil), t.envPassthrough...)
+	account := t.account
 	t.programMu.RUnlock()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
 		return "", nil, nil, err
 	}
-	wrapped, err := sessionenv.WrapCommand(executable, agent, extra, program)
+	var wrapped string
+	if account != "" {
+		// tmux < 3.2 REFUSES rather than falling back. A fallback would launch on
+		// the ambient account while every visible signal reported the selected one,
+		// spending someone else's quota (#3051).
+		if !newSessionEnvSupportedForAccounts() {
+			return "", nil, nil, fmt.Errorf(
+				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
+					"and af refuses rather than starting the session on the ambient account", account)
+		}
+		wrapped, err = sessionenv.WrapAccountCommand(executable, agent, account, extra, program)
+	} else {
+		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
+	}
 	if err != nil {
 		return "", nil, nil, err
 	}

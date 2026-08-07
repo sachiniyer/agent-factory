@@ -12,6 +12,27 @@ import (
 // filtered session process. It is intentionally not a user-facing subcommand.
 const ExecMarker = "__af-session-env-exec"
 
+// AccountExecMarker is the account-scoped variant of ExecMarker.
+//
+// A SEPARATE marker rather than an extra argument, because the shim may be a
+// DIFFERENT BUILD of af than the launcher: the docker backend runs the af binary
+// inside the container, and ssh a staged one. The three ways this could have been
+// carried fail very differently across that skew (#3051):
+//
+//   - Appending to ExecMarker's argv breaks its exact-length check, so an older
+//     shim exits 127 — for EVERY session, including ones using no account.
+//   - Passing the account in the environment is the dangerous one and is why this
+//     is a marker: an older shim ignores an unknown variable and launches
+//     happily, on the AMBIENT account, spending someone else's quota while af
+//     reports the selected one. Silent wrong identity is the exact failure
+//     #2983 exists to prevent.
+//   - A distinct marker is unrecognised by an older shim, so HandleInternalExec
+//     declines it and af then fails on an unknown command: non-zero, visible, and
+//     only for sessions that actually selected an account.
+//
+// Refusing loudly is the direction this can afford to be wrong in.
+const AccountExecMarker = "__af-session-env-exec-account"
+
 var commonNames = nameSet(
 	// Process and terminal basics.
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",

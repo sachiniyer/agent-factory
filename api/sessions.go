@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"fmt"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"os/exec"
 	"strings"
 
@@ -262,6 +264,10 @@ var (
 	createNameFlag    string
 	createPromptFlag  string
 	createProgramFlag string
+	// createAccountFlag selects one of the agent's registered credential accounts
+	// for this session (#3051). Empty keeps the ambient identity, which is what
+	// every session did before accounts existed.
+	createAccountFlag string
 	createHereFlag    bool
 	createInPlaceFlag bool
 	createBackendFlag string
@@ -387,16 +393,51 @@ pointing at one).`,
 			}
 		}
 
+		// Validate the account BEFORE the daemon makes a worktree and starts tmux.
+		// The shim lookup stays as the fail-closed final check, but it runs in the
+		// pane and deliberately prints only a generic message, so a typo'd account
+		// would otherwise fail after mutation with nothing naming the cause or the
+		// fix (#3051 review).
+		if createAccountFlag != "" {
+			home, herr := config.GetConfigDir()
+			if herr != nil {
+				return jsonError(herr)
+			}
+			if _, aerr := agentaccount.Selected(home, sessionenv.AgentForCommand(program), createAccountFlag, ""); aerr != nil {
+				return jsonError(aerr)
+			}
+		}
+
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createTitle,
 			RepoPath: repo.Root,
 			Program:  program,
+			Account:  createAccountFlag,
 			Prompt:   createPromptFlag,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,
 		})
 		if err != nil {
 			return jsonError(err)
+		}
+
+		// An OLDER daemon does not know the account field and drops it silently,
+		// so the session it created runs on the ambient identity while this command
+		// would otherwise report success with the account the user asked for. That
+		// is the silent wrong-account outcome the whole feature exists to prevent,
+		// arriving through version skew instead of through the environment.
+		//
+		// The daemon is the authority on what it stored, so this checks what came
+		// BACK rather than what was sent. Reported as a failure, and it names the
+		// session, because one now exists that must be removed rather than used
+		// (#3075 review).
+		if createAccountFlag != "" && data.Account != createAccountFlag {
+			return jsonError(fmt.Errorf(
+				"session %q was created but the daemon did not apply account %q — it is running on the ambient "+
+					"identity, not that account. The running daemon predates account support; upgrade it "+
+					"(af daemon restart after an upgrade) and recreate. Remove the unscoped session with "+
+					"`af sessions kill %s`",
+				data.Title, createAccountFlag, data.Title))
 		}
 
 		return jsonOut(data)

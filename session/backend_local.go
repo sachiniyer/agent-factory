@@ -89,6 +89,10 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	if err := tmuxSession.SetEnvPassthrough(sessionEnvPassthroughForInstance(i)); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
+	// Refreshed alongside the pass-through, on the same paths, so a restored or
+	// re-provisioned session carries the account it was created with rather than
+	// quietly reverting to the ambient identity (#3051).
+	tmuxSession.SetAccount(i.Account)
 	return nil
 }
 
