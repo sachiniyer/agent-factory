@@ -1,0 +1,249 @@
+package sessionenv
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// Account is a per-session credential scope: exactly one of an agent's logged-in
+// identities, held as a directory the agent CLI treats as its home.
+//
+// af never reads, stores, or forwards the secret itself. It decides which
+// directory a session can see, and the agent's own login flow put the material
+// there. A provider changing its token format costs this nothing.
+type Account struct {
+	Agent string
+	Name  string
+	// Dir is the AGENT HOME handed to the session, not merely a credential file.
+	//
+	// This distinction is a precondition on whoever creates the directory, and
+	// getting it wrong is a silent functional regression rather than a security
+	// one. CODEX_HOME relocates codex's WHOLE home — auth, history, settings, and
+	// skills discovered under $CODEX_HOME/skills, as session/agentskill.go already
+	// documents. So an account directory holding only auth.json gives that session
+	// no history, no user skills, and none of af's managed guidance skill.
+	// CLAUDE_CONFIG_DIR behaves the same way for claude's config root.
+	//
+	// Provisioning must therefore SEED the non-credential state — share or copy it
+	// from the operator's real home — so that an account differs from the default
+	// identity in credentials alone.
+	//
+	// With one exclusion that is easy to miss and defeats the whole feature: a
+	// copied config.toml carrying `cli_auth_credentials_store = "keyring"` makes
+	// Codex ignore the account's auth.json and use the MACHINE-WIDE identity, so
+	// every account authenticates as the same person while ApplyAccount reports
+	// success. Seeding must sanitize credential-source settings to the file-based
+	// mode rather than copying settings unchanged. The command guard cannot catch
+	// this — the override arrives through config, not through argv (#2983 review). ApplyAccount cannot verify that: it never
+	// touches the filesystem and receives a path that may not exist yet. It is
+	// stated here because the account-creation slice is the only place it can be
+	// enforced, and a reader of this type would otherwise reasonably assume
+	// "credential directory" meant a directory of credentials (#2983 review).
+	//
+	// It must also be a real path outside any temp directory: codex refuses to
+	// operate under /tmp, and an account is durable state regardless.
+	Dir string
+	// TrustedWrapper is the exact af binary path the LAUNCHER generated this
+	// session's handoff with, or empty when the program is not an af handoff.
+	//
+	// This is provenance, supplied rather than parsed. The docker and ssh
+	// backends generate `/usr/local/bin/af agent-server …` and a staged absolute
+	// path respectively, so a bare-name rule rejects af's OWN launch and refuses
+	// every account-scoped session on those backends. No amount of inspecting the
+	// string recovers "af wrote this"; the caller knows it, so it says so.
+	//
+	// Only an EXACT match is honoured — never a basename — so a repository file
+	// that merely shares the name is still refused (#2983 review).
+	TrustedWrapper string
+}
+
+// accountConfigVars maps an agent to the variable that relocates its credential
+// ROOT — verified empirically per agent, never assumed from the allowlist.
+//
+// claude 2.1.223: CLAUDE_CONFIG_DIR pointed at an empty directory reports
+// `"loggedIn": false` while the real one reports true, so it moves credential
+// lookup and not merely settings.
+//
+// codex-cli 0.146.1: CODEX_HOME pointed at an empty directory reports "Not
+// logged in" against "Logged in using ChatGPT".
+//
+// gemini and amp are deliberately ABSENT. GEMINI_CLI_HOME and AMP_HOME are on
+// the session-env allowlist, but allowlist membership is not evidence that they
+// relocate credentials, and neither CLI was available to test. An agent missing
+// here reports unsupported rather than silently accepting an account selection
+// that would do nothing (#2983).
+var accountConfigVars = map[string]string{
+	"claude": "CLAUDE_CONFIG_DIR",
+	"codex":  "CODEX_HOME",
+}
+
+// accountCredentialNames are the variables that carry an IDENTITY for an agent
+// and must therefore be removed from an account-scoped session.
+//
+// This is the subtraction half, and it is not defence in depth — it is what
+// makes the selection real. For both of these CLIs an ambient API key takes
+// precedence over the config directory's OAuth state, so a session that selected
+// an account while ANTHROPIC_API_KEY passed through would authenticate as
+// whoever that key belongs to, silently, while every visible signal said
+// otherwise. That is the exact failure #2983 exists to fix.
+//
+// Routing and mode variables (ANTHROPIC_BASE_URL, the Bedrock/Vertex selectors,
+// CODEX_CA_CERTIFICATE) are NOT here on purpose: they are the operator's
+// deployment configuration rather than an identity, and dropping them would
+// break a legitimate proxied setup without scoping anything. accountScopedNames
+// enforces that every name is classified one way or the other, so this
+// distinction cannot rot as the allowlists grow.
+var accountCredentialNames = map[string]map[string]struct{}{
+	"claude": nameSet(
+		"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+	),
+	"codex": nameSet(
+		"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
+	),
+}
+
+// SupportsAccounts reports whether an agent can be account-scoped, and the
+// variable used to do it.
+func SupportsAccounts(agent string) (string, bool) {
+	v, ok := accountConfigVars[agent]
+	return v, ok
+}
+
+// AccountAgents lists the agents that support account scoping, for help text and
+// for an error that can name the alternatives.
+func AccountAgents() []string {
+	out := make([]string, 0, len(accountConfigVars))
+	for agent := range accountConfigVars {
+		out = append(out, agent)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ApplyAccount scopes an already-filtered session environment to exactly one
+// account: it INJECTS that account's credential root and REMOVES every other
+// identity-bearing variable for the agent.
+//
+// Both halves are required and neither is sufficient.
+//
+// Injection alone leaves an ambient API key in place, which wins over the
+// directory — the selection is then silently ignored. Subtraction alone leaves
+// the session with no identity at all.
+//
+// It must also be an INJECTION and not an allowlist entry. Filter is subtractive
+// over the daemon's own environment, so a variable delivered through the
+// allowlist carries the daemon's single value to every session: correct for
+// AF_DAEMON_TOKEN, which is global by nature, and wrong for an account, which is
+// per-session by definition. An allowlist implementation passes a presence check
+// and a smoke test while giving every session the same account (#2983).
+func ApplyAccount(env []string, command string, account Account) ([]string, error) {
+	configVar, ok := SupportsAccounts(account.Agent)
+	if !ok {
+		return nil, fmt.Errorf(
+			"agent %q does not support multiple accounts; supported: %s",
+			account.Agent, strings.Join(AccountAgents(), ", "))
+	}
+	if strings.TrimSpace(account.Dir) == "" {
+		return nil, fmt.Errorf("account %q for agent %q has no credential directory",
+			account.Name, account.Agent)
+	}
+
+	// A CLOUD MODE authenticates somewhere else entirely. Bedrock, Vertex and
+	// Foundry make the CLI use AWS/Google/Azure credentials, which
+	// FilterForCommand deliberately admits for exactly those modes — so the
+	// account directory stops being the session's identity while still appearing
+	// to be. Refusing is the honest answer: removing the selector instead would
+	// silently move the session off the deployment mode its operator configured,
+	// which is a different surprise rather than a smaller one (#2983 review).
+	if selectors := ResolveAuthSelectors(env, account.Agent, command); len(selectors) > 0 {
+		return nil, fmt.Errorf(
+			"account %q cannot scope agent %q while cloud mode %s is active: the session authenticates "+
+				"through that provider's credentials, not through the account directory; unset it to use accounts",
+			account.Name, account.Agent, strings.Join(selectors, ", "))
+	}
+
+	// A COMMAND-LOCAL ASSIGNMENT wins over anything injected here: the launch runs
+	// the program through `/bin/sh -c`, which applies `CODEX_HOME=... codex` after
+	// this environment is installed. program_overrides is reachable from a
+	// repository's checked-in config, so without this a repo could silently
+	// redirect whose quota a session spends. Unprovable commands fail closed —
+	// an unparsed command is not evidence of safety.
+	// EVERY identity-bearing name, not just the config root. Subtraction removed
+	// the ambient copies, but `/bin/sh -c` applies a command-local assignment
+	// afterwards — so `OPENAI_API_KEY=sk-other codex` RECREATES an identity that
+	// outranks the account directory, and the guard would have called it safe
+	// because it only watched CODEX_HOME.
+	//
+	// The guarded cloud selectors are in the set too. A selector assignment whose
+	// value the parser cannot evaluate (`CLAUDE_CODE_USE_BEDROCK=$HOME claude`)
+	// reads as DISABLED to ResolveAuthSelectors, so the cloud-mode refusal above
+	// never fires while the shell expands it to a non-empty string and Claude
+	// authenticates through ~/.aws instead. Refusing any command-local assignment
+	// to a selector removes the need to evaluate it (#2983 review).
+	refused := accountScopedNames(account.Agent, configVar)
+	for _, selector := range GuardedSelectors() {
+		refused[selector] = struct{}{}
+	}
+	if overrides, provable := commandOverridesName(command, account.Agent, account.TrustedWrapper, refused); overrides || !provable {
+		if !provable {
+			return nil, fmt.Errorf(
+				"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+
+					"identity assignments, and an unverifiable program is not evidence that the account would be used",
+				account.Name, account.Agent, account.Agent)
+		}
+		return nil, fmt.Errorf(
+			"account %q cannot scope agent %q: its program sets an identity variable itself, which overrides the account directory",
+			account.Name, account.Agent)
+	}
+
+	denied := accountScopedNames(account.Agent, configVar)
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		name, _, found := strings.Cut(kv, "=")
+		if !found {
+			continue
+		}
+		if _, drop := denied[name]; drop {
+			continue
+		}
+		out = append(out, kv)
+	}
+	// Appended last so it wins over any ambient copy that survived, though the
+	// removal above means there should not be one.
+	out = append(out, configVar+"="+account.Dir)
+	return out, nil
+}
+
+// accountScopedNames is every variable removed from an account-scoped session:
+// the agent's credential names, plus the config variable itself so an ambient
+// value cannot shadow the injected one.
+//
+// It reads from accountCredentialNames rather than from agentNames on purpose. A
+// blanket "drop everything for this agent" would also strip the operator's
+// routing and mode configuration, breaking a proxied or Bedrock deployment to
+// scope an identity. The cost of the explicit list is that a newly allowlisted
+// credential could be forgotten, which is why TestAccountCredentialsAreClassified
+// fails when an agentNames entry for a scoped agent is neither classified as a
+// credential nor listed as deliberately kept.
+func accountScopedNames(agent, configVar string) map[string]struct{} {
+	denied := make(map[string]struct{}, len(accountCredentialNames[agent])+1)
+	for name := range accountCredentialNames[agent] {
+		denied[name] = struct{}{}
+	}
+	denied[configVar] = struct{}{}
+	return denied
+}
+
+// accountNonCredentialNames records the allowlisted names for a scoped agent
+// that are deliberately NOT identity-bearing, so the classification test can
+// tell "reviewed and kept" from "forgotten".
+var accountNonCredentialNames = map[string]map[string]struct{}{
+	"claude": nameSet(
+		"ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR",
+		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+	),
+	"codex": nameSet(
+		"CODEX_HOME", "CODEX_SQLITE_HOME", "CODEX_CA_CERTIFICATE",
+	),
+}
