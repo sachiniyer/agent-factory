@@ -258,7 +258,10 @@ func (m *home) View() string {
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return placeOverlay(fg, mainView)
-	} else if m.state == statePromptInput {
+	} else if m.state == statePromptInput || m.state == stateJumpTab {
+		// Both states drive the same promptOverlay — the naming form's initial-prompt
+		// field and the jump-to-tab prompt (#3021). They differ in who owns the answer,
+		// not in how a single line of text is drawn.
 		if m.promptOverlay == nil {
 			log.ErrorLog.Printf("prompt overlay is nil")
 			return mainView

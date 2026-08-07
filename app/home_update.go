@@ -596,6 +596,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateSelectTabKind(msg)
 	case statePromptInput:
 		return m.handleStateInitialPrompt(msg)
+	case stateJumpTab:
+		return m.handleStateJumpTab(msg)
 	case stateSelectHandoffAgent:
 		return m.handleStateSelectHandoffAgent(msg)
 	case stateSelectBackend:

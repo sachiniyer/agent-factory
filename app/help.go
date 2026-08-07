@@ -267,7 +267,8 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyCopyPR), "Copy PR URL to clipboard"},
 		}},
 		{title: "Tabs:", rows: []helpRow{
-			{helpKey(keys.KeyJumpTab), "Select a tab by number (s opens it, enter attaches)"},
+			{helpKey(keys.KeyJumpTab), "Select one of the first nine tabs by number (s opens it, enter attaches)"},
+			{helpKey(keys.KeyJumpTabPrompt), "Jump to ANY tab by number or name — there is no tab limit (#3021)"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
 			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
 			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll the current tab preview (navigation mode only)"},

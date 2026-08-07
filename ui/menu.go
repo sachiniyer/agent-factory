@@ -465,7 +465,8 @@ func (m *Menu) addInstanceOptions() {
 
 	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key
 	// is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are reached
-	// via the tree and the 1-9 jump keys. Backends without tab management block
+	// via the tree, the 1-9 jump keys and the unbounded g prompt. Backends without
+	// tab management block
 	// `t` (new tab) and `w` (close tab) — those handlers reject them with an
 	// error — so only advertise the tab keys that actually work: number-jump
 	// (#988).

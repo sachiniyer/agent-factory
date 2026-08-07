@@ -433,7 +433,7 @@ func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
 		"D kill",
 		"t new tab",
 		"w close tab",
-		"1-9 jump",
+		"1-9/g go",
 		"s open pane",
 		"tab focus",
 	} {
@@ -462,7 +462,7 @@ func TestMenuSelftestWidthKeepsSelectedRowAndTabPaneHints(t *testing.T) {
 		"D kill",
 		"t new tab",
 		"w close tab",
-		"1-9 jump",
+		"1-9/g go",
 		"s open pane",
 		"tab focus",
 		"? help",
