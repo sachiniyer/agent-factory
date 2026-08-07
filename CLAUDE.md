@@ -64,12 +64,16 @@ Working style:
   `scripts/lint-file-length.sh` — plus `go test` on **only the non-daemon,
   non-app package you changed**. Then push and let CI run the rest, and fix what
   CI reports on your PR head.
-- **`deadcode` is not a local check.** It is whole-program reachability
-  analysis, not a lint: it builds and walks the entire call graph, and ~15
-  sessions running it at once was the largest CPU consumer on this box — ~375%
-  of a core each, load 36 on 16 cores. The Lint job runs it on every push, on a
-  runner, once per PR instead of once per session. Run it locally only to
-  reproduce a CI `deadcode` failure you cannot read from the log.
+- **`deadcode` is not a local check, and no longer blocks.** It is whole-program
+  reachability analysis, not a lint: it builds and walks the entire call graph,
+  and ~15 sessions running it at once was the largest CPU consumer on this box —
+  ~375% of a core each, load 36 on 16 cores. CI runs it on every push, on a
+  runner, once per PR instead of once per session, and **reports** rather than
+  fails (#3014): it named every unreachable symbol *and* made a foundation-only
+  slice unmergeable, so a feature could not land its mechanism first and its call
+  site second — inverting the review order you want for security-sensitive code.
+  Read its annotation and job-summary section anyway. Unreachable code is usually
+  a defect; "it is a staged foundation" is a claim to check, not a default.
 - **Do not run containerized suites as a routine pre-PR gate.** Not
   `make test-container`, not `make remote-roundtrip-container`, not
   `make playtest-container`. Each spins a container that rebuilds the whole Go
@@ -135,12 +139,13 @@ gofmt -l .   # should produce no output
 scripts/lint-file-length.sh   # or: make lint-file-length
 
 # NOT a routine local check — whole-program analysis, and the fleet running it
-# concurrently buries the box. CI's Lint job runs it on every push. Reach for it
-# only to reproduce a CI deadcode failure.
-deadcode -test ./...   # should produce no output
+# concurrently buries the box. CI runs it on every push and REPORTS rather than
+# fails (#3014), so it will not block a merge. Reach for it locally only to
+# investigate what CI reported.
+deadcode -test ./...   # empty output = nothing unreachable
 ```
 
-Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
+Install the `deadcode` binary once with `go install golang.org/x/tools/cmd/deadcode@v0.48.0`; CI pins the same version. Its findings are advisory (#3014) — an unreachable symbol is worth fixing or explaining in the PR, but it does not hold the merge, and it must never be silenced with a per-symbol allowlist. This project's Go floor is 1.25 (raised from 1.24 in #1592 Phase 4 PR5 to pull in the CVE-patched `golang.org/x/crypto` ≥ v0.52.0, which requires Go 1.25); deadcode must be ≥ v0.45.0 to analyze go1.25 source (older x/tools cannot).
 
 **File-length lint (#1145):** `scripts/lint-file-length.sh` fails if any Go
 file exceeds its line limit — 1000 lines for production code, 1500 for
