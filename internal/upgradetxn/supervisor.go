@@ -415,26 +415,15 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			}
 
 		case PhaseRolledBack:
-			// Disqualify the candidate before anything else in this phase, and
-			// before cleanup removes the journal that names it. A candidate that
-			// had to be rolled back must never be activated again on any later
-			// boot: the six-hour check would otherwise find the same release, and
-			// an unattended box would re-break itself on a loop. Idempotent on the
-			// digest, so re-entry after an actor crash refreshes rather than
-			// duplicates.
+			// Get the KNOWN-GOOD daemon back first (#3011 review). The terminal
+			// rollback verdict proves the previous daemon was healthy at the
+			// boundary, not that it survived the actor crash that may have
+			// followed, so re-establish that invariant before anything else here.
 			//
-			// A failure here is returned rather than logged past. The transaction
-			// stays recoverable and re-entry retries; carrying on would leave the
-			// box healthy now and certain to reinstall the same broken binary.
-			if err := RecordRejectedCandidate(
-				journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
-				"the candidate failed validation and was rolled back",
-			); err != nil {
-				return fmt.Errorf("record the rolled-back candidate as rejected: %w", err)
-			}
-			// The terminal rollback verdict proves the previous daemon was
-			// healthy at the boundary, not that it survived the actor crash that
-			// may have followed. Re-establish that invariant before cleanup.
+			// Ordering matters because the rejection record below can fail: an
+			// unreadable or unwritable ledger used to return before this ran, so
+			// recovery looped on bookkeeping while the box had NO daemon at all.
+			// Restoring service is never the thing to postpone for a permission bit.
 			if !previousValidatedThisRun {
 				if err := s.Operations.StartPrevious(ctx, journal); err != nil {
 					return s.finishFailedRollback(
@@ -446,6 +435,24 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 						ctx, txn, lease, fmt.Errorf("revalidate rolled-back previous daemon: %w", err),
 					)
 				}
+			}
+			// Now disqualify the candidate, still BEFORE cleanup removes the journal
+			// that names it. A candidate that had to be rolled back must never be
+			// activated again on any later boot: the six-hour check would otherwise
+			// find the same release, and an unattended box would re-break itself on
+			// a loop. Idempotent on the digest, so re-entry after an actor crash
+			// refreshes rather than duplicates.
+			//
+			// A failure here is still RETURNED rather than logged past, and cleanup
+			// is still withheld: the transaction stays recoverable and re-entry
+			// retries. Carrying on would leave the box healthy now and certain to
+			// reinstall the same broken binary. What changed is that the daemon is
+			// already up while that retry happens.
+			if err := RecordRejectedCandidate(
+				journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
+				"the candidate failed validation and was rolled back",
+			); err != nil {
+				return fmt.Errorf("record the rolled-back candidate as rejected: %w", err)
 			}
 			if err := s.Operations.DisableRecoveryJob(ctx, journal); err != nil {
 				return fmt.Errorf("disable rolled-back recovery job: %w", err)

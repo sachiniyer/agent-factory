@@ -541,3 +541,63 @@ func TestRollbackFailedRemainsTerminalWhenJobDisableReportsAnError(t *testing.T)
 	require.ErrorContains(t, err, "service manager unavailable")
 	require.NoError(t, lease.Release())
 }
+
+// TestSupervisorRestartsPreviousBeforeLedgerBookkeeping is #3011 review: a
+// PhaseRolledBack transaction resumed after an actor crash must get the known-good
+// daemon back BEFORE it records the rejection.
+//
+// The record can fail — an unreadable or unwritable ledger is exactly the case — and
+// it used to run first, so recovery returned on bookkeeping while the box had no
+// daemon at all and every retry failed the same way. Restoring service is never the
+// thing to postpone for a permission bit.
+//
+// The ledger is blocked by putting a DIRECTORY where its file belongs, which fails
+// the write without depending on running as a user who cannot chmod (root can).
+func TestSupervisorRestartsPreviousBeforeLedgerBookkeeping(t *testing.T) {
+	txn, home, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+
+	// Crash the actor exactly at the rolled-back boundary, the way the sibling
+	// takeover tests do, so the resume below is a genuine re-entry.
+	crashed := &fakeSupervisorRuntime{running: "previous", candidateValid: false}
+	injected := false
+	err = (Supervisor{
+		Operations: crashed.operations(),
+		AfterBoundary: func(got Phase) error {
+			if !injected && got == PhaseRolledBack {
+				injected = true
+				return errors.New("simulated actor loss")
+			}
+			return nil
+		},
+	}).Run(context.Background(), txn, lease)
+	require.ErrorIs(t, err, ErrSupervisorInterrupted)
+	require.True(t, injected, "fault injection must actually execute")
+	require.Equal(t, PhaseRolledBack, txn.Journal().Phase)
+	require.NoError(t, lease.Release())
+
+	require.NoError(t, os.MkdirAll(rejectedLedgerPath(executable), 0o755))
+
+	resumed, err := Load(home)
+	require.NoError(t, err)
+	takeover, err := resumed.tryAcquireRecoveryAs(resumed.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	runtime := &fakeSupervisorRuntime{running: "", candidateValid: false}
+	err = (Supervisor{Operations: runtime.operations()}).Run(context.Background(), resumed, takeover)
+
+	require.Error(t, err, "an unwritable ledger must still fail the run, so re-entry retries it")
+	require.Contains(t, err.Error(), "record the rolled-back candidate as rejected")
+
+	// …but the daemon is back up, which is the whole point of the ordering.
+	require.Contains(t, runtime.calls, "start-previous",
+		"the known-good daemon must be restarted before bookkeeping that can fail")
+	require.Contains(t, runtime.calls, "validate-previous",
+		"and revalidated, since the rollback verdict predates the actor crash")
+	require.Equal(t, "previous", runtime.running)
+
+	// Cleanup is still withheld: the transaction stays recoverable so the rejection
+	// is retried rather than lost.
+	require.False(t, runtime.jobDisabled, "cleanup must not run while the rejection is unrecorded")
+	require.NoError(t, takeover.Release())
+}

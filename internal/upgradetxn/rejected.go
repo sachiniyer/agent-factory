@@ -186,24 +186,33 @@ func RecordRejectedCandidate(executable, sha256, version, reason string) error {
 	path := rejectedLedgerPath(executable)
 	mode := rejectedLedgerMode
 	gid, shared := directoryWriterGroup(filepath.Dir(path))
-	if shared {
-		mode = rejectedLedgerSharedMode
+	if !shared {
+		if err := durableAtomicWriteFile(path, encoded, mode); err != nil {
+			return fmt.Errorf("write the rejected-candidate ledger: %w", err)
+		}
+		return nil
 	}
-	if err := durableAtomicWriteFile(path, encoded, mode); err != nil {
+	// Shared install directory: the ledger must carry the DIRECTORY's group, not the
+	// creator's primary group, or the other authorized writers cannot read it.
+	//
+	// Established on the temporary inode before the rename rather than chowned after
+	// (#3011 review). A post-rename chown can fail with EPERM on a group-writable,
+	// non-setgid directory whose owner is not in its group — and by then the ledger
+	// is already published 0660 under the WRONG group: unreadable by the people who
+	// need it and writable by an unrelated one. Falling back to the private mode
+	// keeps the second half from happening; the first half is reported.
+	grouped, err := durableAtomicWriteFileInGroup(path, encoded, rejectedLedgerSharedMode, mode, gid)
+	if err != nil {
 		return fmt.Errorf("write the rejected-candidate ledger: %w", err)
 	}
-	if shared {
-		// The mode alone is not enough: a new file takes its CREATOR's primary
-		// group, which on a shared box is usually not the directory's. Carry the
-		// directory's group, exactly as the install lock does for the same audience.
-		//
-		// A failure here is logged, not returned. The ledger is already durable, and
-		// this record is what lets recovery leave PhaseRolledBack — failing it would
-		// reproduce the stuck-in-rollback half of the very problem the widening
-		// fixes, in exchange for a permission bit.
-		if err := os.Chown(path, -1, gid); err != nil {
-			log.WarningLog.Printf("rejected-candidate ledger %s was written but could not be given group %d, so other authorized writers may not be able to read it: %v", path, gid, err)
-		}
+	if !grouped {
+		// Logged, not returned. The ledger IS durable and correct — it is simply
+		// private to this writer — and this record is what lets recovery leave
+		// PhaseRolledBack. Failing it would reproduce the stuck-in-rollback half of
+		// the problem the widening fixes, in exchange for a permission bit.
+		log.WarningLog.Printf(
+			"rejected-candidate ledger %s was written private (mode %v) because its directory's group %d could not be set, so other authorized writers may not be able to read it",
+			path, mode, gid)
 	}
 	return nil
 }
