@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -298,31 +296,69 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 		done <- createResult{out: out, err: err}
 	}()
 
-	// Wait for the dialog to reach the pane on the CONDITION, not on a nap.
-	require.Eventuallyf(t, func() bool { return countFileLines(t, dialogLog) > 0 },
-		2*time.Minute, 20*time.Millisecond,
-		"the fake codex never printed its trust dialog, so nothing here is a verdict on #729")
-
-	// THE DISCRIMINATOR. The wrapper is blocked, so "›" provably does not exist
-	// yet: if the create finishes now, af reported ready with only the trust
-	// dialog on screen, which is the #729 regression and is not an inference.
+	// Wait for the dialog on the CONDITION, but watch `done` at the same time.
+	// A create that has already failed — daemon startup, session launch, a wrapper
+	// that could not exec — has its result sitting on the channel, and ignoring it
+	// here would poll for the full ceiling and then report a generic missing-dialog
+	// message while discarding the actual error that explains it.
 	//
-	// trustHold is the OPPORTUNITY window — how long af is given to make that
-	// mistake, at its 500ms readiness poll — never a measurement. Load stretches
-	// how long this takes in wall time; it cannot turn a correct af into a
-	// failure here, because a correct af simply never sends on the channel.
+	// The loop runs on the TEST goroutine on purpose. testify's Eventually runs its
+	// condition in a worker goroutine, where countFileLines' t.Fatalf on an
+	// unreadable file would be an illegal FailNow off the test goroutine: it exits
+	// the callback without signalling, so the real read error is replaced by a
+	// timeout two minutes later.
+	dialogDeadline := time.After(2 * time.Minute)
+	for countFileLines(t, dialogLog) == 0 {
+		select {
+		case res := <-done:
+			// Decided before the dialog even appeared. Only a SUCCESSFUL create
+			// here could mean the dialog satisfied readiness, and it cannot even
+			// mean that yet — the dialog is not on screen. Either way this is a
+			// startup/environment failure, not a #729 verdict.
+			t.Fatalf("the create finished before the fake codex printed its trust dialog, so nothing "+
+				"here is a verdict on #729 — startup or environment failure (create err=%v)\n%s",
+				res.err, res.out)
+		case <-dialogDeadline:
+			t.Fatal("the fake codex never printed its trust dialog, so nothing here is a verdict on #729")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// THE DISCRIMINATOR, and the limit of what a black-box test can prove here.
+	//
+	// The wrapper is blocked, so "›" provably does not exist yet: a create that
+	// SUCCEEDS now reported ready with only the trust dialog on screen, which is
+	// #729. An ERROR now is not that — af declared nothing ready — so the two are
+	// classified apart rather than both blamed on the contract.
+	//
+	// trustHold is the OPPORTUNITY for af to make that mistake at its 500ms poll,
+	// never a measurement, so load cannot turn a correct af into a failure. What
+	// load CAN do is deny af a poll in this window entirely, and then a regression
+	// slips past — under-detection, never a false failure. That residue is not
+	// fixable from out here: af leaves no observable trace of a readiness poll, so
+	// no handshake can wait for one. It does not need to be, either. The #729 rule
+	// is decided by isReadyContent, a PURE function of pane content, and
+	// task/runner_test.go asserts it directly and deterministically:
+	//
+	//	{"codex trust folder prompt is not ready (#729)", "codex", "Do you trust this folder?\n> Yes", false},
+	//	{"codex trust dialog with later prompt is ready (#729)", "codex", "Do you trust this folder?\n› ", true},
+	//
+	// That is where the contract is PROVEN. What this test adds is the end-to-end
+	// wiring — real CLI, daemon, tmux, worktree — with best-effort detection, and
+	// it is documented as such so nobody mistakes it for the proof and starts
+	// tuning it to be one.
 	select {
 	case res := <-done:
-		if prompts := countFileLines(t, promptLog); prompts == 0 {
-			t.Fatalf("#729 regression: the create returned while the wrapper was still holding the "+
-				"trust dialog and had not emitted its › prompt — the dialog was treated as ready "+
-				"(create err=%v)\n%s", res.err, res.out)
+		if res.err == nil {
+			t.Fatalf("#729 regression: the create reported the session READY while the wrapper was "+
+				"still holding the trust dialog and had not emitted its › prompt — the dialog was "+
+				"treated as ready\n%s", res.out)
 		}
-		t.Fatalf("the wrapper released its prompt without the test releasing it, so this run cannot "+
-			"judge #729 — fixture problem (create err=%v)\n%s", res.err, res.out)
+		t.Fatalf("the create failed while the wrapper was still holding the trust dialog, so af "+
+			"declared nothing ready — startup or environment failure, NOT #729: %v\n%s", res.err, res.out)
 	case <-time.After(trustHold):
-		// Still waiting with only the dialog visible: af has been given its
-		// chance to accept it and has not.
+		// Still waiting with only the dialog visible: af was given its chance to
+		// accept it and did not.
 	}
 
 	// Release the real prompt and take af's verdict.
