@@ -41,16 +41,39 @@ jobs:
             exit 1
           fi
 
-      - name: Check for dead code
+      # REPORTS, does not block (#3014). The gate was right about the code and wrong
+      # about the workflow: requiring every merged symbol to be reachable means a
+      # feature cannot land its mechanism first and its call site second. That
+      # inverts the review order you want for exactly the code where you want it
+      # most — a security-sensitive core has to be reviewed small, then wired up,
+      # and this forced mechanism and call site into one larger diff. It also
+      # pushed toward shipping a token caller purely to satisfy a linter.
+      #
+      # So the finding survives and the veto does not: every unreachable symbol is
+      # still named, as an annotation and in the job summary. Unreachable code is
+      # still usually a defect — read this output before assuming it is a staged
+      # foundation. What it must never become is an allowlist of permanent
+      # exceptions, which is why nothing here suppresses individual symbols.
+      - name: Report dead code
         run: |
           # Pinned for reproducibility; v0.48.0 supports the Go 1.25 language version
           # (older x/tools cannot analyze go1.25 source).
           go install golang.org/x/tools/cmd/deadcode@v0.48.0
           out=$("$(go env GOPATH)/bin/deadcode" -test ./...)
           if [ -n "$out" ]; then
-            echo "::error::Dead code detected. Remove the following or refactor so it's reachable:"
+            echo "::warning::Dead code detected (reported, not blocking — see #3014):"
             echo "$out"
-            exit 1
+            {
+              echo "### Dead code — reported, not blocking"
+              echo
+              echo "These symbols are unreachable. That is usually a defect worth fixing; it is"
+              echo "not a merge blocker, because a feature may legitimately land its mechanism"
+              echo "before its call site (#3014). Read the list before assuming it is staged."
+              echo
+              echo '```'
+              echo "$out"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           fi
 
       - name: Check file lengths
