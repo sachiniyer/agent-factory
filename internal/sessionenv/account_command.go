@@ -33,7 +33,7 @@ import (
 // agent, and a modelled `env` wrapper around one — and reports everything else
 // as UNPROVABLE. New syntax then arrives as a refusal to scope rather than as a
 // silent bypass, which is the direction this repo can afford to be wrong in.
-func commandOverridesName(command, agent string, names map[string]struct{}) (overrides, provable bool) {
+func commandOverridesName(command, agent, trustedWrapper string, names map[string]struct{}) (overrides, provable bool) {
 	if command == "" {
 		return false, true
 	}
@@ -41,10 +41,10 @@ func commandOverridesName(command, agent string, names map[string]struct{}) (ove
 	if !ok {
 		return false, false
 	}
-	return callOverridesName(call, agent, names, 0)
+	return callOverridesName(call, agent, trustedWrapper, names, 0)
 }
 
-func callOverridesName(call *syntax.CallExpr, agent string, names map[string]struct{}, depth int) (overrides, provable bool) {
+func callOverridesName(call *syntax.CallExpr, agent, trustedWrapper string, names map[string]struct{}, depth int) (overrides, provable bool) {
 	if depth > maxNestedProgramDepth {
 		return false, false
 	}
@@ -85,12 +85,17 @@ func callOverridesName(call *syntax.CallExpr, agent string, names map[string]str
 
 	// A nested agent-server program carries its own command, and is the one
 	// wrapper this package already models.
-	if nested, ok := literalAgentServerProgram(call); ok && isBareName(words[0], "af") {
+	// A bare `af`, or the EXACT path the launcher generated this handoff with.
+	// docker emits /usr/local/bin/af and ssh a staged absolute path, so requiring
+	// a bare name refuses af's own launch on those backends — the same
+	// name-is-not-provenance problem in reverse: here the path IS trusted and the
+	// spelling cannot say so, which is why the caller supplies it.
+	if nested, ok := literalAgentServerProgram(call); ok && isTrustedAfBinary(words[0], trustedWrapper) {
 		inner, ok := singleSimpleCall(nested)
 		if !ok {
 			return false, false
 		}
-		return callOverridesName(inner, agent, names, depth+1)
+		return callOverridesName(inner, agent, trustedWrapper, names, depth+1)
 	}
 
 	if isBareName(words[0], "env") {
@@ -233,4 +238,21 @@ func isBareName(word *syntax.Word, want string) bool {
 		return false
 	}
 	return value == want
+}
+
+// isTrustedAfBinary reports whether a word is af's own binary: a bare `af`, or
+// the exact path the launcher generated the handoff with.
+//
+// Exact, never a basename. `./af` and `/repo/af` are arbitrary repository files
+// that would receive the selected account root; the trusted path is compared
+// whole precisely so a shared name proves nothing.
+func isTrustedAfBinary(word *syntax.Word, trustedWrapper string) bool {
+	if isBareName(word, "af") {
+		return true
+	}
+	if trustedWrapper == "" {
+		return false
+	}
+	value, ok := literalShellWord(word)
+	return ok && value == trustedWrapper
 }

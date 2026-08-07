@@ -44,6 +44,18 @@ type Account struct {
 	// It must also be a real path outside any temp directory: codex refuses to
 	// operate under /tmp, and an account is durable state regardless.
 	Dir string
+	// TrustedWrapper is the exact af binary path the LAUNCHER generated this
+	// session's handoff with, or empty when the program is not an af handoff.
+	//
+	// This is provenance, supplied rather than parsed. The docker and ssh
+	// backends generate `/usr/local/bin/af agent-server …` and a staged absolute
+	// path respectively, so a bare-name rule rejects af's OWN launch and refuses
+	// every account-scoped session on those backends. No amount of inspecting the
+	// string recovers "af wrote this"; the caller knows it, so it says so.
+	//
+	// Only an EXACT match is honoured — never a basename — so a repository file
+	// that merely shares the name is still refused (#2983 review).
+	TrustedWrapper string
 }
 
 // accountConfigVars maps an agent to the variable that relocates its credential
@@ -173,7 +185,7 @@ func ApplyAccount(env []string, command string, account Account) ([]string, erro
 	for _, selector := range GuardedSelectors() {
 		refused[selector] = struct{}{}
 	}
-	if overrides, provable := commandOverridesName(command, account.Agent, refused); overrides || !provable {
+	if overrides, provable := commandOverridesName(command, account.Agent, account.TrustedWrapper, refused); overrides || !provable {
 		if !provable {
 			return nil, fmt.Errorf(
 				"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+

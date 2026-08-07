@@ -274,3 +274,40 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		require.Contains(t, err.Error(), "could not be proven")
 	}
 }
+
+// The docker and ssh backends generate an ABSOLUTE af path for the agent-server
+// handoff (`/usr/local/bin/af agent-server …`, or a staged path). A bare-name
+// rule refuses af's own launch on those backends, so account scoping would fail
+// for every session there — the name-is-not-provenance problem in reverse: the
+// path IS trusted and its spelling cannot say so, which is why the launcher
+// supplies it rather than this parsing it out (#2983).
+func TestApplyAccount_AcceptsTheLaunchersOwnAfWrapper(t *testing.T) {
+	const generated = "/usr/local/bin/af"
+	command := generated + " agent-server --listen x --repo r --title t --program codex --program-resolved"
+
+	// Without the supplied provenance the same command is unprovable: an absolute
+	// path proves nothing on its own.
+	_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
+	require.Error(t, err, "an absolute af path with no supplied provenance must stay unprovable")
+
+	scoped, err := ApplyAccount(nil, command, Account{
+		Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p", TrustedWrapper: generated,
+	})
+	require.NoError(t, err, "the launcher's own handoff must be accepted, or account scoping fails on docker and ssh")
+	dir, ok := envValue(scoped, "CODEX_HOME")
+	require.True(t, ok)
+	require.Equal(t, "/afhome/accounts/codex/p", dir)
+}
+
+// Provenance is an EXACT path, never a basename. A repository file sharing the
+// name — or sitting at a different path — is still refused even when a trusted
+// wrapper was supplied.
+func TestApplyAccount_TrustedWrapperIsNotABasename(t *testing.T) {
+	for _, executable := range []string{"./af", "/repo/af", "/usr/local/bin/af-shim"} {
+		command := executable + " agent-server --program codex --program-resolved"
+		_, err := ApplyAccount(nil, command, Account{
+			Agent: "codex", Name: "p", Dir: "/d", TrustedWrapper: "/usr/local/bin/af",
+		})
+		require.Error(t, err, "%s is not the generated wrapper and must not inherit its trust", executable)
+	}
+}
