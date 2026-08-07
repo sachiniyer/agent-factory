@@ -81,6 +81,25 @@ func (i *Instance) GetBranch() string {
 	return i.Branch
 }
 
+// SetRuntimeTeardownForTest installs the physical reap a sandbox runtime would
+// normally supply through ProvisionResult.Teardown.
+//
+// It exists because the daemon's remote fixtures could not construct one: the
+// field is unexported, so a test in package daemon could only observe the
+// /v1/agent/kill REST call and not the reap it is supposed to trigger. That let a
+// regression which emitted the right message while leaving the container running
+// pass — and a sandbox left alive is a VM still billing with no session record
+// pointing at it, so nothing ever cleans it up (#3042).
+//
+// Deliberately narrow: it installs the callback and nothing else, so a test asserts
+// the EFFECT through the same field production populates rather than through a
+// better-chosen proxy. A better proxy is still a proxy.
+func SetRuntimeTeardownForTest(i *Instance, teardown func() error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.runtimeTeardown = teardown
+}
+
 // SetSandboxBranch records the branch a SANDBOX session's own runtime reports,
 // under the same mutex GetBranch reads it with.
 //
