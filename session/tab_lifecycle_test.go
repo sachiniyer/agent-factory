@@ -371,7 +371,7 @@ func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 			require.Truef(t, ok, "%q must be a name the CLI accepts", a.Kind)
 
 			// The assertion that matters:each entry equals what RefuseTabKind says now.
-			err := caps.RefuseTabKind(kind)
+			err := caps.RefuseTabKind(kind, "")
 			require.Equalf(t, err == nil, a.Allowed, "kind %q disagrees with RefuseTabKind", a.Kind)
 			if err != nil {
 				require.Equalf(t, err.Error(), a.Reason,
