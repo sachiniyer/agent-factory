@@ -93,6 +93,39 @@ const ABANDON = "\x03";
  *  splices generated text into a user's half-written line. */
 const ESC = "\x1b";
 
+/** Sequences the TERMINAL emits, as opposed to escape sequences the user's keys
+ *  produce. Only these are ignored outright.
+ *
+ *  The distinction matters in both directions and an earlier version had it wrong
+ *  by treating every ESC chunk alike. Reports must never create a hold — focusing,
+ *  clicking or scrolling would otherwise defer deliveries with no draft anywhere.
+ *  But arrows, Delete (CSI 3~), Home/End and friends are the user EDITING, and they
+ *  are the only input a draft receives while it is being revised: ignoring them let
+ *  a draft go idle and lose its lease while someone was actively working on it.
+ *
+ *  Anything ESC-prefixed that is not recognised as a report is therefore treated as
+ *  an edit. That fails toward holding, which is the safe direction: a spurious hold
+ *  is bounded and re-fires, a missing one lets a delivery splice into live text. */
+function isTerminalReport(data: string): boolean {
+  if (data.startsWith("\x1b]")) {
+    return true; // OSC reply (colour/clipboard queries)
+  }
+  if (!data.startsWith("\x1b[")) {
+    return false;
+  }
+  const body = data.slice(2);
+  if (body === "I" || body === "O") {
+    return true; // focus in/out
+  }
+  if (body.startsWith("M") || body.startsWith("<")) {
+    return true; // mouse report, X10 or SGR
+  }
+  if (body.startsWith("?")) {
+    return true; // device attributes / DEC mode reply
+  }
+  return /^\d+(;\d+)*R$/.test(body); // cursor position report
+}
+
 /** Shift+Enter's bare LF: a composer newline on the agent tab that inserts a line
  *  without submitting (#2374). It is not printable, so the start gate below would
  *  reject it — leaving the composer holding a draft with no lease taken, which an
@@ -186,21 +219,27 @@ export class MidLineHold {
       // A pasted draft. Held on its content alone — no commit scan, because
       // bracketed paste makes an embedded newline literal text rather than Enter.
       const payload = data.slice(PASTE_START.length).replace(PASTE_END, "");
-      if (!startsADraft(payload)) {
+      // ANY non-empty payload, not just a printable one. Pasting newlines into an
+      // empty composer is a draft: xterm normalises them to CR before wrapping, and
+      // inside a bracketed paste a CR is literal content the application inserts
+      // rather than Enter — so startsADraft's printable-or-LF test called it empty
+      // and took no lease over text that is now sitting in the composer.
+      if (payload === "") {
         return "none";
       }
       this.lastInputMs = nowMs;
       return this.beginOrRenew(nowMs);
     }
     if (data.startsWith(ESC)) {
-      // Renew, never start — see the note on ESC. The activity clock is stamped
-      // here too: this may well be the user editing, and treating an edit as
-      // idleness is the failure that lets a delivery land in a live draft.
-      if (!this.uncommitted) {
-        return "none";
+      if (isTerminalReport(data)) {
+        return "none"; // the terminal talking to us, not the user typing
       }
+      // An editing key: arrows, Delete, Home/End. It can START a hold, not only
+      // renew one — after the idle bound released a draft that is still sitting in
+      // the PTY, these keys are exactly how the user comes back to it, and refusing
+      // to re-acquire would leave live text unprotected for the rest of the session.
       this.lastInputMs = nowMs;
-      return this.renew(nowMs);
+      return this.beginOrRenew(nowMs);
     }
     this.lastInputMs = nowMs;
 
@@ -255,6 +294,13 @@ export class MidLineHold {
    * would later submit whatever an automated delivery had appended to it.
    */
   noteQueued(data: string, nowMs: number): HoldAction {
+    if (data.startsWith(ESC) && !data.startsWith(PASTE_START) && isTerminalReport(data)) {
+      // A report the terminal emitted while the socket was down. It is not a draft,
+      // and starting a hold for it would survive the reconnect: noteFlushed leaves a
+      // hold standing when the flush carried no commit, so this one would renew the
+      // lease to the idle bound with nothing to protect.
+      return "none";
+    }
     this.lastInputMs = nowMs;
     // Remembered, not applied. Whether this run ends the line is only knowable
     // now — the flush sends opaque frames — but it only BECOMES true once the PTY

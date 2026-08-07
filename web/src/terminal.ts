@@ -1212,6 +1212,9 @@ export class AttachTerminal {
       // Whatever is still held was typed at a PTY that has now exited; delivering
       // it to anything later would type into a program the user never saw.
       this.pendingInput.clear();
+      // …and the draft it was protecting died with it, so stop renewing the lease
+      // rather than suppressing the poll to the idle bound over a PTY that is gone.
+      this.releaseMidLine();
       const code = typeof msg.code === "number" ? msg.code : 0;
       this.term.write(`\r\n\x1b[38;5;244m[agent exited (code ${code})]\x1b[0m\r\n`);
       this.cb.onStatus("exited");
@@ -1479,12 +1482,18 @@ export class AttachTerminal {
     // three seconds later, an automated delivery would append to that partial
     // line, and the queued Enter would submit the splice on reconnect. So the
     // hold is extended and the commit is deliberately not read.
-    this.noteQueuedInput(text);
     if (!this.pendingInput.push(frame)) {
       // Refused by the cap — a socket that is not coming back. Say so rather than
       // losing it quietly a second time, which is the whole defect this fixes.
+      //
+      // Recorded ONLY on a successful enqueue: a rejected frame never reaches the
+      // PTY, so noting its commit would let the later flush end the hold over the
+      // partial text that WAS accepted, and an automated delivery could append to
+      // and submit it.
       this.flashNotice("Terminal disconnected — typing was not delivered");
+      return;
     }
+    this.noteQueuedInput(text);
   }
 
   /** Hands the PTY everything typed while the socket was down, in order, then

@@ -53,15 +53,39 @@ test("delivery_hold: a composer newline (LF) keeps the hold", () => {
   assert.equal(h.holding, true, "Shift+Enter is not a commit");
 });
 
-// #3025 review finding: xterm's onData also carries focus reports, mouse reports
-// and query replies. Every one starts with ESC, and a hold created by merely
-// focusing or scrolling would defer deliveries with no draft anywhere.
-test("delivery_hold: terminal-generated sequences never create a hold", () => {
+// #3025 review: xterm's onData carries focus reports, mouse reports and query
+// replies. A hold created by merely focusing or scrolling would defer deliveries
+// with no draft anywhere, so REPORTS are ignored outright.
+test("delivery_hold: terminal reports never create a hold", () => {
   const h = new MidLineHold();
-  for (const seq of ["\x1b[I", "\x1b[O", "\x1b[<0;10;5M", "\x1b[?1;2c", "\x1b[A"]) {
-    assert.equal(h.noteInput(seq, 0), "none", `${JSON.stringify(seq)} is not typing`);
+  for (const seq of ["\x1b[I", "\x1b[O", "\x1b[<0;10;5M", "\x1b[M abc", "\x1b[?1;2c", "\x1b[12;40R", "\x1b]11;rgb:0/0/0\x07"]) {
+    assert.equal(h.noteInput(seq, 0), "none", `${JSON.stringify(seq)} is the terminal talking, not the user`);
     assert.equal(h.holding, false);
   }
+});
+
+// …but arrows, Delete and Home/End are the user EDITING, and they are the only
+// input a draft receives while it is being revised. Ignoring them let a draft go
+// idle and lose its lease while someone was actively working on it — so they can
+// START a hold, not merely renew one.
+test("delivery_hold: editing keys can start a hold", () => {
+  for (const key of ["\x1b[A", "\x1b[3~", "\x1b[D", "\x1bOH"]) {
+    const h = new MidLineHold();
+    assert.equal(h.noteInput(key, 0), "pause", `${JSON.stringify(key)} is the user editing`);
+    assert.equal(h.holding, true);
+  }
+});
+
+// The case that motivated it: the idle bound releases a draft that is still in the
+// PTY, the user comes back to it with cursor keys, and the lease must be re-taken.
+test("delivery_hold: editing after the idle bound re-acquires the lease", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("half a thought", 0);
+  assert.equal(h.tick(15_000), "none", "idle bound released it");
+  assert.equal(h.holding, false);
+
+  assert.equal(h.noteInput("\x1b[D", 20_000), "pause", "the draft is still in the PTY and is being edited again");
+  assert.equal(h.holding, true);
 });
 
 // A bare control key on an empty prompt is not a draft either.
@@ -249,4 +273,22 @@ test("delivery_hold: a later queued draft overrides an earlier queued commit", (
   h.noteQueued("two", 1_200);
   h.noteFlushed(1_300);
   assert.equal(h.holding, true, "the queue ends mid-line, so the flush leaves a draft in the PTY");
+});
+
+// #3025 review: a paste of only newlines into an empty composer is still content —
+// xterm normalises them to CR before wrapping, and inside a bracketed paste a CR is
+// literal text the application inserts rather than Enter.
+test("delivery_hold: a bracketed paste of only newlines is a draft", () => {
+  const h = new MidLineHold();
+  assert.equal(h.noteInput("\x1b[200~\r\r\x1b[201~", 0), "pause");
+  assert.equal(h.holding, true);
+});
+
+// #3025 review: a report arriving while the socket is down must not start a hold
+// either — noteFlushed leaves a commit-less flush holding, so it would renew to the
+// idle bound with nothing to protect.
+test("delivery_hold: a queued terminal report starts no hold", () => {
+  const h = new MidLineHold();
+  assert.equal(h.noteQueued("\x1b[I", 0), "none");
+  assert.equal(h.holding, false);
 });

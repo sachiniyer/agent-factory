@@ -6951,6 +6951,25 @@ function decode(raw) {
 var COMMIT = "\r";
 var ABANDON = "";
 var ESC = "\x1B";
+function isTerminalReport(data) {
+  if (data.startsWith("\x1B]")) {
+    return true;
+  }
+  if (!data.startsWith("\x1B[")) {
+    return false;
+  }
+  const body = data.slice(2);
+  if (body === "I" || body === "O") {
+    return true;
+  }
+  if (body.startsWith("M") || body.startsWith("<")) {
+    return true;
+  }
+  if (body.startsWith("?")) {
+    return true;
+  }
+  return /^\d+(;\d+)*R$/.test(body);
+}
 var COMPOSER_NEWLINE = "\n";
 var PASTE_START = "\x1B[200~";
 var PASTE_END = "\x1B[201~";
@@ -7006,18 +7025,18 @@ var MidLineHold = class {
     }
     if (data.startsWith(PASTE_START)) {
       const payload = data.slice(PASTE_START.length).replace(PASTE_END, "");
-      if (!startsADraft(payload)) {
+      if (payload === "") {
         return "none";
       }
       this.lastInputMs = nowMs;
       return this.beginOrRenew(nowMs);
     }
     if (data.startsWith(ESC)) {
-      if (!this.uncommitted) {
+      if (isTerminalReport(data)) {
         return "none";
       }
       this.lastInputMs = nowMs;
-      return this.renew(nowMs);
+      return this.beginOrRenew(nowMs);
     }
     this.lastInputMs = nowMs;
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
@@ -7066,6 +7085,9 @@ var MidLineHold = class {
    * would later submit whatever an automated delivery had appended to it.
    */
   noteQueued(data, nowMs) {
+    if (data.startsWith(ESC) && !data.startsWith(PASTE_START) && isTerminalReport(data)) {
+      return "none";
+    }
     this.lastInputMs = nowMs;
     if (!data.startsWith(ESC) || data.startsWith(PASTE_START)) {
       const payload = data.startsWith(PASTE_START) ? "" : data;
@@ -8233,6 +8255,7 @@ var AttachTerminal = class {
     } else if (msg.type === "exit") {
       this.exited = true;
       this.pendingInput.clear();
+      this.releaseMidLine();
       const code = typeof msg.code === "number" ? msg.code : 0;
       this.term.write(`\r
 \x1B[38;5;244m[agent exited (code ${code})]\x1B[0m\r
@@ -8462,10 +8485,11 @@ var AttachTerminal = class {
     if (this.stopped || this.exited) {
       return;
     }
-    this.noteQueuedInput(text);
     if (!this.pendingInput.push(frame)) {
       this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
+      return;
     }
+    this.noteQueuedInput(text);
   }
   /** Hands the PTY everything typed while the socket was down, in order, then
    *  empties the queue. Called from onopen, so it covers the first connect and
