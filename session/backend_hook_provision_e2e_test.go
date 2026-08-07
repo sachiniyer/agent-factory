@@ -1,7 +1,9 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -321,7 +323,17 @@ func TestProvisionedHostConnectsWithAnEmbeddedPort(t *testing.T) {
 	prev := newHookSandboxProvisioner
 	newHookSandboxProvisioner = func(spec ProvisionSpec, sshCmd, afBin, program string) *sandboxProvisioner {
 		composed = sshCmd
-		return prev(spec, sshCmd, afBin, program)
+		sp := prev(spec, sshCmd, afBin, program)
+		// ABORT before any remote step runs. The provisioning pipeline's second
+		// step is configureGit, which executes `git config --global` — and the
+		// "remote" here is THIS machine, so letting it proceed would rewrite the
+		// developer's real user.name/user.email and add safe.directory "*" during
+		// an ordinary `go test ./...`. Only the composed command is wanted, and it
+		// is already captured above.
+		sp.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+			return nil, errors.New("e2e: captured the composed command; aborting before any remote step")
+		}
+		return sp
 	}
 	t.Cleanup(func() { newHookSandboxProvisioner = prev })
 
