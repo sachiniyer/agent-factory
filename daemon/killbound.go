@@ -193,12 +193,17 @@ func (s *killStage) get() string {
 // killWatchdogTabCount reports how many tabs this kill may have to tear down,
 // taken from whichever record actually exists.
 //
-// Only TMUX-BEARING tabs count. teardownTabs kills exactly the entries whose
-// tab.tmux is non-nil, so web and vscode tabs perform no per-tab teardown at all —
-// the shared vscode process is already in the fixed term. Charging the whole
-// roster was harmless while it was capped at nine; with the cap gone a session
-// carrying a dozen iframe tabs would push the watchdog out by ten minutes for work
-// it never does, delaying the wedge diagnostics this exists to produce.
+// It counts TMUX SESSIONS a teardown must close, not roster entries, and the two
+// differ in both directions. teardownTabs kills exactly the live tabs whose
+// tab.tmux is non-nil — web and vscode tabs own none, and the shared vscode
+// process is already in the fixed term — but it also appends every PENDING CLEANUP
+// handle to the same sequential loop (#2669).
+//
+// Both directions matter now that the roster is unbounded. Charging the whole
+// roster would push the watchdog out ten minutes for a session of iframe tabs that
+// tears down nothing, delaying the wedge diagnostics this exists to produce;
+// ignoring the pending handles would under-budget a session that has accumulated
+// them and fire the watchdog on a teardown still inside its documented bounds.
 //
 // It must not dereference the instance. A title-based kill can resolve a persisted
 // session that could NOT be reconstructed — resolveActionSession deliberately
@@ -209,12 +214,13 @@ func (s *killStage) get() string {
 // applies, so the watchdog is never armed shorter than it used to be.
 func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData) int {
 	if instance != nil {
-		return instance.TmuxTabCount()
+		return instance.TmuxTeardownCount()
 	}
 	if data != nil {
-		// The persisted record's equivalent of a live tab.tmux: a tab that owns a
-		// tmux session names it, and only those are torn down per-tab.
-		n := 0
+		// The persisted record's spelling of the same two contributions: a tab that
+		// owns a tmux session names it, and every pending cleanup handle is one more
+		// session the same loop closes.
+		n := len(data.PendingTabCleanup)
 		for _, tab := range data.Tabs {
 			if tab.TmuxName != "" {
 				n++

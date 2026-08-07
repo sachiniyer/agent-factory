@@ -29,6 +29,12 @@ func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
 		}}
 		require.Equal(t, 2, killWatchdogTabCount(nil, data),
 			"only tmux-bearing tabs are torn down per-tab; a ghost names them by TmuxName")
+
+		// Pending cleanup handles go through the same close loop, so a ghost that
+		// accumulated them must budget for them too.
+		data.PendingTabCleanup = []session.TabCleanupData{{TabID: "t9", TmuxName: "af_x__stuck"}}
+		require.Equal(t, 3, killWatchdogTabCount(nil, data),
+			"a pending cleanup handle is one more session the teardown closes")
 	})
 }
 

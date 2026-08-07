@@ -311,22 +311,33 @@ func TestRestartSurvival_HumanCreatedShellTab(t *testing.T) {
 	assert.True(t, restored.TabAlive(2), "the restored human-created tab must be live")
 }
 
-// TestTmuxTabCount_ExcludesTabsWithNoSession pins what the kill watchdog budgets
+// TestTmuxTeardownCount_CountsSessionsNotRosterEntries pins what the kill watchdog budgets
 // against. teardownTabs kills exactly the entries whose tab.tmux is non-nil, so a
 // web tab performs no per-tab teardown — and with the nine-tab cap gone, charging
 // the whole roster would let a dozen iframe tabs push the wedge diagnostics out by
 // ten minutes for work that never happens (#3023 review).
-func TestTmuxTabCount_ExcludesTabsWithNoSession(t *testing.T) {
+func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
 	inst := startedMockInstance(t, "af_tmux_count")
 	_, err := inst.AddShellTab()
 	require.NoError(t, err)
-	require.Equal(t, 2, inst.TmuxTabCount(), "agent + shell both own tmux sessions")
+	require.Equal(t, 2, inst.TmuxTeardownCount(), "agent + shell both own tmux sessions")
 
 	_, err = inst.AddWebTab("http://localhost:5173", "")
 	require.NoError(t, err)
 	require.Equal(t, 3, inst.TabCount(), "the web tab is on the roster")
-	require.Equal(t, 2, inst.TmuxTabCount(), "but it owns no tmux session, so it costs no teardown")
+	require.Equal(t, 2, inst.TmuxTeardownCount(), "but it owns no tmux session, so it costs no teardown")
+
+	// A tab closed without a confirmed kill leaves a pending handle, and
+	// teardownTabs appends every one of them to the SAME sequential close loop —
+	// so they are teardown work even though they are off the roster. Ignoring them
+	// under-budgets the watchdog and fires it on a healthy teardown.
+	inst.mu.Lock()
+	inst.pendingTabCleanup = append(inst.pendingTabCleanup, TabCleanupData{TabID: "t9", TmuxName: "af_x__stuck"})
+	inst.mu.Unlock()
+	require.Equal(t, 3, inst.TmuxTeardownCount(),
+		"a pending cleanup handle is one more tmux session the teardown must close")
+	require.Equal(t, 3, inst.TabCount(), "and it is not on the roster")
 }

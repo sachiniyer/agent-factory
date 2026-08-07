@@ -508,15 +508,24 @@ func (i *Instance) TabAlive(idx int) bool {
 }
 
 // TabCount returns the number of tabs the instance currently holds.
-// TmuxTabCount reports how many tabs own a tmux session, which is the count that
-// predicts teardown WORK: teardownTabs only kills entries whose tab.tmux is
-// non-nil, so web and vscode tabs contribute nothing per-tab. Callers budgeting
-// time against the roster want this rather than TabCount, or a session carrying a
-// dozen iframe tabs is charged for teardown it will never perform (#3023).
-func (i *Instance) TmuxTabCount() int {
+// TmuxTeardownCount reports how many tmux sessions a teardown of this instance
+// would have to close, which is the count that predicts teardown WORK.
+//
+// Two contributions, because teardownTabs closes both through one sequential loop:
+// live tabs whose tab.tmux is non-nil — web and vscode tabs own none and cost
+// nothing per-tab — and the PENDING CLEANUP handles of tabs already removed from
+// the roster whose kill was never confirmed (#2669). Omitting either direction
+// gets a caller budgeting against this wrong: counting the whole roster charges a
+// session for iframe tabs it never tears down, while ignoring the pending handles
+// under-budgets a session that has accumulated them.
+//
+// The pending handles are counted unconditionally even though only a destructive
+// mode reaps them. A budget should bound the worst case: over-counting delays a
+// watchdog, under-counting fires one on healthy work (#3023).
+func (i *Instance) TmuxTeardownCount() int {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	n := 0
+	n := len(i.pendingTabCleanup)
 	for _, tab := range i.Tabs {
 		if tab.tmux != nil {
 			n++
