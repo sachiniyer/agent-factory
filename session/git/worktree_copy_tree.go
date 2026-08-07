@@ -54,9 +54,6 @@ type copiedEntry struct {
 	source      pathIdentity
 	destination pathIdentity
 	directory   *copiedDirectory
-	// digest carries the copied bytes' hash out to the link map when the
-	// destination's own mode would lock the copier out of it. See copiedFileLink.
-	digest []byte
 }
 
 type copiedDirectoryRoute struct {
@@ -354,7 +351,7 @@ func copyDirectoryLevel(
 			// archive holding bytes that never existed at that path. Hard-linking
 			// is an optimisation, and one that can corrupt content is not worth its
 			// saving (#3046).
-			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.digest, first.identity) {
+			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
@@ -367,7 +364,6 @@ func copyDirectoryLevel(
 					links[inspected] = copiedFileLink{
 						path:     filepath.Join(relativeDirectory, name),
 						identity: entry.destination,
-						digest:   entry.digest,
 					}
 				}
 			}
@@ -408,21 +404,6 @@ func relativeRoutePath(components []copiedEntry) string {
 type copiedFileLink struct {
 	path     string
 	identity pathIdentity
-	// digest is the SHA-256 of the bytes copied for this inode, recorded only when
-	// the destination's final mode denies the copier read.
-	//
-	// A live descriptor was the first shape of this and it was unbounded: one held
-	// open per distinct unreadable inode for the whole walk, so a large tree of
-	// them exhausts the process file-descriptor limit and takes unrelated
-	// concurrent work down with EMFILE (#3049 review). A digest is 32 bytes and
-	// answers the same question.
-	//
-	// Recorded ONLY for those files. Hashing every copied file would put CPU on
-	// every archive to serve a rare case, so the ordinary path still compares by
-	// reading bytes.
-	//
-	// nil means "compare by reopening", the ordinary path.
-	digest []byte
 }
 
 func linkCopiedFile(
@@ -907,21 +888,6 @@ func copyRegularFileAtWithIdentity(
 		return created, err
 	}
 	pruneDestinationXattrs(int(in.Fd()), outFD, destinationPath, "file")
-	// Only for a mode that denies the copier read: that is the one case where the
-	// comparison cannot simply reopen the destination (#3063), and a digest keeps
-	// it bounded at 32 bytes rather than a held descriptor (#3049 review).
-	//
-	// Hashed from the SOURCE, which this function has open and readable; the
-	// destination holds the same bytes by construction, having just been written
-	// from it.
-	if info.Mode().Perm()&0o400 == 0 {
-		if digest, digestErr := digestOpenFile(in); digestErr == nil {
-			created.digest = digest
-		}
-		// Not fatal: the comparison falls back to reopening by path, the
-		// pre-existing behaviour. Losing the optimisation is acceptable; failing
-		// the archive over it is not.
-	}
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err

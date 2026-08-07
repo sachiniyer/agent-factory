@@ -4,7 +4,6 @@ package git
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"io"
 	"os"
 
@@ -33,34 +32,29 @@ import (
 //
 // Both sides are opened relative to a directory descriptor, never by rebuilt
 // path, keeping the copier descriptor-anchored throughout.
-func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, digest []byte, expected pathIdentity) bool {
+func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, expected pathIdentity) bool {
 	current, err := openAtForCompare(source, name)
 	if err != nil {
 		return false
 	}
 	defer current.Close()
 
-	// A recorded digest is used INSTEAD of reopening, because the reason it exists
-	// is that reopening cannot work: the destination's own mode denies the copier
-	// read, and owner bits take precedence, so the process that created the file
-	// cannot open it (#3063).
+	// The destination is REOPENED AND READ, always. There is no cheaper substitute,
+	// and two review rounds established why (#3049 review).
 	//
-	// Identity is still checked, by fstatat rather than by reading — stat needs no
-	// read permission. Without it a same-UID process could swap copiedPath for an
-	// impostor holding the current bytes and restore the recorded inode before the
-	// linkat, defeating linkCopiedFile's own post-link check (#3049 review).
-	if digest != nil {
-		copiedIdentity, err := identityAt(destinationRoot, copiedPath)
-		if err != nil || !expected.same(copiedIdentity) {
-			return false
-		}
-		currentDigest, err := digestOpenFile(current)
-		if err != nil {
-			return false
-		}
-		return bytes.Equal(currentDigest, digest)
-	}
-
+	// A recorded digest of the source cannot stand in for it. It describes bytes
+	// the source held at some moment, not what the destination holds NOW: a
+	// same-UID process can chmod the destination, rewrite it in place, and restore
+	// the mode, preserving device/inode/type — so identity still matches, the
+	// unchanged source still matches the digest, and linkCopiedFile publishes the
+	// modified bytes. Reading the destination is the only thing that attests it.
+	//
+	// The consequence is deliberate: when the destination cannot be reopened —
+	// its own mode denies the copier read — this returns false and the caller
+	// copies afresh. That LOSES the hard-link relationship for those files, which
+	// is #3063 and is a fidelity cost, not a correctness one. Hard-linking is an
+	// optimisation, and one that can publish bytes that were never at that path is
+	// not worth its saving.
 	copied, err := openAtForCompare(destinationRoot, copiedPath)
 	if err != nil {
 		return false
@@ -111,21 +105,4 @@ func openAtForCompare(parent *os.File, name string) (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), name), nil
-}
-
-// digestOpenFile hashes an open file from its start, leaving the offset at EOF.
-//
-// SHA-256 rather than a cheaper hash because a collision here publishes the
-// WRONG BYTES at a path — the exact outcome #3046 exists to prevent — and this
-// runs only for the rare files whose mode locks the copier out, so its cost is
-// not on the ordinary archive path.
-func digestOpenFile(file *os.File) ([]byte, error) {
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	sum := sha256.New()
-	if _, err := io.Copy(sum, file); err != nil {
-		return nil, err
-	}
-	return sum.Sum(nil), nil
 }
