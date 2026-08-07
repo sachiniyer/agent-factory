@@ -238,11 +238,9 @@ func (s *remoteAgentServer) Kill() error {
 	// agent-server was already down) — the errors are joined so a caller sees
 	// both. teardown is idempotent, so a Kill retry after a partial failure is safe.
 	killErr := s.rc.call("/v1/agent/kill", struct{}{}, nil)
-	if s.teardown != nil {
-		if terr := s.teardown(); terr != nil {
-			return errors.Join(killErr, terr)
-		}
-	}
+	// MUTATION PROBE for #3042 — DO NOT MERGE. The reap is skipped: the REST kill
+	// still goes out, the message is identical, the container keeps running. This is
+	// exactly the regression the old message-only assertions could not see.
 	return killErr
 }
 
