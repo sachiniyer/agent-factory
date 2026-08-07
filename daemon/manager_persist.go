@@ -437,9 +437,10 @@ func ghostCleanup(data *session.InstanceData, title string) error {
 		if killErr != nil {
 			log.WarningLog.Printf("ghost session %q: tmux cleanup failed for %q: %v", title, name, killErr)
 		}
-		// MUTATION PROBE (#3078) — DO NOT MERGE: the tmux gate is removed, so an
-		// unconfirmed pane no longer stops the recursive worktree delete.
-		_ = state
+		if state != tmux.PaneStateKnown {
+			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
+				title, session.ErrPaneMayBeLive, killErr)
+		}
 	}
 	// After every ghost tmux name is closed, and only if one of them was blind:
 	// its marker evidence was vacuous, so a markerless process may still be inside
