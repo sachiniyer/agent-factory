@@ -98,7 +98,14 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		return fmt.Errorf("this session cannot open a web tab yet: %s, so it would disappear at the next daemon restart — see #3062", notRestored)
 	case TabNeedsLocalWorktreeRead:
 		if c.Workspace != WorkspaceLocalWorktree {
-			return fmt.Errorf("this session cannot open a vscode tab: its editor is served by the daemon from the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so the daemon has no worktree to open — see #3054")
+			// Names the missing EDITOR, not the missing worktree path. The path is
+			// how today's implementation happens to fail — the daemon's
+			// code-server is rooted at a daemon-host directory — but it is not
+			// what blocks this. af runs no editor inside an off-box workspace and
+			// copies only the `af` binary there, so there is nothing to reach.
+			// Routing is not the obstacle either: the ssh runtime already carries
+			// a general TCP forward. See #3054, which carries the evidence.
+			return fmt.Errorf("this session cannot open a vscode tab: af runs no editor inside an off-box workspace (docker/ssh/sandbox) — the daemon's own code-server can only serve directories on the daemon host — see #3054")
 		}
 		return nil
 	default:
