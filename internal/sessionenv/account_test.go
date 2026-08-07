@@ -179,6 +179,13 @@ func TestApplyAccount_RefusesWhileACloudModeIsActive(t *testing.T) {
 func TestApplyAccount_RefusesACommandThatSetsTheConfigVar(t *testing.T) {
 	cases := []string{
 		"CODEX_HOME=/other codex",
+		// Forms the first, denylist-shaped version walked straight past.
+		"env --unset=CODEX_HOME codex",
+		"env -uCODEX_HOME codex",
+		"env - codex",
+		// Sets the variable AND wraps a shell: the assignment is the stronger,
+		// definite answer, so this is an override rather than merely unprovable.
+		"env CODEX_HOME=/other sh -c codex",
 		"CODEX_HOME=$HOME/.codex codex",
 		"env CODEX_HOME=/other codex",
 		"env -u CODEX_HOME codex",
@@ -207,6 +214,12 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		"codex | tee /tmp/x",
 		"(CODEX_HOME=/other codex)",
 		"codex && echo done",
+		// A shell wrapper parses as an ordinary single call whose ARGUMENT is
+		// another whole program. It must be unprovable, not "provably fine".
+		"sh -c 'CODEX_HOME=/other codex'",
+		"bash -lc codex",
+		// Any binary whose behaviour is not modelled here.
+		"/usr/local/bin/wrapper codex",
 	} {
 		_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
 		require.Error(t, err, "command %q is unparseable and must not be assumed safe", command)

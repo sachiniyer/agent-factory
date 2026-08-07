@@ -1,25 +1,35 @@
 package sessionenv
 
 import (
-	"strings"
-
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/sachiniyer/agent-factory/internal/envcommand"
 )
 
-// commandOverridesName reports whether a resolved program could set, unset, or
-// otherwise redirect a variable, and whether that answer is PROVABLE.
+// commandOverridesName reports whether a resolved program could redirect a
+// variable away from the value this package injects, and whether that answer is
+// PROVABLE.
 //
 // It exists because the launch runs the program through `/bin/sh -c`, which
 // applies command-local assignments AFTER the session environment is installed.
-// So `CODEX_HOME=$HOME/.codex codex` silently wins over an injected account
-// root — and program_overrides is reachable from a repository's checked-in
-// config, which makes it a repo-controlled way to redirect whose quota a session
-// spends (#2983).
+// program_overrides is reachable from a repository's checked-in config, so
+// without this a repo could silently redirect whose quota a session spends
+// (#2983).
 //
-// The second return is the honest-unknown channel. A command this cannot parse
-// into a single simple call — a pipeline, a subshell, dynamic syntax — is not
-// evidence of safety, and the caller fails closed on it. That is the same
-// posture the surrounding package already takes for cloud-mode assignments.
+// # It proves GOOD shapes; it does not hunt bad ones
+//
+// The first version enumerated the forms that could redirect a variable and
+// treated everything else as safe. That is the wrong polarity for a boundary
+// like this, and it leaked twice in review: `env --unset=NAME`, the attached
+// `-uNAME`, and the bare `-` (which GNU env documents as implying `-i`) all
+// walked straight through, and so did `sh -c '...'` — which parses as a
+// perfectly ordinary call whose ARGUMENT is another whole program.
+//
+// A denylist here is a promise to have thought of every spelling, in a shell,
+// forever. So this recognises exactly two shapes — a direct invocation of the
+// agent, and a modelled `env` wrapper around one — and reports everything else
+// as UNPROVABLE. New syntax then arrives as a refusal to scope rather than as a
+// silent bypass, which is the direction this repo can afford to be wrong in.
 func commandOverridesName(command, name string) (overrides, provable bool) {
 	if command == "" {
 		return false, true
@@ -35,11 +45,13 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 	if depth > maxNestedProgramDepth {
 		return false, false
 	}
+	// Shell-parsed assignment prefixes: `CODEX_HOME=/other codex`.
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil && assign.Name.Value == name {
 			return true, true
 		}
 	}
+
 	words := call.Args
 	if len(words) > 0 && wordEquals(words[0], "exec") {
 		words = words[1:]
@@ -51,7 +63,7 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 		return false, true
 	}
 	// After `exec`, an assignment is a leading WORD rather than a parsed
-	// assignment — `exec CODEX_HOME=/other codex` puts it in Args, not Assigns.
+	// assignment: `exec CODEX_HOME=/other codex`.
 	for _, word := range words {
 		assigned, ok := shellWordAssignmentName(word)
 		if !ok {
@@ -61,27 +73,9 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 			return true, true
 		}
 	}
-	// `env NAME=value agent`, and its unset/clear forms. env's own arguments are
-	// assignments the shell does not expose through call.Assigns.
-	if wordBaseEquals(words[0], "env") {
-		for _, word := range words[1:] {
-			lit, ok := literalShellWord(word)
-			if !ok {
-				// A non-literal argument to env could expand to anything.
-				return false, false
-			}
-			switch {
-			case lit == "-i" || lit == "--ignore-environment":
-				// Clears the environment wholesale, which removes the injected root.
-				return true, true
-			case lit == "-u" || lit == "--unset":
-				return true, true
-			case strings.HasPrefix(lit, name+"="):
-				return true, true
-			}
-		}
-	}
-	// A nested agent-server program carries its own command.
+
+	// A nested agent-server program carries its own command, and is the one
+	// wrapper this package already models.
 	if nested, ok := literalAgentServerProgram(call); ok {
 		inner, ok := singleSimpleCall(nested)
 		if !ok {
@@ -89,5 +83,62 @@ func callOverridesName(call *syntax.CallExpr, name string, depth int) (overrides
 		}
 		return callOverridesName(inner, name, depth+1)
 	}
-	return false, true
+
+	if wordBaseEquals(words[0], "env") {
+		return envOverridesName(words[1:], name)
+	}
+
+	// Anything else is unprovable, and that includes commands that look
+	// completely ordinary. `sh -c '...'` parses as a single simple call whose
+	// argument is another entire program this cannot see into; so does any
+	// interpreter, any wrapper script, and any binary whose behaviour is not
+	// modelled here. The caller refuses rather than assuming.
+	//
+	// A DIRECT invocation of a known agent is the one provable case: it consumes
+	// its arguments itself and starts no second program construction.
+	if base, ok := literalShellWord(words[0]); ok && AgentForCommand(base) != "" {
+		return false, true
+	}
+	return false, false
+}
+
+// envOverridesName decides an `env` wrapper through envcommand.Parse, the
+// closed-set parser this repo already uses for exactly this problem, instead of
+// re-deriving GNU env's option grammar here.
+//
+// Reusing it is the point: the forms that leaked past the hand-rolled version —
+// `--unset=NAME`, `-uNAME`, a bare `-` — are ones that parser already models,
+// and a second implementation of the same grammar is a second thing to keep in
+// step. Anything Parse rejects is unprovable by definition, because Parse's own
+// contract is to refuse rather than silently model a different environment.
+func envOverridesName(args []*syntax.Word, name string) (overrides, provable bool) {
+	literals, ok := literalCommandArgs(args)
+	if !ok {
+		return false, false
+	}
+	invocation, err := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+	if err != nil {
+		return false, false
+	}
+	// `-i`, and the bare `-` that GNU documents as implying it, drop the injected
+	// root along with everything else.
+	if invocation.ClearEnvironment {
+		return true, true
+	}
+	for _, mutation := range invocation.Mutations {
+		if mutation.Name == name {
+			// Set to something else, or unset outright — either way the injected
+			// value is not what the agent will see.
+			return true, true
+		}
+	}
+	if invocation.CommandIndex < 0 || invocation.CommandIndex >= len(literals) {
+		// env with no command to run: nothing launches, so nothing is redirected.
+		return false, true
+	}
+	// env leaves the root alone, so the decision belongs to whatever it runs.
+	if AgentForCommand(literals[invocation.CommandIndex]) != "" {
+		return false, true
+	}
+	return false, false
 }
