@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -1006,40 +1007,42 @@ exit 0
 	require.NoError(t, err)
 
 	// provisionOrReap has returned, so launch_cmd itself is already gone and what
-	// follows measures only the BACKGROUNDED child. Wait for its first heartbeat
-	// on the CONDITION rather than on a fixed nap: that write is gated on a
-	// process spawn, which has no upper bound on a loaded box, and a nap long
-	// enough on an idle one turns a busy machine into a failed assertion (#2879).
-	// The ceiling here is a failure deadline, not an expectation.
-	// The ceiling is deliberately well inside the writer's own lifetime: it ticks
-	// for ~50s, and this wait plus the advance loop below can consume at most ~23s,
-	// so observing the first heartbeat late still leaves ticks to measure. A
-	// ceiling past the writer's lifetime would turn a slow start into a failure of
-	// the NEXT assertion, which is the same bug wearing a different hat.
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(hb)
-		return statErr == nil
-	}, 20*time.Second, 10*time.Millisecond, "the backgrounded child never ran")
-
-	// Then require the heartbeat to keep advancing. Asserting SUSTAINED ticking —
-	// several distinct advances at this later checkpoint, not a single early write
-	// — is deliberate: a capture-path kill lands at or just after Run() returns and
-	// freezes the mtime, so a first-advance-wins probe could observe one stale
-	// write and miss the regression. A brief scheduling stall is tolerated by the
-	// generous deadline; a killed child can never reach the required count.
-
-	const wantAdvances = 3
-	var last time.Time
-	advances := 0
-	deadline := time.Now().Add(3 * time.Second)
-	for advances < wantAdvances && time.Now().Before(deadline) {
-		if fi, statErr := os.Stat(hb); statErr == nil && fi.ModTime().After(last) {
-			last = fi.ModTime()
-			advances++
+	// follows measures only the BACKGROUNDED child.
+	//
+	// Counting TICKS, not mtime advances, and waiting on the count rather than
+	// inside a fixed window (#2879). The previous shape had two independent ways to
+	// fail on a healthy box, and neither had anything to do with the contract:
+	//
+	//   - It required three mtime ADVANCES within a fixed three seconds. mtime
+	//     granularity is a filesystem property, not a liveness property: on a
+	//     one-second-granularity filesystem three distinct advances need ~3s of
+	//     wall time all by themselves, which is the whole budget. This box reports
+	//     nanoseconds and never saw it; a macOS runner can.
+	//   - A loaded box stretches the child's `sleep 0.05` loop, so the same fixed
+	//     window buys fewer ticks exactly when the machine is busy.
+	//
+	// The child appends one "tick" per iteration, so the count is monotonic, has no
+	// granularity, and answers the actual question: did this child keep running
+	// AFTER the capture? Baselined at this instant, so ticks written before
+	// provisionOrReap returned cannot be mistaken for survival — a killed child
+	// contributes exactly zero more, no matter how slow the box is.
+	ticks := func() int {
+		data, readErr := os.ReadFile(hb)
+		if readErr != nil {
+			return 0
 		}
-		time.Sleep(20 * time.Millisecond)
+		return bytes.Count(data, []byte("tick"))
 	}
-	require.GreaterOrEqual(t, advances, wantAdvances,
+	baseline := ticks()
+
+	// The ceiling is a FAILURE deadline, not an expectation: this is normally
+	// satisfied in a few hundred milliseconds. It stays well inside the writer's own
+	// ~50s lifetime (1000 iterations x 0.05s) so a slow start cannot turn into a
+	// failure of this assertion instead.
+	const wantTicks = 3
+	require.Eventually(t, func() bool {
+		return ticks() >= baseline+wantTicks
+	}, 30*time.Second, 10*time.Millisecond,
 		"the process launch_cmd backgrounded stopped ticking — the output capture killed a child that was not ours to kill")
 }
 
