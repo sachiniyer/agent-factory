@@ -71,7 +71,7 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		// at BOTH sizes.
 		assert.Contains(t, view, "t new tab", "%dx%d: tab-create hint", tc.w, tc.h)
 		assert.Contains(t, view, "w close tab", "%dx%d: tab-close hint", tc.w, tc.h)
-		assert.Contains(t, view, "1-9 jump", "%dx%d: tab-jump hint", tc.w, tc.h)
+		assert.Contains(t, view, "1-9/g go", "%dx%d: tab-jump hint names both gestures (#3021)", tc.w, tc.h)
 		assert.Contains(t, view, "q quit", "%dx%d: quit hint must survive narrow widths", tc.w, tc.h)
 		assert.Contains(t, view, "? help", "%dx%d: help hint must survive narrow widths", tc.w, tc.h)
 	}
