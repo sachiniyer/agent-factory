@@ -284,15 +284,19 @@ func (p *sshProvisioner) provision() (ProvisionResult, error) {
 // known_hosts host-key callback, then connect. Host-key verification is always on
 // so a MITM cannot impersonate the remote and capture the bearer token.
 func (p *sshProvisioner) dial() error {
+	// Resolve the address FIRST. It is a pure, side-effect-free configuration
+	// check, so letting authMethods or hostKeyCallback fail ahead of it would
+	// report a local key-file problem for what is actually a bad address — and
+	// would diagnose the same input differently from the hook path (#3044).
+	host, port, err := p.hostPort()
+	if err != nil {
+		return err
+	}
 	auth, err := p.authMethods()
 	if err != nil {
 		return err
 	}
 	hostKey, err := p.hostKeyCallback()
-	if err != nil {
-		return err
-	}
-	host, port, err := p.hostPort()
 	if err != nil {
 		return err
 	}

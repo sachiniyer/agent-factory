@@ -334,7 +334,7 @@ back (see [Archive & restore](#archive-restore)).
 |-----|----------|-------------|
 | `ssh.host` | yes | The remote host (`host` or `host:port`) the session runs on. |
 | `ssh.user` | no | The SSH login user (default: the current OS user). |
-| `ssh.port` | no | The SSH port (default: 22; a port in `ssh.host` wins). |
+| `ssh.port` | no | The SSH port (default: 22). Give the port **either** here or as `host:port` in `ssh.host`, not both with different values — a conflict is rejected with an error naming both, rather than one silently winning. Identical values are fine. |
 | `ssh.identity_file` | no | Path to the private key for auth. Empty ⇒ `ssh-agent` (`SSH_AUTH_SOCK`) and the default `~/.ssh` keys are tried. `~` is expanded. |
 | `ssh.known_hosts` | no | Path to the `known_hosts` file the remote's host key is verified against (default: `~/.ssh/known_hosts`). `~` is expanded. |
 

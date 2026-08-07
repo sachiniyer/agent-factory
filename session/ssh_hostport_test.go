@@ -103,3 +103,59 @@ func atoiForTest(t *testing.T, s string) int {
 	require.NoError(t, err)
 	return n
 }
+
+// Codex 3734417507 (P1): a cleanup handle persisted BEFORE conflicts were
+// refused may embed one port and carry another. That handle is how af reaps a
+// workspace it already provisioned, so refusing there protects nothing and leaks
+// everything — the reap would fail before reaching the host on every retry, the
+// tombstone would be retained forever, and the remote process and workspace
+// would survive.
+func TestLegacyConflictingCleanupHandleCanStillReap(t *testing.T) {
+	data := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+		Config:     config.SSHConfig{Host: "10.0.0.7:2222", Port: 3333}, // written before #3044
+		SessionDir: "/remote/.af-sessions/xyz",
+		RemotePID:  "4242",
+	}}
+
+	backend, teardown, err := restoreRuntimeCleanup("legacy session", "ssh", data)
+	require.NoError(t, err, "a teardown handle must never be refused for an ambiguous address — that leaks the workspace")
+	require.NotNil(t, teardown)
+
+	sb, ok := backend.(*sshBackend)
+	require.True(t, ok)
+	host, port, err := sb.provisioner.hostPort()
+	require.NoError(t, err, "the restored provisioner must resolve cleanly, not carry the conflict forward")
+	assert.Equal(t, "10.0.0.7", host)
+	assert.Equal(t, "2222", port, "normalized with the precedence those configs were written against")
+}
+
+// Codex 3734417514: the address is a pure configuration fact, so it must be
+// diagnosed before local prerequisites — otherwise a machine that also lacks a
+// readable known_hosts reports a key-file problem for what is really a bad
+// address, and the two backends describe the same input differently.
+func TestSSHDialReportsTheAddressConflictNotALocalKeyProblem(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no keys, no known_hosts: prerequisites would fail too
+	p := &sshProvisioner{
+		cfg:                 config.SSHConfig{Host: "10.0.0.7:2222", Port: 3333},
+		hostKeyVerification: config.SSHHostKeyStrict,
+	}
+	err := p.dial()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2222", "the ADDRESS conflict must win over any local prerequisite failure")
+	assert.Contains(t, err.Error(), "3333")
+}
+
+// Codex 3734417518: a backend whose address cannot resolve must not be offered.
+func TestUnresolvableSSHAddressMakesTheBackendUnavailable(t *testing.T) {
+	for name, sshCfg := range map[string]config.SSHConfig{
+		"conflicting ports": {Host: "10.0.0.7:2222", Port: 3333},
+		"non-numeric port":  {Host: "10.0.0.7:ssh"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfgCopy := sshCfg
+			err := BackendConfigError(BackendSSH, &config.ResolvedConfig{SSH: &cfgCopy})
+			require.Error(t, err, "the picker must not offer a backend whose every create fails in the resolver")
+			assert.Contains(t, err.Error(), "backend=ssh")
+		})
+	}
+}

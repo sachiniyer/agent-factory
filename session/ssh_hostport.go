@@ -55,6 +55,28 @@ func resolveSSHHostPort(address string, port int) (string, int, error) {
 	return embeddedHost, embeddedPort, nil
 }
 
+// normalizeLegacySSHAddress resolves an address the OLD way — an embedded port
+// wins, a conflict is never an error — and returns an unambiguous host/port.
+//
+// It exists for exactly one caller: replaying a PERSISTED cleanup handle. A
+// config written before conflicts were refused may embed one port and carry
+// another, and that handle is how af reaps a workspace it already provisioned.
+// Refusing there protects nothing — there is no new session to keep off the
+// wrong port — and costs everything: the reap fails before reaching the host on
+// every retry, the tombstone is retained forever, and the remote process and
+// workspace leak. So the stored address is normalized once, at restore, and
+// everything downstream sees a config that cannot conflict.
+func normalizeLegacySSHAddress(address string, port int) (string, int) {
+	host := strings.TrimSpace(address)
+	if h, embedded, err := splitEmbeddedPort(host); err == nil && embedded != 0 {
+		return h, embedded // the precedence those configs were written against
+	}
+	if port < 0 || port > 65535 {
+		return host, 0
+	}
+	return host, port
+}
+
 // splitEmbeddedPort returns the host and port of an "address:port" value. A port
 // of 0 means the address carried none.
 //
