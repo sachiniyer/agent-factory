@@ -439,7 +439,7 @@
     },
     {
       "id": "session.watch",
-      "title": "Block until a session goes idle",
+      "title": "Block until a session goes idle, or until any session in the fleet changes state",
       "tui": {
         "status": "n/a",
         "pointer": ""
@@ -450,10 +450,10 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_watch.go:214 sessionsWatchCmd"
+        "pointer": "api/sessions_watch.go sessionsWatchCmd; api/sessions_watch_fleet.go fleetWatcher"
       },
       "verdict": "deliberate",
-      "notes": "A blocking scripting primitive for automation. Both UIs show liveness continuously, so 'block until idle' is meaningless there — you just look."
+      "notes": "A blocking scripting primitive for automation. Both UIs show liveness continuously, so 'block until idle' is meaningless there — you just look. The fleet form (#3009, no title or --all) is edge-triggered and exists for an automated driver rather than a person: it returns when any session TRANSITIONS, which is not something a UI can offer by rendering state, so it stays CLI-only for the same reason."
     },
     {
       "id": "session.whoami",
@@ -1712,7 +1712,9 @@
       "af sessions tabs reorder --help": "session.tab.reorder",
       "af sessions tabs reorder --index": "session.tab.reorder",
       "af sessions tabs reorder --name": "session.tab.reorder",
+      "af sessions watch --all": "session.watch",
       "af sessions watch --help": "meta.discovery",
+      "af sessions watch --include-current": "session.watch",
       "af sessions watch --interval": "session.watch",
       "af sessions watch --timeout": "session.watch",
       "af sessions whoami --help": "meta.discovery",

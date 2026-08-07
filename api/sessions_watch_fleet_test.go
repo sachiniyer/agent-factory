@@ -190,8 +190,9 @@ func TestFleetWatcher_KeysBySessionIdNotTitle(t *testing.T) {
 	}
 	require.Equal(t, watchStopIdle, byID["id-new"],
 		"the new session is reported on its own merits rather than inheriting the old one's phase")
-	require.Equal(t, watchStopGone, byID[""],
-		"and the session that vanished is reported as gone, not silently replaced")
+	require.Equal(t, watchStopGone, byID["id-old"],
+		"and the session that vanished is reported as gone, named by ITS id — a driver seeing only the "+
+			"shared title could not tell which of the two records disappeared")
 }
 
 func TestFleetWatcher_ReportsASessionThatDisappears(t *testing.T) {
@@ -345,4 +346,87 @@ func TestFleetWatcher_ReportsATransitionIntoArchived(t *testing.T) {
 
 	events := w.observe([]session.InstanceData{withLiveness("alpha", session.LiveArchived)})
 	require.Equal(t, map[string]watchStopReason{"alpha": watchStopArchived}, reasons(events))
+}
+
+// A `gone` event must still identify WHICH session went. In the kill-and-recreate
+// case the same poll emits a gone and an arrival under one title, so a driver that
+// only has the title cannot tell them apart.
+func TestFleetWatcher_GoneEventKeepsSessionIdentity(t *testing.T) {
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{fleetRunning("alpha")}))
+
+	events := w.observe(nil)
+	require.Len(t, events, 1)
+	require.Equal(t, watchStopGone, events[0].Reason)
+	require.Equal(t, "id-alpha", events[0].ID, "the vanished session is named by its stable id")
+	require.Equal(t, "/w/alpha", events[0].Path)
+}
+
+// Version skew: a newer daemon can send an InFlightOp this build has no name for.
+// Matching only the known ops would fall through to a liveness field that is stale
+// BECAUSE an operation is running, and report a mid-transition session as idle.
+func TestClassifyWatchStop_UnknownInFlightOpIsNotIdle(t *testing.T) {
+	d := withLiveness("s", session.LiveReady)
+	d.InFlightOp = session.InFlightOp(9999) // from a future daemon
+	reason, _ := classifyWatchStop(d)
+	require.Equal(t, watchWorking, reason,
+		"an operation this build cannot name is still an operation in flight")
+}
+
+// MarkUserKilled does not clear StartupStateUnknown, so both are legitimately true
+// during teardown. Telling a driver to "inspect it and remove it explicitly" there
+// is advice to do what is already happening.
+func TestClassifyWatchStop_KillIntentOutranksStartupUncertainty(t *testing.T) {
+	d := withLiveness("s", session.LiveReady)
+	d.StartupStateUnknown = true
+	d.UserKilled = true
+	reason, detail := classifyWatchStop(d)
+	require.Equal(t, watchStopKilled, reason)
+	require.Contains(t, detail, "teardown")
+}
+
+// A pre-#1195 record read off disk has no liveness axis, but its non-zero legacy
+// Status values are unambiguous and should be used rather than discarded.
+func TestClassifyWatchStop_LegacyStatusIsUsedWhereItIsUnambiguous(t *testing.T) {
+	legacy := func(st session.Status) session.InstanceData {
+		return session.InstanceData{ID: "x", Title: "s", Path: "/w/s", Status: st}
+	}
+	idle, _ := classifyWatchStop(legacy(session.Ready))
+	require.Equal(t, watchStopIdle, idle, "legacy Ready is unambiguous")
+
+	loading, _ := classifyWatchStop(legacy(session.Loading))
+	require.Equal(t, watchWorking, loading)
+
+	// Running is the ZERO value, so it cannot be told from a record that never had
+	// a status set — the one legacy value that must stay unknown.
+	ambiguous, _ := classifyWatchStop(legacy(session.Running))
+	require.Equal(t, watchStopUnknown, ambiguous,
+		"Running is Status's zero value and carries no information")
+}
+
+// --interval and --timeout are validated independently, so an interval longer than
+// the timeout is accepted. An unconditional sleep would make the advertised bound a
+// fiction: poll once, block for the interval, then report the short timeout.
+func TestWatchFleet_NeverSleepsPastTheDeadline(t *testing.T) {
+	clock := time.Unix(0, 0)
+	var slept []time.Duration
+	deps := fleetWatchDeps{
+		list:     func() ([]session.InstanceData, error) { return []session.InstanceData{fleetRunning("alpha")}, nil },
+		interval: time.Hour,
+		timeout:  5 * time.Second,
+		now:      func() time.Time { return clock },
+		sleep:    func(d time.Duration) { slept = append(slept, d); clock = clock.Add(d) },
+	}
+	_, err := watchFleet(deps, false)
+	require.ErrorContains(t, err, "timed out")
+	require.Equal(t, []time.Duration{5 * time.Second}, slept,
+		"the wait is clamped to the remaining timeout, not the full hour")
+}
+
+func TestDescribeWatchEvent_QualifiesOnlyWhenTitlesCanCollide(t *testing.T) {
+	e := watchEvent{Title: "worker", Path: "/w/proj-a/worker", Reason: watchStopIdle, Detail: "d"}
+	require.Equal(t, "worker\tidle\td", describeWatchEvent(e, false),
+		"a single-project fleet has unique titles and stays short")
+	require.Equal(t, "worker\t/w/proj-a/worker\tidle\td", describeWatchEvent(e, true),
+		"an all-project fleet can hold two 'worker's, so the path says which")
 }

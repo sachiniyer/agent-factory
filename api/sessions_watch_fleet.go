@@ -99,22 +99,29 @@ type watchEvent struct {
 // a record is not trustworthy — a failed create can carry a stale OpCreating, and
 // a committed kill can carry whatever the row held when the kill landed.
 func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
-	// Asked first: a record whose startup could not be confirmed has a liveness
-	// value that describes nothing. Reading it would produce exactly the
-	// fabricated-idle this command must not emit.
+	// Kill intent outranks startup uncertainty. MarkUserKilled writes the durable
+	// tombstone WITHOUT clearing StartupStateUnknown, so both are legitimately true
+	// while teardown runs — and the useful thing to tell a driver there is "this is
+	// killed", not "inspect it and remove it explicitly", which is advice to do what
+	// is already happening.
+	if d.UserKilled {
+		return watchStopKilled, "killed; its teardown may still be running"
+	}
+	// A record whose startup could not be confirmed has a liveness value that
+	// describes nothing, so it is asked before the liveness axis. Reading it would
+	// produce exactly the fabricated-idle this command must not emit.
 	if d.StartupStateUnknown {
 		return watchStopUnknown,
 			"af could not confirm which runtime owns this workspace; inspect it and remove it explicitly before retrying"
 	}
-	if d.UserKilled {
-		return watchStopKilled, "killed; its teardown may still be running"
-	}
-	// Mid-flight operations are not stops. A create/kill/archive/restore/handoff/
-	// respawn in progress is a session in motion, and reporting it would wake a
-	// driver for a state that is about to change on its own.
-	switch d.InFlightOp {
-	case session.OpCreating, session.OpKilling, session.OpArchiving,
-		session.OpRestoring, session.OpReplacing, session.OpRespawning:
+	// ANY operation in flight means the session is in motion, including one this
+	// binary does not recognise. That last part is the point: a newer daemon can
+	// send an InFlightOp value this build has no name for, JSON decoding accepts it
+	// happily, and matching only the known ops would fall through to a liveness
+	// field that is stale precisely because an operation is running — reporting
+	// `idle` for a session mid-transition, which is the fail-closed guarantee
+	// inverted. Anything non-zero is therefore in motion, known or not.
+	if d.InFlightOp != session.OpNone {
 		return watchWorking, ""
 	}
 	if d.PendingHandoffMission != "" {
@@ -136,16 +143,25 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 		return watchStopArchived, "archived and inert; restore it before sending work"
 	}
 
-	// LivenessUnset, or a value this binary does not know.
+	// LivenessUnset: a pre-#1195 record read off disk when no daemon is reachable,
+	// or one from an older daemon. Its real state is on the legacy Status axis, and
+	// the NON-ZERO values there are unambiguous — Ready, Loading and Deleting each
+	// mean one thing and cannot have been left unset.
 	//
-	// The single-title path falls back to the legacy Status axis here. This one
-	// deliberately does not, and the reason is sharper than "be conservative":
-	// `Running` is Status's ZERO VALUE (session/instance.go: `Running Status =
-	// iota`), so a record that never had a status set is indistinguishable from one
-	// explicitly marked running. Reading it would not be a legacy fallback, it would
-	// be inventing an answer out of an unset field — the exact shape this reason
-	// exists to refuse. An empty record is something af cannot classify, and that is
-	// what it says.
+	// `Running` is the exception, and it is why this does not simply defer to the
+	// legacy axis wholesale: it is Status's ZERO VALUE (session/instance.go:
+	// `Running Status = iota`), so a record that never had a status set is
+	// byte-identical to one explicitly marked running. Reading that as "working"
+	// would not be a legacy fallback, it would be inventing an answer out of an
+	// unset field — the exact shape this reason exists to refuse.
+	switch d.Status {
+	case session.Ready:
+		return watchStopIdle, "the agent stopped and is awaiting input (from this record's legacy status)"
+	case session.Loading:
+		return watchWorking, ""
+	case session.Deleting:
+		return watchStopKilled, "being deleted (from this record's legacy status)"
+	}
 	return watchStopUnknown, "af cannot determine this session's state from its record"
 }
 
@@ -174,9 +190,12 @@ func watchKeyOf(d session.InstanceData) string {
 // will not be tested for all of them.
 type fleetWatcher struct {
 	phase map[string]watchStopReason
-	// titles remembers the last title seen for a key, so a session that vanishes
-	// can still be named in its event.
-	titles map[string]string
+	// identity remembers the last identifying fields seen for a key, so a session
+	// that vanishes can still be NAMED in its event. Title alone is not enough: in
+	// the kill-and-recreate case the poll emits a `gone` and an arrival under the
+	// same title, and without the id a driver cannot tell which of the two records
+	// disappeared.
+	identity map[string]watchEvent
 	// primed is false until the first snapshot has been absorbed. It is what makes
 	// this edge-triggered rather than level-triggered.
 	primed bool
@@ -188,7 +207,7 @@ type fleetWatcher struct {
 func newFleetWatcher(includeCurrent bool) *fleetWatcher {
 	return &fleetWatcher{
 		phase:          map[string]watchStopReason{},
-		titles:         map[string]string{},
+		identity:       map[string]watchEvent{},
 		includeCurrent: includeCurrent,
 	}
 }
@@ -209,7 +228,7 @@ func (w *fleetWatcher) observe(snapshot []session.InstanceData) []watchEvent {
 		reason, detail := classifyWatchStop(data)
 		previous, known := w.phase[key]
 		w.phase[key] = reason
-		w.titles[key] = data.Title
+		w.identity[key] = watchEvent{Title: data.Title, ID: data.ID, Path: data.Path}
 
 		switch {
 		case !known && !w.primed:
@@ -252,14 +271,13 @@ func (w *fleetWatcher) observe(snapshot []session.InstanceData) []watchEvent {
 				continue
 			}
 			if previous != watchStopGone {
-				events = append(events, watchEvent{
-					Title:  w.titles[key],
-					Reason: watchStopGone,
-					Detail: "the session's record disappeared while watching (killed or removed)",
-				})
+				gone := w.identity[key]
+				gone.Reason = watchStopGone
+				gone.Detail = "the session's record disappeared while watching (killed or removed)"
+				events = append(events, gone)
 			}
 			delete(w.phase, key)
-			delete(w.titles, key)
+			delete(w.identity, key)
 		}
 	}
 
@@ -280,12 +298,24 @@ func newWatchEvent(d session.InstanceData, reason watchStopReason, detail string
 	}
 }
 
-// describeWatchEvent renders one event as a human line.
-func describeWatchEvent(e watchEvent) string {
-	if e.Detail == "" {
-		return fmt.Sprintf("%s\t%s", e.Title, e.Reason)
+// describeWatchEvent renders one event as a tab-separated human line.
+//
+// qualify appends the worktree path. Session titles are unique within a PROJECT,
+// not globally, so an unscoped fleet — run outside a repository, or against a
+// remote without --repo — can hold two sessions called `worker`, and both would
+// render as the same line with no way to tell which one changed. The path is
+// added exactly when the scope permits that collision rather than always, so the
+// common single-project output stays short. --json always carries id and path.
+func describeWatchEvent(e watchEvent, qualify bool) string {
+	line := e.Title
+	if qualify && e.Path != "" {
+		line += "\t" + e.Path
 	}
-	return fmt.Sprintf("%s\t%s\t%s", e.Title, e.Reason, e.Detail)
+	line += "\t" + string(e.Reason)
+	if e.Detail != "" {
+		line += "\t" + e.Detail
+	}
+	return line
 }
 
 // fleetWatchDeps are the injectable dependencies of the fleet loop, so its
@@ -321,7 +351,17 @@ func watchFleet(d fleetWatchDeps, includeCurrent bool) ([]watchEvent, error) {
 			return nil, fmt.Errorf("timed out after %s waiting for any session to change state (%d watched)",
 				d.timeout, len(snapshot))
 		}
-		d.sleep(d.interval)
+		// Never sleep past the deadline. --interval and --timeout are validated
+		// independently, so `--timeout 5s --interval 1h` is accepted — and an
+		// unconditional sleep would poll once, block for an hour, and then report a
+		// five-second timeout, making the advertised bound a fiction.
+		wait := d.interval
+		if d.timeout > 0 {
+			if remaining := start.Add(d.timeout).Sub(d.now()); remaining < wait {
+				wait = remaining
+			}
+		}
+		d.sleep(wait)
 	}
 }
 
@@ -354,8 +394,11 @@ func runFleetWatch() error {
 	if envelopeOutput {
 		return jsonOut(map[string]any{"events": events})
 	}
+	// An empty repoID means every project is in scope, which is exactly when titles
+	// can collide.
+	qualify := repoID == ""
 	for _, event := range events {
-		fmt.Println(describeWatchEvent(event))
+		fmt.Println(describeWatchEvent(event, qualify))
 	}
 	return nil
 }
