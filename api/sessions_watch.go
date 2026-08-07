@@ -188,8 +188,8 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, erro
 }
 
 var sessionsWatchCmd = &cobra.Command{
-	Use:   "watch <title>",
-	Short: "Block until a session goes idle (ready for review)",
+	Use:   "watch [title]",
+	Short: "Block until a session goes idle, or until any session in the fleet changes state",
 	Long: `Watch a session and return when its agent finishes working: exit 0 the moment
 the session goes IDLE (the agent stopped working and is awaiting input), so an
 operator or root agent can dispatch a session and be notified on completion
@@ -203,17 +203,41 @@ usage-limit block that auto-resumes, or a create/archive/restore in progress all
 keep the watch waiting.
 
 By default prints a concise line on transition; with --json emits the final
-session record. Honors --repo to scope the title lookup to one repository.`,
-	Args: cobra.ExactArgs(1),
+session record. Honors --repo to scope the title lookup to one repository.
+
+With NO title (or --all) it watches every session in scope and returns when the
+first one CHANGES STATE, printing which and why. That form is edge-triggered: the
+first poll establishes a baseline and reports nothing, so a session that was
+already idle before you called does not fire. Pass --include-current to report
+those too, for a driver that wants a starting snapshot; that snapshot omits
+archived sessions, which are inert by construction and cannot change on their own
+(a session archived WHILE you watch is still reported).
+
+Each reported session carries a reason a driver can act on: idle, usage-limited
+(af resumes it automatically — do not prompt it), lost, dead, archived, killed,
+gone, or unknown. "idle" covers both "finished its work" and "waiting on input":
+af records both as the same state and does not distinguish them, so neither does
+this. A session af cannot classify reports "unknown" and is never reported as
+idle, because an idle report tells a driver to act.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		title := args[0]
-
 		if err := validateWatchFlags(watchIntervalFlag, watchTimeoutFlag); err != nil {
 			return jsonError(err)
 		}
+		if len(args) == 0 || watchAllFlag {
+			if len(args) == 1 && watchAllFlag {
+				return jsonError(fmt.Errorf("--all watches every session, so it cannot be combined with the title %q", args[0]))
+			}
+			return runFleetWatch()
+		}
+		if watchIncludeCurrentFlag {
+			return jsonError(fmt.Errorf("--include-current applies to the fleet form; a single-title watch already reports the session's current state"))
+		}
+
+		title := args[0]
 
 		// Snapshot-based read (getSessionByTitleInScope -> snapshotRead): it
 		// follows --daemon-url to the remote, so the client's cwd must not scope it.
