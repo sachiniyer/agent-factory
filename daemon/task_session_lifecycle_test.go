@@ -360,6 +360,13 @@ func TestTaskSessionLifecycle_WaitsForPostWorktreeHooks(t *testing.T) {
 	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
 	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
 
+	// Put the session in the state every production caller guarantees before it
+	// reaches the teardown: applyTaskSessionLifecycleOnRunEnd only spawns the
+	// goroutine when runEndedIntoIdle is true. The teardown re-checks that after
+	// the hook wait, so a test that drives it directly has to establish the same
+	// precondition or it is asserting against a run that never finished.
+	endRunOnIdleEdge(t, inst)
+
 	hooks := make(chan struct{})
 	reaped := make(chan struct{})
 	prev := killSessionForLifecycle
@@ -369,7 +376,7 @@ func TestTaskSessionLifecycle_WaitsForPostWorktreeHooks(t *testing.T) {
 	}
 	t.Cleanup(func() { killSessionForLifecycle = prev })
 
-	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, hooks)
+	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, inst.StateEpoch(), inst.PromptDeliveries(), hooks)
 
 	select {
 	case <-reaped:
@@ -435,4 +442,36 @@ func TestTaskSessionLifecycle_ParkedIntentIsReclaimedOnTitleReuse(t *testing.T) 
 	_, stillParked := manager.deferredTaskLifecycle[key]
 	manager.mu.Unlock()
 	assert.False(t, stillParked, "a replacement session must not inherit the original's owed teardown")
+}
+
+// The guard the hook wait needed: a user who prompts the finished session while
+// post_worktree_commands are still running has adopted that work, and the verb
+// owed to the completed run must not land on it. Drives the real teardown rather
+// than the helper, so it proves the wait and the re-check are wired together.
+func TestTaskSessionLifecycle_HookWaitAbandonsAnAdoptedSession(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	endRunOnIdleEdge(t, inst)
+
+	hooks := make(chan struct{})
+	reaped := make(chan struct{})
+	prev := killSessionForLifecycle
+	killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
+		close(reaped)
+		return nil
+	}
+	t.Cleanup(func() { killSessionForLifecycle = prev })
+
+	go manager.runTaskSessionLifecycle(repoID, inst.ID, "nightly", "task-kill", task.OnCompleteKill, inst.StateEpoch(), inst.PromptDeliveries(), hooks)
+
+	// The user picks the work back up while the hooks are still running.
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
+	close(hooks)
+
+	select {
+	case <-reaped:
+		t.Fatal("on_complete destroyed work the user adopted during the post-worktree hook wait")
+	case <-time.After(2 * time.Second):
+	}
 }
