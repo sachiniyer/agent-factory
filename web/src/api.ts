@@ -393,6 +393,29 @@ export async function createSession(input: CreateSessionInput, token: string): P
 // id-keyed read/stream paths (#1592 Phase 5 PR5). The title is still sent so the
 // daemon's lifecycle event and any title-only fallback stay correct.
 
+/** Takes the daemon's status-poll pause lease for a session, and renews it by
+ *  being called again — the same lease an attached TUI holds
+ *  (app/home_attach.go runStatusPollPauseHeartbeat).
+ *
+ *  The web takes it while the user has a partially typed line (#3024), because
+ *  `deferWhileAttached` (daemon/delivery.go) holds automated deliveries for
+ *  exactly the sessions whose lease is held. Sharing the lease is what shares the
+ *  rule: the hold policy, the "not dropped, re-queued" handling and the bound all
+ *  stay in the daemon, with no second copy here to drift from it.
+ *
+ *  There is deliberately no duration parameter — the daemon applies its own fixed
+ *  statusPollLease so a misbehaving client cannot silence a session indefinitely.
+ *
+ *  Addressed by id alone: the lease is keyed by stable identity so a same-title
+ *  successor never inherits an old attach's lease (#2358), and the title/repo
+ *  fields are the legacy fallback for id-less rows the web never has.
+ *
+ *  Best-effort by contract, like the TUI's: callers ignore failures, and a lapsed
+ *  lease means deliveries land as they did before #3024. */
+export async function pauseStatusPoll(id: string, token: string): Promise<void> {
+  await af("PauseStatusPoll", { id, title: "", repo_id: "" }, token);
+}
+
 /** Kills a session (mirrors `af sessions kill`). The session.killed event removes
  *  its row from the rail live. */
 export async function killSession(id: string, title: string, token: string): Promise<void> {

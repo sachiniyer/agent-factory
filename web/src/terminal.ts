@@ -41,6 +41,7 @@ import { type IMarker, type ITheme, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { handleClipboardKeydown, handleTerminalCopy } from "./clipboard.js";
 import { decode, encode, inputFrame, Op, resizeFrame } from "./frame.js";
+import { MidLineHold, type HoldAction } from "./delivery_hold.js";
 import { PendingInput } from "./pending_input.js";
 import {
   hasVisibleTerminalGeometry,
@@ -81,6 +82,27 @@ export interface TerminalCallbacks {
    *  focus/blur), so index.ts can keep its nav-vs-terminal mode (#1693) in sync
    *  with real DOM focus — e.g. a mouse click straight into the terminal. */
   onFocusChange(focused: boolean): void;
+  /** Fired when the user's mid-line state changes what should happen to the
+   *  daemon's pause lease (#3024). The terminal knows whether a line is partially
+   *  typed; only its owner knows which session to address, so the RPC lives there.
+   *  Optional: a pane with no session identity (the config assistant) simply omits
+   *  it and no lease is taken. */
+  onDeliveryHold?(action: HoldAction): void;
+}
+
+/** Monotonic milliseconds for the delivery-hold deadlines (#3024).
+ *
+ *  performance.now() rather than Date.now() because these are DURATIONS, and a
+ *  wall clock can move. A backward correction while the user composes makes the
+ *  next timestamp earlier than the last renew, so the renew stops firing and the
+ *  daemon's three-second lease lapses over a live draft; a large forward jump makes
+ *  tick() read a just-touched draft as idle and drop the hold. Neither is exotic on
+ *  a VM whose host corrects its clock. performance.now() is monotonic and immune to
+ *  both. Falls back to Date.now() only where performance is absent, which no
+ *  supported browser is — the fallback exists so a non-browser test context cannot
+ *  crash on it. */
+function holdClockMs(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
 
 const BACKOFF_BASE_MS = 500;
@@ -129,6 +151,10 @@ export class AttachTerminal {
   // Type-ahead: what was typed while the socket was down, replayed on open
   // (#2811). Held here rather than dropped in send().
   private readonly pendingInput = new PendingInput();
+  /** Mid-line tracking for the delivery hold (#3024). See delivery_hold.ts — the
+   *  hold POLICY is the daemon's; this only reports whether a line is in progress. */
+  private readonly midLine = new MidLineHold();
+  private midLineTimer: number | null = null;
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
 
@@ -653,6 +679,8 @@ export class AttachTerminal {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose(): void {
     this.stopped = true;
+    // Hand the lease back before this pane stops existing (#3024).
+    this.releaseMidLine();
     this.pendingInput.clear();
     if (this.mouseCaptureHintTimer !== null) {
       window.clearTimeout(this.mouseCaptureHintTimer);
@@ -1184,6 +1212,9 @@ export class AttachTerminal {
       // Whatever is still held was typed at a PTY that has now exited; delivering
       // it to anything later would type into a program the user never saw.
       this.pendingInput.clear();
+      // …and the draft it was protecting died with it, so stop renewing the lease
+      // rather than suppressing the poll to the idle bound over a PTY that is gone.
+      this.releaseMidLine();
       const code = typeof msg.code === "number" ? msg.code : 0;
       this.term.write(`\r\n\x1b[38;5;244m[agent exited (code ${code})]\x1b[0m\r\n`);
       this.cb.onStatus("exited");
@@ -1433,6 +1464,9 @@ export class AttachTerminal {
   private sendInput(text: string): void {
     const frame = encode(inputFrame(this.enc.encode(text)));
     if (this.send(frame)) {
+      // Noted only once the bytes are actually on the wire. A commit that never
+      // reached the PTY must not end the hold: see the queued path below.
+      this.noteMidLine(text);
       return;
     }
     if (this.stopped || this.exited) {
@@ -1441,11 +1475,25 @@ export class AttachTerminal {
       // program the user never typed at.
       return;
     }
+    // Queued rather than delivered, which changes what this input MEANS. The PTY
+    // still holds whatever was typed before the stream dropped, and this chunk —
+    // Enter included — has not reached it. Processing a commit here would end the
+    // hold over a line that is still sitting in the PTY: the lease would lapse
+    // three seconds later, an automated delivery would append to that partial
+    // line, and the queued Enter would submit the splice on reconnect. So the
+    // hold is extended and the commit is deliberately not read.
     if (!this.pendingInput.push(frame)) {
       // Refused by the cap — a socket that is not coming back. Say so rather than
       // losing it quietly a second time, which is the whole defect this fixes.
+      //
+      // Recorded ONLY on a successful enqueue: a rejected frame never reaches the
+      // PTY, so noting its commit would let the later flush end the hold over the
+      // partial text that WAS accepted, and an automated delivery could append to
+      // and submit it.
       this.flashNotice("Terminal disconnected — typing was not delivered");
+      return;
     }
+    this.noteQueuedInput(text);
   }
 
   /** Hands the PTY everything typed while the socket was down, in order, then
@@ -1454,6 +1502,7 @@ export class AttachTerminal {
    *  socket that dies mid-flush loses nothing. */
   private flushPendingInput(): void {
     const frames = this.pendingInput.drain();
+    const hadQueued = frames.length > 0;
     for (let i = 0; i < frames.length; i++) {
       if (this.send(frames[i])) {
         continue;
@@ -1467,6 +1516,80 @@ export class AttachTerminal {
       }
       return;
     }
+    // Everything the queue was holding is now on the wire, so a commit that was
+    // waiting in it has finally reached the PTY (#3025 review). Applying it here
+    // rather than when it was typed is the whole point: until this moment the line
+    // was still sitting unsubmitted in the PTY and the hold was protecting it.
+    if (hadQueued) {
+      this.midLine.noteFlushed(holdClockMs());
+      this.dispatchHold("none");
+    }
+  }
+
+  /** Feeds one chunk of USER input to the mid-line tracker and acts on its verdict.
+   *
+   *  Only real user input reaches here: sendInput is the single path shared by
+   *  typed keys and the Ctrl+C interrupt, and the held type-ahead flush goes
+   *  straight out through send() rather than back through this. Feeding it the
+   *  flush would be wrong twice over — it would re-note input already noted, and
+   *  it would take a lease on the daemon in response to our own replay. */
+  private noteMidLine(text: string): void {
+    if (!this.cb.onDeliveryHold) {
+      return; // this pane's owner takes no lease; do not even track
+    }
+    this.dispatchHold(this.midLine.noteInput(text, holdClockMs()));
+  }
+
+  /** Extends the hold for input that was QUEUED rather than delivered, without
+   *  reading a commit out of it. What is uncommitted is a property of the PTY, and
+   *  bytes that never arrived cannot have committed anything there. */
+  private noteQueuedInput(text: string): void {
+    if (!this.cb.onDeliveryHold) {
+      return;
+    }
+    this.dispatchHold(this.midLine.noteQueued(text, holdClockMs()));
+  }
+
+
+  /** Applies a hold verdict: keeps the renew timer running while a line is
+   *  uncommitted, and hands each pause to the owner that knows which session to
+   *  address.
+   *
+   *  There is no release verb. The lease is a single per-session expiry with no
+   *  owner (daemon/manager_status.go), so resuming from here would revoke an
+   *  attached TUI's claim, or another window's, and re-open the window #1638
+   *  closed. Ceasing to renew costs at most one lease of extra hold and cannot
+   *  revoke anyone else's protection — see delivery_hold.ts. */
+  private dispatchHold(action: HoldAction): void {
+    if (!this.midLine.holding) {
+      this.stopMidLineTimer();
+    } else if (this.midLineTimer === null) {
+      // A renew cadence, not a hold duration: the bound on how long a delivery can
+      // be held belongs to the daemon's lease and to MidLineHold's idle release,
+      // never to this timer. It exists so a slowly-composed line stays protected
+      // between keystrokes.
+      this.midLineTimer = window.setInterval(() => {
+        this.dispatchHold(this.midLine.tick(holdClockMs()));
+      }, 500);
+    }
+    if (action === "pause") {
+      this.cb.onDeliveryHold?.(action);
+    }
+  }
+
+  private stopMidLineTimer(): void {
+    if (this.midLineTimer !== null) {
+      window.clearInterval(this.midLineTimer);
+      this.midLineTimer = null;
+    }
+  }
+
+  /** Drops this terminal's hold for a teardown that makes the question moot.
+   *  Deliberately sends nothing: the lease is left to expire rather than cleared,
+   *  because this browser may not be its only holder. */
+  private releaseMidLine(): void {
+    this.stopMidLineTimer();
+    this.midLine.release();
   }
 
   /** Copies text to the system clipboard, never silently. localhost is a secure

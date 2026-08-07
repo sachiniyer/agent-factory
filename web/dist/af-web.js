@@ -6281,6 +6281,9 @@ async function createSession(input, token2) {
   const resp = await af("CreateSession", body, token2);
   return resp.instance;
 }
+async function pauseStatusPoll(id, token2) {
+  await af("PauseStatusPoll", { id, title: "", repo_id: "" }, token2);
+}
 async function killSession(id, title, token2) {
   await af("KillSession", { id, title, repo_id: "" }, token2);
 }
@@ -6944,6 +6947,198 @@ function decode(raw) {
   }
 }
 
+// src/delivery_hold.ts
+var COMMIT = "\r";
+var ABANDON = "";
+var ESC = "\x1B";
+function isTerminalReport(data) {
+  if (data.startsWith("\x1B]")) {
+    return true;
+  }
+  if (!data.startsWith("\x1B[")) {
+    return false;
+  }
+  const body = data.slice(2);
+  if (body === "I" || body === "O") {
+    return true;
+  }
+  if (body.startsWith("M") || body.startsWith("<")) {
+    return true;
+  }
+  if (body.startsWith("?")) {
+    return true;
+  }
+  return /^\d+(;\d+)*R$/.test(body);
+}
+var COMPOSER_NEWLINE = "\n";
+var PASTE_START = "\x1B[200~";
+var PASTE_END = "\x1B[201~";
+function startsADraft(data) {
+  return hasPrintable(data) || data.includes(COMPOSER_NEWLINE);
+}
+function hasPrintable(data) {
+  for (const ch of data) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code >= 32 && code !== 127) {
+      return true;
+    }
+  }
+  return false;
+}
+var MidLineHold = class {
+  /**
+   * @param renewIntervalMs how often to re-send the pause while the line stays
+   *   uncommitted. Must be comfortably below the daemon's statusPollLease; the TUI
+   *   uses 1s against a 3s lease "leaving two missed renews of slack" and this
+   *   matches deliberately. Getting it wrong is not a correctness bug on either
+   *   side — a lapsed lease just delivers, as today.
+   * @param idleReleaseMs how long a line may sit untouched before the hold ends
+   *   anyway. This is the answer to "do not hold indefinitely": a user who walks
+   *   away mid-line stops being renewed for, and the queued delivery lands within
+   *   this plus one daemon lease. Stated rather than implicit.
+   */
+  constructor(renewIntervalMs = 1e3, idleReleaseMs = 15e3) {
+    this.renewIntervalMs = renewIntervalMs;
+    this.idleReleaseMs = idleReleaseMs;
+  }
+  uncommitted = false;
+  lastInputMs = 0;
+  lastPauseMs = 0;
+  queuedEndsLine = false;
+  /** True while the user is considered to have a partially typed line. */
+  get holding() {
+    return this.uncommitted;
+  }
+  /**
+   * Records one chunk of terminal input and returns whether to pause.
+   *
+   * Input arrives from xterm as arbitrary chunks, not keystrokes: a paste is ONE
+   * chunk that may contain newlines in the middle. Such a chunk both commits the
+   * text before the last newline and leaves a partial line after it, so the answer
+   * is decided by what FOLLOWS the last commit byte, not by whether one appears
+   * anywhere. Reading it as "contains Enter → committed" would drop the hold while
+   * the user is mid-line again.
+   */
+  noteInput(data, nowMs) {
+    if (data === "") {
+      return "none";
+    }
+    if (data.startsWith(PASTE_START)) {
+      const payload = data.slice(PASTE_START.length).replace(PASTE_END, "");
+      if (payload === "") {
+        return "none";
+      }
+      this.lastInputMs = nowMs;
+      return this.beginOrRenew(nowMs);
+    }
+    if (data.startsWith(ESC)) {
+      if (isTerminalReport(data)) {
+        return "none";
+      }
+      this.lastInputMs = nowMs;
+      return this.beginOrRenew(nowMs);
+    }
+    this.lastInputMs = nowMs;
+    const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
+    if (lastCommit >= 0) {
+      const tail = data.slice(lastCommit + 1);
+      if (!startsADraft(tail)) {
+        this.uncommitted = false;
+        return "none";
+      }
+      return this.beginOrRenew(nowMs);
+    }
+    if (!this.uncommitted && !startsADraft(data)) {
+      return "none";
+    }
+    return this.beginOrRenew(nowMs);
+  }
+  /**
+   * Called on a timer while holding. Re-pauses to extend the lease, or lets the
+   * hold end once the line has sat untouched for idleReleaseMs.
+   *
+   * The renew exists because a user composing slowly can pause longer than the
+   * daemon's lease between keystrokes; without it their line would stop being
+   * protected mid-thought, which is the defect this fixes.
+   */
+  tick(nowMs) {
+    if (!this.uncommitted) {
+      return "none";
+    }
+    if (nowMs - this.lastInputMs >= this.idleReleaseMs) {
+      this.uncommitted = false;
+      return "none";
+    }
+    if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
+      this.lastPauseMs = nowMs;
+      return "pause";
+    }
+    return "none";
+  }
+  /**
+   * Records input that was QUEUED for a dropped stream rather than delivered.
+   *
+   * It starts or extends a hold and never reads a commit, because a commit is only
+   * a commit once the PTY has seen it. Enter typed against a dead socket leaves the
+   * partial line sitting in the PTY exactly as it was; treating it as committed
+   * would release the hold over a line that is still there, and the queued Enter
+   * would later submit whatever an automated delivery had appended to it.
+   */
+  noteQueued(data, nowMs) {
+    if (data.startsWith(ESC) && !data.startsWith(PASTE_START) && isTerminalReport(data)) {
+      return "none";
+    }
+    this.lastInputMs = nowMs;
+    if (!data.startsWith(ESC) || data.startsWith(PASTE_START)) {
+      const payload = data.startsWith(PASTE_START) ? "" : data;
+      const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
+      this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    }
+    return this.beginOrRenew(nowMs);
+  }
+  /**
+   * Applies the commit that queued input was carrying, once the flush has actually
+   * put it on the wire.
+   *
+   * Without this the hold outlives the draft: Enter typed against a dropped stream
+   * is deliberately not read as a commit (see noteQueued), so after the reconnect
+   * flushes it the PTY has submitted the line while the browser is still renewing
+   * the lease — up to the idle bound plus one daemon lease. Nothing is corrupted by
+   * that, but an automated cron delivery is deferred to its next tick for no reason,
+   * and "held longer than necessary" is still a cost worth not paying.
+   */
+  noteFlushed(nowMs) {
+    this.lastInputMs = nowMs;
+    if (this.queuedEndsLine) {
+      this.uncommitted = false;
+      this.queuedEndsLine = false;
+    }
+  }
+  /** Drops the hold for a teardown that makes the question moot — the pane
+   *  closing, the session changing. Nothing is sent to the daemon: the lease is
+   *  left to expire, because clearing it here would revoke a claim this browser
+   *  may not be the only holder of. */
+  release() {
+    this.uncommitted = false;
+  }
+  beginOrRenew(nowMs) {
+    if (!this.uncommitted) {
+      this.uncommitted = true;
+      this.lastPauseMs = nowMs;
+      return "pause";
+    }
+    return this.renew(nowMs);
+  }
+  /** Extends an EXISTING hold without creating one. */
+  renew(nowMs) {
+    if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
+      this.lastPauseMs = nowMs;
+      return "pause";
+    }
+    return "none";
+  }
+};
+
 // src/pending_input.ts
 var DEFAULT_MAX_PENDING_INPUT_BYTES = 64 * 1024;
 var PendingInput = class {
@@ -7240,6 +7435,9 @@ function currentXtermTheme() {
 }
 
 // src/terminal.ts
+function holdClockMs() {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
@@ -7342,6 +7540,10 @@ var AttachTerminal = class {
   // Type-ahead: what was typed while the socket was down, replayed on open
   // (#2811). Held here rather than dropped in send().
   pendingInput = new PendingInput();
+  /** Mid-line tracking for the delivery hold (#3024). See delivery_hold.ts — the
+   *  hold POLICY is the daemon's; this only reports whether a line is in progress. */
+  midLine = new MidLineHold();
+  midLineTimer = null;
   ro;
   io;
   ws = null;
@@ -7645,6 +7847,7 @@ var AttachTerminal = class {
    *  disconnects the observer, and disposes xterm (freeing its DOM/renderer). */
   dispose() {
     this.stopped = true;
+    this.releaseMidLine();
     this.pendingInput.clear();
     if (this.mouseCaptureHintTimer !== null) {
       window.clearTimeout(this.mouseCaptureHintTimer);
@@ -8052,6 +8255,7 @@ var AttachTerminal = class {
     } else if (msg.type === "exit") {
       this.exited = true;
       this.pendingInput.clear();
+      this.releaseMidLine();
       const code = typeof msg.code === "number" ? msg.code : 0;
       this.term.write(`\r
 \x1B[38;5;244m[agent exited (code ${code})]\x1B[0m\r
@@ -8275,6 +8479,7 @@ var AttachTerminal = class {
   sendInput(text) {
     const frame = encode(inputFrame(this.enc.encode(text)));
     if (this.send(frame)) {
+      this.noteMidLine(text);
       return;
     }
     if (this.stopped || this.exited) {
@@ -8282,7 +8487,9 @@ var AttachTerminal = class {
     }
     if (!this.pendingInput.push(frame)) {
       this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
+      return;
     }
+    this.noteQueuedInput(text);
   }
   /** Hands the PTY everything typed while the socket was down, in order, then
    *  empties the queue. Called from onopen, so it covers the first connect and
@@ -8290,6 +8497,7 @@ var AttachTerminal = class {
    *  socket that dies mid-flush loses nothing. */
   flushPendingInput() {
     const frames = this.pendingInput.drain();
+    const hadQueued = frames.length > 0;
     for (let i = 0; i < frames.length; i++) {
       if (this.send(frames[i])) {
         continue;
@@ -8299,6 +8507,66 @@ var AttachTerminal = class {
       }
       return;
     }
+    if (hadQueued) {
+      this.midLine.noteFlushed(holdClockMs());
+      this.dispatchHold("none");
+    }
+  }
+  /** Feeds one chunk of USER input to the mid-line tracker and acts on its verdict.
+   *
+   *  Only real user input reaches here: sendInput is the single path shared by
+   *  typed keys and the Ctrl+C interrupt, and the held type-ahead flush goes
+   *  straight out through send() rather than back through this. Feeding it the
+   *  flush would be wrong twice over — it would re-note input already noted, and
+   *  it would take a lease on the daemon in response to our own replay. */
+  noteMidLine(text) {
+    if (!this.cb.onDeliveryHold) {
+      return;
+    }
+    this.dispatchHold(this.midLine.noteInput(text, holdClockMs()));
+  }
+  /** Extends the hold for input that was QUEUED rather than delivered, without
+   *  reading a commit out of it. What is uncommitted is a property of the PTY, and
+   *  bytes that never arrived cannot have committed anything there. */
+  noteQueuedInput(text) {
+    if (!this.cb.onDeliveryHold) {
+      return;
+    }
+    this.dispatchHold(this.midLine.noteQueued(text, holdClockMs()));
+  }
+  /** Applies a hold verdict: keeps the renew timer running while a line is
+   *  uncommitted, and hands each pause to the owner that knows which session to
+   *  address.
+   *
+   *  There is no release verb. The lease is a single per-session expiry with no
+   *  owner (daemon/manager_status.go), so resuming from here would revoke an
+   *  attached TUI's claim, or another window's, and re-open the window #1638
+   *  closed. Ceasing to renew costs at most one lease of extra hold and cannot
+   *  revoke anyone else's protection — see delivery_hold.ts. */
+  dispatchHold(action) {
+    if (!this.midLine.holding) {
+      this.stopMidLineTimer();
+    } else if (this.midLineTimer === null) {
+      this.midLineTimer = window.setInterval(() => {
+        this.dispatchHold(this.midLine.tick(holdClockMs()));
+      }, 500);
+    }
+    if (action === "pause") {
+      this.cb.onDeliveryHold?.(action);
+    }
+  }
+  stopMidLineTimer() {
+    if (this.midLineTimer !== null) {
+      window.clearInterval(this.midLineTimer);
+      this.midLineTimer = null;
+    }
+  }
+  /** Drops this terminal's hold for a teardown that makes the question moot.
+   *  Deliberately sends nothing: the lease is left to expire rather than cleared,
+   *  because this browser may not be its only holder. */
+  releaseMidLine() {
+    this.stopMidLineTimer();
+    this.midLine.release();
   }
   /** Copies text to the system clipboard, never silently. localhost is a secure
    *  context, so navigator.clipboard.writeText works; but if it is missing (a
@@ -10908,7 +11176,13 @@ var SplitView = class {
           sessionStreamEndpoint(this.sessionId, realId, leaf.tab),
           {
             onStatus: (s) => this.onPaneStatus(leaf.id, s),
-            onFocusChange: (f) => this.onPaneFocus(leaf.id, f)
+            onFocusChange: (f) => this.onPaneFocus(leaf.id, f),
+            // Only the AGENT tab (#3025 review): an automated DeliverPrompt reaches
+            // the session through its agent server, so a half-typed command in an
+            // auxiliary shell has nothing to collide with — and pausing the
+            // session-wide lease for it would defer a delivery aimed at a different
+            // PTY, postponing a cron run to its next tick for no reason.
+            ...leaf.tab === 0 ? { onDeliveryHold: (action) => this.holdDeliveries(action) } : {}
           }
         );
       } else if (moved) {
@@ -11384,6 +11658,38 @@ var SplitView = class {
     for (const [id, pane] of this.panes) {
       pane.container.classList.toggle("af-pane-focused", id === this.focusedId);
     }
+  }
+  /** Asks the daemon to hold automated deliveries while this session's user has a
+   *  partially typed line in the agent tab (#3024).
+   *
+   *  The verdict comes from the terminal (it is the only thing that sees the
+   *  keystrokes) and the session identity from here (the terminal has none), but
+   *  the POLICY is neither of theirs: `deferWhileAttached` in daemon/delivery.go
+   *  holds exactly the sessions whose pause lease is held, so taking the same lease
+   *  the attached TUI takes is what makes the two surfaces behave alike — one
+   *  implementation, nothing to drift.
+   *
+   *  TAKING ONLY. The lease is one expiry per session with no record of who holds
+   *  it, so a resume from here would clear an attached TUI's claim, or another
+   *  window's, and re-open the window #1638 closed until that holder's next
+   *  heartbeat. Letting it lapse costs at most one lease of extra hold and revokes
+   *  nobody. It also makes these requests idempotent and order-free — a pause only
+   *  pushes the expiry out — so two arriving out of order do what either would.
+   *
+   *  Best-effort by the same contract the TUI's heartbeat states: a failed RPC is
+   *  swallowed, and the worst case is that a delivery lands mid-line as it does
+   *  today. Reporting it would be noise about a degraded nicety, mid-keystroke. */
+  holdDeliveries(action) {
+    if (action !== "pause") {
+      return;
+    }
+    const sessionID = this.sessionId;
+    const token2 = this.token;
+    if (!sessionID || token2 === null) {
+      return;
+    }
+    void pauseStatusPoll(sessionID, token2).catch(() => {
+    });
   }
   onPaneStatus(leafId, status) {
     const pane = this.panes.get(leafId);

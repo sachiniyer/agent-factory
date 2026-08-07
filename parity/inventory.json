@@ -1554,6 +1554,7 @@
       "ListPrograms": "enum.agent-programs",
       "ListProjects": "project.list",
       "ListTasks": "task.list",
+      "PauseStatusPoll": "-",
       "RegisterProject": "project.add",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
