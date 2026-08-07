@@ -419,3 +419,29 @@ func TestRegister_ConcurrentCaseVariantsNeverShareADirectory(t *testing.T) {
 		seen[key] = name
 	}
 }
+
+// The RESERVATION directory needs the same ancestor guard as the account
+// directory. It was added after that guard existed and was not routed through
+// it, so a symlinked `.names` had MkdirAll follow it and the reservation — the
+// record of which spelling owns each account — land outside the AF home, while
+// registration reported success (#3057 review).
+func TestRegister_RefusesASymlinkedReservationDirectory(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+
+	names := filepath.Join(home, DirName, "codex", reservationDir)
+	if err := os.MkdirAll(filepath.Dir(names), 0o700); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.Symlink(elsewhere, names); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	if _, err := Register(home, "codex", "work"); err == nil {
+		t.Fatal("a symlinked reservation directory must be refused: the reservation " +
+			"would be written outside the AF home while registration reported success")
+	}
+	if _, err := os.Stat(filepath.Join(elsewhere, "work")); err == nil {
+		t.Fatal("the refused registration wrote a reservation into the symlink target")
+	}
+}

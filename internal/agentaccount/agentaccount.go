@@ -253,6 +253,15 @@ func reserveName(home, agent, name string) (string, error) {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return "", fmt.Errorf("create account reservation directory %s: %w", dir, err)
 	}
+	// The reservation path gets the SAME ancestor check as the account directory.
+	// It was added after that guard existed and was not routed through it, so a
+	// symlinked `.names` had MkdirAll follow it and the reservation land outside
+	// the AF home — the identity record for every account of this agent, written
+	// somewhere chosen by whoever made the link, while registration reported
+	// success. A guard is only worth what it covers (#3057 review).
+	if err := refuseSymlinkedAncestor(home, dir); err != nil {
+		return "", err
+	}
 	path := filepath.Join(dir, strings.ToLower(name))
 
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

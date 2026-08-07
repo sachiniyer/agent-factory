@@ -543,7 +543,7 @@
       },
       "cli": {
         "status": "partial",
-        "pointer": "commands/accountscmd.go:66,109"
+        "pointer": "commands/accountscmd.go:67 accountsAddCmd, :148 accountsListCmd; internal/agentaccount/agentaccount.go Register/List/Selected"
       },
       "verdict": "real-gap",
       "issue": "#3051",
