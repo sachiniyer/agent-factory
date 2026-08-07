@@ -54,6 +54,9 @@ type copiedEntry struct {
 	source      pathIdentity
 	destination pathIdentity
 	directory   *copiedDirectory
+	// readable carries a retained read descriptor out to the link map when the
+	// destination's own mode would lock the copier out of it. See copiedFileLink.
+	readable *os.File
 }
 
 type copiedDirectoryRoute struct {
@@ -237,6 +240,13 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
 	links := map[pathIdentity]copiedFileLink{}
+	// Retained descriptors live as long as the walk that may still link against
+	// them, and no longer. Ordinary trees retain none.
+	defer func() {
+		for _, link := range links {
+			link.close()
+		}
+	}()
 	// Same scoping as links above: whether this DESTINATION holds extended
 	// attributes is learned once per copy and never leaks into another one.
 	xattrs := &xattrDestination{}
@@ -351,7 +361,7 @@ func copyDirectoryLevel(
 			// archive holding bytes that never existed at that path. Hard-linking
 			// is an optimisation, and one that can corrupt content is not worth its
 			// saving (#3046).
-			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path) {
+			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.readable) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
@@ -359,7 +369,12 @@ func copyDirectoryLevel(
 					links[inspected] = copiedFileLink{
 						path:     filepath.Join(relativeDirectory, name),
 						identity: entry.destination,
+						readable: entry.readable,
 					}
+				} else if entry.readable != nil {
+					// The copy failed after the descriptor was retained; nothing will
+					// link against it, so it must not outlive this iteration.
+					_ = entry.readable.Close()
 				}
 			}
 		default:
@@ -399,6 +414,33 @@ func relativeRoutePath(components []copiedEntry) string {
 type copiedFileLink struct {
 	path     string
 	identity pathIdentity
+	// readable is a read descriptor opened while the destination was still
+	// owner-readable, retained ONLY when its final mode denies the copier read.
+	//
+	// The comparison reopens the destination by path, and the destination carries
+	// the source's mode. A mode with no owner-read bit is unreadable by the very
+	// process that created it — owner bits take precedence, so owning the file
+	// does not help — and the comparison then fails for a reason that has nothing
+	// to do with the content. Two paths that shared an inode come back as
+	// independent copies: both present, both correct, only the sharing silently
+	// gone. That is a fidelity loss of the kind #2919 exists to prevent (#3063).
+	//
+	// Opening BEFORE the mode narrows is what makes this work at all; there is no
+	// re-reading a file the process can no longer open. An open descriptor keeps
+	// the access it was opened with regardless of a later chmod, which is the same
+	// property copyRegularFileAtWithIdentity already relies on for its writes.
+	//
+	// nil for the overwhelming majority of files, so this costs no descriptors on
+	// an ordinary tree — only inodes whose own mode locks the copier out.
+	readable *os.File
+}
+
+// close releases a retained descriptor. Safe on the zero value and on a record
+// that never needed one.
+func (l copiedFileLink) close() {
+	if l.readable != nil {
+		_ = l.readable.Close()
+	}
 }
 
 func linkCopiedFile(
@@ -883,6 +925,19 @@ func copyRegularFileAtWithIdentity(
 		return created, err
 	}
 	pruneDestinationXattrs(int(in.Fd()), outFD, destinationPath, "file")
+	// BEFORE the mode narrows, because after it there may be nothing left to open.
+	// Only for a mode that denies the copier read: with no owner-read bit the
+	// destination becomes unopenable by the process that just made it, and the
+	// hard-link comparison would fail for a permission reason rather than a
+	// content one, silently dropping the link relationship (#3063).
+	if info.Mode().Perm()&0o400 == 0 {
+		if retained, err := openAtForCompare(destination, filepath.Base(destinationPath)); err == nil {
+			created.readable = retained
+		}
+		// A failure here is not fatal: the comparison falls back to opening by
+		// path, which is exactly today's behaviour. Losing the optimisation is
+		// acceptable; failing the archive over it is not.
+	}
 	if err := preserveSourceMode(outFD, info.Mode(), destinationPath, "file"); err != nil {
 		_ = out.Close()
 		return created, err

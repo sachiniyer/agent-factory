@@ -32,17 +32,33 @@ import (
 //
 // Both sides are opened relative to a directory descriptor, never by rebuilt
 // path, keeping the copier descriptor-anchored throughout.
-func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string) bool {
+func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, retained *os.File) bool {
 	current, err := openAtForCompare(source, name)
 	if err != nil {
 		return false
 	}
 	defer current.Close()
-	copied, err := openAtForCompare(destinationRoot, copiedPath)
-	if err != nil {
+
+	// A retained descriptor is used INSTEAD of reopening, because the reason it
+	// exists is that reopening cannot work: the destination's own mode denies the
+	// copier read, and owner bits take precedence, so the process that created the
+	// file cannot open it. Reading from the descriptor it opened before the mode
+	// narrowed is the only way to compare at all (#3063).
+	//
+	// It is rewound rather than reopened, since a previous comparison against the
+	// same inode left the offset at EOF and a second sighting would otherwise
+	// compare against nothing and call it a mismatch.
+	copied := retained
+	if copied == nil {
+		opened, err := openAtForCompare(destinationRoot, copiedPath)
+		if err != nil {
+			return false
+		}
+		defer opened.Close()
+		copied = opened
+	} else if _, err := copied.Seek(0, io.SeekStart); err != nil {
 		return false
 	}
-	defer copied.Close()
 
 	currentInfo, err := current.Stat()
 	if err != nil {

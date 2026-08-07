@@ -160,3 +160,57 @@ func TestCopyTree_SameSizeRewriteWithRestoredMtimeIsNotLinked(t *testing.T) {
 		"a same-size rewrite with mtime restored must not be linked to the first sighting's bytes: "+
 			"timestamps are not a content version")
 }
+
+// The retained-descriptor path: a destination whose own mode denies the copier
+// read must still compare, so the hard-link relationship survives (#3063).
+//
+// This is a unit test rather than a copyTree test on purpose, and the reason is
+// worth recording. The end-to-end case needs a source the copier can read
+// through GROUP or OTHER bits while the destination — which it owns — denies it
+// through OWNER bits, because owner bits take precedence. That requires the
+// source to be owned by a different uid (a root-owned 0044 file archived by a
+// non-root user), which a unit test cannot arrange. Measured: a self-owned file
+// at 0000, 0044 or 0004 is unreadable by its own owner, so any single-uid
+// attempt at the end-to-end case fails earlier, at the SOURCE open.
+//
+// So this exercises the mechanism directly: a destination the process cannot
+// reopen, and a retained descriptor that was opened before the mode narrowed.
+func TestSourceMatchesCopiedFile_UsesARetainedDescriptorWhenTheModeDeniesRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses mode bits, so an unreadable destination cannot arise")
+	}
+	dir := t.TempDir()
+	root, err := os.Open(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src"), []byte("SHARED"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dst"), []byte("SHARED"), 0o600))
+
+	// Retain the descriptor while the file is still readable, exactly as the
+	// copier does before preserveSourceMode narrows the mode.
+	retained, err := openAtForCompare(root, "dst")
+	require.NoError(t, err)
+	defer retained.Close()
+	require.NoError(t, os.Chmod(filepath.Join(dir, "dst"), 0o000))
+
+	_, err = os.Open(filepath.Join(dir, "dst"))
+	require.Error(t, err, "precondition: the destination must be unopenable by its own owner")
+
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", nil),
+		"without the retained descriptor the comparison cannot read the destination at all, "+
+			"which is the bug: the link relationship is dropped for a permission reason, not a content one")
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained),
+		"with a descriptor opened before the mode narrowed, identical content must still compare equal")
+
+	// A SECOND sighting must also match. The retained descriptor sits at EOF after
+	// the first comparison, so without a rewind it would compare against nothing
+	// and report a mismatch — turning the fix into a one-shot.
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained),
+		"a repeat sighting must rewind the retained descriptor rather than read from EOF")
+
+	// And it must still be a real comparison, not "always true when retained".
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src"), []byte("CHANGED"), 0o600))
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", retained),
+		"a retained descriptor must not turn the comparison into an unconditional yes")
+}
