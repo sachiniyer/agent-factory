@@ -78,7 +78,13 @@ func TestControlRoundTrips(t *testing.T) {
 		c := routeServer(t, "ArchiveSession", func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.ArchiveSessionResponse{
 				OK: true, ArchivedPath: "/arch/alpha",
-				Warning: "archive committed, but on-archive hook failed",
+				// The outcome is embedded now, and keyed on the SAME apiproto code
+				// the error envelope uses — so this literal states the contract the
+				// client actually reads, not a parallel warning field (#3036).
+				MutationOutcome: daemon.MutationOutcome{
+					Code:    apiproto.ErrorCodeMutationCommitted,
+					Warning: "archive committed, but on-archive hook failed",
+				},
 			})
 		})
 		path, err := c.ArchiveSession(daemon.ArchiveSessionRequest{Title: "alpha"})

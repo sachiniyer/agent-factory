@@ -142,6 +142,7 @@ type KillSessionRequest struct {
 
 type KillSessionResponse struct {
 	OK bool `json:"ok"`
+	MutationOutcome
 }
 
 // ArchiveSessionRequest asks the daemon to archive a session (#1028): tear down
@@ -163,10 +164,18 @@ type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
-	// Warning reports a failed operator hook after the archive itself committed.
-	// The response remains successful so every transport retains ArchivedPath and
-	// clients can reconcile the completed lifecycle transition without retrying.
+	// Warning is the FLAT, pre-#3036 wire field, retained for the one direction
+	// the envelope structurally cannot serve: gob encodes the embedded
+	// MutationOutcome as a NESTED field, so a NEWER daemon answering an OLDER
+	// client would drop the warning and report clean success -- a committed hook
+	// failure rendered as an ordinary one. Measured in both directions. The outer
+	// field wins name resolution for gob and json alike, so the `warning` key is
+	// byte-identical to what this response has always emitted.
 	Warning string `json:"warning,omitempty"`
+	// The response stays successful on a committed failure so every transport
+	// retains ArchivedPath and clients reconcile the completed transition
+	// without retrying.
+	MutationOutcome
 }
 
 // RestoreArchivedRequest asks the daemon to restore an archived session (#1028):
@@ -186,6 +195,7 @@ type RestoreArchivedResponse struct {
 	OK bool `json:"ok"`
 	// WorktreePath is the on-disk location the worktree was restored to.
 	WorktreePath string `json:"worktree_path"`
+	MutationOutcome
 }
 
 // RestoreSessionRequest asks the daemon to restore a restorable session:
@@ -214,6 +224,7 @@ type RestoreSessionResponse struct {
 	OK bool `json:"ok"`
 	// WorktreePath is the on-disk location of the restored/recovered worktree.
 	WorktreePath string `json:"worktree_path"`
+	MutationOutcome
 }
 
 // DeleteProjectRequest asks the daemon to delete a project — a repo grouping of
@@ -246,9 +257,13 @@ type DeleteProjectResponse struct {
 	KilledCount int `json:"killed_count"`
 	// Deregistered reports whether the durable project record was removed.
 	Deregistered bool `json:"deregistered"`
-	// Warning joins nonfatal on-archive hook failures from sessions whose archive
-	// and project deletion both committed.
+	// Warning is the FLAT, pre-#3036 wire field. See ArchiveSessionResponse: it
+	// is what keeps a committed hook failure visible to an OLDER gob client,
+	// which has no slot for the nested envelope.
 	Warning string `json:"warning,omitempty"`
+	// MutationOutcome carries nonfatal on-archive hook failures from sessions
+	// whose archive and project deletion both committed.
+	MutationOutcome
 }
 
 // RegisterProjectRequest asks the daemon to register a git checkout as a durable,
@@ -706,6 +721,7 @@ type AddTaskRequest struct {
 }
 type AddTaskResponse struct {
 	OK bool `json:"ok"`
+	MutationOutcome
 }
 
 // UpdateTaskRequest carries a FIELD-LEVEL patch (#1700): the ID of the task to
@@ -732,6 +748,7 @@ type UpdateTaskRequest struct {
 type UpdateTaskResponse struct {
 	OK   bool      `json:"ok"`
 	Task task.Task `json:"task"`
+	MutationOutcome
 }
 
 // Expect optionally carries the project the caller authorized the id against,
@@ -742,6 +759,7 @@ type RemoveTaskRequest struct {
 }
 type RemoveTaskResponse struct {
 	OK bool `json:"ok"`
+	MutationOutcome
 }
 
 // RestartTaskRequest asks the daemon to stop and replace one enabled watch

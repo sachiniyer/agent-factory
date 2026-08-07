@@ -274,6 +274,22 @@ func (c *Client) callCtx(ctx context.Context, method string, req any, resp any) 
 			return fmt.Errorf("apiclient: malformed response data: %w", err)
 		}
 	}
+	return committedFromResponse(resp)
+}
+
+// committedFromResponse reconstitutes a COMMITTED outcome from any response that
+// embeds daemon.MutationOutcome, keyed on the SAME apiproto code the error
+// envelope uses. Generic on purpose: a new mutating method inherits this by
+// embedding the outcome, with no per-method branch here to forget — which is the
+// property the deleted per-RPC classifier never had (#3036).
+func committedFromResponse(resp any) error {
+	carrier, ok := resp.(interface{ CommittedOutcome() (bool, string) })
+	if !ok {
+		return nil
+	}
+	if committed, warning := carrier.CommittedOutcome(); committed {
+		return &mutationCommittedError{detail: warning}
+	}
 	return nil
 }
 
