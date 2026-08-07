@@ -573,7 +573,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		}
 	}
 	if observedAlive {
-		m.noteAliveObservation(key)
+		m.noteAliveObservation(repoID, instance)
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.

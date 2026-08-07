@@ -22,7 +22,7 @@ import (
 // probe got an ANSWER out of the runtime. Tests drive it explicitly because that,
 // not elapsed time, is what confirms a restore (#1917 round 6).
 func observeAlive(m *Manager, repoID string, inst *session.Instance) {
-	m.noteAliveObservation(stableSessionKey(repoID, inst))
+	m.noteAliveObservation(repoID, inst)
 }
 
 // diesOnSpawnBackend models the reported agent: its Recover SUCCEEDS — the spawn

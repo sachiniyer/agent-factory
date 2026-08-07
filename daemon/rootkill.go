@@ -243,6 +243,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	m.mu.Lock()
 	if m.instances[key] == instance {
 		delete(m.instances, key)
+		m.forgetSessionRuntimeStateLocked(repoID, instance)
 		removed = true
 	}
 	if session.IsReservedTitle(instance.Title) {

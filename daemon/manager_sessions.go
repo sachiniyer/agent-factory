@@ -228,6 +228,9 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	m.mu.Lock()
 	if current := m.instances[key]; current == nil || current == instance || stableIDMatchesForDaemon(current.ID, targetID) {
 		delete(m.instances, key)
+		// Same critical section as the record's removal, so the runtime state
+		// cannot outlive the session it describes (#3031).
+		m.forgetSessionRuntimeStateLocked(repoID, instance)
 	}
 	if session.IsReservedTitle(req.Title) {
 		// An explicit kill is honored only briefly: the ensure loop suppresses
