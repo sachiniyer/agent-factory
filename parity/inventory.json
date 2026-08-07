@@ -542,12 +542,12 @@
         "pointer": ""
       },
       "cli": {
-        "status": "partial",
-        "pointer": "commands/accountscmd.go accountsAddCmd/accountsListCmd; internal/agentaccount/agentaccount.go Register/List/Selected"
+        "status": "yes",
+        "pointer": "commands/accountscmd.go:67 accountsAddCmd, :148 accountsListCmd; api/sessions.go --account; internal/sessionenv/account_scope.go"
       },
       "verdict": "real-gap",
       "issue": "#3051",
-      "notes": "Registration and listing are CLI-only so far (#3051). An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret, so `add` makes a place and the agent's own login flow fills it. Selecting an account for a session, and showing the selected account in the TUI and web, are the remaining slices — which is why cli is partial and the UIs are no rather than n/a."
+      "notes": "Registration, listing and per-session SELECTION are CLI-only (#3051). An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. TUI and web cannot yet choose an account, which is why both are no and the verdict stays real-gap."
     },
     {
       "id": "session.archive",
@@ -1680,6 +1680,7 @@
       "af sessions archive --self": "session.archive",
       "af sessions attach --help": "meta.discovery",
       "af sessions backends --help": "meta.discovery",
+      "af sessions create --account": "session.accounts",
       "af sessions create --backend": "session.create.opt.backend",
       "af sessions create --help": "meta.discovery",
       "af sessions create --here": "session.create.opt.inplace",
@@ -1826,6 +1827,9 @@
         "tui": {
           "in_place": {
             "gap": "session.create.opt.inplace"
+          },
+          "account": {
+            "gap": "session.accounts"
           }
         }
       },
@@ -2063,6 +2067,9 @@
         },
         "force_remote": {
           "gap": "session.create.opt.remote"
+        },
+        "account": {
+          "gap": "session.accounts"
         }
       },
       "CreateTab": {

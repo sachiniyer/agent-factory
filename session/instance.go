@@ -168,6 +168,15 @@ type Instance struct {
 	agentRuntimeGeneration uint64
 	// Program is the program to run in the instance.
 	Program string
+	// Account is the credential account this instance's agent runs as, or empty
+	// for the ambient identity — which is the behaviour every session had before
+	// #3051 and remains the default.
+	//
+	// Persisted, because the identity a session runs as must survive a restart:
+	// a restored session that silently reverted to the ambient account would
+	// spend the wrong quota while still displaying the account it was created
+	// with.
+	Account string `json:"account,omitempty"`
 	// Height is the height of the instance.
 	Height int
 	// Width is the width of the instance.

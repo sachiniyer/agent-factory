@@ -21,7 +21,7 @@ func TestExecInvocationPreservesPOSIXShellSemantics(t *testing.T) {
 	}
 	t.Cleanup(func() { processExec = previous })
 
-	err := execInvocation([]string{"codex", "0", "AF_TEST_ASSIGNMENT=yes command --flag"})
+	err := execInvocation([]string{"codex", "0", "AF_TEST_ASSIGNMENT=yes command --flag"}, false)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 	}
@@ -46,7 +46,7 @@ func TestExecInvocationHonorsInlineClaudeCloudMode(t *testing.T) {
 	}
 	t.Cleanup(func() { processExec = previous })
 
-	err := execInvocation([]string{"claude", "0", "CLAUDE_CODE_USE_BEDROCK=1 claude"})
+	err := execInvocation([]string{"claude", "0", "CLAUDE_CODE_USE_BEDROCK=1 claude"}, false)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 	}

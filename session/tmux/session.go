@@ -156,6 +156,9 @@ type TmuxSession struct {
 	// environment allowlist. It is protected by programMu because a start reads
 	// it alongside program and sibling tabs copy both launch settings.
 	envPassthrough []string
+	// account is the credential account this session runs its agent as, or empty
+	// for the ambient identity. Guarded by programMu with envPassthrough (#3051).
+	account string
 	// inputMu serializes every multi-command transaction that injects pane input.
 	// A submit must not clear/paste between a prompt handler's selected-row
 	// capture and Enter, two submits must not clear each other's freshly pasted

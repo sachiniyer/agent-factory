@@ -610,6 +610,7 @@ func init() {
 	sessionsCreateCmd.Flags().StringVar(&createNameFlag, "name", "", "Session title (alternative to positional <title>)")
 	sessionsCreateCmd.Flags().StringVar(&createPromptFlag, "prompt", "", "Initial prompt to send")
 	sessionsCreateCmd.Flags().StringVar(&createProgramFlag, "program", "", "Program to run (one of: "+tmux.SupportedProgramsString()+"; defaults to config default)")
+	sessionsCreateCmd.Flags().StringVar(&createAccountFlag, "account", "", "Credential account `name` to run the agent as (register it with af accounts add; defaults to the ambient identity)")
 	sessionsCreateCmd.Flags().BoolVar(&createHereFlag, "here", false, "Run in the repo's existing working tree at its current branch (no new worktree/branch; kill preserves both)")
 	sessionsCreateCmd.Flags().BoolVar(&createInPlaceFlag, "in-place", false, "Alias for --here")
 	// The enum comes from config.SupportedBackendsString() so the help can never

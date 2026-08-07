@@ -13,7 +13,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | Method | Path | Request fields | Description |
 |--------|------|----------------|-------------|
 | `GET` | `/v1/health` | — | Lifecycle health probe (alias for Ping): version, boot/transaction identity, phase, and bound listeners; answers before readiness. |
-| `POST` | `/v1/CreateSession` | `title`, `title_base`, `repo_path`, `program`, `prompt`, `in_place`, `force_remote`, `backend` | Create a new session (git worktree + agent) in a repo. |
+| `POST` | `/v1/CreateSession` | `title`, `title_base`, `repo_path`, `program`, `account`, `prompt`, `in_place`, `force_remote`, `backend` | Create a new session (git worktree + agent) in a repo. |
 | `POST` | `/v1/ListBackends` | `repo_path` | List the runtimes a session in this repo can be created on, whether the repo's config supports each, and the backend an unspecified create defaults to. |
 | `POST` | `/v1/ListPrograms` | `repo_path` | List the agent programs a session can be created with, and the program an unspecified create defaults to. |
 | `POST` | `/v1/SuggestSessionName` | — | Suggest a random, readable session name (adjective-noun) not used by any live session, for the create form's autocreate placeholder. |

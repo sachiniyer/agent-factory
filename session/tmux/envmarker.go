@@ -224,3 +224,16 @@ func afHomeDir() (string, error) {
 	}
 	return filepath.Join(home, ".agent-factory"), nil
 }
+
+// newSessionEnvSupportedForAccounts reports the same tmux capability probe that
+// gates the ancestry markers, reused as the account gate.
+//
+// Reused rather than re-derived so the two cannot disagree about what tmux is
+// running, and honouring the same test override so account tests are not forced
+// to run against a real tmux binary.
+func newSessionEnvSupportedForAccounts() bool {
+	if newSessionEnvSupportedOverride != nil {
+		return *newSessionEnvSupportedOverride
+	}
+	return tmuxSupportsNewSessionEnv()
+}

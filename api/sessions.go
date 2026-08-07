@@ -262,6 +262,10 @@ var (
 	createNameFlag    string
 	createPromptFlag  string
 	createProgramFlag string
+	// createAccountFlag selects one of the agent's registered credential accounts
+	// for this session (#3051). Empty keeps the ambient identity, which is what
+	// every session did before accounts existed.
+	createAccountFlag string
 	createHereFlag    bool
 	createInPlaceFlag bool
 	createBackendFlag string
@@ -391,6 +395,7 @@ pointing at one).`,
 			Title:    createTitle,
 			RepoPath: repo.Root,
 			Program:  program,
+			Account:  createAccountFlag,
 			Prompt:   createPromptFlag,
 			InPlace:  inPlace,
 			Backend:  createBackendFlag,

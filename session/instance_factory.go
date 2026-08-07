@@ -43,6 +43,8 @@ type InstanceOptions struct {
 	Path string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
 	Program string
+	// Account scopes the session to a registered credential account (#3051).
+	Account string
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -471,6 +473,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		liveness:              LiveReady,
 		Path:                  absPath,
 		Program:               opts.Program,
+		Account:               opts.Account,
 		Height:                0,
 		Width:                 0,
 		CreatedAt:             t,
