@@ -434,7 +434,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	// Refusing is the first slice deliberately: threading the account through
 	// provisioning and the headless launch is real work, and until it is done an
 	// honest error beats a session that reports one identity and spends another
-	// (#3051, #3076).
+	// (#3051, #3082).
 	if err := refuseOffBoxAccount(opts); err != nil {
 		return nil, err
 	}
@@ -553,7 +553,7 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 //
 // This is deliberately an ALLOWLIST of agents known to work, not a denylist of
 // broken ones: an agent added later is unsupported until someone proves the
-// boundary accepts its launch, which fails in the safe direction (#3051, #3077).
+// boundary accepts its launch, which fails in the safe direction (#3051, #3083).
 func refuseUnsupportedAccountAgent(opts InstanceOptions) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil
