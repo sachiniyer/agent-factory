@@ -267,7 +267,8 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 			{helpKey(keys.KeyCopyPR), "Copy PR URL to clipboard"},
 		}},
 		{title: "Tabs:", rows: []helpRow{
-			{helpKey(keys.KeyJumpTab), "Select a tab by number (s opens it, enter attaches)"},
+			{helpKey(keys.KeyJumpTab), "Select one of the first nine tabs by number (s opens it, enter attaches)"},
+			{helpKey(keys.KeyJumpTabPrompt), "Jump to ANY tab by number or name — there is no tab limit (#3021)"},
 			{helpKey(keys.KeyNewTab), "Choose a terminal or VS Code tab"},
 			{helpKey(keys.KeyCloseTab), "Close the current tab (the agent tab can't be closed)"},
 			{helpKey(keys.KeyShiftUp) + "/" + helpKey(keys.KeyShiftDown), "Scroll the current tab preview (navigation mode only)"},
@@ -286,12 +287,17 @@ func (h helpTypeInstanceStart) toContent() string {
 	// Remote instances block `t` (new tab) and `w` (close tab) — those actions
 	// surface a "not available for remote" error (see handleNewTab /
 	// handleCloseTab in app/handle_actions.go) — so only advertise the tab keys
-	// that actually work for the instance type. 1-9 jump works for both (#988);
+	// that actually work for the instance type. The tab jump works for both (#988);
 	// tabs also live in the left-rail tree since the layout cutover (#1024 PR 4).
+	//
+	// Names the unbounded gesture beside the digits (#3021): the digits reach the
+	// first nine tabs and nothing caps tab creation, so a help screen that mentions
+	// only "1-9" describes a limit the product does not have.
 	openPane, newTab, closeTab := helpKey(keys.KeyOpenPane), helpKey(keys.KeyNewTab), helpKey(keys.KeyCloseTab)
-	tabHelp := keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; %s new tab, %s close; tabs live in the tree)", openPane, newTab, closeTab))
+	jumpAny := helpKey(keys.KeyJumpTabPrompt)
+	tabHelp := keyStyle.Render("1-9/"+jumpAny) + descStyle.Render(fmt.Sprintf(" - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; %s new tab, %s close; tabs live in the tree)", jumpAny, openPane, newTab, closeTab))
 	if !h.instance.Capabilities().TabManagement {
-		tabHelp = keyStyle.Render("1-9 jump") + descStyle.Render(fmt.Sprintf(" - Select a tab (%s opens it; tabs live in the tree)", openPane))
+		tabHelp = keyStyle.Render("1-9/"+jumpAny) + descStyle.Render(fmt.Sprintf(" - Select a tab: digits reach the first nine, %s reaches any by number or name (%s opens it; tabs live in the tree)", jumpAny, openPane))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Session created"),

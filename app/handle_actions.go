@@ -129,6 +129,8 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.showNewTabPicker()
 	case keys.KeyCloseTab:
 		return m.handleCloseTab()
+	case keys.KeyJumpTabPrompt: // unbounded jump; see handle_jump_tab.go (#3021)
+		return m.showJumpTabPrompt()
 
 	// Instance actions
 	case keys.KeyKill:

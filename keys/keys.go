@@ -30,6 +30,12 @@ const (
 	KeyNewTab   // NewTab opens the Terminal / VS Code picker for the selected instance (#2077).
 	KeyCloseTab // CloseTab closes the active (non-agent) tab (#930 PR 4).
 	KeyJumpTab  // JumpTab is the 1-9 number-key jump hint; dispatched manually, menu/help only.
+	// KeyJumpTabPrompt opens the unbounded jump-to-tab prompt (#3021). The digits
+	// only reach the first nine, so past that the fastest path to a tab used to
+	// disappear entirely — and the missing affordance read as a nine-tab limit. This
+	// takes a NUMBER OR A NAME, which is also the answer to finding one tab among
+	// fifteen, where counting to the right digit is not the problem.
+	KeyJumpTabPrompt
 
 	KeyNewRemote // Key for creating a new remote instance
 	KeyHelp      // Key for showing help screen
@@ -225,7 +231,20 @@ var specs = []spec{
 	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
 	{name: KeyNewTab, configKey: "new_tab", keys: []string{"t"}, desc: "new tab", dispatch: true},
 	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "close tab", dispatch: true},
-	{name: KeyJumpTab, keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, helpLabel: "1-9", desc: "jump"},
+	// The chip names BOTH gestures — "1-9/g go" — rather than gaining a second chip
+	// (#3021). The old "1-9" read as "there are nine tabs", and the footer is exactly
+	// where that impression was formed; naming g beside the digits says the digits are
+	// a shortcut to the first nine rather than the whole of what exists. One chip
+	// because adding one is a WIDTH change to a row that already collapses under
+	// pressure, and the two gestures are one capability anyway.
+	//
+	// "go" rather than "jump" because the footer row is FULL: measured, not guessed —
+	// "1-9/g jump" is two characters wider than "1-9 jump" and drops "a archive" off
+	// the end, and so does every one-character variant. "1-9/g go" is the same width
+	// as what it replaces, so it names the unbounded gesture without costing another
+	// hint its place.
+	{name: KeyJumpTab, keys: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}, helpLabel: "1-9/g", desc: "go"},
+	{name: KeyJumpTabPrompt, keys: []string{"g"}, helpLabel: "g", desc: "jump to tab (number or name)", dispatch: true},
 	{name: KeyTaskList, configKey: "tasks", keys: []string{"m"}, desc: "tasks", dispatch: true},
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
 	{name: KeySwitchProjectRow, keys: []string{"enter"}, desc: "switch"},
