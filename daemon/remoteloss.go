@@ -434,8 +434,23 @@ func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
 // remoteLostGracePeriod means an unanswerable remote stays non-Lost long past any
 // short window. Counting answers is immune to both, and scales with whatever the
 // poll interval and grace actually are.
-func (m *Manager) noteAliveObservation(key string) {
+func (m *Manager) noteAliveObservation(repoID string, instance *session.Instance) {
+	// Gated on the instance still being the tracked one, in the SAME critical
+	// section as the increment. RefreshStatuses snapshots instances and releases
+	// m.mu for the slow probe, so a probe that began before a kill can land after
+	// forgetSessionRuntimeStateLocked deleted this entry — and an ungated
+	// increment recreates it, leaking exactly the entry #3031 exists to remove.
+	//
+	// The check is pointer identity against m.instances, NOT presence of the
+	// observation key: the two maps do not share a key space. m.instances is keyed
+	// by daemonInstanceKey (repoID\x00title) while aliveObservations is keyed by
+	// stableSessionKey, which is the stable instance ID whenever one is set — so
+	// `m.instances[key]` would miss on every ID-bearing session and silently stop
+	// recording the observations the restore-confirmation depends on.
 	m.mu.Lock()
-	m.aliveObservations[key]++
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	if m.instances[daemonInstanceKey(repoID, instance.Title)] != instance {
+		return
+	}
+	m.aliveObservations[stableSessionKey(repoID, instance)]++
 }
