@@ -2,9 +2,7 @@ package commands
 
 import (
 	"fmt"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -41,50 +39,6 @@ type accountEntry struct {
 	Dir   string `json:"dir"`
 }
 
-// accountsJSONRequested reads the JSON intent from the RAW arguments, because a
-// flag-parse failure means the bound variable was never set.
-//
-// cobra parses flags before RunE, so `af accounts add --json --bogus` fails
-// while accountsJSONFlag is still false — the caller asked for JSON and the
-// bound flag cannot say so. Scanning argv is the only source of that intent at
-// this point. `--` ends flag parsing, so anything after it is an operand and
-// must not be read as a request.
-//
-// The VALUE goes through strconv.ParseBool rather than a list of spellings,
-// because that is the function pflag's own boolean setter calls. Matching only
-// `--json=true` missed `--json=1`, `--json=t`, `--json=T`, `--json=TRUE` and
-// `--json=True`, every one of which pflag accepts — so automation using a legal
-// spelling got human error text. Enumerating the accepted forms is a promise to
-// have thought of all of them; deferring to the same parser is not (#3057
-// review).
-//
-// A value pflag would REJECT still counts as a request. `--json=zzz` is an
-// invalid invocation, and the caller's intent to receive JSON is unambiguous, so
-// reporting that failure as JSON is the answer they can act on.
-func accountsJSONRequested(args []string) bool {
-	// The LAST occurrence wins, not the first. pflag calls Value.Set for every
-	// occurrence in order, so `--json=false --json=true` is true by the time it
-	// reaches a later bad flag. Returning on the first match read that as false
-	// and emitted human text to a caller that had asked for JSON — the same
-	// mistake as matching one spelling, one level up: I modelled a single
-	// occurrence of a flag that pflag lets repeat (#3057 review).
-	requested := false
-	for _, arg := range args {
-		if arg == "--" {
-			break
-		}
-		if arg == "--json" {
-			requested = true
-			continue
-		}
-		if value, ok := strings.CutPrefix(arg, "--json="); ok {
-			parsed, err := strconv.ParseBool(value)
-			requested = err != nil || parsed
-		}
-	}
-	return requested
-}
-
 // accountsFlagError routes a flag-parse failure through the same {data,error}
 // envelope as every other failure in this group.
 //
@@ -93,33 +47,53 @@ func accountsJSONRequested(args []string) bool {
 // returns before RunE and prints human `Error:` plus usage. ArbitraryArgs moved
 // argument-COUNT validation into RunE but cannot reach flag parsing, which
 // happens earlier still.
+//
+// It reads the BOUND variable, which is already authoritative here. Three
+// revisions of this function scanned os.Args instead, on the premise that a
+// parse failure leaves the bound variable unset — and that premise is false.
+// pflag calls Value.Set as it walks argv, so every occurrence BEFORE the failure
+// has already landed by the time cobra calls this: all spellings, repeats with
+// last-one-wins, and the `--` terminator, handled by the parser itself. The only
+// thing a scanner could add is a `--json` occurring AFTER the failure point,
+// which pflag never accepted and which therefore must not count.
+//
+// Each revision fixed one way the scan diverged from pflag — first occurrence,
+// then boolean spellings, then repeats — and each was a closer simulation of a
+// parser we can simply ask. That is the defect class, not the individual bugs
+// (#3057 review).
 func accountsFlagError(cmd *cobra.Command, err error) error {
-	return jsonWrapError(cmd, accountsJSONRequested(os.Args), err)
+	return jsonWrapError(cmd, accountsJSONFlag, err)
 }
 
 var accountsCmd = &cobra.Command{
 	Use:   "accounts",
 	Short: "Manage per-session agent credential directories",
-	Long: `Manage the credential directories a session can be scoped to.
+	Long: `Prepare the credential directories a session can later be scoped to.
 
 An account is one of an agent's logged-in identities, held as a directory the
 agent CLI treats as its home. af never reads, stores, or forwards the credential
 itself — it decides which directory a session sees, and the agent's own login
 flow puts the material there.
 
+add creates that directory and prints its path · list shows what is registered.
 Register an account, then log in with the agent pointed at that directory:
 
   af accounts add codex work
   CODEX_HOME=$(af accounts add codex work) codex login
 
-Selecting an account for a session both INJECTS that directory and REMOVES every
-other identity-bearing variable for the agent. The removal is what makes the
-selection real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the
-config directory, so without it the session would authenticate as whoever that
-key belongs to while every visible signal reported the selected account.
+Selecting an account for a session is not available yet — see issue #3051. These
+two subcommands prepare the directories and nothing reads them at session start,
+so a session started today still runs on whatever credentials it inherits from
+the environment.
 
-af never switches accounts on its own — not on a rate limit, not on a failure.
-A session runs as the account it was started with.`,
+When selection arrives it will both inject that directory and remove every other
+identity-bearing variable for the agent. The removal is what will make the
+selection real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the
+config directory, so without it a session would authenticate as whoever that key
+belongs to while every visible signal reported the selected account.
+
+af will never switch accounts on its own — not on a rate limit, not on a
+failure. A session will run as the account it was started with.`,
 }
 
 var accountsAddCmd = &cobra.Command{

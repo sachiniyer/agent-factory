@@ -130,26 +130,32 @@ af [flags]
 
 Manage per-session agent credential directories
 
-Manage the credential directories a session can be scoped to.
+Prepare the credential directories a session can later be scoped to.
 
 An account is one of an agent's logged-in identities, held as a directory the
 agent CLI treats as its home. af never reads, stores, or forwards the credential
 itself — it decides which directory a session sees, and the agent's own login
 flow puts the material there.
 
+add creates that directory and prints its path · list shows what is registered.
 Register an account, then log in with the agent pointed at that directory:
 
   af accounts add codex work
   CODEX_HOME=$(af accounts add codex work) codex login
 
-Selecting an account for a session both INJECTS that directory and REMOVES every
-other identity-bearing variable for the agent. The removal is what makes the
-selection real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the
-config directory, so without it the session would authenticate as whoever that
-key belongs to while every visible signal reported the selected account.
+Selecting an account for a session is not available yet — see issue #3051. These
+two subcommands prepare the directories and nothing reads them at session start,
+so a session started today still runs on whatever credentials it inherits from
+the environment.
 
-af never switches accounts on its own — not on a rate limit, not on a failure.
-A session runs as the account it was started with.
+When selection arrives it will both inject that directory and remove every other
+identity-bearing variable for the agent. The removal is what will make the
+selection real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the
+config directory, so without it a session would authenticate as whoever that key
+belongs to while every visible signal reported the selected account.
+
+af will never switch accounts on its own — not on a rate limit, not on a
+failure. A session will run as the account it was started with.
 
 ```
 af accounts
