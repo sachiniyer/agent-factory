@@ -380,18 +380,17 @@ jq -s -r --arg hd "$HD" '
 echo "every RESOLVED finding predates the head commit"
 ```
 
-**A resolution marker is a claim, not evidence.** Replying `RESOLVED` clears the
-finding for the gate whether or not you actually pushed the fix, and that is how
-#2799 shipped broken: its findings were cleared in-thread, Auto Gate merged the
-moment the count hit zero, and the fix commit landed minutes *after* the merge.
-Master then carried the uncorrected commands — the exact defects the review had
-caught (#2822).
+**A resolution marker is a claim, not evidence.** Replying `RESOLVED` used to
+clear the finding for the gate whether or not you actually pushed the fix, and
+that is how #2799 shipped broken: its findings were cleared in-thread, Auto
+Gate merged the moment the count hit zero, and the fix commit landed minutes
+*after* the merge. Master then carried the uncorrected commands — the exact
+defects the review had caught (#2822).
 
 The check above is the cheapest necessary condition: a fix for a finding filed
 at time T cannot exist in a commit made before T. It does not prove the fix is
-*correct*, only that something was pushed after the finding. This is one place
-the hand gate is deliberately **stricter** than `auto-gate.js`, which trusts the
-marker alone — stricter is fine, looser never is.
+*correct*, only that something was pushed after the finding. `auto-gate.js` now
+applies the same check (#2881); the hand gate and the auto gate agree here.
 
 Read from the captured file rather than piping `gh api … --jq` into `jq`, and
 check that file first. Two reasons, and the first is the one that bites:
