@@ -269,3 +269,59 @@ func TestRegister_RefusesASymlinkedAncestor(t *testing.T) {
 		t.Fatal("the refused registration created the account inside the symlink target")
 	}
 }
+
+// The ancestor guard must run where the DECISION is made, not only where the
+// account was created. Register's check cannot protect an account registered
+// earlier whose `accounts/<agent>` component was replaced with a symlink since:
+// the leaf stays a real directory, so a leaf-only check accepts it and the
+// session authenticates through a path outside the registry (#3057 review).
+func TestSelectedAndList_RefuseAnAncestorSwappedAfterRegistration(t *testing.T) {
+	home := t.TempDir()
+	if _, err := Register(home, "codex", "work"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := Selected(home, "codex", "work", ""); err != nil {
+		t.Fatalf("precondition: a freshly registered account must select cleanly: %v", err)
+	}
+
+	// Swap accounts/codex for a symlink to a directory that DOES contain a
+	// real "work" directory — so the leaf check alone would still pass.
+	agentDir := filepath.Join(home, DirName, "codex")
+	elsewhere := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(elsewhere, "work"), 0o700); err != nil {
+		t.Fatalf("mkdir decoy: %v", err)
+	}
+	if err := os.RemoveAll(agentDir); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.Symlink(elsewhere, agentDir); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	if _, err := Selected(home, "codex", "work", ""); err == nil {
+		t.Fatal("Selected accepted an account whose ancestor is now a symlink: the " +
+			"session would authenticate through a path outside the registry")
+	}
+	if _, err := List(home, "codex"); err == nil {
+		t.Fatal("List enumerated through a symlinked ancestor, reporting an arbitrary " +
+			"directory's contents as registered accounts")
+	}
+}
+
+// The login guidance must be the agent's REAL invocation. Appending "login"
+// universally printed `claude login`, which Claude Code does not have — it lives
+// under `auth`. Verified against the installed CLIs on 2026-08-07.
+func TestLoginCommand_IsPerAgentAndNotGuessed(t *testing.T) {
+	claude, ok := LoginCommand("claude")
+	require.True(t, ok)
+	require.Equal(t, []string{"auth", "login"}, claude,
+		"claude puts login under `auth`; `claude login` is not a command")
+
+	codex, ok := LoginCommand("codex")
+	require.True(t, ok)
+	require.Equal(t, []string{"login"}, codex)
+
+	// An unknown agent yields nothing rather than a guess.
+	_, ok = LoginCommand("gemini")
+	require.False(t, ok, "an agent with no verified login command must report none, not a guess")
+}

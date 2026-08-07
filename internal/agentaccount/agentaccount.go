@@ -29,6 +29,34 @@ const dirMode = 0o700
 // those is a bug waiting to happen rather than a convenience.
 var nameRule = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
+// loginCommands is the agent's OWN login invocation, verified against the
+// installed CLIs rather than assumed from the binary name.
+//
+// They do not share a shape, which is the whole reason this is a table. Appending
+// "login" universally printed `claude login`, which is not a command at all —
+// Claude Code puts it under an `auth` subcommand. A registration flow whose
+// printed next step does not run is worse than no guidance: the operator
+// concludes the account is broken, when the only thing wrong was af's sentence.
+//
+// Verified 2026-08-07:
+//   - `claude auth --help` lists `login  Sign in to your Anthropic account`,
+//     and `login` is absent from `claude --help`'s command list.
+//   - `codex --help` lists `login  Manage login` at the top level.
+//
+// An agent added to accountConfigVars without an entry here gets no printed
+// command rather than a guessed one (#3057 review).
+var loginCommands = map[string][]string{
+	"claude": {"auth", "login"},
+	"codex":  {"login"},
+}
+
+// LoginCommand returns the agent's login invocation words, and whether one is
+// known. A false result means "say nothing", never "guess".
+func LoginCommand(agent string) ([]string, bool) {
+	words, ok := loginCommands[agent]
+	return words, ok
+}
+
 // ErrUnsupportedAgent reports an agent whose credential relocation was never
 // verified. It is a distinct error because the answer for the operator is
 // "this agent cannot do accounts", not "you typed the name wrong".
@@ -218,7 +246,14 @@ func List(home, agent string) ([]string, error) {
 	if _, ok := sessionenv.SupportsAccounts(agent); !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedAgent, agent)
 	}
-	entries, err := os.ReadDir(filepath.Join(home, DirName, agent))
+	root := filepath.Join(home, DirName, agent)
+	// Same reason as Selected: ReadDir follows a symlinked ancestor, so a swapped
+	// component would have `af accounts list` enumerate an arbitrary directory as
+	// though those were registered accounts.
+	if err := refuseSymlinkedAncestor(home, root); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -265,6 +300,15 @@ func Selected(home, agent, name, trustedWrapper string) (sessionenv.Account, err
 	}
 	dir, err := Dir(home, agent, name)
 	if err != nil {
+		return sessionenv.Account{}, err
+	}
+	// Ancestors, not just the leaf — and on every SELECTION, not only at
+	// registration. Register's check cannot protect an account registered last
+	// week whose `accounts/<agent>` component was replaced with a symlink since:
+	// the leaf is still a real directory, so a leaf-only check accepts it and the
+	// session authenticates through a path outside the registry. The guard has to
+	// run where the decision is made (#3057 review).
+	if err := refuseSymlinkedAncestor(home, dir); err != nil {
 		return sessionenv.Account{}, err
 	}
 	// Lstat, matching Register and List. os.Stat follows a symlink, so a launch

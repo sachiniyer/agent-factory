@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -73,10 +74,20 @@ the printed directory to put credentials there.
 
 Registration is idempotent — running it again on an existing account reports the
 same directory and touches nothing inside it.`,
-	Args: cobra.ExactArgs(2),
+	// ArbitraryArgs, with the count checked inside RunE. cobra runs an Args
+	// validator BEFORE RunE, so ExactArgs(2) emitted human `Error:` and usage text
+	// even under --json — leaving an automation caller unable to parse the one
+	// class of failure it is most likely to hit, a malformed invocation (#3057
+	// review).
+	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		if len(args) != 2 {
+			return jsonWrapError(cmd, accountsJSONFlag,
+				fmt.Errorf("af accounts add takes exactly two arguments, an agent and an account name (got %d): af accounts add <agent> <name>", len(args)))
+		}
 
 		// --daemon-url / AF_DAEMON_URL promises to target a REMOTE daemon, and this
 		// command writes to the LOCAL AF home. Honouring the flag by ignoring it
@@ -117,9 +128,19 @@ same directory and touches nothing inside it.`,
 		// something else and logs in somewhere other than the registered directory.
 		// The stdout copy above stays bare on purpose — it is consumed by command
 		// substitution, which needs the raw value (#3057 review).
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"Registered account %q for %s.\nLog in with that account before using it:\n  %s=%s %s login\n",
-			name, agent, configVar, config.ShellQuotePath(dir), agent)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Registered account %q for %s.\n", name, agent)
+		// Per agent, never a universal "login": Claude Code puts it under `auth`,
+		// so the generic template printed `claude login`, which is not a command.
+		// An agent with no known invocation gets no printed command rather than a
+		// guessed one — a next step that does not run reads as a broken account
+		// (#3057 review).
+		if words, ok := agentaccount.LoginCommand(agent); ok {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Log in with that account before using it:\n  %s=%s %s %s\n",
+				configVar, config.ShellQuotePath(dir), agent, strings.Join(words, " "))
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Log in with %s's own login flow, with %s set to %s.\n",
+				agent, configVar, config.ShellQuotePath(dir))
+		}
 		return nil
 	},
 }
@@ -133,10 +154,16 @@ supports account scoping.
 An agent absent from this list is one whose credential relocation af has not
 verified, not one that is merely unconfigured — af reports unsupported rather
 than accepting a selection that would silently do nothing.`,
-	Args: cobra.MaximumNArgs(1),
+	// ArbitraryArgs for the same reason as `add` — see the note there.
+	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+
+		if len(args) > 1 {
+			return jsonWrapError(cmd, accountsJSONFlag,
+				fmt.Errorf("af accounts list takes at most one argument, an agent name (got %d): af accounts list [agent]", len(args)))
+		}
 
 		// --daemon-url / AF_DAEMON_URL promises to target a REMOTE daemon, and this
 		// command reads the LOCAL AF home. Ignoring the flag would report this
