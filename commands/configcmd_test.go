@@ -16,12 +16,45 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// tempAFHome points AGENT_FACTORY_HOME at a fresh temp dir so config reads
-// materialize DefaultConfig there instead of touching the real home or a
-// running daemon's config.
+// tempAFHome isolates config resolution from the developer's machine: a fresh
+// AGENT_FACTORY_HOME so reads materialize DefaultConfig there instead of touching
+// the real home or a running daemon's config, AND a working directory outside any
+// git repository.
+//
+// THE SECOND HALF IS THE ONE THAT WAS MISSING (#3058), and the first half is why
+// that was hard to see. `af config get` resolves the CURRENT REPOSITORY by default
+// — configReadProjectSelector falls back to config.CurrentRepo() when no --repo is
+// passed — so a test run from inside this checkout resolves the repo-shared layer
+// at <repo>/.agent-factory/config.toml. That layer outranks both built-in and
+// global, so a developer with a checked-in default_program there fails
+// TestConfigGetScalarBare with their own value, while AGENT_FACTORY_HOME sits
+// correctly sandboxed and looks like it has already handled this.
+//
+// It is also not the developer's HOME that leaks, which is what the issue reported:
+// the home is sandboxed twice over, by TestMain's testguard.SandboxHome and again
+// here. What leaks is a file in the repository, untracked, which is why CI is green
+// — and why the failure follows the machine rather than the branch. CurrentRepo
+// resolves to the MAIN worktree, so a linked worktree reads the main checkout's
+// file even when its own tree has none.
+//
+// A test that genuinely wants project scope passes --repo explicitly; leaving the
+// ambient repository out is what makes "assert the compiled-in default" mean that.
 func tempAFHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	leaveAmbientRepo(t)
+}
+
+// leaveAmbientRepo moves the test out of any git repository, so a command that
+// resolves the CURRENT repo by default resolves none.
+//
+// Separate from tempAFHome because the two isolations are needed independently: a
+// test that asserts on the config FILE sets its own AGENT_FACTORY_HOME to a path
+// it knows, and still must not inherit this checkout's repo-shared layer when it
+// reads a value back through `af config get`.
+func leaveAmbientRepo(t *testing.T) {
+	t.Helper()
+	t.Chdir(t.TempDir())
 }
 
 func captureProcessStderr(t *testing.T, fn func()) string {
@@ -365,6 +398,7 @@ func TestConfigGetUnknownKeyJSONRootSuppressesCobraAndLog(t *testing.T) {
 func TestConfigSetWritesAndReflects(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	leaveAmbientRepo(t)
 	path := filepath.Join(home, "config.toml")
 	if err := os.WriteFile(path, []byte("# hi\ndefault_program = 'claude'  # note\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -403,6 +437,7 @@ func TestConfigSetWritesAndReflects(t *testing.T) {
 func TestConfigSetEchoesKeyValueAndRoundTrips(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	leaveAmbientRepo(t)
 	path := filepath.Join(home, "config.toml")
 
 	setCmd := &cobra.Command{}
