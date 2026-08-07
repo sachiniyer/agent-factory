@@ -338,6 +338,25 @@ back (see [Archive & restore](#archive-restore)).
 | `ssh.identity_file` | no | Path to the private key for auth. Empty ⇒ `ssh-agent` (`SSH_AUTH_SOCK`) and the default `~/.ssh` keys are tried. `~` is expanded. |
 | `ssh.known_hosts` | no | Path to the `known_hosts` file the remote's host key is verified against (default: `~/.ssh/known_hosts`). `~` is expanded. |
 
+> **Behaviour change: your `~/.ssh/config` now applies.** The ssh backend used to
+> connect with a Go ssh client that never read `~/.ssh/config`, so a `Host` block
+> matching your `ssh.host` had no effect. It now runs the real `ssh` binary, so
+> that block's `HostName`, `ProxyJump`, `ProxyCommand` and friends **do** apply —
+> which is what makes a bastion or jump host reachable without changing backends.
+>
+> **What this means for an existing setup.** If `ssh <your ssh.host>` already works
+> in your terminal, af now behaves the same way, which is usually the fix rather
+> than a surprise. The one case to check is a `Host` block that rewrites
+> `HostName` to a *different* machine than the literal `ssh.host` af used to dial
+> — there, af will now follow your ssh_config, as ssh itself always did.
+>
+> **What af still controls.** Every setting af owns is passed explicitly and wins
+> over `ssh_config`: the login user (`ssh.user`, else your own account), the port,
+> the identity file, and the whole of host-key verification — including the rule
+> that `accept-new` records learned keys in an af-owned store and never your
+> shared `~/.ssh/known_hosts`. An `ssh_config` `User`, `KnownHostsCommand` or
+> global known-hosts file cannot change any of those.
+
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
 relax it with the global-only **`ssh_host_key_verification`** key:
