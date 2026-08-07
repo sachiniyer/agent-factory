@@ -109,16 +109,10 @@ func (r *ArchiveSessionResponse) record(err error) bool {
 	return ok
 }
 
-// CommittedOutcome also consults the flat field, which is where an OLDER
-// daemon's warning lands once the outer name takes precedence.
+// CommittedOutcome reconciles the envelope with the flat legacy field; see
+// committedWithFlatWarning for why the text can land on either side.
 func (r ArchiveSessionResponse) CommittedOutcome() (committed bool, warning string) {
-	if committed, warning := r.MutationOutcome.CommittedOutcome(); committed {
-		return true, warning
-	}
-	if r.Warning != "" {
-		return true, r.Warning
-	}
-	return false, ""
+	return committedWithFlatWarning(r.MutationOutcome, r.Warning)
 }
 
 func (r *DeleteProjectResponse) record(err error) bool {
@@ -127,12 +121,25 @@ func (r *DeleteProjectResponse) record(err error) bool {
 	return ok
 }
 
+// CommittedOutcome reconciles the envelope with the flat legacy field; see
+// committedWithFlatWarning for why the text can land on either side.
 func (r DeleteProjectResponse) CommittedOutcome() (committed bool, warning string) {
-	if committed, warning := r.MutationOutcome.CommittedOutcome(); committed {
-		return true, warning
+	return committedWithFlatWarning(r.MutationOutcome, r.Warning)
+}
+
+// committedWithFlatWarning reconciles the envelope with the flat legacy field.
+// Both encoders resolve the OUTER `warning` name first, so a current daemon's
+// JSON puts the text in flat while `code` still decodes into the embedded
+// struct -- the envelope then reads committed with an EMPTY message, and the
+// TUI has no hook failure to show. Whichever side carries the text wins, and a
+// flat warning with no code is an older daemon reporting a committed outcome.
+func committedWithFlatWarning(outcome MutationOutcome, flat string) (committed bool, warning string) {
+	committed, warning = outcome.CommittedOutcome()
+	if warning == "" {
+		warning = flat
 	}
-	if r.Warning != "" {
-		return true, r.Warning
+	if !committed && flat != "" {
+		committed = true
 	}
-	return false, ""
+	return committed, warning
 }

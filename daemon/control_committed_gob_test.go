@@ -179,3 +179,94 @@ func TestDeleteProjectCarriesCommittedOutcome(t *testing.T) {
 		t.Errorf("legacy `warning` json key disappeared, breaking old clients: %s", encoded)
 	}
 }
+
+// TestCommittedWarningSurvivesEveryDecodePath is the matrix the earlier tests
+// left a hole in: they covered new->old and old->new but never a CURRENT daemon
+// decoded by a CURRENT client. Both encoders resolve the outer `warning` name
+// first, so that case lands the text in the flat field while `code` lands in the
+// embedded struct -- and an envelope read that stopped at the embedded pair
+// reported committed with an EMPTY message, leaving the TUI nothing to show.
+func TestCommittedWarningSurvivesEveryDecodePath(t *testing.T) {
+	current := ArchiveSessionResponse{OK: true, ArchivedPath: "/archived/here"}
+	current.record(&mutationCommittedError{err: errors.New("on-archive hook failed")})
+
+	type legacyWire struct {
+		OK           bool
+		ArchivedPath string
+		Warning      string
+	}
+	legacy := legacyWire{OK: true, ArchivedPath: "/archived/here", Warning: "legacy hook failed"}
+
+	for _, tc := range []struct {
+		name    string
+		decode  func(*testing.T) ArchiveSessionResponse
+		wantMsg string
+	}{
+		{"json, current daemon and client", func(t *testing.T) ArchiveSessionResponse {
+			raw, err := json.Marshal(current)
+			require.NoError(t, err)
+			var got ArchiveSessionResponse
+			require.NoError(t, json.Unmarshal(raw, &got))
+			return got
+		}, "on-archive hook failed"},
+		{"gob, current daemon and client", func(t *testing.T) ArchiveSessionResponse {
+			var buf bytes.Buffer
+			require.NoError(t, gob.NewEncoder(&buf).Encode(current))
+			var got ArchiveSessionResponse
+			require.NoError(t, gob.NewDecoder(&buf).Decode(&got))
+			return got
+		}, "on-archive hook failed"},
+		{"json, older daemon", func(t *testing.T) ArchiveSessionResponse {
+			raw, err := json.Marshal(legacy)
+			require.NoError(t, err)
+			var got ArchiveSessionResponse
+			require.NoError(t, json.Unmarshal(raw, &got))
+			return got
+		}, "legacy hook failed"},
+		{"gob, older daemon", func(t *testing.T) ArchiveSessionResponse {
+			var buf bytes.Buffer
+			require.NoError(t, gob.NewEncoder(&buf).Encode(legacy))
+			var got ArchiveSessionResponse
+			require.NoError(t, gob.NewDecoder(&buf).Decode(&got))
+			return got
+		}, "legacy hook failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.decode(t)
+			committed, warning := got.CommittedOutcome()
+			require.True(t, committed, "committed outcome lost across this decode path")
+			require.Equal(t, tc.wantMsg, warning,
+				"committed but with no message to show the user -- the hook failure is invisible")
+			require.Equal(t, "/archived/here", got.ArchivedPath, "payload lost")
+		})
+	}
+
+	// Negative control: a clean success must not be promoted by either field.
+	var clean ArchiveSessionResponse
+	raw, err := json.Marshal(ArchiveSessionResponse{OK: true, ArchivedPath: "/p"})
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &clean))
+	committed, _ := clean.CommittedOutcome()
+	require.False(t, committed, "a clean success was promoted to committed")
+}
+
+// TestNewDaemonWarningReachesOlderClient pins the direction the flat field
+// exists for: gob encodes the embedded envelope as a NESTED field an older
+// client has no slot for, so without the flat mirror the hook failure vanishes
+// and the older client reports clean success.
+func TestNewDaemonWarningReachesOlderClient(t *testing.T) {
+	current := ArchiveSessionResponse{OK: true, ArchivedPath: "/archived/here"}
+	current.record(&mutationCommittedError{err: errors.New("on-archive hook failed")})
+
+	type olderClientWire struct {
+		OK           bool
+		ArchivedPath string
+		Warning      string
+	}
+	var buf bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&buf).Encode(current))
+	var older olderClientWire
+	require.NoError(t, gob.NewDecoder(&buf).Decode(&older))
+	require.Equal(t, "on-archive hook failed", older.Warning,
+		"an older gob client saw clean success for a committed hook failure")
+}
