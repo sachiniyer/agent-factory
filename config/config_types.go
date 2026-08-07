@@ -433,6 +433,12 @@ type Config struct {
 	// loopback, so this is same-machine viewing only; a remote viewer keeps the
 	// same-origin sandboxed preview on listen_addr.
 	//
+	// That makes a NETWORK bind pointless but not harmless, which is why it carries
+	// its own notice. *.localhost binds the browser, not the port: any client that
+	// reaches the address can send `Host: <label>.localhost` itself, and the label
+	// is the only credential this listener checks. Keep it on loopback — see
+	// PreviewListenerExposureNotice (#3045).
+	//
 	// Global-only (daemon network surface), like listen_addr: a cloned repo must
 	// never be able to open a network port. See docs/configuration.md.
 	PreviewListenAddr string `json:"preview_listen_addr,omitempty" toml:"preview_listen_addr,omitempty"`

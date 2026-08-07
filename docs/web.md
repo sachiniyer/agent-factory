@@ -614,8 +614,15 @@ What to know before turning it on:
   and nothing to detect by hand.
 - **Viewing remotely is unchanged.** A Tailscale or SSH viewer keeps the
   same-origin, sandboxed preview it has always had. Binding `preview_listen_addr` to
-  a network interface gains nothing (a remote browser still resolves `*.localhost`
-  to its own machine), and the daemon warns about it at start.
+  a network interface gains a remote *browser* nothing — it still resolves
+  `*.localhost` to its own machine — but it is not therefore harmless. `*.localhost`
+  is a browser convention, not a restriction on the port: anything that can reach
+  the address can send `Host: <tab>.localhost` itself, and on this listener a tab's
+  hostname is the only credential checked. So a network bind turns every tab
+  hostname into a network-reachable capability, and one that leaks through a log, a
+  screenshot, or browser history stops being usable only from this machine. Editor
+  tabs are withheld entirely while the listener is network-bound, and the daemon
+  warns at start. Keep it on loopback unless you have a reason not to.
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
 

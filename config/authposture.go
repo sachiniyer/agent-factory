@@ -93,12 +93,23 @@ func ListenerExposureNotice(cfg *Config) string {
 // who may read a preview.
 //
 // What the notice must say on a network bind is that binding one is pointless as
-// well as exposed. Per-tab origins live under *.localhost, which a browser resolves
-// to ITS OWN loopback — so a remote viewer cannot reach a per-tab origin however the
-// port is bound, and keeps the sandboxed same-origin preview served from
-// listen_addr. A network bind therefore exposes a port that no remote browser can
-// usefully address, while making the previewed dev servers reachable by anything
-// that learns a tab's hostname.
+// well as exposed, and it must say BOTH halves. Per-tab origins live under
+// *.localhost, which a browser resolves to ITS OWN loopback — so a remote viewer
+// cannot reach a per-tab origin however the port is bound, and keeps the sandboxed
+// same-origin preview served from listen_addr.
+//
+// The second half is the one that cost this a bug report (#3045). *.localhost is a
+// browser CONVENTION, not a restriction on the port: anything that can reach the
+// address can send `Host: <label>.localhost` itself, and on this listener that
+// label is the only credential checked (there is no bearer token here — see the
+// require_token note above). So a network bind turns every tab hostname into a
+// network-reachable capability: a label that leaks through a log, a screenshot, or
+// browser history stops being usable only from this machine.
+//
+// Saying only "a network bind gains nothing" is worse than saying nothing at all.
+// The notice exists so an operator can make an informed choice, and one that
+// understates the exposure converts an unexamined default into an examined and
+// approved one.
 //
 // Same emit-at-most-once-per-daemon-start discipline as ListenerExposureNotice:
 // a string, reported by the one startup site, never on a per-request path.
@@ -108,8 +119,12 @@ func PreviewListenerExposureNotice(cfg *Config) string {
 	}
 	return fmt.Sprintf("preview_listen_addr %q is reachable from the network · it is the web-tab preview origin, "+
 		"kept separate from listen_addr so it never serves the daemon control API · it serves your previewed dev "+
-		"servers, each on its own hostname · a network bind gains nothing: per-tab origins are *.localhost names, "+
-		"which a remote browser resolves to its own machine, so remote viewers keep the same-origin preview on "+
-		"listen_addr · set it to a loopback address such as 127.0.0.1:8444, or \"\" to disable it",
+		"servers, each on its own hostname · a remote browser gains nothing from the bind: per-tab origins are "+
+		"*.localhost names, which a browser resolves to its own machine, so remote viewers keep the same-origin "+
+		"preview on listen_addr · but *.localhost is a browser convention, not a restriction — anything that "+
+		"reaches this address can send Host: <tab>.localhost itself, and a tab's hostname is the only credential "+
+		"this listener checks, so a hostname that leaks through a log, a screenshot, or browser history becomes "+
+		"readable from the network instead of only from this machine · editor tabs are withheld entirely while "+
+		"this is network-bound · set it to a loopback address such as 127.0.0.1:8444, or \"\" to disable it",
 		cfg.PreviewListenAddr)
 }
