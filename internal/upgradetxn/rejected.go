@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The durable rejected-candidate ledger (#2212).
@@ -45,9 +47,27 @@ const rejectedLedgerSuffix = ".af-rejected-candidates.json"
 // nothing will offer again.
 const maxRejectedCandidates = 32
 
-// rejectedLedgerMode is 0600. The ledger decides whether a binary may be activated,
-// so a user who can write it can re-enable a release this box rejected.
+// rejectedLedgerMode is 0600 on a privately-owned installation. The ledger decides
+// whether a binary may be activated, so a user who can write it can re-enable a
+// release this box rejected.
 const rejectedLedgerMode os.FileMode = 0o600
+
+// rejectedLedgerSharedMode is the mode on a SHARED install directory, and it is
+// widened for the same reason the install lock is (#3011).
+//
+// The ledger is scoped to an executable, not to a home, so on a group-writable
+// /usr/local/bin every authorized writer consults the same file. Owner-only, the
+// first user's rollback creates a ledger nobody else can read — and every other
+// member's updater then fails closed on EVERY release, while their own rollback
+// fails mid-record and leaves recovery retrying in PhaseRolledBack with no
+// cleanup. A safety mechanism that silently disables upgrades for everyone but
+// its creator is worse than the risk it manages.
+//
+// Widening gives away nothing. The audience is exactly directoryWriterGroup — the
+// set that can already REPLACE the binary this ledger is about. Someone who can
+// swap the executable outright does not need to edit a ledger to install what
+// they like, so the 0600 justification above simply does not describe them.
+const rejectedLedgerSharedMode os.FileMode = 0o660
 
 // RejectedCandidate is one disqualified upgrade candidate.
 //
@@ -163,8 +183,27 @@ func RecordRejectedCandidate(executable, sha256, version, reason string) error {
 	if err != nil {
 		return fmt.Errorf("encode the rejected-candidate ledger: %w", err)
 	}
-	if err := durableAtomicWriteFile(rejectedLedgerPath(executable), encoded, rejectedLedgerMode); err != nil {
+	path := rejectedLedgerPath(executable)
+	mode := rejectedLedgerMode
+	gid, shared := directoryWriterGroup(filepath.Dir(path))
+	if shared {
+		mode = rejectedLedgerSharedMode
+	}
+	if err := durableAtomicWriteFile(path, encoded, mode); err != nil {
 		return fmt.Errorf("write the rejected-candidate ledger: %w", err)
+	}
+	if shared {
+		// The mode alone is not enough: a new file takes its CREATOR's primary
+		// group, which on a shared box is usually not the directory's. Carry the
+		// directory's group, exactly as the install lock does for the same audience.
+		//
+		// A failure here is logged, not returned. The ledger is already durable, and
+		// this record is what lets recovery leave PhaseRolledBack — failing it would
+		// reproduce the stuck-in-rollback half of the very problem the widening
+		// fixes, in exchange for a permission bit.
+		if err := os.Chown(path, -1, gid); err != nil {
+			log.WarningLog.Printf("rejected-candidate ledger %s was written but could not be given group %d, so other authorized writers may not be able to read it: %v", path, gid, err)
+		}
 	}
 	return nil
 }

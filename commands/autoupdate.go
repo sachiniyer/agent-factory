@@ -174,6 +174,13 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		// to update costs a stale binary, guessing wrong costs the working one.
 		if rejected, entry, ledgerErr := upgradetxn.CandidateRejected(resolvedPath, binary); ledgerErr != nil {
 			log.WarningLog.Printf("auto-update: cannot read the rejected-candidate ledger, so %s is not safe to install: %v", latestVersion, ledgerErr)
+			// COMPLETED, not deferred — the same reasoning as the rejected branch
+			// below, and it applies here for a sharper reason. A ledger that cannot
+			// be read or parsed does not fix itself, and the candidate's identity is
+			// only known AFTER the archive is downloaded: without this, every
+			// interactive launch pays the full download budget in front of the TUI
+			// and then hits the identical permanent error.
+			throttleFailure(latestTag)
 			return nil
 		} else if rejected {
 			log.WarningLog.Printf(
