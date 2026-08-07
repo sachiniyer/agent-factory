@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,6 +31,15 @@ func TestArchiveRemoteSession_RecordsThePushedBranchAndReapsOnce(t *testing.T) {
 	srv := newSandboxProbeServer(t, "af/pushed-branch")
 	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-worker", srv.url, session.Running)
 
+	// The PHYSICAL reap, installed through the same field a sandbox runtime
+	// populates. Counting the /v1/agent/kill request instead would pass for a
+	// regression that sent the message and left the container running (#3042).
+	var reaps atomic.Int32
+	session.SetRuntimeTeardownForTest(inst, func() error {
+		reaps.Add(1)
+		return nil
+	})
+
 	require.Empty(t, inst.GetBranch(),
 		"precondition: a never-archived sandbox session has no branch recorded")
 
@@ -49,9 +59,13 @@ func TestArchiveRemoteSession_RecordsThePushedBranchAndReapsOnce(t *testing.T) {
 		assert.Equal(t, session.LiveArchived, rec.Liveness)
 	}
 
+	assert.Equal(t, int32(1), reaps.Load(),
+		"the sandbox runtime must actually be RELEASED exactly once — a kill that reports success "+
+			"while the container keeps running leaves a VM billing with no session record pointing "+
+			"at it, so nothing will ever reap it")
 	assert.Equal(t, int32(1), srv.killCalls.Load(),
-		"the sandbox is reaped exactly once, and only AFTER the push — reaping it first would "+
-			"destroy the workspace whose branch the push is making durable")
+		"and the request that triggers it is sent once; the fixture refuses it before the push, so "+
+			"this also pins that the release came AFTER the work was made durable")
 	assert.Equal(t, int32(1), srv.archiveCalls.Load(),
 		"the push runs exactly once: twice would mean the sandbox was archived again after its "+
 			"branch was already durable")
