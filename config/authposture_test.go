@@ -200,6 +200,29 @@ func TestPreviewListenerExposureNotice(t *testing.T) {
 					"the notice must say the preview origin never carries the control plane, not warn that it does")
 				assert.Contains(t, notice, "preview", "name what this listener is")
 				assert.NotContains(t, notice, "\n", "one line: this goes in a log and a status row")
+
+				// And it must state the EXPOSURE, not only the reassurance. This block is
+				// the whole reason #3045 existed: the doc comment specified both halves,
+				// the string carried only the comforting one ("a network bind gains
+				// nothing"), and every assertion above passed anyway — they checked the
+				// code that was written rather than the claim the comment made.
+				//
+				// A notice that understates the risk is worse than no notice, because it
+				// converts an unexamined default into an examined and approved one. So
+				// these assert the mechanism an operator needs to weigh, each phrased as
+				// the fact rather than as today's wording where possible.
+				assert.Contains(t, notice, "only credential",
+					"the operator must be told the tab hostname is the ONLY thing guarding a preview here")
+				assert.Contains(t, notice, "Host: <tab>.localhost",
+					"say HOW a non-browser client reaches a per-tab origin, or *.localhost reads as a protection")
+				for _, leak := range []string{"log", "screenshot", "browser history"} {
+					assert.Containsf(t, notice, leak,
+						"name where a hostname realistically leaks (%s) — that is what makes the exposure concrete", leak)
+				}
+				// The reassuring half must survive too: both are required, and dropping
+				// either one is a different bug.
+				assert.Contains(t, notice, "gains nothing from the bind",
+					"a remote browser genuinely cannot use this bind, and omitting that would overstate the risk")
 			}
 		})
 	}
