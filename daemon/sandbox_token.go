@@ -12,17 +12,21 @@ import (
 // The sandbox callback credential (#2999).
 //
 // A provisioned sandbox can be driven BY the daemon but could not call back INTO
-// it, so a remote agent could not do the things a local one does by running `af`.
-// Giving it the operator's own token would have been the easy answer and the
-// wrong one: that token grants the whole control plane including DeliverPrompt,
-// which runs instructions through every agent on the machine — so one compromised
-// sandbox would own the host.
+// it at all. Giving it the operator's own token would have been the easy answer
+// and the wrong one: that token grants the whole control plane including
+// DeliverPrompt, which runs instructions through every agent on the machine — so
+// one compromised sandbox would own the host.
 //
 // What a sandbox gets instead is a token that is:
 //
 //   - PER SESSION, so it can be revoked with that session and names who used it;
-//   - SCOPED, admitting only the routes a remote agent legitimately needs, with
-//     every route denied unless it opts in (see HTTPRoute.sandboxAllowed);
+//   - SCOPED to capability DISCOVERY — which backends and programs this daemon
+//     offers, and a free session name — with every other route denied unless it
+//     opts in (see HTTPRoute.sandboxAllowed, which carries the rule and the
+//     reasoning for each denial). Notably NOT creating a session: that names no
+//     session and still starts an agent on the host with a caller-supplied
+//     repo_path, program and prompt (#3012 review). Widening the scope waits on
+//     binding the credential to its owning session;
 //   - IN MEMORY ONLY, so a daemon restart invalidates every outstanding sandbox
 //     credential. A long-running sandbox loses callback until it is
 //     re-provisioned, which is the right side to fail on: a restart is exactly

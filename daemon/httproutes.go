@@ -45,18 +45,36 @@ type HTTPRoute struct {
 	// would grant every future route by default, which is the wrong direction for
 	// a credential handed to a machine af provisioned but does not trust.
 	//
-	// THE RULE FOR ADDING ONE, learned the hard way (#3012 review). A route may be
-	// opted in only if it CANNOT NAME ANOTHER SESSION. Denying DeliverPrompt while
-	// allowing SendPrompt was security theatre: SendPrompt takes an arbitrary
-	// session id, so a sandbox could enumerate with Snapshot and then run
-	// instructions in every agent on the machine one at a time — the exact
-	// authority the denial was supposed to withhold. AddTask reaches the same end
-	// through Task.TargetSession, and Snapshot is the enumeration that makes it
-	// aimable.
+	// THE RULE FOR ADDING ONE, and it took two review rounds to state correctly
+	// (#3012). A route may be opted in only if an attacker who has taken the
+	// sandbox cannot use it to gain authority over the HOST, or to learn the
+	// operator's private layout. What remains is capability DISCOVERY: what this
+	// daemon could offer, never what the operator has or what it will go do.
 	//
-	// Those four stay OUT until the credential is bound to its owning session and
-	// session-targeted operations are enforced against it. Route-level scoping
-	// alone cannot express "this session only", so it must not be asked to.
+	// The rule was first written as "it cannot name another session", which is a
+	// SYMPTOM of the real predicate and let CreateSession through — it names no
+	// session and still starts an agent on the host with an attacker's repo_path,
+	// program, and prompt, which is the host-side instruction authority denying
+	// DeliverPrompt exists to withhold. Naming is one route to that authority, not
+	// the definition of it. Test the authority, not the shape of the request.
+	//
+	// Denied by this rule, with the reason each is tempting:
+	//
+	//   - CreateSession — no session named; starts one on the host anyway.
+	//   - SendPrompt, CreateTab, AddTask (via Task.TargetSession) — reach an
+	//     existing agent, reproducing DeliverPrompt one at a time.
+	//   - Snapshot — the enumeration that makes the above aimable.
+	//   - ListProjects, ListDirectory — read-only, and still hand a compromised
+	//     sandbox the operator's absolute host paths and an arbitrary directory
+	//     walk of the daemon's filesystem. Reconnaissance is authority's
+	//     precursor, and a sandbox has no use for the HOST's tree: the picker
+	//     that consumes ListDirectory (#2788) is the operator's own client,
+	//     holding the operator's own token.
+	//
+	// They stay out until the credential is bound to its owning session and
+	// session-targeted operations are enforced against that owner. Route-level
+	// scoping alone cannot express "this session only" or "isolated like its
+	// parent", so it must not be asked to.
 	sandboxAllowed bool
 	// requestType is the RPC request struct this route decodes, kept so a consumer
 	// that needs the FULL body shape can reflect it rather than re-deriving a
@@ -95,12 +113,11 @@ var httpRoutes = []HTTPRoute{
 
 	// Sessions.
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/CreateSession",
-		sandboxAllowed: true,
-		Description:    "Create a new session (git worktree + agent) in a repo.",
-		requestType:    reflect.TypeOf(CreateSessionRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSession) },
+		Method:      http.MethodPost,
+		Path:        "/v1/CreateSession",
+		Description: "Create a new session (git worktree + agent) in a repo.",
+		requestType: reflect.TypeOf(CreateSessionRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.createSession) },
 	},
 	{
 		Method:         http.MethodPost,
@@ -203,12 +220,11 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterProject) },
 	},
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/ListProjects",
-		sandboxAllowed: true,
-		Description:    "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
-		requestType:    reflect.TypeOf(ListProjectsRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProjects) },
+		Method:      http.MethodPost,
+		Path:        "/v1/ListProjects",
+		Description: "List every durable project in the daemon's registry (id, last-known root, path_exists) — the read a web/TUI client unions with its derived project list.",
+		requestType: reflect.TypeOf(ListProjectsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListProjects) },
 	},
 	// The Add-project picker's read (#2788). PUBLIC, not internal: a client that
 	// cannot see the daemon host's filesystem needs it to offer anything better
@@ -216,12 +232,11 @@ var httpRoutes = []HTTPRoute{
 	// the internalHTTPRoutes note below is explicit that a verb a user could
 	// reasonably want belongs here.
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/ListDirectory",
-		sandboxAllowed: true,
-		Description:    "List the child DIRECTORIES of one directory on the daemon's filesystem, marking which are git checkouts — the read behind an Add-project picker. Resolves ~ and symlinks and answers with canonical paths; an unreadable directory is an error, never an empty list.",
-		requestType:    reflect.TypeOf(ListDirectoryRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListDirectory) },
+		Method:      http.MethodPost,
+		Path:        "/v1/ListDirectory",
+		Description: "List the child DIRECTORIES of one directory on the daemon's filesystem, marking which are git checkouts — the read behind an Add-project picker. Resolves ~ and symlinks and answers with canonical paths; an unreadable directory is an error, never an empty list.",
+		requestType: reflect.TypeOf(ListDirectoryRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ListDirectory) },
 	},
 	{
 		Method:      http.MethodPost,

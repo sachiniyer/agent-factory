@@ -72,21 +72,36 @@ func TestSandboxTokenRegistry_SessionsDoNotShareCredentials(t *testing.T) {
 // The scope is what stops a compromised sandbox owning the host, so the denials
 // are asserted by name rather than by counting.
 func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
-	for _, path := range []string{"/v1/CreateSession", "/v1/ListBackends", "/v1/ListDirectory"} {
-		assert.Truef(t, sandboxAllowedPath(path), "%s is what a remote agent is for", path)
+	// What the scope IS: capability discovery — what this daemon could offer.
+	// None of these names a session, starts anything, or reveals a host path.
+	for _, path := range []string{"/v1/ListBackends", "/v1/ListPrograms", "/v1/SuggestSessionName"} {
+		assert.Truef(t, sandboxAllowedPath(path), "%s only describes what the daemon offers", path)
 	}
 	for _, path := range []string{
 		// DeliverPrompt runs instructions through every agent on the machine.
 		"/v1/DeliverPrompt",
+		// CreateSession names NO session and reaches the same authority anyway, by
+		// creating the target itself: repo_path, backend, program and prompt are
+		// all caller-supplied, so the default/local backend starts an attacker's
+		// agent on the HOST (#3012 review). This one is why the rule is "cannot
+		// gain host authority" rather than "cannot name a session".
+		"/v1/CreateSession",
 		// These four NAME a session, so admitting them without binding the
-		// credential to its owner reproduces DeliverPrompt one agent at a time
-		// (#3012 review): SendPrompt and CreateTab take a session id directly,
-		// AddTask reaches one through Task.TargetSession, and Snapshot is the
-		// enumeration that makes any of them aimable.
+		// credential to its owner reproduces DeliverPrompt one agent at a time:
+		// SendPrompt and CreateTab take a session id directly, AddTask reaches one
+		// through Task.TargetSession, and Snapshot is the enumeration that makes
+		// any of them aimable.
 		"/v1/SendPrompt",
 		"/v1/CreateTab",
 		"/v1/AddTask",
 		"/v1/Snapshot",
+		// Read-only, and still host reconnaissance: ListProjects returns the
+		// operator's absolute project roots and ListDirectory walks the daemon's
+		// filesystem at an arbitrary path. The Add-project picker that consumes
+		// ListDirectory (#2788) is the operator's own client on the operator's own
+		// token, so denying it here costs nothing that works today.
+		"/v1/ListProjects",
+		"/v1/ListDirectory",
 		"/v1/SetConfigValue",
 		"/v1/DeleteProject",
 		"/v1/KillSession",
@@ -114,12 +129,14 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 		return r
 	}
 
-	assert.True(t, gate.authorize(request("/v1/CreateSession", secret)),
+	assert.True(t, gate.authorize(request("/v1/ListBackends", secret)),
 		"a sandbox credential must work for a route its scope admits")
 	assert.False(t, gate.authorize(request("/v1/DeliverPrompt", secret)),
 		"a sandbox credential must NOT reach DeliverPrompt")
 	assert.False(t, gate.authorize(request("/v1/SendPrompt", secret)),
 		"nor SendPrompt, which names a session and so reaches the same authority one agent at a time")
+	assert.False(t, gate.authorize(request("/v1/CreateSession", secret)),
+		"nor CreateSession, which names no session and starts one on the host anyway")
 
 	// The operator's own token is unaffected by any of this.
 	assert.True(t, gate.authorize(request("/v1/DeliverPrompt", "operator-token")))
@@ -132,7 +149,7 @@ func TestAuthGate_SandboxCredentialIsScopedAndRevocable(t *testing.T) {
 	// A gate with no registry (the agent-server, the preview origin) accepts no
 	// sandbox credential at all.
 	bare := &authGate{expectedToken: func() (string, error) { return "operator-token", nil }}
-	assert.False(t, bare.authorize(request("/v1/CreateSession", secret)))
+	assert.False(t, bare.authorize(request("/v1/ListBackends", secret)))
 }
 
 func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
