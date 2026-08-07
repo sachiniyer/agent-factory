@@ -545,6 +545,12 @@ func TestFailedCreateCleanupRetryPublishesRemoval(t *testing.T) {
 func TestDeleteSessionRecord_EndpointDeadButWorkspaceGone_ClearsTheTombstone(t *testing.T) {
 	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "remote-ish")
 
+	// The record must EXIST first, or "it is gone" below passes vacuously and this
+	// test would keep reporting success against a fixture that stopped writing one.
+	if rec := recordFor(t, repoID, "remote-ish"); rec == nil {
+		t.Fatal("precondition: there must be a record on disk for the delete to clear")
+	}
+
 	endpointDead := fmt.Errorf("kill agent: dial tcp: connection refused")
 	deleted, err := manager.deleteSessionRecord(repoID, "remote-ish", "", endpointDead)
 
@@ -556,6 +562,18 @@ func TestDeleteSessionRecord_EndpointDeadButWorkspaceGone_ClearsTheTombstone(t *
 	}
 	if !deleted {
 		t.Fatal("the record was not deleted despite the workspace being gone")
+	}
+	// THE EFFECT, not the report (#3078). `deleted` is deleteSessionRecord's own
+	// account of what it did; the tombstone clearing is a fact about STORAGE. A
+	// delete that returned true while its write was lost leaves finishUserKill
+	// retrying a dead endpoint on every poll forever — the exact stuck-by-default
+	// this test is named for — and the boolean cannot see it.
+	//
+	// Its sibling below already reads the record to prove a refused delete RETAINED
+	// it. The two halves of one guard have to be observed the same way, or the
+	// direction that matters more here is the one taken on trust.
+	if rec := recordFor(t, repoID, "remote-ish"); rec != nil {
+		t.Fatalf("deleteSessionRecord reported success but the record is still on disk: %+v", rec)
 	}
 }
 
