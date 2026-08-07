@@ -5,8 +5,12 @@ import (
 	"encoding/gob"
 	"testing"
 
+	"encoding/json"
+	"errors"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/stretchr/testify/require"
+	"net/rpc"
+	"strings"
 )
 
 // The control socket is net/rpc with gob, and gob ELIDES zero values. That is
@@ -93,4 +97,85 @@ func TestUnlistedResponseTypeStillRoundTripsCommitted(t *testing.T) {
 	committed, warning := carrier.CommittedOutcome()
 	require.True(t, committed, "an unlisted response type must still report its committed outcome")
 	require.Equal(t, "committed, follow-up failed", warning)
+}
+
+// TestLegacyDaemonCommittedWarningSurvivesSkew pins the old-daemon -> new-client
+// direction: a pre-#3036 daemon sends `warning` with no `code`. Measured: gob
+// matches the promoted field name and json flattens via the tag, so the value
+// lands in the envelope on both transports and must read as COMMITTED. Without
+// the code-less branch this is an ordinary success and the hook failure is lost.
+func TestLegacyDaemonCommittedWarningSurvivesSkew(t *testing.T) {
+	type legacyArchiveResponse struct {
+		ArchivedPath string
+		Warning      string
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(legacyArchiveResponse{
+		ArchivedPath: "/archived/here",
+		Warning:      "on-archive hook failed",
+	}); err != nil {
+		t.Fatalf("encode legacy response: %v", err)
+	}
+	var got ArchiveSessionResponse
+	if err := gob.NewDecoder(&buf).Decode(&got); err != nil {
+		t.Fatalf("decode into current response: %v", err)
+	}
+	if got.ArchivedPath != "/archived/here" {
+		t.Errorf("payload lost across skew: got %q", got.ArchivedPath)
+	}
+	committed, warning := got.CommittedOutcome()
+	if !committed {
+		t.Fatal("a code-less warning from an older daemon read as a CLEAN success; " +
+			"the committed hook failure would be silently dropped")
+	}
+	if warning != "on-archive hook failed" {
+		t.Errorf("warning = %q, want the legacy text", warning)
+	}
+}
+
+// TestLegacyRPCErrorStillClassifiesCommitted pins the task path, which answers
+// with an ERROR -- net/rpc sends no response body then, so the envelope never
+// runs. An older daemon's committed marker survives only as a flattened
+// rpc.ServerError string (#2512). Reading it as an ordinary failure invites a
+// retry that duplicates an already-durable task.
+func TestLegacyRPCErrorStillClassifiesCommitted(t *testing.T) {
+	for _, prefix := range committedPrefixes {
+		err := rpc.ServerError(prefix + " reload refused")
+		classified := committedFromLegacyRPCError(err)
+		if classified == nil {
+			t.Fatalf("committed marker %q read as an ordinary failure", prefix)
+		}
+		if !isMutationCommitted(classified) {
+			t.Errorf("classified error for %q is not marked committed", prefix)
+		}
+	}
+	// A genuine clean failure must NOT be laundered into "committed".
+	if got := committedFromLegacyRPCError(rpc.ServerError("task add failed: bad cron")); got != nil {
+		t.Errorf("clean failure misclassified as committed: %v", got)
+	}
+	if got := committedFromLegacyRPCError(nil); got != nil {
+		t.Errorf("nil error classified as committed: %v", got)
+	}
+}
+
+// TestDeleteProjectCarriesCommittedOutcome pins the response that did NOT opt in
+// and silently regressed to a clean success (#3041 review). Its json key is
+// unchanged, so this is wire-compatible, not a new contract.
+func TestDeleteProjectCarriesCommittedOutcome(t *testing.T) {
+	resp := DeleteProjectResponse{OK: true, ArchivedCount: 2}
+	resp.record(&mutationCommittedError{err: errors.New("on-archive hook failed")})
+	committed, warning := resp.CommittedOutcome()
+	if !committed {
+		t.Fatal("DeleteProject committed outcome does not round-trip")
+	}
+	if warning == "" {
+		t.Error("warning text lost")
+	}
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"warning":`) {
+		t.Errorf("legacy `warning` json key disappeared, breaking old clients: %s", encoded)
+	}
 }

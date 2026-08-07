@@ -178,7 +178,18 @@ type MutationOutcome struct {
 // apiclient — generically, off the embedded struct, so a response type opts in
 // by embedding rather than by each client growing a per-method branch.
 func (o MutationOutcome) CommittedOutcome() (committed bool, warning string) {
-	return o.Code == apiproto.ErrorCodeMutationCommitted, o.Warning
+	if o.Code == apiproto.ErrorCodeMutationCommitted {
+		return true, o.Warning
+	}
+	// Version skew: a pre-#3036 daemon sends `warning` with no `code`, and that
+	// field lands here on both transports (gob matches the promoted name; the
+	// json tag flattens). `warning` only ever meant "durable, post-commit step
+	// failed", so a code-less warning IS a committed outcome. Delete this branch
+	// once the oldest supported daemon emits the code.
+	if o.Code == "" && o.Warning != "" {
+		return true, o.Warning
+	}
+	return false, ""
 }
 
 type KillSessionResponse struct {
@@ -290,9 +301,10 @@ type DeleteProjectResponse struct {
 	KilledCount int `json:"killed_count"`
 	// Deregistered reports whether the durable project record was removed.
 	Deregistered bool `json:"deregistered"`
-	// Warning joins nonfatal on-archive hook failures from sessions whose archive
-	// and project deletion both committed.
-	Warning string `json:"warning,omitempty"`
+	// MutationOutcome carries nonfatal on-archive hook failures from sessions
+	// whose archive and project deletion both committed. Its Warning field keeps
+	// this response's original `warning` json key, so the wire is unchanged.
+	MutationOutcome
 }
 
 // RegisterProjectRequest asks the daemon to register a git checkout as a durable,

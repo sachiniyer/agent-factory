@@ -297,6 +297,14 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	client := rpc.NewClient(conn)
 	defer client.Close()
 	if err := client.Call(controlServiceName+"."+method, req, resp); err != nil {
+		// An erroring handler sends NO response body, so the envelope below
+		// never runs for handlers that answer with an error -- the task
+		// mutations do. Recognise an older daemon's committed marker here so a
+		// new CLI does not read "failed" and retry a durable task change into a
+		// duplicate. Skew-only; see committedFromLegacyRPCError.
+		if committed := committedFromLegacyRPCError(err); committed != nil {
+			return committed
+		}
 		return err
 	}
 	// A committed mutation answers OK and reports itself in the response
@@ -309,6 +317,35 @@ func callDaemonNoEnsure(method string, req any, resp any) error {
 	}); ok {
 		if committed, warning := carrier.CommittedOutcome(); committed {
 			return &rpcMutationCommittedError{err: errors.New(warning)}
+		}
+	}
+	return nil
+}
+
+// committedPrefixes are the wire strings a pre-#3036 daemon uses to mark a
+// durable-but-incomplete task mutation. This is NOT the deleted per-method
+// classifier: it is one shared, method-agnostic check over the SAME shared
+// vocabulary, reached only when no response body exists to carry the envelope.
+// Delete it once the oldest supported daemon reports through the envelope.
+var committedPrefixes = []string{
+	taskAddCommittedErrorPrefix,
+	taskUpdateCommittedErrorPrefix,
+	taskRemoveCommittedErrorPrefix,
+}
+
+// committedFromLegacyRPCError recognises an older daemon's committed outcome,
+// which arrives as a flattened rpc.ServerError with no structure left (#2512).
+func committedFromLegacyRPCError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var srv rpc.ServerError
+	if !errors.As(err, &srv) {
+		return nil
+	}
+	for _, prefix := range committedPrefixes {
+		if strings.HasPrefix(string(srv), prefix) {
+			return &rpcMutationCommittedError{err: err}
 		}
 	}
 	return nil
@@ -445,13 +482,14 @@ func KillSession(req KillSessionRequest) error {
 // relocated worktree's new path.
 func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	var resp ArchiveSessionResponse
-	if err := callDaemon("ArchiveSession", req, &resp); err != nil {
+	err := callDaemon("ArchiveSession", req, &resp)
+	// callDaemon classifies the committed outcome generically. Keep the payload
+	// on that path: the archive IS durable, and the CLI still has to report
+	// where it landed. Only a clean failure has no path to report.
+	if err != nil && !isMutationCommitted(err) {
 		return "", err
 	}
-	if resp.Warning != "" {
-		return resp.ArchivedPath, &rpcMutationCommittedError{err: errors.New(resp.Warning)}
-	}
-	return resp.ArchivedPath, nil
+	return resp.ArchivedPath, err
 }
 
 // ResumeFromLimit asks the daemon to retry a session parked at a usage-limit

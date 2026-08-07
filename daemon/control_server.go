@@ -326,11 +326,13 @@ func (s *controlServer) AddTask(req AddTaskRequest, resp *AddTaskResponse) error
 	// stale when that follow-up fails.
 	s.manager.publishEvent(agentproto.EventTaskCreated, created)
 	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
-		// Committed: the task change is durable, only the schedule reload
-		// failed. Reported in the envelope so net/rpc cannot strip it (#3036).
-		resp.record(&mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskAddCommittedErrorPrefix, reloadErr)})
-		return nil
+		// Returned as an ERROR, not through the envelope: net/rpc does not send
+		// the response body when a handler errors, and the HTTP route turns this
+		// into an error envelope carrying the shared committed code — which is
+		// what every existing consumer reads. The envelope covers the handlers
+		// that answer OK; these answer with an error (#3036).
+		return &mutationCommittedError{err: fmt.Errorf(
+			"%s %w", taskAddCommittedErrorPrefix, reloadErr)}
 	}
 	return nil
 }
@@ -419,11 +421,10 @@ func (s *controlServer) UpdateTask(req UpdateTaskRequest, resp *UpdateTaskRespon
 	if reloadErr == nil {
 		return nil
 	}
-	// Committed: the update is durable, only the schedule reload failed.
-	// Reported in the envelope so net/rpc cannot strip it (#3036).
-	resp.record(&mutationCommittedError{err: fmt.Errorf(
-		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)})
-	return nil
+	// See AddTask: an erroring handler sends no response body, so the error is
+	// the only channel that reaches both transports.
+	return &mutationCommittedError{err: fmt.Errorf(
+		"%s %w", taskUpdateCommittedErrorPrefix, reloadErr)}
 }
 
 func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskResponse) error {
@@ -443,11 +444,13 @@ func (s *controlServer) RemoveTask(req RemoveTaskRequest, resp *RemoveTaskRespon
 	// the scheduler/watch reload cannot apply it in-process.
 	s.manager.publishEvent(agentproto.EventTaskRemoved, task.Task{ID: req.ID})
 	if reloadErr := s.reloadTaskSchedulesLocked(); reloadErr != nil {
-		// Committed: the task change is durable, only the schedule reload
-		// failed. Reported in the envelope so net/rpc cannot strip it (#3036).
-		resp.record(&mutationCommittedError{err: fmt.Errorf(
-			"%s %w", taskRemoveCommittedErrorPrefix, reloadErr)})
-		return nil
+		// Returned as an ERROR, not through the envelope: net/rpc does not send
+		// the response body when a handler errors, and the HTTP route turns this
+		// into an error envelope carrying the shared committed code — which is
+		// what every existing consumer reads. The envelope covers the handlers
+		// that answer OK; these answer with an error (#3036).
+		return &mutationCommittedError{err: fmt.Errorf(
+			"%s %w", taskRemoveCommittedErrorPrefix, reloadErr)}
 	}
 	return nil
 }
