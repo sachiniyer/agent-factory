@@ -18,6 +18,7 @@ import (
 type sandboxProbeServer struct {
 	url          string
 	archiveCalls atomic.Int32
+	killCalls    atomic.Int32
 	archiveFails atomic.Bool
 	branch       atomic.Value // string
 	unreachable  atomic.Bool
@@ -45,6 +46,13 @@ func newSandboxProbeServer(t *testing.T, branch string) *sandboxProbeServer {
 		case "/v1/agent/alive":
 			// Answered, agent gone: reachable. The sandbox is still there.
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
+		case "/v1/agent/kill":
+			// The teardown half. A fixture that serves the push but not this one makes
+			// ArchiveSandbox report "pushed the branch but failed to tear the sandbox
+			// down", so any test driving a SUCCESSFUL archive through it is really
+			// driving a half-failed one (#3037).
+			s.killCalls.Add(1)
+			writeSandboxProbeEnvelope(w, struct{}{})
 		case "/v1/agent/archive":
 			s.archiveCalls.Add(1)
 			if s.archiveFails.Load() {
@@ -52,7 +60,7 @@ func newSandboxProbeServer(t *testing.T, branch string) *sandboxProbeServer {
 				return
 			}
 			b, _ := s.branch.Load().(string)
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"branch": b}})
+			writeSandboxProbeEnvelope(w, map[string]any{"branch": b})
 		default:
 			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
 		}
@@ -319,4 +327,9 @@ func TestRestoreSession_ForceReapRefusesAStalePersistedBranch(t *testing.T) {
 			t.Fatalf("the refusal must name %q so the operator can see what diverged, got: %v", want, err)
 		}
 	}
+}
+
+// writeSandboxProbeEnvelope writes the agent-server's success envelope.
+func writeSandboxProbeEnvelope(w http.ResponseWriter, data any) {
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }

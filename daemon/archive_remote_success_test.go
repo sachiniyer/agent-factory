@@ -49,6 +49,9 @@ func TestArchiveRemoteSession_RecordsThePushedBranchAndReapsOnce(t *testing.T) {
 		assert.Equal(t, session.LiveArchived, rec.Liveness)
 	}
 
+	assert.Equal(t, int32(1), srv.killCalls.Load(),
+		"the sandbox is reaped exactly once, and only AFTER the push — reaping it first would "+
+			"destroy the workspace whose branch the push is making durable")
 	assert.Equal(t, int32(1), srv.archiveCalls.Load(),
 		"the push runs exactly once: twice would mean the sandbox was archived again after its "+
 			"branch was already durable")
