@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 
@@ -406,26 +405,6 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
 	}
 	defer copied.close()
-	// DURABLE report, written into the archive itself.
-	//
-	// The archive succeeded without these files, and the user must be able to find
-	// out which ones — at RESTORE time, which is when it matters and when the
-	// original worktree no longer exists to compare against. A log line does not
-	// survive that gap, so the record travels with the data it describes.
-	//
-	// A failure to write the report FAILS the archive. That is deliberate: an
-	// archive that silently omits files is the one outcome #3066 rules out, and
-	// falling back to "archived anyway, report lost" would reproduce it exactly.
-	if len(copied.unreadable) > 0 {
-		if err := writeUnreadableReport(copied.destination, copied.unreadable); err != nil {
-			return fmt.Errorf(
-				"copied the worktree but could not record the %d unreadable file(s) it skipped, and an archive "+
-					"that omits files without saying so is not safe to publish: %w", len(copied.unreadable), err)
-		}
-		log.WarningLog.Printf(
-			"archive skipped %d unreadable file(s); they are listed in %s inside the archive: %s",
-			len(copied.unreadable), unreadableReportName, strings.Join(copied.unreadable, ", "))
-	}
 	stagingName := filepath.Base(stagingPath)
 	published := false
 	defer func() {
@@ -691,44 +670,4 @@ func restoreSecuredSource(parent *os.File, securedName, sourceName string, sourc
 func pathExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil || !os.IsNotExist(err)
-}
-
-// unreadableReportName is the manifest of files an archive could not read.
-//
-// Named with the af prefix and a leading dot so it cannot collide with a
-// tracked path, and placed at the archive ROOT so a restore surfaces it without
-// anyone having to go looking (#3066).
-const unreadableReportName = ".af-archive-skipped"
-
-// writeUnreadableReport records the skipped paths inside the archive.
-//
-// Written through the destination DESCRIPTOR rather than a rebuilt path, like
-// every other write in this copier, so it cannot land outside the tree it
-// describes if anything moved underneath.
-func writeUnreadableReport(destination *os.File, paths []string) error {
-	sorted := append([]string(nil), paths...)
-	sort.Strings(sorted)
-	var body strings.Builder
-	body.WriteString("# Files af could not read while archiving this worktree, and therefore did NOT copy.\n")
-	body.WriteString("# The archive is otherwise complete. These paths existed in the original worktree\n")
-	body.WriteString("# and are absent here; af never had permission to read their contents.\n")
-	for _, path := range sorted {
-		body.WriteString(path)
-		body.WriteString("\n")
-	}
-
-	fd, err := unix.Openat(
-		int(destination.Fd()), unreadableReportName,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		0o600,
-	)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", unreadableReportName, err)
-	}
-	file := os.NewFile(uintptr(fd), unreadableReportName)
-	if _, err := file.WriteString(body.String()); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write %s: %w", unreadableReportName, err)
-	}
-	return file.Close()
 }

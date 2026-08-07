@@ -28,8 +28,11 @@ import (
 // nonblocking and no-follow, and every destination node is created exclusively.
 // This is only reached on the cross-device fallback.
 func copyTree(src, dest string) error {
-	var unreadable []string
-	return copyTreeCollectingUnreadable(src, dest, &unreadable)
+	copied, err := copyTreeWithIdentities(src, dest)
+	if copied != nil {
+		copied.close()
+	}
+	return err
 }
 
 type copiedTreeIdentities struct {
@@ -40,15 +43,6 @@ type copiedTreeIdentities struct {
 	destination               *os.File
 	destinationIdentity       pathIdentity
 	root                      copiedDirectory
-	// unreadable are source paths, relative to the copy root, that were skipped
-	// because this process cannot read them.
-	//
-	// Carried out rather than logged. A log line is not a report: the loss would
-	// surface at RESTORE time, when the original worktree is gone, which is worse
-	// than refusing to archive at all. The caller is responsible for making this
-	// durable and visible; silently dropping it is the one outcome that is never
-	// acceptable (#3066).
-	unreadable []string
 }
 
 type copiedDirectory struct {
@@ -228,7 +222,7 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		destinationIdentity:       destinationIdentity,
 	}
 
-	copied.root, err = copyDirectoryContents(source, destination, src, dest, &copied.unreadable)
+	copied.root, err = copyDirectoryContents(source, destination, src, dest)
 	if err != nil {
 		partialManifest := destinationCleanupManifest(copied.root)
 		cleanupErr := removeOpenedDirectory(destParent, destName, dest, destination, &partialManifest)
@@ -241,7 +235,7 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 	return copied, nil
 }
 
-func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string, unreadable *[]string) (copiedDirectory, error) {
+func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) (copiedDirectory, error) {
 	root := copiedDirectory{}
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
@@ -279,7 +273,6 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			relativeRoutePath(components),
 			links,
 			xattrs,
-			unreadable,
 		)
 		if err == nil {
 			// The level is complete, and nothing is ever written directly into
@@ -316,7 +309,6 @@ func copyDirectoryLevel(
 	relativeDirectory string,
 	links map[pathIdentity]copiedFileLink,
 	xattrs *xattrDestination,
-	unreadable *[]string,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -387,16 +379,6 @@ func copyDirectoryLevel(
 			}
 		default:
 			err = unsupportedSourceTypeError(childSourcePath, uint32(stat.Mode))
-		}
-		// Skip-and-RECORD, before the manifest step. Nothing was created for this
-		// name, so no entry describes it and cleanup has nothing to undo; the path
-		// is collected so the caller can report it durably. Skipping SILENTLY is
-		// the one outcome that is never acceptable — the loss would surface at
-		// restore time, with the original worktree already gone (#3066).
-		if errors.Is(err, errSourceUnreadable) {
-			*unreadable = append(*unreadable, filepath.Join(relativeDirectory, name))
-			err = nil
-			entry = copiedEntry{}
 		}
 		// A helper names its entry as soon as it has created the destination
 		// node and learned its identity, so record it even when the entry
@@ -884,13 +866,6 @@ func copyRegularFileAtWithIdentity(
 		0,
 	)
 	if err != nil {
-		// A PERMISSION failure is not a broken archive, it is a file this process
-		// cannot read. Distinguish it so the walker can record and continue rather
-		// than abort. Note this is NOT the #3063 case and no descriptor helps here:
-		// there was never one to retain, because the bytes were never readable.
-		if errors.Is(err, os.ErrPermission) {
-			return copiedEntry{}, fmt.Errorf("%w: %s: %v", errSourceUnreadable, sourcePath, err)
-		}
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to open source file %s without following links: %w", sourcePath, err)
 	}
 	in := os.NewFile(uintptr(fd), sourcePath)
