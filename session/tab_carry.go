@@ -2,8 +2,6 @@ package session
 
 import (
 	"strings"
-
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // restoreCarriedTabs rebuilds the non-agent tabs of a record a previous instance
@@ -56,7 +54,6 @@ func (i *Instance) restoreCarriedTabs() {
 	i.carriedTabs = nil
 	agentTmux := i.tmuxLocked()
 	existing := append([]*Tab(nil), i.Tabs...)
-	title := i.Title
 	i.mu.Unlock()
 
 	// len(existing) != 1 means this is not a fresh launch's agent-only roster —
@@ -77,10 +74,6 @@ func (i *Instance) restoreCarriedTabs() {
 		// or forward-incompatible record listing a second one: an instance has
 		// exactly one agent tab, at Tabs[0].
 		if idx == 0 || kind == TabKindAgent {
-			continue
-		}
-		if len(existing)+len(rebuilt) >= maxTabs {
-			log.WarningLog.Printf("re-created session %q: not restoring carried tab %q — the roster is already at the %d-tab cap", title, td.Name, maxTabs)
 			continue
 		}
 

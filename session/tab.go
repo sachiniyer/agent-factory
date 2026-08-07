@@ -66,10 +66,16 @@ const tmuxTabSeparator = "__"
 // exact name across a restart.
 const shellTmuxSuffix = tmuxTabSeparator + shellTabName
 
-// maxTabs is the soft cap on tabs per instance (#930 PR 4). It matches the 1-9
-// number-key jump range: a session can hold the agent tab plus up to eight
-// shell/process tabs, all reachable by a single number key.
-const maxTabs = 9
+// There is deliberately no cap on tabs per instance (#3023).
+//
+// #930 PR 4 set one at 9 to match the 1-9 number-key jump range, so every tab was
+// reachable by a single key. That reasoning made the KEYBOARD the limit on the
+// DATA: a session could not hold a tenth tab because there was no tenth number key
+// to jump to it with. Reaching a tab is a navigation problem (#3021); refusing to
+// create it is a different and worse answer, and it is the one users hit.
+//
+// Anything that renders a roster therefore has to cope with an arbitrary count
+// rather than assume it fits — see the web tab bar, which scrolls.
 
 // TabKind enumerates the kinds of process a Tab can host within an instance's
 // worktree. PR 1 of the #930 ephemeral-tabs epic only materializes the Agent

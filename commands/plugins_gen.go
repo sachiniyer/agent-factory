@@ -70,6 +70,7 @@ var pluginReleaseDigests = []string{
 	"a2b54cb9209becd766678828fd09ff7bd597b683802305850bcb40cefe61b9e7", // 3.5 — add the missing devin to the --program enum in the af usage reference (#2410 drift)
 	"1f781373e8d7964be4288de32c946098896b6fe3567dba73925fedc2fab995c1", // 3.6 — teach agents the canonical --kind shell parity path (#2619)
 	"19f6ea8788b212bd41fb90f66947b82b1fc4dd17887c9ddc1780e20fb178938b", // 3.7 — teach agents to rebind a task with update --project-path (parity: task.edit.project-path)
+	"db64cd98b4631f1781a1635595ac68a83e2db52a721e5ea0c6287519696ff675", // 3.8 — drop the nine-tab limit from the tab guidance; agents were being told not to create a tenth (#3023)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

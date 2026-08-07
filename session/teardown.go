@@ -258,6 +258,41 @@ func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName s
 	return stateKnown, blind, nil
 }
 
+// TryTmuxTeardownCount reports how many tmux sessions a teardown of this instance
+// would have to close, which is the count that predicts teardown WORK.
+//
+// Two contributions, because teardownTabs closes both through one sequential loop:
+// live tabs whose tab.tmux is non-nil — web and vscode tabs own none and cost
+// nothing per-tab — and the PENDING CLEANUP handles of tabs already removed from
+// the roster whose kill was never confirmed (#2669). Omitting either direction
+// gets a caller budgeting against this wrong: counting the whole roster charges a
+// session for iframe tabs it never tears down, while ignoring the pending handles
+// under-budgets a session that has accumulated them.
+//
+// The pending handles are counted unconditionally even though only a destructive
+// mode reaps them. A budget should bound the worst case: over-counting delays a
+// watchdog, under-counting fires one on healthy work (#3023).
+// It never BLOCKS, and that is a correctness requirement rather than a nicety.
+// Its caller is the kill watchdog, which is armed while the kill already holds
+// killsInFlight and the operation lock — so waiting on i.mu here would stall the
+// arming on precisely the stuck-lock wedge the watchdog exists to report, leaving
+// the session undeletable with no diagnostics at all (#3023 review). A caller that
+// cannot read the roster gets ok=false and is expected to budget from the
+// persisted record instead, which needs no lock.
+func (i *Instance) TryTmuxTeardownCount() (int, bool) {
+	if !i.mu.TryRLock() {
+		return 0, false
+	}
+	defer i.mu.RUnlock()
+	n := len(i.pendingTabCleanup)
+	for _, tab := range i.Tabs {
+		if tab.tmux != nil {
+			n++
+		}
+	}
+	return n, true
+}
+
 // teardownTabs runs the one teardown skeleton for the given mode. It snapshots
 // each tab's tmux under i.mu, tears them down OUTSIDE the lock (closing under
 // i.mu would stall every reader while a pane drains), performs the mode's

@@ -94,8 +94,7 @@ func uniqueTabTmuxName(tabs []*Tab, pending []TabCleanupData, agentSanitized, ba
 	prefix := agentSanitized + tmuxTabSeparator
 	// Sized off the roster alone rather than len(tabs)+len(pending): a map grows
 	// on its own, pending is empty on every close that confirmed its teardown, and
-	// summing two lengths is an allocation size CodeQL cannot bound (it does not
-	// know maxTabs caps both).
+	// summing two lengths is an allocation size CodeQL cannot bound.
 	used := make(map[string]bool, len(tabs))
 	for _, t := range tabs {
 		if token := tabTmuxToken(prefix, t); token != "" {

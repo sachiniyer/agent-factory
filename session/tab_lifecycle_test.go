@@ -1,7 +1,6 @@
 package session
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -144,24 +143,31 @@ func TestCloseTab_RemovesAndProtectsAgent(t *testing.T) {
 	require.False(t, inst.TabAlive(1), "the closed tab's session must be gone")
 }
 
-// TestAddShellTab_SoftCapAtNine verifies new-tab is refused once the instance
-// already holds maxTabs (9) tabs — the number-key range can't address more.
-func TestAddShellTab_SoftCapAtNine(t *testing.T) {
+// TestAddShellTab_HasNoTabCountCap is the inverse of the guard it replaces, and
+// the count is chosen to matter: 12 is past the old 9-tab cap AND past the 1-9
+// number-key range that justified it. #930 PR 4 let the KEYBOARD limit the DATA —
+// a session could not hold a tenth tab because there was no tenth key to jump to
+// it with. Reaching a tab is navigation (#3021); refusing to create it is a worse
+// answer, and it is the one users hit (#3023).
+func TestAddShellTab_HasNoTabCountCap(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
 	inst := startedMockInstance(t, "af_tabs_cap")
-	// Agent tab + 8 shell tabs = 9 == maxTabs.
-	for i := 0; i < maxTabs-1; i++ {
+	// Agent tab + 11 shell tabs = 12, three past the old cap.
+	for i := 0; i < 11; i++ {
 		_, err := inst.AddShellTab()
-		require.NoError(t, err)
+		require.NoErrorf(t, err, "tab %d must be created; there is no cap", i+2)
 	}
-	require.Equal(t, maxTabs, inst.TabCount())
+	require.Equal(t, 12, inst.TabCount())
 
-	_, err := inst.AddShellTab()
-	require.Error(t, err, "the 10th tab must be refused")
-	require.Contains(t, err.Error(), fmt.Sprintf("%d", maxTabs))
-	require.Equal(t, maxTabs, inst.TabCount(), "the cap must not create a tab")
+	// Names stay unique past the old ceiling — the uniquifier used to be exercised
+	// only up to "shell-9", so two-digit suffixes are genuinely new ground.
+	names := map[string]bool{}
+	for _, tab := range inst.GetTabs() {
+		require.False(t, names[tab.Name], "duplicate tab name %q past the old cap", tab.Name)
+		names[tab.Name] = true
+	}
 }
 
 // TestAddShellTab_RejectedForUnstarted verifies AddShellTab errors when the
@@ -303,4 +309,47 @@ func TestRestartSurvival_HumanCreatedShellTab(t *testing.T) {
 	assert.Equal(t, shell2Name, tabs[2].tmux.SanitizedName(),
 		"the human-created tab must reconnect to its exact persisted tmux session")
 	assert.True(t, restored.TabAlive(2), "the restored human-created tab must be live")
+}
+
+// TestTmuxTeardownCount_CountsSessionsNotRosterEntries pins what the kill watchdog budgets
+// against. teardownTabs kills exactly the entries whose tab.tmux is non-nil, so a
+// web tab performs no per-tab teardown — and with the nine-tab cap gone, charging
+// the whole roster would let a dozen iframe tabs push the wedge diagnostics out by
+// ten minutes for work that never happens (#3023 review).
+func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	inst := startedMockInstance(t, "af_tmux_count")
+	_, err := inst.AddShellTab()
+	require.NoError(t, err)
+	n, ok := inst.TryTmuxTeardownCount()
+	require.True(t, ok)
+	require.Equal(t, 2, n, "agent + shell both own tmux sessions")
+
+	_, err = inst.AddWebTab("http://localhost:5173", "")
+	require.NoError(t, err)
+	require.Equal(t, 3, inst.TabCount(), "the web tab is on the roster")
+	n, ok = inst.TryTmuxTeardownCount()
+	require.True(t, ok)
+	require.Equal(t, 2, n, "but it owns no tmux session, so it costs no teardown")
+
+	// A tab closed without a confirmed kill leaves a pending handle, and
+	// teardownTabs appends every one of them to the SAME sequential close loop —
+	// so they are teardown work even though they are off the roster. Ignoring them
+	// under-budgets the watchdog and fires it on a healthy teardown.
+	inst.mu.Lock()
+	inst.pendingTabCleanup = append(inst.pendingTabCleanup, TabCleanupData{TabID: "t9", TmuxName: "af_x__stuck"})
+	inst.mu.Unlock()
+	n, ok = inst.TryTmuxTeardownCount()
+	require.True(t, ok)
+	require.Equal(t, 3, n, "a pending cleanup handle is one more tmux session the teardown must close")
+	require.Equal(t, 3, inst.TabCount(), "and it is not on the roster")
+
+	// Held lock: the budget must degrade rather than wait, or arming the kill
+	// watchdog would block on the very wedge it exists to diagnose.
+	inst.mu.Lock()
+	_, ok = inst.TryTmuxTeardownCount()
+	inst.mu.Unlock()
+	require.False(t, ok, "a locked roster must report unavailable, never block")
 }

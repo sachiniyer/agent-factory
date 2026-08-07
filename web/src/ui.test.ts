@@ -161,20 +161,24 @@ test("supportsTabManagement: local and legacy records keep tab management", () =
 });
 
 test("tab creation always explains archived, off-box, and full states (#2077)", () => {
-  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "local" }), 1), null);
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "local" })), null);
   assert.equal(
-    tabCreationUnavailableReason(sess({ backend_type: "local", liveness: Liveness.Archived }), 1),
+    tabCreationUnavailableReason(sess({ backend_type: "local", liveness: Liveness.Archived })),
     "Restore this session to create tabs",
   );
-  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "docker" }), 1), "Docker sessions have a fixed tab list");
-  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "ssh" }), 1), "SSH sessions have a fixed tab list");
-  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "remote" }), 1), "Remote sessions have a fixed tab list");
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "docker" })), "Docker sessions have a fixed tab list");
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "ssh" })), "SSH sessions have a fixed tab list");
+  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "remote" })), "Remote sessions have a fixed tab list");
   assert.equal(
-    tabCreationUnavailableReason(sess({ backend_type: "remote", liveness: Liveness.Archived }), 1),
+    tabCreationUnavailableReason(sess({ backend_type: "remote", liveness: Liveness.Archived })),
     "Archived · Remote sessions have a fixed tab list",
     "restoring an off-box session must not falsely promise that tab creation will become available",
   );
-  assert.equal(tabCreationUnavailableReason(sess({ backend_type: "local" }), 9), "Nine-tab limit reached");
+  assert.equal(
+    tabCreationUnavailableReason(sess({ backend_type: "local" })),
+    null,
+    "a local session offers tab creation at any count — the nine-tab cap is gone (#3023)",
+  );
 });
 
 test("archiving the selected session changes the sig — the bar must rebuild to drop the × (#1809)", () => {

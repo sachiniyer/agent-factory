@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // Bounding the kill path (#1917).
@@ -115,13 +116,21 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 //
 //	per tab   10s panePID + 10s list-panes + 10s kill-session + 10s has-session
 //	          + 3s pane-exit wait                                          =  43s
-//	× maxTabs (9)                                                          = 387s
+//	× the session's OWN tab count            (9 tabs, the old cap: 387s)
 //	Cleanup   5 bounded git commands × 60s (remove, list, prune,
 //	          branch -D, prune)                                            = 300s
 //	vscode    2 × (5s SIGTERM grace + 5s SIGKILL grace)                    =  20s
 //	flocks    tombstone write 10s + record delete 10s                      =  20s
 //	                                                                        ------
-//	worst-case LEGITIMATE teardown                                          ≈ 727s
+//	fixed terms                                                             = 340s
+//	worst-case LEGITIMATE teardown                              340s + 43s × tabs
+//
+// The per-tab term used to be multiplied by a constant, because tabs were capped
+// at 9 (#930). #3023 removed that cap — the keyboard should not decide how many
+// tabs a session may hold — so this had to stop being a constant too. A fixed 15
+// minutes would have been correct for 9 tabs and a false alarm for 30: the
+// watchdog would fire on a teardown that was entirely legitimate and bounded,
+// which is exactly the cry-wolf failure the paragraph above rejects.
 //
 // 45s — the old value — fired on any wedged-tmux teardown with two or more tabs,
 // all of it bounded and correct. 15 minutes clears the sum with headroom, and that
@@ -130,8 +139,39 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 // we know of is precisely the wedge worth dumping stacks for. Firing late costs
 // only a later log; firing early costs the signal itself.
 //
-// If any bound above grows, this must grow with it. A var so tests can shorten it.
-var killWatchdogDelay = 15 * time.Minute
+// If any bound above grows, these must grow with them.
+const (
+	// killWatchdogPerTab is the summed per-tab bound from the table above.
+	killWatchdogPerTab = 43 * time.Second
+	// killWatchdogFixed is every term that does not scale with the roster.
+	killWatchdogFixed = 340 * time.Second
+	// killWatchdogCountAttempts and killWatchdogCountRetryDelay bound how long the
+	// arming path will try to read a contended roster. The total is deliberately
+	// tiny — this runs while the kill holds its locks — and exists only to ride out
+	// ordinary contention, never to wait out a wedge.
+	killWatchdogCountAttempts   = 4
+	killWatchdogCountRetryDelay = 250 * time.Microsecond
+)
+
+// killWatchdogFloor is the shortest this watchdog will ever wait, and it is the
+// value the constant used to hold. Keeping it as a floor means no session that was
+// under the old 9-tab cap changes behaviour at all. A var so tests can shorten it.
+var killWatchdogFloor = 15 * time.Minute
+
+// killWatchdogDelayFor bounds a legitimate teardown of a session with this many
+// tabs, plus the same ~25% headroom the old flat 15 minutes gave the 9-tab sum
+// (727s → 900s). Firing late costs a later log; firing early costs the signal.
+func killWatchdogDelayFor(tabs int) time.Duration {
+	if tabs < 1 {
+		tabs = 1 // a session always has its agent tab, even if the roster is unread
+	}
+	budget := killWatchdogFixed + time.Duration(tabs)*killWatchdogPerTab
+	budget += budget / 4
+	if budget < killWatchdogFloor {
+		return killWatchdogFloor
+	}
+	return budget
+}
 
 // killStageDumpsStacks controls whether the watchdog appends goroutine stacks to
 // its report. The stacks are the evidence #1917 could not get from the field —
@@ -156,6 +196,69 @@ func (s *killStage) get() string {
 	return "starting"
 }
 
+// killWatchdogTabCount reports how many tabs this kill may have to tear down,
+// taken from whichever record actually exists.
+//
+// It counts TMUX SESSIONS a teardown must close, not roster entries, and the two
+// differ in both directions. teardownTabs kills exactly the live tabs whose
+// tab.tmux is non-nil — web and vscode tabs own none, and the shared vscode
+// process is already in the fixed term — but it also appends every PENDING CLEANUP
+// handle to the same sequential loop (#2669).
+//
+// Both directions matter now that the roster is unbounded. Charging the whole
+// roster would push the watchdog out ten minutes for a session of iframe tabs that
+// tears down nothing, delaying the wedge diagnostics this exists to produce;
+// ignoring the pending handles would under-budget a session that has accumulated
+// them and fire the watchdog on a teardown still inside its documented bounds.
+//
+// It must not dereference the instance. A title-based kill can resolve a persisted
+// session that could NOT be reconstructed — resolveActionSession deliberately
+// returns a nil instance with non-nil data, and the ghost branch later cleans the
+// record up — so reading the count off the instance would panic the daemon on
+// exactly the path that exists to tidy up after a session that no longer runs.
+// Zero is the honest answer when neither record survives: the delay floor still
+// applies, so the watchdog is never armed shorter than it used to be.
+func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData) int {
+	// Never BLOCKS, but does retry briefly, and the two together are the point. The
+	// argument to a deferred call is evaluated AT the defer statement, so this runs
+	// while the kill already holds killsInFlight and the operation lock: waiting on
+	// the instance lock would stall the arming on exactly the stuck-lock wedge the
+	// watchdog exists to report. But giving up on the first contended read loses the
+	// roster scale for a TRACKED session — resolveActionSession returns no persisted
+	// record for one — and a >9-tab teardown would then be judged against the bare
+	// floor and reported as a false wedge.
+	//
+	// A bounded retry separates those without having to tell them apart: ordinary
+	// contention clears in microseconds, and a wedge never clears at all.
+	if instance != nil {
+		for attempt := 0; attempt < killWatchdogCountAttempts; attempt++ {
+			if n, ok := instance.TryTmuxTeardownCount(); ok {
+				return n
+			}
+			if attempt < killWatchdogCountAttempts-1 {
+				time.Sleep(killWatchdogCountRetryDelay)
+			}
+		}
+		// Genuinely stuck. Arm on the floor rather than wait: a watchdog that fires
+		// somewhat early on a huge roster is still a watchdog, and one that never
+		// arms at all is not.
+		return 0
+	}
+	if data != nil {
+		// Asked of the SAME function the ghost teardown iterates, rather than
+		// reconstructed from the same fields. ghostCleanup loops over
+		// ghostTmuxNames(data), which collects the session's own tmux session plus
+		// each tab's, DEDUPLICATES them, and does not reap PendingTabCleanup — and
+		// every one of those three properties has to hold here too. Rebuilding the
+		// set by hand got the last two wrong: pending handles bought ~54s apiece for
+		// work this path never does, and a post-#953 record stores the agent's name
+		// in both data.TmuxName and data.Tabs[0].TmuxName, so it was counted twice.
+		// Calling the real thing cannot drift from it.
+		return len(ghostTmuxNames(data))
+	}
+	return 0
+}
+
 // watchKill arms a watchdog that reports the in-flight stage — and, by default,
 // goroutine stacks — if the kill has not finished within killWatchdogDelay. It
 // returns a stop function the caller must defer.
@@ -165,16 +268,17 @@ func (s *killStage) get() string {
 // anyway, the next field report carries the wedge point instead of the guesswork
 // #1917 had to work from. Off the hot path by construction — a kill that
 // finishes normally stops the timer having done nothing.
-func watchKill(title string, stage *killStage) (stop func()) {
+func watchKill(title string, tabs int, stage *killStage) (stop func()) {
 	done := make(chan struct{})
 	var once sync.Once
+	delay := killWatchdogDelayFor(tabs)
 	go func() {
 		select {
 		case <-done:
 			return
-		case <-time.After(killWatchdogDelay):
+		case <-time.After(delay):
 		}
-		log.WarningLog.Printf("kill of session %q has been running for over %s, stuck in stage %q; this is the #1917 wedge shape — the session cannot be killed or acted on until this returns", title, killWatchdogDelay, stage.get())
+		log.WarningLog.Printf("kill of session %q has been running for over %s, stuck in stage %q; this is the #1917 wedge shape — the session cannot be killed or acted on until this returns", title, delay, stage.get())
 		if killStageDumpsStacks {
 			log.WarningLog.Printf("kill of session %q: goroutine stacks at the wedge:\n%s", title, goroutineStacks())
 		}

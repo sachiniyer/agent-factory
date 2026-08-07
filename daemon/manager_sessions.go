@@ -95,7 +95,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// somehow outlives its own bound, so the next occurrence names its wedge
 	// point instead of leaving it to be inferred from logs (#1917).
 	stage := &killStage{}
-	defer watchKill(req.Title, stage)()
+	defer watchKill(req.Title, killWatchdogTabCount(instance, data), stage)()
 
 	stage.set("checking instance identity")
 	if m.currentInstanceReplaced(key, instance, targetID) {
