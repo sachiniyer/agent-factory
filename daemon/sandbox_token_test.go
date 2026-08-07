@@ -190,7 +190,10 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	// so does loopback, even more definitively — and nothing forwards a callback
 	// the other way, since the ssh runtime tunnels daemon→sandbox only. Port 0
 	// names nothing fixed at all.
-	for _, addr := range []string{"0.0.0.0:8443", ":8443", "[::]:8443", "10.0.0.5:0", "127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
+	// "10.0.0.5:" is the OTHER spelling of a kernel-selected port: SplitHostPort
+	// returns port "" with no error, so a check against the literal "0" alone let it
+	// through and produced "http://10.0.0.5:" (#3012 review).
+	for _, addr := range []string{"0.0.0.0:8443", ":8443", "[::]:8443", "10.0.0.5:0", "10.0.0.5:", "127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
 		_, _, err = m.mintSandboxCallback(daemonTestConfig(true, addr), "sess-a")
 		require.Errorf(t, err, "listen_addr %q is not dialable from a sandbox", addr)
 		assert.Emptyf(t, m.sandboxTokens.bySession, "a refused mint must leave no credential behind (%s)", addr)

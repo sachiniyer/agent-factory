@@ -287,6 +287,16 @@ func (wl *webListeners) webConfigAddress() string {
 	return wl.webConfigAddr
 }
 
+// bindGeneration is the control listener's binding counter, incremented on every
+// successful (re)bind. A caller that read the listener address without holding
+// wl.mu can compare it before and after to learn whether the listener moved in
+// between — see mintSandboxCallback, which cannot hold this lock across a mint.
+func (wl *webListeners) bindGeneration() uint64 {
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	return wl.webGen
+}
+
 // close tears down both listeners (daemon shutdown). Errors are joined so one
 // listener's close failure does not hide the other's.
 func (wl *webListeners) close() error {

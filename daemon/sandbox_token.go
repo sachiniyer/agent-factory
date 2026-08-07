@@ -192,11 +192,39 @@ func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url
 	if err := sandboxCallbackPostureOK(cfg); err != nil {
 		return "", "", err
 	}
+	// Snapshot the listener generation BEFORE minting and revalidate after, because
+	// nothing holds webListeners.mu across the mint (#3012 review). A listen_addr
+	// change racing this create would otherwise complete its rebind — including the
+	// revokeAll sweep — in the window between reading the address and registering
+	// the token, leaving a credential that survived the sweep while carrying the
+	// URL of the listener the sweep just closed.
+	//
+	// Revalidate-and-refuse rather than lock, deliberately. Holding the listener
+	// lock across a mint inverts the order bindWebLocked already uses (listener lock
+	// -> revokeAll -> registry lock) and is a deadlock waiting to happen. Refusing
+	// costs a create that the operator can retry against the new listener; the retry
+	// is honest, and the alternative is a session that looks provisioned and has a
+	// callback that never connects.
+	gen := m.webBindGeneration()
 	token, err = m.sandboxTokens.mint(sessionID)
 	if err != nil {
 		return "", "", err
 	}
+	if m.webBindGeneration() != gen {
+		m.sandboxTokens.revoke(sessionID)
+		return "", "", fmt.Errorf("refusing to give this sandbox a callback credential: the control listener rebound while this session was being provisioned, so the callback address %q is already closed. Retry the create", url)
+	}
 	return url, token, nil
+}
+
+// webBindGeneration counts control-listener bindings, so a caller can tell whether
+// the listener moved underneath it. 0 when there is no listener owner (a bare
+// Manager, as tests construct), where nothing can rebind.
+func (m *Manager) webBindGeneration() uint64 {
+	if m.webListeners == nil {
+		return 0
+	}
+	return m.webListeners.bindGeneration()
 }
 
 // activeWebConfigAddr is the config address behind the control-plane listener that
@@ -257,7 +285,11 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 	if config.IsLoopbackListenAddr(addr) {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q is loopback, so a sandbox dialling it reaches ITSELF rather than this daemon — and nothing forwards the other way (the ssh runtime tunnels daemon→sandbox only). Set listen_addr to an address the sandbox can reach", addr)
 	}
-	if port == "0" {
+	// Both spellings of "let the kernel pick". SplitHostPort("10.0.0.5:") returns
+	// port "" with NO error, and that form is a supported listen_addr, so a check
+	// against the literal "0" alone let it through and produced "http://10.0.0.5:"
+	// — a URL naming no port at all (#3012 review).
+	if port == "" || port == "0" {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q asks the kernel to choose a port, so no fixed callback URL exists. Set an explicit port", addr)
 	}
 	return "http://" + net.JoinHostPort(host, port), nil
