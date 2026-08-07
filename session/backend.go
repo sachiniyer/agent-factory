@@ -1,6 +1,9 @@
 package session
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // WorkspaceKind describes where a backend's workspace physically lives, so
 // callers reason about locality without asking "is this the remote type"
@@ -39,7 +42,12 @@ type Capabilities struct {
 	Archive bool
 	// Recover: a Lost session can be reconnected / re-spawned in place.
 	Recover bool
-	// TabManagement: the user can add/close arbitrary tabs (new process tab).
+	// TabManagement: the user can add/close tabs that RUN A PROCESS — a shell or
+	// process tab, which needs a PTY in the daemon-side worktree. It does not
+	// govern metadata-only tabs (a web tab is a name and a URL): those spawn
+	// nothing, so gating them on this bit refused them for a reason that did not
+	// apply to them (#3053). Ask TabKindRequires what a kind needs, and
+	// RefuseTabKind whether this backend can serve it.
 	TabManagement bool
 	// TerminalTab: an interactive terminal surface is available. Off-box runtimes
 	// provide it through their AgentServer stream rather than a daemon-local tmux.
@@ -52,6 +60,53 @@ type Capabilities struct {
 	// backend would have to re-launch the agent inside the provisioned sandbox
 	// rather than re-provision it, which is a separate lifecycle.
 	Handoff bool
+}
+
+// RefuseTabKind reports why this backend cannot serve a tab of this kind, or nil
+// if it can. It is the single gate for "may this session gain THIS tab", and it
+// asks what the KIND needs rather than whether the session is off-box (#3053):
+// the old form refused every kind on off-box sessions and explained each refusal
+// as a missing worktree, which is untrue of a tab that spawns nothing.
+//
+// target is the web tab's resolved URL and is ignored for every other kind. It
+// is a parameter because a web tab's blockers depend on WHERE it points: only a
+// loopback target is reverse-proxied, so only a loopback target is affected by
+// the daemon-host routing gap. Naming that blocker for an external URL would
+// state a requirement the caller's tab does not have — the exact defect this
+// function exists to remove, one level down.
+//
+// Each refusal names the requirement that is actually unmet, because a user told
+// "not supported on this backend" cannot tell that from a kind that could work.
+func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
+	switch TabKindRequires(kind) {
+	case TabNeedsMetadataOnly:
+		// A web tab spawns nothing and reads nothing, so the KIND needs nothing
+		// from the workspace. What the daemon cannot yet do is SERVE one off-box,
+		// and that is a different question with two different answers (#3062).
+		if c.Workspace == WorkspaceLocalWorktree {
+			return nil
+		}
+		// True of every off-box web tab: the sandbox branch of FromInstanceData
+		// rebuilds an inert backend with an empty roster, so the persisted row
+		// does not come back.
+		const notRestored = "a persisted web tab is not restored on the sandbox recovery path"
+		if IsLoopbackWebTarget(target) {
+			// Additionally true only here: loopback targets are the ones the
+			// daemon reverse-proxies, and it proxies them from its OWN host.
+			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, and %s — see #3062", target, notRestored)
+		}
+		return fmt.Errorf("this session cannot open a web tab yet: %s, so it would disappear at the next daemon restart — see #3062", notRestored)
+	case TabNeedsLocalWorktreeRead:
+		if c.Workspace != WorkspaceLocalWorktree {
+			return fmt.Errorf("this session cannot open a vscode tab: its editor is served by the daemon from the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so the daemon has no worktree to open — see #3054")
+		}
+		return nil
+	default:
+		if !c.TabManagement {
+			return fmt.Errorf("this session cannot open a shell or process tab: it runs a process in the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so there is no local worktree to spawn it in")
+		}
+		return nil
+	}
 }
 
 // ErrHandoffUnsupported is returned when an agent handoff (#2013) is requested

@@ -19,9 +19,13 @@ import "fmt"
 // against.
 func (i *Instance) CloseTab(idx int) error {
 	i.mu.Lock()
-	if idx <= 0 || idx >= len(i.Tabs) {
+	if idx < 0 || idx >= len(i.Tabs) {
 		i.mu.Unlock()
-		return fmt.Errorf("tab cannot be closed")
+		return fmt.Errorf("session %q has no tab at index %d", i.Title, idx)
+	}
+	if idx == 0 {
+		i.mu.Unlock()
+		return fmt.Errorf("the agent tab of session %q can't be closed: it is the session's own agent, pinned to the first slot — archive or kill the session instead", i.Title)
 	}
 	tab := i.removeTabLocked(idx)
 	i.mu.Unlock()
@@ -40,7 +44,7 @@ func (i *Instance) CloseTabByID(tabID string) error {
 	}
 	if idx == 0 {
 		i.mu.Unlock()
-		return fmt.Errorf("tab cannot be closed")
+		return fmt.Errorf("the agent tab of session %q can't be closed: it is the session's own agent, pinned to the first slot — archive or kill the session instead", i.Title)
 	}
 	tab := i.removeTabLocked(idx)
 	i.mu.Unlock()

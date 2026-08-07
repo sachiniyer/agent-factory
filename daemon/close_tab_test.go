@@ -406,6 +406,9 @@ func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
+	// The session-level gate stands: no user-managed tab can exist on an off-box
+	// session yet, because RefuseTabKind admits none of the four kinds there
+	// (#3053 classified them; #3062 is what would admit the first one).
 	_, err = manager.CloseTab(CloseTabRequest{Title: "rem", RepoID: repo.ID, TabName: "shell"})
 	assertTabRejection(t, err, "fixed by its runtime")
 }

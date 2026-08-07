@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,10 +11,16 @@ import (
 // #1874: the sandbox runtimes (docker/ssh/hook) declare WorkspaceRemote — their
 // workspace is off-box, so the daemon-side instance has no local git worktree
 // (gitWorktree is assigned only in LocalBackend.Provision and the LOCAL restore
-// branch of FromInstanceData). Every Add*Tab path requires that worktree, so a
-// TabManagement:true on these backends would advertise a capability no code path
-// can service: the web menu would offer "New shell tab"/"Open in VS Code" and
-// the daemon would reject the call.
+// branch of FromInstanceData). The tab paths that RUN A PROCESS require that
+// worktree, so a TabManagement:true on these backends would advertise a
+// capability no code path can service: the web menu would offer "New shell tab"
+// and the daemon would reject the call.
+//
+// #3053 split that premise per kind. It is not true of every Add*Tab path: a web
+// tab is a name and a URL, spawning nothing and reading nothing, so it works on
+// any backend and is no longer governed by this bit. TabManagement stays false
+// here because it now means what its name says — process-backed tabs — and those
+// still cannot work off-box.
 //
 // These tests pin the capability to what the implementation can actually do, so
 // the advertisement and the behavior cannot drift apart again. When tab creation
@@ -64,11 +71,15 @@ func TestSandboxBackendsDoNotAdvertiseHandoff(t *testing.T) {
 	}
 }
 
-// TestSandboxInstanceTabSpawnRejected pins the other half of the contract: the
-// Add*Tab paths really are unable to service a sandbox instance. If this ever
-// starts passing, the capability above should be flipped to true in the same
-// change — that is what makes the fix decidable rather than a guess.
-func TestSandboxInstanceTabSpawnRejected(t *testing.T) {
+// TestSandboxInstanceTabSpawnIsPerKind pins the other half of the contract: what
+// the Add*Tab paths can and cannot service on a sandbox instance, per KIND.
+//
+// Before #3053 this asserted that all four refuse, which was the defect — the
+// web tab was refused for a worktree requirement it does not have. The
+// assertions here are strictly stronger than that blanket form: each refusal
+// must also name the requirement it is actually missing, so a message that
+// degrades to "not supported on this backend" fails.
+func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 	for name, b := range sandboxBackends() {
 		t.Run(name, func(t *testing.T) {
 			// A started sandbox instance, exactly as Launch leaves it: started,
@@ -82,17 +93,36 @@ func TestSandboxInstanceTabSpawnRejected(t *testing.T) {
 				}
 			}
 
-			_, shellErr := newInst().AddShellTab()
-			assert.Error(t, shellErr, "AddShellTab must reject a worktree-less sandbox instance")
+			// Metadata only: nothing to spawn, nothing to read, so the MECHANICS
+			// layer admits it even here. Whether the daemon can SERVE it off-box
+			// is a policy question answered by Capabilities.RefuseTabKind, which
+			// still refuses (#3062) — the two layers are deliberately separate so
+			// the serving gap is not re-encoded as a fake worktree requirement.
+			webTab, webErr := newInst().AddWebTab("http://localhost:3000", "")
+			require.NoError(t, webErr,
+				"AddWebTab must serve a worktree-less sandbox instance: a web tab needs no worktree (#3053)")
+			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, ""),
+				"the capability layer must still refuse a web tab off-box until #3062 lands")
+			require.NotNil(t, webTab)
+			assert.Equal(t, TabKindWeb, webTab.Kind)
+			assert.Nil(t, webTab.tmux, "a web tab must hold no tmux session")
 
-			_, webErr := newInst().AddWebTab("http://localhost:3000", "")
-			assert.Error(t, webErr, "AddWebTab must reject a worktree-less sandbox instance")
-
+			// Needs the worktree to READ, which off-box cannot serve yet (#3054).
 			_, vscodeErr := newInst().AddVSCodeTab("")
-			assert.Error(t, vscodeErr, "AddVSCodeTab must reject a worktree-less sandbox instance")
+			require.Error(t, vscodeErr, "AddVSCodeTab must reject a worktree-less sandbox instance")
+			assert.Contains(t, strings.ToLower(vscodeErr.Error()), "editor",
+				"the vscode refusal must name the editor requirement, not a spawn it does not do")
+
+			// Need a PTY in the local worktree.
+			_, shellErr := newInst().AddShellTab()
+			require.Error(t, shellErr, "AddShellTab must reject a worktree-less sandbox instance")
+			assert.Contains(t, strings.ToLower(shellErr.Error()), "spawn",
+				"the shell refusal must name the spawn it cannot do")
 
 			_, procErr := newInst().AddProcessTab("echo hi", "")
-			assert.Error(t, procErr, "AddProcessTab must reject a worktree-less sandbox instance")
+			require.Error(t, procErr, "AddProcessTab must reject a worktree-less sandbox instance")
+			assert.Contains(t, strings.ToLower(procErr.Error()), "spawn",
+				"the process refusal must name the spawn it cannot do")
 		})
 	}
 }

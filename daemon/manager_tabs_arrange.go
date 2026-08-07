@@ -88,6 +88,12 @@ func (m *Manager) tabMutationTarget(reqID, reqTitle, reqRepoID string, labels ta
 	if instance == nil {
 		return nil, "", "", nil, fmt.Errorf("failed to restore instance %q", title)
 	}
+	// Still a session-level gate: no user-managed tab can exist on an off-box
+	// session today, because RefuseTabKind admits none of the four kinds there
+	// (#3053) — process tabs need a worktree to spawn in, a vscode tab needs one
+	// to read, and a web tab cannot be SERVED off-box yet (#3062). Relaxing this
+	// belongs with the change that admits the first such tab, not before it:
+	// until then it would be a path nothing can reach.
 	if !instance.Capabilities().TabManagement {
 		return nil, "", "", nil, fmt.Errorf("cannot %s on session %q: its tab list is fixed by its runtime, not user-managed — this session's workspace runs off-box (docker/ssh/remote)", labels.action, title)
 	}
