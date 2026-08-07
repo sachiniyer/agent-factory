@@ -74,7 +74,23 @@ type Capabilities struct {
 func (c Capabilities) RefuseTabKind(kind TabKind) error {
 	switch TabKindRequires(kind) {
 	case TabNeedsMetadataOnly:
-		// A name and a URL. Nothing to spawn, nothing to read: every backend.
+		// A web tab spawns nothing and reads nothing, so the KIND needs nothing
+		// from the workspace — but the daemon cannot yet SERVE one off-box, and
+		// that is a different question from what the kind requires. Two reasons,
+		// both measured (#3062): a loopback target is proxied over the daemon's
+		// own TCP stack, so `--port 3000` reaches the daemon host rather than the
+		// workspace and can surface an unrelated daemon-local service; and
+		// FromInstanceData restores tabs only on its local branch, so a persisted
+		// web tab disappears at the next daemon restart.
+		//
+		// This is deliberately NOT the old blanket refusal wearing new words. The
+		// old one claimed there was no worktree to spawn in, which is not a
+		// requirement a web tab has; this one names what is actually missing, and
+		// it is the only kind whose refusal will lift without new worktree
+		// semantics.
+		if c.Workspace != WorkspaceLocalWorktree {
+			return fmt.Errorf("this session cannot open a web tab yet: its target would be proxied from the daemon host rather than from the session's off-box workspace, and a persisted web tab is not restored on the sandbox recovery path — see #3062")
+		}
 		return nil
 	case TabNeedsLocalWorktreeRead:
 		if c.Workspace != WorkspaceLocalWorktree {

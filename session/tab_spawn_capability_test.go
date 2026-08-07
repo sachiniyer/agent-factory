@@ -93,10 +93,16 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 				}
 			}
 
-			// Metadata only: nothing to spawn, nothing to read.
+			// Metadata only: nothing to spawn, nothing to read, so the MECHANICS
+			// layer admits it even here. Whether the daemon can SERVE it off-box
+			// is a policy question answered by Capabilities.RefuseTabKind, which
+			// still refuses (#3062) — the two layers are deliberately separate so
+			// the serving gap is not re-encoded as a fake worktree requirement.
 			webTab, webErr := newInst().AddWebTab("http://localhost:3000", "")
 			require.NoError(t, webErr,
 				"AddWebTab must serve a worktree-less sandbox instance: a web tab needs no worktree (#3053)")
+			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb),
+				"the capability layer must still refuse a web tab off-box until #3062 lands")
 			require.NotNil(t, webTab)
 			assert.Equal(t, TabKindWeb, webTab.Kind)
 			assert.Nil(t, webTab.tmux, "a web tab must hold no tmux session")

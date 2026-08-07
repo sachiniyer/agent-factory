@@ -33,17 +33,37 @@ func TestTabKindRequiresClassifiesEveryKind(t *testing.T) {
 	}
 }
 
-// TestRefuseTabKindAdmitsMetadataTabsOffBox is the #3053 regression. A web tab
-// is a name and a URL: it spawns nothing and reads nothing, so no backend has
-// grounds to refuse it. Before the fix the single TabManagement bit refused it
-// alongside the kinds that genuinely need a worktree.
-func TestRefuseTabKindAdmitsMetadataTabsOffBox(t *testing.T) {
+// TestRefuseTabKindGivesEachKindItsOwnReason is the #3053 regression. The three
+// kinds are refused off-box for THREE DIFFERENT reasons, and before the fix all
+// three were refused for one — the worktree a web tab never needed. That the
+// reasons are distinct is the property under test: it is what lets a user tell a
+// tab kind that could work from one that cannot.
+func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 	require.False(t, remoteCaps().TabManagement,
 		"fixture drifted: the off-box row is supposed to lack TabManagement")
 
-	require.NoError(t, remoteCaps().RefuseTabKind(TabKindWeb),
-		"an off-box session refused a web tab, which needs nothing from the workspace")
-	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb))
+	web := remoteCaps().RefuseTabKind(TabKindWeb)
+	vscode := remoteCaps().RefuseTabKind(TabKindVSCode)
+	shell := remoteCaps().RefuseTabKind(TabKindShell)
+	require.Error(t, web, "a web tab cannot be SERVED off-box yet (#3062)")
+	require.Error(t, vscode)
+	require.Error(t, shell)
+
+	msgs := map[string]string{"web": web.Error(), "vscode": vscode.Error(), "shell": shell.Error()}
+	for a, ma := range msgs {
+		for bName, mb := range msgs {
+			if a < bName {
+				assert.NotEqual(t, ma, mb, "%s and %s share a refusal message; the whole point is that they differ", a, bName)
+			}
+		}
+	}
+
+	// And each names its OWN missing requirement, not another kind's.
+	assert.NotContains(t, strings.ToLower(msgs["web"]), "spawn",
+		"a web tab spawns nothing; saying spawn is the #3053 defect")
+	assert.Contains(t, strings.ToLower(msgs["web"]), "proxied",
+		"the web refusal must name the serving problem that actually blocks it")
+	assert.Contains(t, msgs["web"], "3062", "the web refusal must point at the work that lifts it")
 }
 
 // TestRefuseTabKindNamesTheUnmetRequirement is the other half of #3053: a
@@ -88,6 +108,11 @@ func TestTabSpawnPreconditionIsPerKind(t *testing.T) {
 		hasWorktree = true
 	)
 
+	// This layer answers MECHANICS — what the kind needs from the instance — and
+	// a web tab needs nothing, which stays true. Whether the daemon can SERVE one
+	// off-box is a separate question, answered by RefuseTabKind above (#3062).
+	// Keeping them apart is what stops the serving gap from being re-encoded as a
+	// fake worktree requirement.
 	require.NoError(t, tabSpawnPreconditionErr(started, noTmux, noWorktree, TabKindWeb),
 		"a web tab needs neither tmux nor a worktree, but the precondition demanded both")
 

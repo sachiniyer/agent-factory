@@ -88,15 +88,15 @@ func (m *Manager) tabMutationTarget(reqID, reqTitle, reqRepoID string, labels ta
 	if instance == nil {
 		return nil, "", "", nil, fmt.Errorf("failed to restore instance %q", title)
 	}
-	// No blanket capability gate here any more (#3053). It said the roster was
-	// "fixed by its runtime", which stopped being true once metadata-only tabs
-	// could be created on any backend — a web tab you cannot close or rename is
-	// worse than one you cannot create. Every protection this gate was standing
-	// in for is per-TAB and still applies below: the agent tab is pinned to slot
-	// 0 (it cannot be closed or moved, and nothing may be moved in front of it),
-	// and TabKindRenameable refuses a rename that no surface would render. A
-	// process-backed tab cannot exist on an off-box session to begin with,
-	// because RefuseTabKind never admits one.
+	// Still a session-level gate: no user-managed tab can exist on an off-box
+	// session today, because RefuseTabKind admits none of the four kinds there
+	// (#3053) — process tabs need a worktree to spawn in, a vscode tab needs one
+	// to read, and a web tab cannot be SERVED off-box yet (#3062). Relaxing this
+	// belongs with the change that admits the first such tab, not before it:
+	// until then it would be a path nothing can reach.
+	if !instance.Capabilities().TabManagement {
+		return nil, "", "", nil, fmt.Errorf("cannot %s on session %q: its tab list is fixed by its runtime, not user-managed — this session's workspace runs off-box (docker/ssh/remote)", labels.action, title)
+	}
 	// Fast path only: reject an already-archived session without making the caller
 	// wait on the op-lock. The authoritative check is the post-lock one below.
 	if instance.IsArchived() {

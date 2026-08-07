@@ -269,7 +269,7 @@ func TestArrangeTab_RejectsArchivedSession(t *testing.T) {
 // TestArrangeTab_RejectsRemoteInstance: a remote session's tabs come from its
 // remote_hooks config, not from user edits, so neither verb applies — mirroring
 // CreateTab/CloseTab and the TUI's rules.
-func TestArrangeTab_MetadataTabArrangesOnRemoteInstance(t *testing.T) {
+func TestArrangeTab_RejectsRemoteInstance(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -293,26 +293,16 @@ func TestArrangeTab_MetadataTabArrangesOnRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, title)] = inst
 	manager.mu.Unlock()
 
-	// #3053 removed the blanket remote gate here: it claimed the roster was
-	// "fixed by its runtime", which stops being true once a metadata tab can be
-	// created on any backend. What replaced it is per-TAB, and that is what this
-	// now pins — a web tab arranges like any other, and the agent tab stays
-	// pinned to slot 0.
-	created, err := manager.CreateTab(CreateTabRequest{Title: title, RepoID: repo.ID, Kind: "web", URL: "http://localhost:3000"})
-	if err != nil {
-		t.Fatalf("creating a web tab on an off-box session must succeed (#3053): %v", err)
+	if _, err := manager.RenameTab(RenameTabRequest{Title: title, RepoID: repo.ID, TabName: "shell", NewName: "editor"}); err == nil {
+		t.Fatal("expected a remote rejection for rename, got nil")
+	} else if !strings.Contains(err.Error(), "remote") {
+		t.Fatalf("expected a remote-rejection error, got: %v", err)
 	}
 
-	if _, err := manager.RenameTab(RenameTabRequest{Title: title, RepoID: repo.ID, TabName: created.Name, NewName: "editor"}); err != nil {
-		t.Fatalf("renaming a web tab on an off-box session must succeed, got: %v", err)
-	}
-
-	// The protection the blanket gate was standing in for: slot 0 is the agent
-	// tab, and nothing may be moved in front of it.
-	if _, _, err := manager.ReorderTab(ReorderTabRequest{Title: title, RepoID: repo.ID, TabName: "editor", NewIndex: 0}); err == nil {
-		t.Fatal("expected slot 0 to stay reserved for the agent tab, got nil")
-	} else if !strings.Contains(err.Error(), "agent tab") {
-		t.Fatalf("expected the refusal to name the agent tab, got: %v", err)
+	if _, _, err := manager.ReorderTab(ReorderTabRequest{Title: title, RepoID: repo.ID, TabName: "shell", NewIndex: 1}); err == nil {
+		t.Fatal("expected a remote rejection for reorder, got nil")
+	} else if !strings.Contains(err.Error(), "remote") {
+		t.Fatalf("expected a remote-rejection error, got: %v", err)
 	}
 }
 

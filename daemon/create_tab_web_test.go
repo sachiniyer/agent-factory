@@ -171,18 +171,20 @@ func TestCreateTab_WebRejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	// #3053 INVERTED this. A web tab is a name and a URL: it spawns nothing and
-	// reads nothing, so an off-box workspace is not a reason to refuse it. It was
-	// previously turned away by the single TabManagement bit, whose stated reason
-	// — no local worktree to spawn in — is a requirement a web tab does not have.
-	resp, err := manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Kind: "web", URL: "http://localhost:3000"})
-	if err != nil {
-		t.Fatalf("a web tab must be accepted on an off-box session (#3053), got: %v", err)
+	// Still refused off-box, but #3053 changed WHY, and the why is the contract.
+	// The old refusal said there was no local worktree to spawn the tab in — a
+	// requirement a web tab does not have, which made it indistinguishable from a
+	// shell tab's refusal. What actually blocks it is serving: a loopback target
+	// would be proxied from the daemon host rather than the workspace, and a
+	// persisted web tab is not restored on the sandbox path (#3062).
+	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Kind: "web", URL: "http://localhost:3000"})
+	if err == nil {
+		t.Fatal("expected error for remote instance, got nil")
 	}
-	if resp.Name == "" {
-		t.Fatal("expected the created web tab's resolved name")
+	if strings.Contains(err.Error(), "spawn") {
+		t.Fatalf("a web tab spawns nothing; refusing it for a spawn is the #3053 defect: %v", err)
 	}
-	if resp.TmuxName != "" {
-		t.Fatalf("a web tab owns no PTY, so it must report no tmux session, got %q", resp.TmuxName)
+	if !strings.Contains(err.Error(), "3062") {
+		t.Fatalf("the refusal must point at the work that lifts it (#3062), got: %v", err)
 	}
 }
