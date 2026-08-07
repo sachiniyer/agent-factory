@@ -244,13 +244,6 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
 		instance.backend = newInertSandboxBackend(data.BackendType)
-		// METADATA-ONLY tabs survive the restart even though the workspace does not
-		// (#3062). A web tab is a name and a URL — it binds no tmux session and reads
-		// no worktree — so the reasons this branch cannot reconstruct the rest do not
-		// apply to it. Dropping it made admission non-durable: a tab created off-box
-		// vanished silently at the next daemon restart, which is the harder failure
-		// to notice because nothing errors.
-		restoreMetadataTabs(instance, data)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
 		// intent. Rebuild only that teardown handle — no endpoint, tunnel, or live
@@ -456,37 +449,5 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 	}
 	if data.AgentConversation != nil {
 		instance.SetAgentConversation(*data.AgentConversation)
-	}
-}
-
-// restoreMetadataTabs rebuilds only the tabs whose kind needs nothing from the
-// workspace, for a backend whose workspace did not survive the restart.
-//
-// It is deliberately NOT restoreLocalTabs with a filter. That function binds tmux
-// sessions and resolves programs, which is exactly what this branch cannot do; the
-// point here is that a metadata-only tab requires none of it, so the restore is a
-// copy of the record rather than a reconstruction of a runtime.
-//
-// Tabs of any other kind are dropped, as before. They describe a worktree and a PTY
-// that no longer exist, and inventing rows for them would put entries in the roster
-// that every later operation would fail on.
-func restoreMetadataTabs(instance *Instance, data InstanceData) {
-	for _, td := range data.Tabs {
-		kind := tabKindForData(td.Kind)
-		if TabKindRequires(kind) != TabNeedsMetadataOnly || kind == TabKindAgent {
-			continue
-		}
-		id := td.ID
-		if id == "" {
-			// Same rollforward as restoreLocalTabs: a pre-#1738 row has no id, and it
-			// must be addressable by a stable one from this load forward.
-			id = newTabID()
-		}
-		instance.Tabs = append(instance.Tabs, &Tab{
-			ID:   id,
-			Name: td.Name,
-			Kind: kind,
-			URL:  td.URL,
-		})
 	}
 }

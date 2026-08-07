@@ -86,23 +86,16 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		if c.Workspace == WorkspaceLocalWorktree {
 			return nil
 		}
-		// The gate is per-TARGET here, not per-kind, because the two remaining
-		// blockers were never the same blocker (#3062).
-		//
-		// A LOOPBACK target is still refused. daemon/webtab_proxy.go returns a
-		// webTabTarget with no transport for TabKindWeb, so the daemon proxies it
-		// over its OWN TCP stack: `--port 3000` resolves on the daemon host rather
-		// than in the sandbox, and can surface an unrelated daemon-local service
-		// inside the session's tab. Serving one needs a transport through the remote
-		// AgentServer, the way the vscode branch uses a unix socket.
+		// True of every off-box web tab: the sandbox branch of FromInstanceData
+		// rebuilds an inert backend with an empty roster, so the persisted row
+		// does not come back.
+		const notRestored = "a persisted web tab is not restored on the sandbox recovery path"
 		if IsLoopbackWebTarget(target) {
-			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, so it would show the daemon's own %s — see #3062", target, target)
+			// Additionally true only here: loopback targets are the ones the
+			// daemon reverse-proxies, and it proxies them from its OWN host.
+			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, and %s — see #3062", target, notRestored)
 		}
-		// An EXTERNAL absolute URL is admitted. It is iframed directly and never
-		// touches the proxy, so the routing blocker above does not apply to it, and
-		// FromInstanceData now restores metadata-only tabs on the sandbox path so it
-		// no longer vanishes at the next daemon restart.
-		return nil
+		return fmt.Errorf("this session cannot open a web tab yet: %s, so it would disappear at the next daemon restart — see #3062", notRestored)
 	case TabNeedsLocalWorktreeRead:
 		if c.Workspace != WorkspaceLocalWorktree {
 			return fmt.Errorf("this session cannot open a vscode tab: its editor is served by the daemon from the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so the daemon has no worktree to open — see #3054")

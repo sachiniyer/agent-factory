@@ -370,7 +370,10 @@ const LEGACY_TAB_KINDS = ["shell", "process", "web", "vscode"];
  *  omitempty), so the fallback defaults to local — treating it as off-box would
  *  strip tab management from every legacy row. */
 export function supportsTabManagement(s: SessionData): boolean {
-  return allowedTabKinds(s).some((k) => k.allowed);
+  // Scoped to what the web can actually OFFER. A kind the daemon allows but this
+  // UI has no menu entry for must not light up the control or the `t` shortcut,
+  // or both lead to a create the per-kind check rejects (#3060).
+  return NEW_TAB_MENU_KINDS.some((kind) => canCreateTabKind(s, kind));
 }
 
 /** Whether this session may gain a tab of one specific kind. */
@@ -452,7 +455,11 @@ export function tabCreationUnavailableReason(s: SessionData): string | null {
   // the projection carries prose at all (#3060).
   const projected = s.tab_kinds;
   if (projected && projected.length > 0 && !isArchived(s)) {
-    if (projected.some((k) => k.allowed)) {
+    // MENU-supported kinds, not "any kind". The control this reason gates offers
+    // only Terminal and VS Code, so a session allowing solely `web` would render
+    // the control over an empty menu and consume the `t` shortcut for a create
+    // that is then silently rejected (#3060).
+    if (NEW_TAB_MENU_KINDS.some((kind) => canCreateTabKind(s, kind))) {
       return null;
     }
     const explained = projected.find((k) => k.reason);

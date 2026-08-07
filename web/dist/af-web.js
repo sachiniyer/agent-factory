@@ -12670,7 +12670,7 @@ function allowedTabKinds(s) {
 }
 var LEGACY_TAB_KINDS = ["shell", "process", "web", "vscode"];
 function supportsTabManagement(s) {
-  return allowedTabKinds(s).some((k) => k.allowed);
+  return NEW_TAB_MENU_KINDS.some((kind) => canCreateTabKind(s, kind));
 }
 function canCreateTabKind(s, kind) {
   return allowedTabKinds(s).some((k) => k.kind === kind && k.allowed);
@@ -12695,7 +12695,7 @@ function canCloseTabs(s) {
 function tabCreationUnavailableReason(s) {
   const projected = s.tab_kinds;
   if (projected && projected.length > 0 && !isArchived(s)) {
-    if (projected.some((k) => k.allowed)) {
+    if (NEW_TAB_MENU_KINDS.some((kind) => canCreateTabKind(s, kind))) {
       return null;
     }
     const explained = projected.find((k) => k.reason);

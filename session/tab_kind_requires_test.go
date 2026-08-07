@@ -66,27 +66,28 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 	assert.Contains(t, msgs["web"], "3062", "the web refusal must point at the work that lifts it")
 }
 
-// TestWebRefusalIsPerTargetNotPerKind is the thesis applied to its own message,
-// now that one of the two blockers is gone (#3062).
-//
-// Only LOOPBACK targets are reverse-proxied, so the daemon-host routing gap was
-// never a property of the KIND. With metadata-only tabs restored on the sandbox
-// path, the restore gap that applied to both is closed, and what remains applies
-// to exactly one target shape — so an external URL is admitted and a loopback one
-// is refused for the reason that is actually true of it.
-func TestWebRefusalIsPerTargetNotPerKind(t *testing.T) {
+// TestWebRefusalNamesOnlyTheBlockersThatApply is this PR's own thesis applied to
+// its own message. Only LOOPBACK targets are reverse-proxied, so citing the
+// daemon-host routing gap for an external URL states a requirement that tab does
+// not have — the same defect one level down. Both targets are refused, for
+// different and individually true reasons.
+func TestWebRefusalNamesOnlyTheBlockersThatApply(t *testing.T) {
 	loopback := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
 	external := remoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
-
-	require.Error(t, loopback, "a loopback target is still proxied from the daemon host")
-	require.NoError(t, external,
-		"an external URL is iframed directly and now survives a restart, so neither blocker applies to it")
+	require.Error(t, loopback)
+	require.Error(t, external, "an off-box web tab is still not restored across a restart, whatever it points at")
 
 	assert.Contains(t, strings.ToLower(loopback.Error()), "proxied",
-		"the surviving refusal must name the routing gap, which is what is actually true of it")
-	assert.Contains(t, loopback.Error(), "3062", "and point at the work that lifts it")
-	assert.NotContains(t, strings.ToLower(loopback.Error()), "restored",
-		"the restore gap is closed; still citing it would state a requirement this tab no longer has")
+		"a loopback target IS reverse-proxied from the daemon host; the refusal must say so")
+	assert.NotContains(t, strings.ToLower(external.Error()), "proxied",
+		"an external URL is iframed directly and never proxied; claiming otherwise is the #3053 defect recreated")
+
+	// The blocker they DO share is the one that is unconditionally true.
+	for name, err := range map[string]error{"loopback": loopback, "external": external} {
+		assert.Contains(t, strings.ToLower(err.Error()), "restored",
+			"%s refusal must name the restore gap, which applies to every off-box web tab", name)
+		assert.Contains(t, err.Error(), "3062", "%s refusal must point at the work that lifts it", name)
+	}
 
 	// A local session takes neither branch.
 	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000"))

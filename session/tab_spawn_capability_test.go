@@ -101,15 +101,8 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 			webTab, webErr := newInst().AddWebTab("http://localhost:3000", "")
 			require.NoError(t, webErr,
 				"AddWebTab must serve a worktree-less sandbox instance: a web tab needs no worktree (#3053)")
-			// The policy layer is now per-TARGET (#3062). An EXTERNAL URL is admitted:
-			// it is iframed directly and never proxied, and metadata-only tabs are
-			// restored on the sandbox path, so neither remaining blocker applies.
-			require.NoError(t, b.Capabilities().RefuseTabKind(TabKindWeb, "https://example.com/app"),
-				"an external web tab is served off-box: nothing proxies it and it now survives a restart")
-			// A LOOPBACK target is still refused, and for its own reason: the daemon
-			// would proxy it over its own TCP stack and show its own localhost.
-			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, "http://localhost:3000"),
-				"a loopback target still needs a transport through the remote AgentServer (#3062)")
+			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, ""),
+				"the capability layer must still refuse a web tab off-box until #3062 lands")
 			require.NotNil(t, webTab)
 			assert.Equal(t, TabKindWeb, webTab.Kind)
 			assert.Nil(t, webTab.tmux, "a web tab must hold no tmux session")

@@ -447,33 +447,3 @@ func TestTabRosterMutable_FalseSurvivesSerialization(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(absent), "tab_roster_mutable")
 }
-
-// A metadata-only tab must survive a daemon restart on the sandbox path, or
-// admitting one off-box is not durable: it vanishes silently at the next restart,
-// which is the harder failure to notice because nothing errors (#3062).
-func TestFromInstanceData_RestoresMetadataTabsOnTheSandboxPath(t *testing.T) {
-	data := InstanceData{
-		Title:       "off-box",
-		BackendType: "ssh",
-		Tabs: []TabData{
-			{ID: "t0", Name: "agent", Kind: TabKindAgent},
-			{ID: "t1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/app"},
-			// A shell tab describes a PTY in a worktree that did not survive; it is
-			// still dropped, because inventing a row for it would put an entry in the
-			// roster that every later operation fails on.
-			{ID: "t2", Name: "shell", Kind: TabKindShell, TmuxName: "af_x__shell"},
-		},
-	}
-	instance, err := FromInstanceData(data)
-	require.NoError(t, err)
-
-	names := map[string]TabKind{}
-	for _, tab := range instance.Tabs {
-		names[tab.Name] = tab.Kind
-		require.NotEmptyf(t, tab.ID, "restored tab %q must be addressable by a stable id", tab.Name)
-	}
-	require.Equal(t, TabKindWeb, names["docs"], "the web tab must come back — it needs no worktree")
-	require.Equal(t, "https://example.com/app", instance.Tabs[len(instance.Tabs)-1].URL,
-		"and its target must come back with it, or the tab is empty")
-	require.NotContains(t, names, "shell", "a PTY tab's workspace did not survive; it stays dropped")
-}

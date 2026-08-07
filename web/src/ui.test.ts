@@ -298,7 +298,14 @@ test("tab kinds come from the daemon's projection, not from backend_type (#3060)
   });
   assert.equal(canCreateTabKind(offBoxButWebAllowed, "web"), true, "the daemon said yes; the UI must offer it");
   assert.equal(canCreateTabKind(offBoxButWebAllowed, "shell"), false);
-  assert.equal(supportsTabManagement(offBoxButWebAllowed), true, "at least one kind is creatable");
+  // supportsTabManagement is scoped to what the web can OFFER: the menu has no
+  // entry for `web`, so allowing only that kind must not light up the control or
+  // the `t` shortcut — both would lead to a create the per-kind check rejects.
+  assert.equal(
+    supportsTabManagement(offBoxButWebAllowed),
+    false,
+    "the daemon allows a kind this UI cannot offer, so the new-tab control stays withdrawn",
+  );
 
   // And a LOCAL session whose daemon refuses everything is refused, which the old
   // rule could not express at all.
