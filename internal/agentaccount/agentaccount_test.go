@@ -155,3 +155,87 @@ func envValue(t *testing.T, env []string, name string) string {
 	t.Fatalf("%s not present in the scoped environment", name)
 	return ""
 }
+
+// A case-only variant must be refused. On the default macOS/Windows filesystem
+// `work` and `Work` are ONE directory, so registering both would give two named
+// accounts a single credential store: the second login overwrites the first, and
+// both selections then authenticate as the same person while the UI reports two
+// accounts. That is the silent-wrong-identity failure #2983 exists to prevent,
+// reached through the filesystem rather than through the environment.
+//
+// Asserted on every platform, because the rule is uniform on every platform: an
+// account name travels in shared project config, so one that means two accounts
+// on Linux and one on a colleague's Mac is broken wherever it is written.
+func TestRegister_RefusesANameThatDiffersOnlyByCase(t *testing.T) {
+	home := t.TempDir()
+	if _, err := Register(home, "codex", "work"); err != nil {
+		t.Fatalf("register work: %v", err)
+	}
+
+	_, err := Register(home, "codex", "Work")
+	if err == nil {
+		t.Fatal("registering a case-only variant must be refused: on a case-insensitive " +
+			"filesystem both names address one directory and share one identity")
+	}
+	if !strings.Contains(err.Error(), "collides with existing account") {
+		t.Fatalf("the refusal must name the collision, got: %v", err)
+	}
+	// And it must not have been created under either spelling.
+	names, err := List(home, "codex")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 1 || names[0] != "work" {
+		t.Fatalf("the refused registration must leave the registry untouched, got %v", names)
+	}
+
+	// The exact same name is still idempotent — the collision rule must not break
+	// re-registration, which is the ordinary case.
+	if _, err := Register(home, "codex", "work"); err != nil {
+		t.Fatalf("re-registering the same name must stay idempotent: %v", err)
+	}
+}
+
+// A symlinked account path must be refused rather than followed.
+//
+// Two distinct harms, both silent. MkdirAll succeeds on an existing
+// symlink-to-directory without saying it followed one, so the Chmod behind it
+// would re-permission an arbitrary target to 0700. And the readers disagree
+// about whether such an account exists at all: List skips it (DirEntry.IsDir is
+// false for a symlink) while a Stat-based Selected would accept it, giving an
+// account that `af accounts list` does not show and a launch happily uses.
+func TestRegister_RefusesASymlinkedAccountPath(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+	if err := os.Chmod(elsewhere, 0o755); err != nil {
+		t.Fatalf("chmod target: %v", err)
+	}
+
+	linkPath := filepath.Join(home, DirName, "codex", "linked")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o700); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	if err := os.Symlink(elsewhere, linkPath); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	if _, err := Register(home, "codex", "linked"); err == nil {
+		t.Fatal("a symlinked account path must be refused, not followed")
+	}
+
+	// The link target's permissions must be untouched — the whole point.
+	info, err := os.Stat(elsewhere)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Fatalf("the refused registration re-permissioned the symlink target to %#o; "+
+			"chmod followed the link", perm)
+	}
+
+	// And Selected must agree with List that it is not an account, rather than
+	// authenticating through a path the registry never created.
+	if _, err := Selected(home, "codex", "linked", ""); err == nil {
+		t.Fatal("Selected must refuse a symlinked account, matching List which cannot see it")
+	}
+}

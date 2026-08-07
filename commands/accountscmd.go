@@ -96,9 +96,15 @@ same directory and touches nothing inside it.`,
 		// stderr so it survives being captured.
 		fmt.Fprintln(cmd.OutOrStdout(), dir)
 		configVar, _ := sessionenv.SupportsAccounts(agent)
+		// The guidance line is PASTEABLE, so the path in it must be shell-quoted:
+		// an AGENT_FACTORY_HOME containing a space or a shell metacharacter would
+		// otherwise produce a command that fails, or worse, one that parses into
+		// something else and logs in somewhere other than the registered directory.
+		// The stdout copy above stays bare on purpose — it is consumed by command
+		// substitution, which needs the raw value (#3057 review).
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Registered account %q for %s.\nLog in with that account before using it:\n  %s=%s %s login\n",
-			name, agent, configVar, dir, agent)
+			name, agent, configVar, config.ShellQuotePath(dir), agent)
 		return nil
 	},
 }

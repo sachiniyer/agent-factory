@@ -78,8 +78,34 @@ func Register(home, agent, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := refuseCaseCollision(home, agent, name); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return "", fmt.Errorf("create account directory %s: %w", dir, err)
+	}
+	// Lstat AFTER MkdirAll, which succeeds on an existing symlink-to-directory
+	// without reporting that it followed one. Chmod would then follow it too and
+	// re-permission whatever it points at — an arbitrary path, chosen by whoever
+	// made the link, silently set to 0700 by a registration command.
+	//
+	// Refusing also keeps the readers agreeing with each other. List skips a
+	// symlink (DirEntry.IsDir is false for one) while Selected accepts it
+	// (os.Stat follows), so a symlinked account is invisible to `af accounts
+	// list` and usable by a launch — an account that does not appear to exist and
+	// works anyway is the kind of state nobody debugs successfully (#3057 review).
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("inspect account directory %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf(
+			"account path %s is a symlink; accounts must be real directories so af never re-permissions or "+
+				"authenticates through a path chosen elsewhere — remove the link, or point AGENT_FACTORY_HOME at the real location",
+			dir)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("account path %s exists and is not a directory", dir)
 	}
 	// MkdirAll honours the umask, so a 077 umask would have produced 0700 anyway
 	// and a 022 one would not. Set it explicitly rather than inherit whatever the
@@ -88,6 +114,43 @@ func Register(home, agent, name string) (string, error) {
 		return "", fmt.Errorf("secure account directory %s: %w", dir, err)
 	}
 	return dir, nil
+}
+
+// refuseCaseCollision rejects a name that differs from an existing account only
+// by case.
+//
+// macOS and Windows default to case-INSENSITIVE filesystems, where `work` and
+// `Work` are one directory. The registry would treat them as two accounts, so a
+// second `codex login` would overwrite the first account's credentials and both
+// selections would then authenticate as the same person — while the UI reported
+// two distinct accounts. That is the exact silent-wrong-identity outcome this
+// feature exists to prevent, arrived at from the filesystem instead of from the
+// environment (#3057 review).
+//
+// It refuses on EVERY platform rather than probing the filesystem's behaviour.
+// An account name is portable configuration — a project config can name one, and
+// that config is shared across machines — so a name that means two accounts on
+// Linux and one on a colleague's Mac is a footgun wherever it is written. The
+// uniform rule costs a user one rename and behaves identically everywhere.
+//
+// Refusing rather than lowercasing is deliberate too: silently folding `Work`
+// into `work` would hand back an EXISTING account's directory from a command the
+// operator issued to create a new one.
+func refuseCaseCollision(home, agent, name string) error {
+	existing, err := List(home, agent)
+	if err != nil {
+		return err
+	}
+	for _, other := range existing {
+		if other != name && strings.EqualFold(other, name) {
+			return fmt.Errorf(
+				"account %q collides with existing account %q for %s: account names must differ by more than case, "+
+					"because macOS and Windows filesystems treat them as one directory and both accounts would share "+
+					"a single identity",
+				name, other, agent)
+		}
+	}
+	return nil
 }
 
 // List returns the registered account names for an agent, sorted.
@@ -148,7 +211,11 @@ func Selected(home, agent, name, trustedWrapper string) (sessionenv.Account, err
 	if err != nil {
 		return sessionenv.Account{}, err
 	}
-	info, err := os.Stat(dir)
+	// Lstat, matching Register and List. os.Stat follows a symlink, so a launch
+	// would authenticate through a path the registry never created and that `af
+	// accounts list` does not show. All three readers must answer the same
+	// question or an account exists for some of them and not others.
+	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {
 		return sessionenv.Account{}, fmt.Errorf(
 			"account %q is not registered for %s; run `af accounts add %s %s` and log in with that account first",
