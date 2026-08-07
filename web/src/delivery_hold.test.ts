@@ -209,10 +209,44 @@ test("a commit that was only queued does not end the hold (#3025)", () => {
 
   // The stream drops and Enter is queued rather than delivered. The PTY still
   // holds "deploy prod"; nothing has committed there.
-  assert.equal(hold.noteQueued(1_100), "pause");
+  assert.equal(hold.noteQueued("\r", 1_100), "pause");
   assert.equal(hold.holding, true, "the partial line is still in the PTY — keep protecting it");
 
   // Only a commit that actually reached the PTY ends it.
   hold.noteInput("\r", 2_200);
   assert.equal(hold.holding, false);
+});
+
+// #3025 review: the queued commit must be applied once the flush puts it on the
+// wire. Until then the line is still sitting unsubmitted in the PTY and the hold is
+// protecting it — but after, the draft is gone and continuing to renew defers an
+// automated delivery to its next cron tick for no reason.
+test("delivery_hold: a flushed queued commit ends the hold", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  assert.equal(h.noteInput("deploy prod", 0), "pause");
+  assert.equal(h.noteQueued("\r", 1_100), "pause", "queued Enter keeps protecting the line in the PTY");
+  assert.equal(h.holding, true);
+
+  h.noteFlushed(1_200);
+  assert.equal(h.holding, false, "the commit has reached the PTY; there is no draft left to protect");
+});
+
+// …but a flush that carried no commit must NOT end the hold: the draft is still
+// there, now actually in the PTY, which is exactly when it needs protecting.
+test("delivery_hold: a flush with no commit keeps the hold", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  assert.equal(h.noteInput("deploy", 0), "pause");
+  assert.equal(h.noteQueued(" --to prod", 1_100), "pause", "renew interval elapsed");
+  h.noteFlushed(1_200);
+  assert.equal(h.holding, true, "the flushed bytes were a draft, not a commit");
+});
+
+// Two queued runs: the LAST one decides, the same rule live input follows.
+test("delivery_hold: a later queued draft overrides an earlier queued commit", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("one", 0);
+  h.noteQueued("\r", 1_100);
+  h.noteQueued("two", 1_200);
+  h.noteFlushed(1_300);
+  assert.equal(h.holding, true, "the queue ends mid-line, so the flush leaves a draft in the PTY");
 });

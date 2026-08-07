@@ -145,6 +145,7 @@ export class MidLineHold {
   private uncommitted = false;
   private lastInputMs = 0;
   private lastPauseMs = 0;
+  private queuedEndsLine = false;
 
   /**
    * @param renewIntervalMs how often to re-send the pause while the line stays
@@ -253,9 +254,36 @@ export class MidLineHold {
    * would release the hold over a line that is still there, and the queued Enter
    * would later submit whatever an automated delivery had appended to it.
    */
-  noteQueued(nowMs: number): HoldAction {
+  noteQueued(data: string, nowMs: number): HoldAction {
     this.lastInputMs = nowMs;
+    // Remembered, not applied. Whether this run ends the line is only knowable
+    // now — the flush sends opaque frames — but it only BECOMES true once the PTY
+    // has them, which is what noteFlushed decides.
+    if (!data.startsWith(ESC) || data.startsWith(PASTE_START)) {
+      const payload = data.startsWith(PASTE_START) ? "" : data;
+      const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
+      this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    }
     return this.beginOrRenew(nowMs);
+  }
+
+  /**
+   * Applies the commit that queued input was carrying, once the flush has actually
+   * put it on the wire.
+   *
+   * Without this the hold outlives the draft: Enter typed against a dropped stream
+   * is deliberately not read as a commit (see noteQueued), so after the reconnect
+   * flushes it the PTY has submitted the line while the browser is still renewing
+   * the lease — up to the idle bound plus one daemon lease. Nothing is corrupted by
+   * that, but an automated cron delivery is deferred to its next tick for no reason,
+   * and "held longer than necessary" is still a cost worth not paying.
+   */
+  noteFlushed(nowMs: number): void {
+    this.lastInputMs = nowMs;
+    if (this.queuedEndsLine) {
+      this.uncommitted = false;
+      this.queuedEndsLine = false;
+    }
   }
 
   /** Drops the hold for a teardown that makes the question moot — the pane

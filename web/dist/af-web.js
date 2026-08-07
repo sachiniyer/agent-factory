@@ -6985,6 +6985,7 @@ var MidLineHold = class {
   uncommitted = false;
   lastInputMs = 0;
   lastPauseMs = 0;
+  queuedEndsLine = false;
   /** True while the user is considered to have a partially typed line. */
   get holding() {
     return this.uncommitted;
@@ -7064,9 +7065,32 @@ var MidLineHold = class {
    * would release the hold over a line that is still there, and the queued Enter
    * would later submit whatever an automated delivery had appended to it.
    */
-  noteQueued(nowMs) {
+  noteQueued(data, nowMs) {
     this.lastInputMs = nowMs;
+    if (!data.startsWith(ESC) || data.startsWith(PASTE_START)) {
+      const payload = data.startsWith(PASTE_START) ? "" : data;
+      const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
+      this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    }
     return this.beginOrRenew(nowMs);
+  }
+  /**
+   * Applies the commit that queued input was carrying, once the flush has actually
+   * put it on the wire.
+   *
+   * Without this the hold outlives the draft: Enter typed against a dropped stream
+   * is deliberately not read as a commit (see noteQueued), so after the reconnect
+   * flushes it the PTY has submitted the line while the browser is still renewing
+   * the lease — up to the idle bound plus one daemon lease. Nothing is corrupted by
+   * that, but an automated cron delivery is deferred to its next tick for no reason,
+   * and "held longer than necessary" is still a cost worth not paying.
+   */
+  noteFlushed(nowMs) {
+    this.lastInputMs = nowMs;
+    if (this.queuedEndsLine) {
+      this.uncommitted = false;
+      this.queuedEndsLine = false;
+    }
   }
   /** Drops the hold for a teardown that makes the question moot — the pane
    *  closing, the session changing. Nothing is sent to the daemon: the lease is
@@ -7389,6 +7413,9 @@ function currentXtermTheme() {
 }
 
 // src/terminal.ts
+function holdClockMs() {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 1e4;
 var RESIZE_DEBOUNCE_MS = 120;
@@ -8435,7 +8462,7 @@ var AttachTerminal = class {
     if (this.stopped || this.exited) {
       return;
     }
-    this.noteQueuedInput();
+    this.noteQueuedInput(text);
     if (!this.pendingInput.push(frame)) {
       this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
     }
@@ -8446,6 +8473,7 @@ var AttachTerminal = class {
    *  socket that dies mid-flush loses nothing. */
   flushPendingInput() {
     const frames = this.pendingInput.drain();
+    const hadQueued = frames.length > 0;
     for (let i = 0; i < frames.length; i++) {
       if (this.send(frames[i])) {
         continue;
@@ -8454,6 +8482,10 @@ var AttachTerminal = class {
         this.pendingInput.push(frames[j]);
       }
       return;
+    }
+    if (hadQueued) {
+      this.midLine.noteFlushed(holdClockMs());
+      this.dispatchHold("none");
     }
   }
   /** Feeds one chunk of USER input to the mid-line tracker and acts on its verdict.
@@ -8467,16 +8499,16 @@ var AttachTerminal = class {
     if (!this.cb.onDeliveryHold) {
       return;
     }
-    this.dispatchHold(this.midLine.noteInput(text, Date.now()));
+    this.dispatchHold(this.midLine.noteInput(text, holdClockMs()));
   }
   /** Extends the hold for input that was QUEUED rather than delivered, without
    *  reading a commit out of it. What is uncommitted is a property of the PTY, and
    *  bytes that never arrived cannot have committed anything there. */
-  noteQueuedInput() {
+  noteQueuedInput(text) {
     if (!this.cb.onDeliveryHold) {
       return;
     }
-    this.dispatchHold(this.midLine.noteQueued(Date.now()));
+    this.dispatchHold(this.midLine.noteQueued(text, holdClockMs()));
   }
   /** Applies a hold verdict: keeps the renew timer running while a line is
    *  uncommitted, and hands each pause to the owner that knows which session to
@@ -8492,7 +8524,7 @@ var AttachTerminal = class {
       this.stopMidLineTimer();
     } else if (this.midLineTimer === null) {
       this.midLineTimer = window.setInterval(() => {
-        this.dispatchHold(this.midLine.tick(Date.now()));
+        this.dispatchHold(this.midLine.tick(holdClockMs()));
       }, 500);
     }
     if (action === "pause") {

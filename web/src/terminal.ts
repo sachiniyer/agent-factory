@@ -90,6 +90,21 @@ export interface TerminalCallbacks {
   onDeliveryHold?(action: HoldAction): void;
 }
 
+/** Monotonic milliseconds for the delivery-hold deadlines (#3024).
+ *
+ *  performance.now() rather than Date.now() because these are DURATIONS, and a
+ *  wall clock can move. A backward correction while the user composes makes the
+ *  next timestamp earlier than the last renew, so the renew stops firing and the
+ *  daemon's three-second lease lapses over a live draft; a large forward jump makes
+ *  tick() read a just-touched draft as idle and drop the hold. Neither is exotic on
+ *  a VM whose host corrects its clock. performance.now() is monotonic and immune to
+ *  both. Falls back to Date.now() only where performance is absent, which no
+ *  supported browser is — the fallback exists so a non-browser test context cannot
+ *  crash on it. */
+function holdClockMs(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 10_000;
 // Debounce the fit→OpResize send so dragging a window edge sends one resize on
@@ -1464,7 +1479,7 @@ export class AttachTerminal {
     // three seconds later, an automated delivery would append to that partial
     // line, and the queued Enter would submit the splice on reconnect. So the
     // hold is extended and the commit is deliberately not read.
-    this.noteQueuedInput();
+    this.noteQueuedInput(text);
     if (!this.pendingInput.push(frame)) {
       // Refused by the cap — a socket that is not coming back. Say so rather than
       // losing it quietly a second time, which is the whole defect this fixes.
@@ -1478,6 +1493,7 @@ export class AttachTerminal {
    *  socket that dies mid-flush loses nothing. */
   private flushPendingInput(): void {
     const frames = this.pendingInput.drain();
+    const hadQueued = frames.length > 0;
     for (let i = 0; i < frames.length; i++) {
       if (this.send(frames[i])) {
         continue;
@@ -1490,6 +1506,14 @@ export class AttachTerminal {
         this.pendingInput.push(frames[j]);
       }
       return;
+    }
+    // Everything the queue was holding is now on the wire, so a commit that was
+    // waiting in it has finally reached the PTY (#3025 review). Applying it here
+    // rather than when it was typed is the whole point: until this moment the line
+    // was still sitting unsubmitted in the PTY and the hold was protecting it.
+    if (hadQueued) {
+      this.midLine.noteFlushed(holdClockMs());
+      this.dispatchHold("none");
     }
   }
 
@@ -1504,18 +1528,19 @@ export class AttachTerminal {
     if (!this.cb.onDeliveryHold) {
       return; // this pane's owner takes no lease; do not even track
     }
-    this.dispatchHold(this.midLine.noteInput(text, Date.now()));
+    this.dispatchHold(this.midLine.noteInput(text, holdClockMs()));
   }
 
   /** Extends the hold for input that was QUEUED rather than delivered, without
    *  reading a commit out of it. What is uncommitted is a property of the PTY, and
    *  bytes that never arrived cannot have committed anything there. */
-  private noteQueuedInput(): void {
+  private noteQueuedInput(text: string): void {
     if (!this.cb.onDeliveryHold) {
       return;
     }
-    this.dispatchHold(this.midLine.noteQueued(Date.now()));
+    this.dispatchHold(this.midLine.noteQueued(text, holdClockMs()));
   }
+
 
   /** Applies a hold verdict: keeps the renew timer running while a line is
    *  uncommitted, and hands each pause to the owner that knows which session to
@@ -1535,7 +1560,7 @@ export class AttachTerminal {
       // never to this timer. It exists so a slowly-composed line stays protected
       // between keystrokes.
       this.midLineTimer = window.setInterval(() => {
-        this.dispatchHold(this.midLine.tick(Date.now()));
+        this.dispatchHold(this.midLine.tick(holdClockMs()));
       }, 500);
     }
     if (action === "pause") {
