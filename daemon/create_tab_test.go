@@ -198,7 +198,11 @@ func TestCreateTab_RejectsRemoteInstance(t *testing.T) {
 	manager.mu.Unlock()
 
 	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Command: "btop"})
-	assertTabRejection(t, err, "only local sessions support user-managed tabs")
+	// The message names the SPAWN, which is what a process tab actually needs and
+	// cannot have off-box (#3053). The old blanket wording ("only local sessions
+	// support user-managed tabs") was also used to refuse tabs that spawn
+	// nothing, so it could not tell the two apart.
+	assertTabRejection(t, err, "no local worktree to spawn it in")
 }
 
 // TestCreateTab_SpawnsPersistsAndReturnsName is the headline daemon test: a
@@ -414,5 +418,5 @@ func TestCreateTab_ShellRejectsRemoteInstance(t *testing.T) {
 	manager.mu.Unlock()
 
 	_, err = manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Shell: true})
-	assertTabRejection(t, err, "only local sessions support user-managed tabs")
+	assertTabRejection(t, err, "no local worktree to spawn it in")
 }

@@ -382,7 +382,7 @@ func TestCloseTab_RejectsUnknownTab(t *testing.T) {
 
 // TestCloseTab_RejectsRemoteInstance verifies remote sessions' tabs (fixed by
 // their hook config) cannot be closed, mirroring the TUI's `w` rule.
-func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
+func TestCloseTab_MetadataTabRoundTripsOnRemoteInstance(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -406,8 +406,17 @@ func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: "rem", RepoID: repo.ID, TabName: "shell"})
-	assertTabRejection(t, err, "fixed by its runtime")
+	// #3053: the blanket "its tab list is fixed by its runtime" gate is gone,
+	// because that stopped being true once a metadata tab could exist here. A web
+	// tab you can create but cannot close would be worse than one you cannot
+	// create, so the round trip is the contract being pinned.
+	created, err := manager.CreateTab(CreateTabRequest{Title: "rem", RepoID: repo.ID, Kind: "web", URL: "http://localhost:3000"})
+	if err != nil {
+		t.Fatalf("creating a web tab on an off-box session must succeed (#3053): %v", err)
+	}
+	if _, err := manager.CloseTab(CloseTabRequest{Title: "rem", RepoID: repo.ID, TabName: created.Name}); err != nil {
+		t.Fatalf("closing a web tab on an off-box session must succeed, got: %v", err)
+	}
 }
 
 func closeBlockingTabExec(alive map[string]bool, blockedKillName string, killStarted chan<- struct{}, releaseKill <-chan struct{}) (cmd_test.MockCmdExec, func(string) bool) {
