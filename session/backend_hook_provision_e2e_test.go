@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ LogLevel ERROR
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
 
-		ready, exited := waitForSSHD(done, port)
+		ready, exited := waitForSSHD(done, port, hostPubKey)
 		if ready {
 			t.Cleanup(func() {
 				_ = cmd.Process.Kill()
@@ -126,7 +127,7 @@ LogLevel ERROR
 // well as the port, so a daemon that died is distinguished from one still
 // starting — and a port answered by an unrelated listener never counts, because
 // the process must still be alive for readiness to be declared.
-func waitForSSHD(done <-chan struct{}, port int) (ready, exited bool) {
+func waitForSSHD(done <-chan struct{}, port int, wantHostKey string) (ready, exited bool) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
@@ -137,16 +138,39 @@ func waitForSSHD(done <-chan struct{}, port int) (ready, exited bool) {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
-			select {
-			case <-done:
-				return false, true // it answered, but our daemon is gone: not ours
-			default:
-				return true, false
+			// A live process plus an answering port is NOT proof the port is ours:
+			// a stranger may hold it while our sshd is still starting and about to
+			// fail its bind. Only the host key settles ownership — nothing else has
+			// the key we just generated.
+			if sshdOwnsPort(port, wantHostKey) {
+				select {
+				case <-done:
+					return false, true // ours died after answering: not usable
+				default:
+					return true, false
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return false, false
+}
+
+// sshdOwnsPort reports whether the listener on port presents the host key we
+// generated — the only evidence that the socket belongs to the sshd this harness
+// started, rather than to a process that won the bind race.
+func sshdOwnsPort(port int, wantHostKey string) bool {
+	out, err := exec.Command("ssh-keyscan", "-T", "2", "-p", strconv.Itoa(port), "127.0.0.1").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 3 && f[1]+" "+f[2] == wantHostKey {
+			return true
+		}
+	}
+	return false
 }
 
 // withIdentity appends the test identity to a composed command, standing in for
@@ -314,4 +338,36 @@ func runPinnedSSHAndReportPrompt(t *testing.T, record *hookProvisionRecord, batc
 
 	_, statErr := os.Stat(marker)
 	return statErr == nil
+}
+
+// Codex 3732268431: readiness must establish SOCKET OWNERSHIP, not merely that
+// our process is momentarily alive. A stranger holding the port while our sshd
+// is still starting would otherwise be accepted, and the connection tests would
+// target it. Only the host key settles it.
+func TestSSHDOwnershipCheckRejectsAStranger(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keyscan"); err != nil {
+		t.Skipf("ssh-keyscan absent, so ownership cannot be established here: %v", err)
+	}
+	// A plain TCP listener: reachable, answers a dial, and is emphatically not
+	// our sshd.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			c, aErr := ln.Accept()
+			if aErr != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	assert.False(t, sshdOwnsPort(port, "ssh-ed25519 AAAAsomekeywedidnotgenerate"),
+		"a listener that is not our sshd must never be accepted as ready — that is the bind race")
+
+	// And the positive direction: a real harness sshd IS recognised.
+	realPort, realKey := throwawaySSHD(t)
+	assert.True(t, sshdOwnsPort(realPort, realKey), "our own sshd must be recognised by its host key")
 }
