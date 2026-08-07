@@ -204,13 +204,18 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// protects nothing and leaks the workspace it was meant to remove.
 		legacyCfg := data.SSH.Config
 		legacyCfg.Host, legacyCfg.Port = normalizeLegacySSHAddress(legacyCfg.Host, legacyCfg.Port)
-		p := &sshProvisioner{
-			spec:                ProvisionSpec{Title: title},
-			cfg:                 legacyCfg,
-			hostKeyVerification: data.SSH.HostKeyVerification,
-			sessionDir:          data.SSH.SessionDir,
-			remotePID:           data.SSH.RemotePID,
+		// Compose the transport from the PERSISTED config, through the same
+		// constructor the create path uses. A handle written before #3052 carries
+		// ssh.* settings, not a command — and refusing to reap it because the
+		// transport changed underneath would leak the workspace it exists to
+		// remove (the #3044 lesson).
+		sshCmd, cmdErr := sshCommandForConfig(legacyCfg, data.SSH.HostKeyVerification)
+		if cmdErr != nil {
+			return nil, nil, fmt.Errorf("ssh cleanup handle has an unusable address: %w", cmdErr)
 		}
+		p := newSSHSandboxProvisioner(ProvisionSpec{Title: title}, sshCmd, "", "")
+		p.sessionDir = data.SSH.SessionDir
+		p.remotePID = data.SSH.RemotePID
 		teardown := p.reap
 		return &sshBackend{
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},

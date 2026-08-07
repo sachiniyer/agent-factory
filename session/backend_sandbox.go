@@ -394,8 +394,15 @@ func (p *sandboxProvisioner) reap() error {
 		return nil
 	}
 
+	// err can be nil here: the command exited 0 but never returned the challenge,
+	// which means the far side did not run. Formatting a nil with %w renders
+	// "%!w(<nil>)", so say what actually happened instead.
 	reapErr := fmt.Errorf("backend=sandbox: reaping %q failed: %s: %w",
 		p.sessionDir, strings.TrimSpace(string(out)), err)
+	if err == nil {
+		reapErr = fmt.Errorf("backend=sandbox: reaping %q did not complete — the sandbox never confirmed it ran: %s",
+			p.sessionDir, strings.TrimSpace(string(out)))
+	}
 
 	// A reap may latch ONLY when the remote side demonstrably ran. Three ways it
 	// may not have, all of which must retain the record and retry:

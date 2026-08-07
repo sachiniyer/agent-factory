@@ -4,17 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-
-	"golang.org/x/crypto/ssh"
 )
 
 func TestHookCleanupHandleRestoresFilteredEnvironment(t *testing.T) {
@@ -182,13 +182,9 @@ func TestHookCleanupHandlePreservesResolvedNoAgent(t *testing.T) {
 // off-box teardown handle survives with it; an inert no-op backend would delete
 // the retained row while leaving its remote process and directory behind.
 func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
-	p := &sshProvisioner{
-		spec:                ProvisionSpec{Title: "restart-reap"},
-		cfg:                 config.SSHConfig{Host: "cleanup.example.test", User: "remote"},
-		hostKeyVerification: config.SSHHostKeyAcceptNew,
-		sessionDir:          "/home/remote/.af-sessions/restart-reap.1234",
-		remotePID:           "4242",
-	}
+	p := newSSHSandboxProvisioner(ProvisionSpec{Title: "restart-reap"}, "ssh cleanup.example.test", "", "")
+	p.sessionDir = "/home/remote/.af-sessions/restart-reap.1234"
+	p.remotePID = "4242"
 	teardown := p.reap
 	inst := &Instance{
 		ID:    "restart-reap-id",
@@ -198,10 +194,10 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
 			cleanup: &SSHRuntimeCleanupData{
-				Config:              p.cfg,
+				Config:              config.SSHConfig{Host: "cleanup.example.test", User: "remote"},
 				SessionDir:          p.sessionDir,
 				RemotePID:           p.remotePID,
-				HostKeyVerification: p.hostKeyVerification,
+				HostKeyVerification: config.SSHHostKeyAcceptNew,
 			},
 		},
 		runtimeTeardown: teardown,
@@ -215,7 +211,7 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
-	for _, private := range []string{p.cfg.Host, p.sessionDir, p.remotePID, "runtime_cleanup"} {
+	for _, private := range []string{"cleanup.example.test", p.sessionDir, p.remotePID, "runtime_cleanup"} {
 		if strings.Contains(string(snapshotRaw), private) {
 			t.Fatalf("daemon snapshot leaked storage-only cleanup value %q: %s", private, snapshotRaw)
 		}
@@ -237,12 +233,11 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 	// reloads in that window; it still carries the original PID by design, and the
 	// remote argv guard makes retrying that stale numeric value safe.
 	inst.MarkUserKilled()
-	p.client = &ssh.Client{}
-	p.reapRunKill = func(time.Duration, string) (bool, error) { return true, nil }
-	p.reapRunCombined = func(time.Duration, string) ([]byte, error) {
+	// The reap loses certainty mid-teardown: the shared transport's seam returns a
+	// deadline, which is the "did not complete" outcome that must RETAIN the row.
+	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
 		return nil, context.DeadlineExceeded
 	}
-	p.reapCloseClient = func() {}
 	if err := inst.Kill(); !errors.Is(err, ErrWorkspaceStateUnknown) {
 		t.Fatalf("pre-restart rm timeout did not retain tombstone: %v", err)
 	}
@@ -266,31 +261,35 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 		t.Fatalf("restored backend has no SSH reaper: %T", restored.backend)
 	}
 	restoredP := restoredBackend.provisioner
-	if restoredP.hostKeyVerification != config.SSHHostKeyAcceptNew {
-		t.Fatalf("restored SSH cleanup posture = %q, want %q", restoredP.hostKeyVerification, config.SSHHostKeyAcceptNew)
+	// The posture now lives in the composed command rather than a field: the
+	// restored transport must still carry accept-new, or a legacy handle would
+	// reap under a different host-key policy than it was created with.
+	if !strings.Contains(restoredP.sshCmd, "StrictHostKeyChecking=accept-new") {
+		t.Fatalf("restored SSH cleanup lost its posture: %q", restoredP.sshCmd)
 	}
-	restoredP.client = &ssh.Client{}
-	var killCalls, rmCalls int
-	restoredP.reapRunKill = func(_ time.Duration, script string) (bool, error) {
-		killCalls++
-		if !strings.Contains(script, restoredP.afPath()) || !strings.Contains(script, stored.RuntimeCleanup.SSH.RemotePID) {
+	// The shared transport runs the identity kill and the removal as ONE script,
+	// so the invariants are asserted on that script rather than on two seams: it
+	// must still guard the PID by argv and still target this session's directory.
+	var reapCalls int
+	restoredP.runCommandFn = func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		reapCalls++
+		if !strings.Contains(script, stored.RuntimeCleanup.SSH.RemotePID) ||
+			!strings.Contains(script, "/proc/$pid/cmdline") {
 			t.Fatalf("restored kill lost its process identity guard: %q", script)
 		}
-		return true, nil
-	}
-	restoredP.reapRunCombined = func(_ time.Duration, script string) ([]byte, error) {
-		rmCalls++
-		if !strings.HasPrefix(script, "rm -rf ") || !strings.Contains(script, stored.RuntimeCleanup.SSH.SessionDir) {
+		if !strings.Contains(script, stored.RuntimeCleanup.SSH.SessionDir) {
 			t.Fatalf("restored reap targeted the wrong directory: %q", script)
 		}
-		return nil, nil
+		// Answer the reap's per-reap challenge by transforming it, exactly as the
+		// remote shell would — a fixed string cannot satisfy it, which is the point.
+		m := regexp.MustCompile(sandboxReapMarkerPrefix + `[0-9a-f]+`).FindString(script)
+		return []byte(strings.ToUpper(m)), nil
 	}
-	restoredP.reapCloseClient = func() {}
 	if err := restored.Kill(); err != nil {
 		t.Fatalf("restored tombstone could not execute its SSH cleanup: %v", err)
 	}
-	if killCalls != 1 || rmCalls != 1 {
-		t.Fatalf("restored cleanup work: kill=%d rm=%d, want 1/1", killCalls, rmCalls)
+	if reapCalls != 1 {
+		t.Fatalf("restored cleanup work: reap=%d, want 1", reapCalls)
 	}
 }
 
@@ -309,8 +308,13 @@ func TestLegacySSHCleanupHandleDefaultsHostKeyVerificationToStrict(t *testing.T)
 	if !ok || sshBackend.provisioner == nil {
 		t.Fatalf("restored backend has no SSH provisioner: %T", backend)
 	}
-	if _, err := sshBackend.provisioner.hostKeyCallback(); err == nil {
-		t.Fatal("legacy cleanup without a stored posture did not default to strict; strict must refuse a missing known_hosts file")
+	// A handle with no recorded posture must still reap under STRICT: the posture
+	// now rides in the composed command, so that is where it is asserted.
+	if !strings.Contains(sshBackend.provisioner.sshCmd, "StrictHostKeyChecking=yes") {
+		t.Fatalf("legacy cleanup without a stored posture did not default to strict: %q", sshBackend.provisioner.sshCmd)
+	}
+	if !strings.Contains(sshBackend.provisioner.sshCmd, missingKnownHosts) {
+		t.Fatalf("legacy strict fallback lost its configured known_hosts: %q", sshBackend.provisioner.sshCmd)
 	}
 	if _, err := os.Stat(missingKnownHosts); !os.IsNotExist(err) {
 		t.Fatalf("legacy strict fallback created an accept-new host-key store: %v", err)
@@ -335,8 +339,8 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 		{
 			name: "ssh",
 			backend: &sshBackend{
-				provisioner: &sshProvisioner{
-					cfg:        config.SSHConfig{Host: "builder.internal", User: "ci"},
+				provisioner: &sandboxProvisioner{
+					sshCmd:     "ssh -o User='ci' builder.internal",
 					sessionDir: "/srv/af/session.123",
 					remotePID:  "991",
 				},
