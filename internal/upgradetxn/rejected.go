@@ -241,17 +241,41 @@ func RecordRejectedCandidate(executable, sha256, version, reason string) error {
 // readable and the caller proceeds, because refusing to read it would fail every
 // upgrade closed over a permission bit.
 func alignRejectedLedgerWithDirectoryWriters(path string) {
-	info, err := os.Stat(path)
+	// Lstat, and refuse a symlink outright (#3011 review). A group writer can replace
+	// the ledger with a link before an administrator tightens the directory; chmod
+	// through it would then restyle whatever it points at — with this process's
+	// privileges, on a path the attacker chose. Nothing here is worth that, and the
+	// reader below fails on the contents anyway.
+	info, err := os.Lstat(path)
 	if err != nil {
 		return
 	}
-	if _, shared := directoryWriterGroup(filepath.Dir(path)); shared {
-		return // still shared: the widened mode is still the right one
+	if info.Mode()&os.ModeSymlink != 0 {
+		log.WarningLog.Printf("rejected-candidate ledger %s is a symlink; refusing to adjust its mode", path)
+		return
 	}
-	if info.Mode().Perm()&0o077 == 0 {
-		return // already private
+	_, shared := directoryWriterGroup(filepath.Dir(path))
+	want := rejectedLedgerMode
+	if shared {
+		want = rejectedLedgerSharedMode
 	}
-	_ = os.Chmod(path, rejectedLedgerMode)
+	if info.Mode().Perm() == want {
+		return
+	}
+	// Both directions, not just narrowing. An installation that BECOMES shared leaves
+	// a pre-existing 0600 ledger owner-only, and every other authorized writer's
+	// updater then fails closed on every release — the exact harm the widening was
+	// introduced to prevent, reached by a different route.
+	if err := os.Chmod(path, want); err != nil {
+		// Reported, not silent. A revoke that fails is the interesting case: the
+		// directory has been tightened and the ledger is still group-writable, so
+		// somebody who can no longer replace the binary can still rewrite the record
+		// that decides which binaries get installed. The caller proceeds — refusing
+		// to read would fail every upgrade closed over a permission bit — but this
+		// must not pass unmentioned.
+		log.WarningLog.Printf("rejected-candidate ledger %s could not be set to mode %v (its directory is shared=%v): %v",
+			path, want, shared, err)
+	}
 }
 
 func readRejectedLedger(executable string) (rejectedLedger, error) {

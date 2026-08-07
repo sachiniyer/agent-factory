@@ -350,12 +350,18 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 			// retry it, and the same bytes would be installable again the moment the
 			// transaction was repaired. Idempotent on the digest, so re-entry after a
 			// successful record only refreshes it.
-			if err := RecordRejectedCandidate(
-				journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
-				"the candidate was rolled back and the rollback did not complete",
-			); err != nil {
-				return errors.Join(ErrRollbackRecoveryFailed,
-					fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+			// Gated on installation for the same reason as the PhaseRolledBack arm
+			// (#3011 review): a rollback that failed does not mean the candidate's
+			// bytes ever ran, and disqualifying a release the box never installed is
+			// a permanent block earned by an interruption.
+			if txn.Journal().CandidateInstalled {
+				if err := RecordRejectedCandidate(
+					journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
+					"the candidate was rolled back and the rollback did not complete",
+				); err != nil {
+					return errors.Join(ErrRollbackRecoveryFailed,
+						fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+				}
 			}
 			if err := s.Operations.DisableRecoveryJob(ctx, journal); err != nil {
 				return errors.Join(
@@ -528,12 +534,17 @@ func (s Supervisor) finishFailedRollback(
 	// it, and the same broken bytes would be installable again once the transaction
 	// was cleared.
 	journal := txn.Journal()
-	if err := RecordRejectedCandidate(
-		journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
-		"the candidate was rolled back and the rollback did not complete",
-	); err != nil {
-		return errors.Join(ErrRollbackRecoveryFailed, cause,
-			fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+	// Only a candidate whose bytes actually reached the executable is disqualified
+	// (#3011 review). A takeover from PhaseDaemonStopping, or an install error before
+	// the rename, can reach a failed rollback having never installed anything.
+	if journal.CandidateInstalled {
+		if err := RecordRejectedCandidate(
+			journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
+			"the candidate was rolled back and the rollback did not complete",
+		); err != nil {
+			return errors.Join(ErrRollbackRecoveryFailed, cause,
+				fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
+		}
 	}
 	if err := s.Operations.DisableRecoveryJob(ctx, txn.Journal()); err != nil {
 		return errors.Join(
