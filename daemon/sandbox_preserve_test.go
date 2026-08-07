@@ -45,6 +45,15 @@ func newSandboxProbeServer(t *testing.T, branch string) *sandboxProbeServer {
 		case "/v1/agent/alive":
 			// Answered, agent gone: reachable. The sandbox is still there.
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"alive": false}})
+		case "/v1/agent/kill":
+			// The archive path tears the sandbox down AFTER pushing, so a test that
+			// drives a full archive reaches this route. Without a case here the
+			// default arm answers a plain-text 404, and the client reports
+			// `malformed /v1/agent/kill response envelope: invalid character 'u'` —
+			// the archive then fails at teardown and never reaches the step under
+			// test, so the assertion fails naming a completely unrelated cause.
+			// kill sends resp == nil, so an empty data member is all it needs.
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{}})
 		case "/v1/agent/archive":
 			s.archiveCalls.Add(1)
 			if s.archiveFails.Load() {
