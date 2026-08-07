@@ -324,33 +324,50 @@ func TestPersistKillTombstone_ConcurrentPollWrite_TombstoneSurvives(t *testing.T
 	}
 }
 
-// TestGhostCleanup_WorktreeTimeout_RetainsTheRecord is round-3 finding (2): the
-// third instance of the orphaning class.
+// TestKillSession_GhostWorktreeTimeout_RetainsTheRecord is round-3 finding (2):
+// the third instance of the orphaning class.
 //
 // A ghost session's worktree removal hits the local-git deadline. The cleanup only
 // LOGGED it, so ghostCleanup returned nil and KillSession deleted the tombstoned
 // record — leaving a partially-removed workspace with no record and no retry path.
 //
-// PRE-FIX BEHAVIOR THIS REPRODUCES: ghostCleanup returns nil.
-func TestGhostCleanup_WorktreeTimeout_RetainsTheRecord(t *testing.T) {
-	prevWT, prevTmux := ghostCleanupWorktree, ghostKillTmuxByName
-	ghostKillTmuxByName = func(string) (tmux.PaneState, bool, error) { return tmux.PaneStateKnown, false, nil }
-	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error) {
-		return git.CleanupStateUnknown, context.DeadlineExceeded
-	}
-	t.Cleanup(func() { ghostCleanupWorktree, ghostKillTmuxByName = prevWT, prevTmux })
+// PRE-FIX BEHAVIOR THIS REPRODUCES: ghostCleanup returns nil and the record is gone.
+//
+// It drives the real KillSession rather than ghostCleanup alone (#3078). The name
+// has always promised the RECORD is retained, and the old body never looked at a
+// record — it called ghostCleanup directly and asserted only the error's class, so
+// the retention it is named for was checked nowhere. Whether a non-nil error from
+// there actually stops the delete is a property of KillSession's branch and
+// deleteSessionRecord's classifier, both of which this now exercises.
+func TestKillSession_GhostWorktreeTimeout_RetainsTheRecord(t *testing.T) {
+	manager, repoID := newGhostKillManager(t, "ghost-wt", "af_ghost-wt")
 
-	data := &session.InstanceData{Title: "ghost", TmuxName: "af_ghost"}
-	err := ghostCleanup(data, "ghost")
+	// tmux CONFIRMS dead, so the gate opens and the worktree delete is reached —
+	// which is the only way to test the worktree arm at all (see the tmux-wedged
+	// test below, where ghostCleanup returns before ever getting here).
+	tmuxKills := stubGhostTmux(t, tmux.PaneStateKnown, nil)
+	worktrees := stubGhostWorktree(t, git.CleanupStateUnknown, context.DeadlineExceeded)
 
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-wt", RepoID: repoID})
 	if err == nil {
-		t.Fatal("ghostCleanup reported success though the worktree removal was cut off mid-delete: " +
+		t.Fatal("the kill reported success though the worktree removal was cut off mid-delete: " +
 			"KillSession then deletes the record, leaving a partially-removed workspace with NO " +
 			"record and NO retry path — the exact orphaning the timeout work exists to prevent (#1917)")
 	}
 	if !errors.Is(err, session.ErrWorkspaceStateUnknown) {
-		t.Fatalf("the error must identify an unknown workspace state so the caller keeps the record, got: %v", err)
+		t.Fatalf("the error must identify an unknown workspace state so the record is kept, got: %v", err)
 	}
+
+	// THE EFFECT, through the seams production reaches for: it got as far as the
+	// worktree, and it stopped there.
+	if got := len(*tmuxKills); got != 1 {
+		t.Fatalf("ghost tmux kills = %d, want 1 (the record's own name)", got)
+	}
+	if got := *worktrees; got != 1 {
+		t.Fatalf("worktree cleanups = %d, want 1: tmux confirmed dead, so the delete must be attempted", got)
+	}
+	requireGhostRecordRetained(t, repoID, "ghost-wt",
+		"its worktree may be half-deleted and this record is the only handle anything has on the leftovers")
 }
 
 // unsafeKillBackend fails to START and cannot clean up safely afterwards: its Kill
@@ -575,28 +592,146 @@ func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
 //
 // PRE-FIX BEHAVIOR THIS REPRODUCES: the error claims it "will be retried
 // automatically".
+//
+// #3078: this test used to build production's message ITSELF with fmt.Sprintf and
+// then assert strings.Contains over its own literal, so it consulted no production
+// code and could not fail. It could not even catch the defect it names: the OTHER
+// arm of this same function (manager_sessions.go:189) genuinely does say "will be
+// retried automatically", so swapping the two branches — the #1917 round-5 bug —
+// left the hand-written copy unchanged and the test green. It now drives the real
+// KillSession, so the assertion reads the string production built AND exercises
+// which of the two branches was selected.
 func TestKillSession_GhostUnsafeTeardown_DoesNotPromiseAnAutomaticRetry(t *testing.T) {
-	prevWT, prevTmux := ghostCleanupWorktree, ghostKillTmuxByName
-	ghostKillTmuxByName = func(string) (tmux.PaneState, bool, error) {
-		return tmux.PaneStateUnknown, false, fmt.Errorf("%w: wedged", tmux.ErrTmuxTimeout)
-	}
-	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error) {
-		return git.CleanupSettled, nil
-	}
-	t.Cleanup(func() { ghostCleanupWorktree, ghostKillTmuxByName = prevWT, prevTmux })
+	manager, repoID := newGhostKillManager(t, "ghost", "af_ghost")
 
-	err := ghostCleanup(&session.InstanceData{Title: "ghost", TmuxName: "af_ghost"}, "ghost")
+	// tmux never confirmed the pane dead: PaneStateUnknown is the shape that means
+	// "something may still be writing into this workspace".
+	tmuxKills := stubGhostTmux(t, tmux.PaneStateUnknown, fmt.Errorf("%w: wedged", tmux.ErrTmuxTimeout))
+	worktrees := stubGhostWorktree(t, git.CleanupSettled, nil)
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost", RepoID: repoID})
 	if err == nil {
 		t.Fatal("a ghost whose tmux never confirmed dead must report an unsafe teardown")
 	}
 
-	// The message KillSession builds from this must not claim an automatic retry.
-	msg := fmt.Sprintf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %v", "ghost", err)
-	if strings.Contains(msg, "will be retried automatically") {
-		t.Fatal("the ghost path promises an automatic retry that cannot happen: finishUserKill only " +
-			"visits instances in m.instances, and a ghost never enters that map (#1917 round 5)")
+	// EFFECT 1 — the destructive step was NOT taken. tmux gates the worktree delete
+	// (#802/#1917): a pane that may still be live could be writing into the directory
+	// git is about to remove recursively, so ghostCleanup returns before reaching it.
+	// This is the assertion a message check cannot make, and it is the one that says
+	// the user's files are still there.
+	if got := len(*tmuxKills); got != 1 {
+		t.Fatalf("ghost tmux kills = %d, want 1: the record's tmux name must be attempted", got)
 	}
-	if !strings.Contains(msg, "run the kill again") {
-		t.Fatal("the ghost path must tell the user the retry is theirs to make")
+	if got := *worktrees; got != 0 {
+		t.Fatalf("worktree cleanups = %d, want 0: tmux never confirmed the pane dead, so the workspace "+
+			"must be left untouched — a recursive delete under a live pane is #802", got)
+	}
+
+	// EFFECT 2 — the record and its tombstone survive, which is what keeps the
+	// workspace addressable and stops the next daemon calling it Lost and RESTORING
+	// a session the user explicitly killed.
+	requireGhostRecordRetained(t, repoID, "ghost",
+		"its tmux may still be live, so this record is the only handle on the workspace")
+
+	// AND the message, read from what production actually returned rather than from a
+	// copy of it. Both halves matter: the promise must be absent, and the honest
+	// alternative must be present.
+	if strings.Contains(err.Error(), "will be retried automatically") {
+		t.Fatalf("the ghost path promises an automatic retry that cannot happen: finishUserKill only "+
+			"visits instances in m.instances, and a ghost never enters that map (#1917 round 5). This is "+
+			"also what a swap of the two branches in KillSession looks like, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "run the kill again") {
+		t.Fatalf("the ghost path must tell the user the retry is theirs to make, got: %v", err)
+	}
+}
+
+// newGhostKillManager builds a manager holding a GHOST: a record on disk that
+// cannot be reconstructed into an instance, which is the one shape that reaches
+// KillSession's ghost branch. failLoadFor is the same seam the refresh loop fails
+// through, so this is a ghost for the same reason a real one is.
+func newGhostKillManager(t *testing.T, title, tmuxName string) (*Manager, string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:          title + "-id",
+		Title:       title,
+		Path:        repoPath,
+		TmuxName:    tmuxName,
+		Status:      session.Lost,
+		Liveness:    session.LiveLost,
+		BackendType: "local",
+		Worktree:    session.GitWorktreeData{RepoPath: repoPath, WorktreePath: repoPath + "/wt"},
+	}); err != nil {
+		t.Fatalf("append ghost row: %v", err)
+	}
+	failLoadFor(t, title)
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.mu.Lock()
+	_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+	manager.mu.Unlock()
+	if live {
+		t.Fatal("precondition: the row must fail to materialize, or this exercises the live-instance " +
+			"branch and says nothing about ghosts")
+	}
+	return manager, repo.ID
+}
+
+// stubGhostTmux installs the tmux seam ghostCleanup calls and returns the names it
+// was asked to kill, so a test can assert WHICH sessions were targeted rather than
+// just how many.
+func stubGhostTmux(t *testing.T, state tmux.PaneState, err error) *[]string {
+	t.Helper()
+	killed := &[]string{}
+	prev := ghostKillTmuxByName
+	ghostKillTmuxByName = func(name string) (tmux.PaneState, bool, error) {
+		*killed = append(*killed, name)
+		return state, false, err
+	}
+	t.Cleanup(func() { ghostKillTmuxByName = prev })
+	return killed
+}
+
+// stubGhostWorktree installs the worktree seam and counts the attempts. Zero is a
+// meaningful answer here, not an absence of coverage: it is how "the delete was
+// gated" is observed.
+func stubGhostWorktree(t *testing.T, state git.CleanupState, err error) *int {
+	t.Helper()
+	calls := 0
+	prev := ghostCleanupWorktree
+	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error) {
+		calls++
+		return state, err
+	}
+	t.Cleanup(func() { ghostCleanupWorktree = prev })
+	return &calls
+}
+
+// requireGhostRecordRetained asserts the two durable effects a refused ghost
+// teardown must leave behind: the record itself, and its kill tombstone.
+//
+// Both, not either. The record is the only handle on a workspace that may be
+// half-removed. The tombstone is what stops the next daemon reading that surviving
+// record as Lost and RESTORING the session the user explicitly killed (#1917) —
+// keeping the row without it trades an orphaned workspace for a resurrected session.
+func requireGhostRecordRetained(t *testing.T, repoID, title, why string) {
+	t.Helper()
+	rec := recordFor(t, repoID, title)
+	if rec == nil {
+		t.Fatalf("the ghost's record was DELETED after a teardown that could not complete — %s. "+
+			"Nothing points at the leftovers now and no retry is possible: af has forgotten it exists", why)
+	}
+	if !rec.UserKilled {
+		t.Fatal("the kill tombstone did not survive: a retained record with no tombstone is read as Lost " +
+			"by the next daemon, which RESTORES a session the user explicitly killed, into a workspace " +
+			"the teardown may have already started deleting (#1917)")
 	}
 }
