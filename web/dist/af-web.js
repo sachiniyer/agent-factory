@@ -9880,7 +9880,7 @@ function decideKey(key, ctx, mods = {}) {
       return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
     }
     if (key === "w") {
-      return ctx.tabManagement && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
+      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
     }
   }
   let delta;
@@ -12657,11 +12657,26 @@ function isKillableSession(s) {
 }
 var TAB_PINNED_NOTICE = "The agent tab stays first \xB7 drag it onto a pane to split instead";
 var OFF_BOX_BACKENDS = /* @__PURE__ */ new Set(["docker", "ssh", "sandbox", "remote"]);
+function allowedTabKinds(s) {
+  if (s.tab_kinds && s.tab_kinds.length > 0) {
+    return s.tab_kinds;
+  }
+  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  return LEGACY_TAB_KINDS.map((kind) => ({
+    kind,
+    allowed: legacyAllowed,
+    reason: legacyAllowed ? void 0 : `${tabRuntimeLabel(s)} sessions have a fixed tab list`
+  }));
+}
+var LEGACY_TAB_KINDS = ["shell", "process", "web", "vscode"];
 function supportsTabManagement(s) {
-  return !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  return allowedTabKinds(s).some((k) => k.allowed);
 }
 function canManageTabs(s) {
   return supportsTabManagement(s) && !isArchived(s);
+}
+function canCloseTabs(s) {
+  return !isArchived(s);
 }
 function tabCreationUnavailableReason(s) {
   const supported = supportsTabManagement(s);
@@ -15337,7 +15352,11 @@ function onKeydown(e) {
       selectedId: actionableSelected ? state.selectedId : null,
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
-      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false
+      tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      // Closing is gated on the session being live, NOT on it being able to create
+      // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
+      // is still excluded — the daemon does refuse that one (#1809).
+      tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false
     },
     { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") }
   );

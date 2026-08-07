@@ -89,6 +89,7 @@ import {
   renderLogin,
   sessionTabs,
   canManageTabs,
+  canCloseTabs,
   tabIdentity,
   tabRealId,
   type ActionableSession,
@@ -1894,6 +1895,10 @@ function onKeydown(e: KeyboardEvent): void {
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      // Closing is gated on the session being live, NOT on it being able to create
+      // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
+      // is still excluded — the daemon does refuse that one (#1809).
+      tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false,
     },
     { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") },
   );

@@ -52,7 +52,14 @@ import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
-import { type ConfigEntry, type LifecycleAction, type SessionData, type TaskData, TabKind } from "./types.js";
+import {
+  type ConfigEntry,
+  type LifecycleAction,
+  type SessionData,
+  type TabKindAllowance,
+  type TaskData,
+  TabKind,
+} from "./types.js";
 
 /** The tab kinds the web UI can create with no further input from the user. A
  *  web tab is deliberately absent: its target comes from whatever an agent is
@@ -327,17 +334,48 @@ export interface Actions {
  *  what ui.test.ts pins. */
 const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
 
-/** Whether a session supports user tab management. Off-box sessions (docker/ssh/
- *  remote-hook) have a tab list their runtime fixes at launch — a single agent
- *  tab — so the web withdraws their × controls, replaces new-tab with a visible
- *  fixed-list explanation, and gates the `t`/`w` keys, mirroring the daemon's
- *  Capabilities().TabManagement.
+/** The kinds this session may gain a tab of, as the DAEMON decided them.
+ *
+ *  This reads session.Capabilities.RefuseTabKind projected onto the snapshot
+ *  (#3060). It replaces a TypeScript re-derivation from backend_type, which agreed
+ *  with the daemon by coincidence and would have disagreed the moment a refusal
+ *  lifted — nothing linked the two.
+ *
+ *  A daemon older than #3060 sends no tab_kinds. Falling back to the old
+ *  backend_type rule there is deliberate and is the safe direction: it is exactly
+ *  what that daemon enforces, so the affordances still match ITS answer. The
+ *  fallback is confined to this one function. */
+export function allowedTabKinds(s: SessionData): TabKindAllowance[] {
+  if (s.tab_kinds && s.tab_kinds.length > 0) {
+    return s.tab_kinds;
+  }
+  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  return LEGACY_TAB_KINDS.map((kind) => ({
+    kind,
+    allowed: legacyAllowed,
+    reason: legacyAllowed ? undefined : `${tabRuntimeLabel(s)} sessions have a fixed tab list`,
+  }));
+}
+
+/** The kinds a pre-#3060 daemon would have allowed as one group. Only used by the
+ *  fallback above; the vocabulary otherwise comes from the daemon. */
+const LEGACY_TAB_KINDS = ["shell", "process", "web", "vscode"];
+
+/** Whether a session supports user tab management AT ALL — any creatable kind is
+ *  allowed. Kept because several call sites ask that coarse question (does this
+ *  session get a tab bar with controls), but it is now DERIVED from the daemon's
+ *  per-kind answer rather than from the backend type.
  *
  *  A record with no backend_type is a pre-#1592 local session (the field is
- *  omitempty), so it defaults to local — treating it as off-box would strip tab
- *  management from every legacy row. */
+ *  omitempty), so the fallback defaults to local — treating it as off-box would
+ *  strip tab management from every legacy row. */
 export function supportsTabManagement(s: SessionData): boolean {
-  return !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  return allowedTabKinds(s).some((k) => k.allowed);
+}
+
+/** Whether this session may gain a tab of one specific kind. */
+export function canCreateTabKind(s: SessionData, kind: string): boolean {
+  return allowedTabKinds(s).some((k) => k.kind === kind && k.allowed);
 }
 
 /** Whether the web may offer tab management for a session RIGHT NOW: its backend
@@ -349,6 +387,21 @@ export function supportsTabManagement(s: SessionData): boolean {
  *  supportsTabManagement, so the affordances and the daemon's answer can't drift. */
 export function canManageTabs(s: SessionData): boolean {
   return supportsTabManagement(s) && !isArchived(s);
+}
+
+/** Whether the web may offer to CLOSE a tab on this session.
+ *
+ *  Separate from canManageTabs on purpose. The daemon's CloseTab has no backend
+ *  capability gate — it refuses only the agent tab — so an off-box session whose
+ *  roster already holds a web tab can close it, even though it may not create a new
+ *  one. Gating the × on the CREATE rule stranded those tabs in the bar with no way
+ *  to remove them from the UI (#3060); they could only be removed with
+ *  `af sessions tab-delete`.
+ *
+ *  Archived is still excluded, because the daemon genuinely does refuse a close
+ *  there and the × would try to strip the web-tab URL archive preserved (#1809). */
+export function canCloseTabs(s: SessionData): boolean {
+  return !isArchived(s);
 }
 
 /** A visible explanation for every state in which the tab bar cannot offer its

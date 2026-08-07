@@ -504,3 +504,27 @@ func defaultShell() string {
 	}
 	return shell
 }
+
+// tabKindAllowances projects RefuseTabKind across every creatable kind, so a
+// client can offer exactly what the daemon would accept.
+//
+// The agent kind is absent deliberately: it is not creatable — a session's agent
+// tab is made with the session — so including it would invite a client to offer a
+// control that has no call behind it.
+func tabKindAllowances(c Capabilities) []TabKindAllowance {
+	names := TabKindNameList()
+	out := make([]TabKindAllowance, 0, len(names))
+	for _, name := range names {
+		kind, ok := ParseTabKindName(name)
+		if !ok || kind == TabKindAgent {
+			continue
+		}
+		allowance := TabKindAllowance{Kind: name, Allowed: true}
+		if err := c.RefuseTabKind(kind); err != nil {
+			allowance.Allowed = false
+			allowance.Reason = err.Error()
+		}
+		out = append(out, allowance)
+	}
+	return out
+}

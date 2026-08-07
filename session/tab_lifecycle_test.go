@@ -353,3 +353,34 @@ func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
 	inst.mu.Unlock()
 	require.False(t, ok, "a locked roster must report unavailable, never block")
 }
+
+// TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict pins the contract the web UI
+// consumes (#3060). The point is not the values — those are RefuseTabKind's and
+// will change as #3062/#3054 lift refusals — but that the projection IS
+// RefuseTabKind, so an affordance and the call behind it cannot drift.
+func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
+	for _, workspace := range []WorkspaceKind{WorkspaceLocalWorktree, WorkspaceRemote} {
+		caps := Capabilities{Workspace: workspace}
+		allowances := tabKindAllowances(caps)
+		require.NotEmpty(t, allowances)
+
+		seen := map[string]bool{}
+		for _, a := range allowances {
+			seen[a.Kind] = true
+			kind, ok := ParseTabKindName(a.Kind)
+			require.Truef(t, ok, "%q must be a name the CLI accepts", a.Kind)
+
+			// The assertion that matters:each entry equals what RefuseTabKind says now.
+			err := caps.RefuseTabKind(kind)
+			require.Equalf(t, err == nil, a.Allowed, "kind %q disagrees with RefuseTabKind", a.Kind)
+			if err != nil {
+				require.Equalf(t, err.Error(), a.Reason,
+					"the daemon's own refusal text must be carried, not a client-invented one (%q)", a.Kind)
+			} else {
+				require.Emptyf(t, a.Reason, "an allowed kind carries no reason (%q)", a.Kind)
+			}
+		}
+		require.False(t, seen["agent"],
+			"the agent tab is not creatable, so offering it would be a control with no call behind it")
+	}
+}

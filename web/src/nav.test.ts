@@ -22,6 +22,7 @@ function ctx(over: Partial<NavContext> = {}): NavContext {
     tabCount: 1,
     activeTab: 0,
     tabManagement: true,
+    tabClosable: true,
     ...over,
   };
 }
@@ -148,10 +149,28 @@ test("split panes: the Alt chord needs a selection in the sessions view, and yie
   assert.deepEqual(decideKey("j", ctx()), { kind: "select", id: "c" });
 });
 
-test("nav mode: remote sessions can't manage tabs (t/w pass through) but can still switch", () => {
-  const remote = ctx({ tabManagement: false, tabCount: 2, activeTab: 0 });
-  assert.deepEqual(decideKey("t", remote), { kind: "none" }, "no new tab on a remote session");
-  assert.deepEqual(decideKey("w", ctx({ tabManagement: false, tabCount: 2, activeTab: 1 })), { kind: "none" });
+test("nav mode: a session that can create nothing can still CLOSE what it has (#3060)", () => {
+  // Creating and closing are different daemon rules and are now different gates.
+  // CreateTab consults Capabilities.RefuseTabKind; CloseTab consults nothing but
+  // "is this the agent tab". Tying the × to the create rule stranded agent-created
+  // web tabs in an off-box session's bar with no way to remove them.
+  const remote = ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 0 });
+  assert.deepEqual(decideKey("t", remote), { kind: "none" }, "no kind is creatable here, so no new tab");
+  assert.deepEqual(
+    decideKey("w", ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 1 })),
+    { kind: "closeTab" },
+    "but an existing tab is closable — the daemon's CloseTab has no backend gate",
+  );
+  // The agent tab is still never closable, whatever the session.
+  assert.deepEqual(decideKey("w", ctx({ tabManagement: false, tabClosable: true, tabCount: 2, activeTab: 0 })), {
+    kind: "none",
+  });
+  // And an archived session refuses closes at the daemon, so the key stays inert.
+  assert.deepEqual(
+    decideKey("w", ctx({ tabManagement: false, tabClosable: false, tabCount: 2, activeTab: 1 })),
+    { kind: "none" },
+    "archived: the daemon refuses CloseTab, so the affordance must not be offered",
+  );
   // Switching among the fixed tabs of a remote session is still fine.
   assert.deepEqual(decideKey("2", remote), { kind: "switchTab", index: 1 });
 });

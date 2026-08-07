@@ -17,6 +17,8 @@ import {
   tabBarSig,
   tabCreationUnavailableReason,
   usesCondensedSessionChrome,
+  canCreateTabKind,
+  canCloseTabs,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
@@ -280,4 +282,51 @@ test("documentTitle: the session's own repo wins over the scoped project", () =>
     selectedProject: "/home/u/code/other-repo",
   });
   assert.equal(documentTitle(s), "api — agent-factory · Agent Factory");
+});
+
+test("tab kinds come from the daemon's projection, not from backend_type (#3060)", () => {
+  // The whole point: the client reads the daemon's per-kind verdict. An off-box
+  // session whose daemon ALLOWS a web tab must be offered one, even though the old
+  // backend_type rule would have refused every kind.
+  const offBoxButWebAllowed = sess({
+    backend_type: "ssh",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "needs a local worktree" },
+      { kind: "web", allowed: true },
+    ],
+  });
+  assert.equal(canCreateTabKind(offBoxButWebAllowed, "web"), true, "the daemon said yes; the UI must offer it");
+  assert.equal(canCreateTabKind(offBoxButWebAllowed, "shell"), false);
+  assert.equal(supportsTabManagement(offBoxButWebAllowed), true, "at least one kind is creatable");
+
+  // And a LOCAL session whose daemon refuses everything is refused, which the old
+  // rule could not express at all.
+  const localButRefused = sess({
+    backend_type: "local",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "some future reason" },
+      { kind: "web", allowed: false, reason: "some future reason" },
+    ],
+  });
+  assert.equal(supportsTabManagement(localButRefused), false, "backend_type says local; the daemon says no");
+});
+
+test("a pre-#3060 daemon falls back to the backend_type rule it actually enforces", () => {
+  // No tab_kinds at all. Falling back is the SAFE direction: that daemon enforces
+  // exactly the old rule, so the affordances still match its answer.
+  assert.equal(supportsTabManagement(sess({ backend_type: "local" })), true);
+  assert.equal(supportsTabManagement(sess({ backend_type: "ssh" })), false);
+  assert.equal(canCreateTabKind(sess({ backend_type: "docker" }), "web"), false);
+  // A record with no backend_type is a pre-#1592 local session.
+  assert.equal(supportsTabManagement(sess({})), true, "a legacy row must not lose tab management");
+});
+
+test("closing is gated separately from creating (#3060)", () => {
+  // An off-box session that can create nothing can still close a tab it already
+  // has — the daemon's CloseTab refuses only the agent tab.
+  const offBox = sess({ backend_type: "ssh" });
+  assert.equal(supportsTabManagement(offBox), false, "creates nothing");
+  assert.equal(canCloseTabs(offBox), true, "but closes fine");
+  // Archived is the one case the daemon genuinely refuses.
+  assert.equal(canCloseTabs(sess({ backend_type: "local", liveness: Liveness.Archived })), false);
 });

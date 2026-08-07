@@ -64,7 +64,16 @@ export interface NavContext {
   activeTab: number;
   /** Whether the selected session supports user tab management (false for remote
    *  sessions, whose tabs are fixed by hook config). Gates `t`/`w`. */
+  /** Whether this session may gain a NEW tab of at least one kind — the daemon's
+   *  per-kind answer, not a backend-type guess (#3060). */
   tabManagement: boolean;
+  /** Whether the SELECTED tab can be closed. Deliberately separate from
+   *  tabManagement: CloseTab has no backend gate at all (it refuses only the agent
+   *  tab), so a web tab that already exists on an off-box session is closable even
+   *  though that session may create nothing new. Tying the × to the create rule
+   *  stranded exactly those tabs — visible in the bar with no way to remove them
+   *  from the UI (#3060). */
+  tabClosable: boolean;
 }
 
 /** What a keydown resolves to. Anything other than "none" is a handled key the
@@ -209,7 +218,7 @@ export function decideKey(key: string, ctx: NavContext, mods: KeyMods = {}): Nav
       return ctx.tabManagement ? { kind: "newTab" } : { kind: "none" };
     }
     if (key === "w") {
-      return ctx.tabManagement && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
+      return ctx.tabClosable && ctx.activeTab > 0 ? { kind: "closeTab" } : { kind: "none" };
     }
   }
   let delta: 1 | -1;
