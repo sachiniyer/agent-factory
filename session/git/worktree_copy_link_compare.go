@@ -32,12 +32,22 @@ import (
 //
 // Both sides are opened relative to a directory descriptor, never by rebuilt
 // path, keeping the copier descriptor-anchored throughout.
-func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, expected pathIdentity) bool {
+func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, expected, expectedSource pathIdentity) bool {
 	current, err := openAtForCompare(source, name)
 	if err != nil {
 		return false
 	}
 	defer current.Close()
+
+	// The SOURCE descriptor must be the inode the walk inspected, symmetrically
+	// with the destination check below. statAt and this open are separate calls,
+	// so a swap in between hands back a different file; if it holds the first
+	// copy's bytes the comparison succeeds and links the old destination. The
+	// regular-file copy path already makes exactly this check (#3049 review).
+	currentIdentity, err := identityFromFile(current)
+	if err != nil || !expectedSource.same(currentIdentity) {
+		return false
+	}
 
 	// The destination is REOPENED AND READ, always. There is no cheaper substitute,
 	// and two review rounds established why (#3049 review).

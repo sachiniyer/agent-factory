@@ -183,12 +183,14 @@ func TestSourceMatchesCopiedFile_RefusesWhenTheDestinationCannotBeRead(t *testin
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dst"), []byte("SHARED"), 0o600))
 	dstIdentity, err := identityAt(root, "dst")
 	require.NoError(t, err)
+	srcIdentity, err := identityAt(root, "src")
+	require.NoError(t, err)
 
-	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity),
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity),
 		"a readable destination with identical bytes must still link")
 
 	require.NoError(t, os.Chmod(filepath.Join(dir, "dst"), 0o000))
-	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity),
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity),
 		"an unreadable destination cannot be attested, so it must not be linked against")
 
 	// Identity, not just content: a matching-content impostor at a different inode
@@ -197,6 +199,26 @@ func TestSourceMatchesCopiedFile_RefusesWhenTheDestinationCannotBeRead(t *testin
 	impostor, err := identityAt(root, "impostor")
 	require.NoError(t, err)
 	require.NotEqual(t, dstIdentity, impostor, "precondition: the impostor must be a different inode")
-	require.False(t, sourceMatchesCopiedFile(root, "src", root, "impostor", dstIdentity),
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "impostor", dstIdentity, srcIdentity),
 		"content equality on a substituted inode must not be accepted")
+
+	// And symmetrically on the SOURCE side. statAt and the open in the comparison
+	// are separate calls, so a same-UID swap in between hands back a different
+	// inode; if it holds the right bytes, a content-only check links the old
+	// destination (#3049 review).
+	// A READABLE destination, so this asserts the source check rather than
+	// failing earlier on the unreadable dst above — which is what it did first,
+	// passing for the wrong reason.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dst2"), []byte("SHARED"), 0o600))
+	dst2, err := identityAt(root, "dst2")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src2"), []byte("SHARED"), 0o600))
+	src2, err := identityAt(root, "src2")
+	require.NoError(t, err)
+	require.NotEqual(t, srcIdentity, src2, "precondition: the swapped source must be a different inode")
+	require.True(t, sourceMatchesCopiedFile(root, "src2", root, "dst2", dst2, src2),
+		"control: matching bytes and BOTH identities correct must link")
+	require.False(t, sourceMatchesCopiedFile(root, "src2", root, "dst2", dst2, srcIdentity),
+		"a source inode that is not the one the walk inspected must be refused, "+
+			"even when its bytes match and the destination is readable")
 }

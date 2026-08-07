@@ -351,16 +351,11 @@ func copyDirectoryLevel(
 			// archive holding bytes that never existed at that path. Hard-linking
 			// is an optimisation, and one that can corrupt content is not worth its
 			// saving (#3046).
-			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity) {
+			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity, inspected) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
 				if err == nil {
-					// Close the descriptor the OUTGOING record held. The deferred
-					// cleanup only ever sees the newest value for a key, so replacing
-					// one in place strands its predecessor's descriptor for the rest of
-					// the walk — and a repeatedly-rewritten unreadable inode would leak
-					// one per sighting until the process runs out (#3049 review).
 					links[inspected] = copiedFileLink{
 						path:     filepath.Join(relativeDirectory, name),
 						identity: entry.destination,
