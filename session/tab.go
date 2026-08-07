@@ -504,3 +504,47 @@ func defaultShell() string {
 	}
 	return shell
 }
+
+// tabKindAllowances projects RefuseTabKind across every creatable kind, so a
+// client can offer exactly what the daemon would accept.
+//
+// The agent kind is absent deliberately: it is not creatable — a session's agent
+// tab is made with the session — so including it would invite a client to offer a
+// control that has no call behind it.
+//
+// It answers the MENU-level question — may this session gain a tab of this kind at
+// all — and passes an empty target for that reason. A web tab's refusal can be
+// sharper once a URL is known (RefuseTabKind names the daemon-host proxy gap only
+// for a loopback target), but no target exists at the moment a client decides
+// whether to OFFER the kind. Both of that kind's branches refuse off-box and
+// neither refuses on a local worktree, so the menu-level verdict is the same
+// either way; only the wording of a refusal a user has not yet triggered differs.
+// The call itself still re-asks with the real target, so nothing is decided here
+// that the create path does not check again.
+func tabKindAllowances(c Capabilities) []TabKindAllowance {
+	// Every Kind here must be SUBMIT-READY: a value a client can put straight into
+	// CreateTabRequest.Kind. That rules out "process", which has no --kind spelling
+	// — a process tab is what the default request makes when given a command — so
+	// projecting it would hand clients an identifier ParseTabKindName rejects.
+	//
+	// Nothing is under-reported by leaving it out. TabKindRequires classifies shell
+	// and process identically (TabNeedsLocalProcess), so their verdicts are equal by
+	// construction, and a client deciding whether it may create a process tab reads
+	// the shell entry. That is a property of the classification rather than a
+	// convenience, so it cannot quietly stop being true.
+	names := TabKindNameList()
+	out := make([]TabKindAllowance, 0, len(names))
+	for _, name := range names {
+		kind, ok := ParseTabKindName(name)
+		if !ok || kind == TabKindAgent {
+			continue
+		}
+		allowance := TabKindAllowance{Kind: name, Allowed: true}
+		if err := c.RefuseTabKind(kind, ""); err != nil {
+			allowance.Allowed = false
+			allowance.Reason = err.Error()
+		}
+		out = append(out, allowance)
+	}
+	return out
+}

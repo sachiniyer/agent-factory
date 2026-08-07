@@ -17,6 +17,9 @@ import {
   tabBarSig,
   tabCreationUnavailableReason,
   usesCondensedSessionChrome,
+  canCreateTabKind,
+  canCloseTabs,
+  canMutateTabRoster,
 } from "./ui.js";
 import type { AppState } from "./ui.js";
 import { Liveness, type SessionData } from "./types.js";
@@ -280,4 +283,157 @@ test("documentTitle: the session's own repo wins over the scoped project", () =>
     selectedProject: "/home/u/code/other-repo",
   });
   assert.equal(documentTitle(s), "api — agent-factory · Agent Factory");
+});
+
+test("tab kinds come from the daemon's projection, not from backend_type (#3060)", () => {
+  // The whole point: the client reads the daemon's per-kind verdict. An off-box
+  // session whose daemon ALLOWS a web tab must be offered one, even though the old
+  // backend_type rule would have refused every kind.
+  const offBoxButWebAllowed = sess({
+    backend_type: "ssh",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "needs a local worktree" },
+      { kind: "web", allowed: true },
+    ],
+  });
+  assert.equal(canCreateTabKind(offBoxButWebAllowed, "web"), true, "the daemon said yes; the UI must offer it");
+  assert.equal(canCreateTabKind(offBoxButWebAllowed, "shell"), false);
+  // supportsTabManagement is scoped to what the web can OFFER: the menu has no
+  // entry for `web`, so allowing only that kind must not light up the control or
+  // the `t` shortcut — both would lead to a create the per-kind check rejects.
+  assert.equal(
+    supportsTabManagement(offBoxButWebAllowed),
+    false,
+    "the daemon allows a kind this UI cannot offer, so the new-tab control stays withdrawn",
+  );
+
+  // And a LOCAL session whose daemon refuses everything is refused, which the old
+  // rule could not express at all.
+  const localButRefused = sess({
+    backend_type: "local",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "some future reason" },
+      { kind: "web", allowed: false, reason: "some future reason" },
+    ],
+  });
+  assert.equal(supportsTabManagement(localButRefused), false, "backend_type says local; the daemon says no");
+});
+
+test("a pre-#3060 daemon falls back to the backend_type rule it actually enforces", () => {
+  // No tab_kinds at all. Falling back is the SAFE direction: that daemon enforces
+  // exactly the old rule, so the affordances still match its answer.
+  assert.equal(supportsTabManagement(sess({ backend_type: "local" })), true);
+  assert.equal(supportsTabManagement(sess({ backend_type: "ssh" })), false);
+  assert.equal(canCreateTabKind(sess({ backend_type: "docker" }), "web"), false);
+  // A record with no backend_type is a pre-#1592 local session.
+  assert.equal(supportsTabManagement(sess({})), true, "a legacy row must not lose tab management");
+});
+
+test("closing follows the roster verdict, which is what the daemon actually enforces (#3060)", () => {
+  // An off-box session that can create nothing can still close a tab it already
+  // has — the daemon's CloseTab refuses only the agent tab.
+  const offBox = sess({ backend_type: "ssh" });
+  assert.equal(supportsTabManagement(offBox), false, "creates nothing");
+  assert.equal(
+    canCloseTabs(offBox),
+    false,
+    "and cannot close either: CloseTab opens with tabMutationTarget, which refuses TabManagement=false",
+  );
+  // Archived is the one case the daemon genuinely refuses.
+  assert.equal(canCloseTabs(sess({ backend_type: "local", liveness: Liveness.Archived })), false);
+});
+
+test("each affordance asks its OWN daemon verdict (#3060)", () => {
+  // The shared cause of the review round: one bool stood in for four different
+  // daemon rules — create (per kind), close (no backend gate), and roster mutation
+  // (Capabilities.TabManagement). A session can legitimately answer these
+  // differently, and every combination below is one the daemon can produce.
+  const createsNothingButHasTabs = sess({
+    backend_type: "ssh",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "needs a local worktree" },
+      { kind: "web", allowed: false, reason: "not restored on the sandbox path" },
+    ],
+    tab_roster_mutable: false,
+  });
+  assert.equal(supportsTabManagement(createsNothingButHasTabs), false);
+  assert.equal(
+    canCloseTabs(createsNothingButHasTabs),
+    false,
+    "closing is the ROSTER verdict: CloseTab delegates to tabMutationTarget, which this session fails",
+  );
+  assert.equal(canMutateTabRoster(createsNothingButHasTabs), false, "but its roster is fixed");
+
+  // A metadata kind opening up must NOT drag rename/reorder open with it: those
+  // still enter tabMutationTarget, which gates on TabManagement.
+  const webAllowedOffBox = sess({
+    backend_type: "ssh",
+    tab_kinds: [
+      { kind: "shell", allowed: false, reason: "needs a local worktree" },
+      { kind: "web", allowed: true },
+    ],
+    tab_roster_mutable: false,
+  });
+  assert.equal(canCreateTabKind(webAllowedOffBox, "web"), true);
+  assert.equal(canCreateTabKind(webAllowedOffBox, "shell"), false);
+  assert.equal(
+    canMutateTabRoster(webAllowedOffBox),
+    false,
+    "rename/reorder still hit tabMutationTarget, which the daemon refuses here",
+  );
+});
+
+test("the create refusal is the daemon's own text, not a backend guess (#3060)", () => {
+  const refused = sess({
+    backend_type: "local",
+    tab_kinds: [{ kind: "web", allowed: false, reason: "see #3062: not restored on the sandbox recovery path" }],
+  });
+  assert.equal(
+    tabCreationUnavailableReason(refused),
+    "see #3062: not restored on the sandbox recovery path",
+    "the daemon names the requirement actually unmet; a client cannot know it",
+  );
+  // Archived still wins: the daemon refuses creation there for its own reason.
+  assert.match(
+    tabCreationUnavailableReason(sess({ backend_type: "local", liveness: Liveness.Archived })) ?? "",
+    /Restore this session/,
+  );
+});
+
+test("the tab-bar sig changes when WHICH kind is creatable changes (#3060)", () => {
+  // Both snapshots allow something, so createReason is null in each and every other
+  // value in the signature is equal. Only the SET differs. Without it in the sig the
+  // bar does not rebuild, and the menu keeps offering the kind that just became
+  // refused while omitting the one that just became available.
+  const shellOnly = state({
+    sessions: [
+      sess({
+        id: "a",
+        tabs: [{ name: "agent", kind: 0 }],
+        tab_kinds: [
+          { kind: "shell", allowed: true },
+          { kind: "vscode", allowed: false, reason: "no worktree to read" },
+        ],
+      }),
+    ],
+  });
+  const vscodeOnly = state({
+    sessions: [
+      sess({
+        id: "a",
+        tabs: [{ name: "agent", kind: 0 }],
+        tab_kinds: [
+          { kind: "shell", allowed: false, reason: "no worktree to spawn in" },
+          { kind: "vscode", allowed: true },
+        ],
+      }),
+    ],
+  });
+
+  assert.equal(
+    tabCreationUnavailableReason(vscodeOnly.sessions[0]),
+    tabCreationUnavailableReason(shellOnly.sessions[0]),
+    "premise: creation is available in both, so the reason cannot distinguish them",
+  );
+  assert.notEqual(tabBarSig(shellOnly), tabBarSig(vscodeOnly), "the bar must rebuild when the menu's kinds change");
 });

@@ -52,7 +52,14 @@ import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES } from "./theme.js";
 import type { TerminalStatus } from "./terminal.js";
-import { type ConfigEntry, type LifecycleAction, type SessionData, type TaskData, TabKind } from "./types.js";
+import {
+  type ConfigEntry,
+  type LifecycleAction,
+  type SessionData,
+  type TabKindAllowance,
+  type TaskData,
+  TabKind,
+} from "./types.js";
 
 /** The tab kinds the web UI can create with no further input from the user. A
  *  web tab is deliberately absent: its target comes from whatever an agent is
@@ -327,17 +334,51 @@ export interface Actions {
  *  what ui.test.ts pins. */
 const OFF_BOX_BACKENDS = new Set(["docker", "ssh", "sandbox", "remote"]);
 
-/** Whether a session supports user tab management. Off-box sessions (docker/ssh/
- *  remote-hook) have a tab list their runtime fixes at launch — a single agent
- *  tab — so the web withdraws their × controls, replaces new-tab with a visible
- *  fixed-list explanation, and gates the `t`/`w` keys, mirroring the daemon's
- *  Capabilities().TabManagement.
+/** The kinds this session may gain a tab of, as the DAEMON decided them.
+ *
+ *  This reads session.Capabilities.RefuseTabKind projected onto the snapshot
+ *  (#3060). It replaces a TypeScript re-derivation from backend_type, which agreed
+ *  with the daemon by coincidence and would have disagreed the moment a refusal
+ *  lifted — nothing linked the two.
+ *
+ *  A daemon older than #3060 sends no tab_kinds. Falling back to the old
+ *  backend_type rule there is deliberate and is the safe direction: it is exactly
+ *  what that daemon enforces, so the affordances still match ITS answer. The
+ *  fallback is confined to this one function. */
+export function allowedTabKinds(s: SessionData): TabKindAllowance[] {
+  if (s.tab_kinds && s.tab_kinds.length > 0) {
+    return s.tab_kinds;
+  }
+  const legacyAllowed = !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  return LEGACY_TAB_KINDS.map((kind) => ({
+    kind,
+    allowed: legacyAllowed,
+    reason: legacyAllowed ? undefined : `${tabRuntimeLabel(s)} sessions have a fixed tab list`,
+  }));
+}
+
+/** The kinds a pre-#3060 daemon would have allowed as one group. Only used by the
+ *  fallback above; the vocabulary otherwise comes from the daemon. */
+const LEGACY_TAB_KINDS = ["shell", "process", "web", "vscode"];
+
+/** Whether a session supports user tab management AT ALL — any creatable kind is
+ *  allowed. Kept because several call sites ask that coarse question (does this
+ *  session get a tab bar with controls), but it is now DERIVED from the daemon's
+ *  per-kind answer rather than from the backend type.
  *
  *  A record with no backend_type is a pre-#1592 local session (the field is
- *  omitempty), so it defaults to local — treating it as off-box would strip tab
- *  management from every legacy row. */
+ *  omitempty), so the fallback defaults to local — treating it as off-box would
+ *  strip tab management from every legacy row. */
 export function supportsTabManagement(s: SessionData): boolean {
-  return !OFF_BOX_BACKENDS.has(s.backend_type ?? "local");
+  // Scoped to what the web can actually OFFER. A kind the daemon allows but this
+  // UI has no menu entry for must not light up the control or the `t` shortcut,
+  // or both lead to a create the per-kind check rejects (#3060).
+  return NEW_TAB_MENU_KINDS.some((kind) => canCreateTabKind(s, kind));
+}
+
+/** Whether this session may gain a tab of one specific kind. */
+export function canCreateTabKind(s: SessionData, kind: string): boolean {
+  return allowedTabKinds(s).some((k) => k.kind === kind && k.allowed);
 }
 
 /** Whether the web may offer tab management for a session RIGHT NOW: its backend
@@ -351,6 +392,53 @@ export function canManageTabs(s: SessionData): boolean {
   return supportsTabManagement(s) && !isArchived(s);
 }
 
+/** The kinds the new-tab menu can offer, and their labels. One list so the menu
+ *  and the tab-bar signature cannot disagree about which kinds are on offer —
+ *  a signature that omitted one left the menu stale when that kind's verdict
+ *  changed (#3060). */
+const NEW_TAB_MENU_ITEMS: [string, NewTabKind][] = [
+  ["Terminal", "shell"],
+  ["VS Code", "vscode"],
+];
+const NEW_TAB_MENU_KINDS: NewTabKind[] = NEW_TAB_MENU_ITEMS.map(([, kind]) => kind);
+
+/** Whether the web may RENAME or REORDER this session's tabs.
+ *
+ *  A third question, and it has a third answer. The daemon's tabMutationTarget
+ *  gates roster mutation on Capabilities.TabManagement, which is not the same as
+ *  "may create this kind" or "may close a tab" — so as soon as a metadata-only kind
+ *  becomes creatable off-box (#3062), reusing the create verdict here would enable
+ *  a rename the daemon rejects. Falls back to the create answer only for a
+ *  pre-#3060 daemon, where the two genuinely were one bit. */
+export function canMutateTabRoster(s: SessionData): boolean {
+  if (s.tab_roster_mutable !== undefined) {
+    return s.tab_roster_mutable && !isArchived(s);
+  }
+  return canManageTabs(s);
+}
+
+/** Whether the web may offer to CLOSE a tab on this session.
+ *
+ *  This is the ROSTER verdict, not a looser one, and getting that wrong is worth
+ *  recording: an earlier revision of this file claimed CloseTab had no backend gate
+ *  because its own body checks only "is this the agent tab". It does not — it opens
+ *  with `tabMutationTarget`, which refuses every backend whose
+ *  Capabilities.TabManagement is false (daemon/manager_tabs_arrange.go). Reading
+ *  the function and not the helper it delegates to produced a × the daemon rejects,
+ *  which is the guaranteed-to-fail affordance this whole PR exists to prevent.
+ *
+ *  So closing a metadata tab on an off-box session is NOT fixable from the client:
+ *  `af sessions tab-delete` goes through the same CloseTab and is refused too. That
+ *  stranding is a daemon-side gap and belongs with #3062, which is the change that
+ *  admits such a tab in the first place.
+ *
+ *  Kept as its own function rather than folded into canMutateTabRoster because the
+ *  two answer different questions and will diverge when #3062 lands; today they
+ *  agree because one gate serves both. */
+export function canCloseTabs(s: SessionData): boolean {
+  return canMutateTabRoster(s);
+}
+
 /** A visible explanation for every state in which the tab bar cannot offer its
  *  new-tab control. Returning null means creation is available. This stays
  *  separate from canManageTabs because "archived" and "runtime-fixed" have
@@ -362,6 +450,23 @@ export function canManageTabs(s: SessionData): boolean {
  *  to reach the twelfth tab is navigation (#3021), not a reason to refuse to
  *  create it. */
 export function tabCreationUnavailableReason(s: SessionData): string | null {
+  // The daemon's own reason wins over anything derived here. It names the
+  // requirement that is actually unmet — which a client cannot know — and it is why
+  // the projection carries prose at all (#3060).
+  const projected = s.tab_kinds;
+  if (projected && projected.length > 0 && !isArchived(s)) {
+    // MENU-supported kinds, not "any kind". The control this reason gates offers
+    // only Terminal and VS Code, so a session allowing solely `web` would render
+    // the control over an empty menu and consume the `t` shortcut for a create
+    // that is then silently rejected (#3060).
+    if (NEW_TAB_MENU_KINDS.some((kind) => canCreateTabKind(s, kind))) {
+      return null;
+    }
+    const explained = projected.find((k) => k.reason);
+    if (explained?.reason) {
+      return explained.reason;
+    }
+  }
   const supported = supportsTabManagement(s);
   if (isArchived(s)) {
     if (!supported) {
@@ -1605,7 +1710,7 @@ export class AppShell {
    *  Built per render (the tab bar is rebuilt wholesale), so the menu's listeners
    *  are bound to THIS instance and torn down with it — see the isConnected check
    *  in onDocMouseDown, which self-cleans if a rerender detaches an open menu. */
-  private newTabControl(): HTMLElement {
+  private newTabControl(selected: SessionData | null): HTMLElement {
     const wrap = h("div", { class: "af-tab-new-wrap" });
     const trigger = h(
       "button",
@@ -1693,7 +1798,16 @@ export class AppShell {
       });
       return b;
     };
-    menu.append(item("Terminal", "shell"), item("VS Code", "vscode"));
+    // Offer only kinds the daemon would accept. The control itself is shown when
+    // ANY kind is creatable, so without this a session allowing only `web` would
+    // render a menu whose every entry createSessionTab silently rejects (#3060).
+    const offered: HTMLElement[] = [];
+    for (const [label, kind] of NEW_TAB_MENU_ITEMS) {
+      if (!selected || canCreateTabKind(selected, kind)) {
+        offered.push(item(label, kind));
+      }
+    }
+    menu.append(...offered);
 
     trigger.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1902,7 +2016,8 @@ export class AppShell {
     // (`done`) when the edit was already settled by Enter/Escape.
     this.settleTabEdit();
     const tabs = sessionTabs(selected);
-    const canManage = canManageTabs(selected);
+    const canRename = canMutateTabRoster(selected);
+    const canClose = canCloseTabs(selected);
     // The active index is clamped: a resync that shrank the list must not leave the
     // highlight (and the streamed tab) pointing past the end.
     const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
@@ -1914,11 +2029,11 @@ export class AppShell {
     // them on every snapshot instead — see syncTabIdentityCaches (#1779).
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
-      tabButton(tab, i, i === active, shown.has(i), canManage, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
+      tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions, () => this.liveTabIdentity(i), selected.id ?? ""),
     );
     const unavailable = tabCreationUnavailableReason(selected);
     if (unavailable === null) {
-      children.push(this.newTabControl());
+      children.push(this.newTabControl(selected));
     } else {
       const reason = h("span", { class: "af-tab-new-unavailable", title: unavailable }, unavailable);
       reason.setAttribute("aria-label", `New tab unavailable · ${unavailable}`);
@@ -2522,10 +2637,28 @@ export function tabBarSig(state: AppState): string {
   }
   const tabs = sessionTabs(selected);
   const active = Math.min(Math.max(state.activeTab, 0), tabs.length - 1);
-  const canManage = canManageTabs(selected);
+  // Every verdict that changes what the bar renders belongs in the sig, or a
+  // session whose close-ability changed keeps a stale bar (#1809's lesson).
+  const canRename = canMutateTabRoster(selected);
+  const canClose = canCloseTabs(selected);
   const createReason = tabCreationUnavailableReason(selected);
+  // The MENU's kinds, not just whether creation is available at all. Two snapshots
+  // can both allow something — so createReason is null in each — while swapping
+  // WHICH kind is allowed, and every other value here stays equal. The bar would
+  // then not rebuild and the menu would keep offering the kind that just became
+  // refused while omitting the one that just became available.
+  const creatable = NEW_TAB_MENU_KINDS.filter((kind) => canCreateTabKind(selected, kind));
   const shown = [...new Set(state.shownTabs)].sort((a, b) => a - b);
-  return JSON.stringify([selected.id ?? "", tabs.map((t) => [t.kind, t.name]), active, shown, canManage, createReason]);
+  return JSON.stringify([
+    selected.id ?? "",
+    tabs.map((t) => [t.kind, t.name]),
+    active,
+    shown,
+    canRename,
+    canClose,
+    createReason,
+    creatable,
+  ]);
 }
 
 /** The bar's tab buttons in render order. Excludes the + button and the insertion
@@ -2566,7 +2699,8 @@ function tabButton(
   index: number,
   active: boolean,
   shown: boolean,
-  canManage: boolean,
+  canRename: boolean,
+  canClose: boolean,
   actions: Actions,
   /** This tab's identity as of the LATEST snapshot — see AppShell.liveTabIdentity.
    *  A getter rather than a value because this button outlives the render that built
@@ -2600,7 +2734,10 @@ function tabButton(
   // only appear to work (see isRenameableTab). A tab-managed session is required for
   // the same reason the + / × are: an archived/remote session's tab list is not the
   // web's to mutate.
-  const renameable = canManage && isRenameableTab(tab.kind);
+  // Rename is roster mutation; the × below is a close. Two daemon rules, two
+  // parameters — one bool here is what stranded closable tabs behind a create
+  // verdict (#3060).
+  const renameable = canRename && isRenameableTab(tab.kind);
   btn.title = renameable ? `${tabDisplayLabel(tab)} — double-click to rename` : tabDisplayLabel(tab);
   if (renameable) {
     tabRenameIntents.set(btn, {
@@ -2614,7 +2751,7 @@ function tabButton(
     });
   }
   // The agent tab (index 0) is unclosable — killing the session tears it down.
-  if (index > 0 && canManage) {
+  if (index > 0 && canClose) {
     const close = h("span", { class: "af-tab-close", title: "Close tab" }, icon("x"));
     close.setAttribute("aria-hidden", "true");
     close.addEventListener("click", (e) => {

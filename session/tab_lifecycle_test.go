@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -352,4 +353,97 @@ func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
 	_, ok = inst.TryTmuxTeardownCount()
 	inst.mu.Unlock()
 	require.False(t, ok, "a locked roster must report unavailable, never block")
+}
+
+// TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict pins the contract the web UI
+// consumes (#3060). The point is not the values — those are RefuseTabKind's and
+// will change as #3062/#3054 lift refusals — but that the projection IS
+// RefuseTabKind, so an affordance and the call behind it cannot drift.
+func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
+	for _, workspace := range []WorkspaceKind{WorkspaceLocalWorktree, WorkspaceRemote} {
+		caps := Capabilities{Workspace: workspace}
+		allowances := tabKindAllowances(caps)
+		require.NotEmpty(t, allowances)
+
+		seen := map[string]bool{}
+		for _, a := range allowances {
+			seen[a.Kind] = true
+			kind, ok := ParseTabKindName(a.Kind)
+			require.Truef(t, ok, "%q must be a name the CLI accepts", a.Kind)
+
+			// The assertion that matters:each entry equals what RefuseTabKind says now.
+			err := caps.RefuseTabKind(kind, "")
+			require.Equalf(t, err == nil, a.Allowed, "kind %q disagrees with RefuseTabKind", a.Kind)
+			if err != nil {
+				require.Equalf(t, err.Error(), a.Reason,
+					"the daemon's own refusal text must be carried, not a client-invented one (%q)", a.Kind)
+			} else {
+				require.Emptyf(t, a.Reason, "an allowed kind carries no reason (%q)", a.Kind)
+			}
+		}
+		require.False(t, seen["agent"],
+			"the agent tab is not creatable, so offering it would be a control with no call behind it")
+	}
+}
+
+// The projection is derived from the backend on every snapshot, so persisting it
+// would store a stale answer — and it carries long, versioned refusal prose that
+// an older binary would read back as fact.
+func TestTabKindProjection_IsNotPersisted(t *testing.T) {
+	mutable := true
+	data := InstanceData{
+		Title:            "s",
+		TabKinds:         []TabKindAllowance{{Kind: "web", Allowed: false, Reason: "some long versioned reason"}},
+		TabRosterMutable: &mutable,
+	}
+	stored := data.ForStorage()
+	require.Nil(t, stored.TabKinds, "a derived verdict must not reach instances.json")
+	require.Nil(t, stored.TabRosterMutable, "and the roster verdict is not persisted either")
+	require.Equal(t, "s", stored.Title, "and the real record survives")
+}
+
+// Every projected Kind must be SUBMIT-READY — a value a client can put straight
+// into CreateTabRequest.Kind. "process" is deliberately absent: it has no --kind
+// spelling, so projecting it would hand clients an identifier ParseTabKindName
+// rejects. Nothing is under-reported, because shell and process classify
+// identically and a client reads the shell entry for both.
+func TestTabKindAllowances_ProjectsOnlySubmittableKinds(t *testing.T) {
+	kinds := map[string]bool{}
+	for _, a := range tabKindAllowances(Capabilities{Workspace: WorkspaceLocalWorktree}) {
+		_, ok := ParseTabKindName(a.Kind)
+		require.Truef(t, ok, "%q must be accepted by ParseTabKindName, or a client cannot submit it", a.Kind)
+		kinds[a.Kind] = true
+	}
+	for _, want := range []string{"shell", "web", "vscode"} {
+		require.Truef(t, kinds[want], "every submittable kind must be projected; %q was missing", want)
+	}
+	require.False(t, kinds["process"], "process has no --kind spelling and must not be offered as one")
+
+	// The property that makes the omission safe rather than convenient.
+	require.Equal(t, TabKindRequires(TabKindShell), TabKindRequires(TabKindProcess),
+		"shell and process must classify identically, or reading the shell entry for a process tab is wrong")
+}
+
+// TestTabRosterMutable_FalseSurvivesSerialization is the forward-compatibility
+// case this projection exists for (#3062): a backend that allows a metadata-only
+// kind while keeping TabManagement false. With a plain bool, omitempty erased that
+// verdict, and a client cannot tell "the daemon said no" from "the daemon is too
+// old to say" — so it falls back to the create verdict, which is TRUE there, and
+// offers a rename tabMutationTarget rejects.
+func TestTabRosterMutable_FalseSurvivesSerialization(t *testing.T) {
+	no := false
+	encoded, err := json.Marshal(InstanceData{Title: "s", TabRosterMutable: &no})
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"tab_roster_mutable":false`,
+		"a false verdict must reach the client; omitempty on a plain bool erased it")
+
+	var back InstanceData
+	require.NoError(t, json.Unmarshal(encoded, &back))
+	require.NotNil(t, back.TabRosterMutable, "and it must decode as PRESENT, not as a legacy absence")
+	require.False(t, *back.TabRosterMutable)
+
+	// An unprojected record stays absent, which is what a pre-#3060 daemon sends.
+	absent, err := json.Marshal(InstanceData{Title: "s"})
+	require.NoError(t, err)
+	require.NotContains(t, string(absent), "tab_roster_mutable")
 }

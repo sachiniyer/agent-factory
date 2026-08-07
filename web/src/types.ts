@@ -131,6 +131,23 @@ export interface SessionData {
   limit_reset_at?: string;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
   backend_type?: string;
+  /** The daemon's OWN answer, per tab kind, to "may this session gain one of
+   *  these" — session.Capabilities.RefuseTabKind projected onto the snapshot
+   *  (#3060).
+   *
+   *  Read this instead of deriving anything from backend_type. The client used to
+   *  compute the rule itself, which agreed with the daemon only by coincidence and
+   *  would disagree the moment a refusal lifted; projecting it means the affordance
+   *  and the call behind it cannot drift, and a kind that becomes available off-box
+   *  needs no change here at all. Absent on a pre-#3060 daemon — see
+   *  allowedTabKinds for how that degrades. */
+  tab_kinds?: TabKindAllowance[];
+  /** Capabilities.TabManagement projected: may this session's tab ROSTER be
+   *  mutated (rename, reorder)? A different daemon rule from creating a kind or
+   *  closing a tab, with a different answer — `tabMutationTarget` still gates on
+   *  it — so reusing either of those verdicts here offers controls the daemon
+   *  refuses (#3060). */
+  tab_roster_mutable?: boolean;
   /** Worktree metadata; the rail reads `repo_path` (the session's repo root) to
    *  derive the new-session modal's project picker, exactly as the TUI does from
    *  InstanceData.Worktree.RepoPath (app/switch_project.go buildProjectListFrom). */
@@ -163,6 +180,16 @@ export interface TabData {
 
 /** The subset of session.GitWorktreeData (session/storage.go) the web reads: the
  *  repo root the session belongs to, used to group/pick projects. */
+/** One creatable tab kind and whether this session may gain one. */
+export interface TabKindAllowance {
+  /** The `--kind` spelling the CLI accepts: "shell", "process", "web", "vscode". */
+  kind: string;
+  allowed: boolean;
+  /** The daemon's own refusal text, empty when allowed. Rendered verbatim: it
+   *  names the requirement that is actually unmet, which a client cannot know. */
+  reason?: string;
+}
+
 export interface WorktreeData {
   repo_path?: string;
 }

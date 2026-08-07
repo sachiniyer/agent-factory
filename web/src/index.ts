@@ -89,6 +89,9 @@ import {
   renderLogin,
   sessionTabs,
   canManageTabs,
+  canMutateTabRoster,
+  canCreateTabKind,
+  canCloseTabs,
   tabIdentity,
   tabRealId,
   type ActionableSession,
@@ -907,7 +910,9 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696),
   // so a loopback client can still create tabs.
-  if (!sel || tok === null || !canManageTabs(sel)) {
+  // Per KIND, not one bool: the daemon answers separately for each, so a session
+  // that may open a web tab but not a shell must be offered exactly that (#3060).
+  if (!sel || tok === null || !canCreateTabKind(sel, kind)) {
     return;
   }
   clearTabError();
@@ -943,7 +948,9 @@ function closeSessionTab(index: number): void {
   const sel = selectedSessionData();
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-  if (!sel || tok === null || index <= 0 || !canManageTabs(sel)) {
+  // CloseTab has no backend gate — it refuses only the agent tab — so an existing
+  // tab is closable even on a session that can create nothing (#3060).
+  if (!sel || tok === null || index <= 0 || !canCloseTabs(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
@@ -1028,7 +1035,9 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
   const sel = selectedSessionData();
   const tok = token;
   // `tok === null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-  if (!sel || tok === null || !canManageTabs(sel)) {
+  // Roster mutation is its own verdict — tabMutationTarget gates on
+  // Capabilities.TabManagement, not on what may be created or closed (#3060).
+  if (!sel || tok === null || !canMutateTabRoster(sel)) {
     return;
   }
   // The edit spanned a session switch: the input opened on `editedSessionId` and the
@@ -1096,7 +1105,8 @@ function renameSessionTab(id: string, name: string, editedSessionId: string): vo
 function reorderSessionTab(from: number, to: number): void {
   const sel = selectedSessionData();
   const tok = token;
-  if (!sel || tok === null || !canManageTabs(sel)) {
+  // Roster mutation, like rename above — not the create or close verdict (#3060).
+  if (!sel || tok === null || !canMutateTabRoster(sel)) {
     return;
   }
   const tabs = sessionTabs(sel);
@@ -1894,6 +1904,12 @@ function onKeydown(e: KeyboardEvent): void {
       tabCount: actionableSelected ? sessionTabs(actionableSelected).length : 1,
       activeTab: state.activeTab,
       tabManagement: actionableSelected ? canManageTabs(actionableSelected) : false,
+      // `t` opens a shell specifically, so it asks the shell verdict (#3060).
+      shellCreatable: actionableSelected ? canCreateTabKind(actionableSelected, "shell") : false,
+      // Closing is gated on the session being live, NOT on it being able to create
+      // tabs: the daemon's CloseTab refuses only the agent tab. An archived session
+      // is still excluded — the daemon does refuse that one (#1809).
+      tabClosable: actionableSelected ? canCloseTabs(actionableSelected) : false,
     },
     { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph") },
   );

@@ -171,6 +171,34 @@ type InstanceData struct {
 	Worktree            GitWorktreeData     `json:"worktree"`
 	PRInfo              PRInfoData          `json:"pr_info,omitempty"`
 	BackendType         string              `json:"backend_type,omitempty"`
+	// TabKinds is the daemon's own answer, per tab kind, to "may this session gain
+	// one of these" — Capabilities.RefuseTabKind projected onto the snapshot.
+	//
+	// It exists so a CLIENT never re-derives that rule. The web UI used to compute
+	// it in TypeScript from BackendType, which agreed with the daemon only by
+	// coincidence and would disagree the moment a refusal lifted (#3060). Projecting
+	// the verdict means an affordance and the call behind it cannot drift: whatever
+	// RefuseTabKind decides is what the UI offers, and a kind that becomes available
+	// off-box (#3062, #3054) needs no client change at all.
+	//
+	// Each entry carries the daemon's OWN refusal text rather than a client-invented
+	// one, because a user told "not supported" cannot tell a kind that could work
+	// from one that genuinely cannot.
+	TabKinds []TabKindAllowance `json:"tab_kinds,omitempty"`
+	// TabRosterMutable is Capabilities.TabManagement projected: whether this
+	// session's tab ROSTER may be mutated (rename, reorder). It is a different
+	// question from either creating a kind or closing a tab, and it has a different
+	// answer — tabMutationTarget still gates on TabManagement — so a client that
+	// reuses a create-or-close verdict for it offers controls the daemon refuses.
+	// A POINTER so that false survives the wire. With a plain bool, omitempty
+	// erased exactly the verdict that matters: a backend allowing a metadata-only
+	// kind while keeping TabManagement false — the forward-compatibility case this
+	// projection exists for (#3062) — serialized to nothing, and a client cannot
+	// tell "the daemon said no" from "the daemon is too old to say", so it falls
+	// back to the create verdict and offers a rename tabMutationTarget rejects.
+	// nil therefore means only "not projected", and ForStorage sets it back to nil
+	// so a derived verdict still never reaches instances.json.
+	TabRosterMutable *bool `json:"tab_roster_mutable,omitempty"`
 	// RuntimeCleanupStateUnknown is the independent retention marker for a sandbox
 	// teardown whose completion could not be determined. The next restore must
 	// retry RuntimeCleanup before it can safely provision a replacement. It is not
@@ -219,6 +247,12 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.CurrentAgent = ""
 	d.IsRoot = false
 	d.ModelChange = nil
+	// Derived from the backend on every snapshot, exactly like CanKill above, so
+	// persisting them stores a stale answer that a restart would recompute anyway —
+	// and these carry long, versioned refusal PROSE, which would sit in every
+	// instances.json row and be read back as fact by an older binary.
+	d.TabKinds = nil
+	d.TabRosterMutable = nil
 	switch {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown
@@ -245,6 +279,18 @@ func (d InstanceData) ForStorage() InstanceData {
 // is omitempty + additive, mirroring the BranchCreatedByUs back-compat
 // precedent: instances.json written before #930 PR 2 simply has no Tabs, and
 // FromInstanceData synthesizes [agent, shell] from the legacy TmuxName/Program.
+// TabKindAllowance is the projected verdict for one creatable tab kind.
+type TabKindAllowance struct {
+	// Kind is the `--kind` spelling, the same vocabulary the CLI validates against
+	// (session.TabKindNameList), so a client switches on the name the user types.
+	Kind string `json:"kind"`
+	// Allowed is RefuseTabKind returning nil for this kind on this session.
+	Allowed bool `json:"allowed"`
+	// Reason is the daemon's refusal text, empty when allowed. Rendered verbatim by
+	// clients; it names the requirement that is actually unmet (#3053).
+	Reason string `json:"reason,omitempty"`
+}
+
 type TabData struct {
 	// ID is the tab's stable identity (#1738), minted at creation and never
 	// reused. It is the collision-proof key the PTY stream (?tab_id=) and the web
