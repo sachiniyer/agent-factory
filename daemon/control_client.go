@@ -532,13 +532,14 @@ func RestoreSession(req RestoreSessionRequest) (string, error) {
 // opt-in. Returns how many sessions were archived and how many were torn down.
 func DeleteProject(req DeleteProjectRequest) (DeleteProjectResponse, error) {
 	var resp DeleteProjectResponse
-	if err := callDaemon("DeleteProject", req, &resp); err != nil {
+	err := callDaemon("DeleteProject", req, &resp)
+	// Keep the payload on the committed path, as ArchiveSession does: the
+	// deletion IS durable, and api/projects.go prints the archived/killed counts
+	// and deregistration state from exactly this response.
+	if err != nil && !isMutationCommitted(err) {
 		return DeleteProjectResponse{}, err
 	}
-	if resp.Warning != "" {
-		return resp, &rpcMutationCommittedError{err: errors.New(resp.Warning)}
-	}
-	return resp, nil
+	return resp, err
 }
 
 // RegisterProject asks the daemon to register a git checkout as a durable,

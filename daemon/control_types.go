@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -141,57 +140,6 @@ type KillSessionRequest struct {
 	// restorable instead.
 }
 
-// MutationOutcome is the control socket's answer to a question its transport
-// could not previously express: did the side effect land?
-//
-// A mutating operation has THREE outcomes — succeeded, failed with nothing
-// committed, and failed AFTER something irreversible landed — and only the third
-// is unsafe to retry. The HTTP API already carries that distinction structurally
-// (apiproto.ErrorCodeMutationCommitted, reconstituted in apiclient/skew.go), but
-// the control socket is net/rpc, which reduces any concrete error to
-// rpc.ServerError and keeps only its string. Rebuilding the marker from that
-// string is what classifyTaskMutationRPCError did, and why it could only ever
-// cover the three task RPCs whose message prefixes were fixed.
-//
-// Embedding it in the RESPONSE puts the answer somewhere the transport cannot
-// drop: gob encodes struct fields, so no prefix matching, no per-method casing,
-// and a new mutating RPC inherits the channel by embedding rather than by
-// remembering (#3036).
-//
-// VALUE TYPES ONLY — never pointers. gob elides zero values (see
-// control_expect_gob_test.go and #1700), so a *bool would arrive nil at false
-// and be indistinguishable from "never set", silently turning a committed
-// outcome back into a clean failure: exactly the bug this exists to prevent.
-type MutationOutcome struct {
-	// Code carries apiproto.ErrorCodeMutationCommitted when the mutation
-	// committed, and is empty otherwise. It SHARES the HTTP envelope's code
-	// rather than paralleling it with a second boolean: one vocabulary means a
-	// client asks both transports the same question, and a new signal would be
-	// one more thing that can disagree.
-	Code string `json:"code,omitempty"`
-	// Warning is why the follow-up failed, when Code says it committed.
-	Warning string `json:"warning,omitempty"`
-}
-
-// CommittedOutcome reports whether the mutation committed and why its follow-up
-// failed. Exported because BOTH clients read it — daemon's control client and
-// apiclient — generically, off the embedded struct, so a response type opts in
-// by embedding rather than by each client growing a per-method branch.
-func (o MutationOutcome) CommittedOutcome() (committed bool, warning string) {
-	if o.Code == apiproto.ErrorCodeMutationCommitted {
-		return true, o.Warning
-	}
-	// Version skew: a pre-#3036 daemon sends `warning` with no `code`, and that
-	// field lands here on both transports (gob matches the promoted name; the
-	// json tag flattens). `warning` only ever meant "durable, post-commit step
-	// failed", so a code-less warning IS a committed outcome. Delete this branch
-	// once the oldest supported daemon emits the code.
-	if o.Code == "" && o.Warning != "" {
-		return true, o.Warning
-	}
-	return false, ""
-}
-
 type KillSessionResponse struct {
 	OK bool `json:"ok"`
 	MutationOutcome
@@ -216,6 +164,14 @@ type ArchiveSessionResponse struct {
 	OK bool `json:"ok"`
 	// ArchivedPath is the new on-disk location of the relocated worktree.
 	ArchivedPath string `json:"archived_path"`
+	// Warning is the FLAT, pre-#3036 wire field, retained for the one direction
+	// the envelope structurally cannot serve: gob encodes the embedded
+	// MutationOutcome as a NESTED field, so a NEWER daemon answering an OLDER
+	// client would drop the warning and report clean success -- a committed hook
+	// failure rendered as an ordinary one. Measured in both directions. The outer
+	// field wins name resolution for gob and json alike, so the `warning` key is
+	// byte-identical to what this response has always emitted.
+	Warning string `json:"warning,omitempty"`
 	// The response stays successful on a committed failure so every transport
 	// retains ArchivedPath and clients reconcile the completed transition
 	// without retrying.
@@ -301,9 +257,12 @@ type DeleteProjectResponse struct {
 	KilledCount int `json:"killed_count"`
 	// Deregistered reports whether the durable project record was removed.
 	Deregistered bool `json:"deregistered"`
+	// Warning is the FLAT, pre-#3036 wire field. See ArchiveSessionResponse: it
+	// is what keeps a committed hook failure visible to an OLDER gob client,
+	// which has no slot for the nested envelope.
+	Warning string `json:"warning,omitempty"`
 	// MutationOutcome carries nonfatal on-archive hook failures from sessions
-	// whose archive and project deletion both committed. Its Warning field keeps
-	// this response's original `warning` json key, so the wire is unchanged.
+	// whose archive and project deletion both committed.
 	MutationOutcome
 }
 
