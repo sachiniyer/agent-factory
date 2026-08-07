@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -215,15 +217,31 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 		t.Fatalf("mkdir wrapper dir: %v", err)
 	}
 	wrapper := filepath.Join(wrapperDir, "codex")
-	// promptLog records the instant BEFORE the real prompt is exposed, and it
-	// replaces the wall-clock discriminator this test used to rely on (#2879).
-	// The hold below is the OPPORTUNITY for the bug to appear, not the
-	// measurement: load can only make that window longer, never shorter.
+	// The wrapper shows the trust dialog and then BLOCKS until the test releases
+	// it. That gate is what makes the #729 verdict provable rather than inferred
+	// (#2879).
+	//
+	// A marker written just before the prompt is not enough, and the previous
+	// attempt here got that wrong: it proved af could not have matched "›"
+	// without the marker existing, but not the converse. Between writing a marker
+	// and executing the next printf, only the DIALOG is on screen, so a buggy
+	// readiness poll landing in that window accepts the dialog while the marker
+	// assertion still passes.
+	//
+	// While the wrapper is blocked, "›" provably does not exist yet, so any ready
+	// verdict af reaches in that window is a verdict on the trust dialog alone —
+	// which is exactly the regression. The test checks for that BEFORE releasing.
+	dialogLog := filepath.Join(home, "codex-dialog.log")
 	promptLog := filepath.Join(home, "codex-prompt.log")
+	releaseFile := filepath.Join(home, "release-prompt")
 	writeFile(t, wrapper,
 		"#!/bin/sh\n"+
 			"printf 'OpenAI Codex (vX)\\nDo you trust this folder?\\n> 1. Yes\\n'\n"+
-			"sleep 12\n"+
+			"printf 'dialog\\n' >> '"+dialogLog+"'\n"+
+			// Bounded so a broken test cannot wedge the wrapper forever; the
+			// create's own hang guard is the outer net.
+			"i=0\n"+
+			"while [ ! -f '"+releaseFile+"' ] && [ \"$i\" -lt 4000 ]; do i=$((i+1)); sleep 0.05; done\n"+
 			"printf 'prompt\\n' >> '"+promptLog+"'\n"+
 			"printf '\\342\\200\\272 '\n"+ // U+203A "›" in octal-escaped UTF-8
 			"exec cat\n",
@@ -266,35 +284,61 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 	// A hang guard, not an expectation — see the sibling test.
 	const createHangGuard = 4 * time.Minute
 
-	start := time.Now()
-	out, err := runAFWithin(createHangGuard, "sessions", "--repo", repo, "create", "--name", "codex-trust", "--program", tmux.ProgramCodex)
-	elapsed := time.Since(start)
-	if errors.Is(err, errHangGuardExpired) {
-		t.Fatalf("the create never returned within the %s hang guard, so af rendered no verdict — "+
-			"a hang or environment failure, NOT #729: %v\n%s", createHangGuard, err, out)
+	// The create runs on its own goroutine so the test can observe it WHILE the
+	// wrapper is still holding the dialog. t.Fatalf is illegal off the test
+	// goroutine, so results come back on a channel and every assertion below runs
+	// here.
+	type createResult struct {
+		out string
+		err error
 	}
-	if err != nil {
-		t.Fatalf("create codex session failed: %v\n%s", err, out)
+	done := make(chan createResult, 1)
+	go func() {
+		out, err := runAFWithin(createHangGuard, "sessions", "--repo", repo, "create", "--name", "codex-trust", "--program", tmux.ProgramCodex)
+		done <- createResult{out: out, err: err}
+	}()
+
+	// Wait for the dialog to reach the pane on the CONDITION, not on a nap.
+	require.Eventuallyf(t, func() bool { return countFileLines(t, dialogLog) > 0 },
+		2*time.Minute, 20*time.Millisecond,
+		"the fake codex never printed its trust dialog, so nothing here is a verdict on #729")
+
+	// THE DISCRIMINATOR. The wrapper is blocked, so "›" provably does not exist
+	// yet: if the create finishes now, af reported ready with only the trust
+	// dialog on screen, which is the #729 regression and is not an inference.
+	//
+	// trustHold is the OPPORTUNITY window — how long af is given to make that
+	// mistake, at its 500ms readiness poll — never a measurement. Load stretches
+	// how long this takes in wall time; it cannot turn a correct af into a
+	// failure here, because a correct af simply never sends on the channel.
+	select {
+	case res := <-done:
+		if prompts := countFileLines(t, promptLog); prompts == 0 {
+			t.Fatalf("#729 regression: the create returned while the wrapper was still holding the "+
+				"trust dialog and had not emitted its › prompt — the dialog was treated as ready "+
+				"(create err=%v)\n%s", res.err, res.out)
+		}
+		t.Fatalf("the wrapper released its prompt without the test releasing it, so this run cannot "+
+			"judge #729 — fixture problem (create err=%v)\n%s", res.err, res.out)
+	case <-time.After(trustHold):
+		// Still waiting with only the dialog visible: af has been given its
+		// chance to accept it and has not.
 	}
 
-	// The #729 discriminator, as an EVENT rather than a duration.
-	//
-	// It used to require elapsed >= trustHold-3s. That reads as load-safe — a slow
-	// box only makes elapsed larger — but elapsed includes SESSION STARTUP, which
-	// is not part of what is being measured. On a runner where startup alone
-	// reaches the threshold, a create that returned the instant the trust dialog
-	// appeared would still clear the bound, and the regression would pass. Raising
-	// the ceiling to four minutes made that worse, not better: it gave slow
-	// startups room to finish green instead of timing out.
-	//
-	// The wrapper records this marker immediately BEFORE emitting the real "›", so
-	// the ordering settles it with no clock at all. With the regression, the create
-	// returns while the wrapper is still holding the dialog and the marker does not
-	// exist yet. With the fix, af cannot have matched "›" without the marker
-	// already being written.
+	// Release the real prompt and take af's verdict.
+	writeFile(t, releaseFile, "go\n", 0644)
+	res := <-done
+	out, err := res.out, res.err
+	if errors.Is(err, errHangGuardExpired) {
+		t.Fatalf("the create never returned within the %s hang guard after the prompt was released, "+
+			"so af rendered no verdict — a hang or environment failure, NOT #729: %v\n%s",
+			createHangGuard, err, out)
+	}
+	if err != nil {
+		t.Fatalf("create codex session failed after the › prompt was released: %v\n%s", err, out)
+	}
 	if prompts := countFileLines(t, promptLog); prompts == 0 {
-		t.Fatalf("#729 regression: the create reported the session ready in %s, before the wrapper "+
-			"ever emitted its › prompt — the trust dialog was treated as ready\n%s", elapsed, out)
+		t.Fatalf("the create reported ready but the wrapper never recorded emitting its › prompt: %s", out)
 	}
 
 	var data instanceData
