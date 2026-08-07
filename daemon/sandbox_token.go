@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -177,6 +178,14 @@ func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url
 	if cfg == nil {
 		return "", "", errSandboxCallbackNeedsRequireToken()
 	}
+	// The generation is sampled BEFORE the address is read, not just before the mint
+	// (#3012 review). Sampling it after left the address read itself outside the
+	// window: a rebind landing in between would close the old listener, complete its
+	// revokeAll, and then be recorded as the "starting" generation — so the final
+	// comparison matched and the create finished with a live token paired to a
+	// closed URL. Everything the credential depends on must be read inside the
+	// window, and the address is the first of those reads.
+	gen := m.webBindGeneration()
 	active := m.activeWebConfigAddr(cfg.ListenAddr)
 	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
 		return "", "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix listen_addr", cfg.ListenAddr)
@@ -205,7 +214,6 @@ func (m *Manager) mintSandboxCallback(cfg *config.Config, sessionID string) (url
 	// costs a create that the operator can retry against the new listener; the retry
 	// is honest, and the alternative is a session that looks provisioned and has a
 	// callback that never connects.
-	gen := m.webBindGeneration()
 	token, err = m.sandboxTokens.mint(sessionID)
 	if err != nil {
 		return "", "", err
@@ -264,7 +272,16 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 	// Refused rather than guessed. Rewriting a wildcard into some interface address
 	// would invent a fact about the operator's network, and a wrong guess points the
 	// agent at whatever answers there — far worse to debug than a named refusal.
-	if host == "" || host == "0.0.0.0" || host == "::" {
+	// Tested by PARSING, not by spelling (#3012 review). An unspecified address has
+	// many valid textual forms — "0.0.0.0", "::", the expanded "0:0:0:0:0:0:0:0",
+	// the v4-mapped "::ffff:0.0.0.0" — and net.Listen binds every one of them the
+	// same way, so a check against two literals recognised two of them and passed
+	// the rest through. net.IP.IsUnspecified answers the question the literals were
+	// approximating. An empty host is the same case with nothing to parse.
+	if host == "" {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set listen_addr to an address the sandbox can reach", addr)
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set listen_addr to an address the sandbox can reach", addr)
 	}
 	// Loopback is the same failure as the wildcard above, and refusing it is the
@@ -285,14 +302,22 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 	if config.IsLoopbackListenAddr(addr) {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q is loopback, so a sandbox dialling it reaches ITSELF rather than this daemon — and nothing forwards the other way (the ssh runtime tunnels daemon→sandbox only). Set listen_addr to an address the sandbox can reach", addr)
 	}
-	// Both spellings of "let the kernel pick". SplitHostPort("10.0.0.5:") returns
-	// port "" with NO error, and that form is a supported listen_addr, so a check
-	// against the literal "0" alone let it through and produced "http://10.0.0.5:"
-	// — a URL naming no port at all (#3012 review).
-	if port == "" || port == "0" {
+	// The port is RESOLVED rather than string-matched, for the same reason as the
+	// host above: "", "0", "00" and "000" are four spellings of port zero, they all
+	// resolve to 0, and net.Listen treats every one as "let the kernel pick" — so
+	// each literal I matched was one spelling out of an open-ended set (#3012
+	// review). LookupPort is the same resolution net.Listen performs, so an address
+	// it rejects could not have been bound either.
+	resolved, perr := net.LookupPort("tcp", port)
+	if perr != nil {
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q has no resolvable port, so no callback URL can be derived from it", addr)
+	}
+	if resolved == 0 {
 		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q asks the kernel to choose a port, so no fixed callback URL exists. Set an explicit port", addr)
 	}
-	return "http://" + net.JoinHostPort(host, port), nil
+	// The RESOLVED port goes into the URL, so a service name ("…:http") becomes a
+	// number the sandbox's HTTP client can dial rather than being passed through.
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(resolved)), nil
 }
 
 // sandboxCallbackPostureOK reports whether a credential handed out now would

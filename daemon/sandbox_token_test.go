@@ -193,7 +193,20 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	// "10.0.0.5:" is the OTHER spelling of a kernel-selected port: SplitHostPort
 	// returns port "" with no error, so a check against the literal "0" alone let it
 	// through and produced "http://10.0.0.5:" (#3012 review).
-	for _, addr := range []string{"0.0.0.0:8443", ":8443", "[::]:8443", "10.0.0.5:0", "10.0.0.5:", "127.0.0.1:8443", "[::1]:8443", "localhost:8443"} {
+	// Every case here is a SPELLING the previous version of this check missed, and
+	// they are listed rather than reduced because each one was a separate review
+	// finding: an unspecified address and a zero port each have an open-ended set of
+	// textual forms, and matching literals recognised whichever ones I happened to
+	// think of. The code now parses instead — net.IP.IsUnspecified and
+	// net.LookupPort — so this table's job is to keep proving that.
+	for _, addr := range []string{
+		// Unspecified, four ways. net.Listen binds all of them identically.
+		"0.0.0.0:8443", ":8443", "[::]:8443", "[0:0:0:0:0:0:0:0]:8443", "[::ffff:0.0.0.0]:8443",
+		// Port zero, four ways. All resolve to 0 and mean "kernel picks".
+		"10.0.0.5:0", "10.0.0.5:", "10.0.0.5:00", "10.0.0.5:000",
+		// Loopback, three ways.
+		"127.0.0.1:8443", "[::1]:8443", "localhost:8443",
+	} {
 		_, _, err = m.mintSandboxCallback(daemonTestConfig(true, addr), "sess-a")
 		require.Errorf(t, err, "listen_addr %q is not dialable from a sandbox", addr)
 		assert.Emptyf(t, m.sandboxTokens.bySession, "a refused mint must leave no credential behind (%s)", addr)
@@ -210,6 +223,12 @@ func TestMintSandboxCallback_RefusesWithoutRequireToken(t *testing.T) {
 	url, token, err := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:8443"), "sess-a")
 	require.NoError(t, err)
 	assert.Equal(t, "http://10.0.0.5:8443", url)
+
+	// A service-name port resolves into the URL as a NUMBER, because an HTTP client
+	// inside the sandbox dials a port, not an /etc/services entry.
+	namedPort, _, nerr := m.mintSandboxCallback(daemonTestConfig(true, "10.0.0.5:http"), "sess-b")
+	require.NoError(t, nerr)
+	assert.Equal(t, "http://10.0.0.5:80", namedPort)
 	assert.NotEmpty(t, token)
 	owner, ok := m.sandboxTokens.sessionFor(token)
 	require.True(t, ok)
