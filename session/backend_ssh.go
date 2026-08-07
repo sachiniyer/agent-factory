@@ -1,22 +1,17 @@
 package session
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // The SSH remote-machine runtime (#1592 Phase 4 PR5) — the first-class remote
@@ -224,56 +219,6 @@ type sshProvisioner struct {
 // needs. Each step wraps the remote command's output in the error so a failure is
 // self-diagnosing.
 
-// agentSigners returns the signers a running ssh-agent holds, or nil. It PROBES
-// the agent up front (rather than registering a lazy PublicKeysCallback) so an
-// empty/wedged agent socket contributes nothing to the auth attempt instead of
-// aborting the handshake or burning MaxAuthTries on keys that do not exist.
-//
-// When it returns a non-empty slice, it ALSO returns the live agent connection as
-// an io.Closer: the signers are agentKeyringSigner values that sign by calling
-// back into the agent over conn during the ssh handshake (they are not
-// self-contained key snapshots), so the caller must keep conn open until the dial
-// completes and then close it — otherwise the Unix socket FD and the agent
-// client's readLoop goroutine leak on every session creation (#1684). When there
-// are no usable signers, conn is closed here and a nil closer is returned so an
-// empty/wedged agent never leaks either.
-func agentSigners() ([]ssh.Signer, io.Closer) {
-	sock := os.Getenv("SSH_AUTH_SOCK")
-	if sock == "" {
-		return nil, nil
-	}
-	conn, err := net.Dial("unix", sock)
-	if err != nil {
-		return nil, nil
-	}
-	signers, err := agent.NewClient(conn).Signers()
-	if err != nil || len(signers) == 0 {
-		_ = conn.Close()
-		return nil, nil
-	}
-	return signers, conn
-}
-
-// isUnknownHostKeyError reports whether err is knownhosts' "host not present"
-// signal (a *knownhosts.KeyError carrying no known keys) rather than a key
-// MISMATCH (Want non-empty), which accept-new must still refuse.
-func isUnknownHostKeyError(err error) bool {
-	var keyErr *knownhosts.KeyError
-	return errors.As(err, &keyErr) && len(keyErr.Want) == 0
-}
-
-// appendKnownHostKey appends a single known_hosts line binding hostname → key.
-func appendKnownHostKey(path, hostname string, key ssh.PublicKey) error {
-	line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(line + "\n")
-	return err
-}
-
 // ensureKnownHostsFile creates path (and its parent directory) if absent, so
 // knownhosts.New can read an as-yet-unused af store.
 func ensureKnownHostsFile(path string) error {
@@ -308,92 +253,7 @@ type sshCommandSession interface {
 	Close() error
 }
 
-// runAcceptedSSHCommand bounds both exec acceptance and completion. The boolean
-// answers only whether Session.Start returned nil; callers must still inspect the
-// error before treating the command as complete.
-func runAcceptedSSHCommand(timeout time.Duration, sess sshCommandSession, command string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	started := make(chan error, 1)
-	go func() { started <- sess.Start(command) }()
-	select {
-	case err := <-started:
-		if err != nil {
-			return false, fmt.Errorf("starting remote command failed: %w", err)
-		}
-	case <-ctx.Done():
-		_ = sess.Close()
-		return false, fmt.Errorf("remote command acceptance timed out after %s: %w", timeout, ctx.Err())
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- sess.Wait() }()
-	select {
-	case err := <-done:
-		return true, err
-	case <-ctx.Done():
-		_ = sess.Close()
-		return true, fmt.Errorf("accepted remote command timed out after %s: %w", timeout, ctx.Err())
-	}
-}
-
-// runOpenedSSHSession owns ordinary command execution after NewSession has
-// established the SSH channel. Reap uses runAcceptedSSHCommand instead because
-// its identity-bearing kill must expose Start acceptance separately from Wait.
-func runOpenedSSHSession(timeout time.Duration, sess *ssh.Session, script string, stdin io.Reader, combined bool) ([]byte, error) {
-	if stdin != nil {
-		sess.Stdin = stdin
-	}
-
-	cmd := "sh -c " + shellQuote(script)
-	ch := make(chan sshSessionResult, 1)
-	go func() {
-		var out []byte
-		var runErr error
-		if combined {
-			out, runErr = sess.CombinedOutput(cmd)
-		} else {
-			out, runErr = sess.Output(cmd)
-		}
-		ch <- sshSessionResult{out, runErr}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return awaitSSHSession(ctx, sess, ch, timeout, script)
-}
-
-func awaitSSHSession(ctx context.Context, sess io.Closer, ch <-chan sshSessionResult, timeout time.Duration, script string) ([]byte, error) {
-	select {
-	case r := <-ch:
-		return r.out, r.err
-	case <-ctx.Done():
-		_ = sess.Close() // unblock the CombinedOutput/Output goroutine
-		return nil, fmt.Errorf("remote command timed out after %s: %q: %w", timeout, script, ctx.Err())
-	}
-}
-
 // --- remote path helpers ----------------------------------------------------
-
-// afPath is the streamed binary's remote path; the reap's identity-kill checks
-// argv[0] against it (backend_ssh_reap.go). The other per-session paths live on
-// sandboxWorkspace, which owns the provision steps that use them.
-func (p *sshProvisioner) afPath() string { return p.sessionDir + "/" + sshAfBinaryName }
-
-// expandUserPath expands a leading ~ to the user's home dir, so ssh.identity_file
-// / ssh.known_hosts accept the usual ~/.ssh/... form.
-func expandUserPath(path string) string {
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			if path == "~" {
-				return home
-			}
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
-}
 
 // sshBackend is the in-process Backend for an ssh session. Like dockerBackend, its
 // agent-facing operations delegate to the instance's remote AgentServer (the

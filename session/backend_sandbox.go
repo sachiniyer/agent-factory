@@ -480,7 +480,14 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 		return rm + " && " + respond, expect
 	}
 	kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName)
-	return "{ " + kill + "; } && " + rm + " && " + respond, expect
+	// A SUBSHELL, not a { } group. The identity-kill script ends in `exit 0` when
+	// the process is already gone — the common case after a clean shutdown — and a
+	// group command runs in the CURRENT shell, so that exit terminated the whole
+	// remote script before `rm -rf` or the confirmation could run. The reap then
+	// looked like "exited 0, never confirmed": the directory survived and the
+	// record was retained forever. A subshell contains the exit and yields it as
+	// the group's status, which is what `&&` needs.
+	return "( " + kill + " ) && " + rm + " && " + respond, expect
 }
 
 // sandboxReapNonce makes each reap's challenge unique, so a marker captured from
