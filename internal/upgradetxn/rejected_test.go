@@ -305,3 +305,47 @@ func TestPrepareRefusesACandidateRejectedAfterTheCallersCheck(t *testing.T) {
 	require.Contains(t, err.Error(), "rolled back")
 	require.Nil(t, txn, "no transaction may be published for disqualified bytes")
 }
+
+// #3011 review: the CandidateInstalled field is omitempty and the schema version did
+// not change, so a transaction left in flight by the PREVIOUS release decodes with
+// it false. Resumed by this binary it would roll back without disqualifying a
+// candidate whose bytes really did run — the safety mechanism silently skipped for
+// exactly one upgrade, which is the boundary nobody tests by hand.
+func TestLegacyJournalInAnInstalledPhaseCountsAsInstalled(t *testing.T) {
+	for _, phase := range []Phase{PhaseCandidateInstalled, PhaseCandidateStarting, PhaseCandidateValidating} {
+		require.True(t, phaseImpliesCandidateInstalled(phase),
+			"%s is reached only after the candidate's bytes are on disk", phase)
+	}
+	// The phases that do NOT imply it must stay false, or a candidate that never
+	// installed would be permanently blocked — the defect this whole gate prevents.
+	for _, phase := range []Phase{PhaseDaemonStopping, PhaseRolledBack, PhaseRollbackFailed} {
+		require.False(t, phaseImpliesCandidateInstalled(phase),
+			"%s can be reached with nothing installed", phase)
+	}
+}
+
+// #3011 review: the ledger read must not follow a symlink. This one fails OPEN if
+// it is fooled — a link to a structurally VALID empty ledger parses fine, the list
+// is empty, and every disqualified release becomes installable again. The
+// corrupt-bytes guard cannot catch it, because nothing about it is corrupt.
+func TestRejectedLedgerRefusesToFollowASymlink(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "af")
+	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	candidate := []byte("bad candidate")
+	require.NoError(t, RecordRejectedCandidate(executable, digest(candidate), "v9.9.9", "rolled back"))
+
+	rejected, _, err := CandidateRejected(executable, candidate)
+	require.NoError(t, err)
+	require.True(t, rejected, "precondition: the ledger disqualifies these bytes")
+
+	// An attacker-controlled, structurally valid EMPTY ledger, reached by a link.
+	path := rejectedLedgerPath(executable)
+	decoy := filepath.Join(t.TempDir(), "decoy.json")
+	require.NoError(t, os.WriteFile(decoy, []byte(`{"schema_version":1}`), 0o600))
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.Symlink(decoy, path))
+
+	_, _, err = CandidateRejected(executable, candidate)
+	require.Error(t, err, "following the link would re-arm every disqualified release, silently")
+}

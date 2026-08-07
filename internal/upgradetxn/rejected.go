@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"io"
+	"syscall"
 )
 
 // The durable rejected-candidate ledger (#2212).
@@ -154,6 +156,43 @@ func RecordRejectedCandidate(executable, sha256, version, reason string) error {
 	if strings.TrimSpace(executable) == "" {
 		return errors.New("cannot reject an upgrade candidate without the executable it applies to")
 	}
+	// The whole read-modify-write runs under the EXECUTABLE install lock (#3011
+	// review). Moving the readers inside their locks was only half of it: a
+	// publication that is not serialised against installs of the same executable can
+	// land between a locked reader's read and its swap, and two concurrent rollbacks
+	// can lose one another's entry outright.
+	//
+	// The executable lock rather than the full install lock, because that is the
+	// scope the ledger has: it is keyed to the executable and shared by every home
+	// that installs it, which is exactly the audience this must serialise against.
+	// None of the three callers holds it — they are supervisor phases, and Prepare
+	// releases it before the supervisor runs — so this cannot self-deadlock.
+	// A FAILURE TO TAKE THE LOCK MUST NOT BLOCK THE RECORD, the same polarity the
+	// in-place installer states for its own lock. The executable can be absent or its
+	// lock storage broken, and neither says anything about whether this candidate
+	// should be disqualified — while failing here strands recovery in
+	// PhaseRolledBack, retrying forever, with the candidate still installable. So the
+	// lock is an ordering guarantee when it can be had, not a precondition.
+	//
+	// recorded separates "the lock could not be taken" from "the write itself
+	// failed": withExecutableLock returns fn's error too, so the error alone cannot
+	// tell them apart, and retrying a genuine write failure unlocked would be
+	// pointless while silently skipping the lock on every call would be worse.
+	recorded := false
+	var writeErr error
+	lockErr := withExecutableLock(executable, false, func() error {
+		recorded = true
+		writeErr = recordRejectedCandidateLocked(executable, sha256, version, reason)
+		return writeErr
+	})
+	if recorded {
+		return writeErr
+	}
+	log.WarningLog.Printf("could not take the executable lock for %s to publish the rejected-candidate ledger, recording unserialised: %v", executable, lockErr)
+	return recordRejectedCandidateLocked(executable, sha256, version, reason)
+}
+
+func recordRejectedCandidateLocked(executable, sha256, version, reason string) error {
 	ledger, err := readRejectedLedger(executable)
 	if err != nil {
 		return err
@@ -254,10 +293,24 @@ func alignRejectedLedgerWithDirectoryWriters(path string) {
 		log.WarningLog.Printf("rejected-candidate ledger %s is a symlink; refusing to adjust its mode", path)
 		return
 	}
-	_, shared := directoryWriterGroup(filepath.Dir(path))
+	gid, shared := directoryWriterGroup(filepath.Dir(path))
 	want := rejectedLedgerMode
 	if shared {
 		want = rejectedLedgerSharedMode
+		// The group, not just the mode (#3011 review). A private installation that
+		// becomes shared — or one moved to a DIFFERENT collaboration group — leaves
+		// the ledger under its creator's primary group, so 0660 widens it to the
+		// wrong audience: still unreadable by the directory's writers, now writable
+		// by an unrelated group. Group before mode, because chown clears setuid and
+		// setgid bits and would undo a mode set first; and if the chown fails the
+		// mode is left alone rather than widened to the wrong group, which is the
+		// same rule alignLockWithDirectoryWriters follows.
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Gid) != gid {
+			if err := os.Chown(path, -1, gid); err != nil {
+				log.WarningLog.Printf("rejected-candidate ledger %s could not be given its directory's group %d, leaving its mode alone: %v", path, gid, err)
+				return
+			}
+		}
 	}
 	if info.Mode().Perm() == want {
 		return
@@ -281,7 +334,21 @@ func alignRejectedLedgerWithDirectoryWriters(path string) {
 func readRejectedLedger(executable string) (rejectedLedger, error) {
 	path := rejectedLedgerPath(executable)
 	alignRejectedLedgerWithDirectoryWriters(path)
-	data, err := os.ReadFile(path)
+	// O_NOFOLLOW, because this read FAILS OPEN if it is fooled (#3011 review). A
+	// former shared-directory writer who replaces the ledger with a symlink to a
+	// structurally valid empty one does not corrupt anything — the file parses, the
+	// list is empty, and every disqualified release becomes installable again. The
+	// corrupt-bytes path below cannot catch that: there is nothing corrupt about it.
+	// Refusing to follow the link turns a silent re-arm into a read error, and a read
+	// error fails closed at every caller.
+	handle, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err == nil {
+		defer func() { _ = handle.Close() }()
+	}
+	var data []byte
+	if err == nil {
+		data, err = io.ReadAll(handle)
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		return rejectedLedger{SchemaVersion: journalSchemaVersion}, nil
 	}

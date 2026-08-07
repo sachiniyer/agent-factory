@@ -308,7 +308,29 @@ func Load(homeDir string) (*Transaction, error) {
 	if err := validateJournal(home, journal); err != nil {
 		return nil, fmt.Errorf("validate active upgrade journal: %w", err)
 	}
+	journal.CandidateInstalled = journal.CandidateInstalled || phaseImpliesCandidateInstalled(journal.Phase)
 	return &Transaction{journal: journal}, nil
+}
+
+// phaseImpliesCandidateInstalled derives CandidateInstalled for a journal written
+// before the field existed (#3011 review).
+//
+// The field is omitempty and the schema version did not change, so a transaction
+// left in flight by the PREVIOUS release decodes with it false. Resumed by this
+// binary it would roll back without disqualifying a candidate whose bytes really
+// did run — the safety mechanism silently skipped for exactly one upgrade, which is
+// the boundary nobody tests by hand.
+//
+// Derived at LOAD, while the phase can still answer the question. These three
+// phases are reached only after the bytes are on disk; PhaseRolledBack cannot be
+// read this way, which is why the inference has to happen before the transaction
+// moves on. From here the value is carried in the journal like any other.
+func phaseImpliesCandidateInstalled(phase Phase) bool {
+	switch phase {
+	case PhaseCandidateInstalled, PhaseCandidateStarting, PhaseCandidateValidating:
+		return true
+	}
+	return false
 }
 
 // ReadRecoveryStatus validates the live actor's diagnostic handshake. It does
