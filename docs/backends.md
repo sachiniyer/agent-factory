@@ -382,7 +382,16 @@ either switch that host to `accept-new` for the first connect, or add its key to
 your `known_hosts` out of band (`ssh-keyscan -H host >> ~/.ssh/known_hosts`, or
 point `ssh.known_hosts` at a dedicated file), then create the session.
 
-The Go SSH client never forwards the daemon's environment. The remote
+**Legacy cleanup records.** `ssh_host_key_verification` is stored alongside a
+killed session's cleanup record, but records written before that field existed
+carry no posture, so they are cleaned up strictly. If such a record's host is not
+in the strict `known_hosts` file, no retry can ever complete it — af says so once
+and stops retrying, naming the host to add, rather than backing off and retrying
+forever. Restarting the daemon re-attempts it, so adding the key is enough to let
+the cleanup finish. This applies only to those pre-existing records · every
+session created since records its posture and is unaffected.
+
+af's `ssh` invocation never forwards the daemon's environment. The remote
 agent-server and pane use credentials already present for the remote login
 account, filtered through the same built-in allowlist. Names in the daemon's
 global `session_env_passthrough` list are sent to the remote as names only; if a

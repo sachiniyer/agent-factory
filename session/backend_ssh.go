@@ -2,16 +2,11 @@ package session
 
 import (
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-
-	"golang.org/x/crypto/ssh"
 )
 
 // The SSH remote-machine runtime (#1592 Phase 4 PR5) — the first-class remote
@@ -24,33 +19,40 @@ import (
 // it drives a local in-process session. Same provision-and-expose model as the
 // docker runtime (PR4), a different sandbox.
 //
-// It provisions with the Go `golang.org/x/crypto/ssh` client (NOT shelling to the
-// `ssh` binary) so the runtime owns the connection + tunnel and does not depend on
-// the host's ssh binary — reusing the user's keys/agent and known_hosts. Locked
-// decisions this mirrors from docker (Q3/Q4): the daemon's OWN `af` binary is
-// streamed onto the remote (always version-matched to the daemon), and GitHub is
-// the durable workspace store (the remote clones repo@origin into a per-session
-// dir, otherwise disposable).
+// It used to provision with the Go `golang.org/x/crypto/ssh` client, shelling to
+// nothing. It no longer does (#3052): it composes an `ssh(1)` invocation from the
+// same `ssh.*` settings and hands it to the SAME sandboxProvisioner
+// `backend = "sandbox"` uses, so there is ONE ssh transport in the tree rather
+// than two that can disagree about an address (#3044). What stayed is everything
+// above the transport, including the locked decisions this mirrors from docker
+// (Q3/Q4): the daemon's OWN `af` binary is streamed onto the remote (always
+// version-matched to the daemon), and GitHub is the durable workspace store (the
+// remote clones repo@origin into a per-session dir, otherwise disposable).
+//
+// What this backend still owns, and what makes it more than a `sandbox` with a
+// generated command: it OPINIONATES. `ssh.user`, `ssh.port`, `ssh.identity_file`
+// and `ssh_host_key_verification` are real settings with af-enforced meanings,
+// each pinned with `-o` so ssh_config cannot quietly override them — see
+// ssh_command.go, which documents the preservation option by option.
 //
 // Lifecycle (sshRuntime.Provision, called from the backend factory during
-// NewInstance):
+// NewInstance) — every step below runs over the composed command, in
+// sandboxProvisioner:
 //
-//	dial          — ssh to ssh.host with key auth + host-key verification
 //	mktemp -d     — a fresh per-session dir under the remote home (~/.af-sessions)
 //	git clone     — clone the repo's origin into <dir>/workspace on the remote
-//	stream af     — copy the daemon's own `af` binary into <dir>/af over the ssh
-//	                connection (scp-equivalent; no external scp/sftp dependency)
+//	stream af     — copy the daemon's own `af` binary into <dir>/af over ssh stdin
 //	af agent-server — start it headless bound to 127.0.0.1:0 on the remote; read
 //	                its startup banner (addr/token) from a file
-//	local-forward — open an ssh tunnel from a daemon-local loopback port to the
+//	local-forward — an `ssh -L` child from a daemon-local loopback port to the
 //	                remote agent-server's loopback addr → http://127.0.0.1:<localport>
 //
 // The result is an AgentServerEndpoint the daemon dials over the tunnel, plus a
 // teardown that kills the remote agent-server, removes the session dir, and closes
-// the tunnel + ssh connection. The in-sandbox agent-server itself runs the
-// ordinary LOCAL runtime (tmux + git worktree) against the clone — so
-// provision/launch/preview/prompt/stream all work on the remote exactly as on the
-// daemon's own box, reached over the wire.
+// the tunnel. The in-sandbox agent-server itself runs the ordinary LOCAL runtime
+// (tmux + git worktree) against the clone — so provision/launch/preview/prompt/
+// stream all work on the remote exactly as on the daemon's own box, reached over
+// the wire.
 
 const (
 	// sshDefaultPort is the ssh port used when neither ssh.port nor a port in
@@ -173,54 +175,9 @@ func newSSHSandboxProvisioner(spec ProvisionSpec, sshCmd, afBin, program string)
 	return &sandboxProvisioner{spec: spec, sshCmd: sshCmd, afBin: afBin, program: program}
 }
 
-// sshProvisioner holds the state of one remote provisioning so its steps and its
-// reap closure share the ssh connection, the remote session dir, the started PID,
-// and the tunnel.
-type sshProvisioner struct {
-	spec    ProvisionSpec
-	cfg     config.SSHConfig
-	afBin   string
-	program string
-	// hostKeyVerification is the operator's global-only ssh_host_key_verification
-	// posture (strict|accept-new|insecure), resolved from config.Config — NOT the
-	// repo-settable ssh table — so a cloned repo cannot relax it (#2556).
-	hostKeyVerification string
-
-	client         *ssh.Client
-	agentConn      io.Closer
-	sessionDir     string
-	remotePID      string
-	tunnelLn       net.Listener
-	tunnelAcceptWG sync.WaitGroup
-	tunnelWG       sync.WaitGroup
-
-	// Reap memoizes only an attempt that COMPLETED. A timeout leaves the remote
-	// directory's state unknown, so the daemon must retain the row and actually
-	// retry on its next poll; sync.Once cannot express that conditional latch.
-	reapMu  sync.Mutex
-	reaped  bool
-	reapErr error
-
-	// Narrow per-instance seams let the cleanup contract be exercised without a
-	// real SSH server. Production instances leave these nil and use the methods
-	// below; tests inject only the remote command/dial/client-close boundary.
-	reapRunCombined func(time.Duration, string) ([]byte, error)
-	// reapRunKill reports whether SSH accepted the exec request. Reap consumes the
-	// live PID at that acceptance boundary; only pre-acceptance failures retry it.
-	// A persisted pre-kill copy remains safe after a crash because the remote
-	// command re-verifies the process identity before signalling.
-	reapRunKill     func(time.Duration, string) (bool, error)
-	reapOpenSession func() (sshCommandSession, error)
-	reapDial        func() error
-	reapCloseClient func()
-}
-
-// provision runs the full remote lifecycle and returns the wiring an ssh session
-// needs. Each step wraps the remote command's output in the error so a failure is
-// self-diagnosing.
-
-// ensureKnownHostsFile creates path (and its parent directory) if absent, so
-// knownhosts.New can read an as-yet-unused af store.
+// ensureKnownHostsFile creates path (and its parent directory) if absent.
+// accept-new needs a file it can append the learned key to, and ssh(1) refuses a
+// UserKnownHostsFile whose directory does not exist rather than creating it.
 func ensureKnownHostsFile(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
@@ -236,24 +193,6 @@ func ensureKnownHostsFile(path string) error {
 	}
 	return f.Close()
 }
-
-// --- remote command helpers -------------------------------------------------
-
-type sshSessionResult struct {
-	out []byte
-	err error
-}
-
-// sshCommandSession is the narrow x/crypto session surface the kill delivery
-// boundary needs. The interface lets tests make an accepted/rejected exec
-// explicit without standing up a real SSH server.
-type sshCommandSession interface {
-	Start(string) error
-	Wait() error
-	Close() error
-}
-
-// --- remote path helpers ----------------------------------------------------
 
 // sshBackend is the in-process Backend for an ssh session. Like dockerBackend, its
 // agent-facing operations delegate to the instance's remote AgentServer (the

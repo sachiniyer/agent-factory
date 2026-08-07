@@ -20,26 +20,32 @@ import (
 )
 
 // The sandbox runtime (#2476 PR2) — the same provision-and-expose model as the
-// ssh runtime, reached through the operator's OWN `ssh` invocation instead of
-// af's Go client.
+// ssh runtime, reached through the operator's OWN `ssh` invocation.
 //
-// WHY IT EXISTS. `backend = "ssh"` connects with golang.org/x/crypto/ssh and
-// deliberately never reads ~/.ssh/config, so it cannot express a target that
-// needs a jump host, a ProxyCommand, a bastion, or any other flag the operator
-// already relies on. `sandbox_ssh` is a free-form command line — whatever
-// already works in their terminal — and af runs the provision steps over it.
-// Everything above the transport is shared: sandboxWorkspace (#2557) does the
-// mktemp/clone/binary-stream/start-agent-server sequence against any
-// sandboxShell.
+// WHY IT EXISTS. `backend = "ssh"` used to connect with golang.org/x/crypto/ssh
+// and never read ~/.ssh/config, so it could not express a target that needed a
+// jump host, a ProxyCommand, a bastion, or any other flag the operator already
+// relied on. `sandbox_ssh` is a free-form command line — whatever already works
+// in their terminal — and af runs the provision steps over it.
 //
-// WHAT THIS RUNTIME OWNS, and the ssh runtime owns separately: the connection
-// (there is none to hold — each step is a fresh `ssh` invocation), the tunnel (a
-// long-lived `ssh -L` child rather than an in-process forward), and the reap.
+// THAT GAP IS NOW CLOSED FROM THE OTHER SIDE TOO (#3052): `backend = "ssh"`
+// composes an ssh(1) command and provisions through THIS type. So the two are no
+// longer two transports; they are one transport with two ways of naming a target.
 //
-// HOST KEYS ARE THE SSH BINARY'S PROBLEM HERE, on purpose. The operator's
-// ssh_config, known_hosts and ProxyCommand are the authority, exactly as they
-// are in their terminal — af adds no posture of its own, unlike `backend=ssh`
-// which enforces ssh_host_key_verification because it bypasses all of that.
+// WHICH LEAVES A REAL DISTINCTION, and it is about who decides:
+//
+//   - `sandbox_ssh` — the operator writes the command. Their ssh_config,
+//     known_hosts and ProxyCommand are the whole authority, exactly as in their
+//     terminal, and af adds no posture of its own.
+//   - `backend = "ssh"` — af writes the command from `ssh.*` settings and pins
+//     each one with `-o`, so `ssh_host_key_verification` and friends keep their
+//     af-enforced meaning and ssh_config cannot override them (see
+//     ssh_command.go). ssh_config still supplies everything af does NOT pin.
+//
+// Everything above the transport is shared either way: sandboxWorkspace (#2557)
+// does the mktemp/clone/binary-stream/start-agent-server sequence against any
+// sandboxShell, and this type owns the tunnel (a long-lived `ssh -L` child) and
+// the reap for both.
 
 const (
 	// sandboxTunnelReadyTimeout bounds the wait for the `ssh -L` child to make
@@ -90,9 +96,9 @@ func (sandboxRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	return res, nil
 }
 
-// sandboxProvisioner holds one provisioning's state. Unlike sshProvisioner there
-// is no persistent client: every step is its own `ssh` invocation, so the only
-// long-lived child is the tunnel.
+// sandboxProvisioner holds one provisioning's state, for `backend = "sandbox"`
+// and (since #3052) `backend = "ssh"` alike. There is no persistent client: every
+// step is its own `ssh` invocation, so the only long-lived child is the tunnel.
 type sandboxProvisioner struct {
 	spec    ProvisionSpec
 	sshCmd  string

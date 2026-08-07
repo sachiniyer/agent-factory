@@ -217,6 +217,16 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		p.sessionDir = data.SSH.SessionDir
 		p.remotePID = data.SSH.RemotePID
 		teardown := p.reap
+		if strings.TrimSpace(data.SSH.HostKeyVerification) == "" {
+			// The ONLY way an empty posture reaches here is a record written before
+			// #2704 added the field — config defaults it to strict at parse time, so a
+			// live session always records one. Such a record restores as strict, and if
+			// its host is absent from the strict store no retry can ever complete it;
+			// classify that so the daemon retires it instead of backing off forever
+			// (#2737). See ssh_legacy_tombstone.go for what is deliberately different
+			// from the x/crypto predicate this replaces.
+			teardown = legacySSHTombstoneReap(teardown, legacyCfg)
+		}
 		return &sshBackend{
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
