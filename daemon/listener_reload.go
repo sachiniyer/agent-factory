@@ -126,6 +126,21 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			}
 		}
 		wl.webConfigAddr = ""
+		// Tearing the listener DOWN is a listener change like any other, and this
+		// early return used to skip both consequences of that (#3012 review): no
+		// sweep ran, so credentials outlived the listener entirely, and the
+		// generation did not advance. The opt-out is the MOST complete form of "the
+		// endpoint is gone", so it cannot be the one path that reports nothing.
+		//
+		// The generation bump no longer feeds a mint check — that fence moved onto
+		// the registry in #3065, because a listener counter could not see an
+		// auth-only invalidation. It stays because it still retires THIS generation:
+		// the done-watcher below clears listener state only while its own generation
+		// is current, and a torn-down listener must not have its state cleared twice.
+		wl.webGen++
+		if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
+			log.WarningLog.Printf("listen_addr is now empty: revoked %d sandbox callback credential(s) — the control listener is closed, so nothing can call back until it is re-enabled and those sessions are re-provisioned", n)
+		}
 		return nil
 	}
 	cfg := wl.manager.Config()
@@ -135,7 +150,11 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
 	closer, info, err := startTCPListenerWithListen(wl.webMux, addr, cfg, policy, withWebShell, nil,
-		&livePosture{snapshot: wl.manager.Config, policyFromConfig: true}, wl.listenTCP)
+		&livePosture{
+			snapshot:         wl.manager.Config,
+			policyFromConfig: true,
+			sandboxTokens:    &wl.manager.sandboxTokens,
+		}, wl.listenTCP)
 	if err != nil {
 		return fmt.Errorf("apply listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
 	}
@@ -152,6 +171,7 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	go func() {
 		<-info.done
 		wl.mu.Lock()
+		revoked := 0
 		if wl.webGen == gen {
 			if wl.manager.lifecycle != nil {
 				wl.manager.lifecycle.clearTCPBound()
@@ -160,11 +180,40 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 				wl.webClose = nil
 			}
 			wl.webConfigAddr = ""
+			// The listener is gone whether or not anyone asked for it to be, so an
+			// UNEXPECTED death has to advance the same state a rebind or a teardown
+			// does (#3012 review). Without this, a listener that dies under
+			// http.Server left credentials registered against an endpoint that no
+			// longer accepts — contradicting the invariant this file states — and
+			// left webGen unchanged, so a create racing the failure passed its
+			// post-mint revalidation and shipped a URL nothing answers.
+			//
+			// This is the third path that had to learn the same rule. Rebind and
+			// teardown were the two I wrote by hand; the listener simply dying was
+			// the one I did not think of, which is the argument for the rule being
+			// stated on the state itself rather than remembered at each site.
+			wl.webGen++
+			revoked = wl.manager.sandboxTokens.revokeAll()
 		}
 		wl.mu.Unlock()
+		if revoked > 0 {
+			log.WarningLog.Printf("the control listener on %s is no longer accepting: revoked %d sandbox callback credential(s) issued against it; those sessions lose callback until the listener is restored and they are re-provisioned", addr, revoked)
+		}
 	}()
 	if old != nil {
 		_ = old()
+	}
+	// The listener moved, so every sandbox callback credential minted against the
+	// old one now points at a closed address (#3012 review). Each sandbox has the
+	// URL baked into the environment file written at provision time and nothing
+	// rewrites it, so those tokens can no longer be used by the sandboxes holding
+	// them. Revoke rather than leave live credentials aimed at nothing, and SAY so:
+	// otherwise the capability vanishes silently inside sandboxes nobody is
+	// watching. Same rule the registry already applies across a daemon restart —
+	// a credential does not outlive the listener it was issued against. Affected
+	// sessions regain callback when they are re-provisioned.
+	if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
+		log.WarningLog.Printf("listen_addr moved to %s: revoked %d sandbox callback credential(s) minted against the previous listener; those sessions lose callback until they are re-provisioned", addr, n)
 	}
 	// The enable banner + posture, logged once per bind (initial and rebind). The
 	// bearer-token line is the operator's only channel to a network listener's
@@ -258,6 +307,17 @@ func (wl *webListeners) previewConfigAddress() string {
 	wl.mu.Lock()
 	defer wl.mu.Unlock()
 	return wl.previewConfigAddr
+}
+
+// webConfigAddress is previewConfigAddress for the control-plane listener: the
+// CONFIG address that produced the listener currently accepting, not the one
+// config merely asks for. Same divergence, same cause — a live rebind that failed
+// leaves the old listener serving while ApplyConfig has already stored the new
+// address. "" when nothing is bound.
+func (wl *webListeners) webConfigAddress() string {
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	return wl.webConfigAddr
 }
 
 // close tears down both listeners (daemon shutdown). Errors are joined so one

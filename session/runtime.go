@@ -67,6 +67,21 @@ type ProvisionSpec struct {
 	// Program is the agent program to run in the workspace (empty ⇒ the config
 	// default). Passed through to the sandbox's `af agent-server --program`.
 	Program string
+	// CallbackURL and CallbackToken let the agent INSIDE a sandbox call back into
+	// the daemon (#2999) — the reverse of the daemon-drives-sandbox direction. They
+	// are AF_DAEMON_URL / AF_DAEMON_TOKEN, which apiclient already reads, so no new
+	// CLI surface exists for them.
+	//
+	// The token is per-session, scoped and revocable — never the operator's, which
+	// grants DeliverPrompt over every agent on the machine. The scope it currently
+	// carries is deliberately one route (SuggestSessionName): it does not include
+	// creating a session, which would start an agent on the host with a
+	// caller-supplied program, nor the repo/path reads, whose caller-supplied paths
+	// are a host oracle (#3012 review). See HTTPRoute.sandboxAllowed for the rule
+	// and what widening it waits on. Empty means no callback was granted, which is
+	// the normal case for a local session and also what a refusal leaves behind.
+	CallbackURL   string
+	CallbackToken string
 	// CloneURL is the git remote an off-box runtime clones the workspace from —
 	// the repo's `origin` for a real repo, or a file:// / bind-mounted path for a
 	// self-contained test. Empty for the in-process local runtime. On a fresh
@@ -168,6 +183,19 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // An unregistered kind reports false, which is the conservative answer —
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
+
+// InjectsSandboxCallback reports whether this kind's provisioner actually
+// delivers the #2999 callback credential into the workspace.
+//
+// Narrower than ProvisionsOffBox on purpose (#3012 review). Only the ssh and
+// sandbox provisioners call writeCallbackEnv; docker and hook do not read the
+// spec fields at all. Minting for them would have been strictly harmful — the
+// create would newly fail whenever require_token was off, and buy the agent
+// nothing when it succeeded, because nothing carries the credential in. A
+// capability nobody delivers must not impose its precondition.
+func (k BackendKind) InjectsSandboxCallback() bool {
+	return k == BackendSSH || k == BackendSandbox
+}
 
 // SetRuntimeForTest replaces the Runtime registered for kind with ctor and
 // returns a restore function. It is the exported form of the registry swap the

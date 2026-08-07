@@ -87,7 +87,7 @@ func killGuardHeld(m *Manager, key string) bool {
 // is not that the error was wrong — there was no error at all.
 func TestKillSession_ContendedInstancesLock_IsBoundedAndRetryable(t *testing.T) {
 	backend := &raceBackend{}
-	manager, repoID, _ := installRaceBackend(t, backend, "wedged")
+	manager, repoID, inst := installRaceBackend(t, backend, "wedged")
 
 	// Short budgets: this test is about the bounds existing, not their production
 	// sizes. BOTH flock sites on the kill path are bounded and both are exercised
@@ -114,6 +114,16 @@ func TestKillSession_ContendedInstancesLock_IsBoundedAndRetryable(t *testing.T) 
 	defer release()
 
 	key := daemonInstanceKey(repoID, "wedged")
+
+	// A sandbox callback credential for this session (#2999), so the two kill
+	// outcomes below can be told apart by their effect on it (#3012 review). The
+	// pair is what makes each half non-vacuous: revocation is keyed on the
+	// resolved session id, so if that id were not inst.ID the second assertion
+	// fails rather than the first passing for the wrong reason.
+	callback, err := manager.sandboxTokens.mint(inst.ID)
+	if err != nil {
+		t.Fatalf("mint sandbox callback credential: %v", err)
+	}
 
 	killDone := make(chan error, 1)
 	go func() {
@@ -148,6 +158,16 @@ func TestKillSession_ContendedInstancesLock_IsBoundedAndRetryable(t *testing.T) 
 		t.Fatal("killsInFlight still held after a failed kill: the session is undeletable and a retry would be rejected")
 	}
 
+	// The kill aborted at the tombstone and told the caller nothing was changed, so
+	// the still-running session's callback credential must still work (#3012
+	// review). Revocation is NOT reversible — the registry mints only at provision
+	// time — so revoking on an aborted kill silently and permanently severs a live
+	// sandbox from the daemon, and the retry the error asks for cannot restore it.
+	if _, ok := manager.sandboxTokens.sessionFor(callback); !ok {
+		t.Fatal("a kill that aborted before its commit point revoked the session's sandbox callback credential anyway: " +
+			"the session is still running, the error says nothing was changed, and the credential cannot be re-minted without re-provisioning")
+	}
+
 	// And the retry must actually work once the contention clears.
 	release()
 	if _, err := manager.KillSession(KillSessionRequest{Title: "wedged", RepoID: repoID}); err != nil {
@@ -158,6 +178,13 @@ func TestKillSession_ContendedInstancesLock_IsBoundedAndRetryable(t *testing.T) 
 	manager.mu.Unlock()
 	if stillTracked {
 		t.Fatal("session still tracked after a successful retry")
+	}
+	// The other half of the pair: a kill that DID commit must take the credential
+	// with it, before the runtime is torn down. Without this assertion the check
+	// above would pass just as happily if revocation never ran at all.
+	if _, ok := manager.sandboxTokens.sessionFor(callback); ok {
+		t.Fatal("a committed kill left the session's sandbox callback credential live: " +
+			"a token copied out of the sandbox keeps authenticating until the daemon restarts")
 	}
 }
 

@@ -70,6 +70,12 @@ type authGate struct {
 	// the daemon's web listener sets it true.
 	loopbackExempt bool
 
+	// sandboxTokens admits per-session sandbox callback credentials alongside the
+	// operator token (#2999). Nil ⇒ no sandbox credential is accepted on this
+	// listener, which is the correct default: only the daemon's own control-plane
+	// listener sets it, and the agent-server and preview gates leave it nil.
+	sandboxTokens *sandboxTokenRegistry
+
 	// presentedToken extracts the credential a request presents. Nil ⇒
 	// webTabAwareToken, the daemon/agent-server default (Authorization header, then
 	// the ?access_token= / webtab query+cookie fallbacks). The PREVIEW listener
@@ -99,19 +105,60 @@ func (g *authGate) authRequired(r *http.Request) bool {
 // bearer token. Token resolution failing, or an empty expected token (a daemon
 // with no token must never accept the empty credential), fails closed; the
 // compare is constant time to close the timing oracle.
-func (g *authGate) authorize(r *http.Request) bool {
+func (g *authGate) authorize(r *http.Request) (sandboxOwner string, ok bool) {
 	if !g.authRequired(r) {
-		return true
+		return "", true
 	}
 	want, err := g.wantToken(r)
 	if err != nil {
-		return false
+		return "", false
 	}
 	extract := g.presentedToken
 	if extract == nil {
 		extract = webTabAwareToken
 	}
-	return ConstantTimeEqual(extract(r), want)
+	presented := extract(r)
+	if ConstantTimeEqual(presented, want) {
+		return "", true
+	}
+	return g.authorizeSandbox(r, presented)
+}
+
+// authorizeSandbox admits a per-session sandbox callback credential (#2999).
+//
+// Checked only AFTER the operator token fails, so the ordinary path is unchanged
+// and costs nothing extra. A sandbox credential is accepted for the routes its
+// scope opts into and refused everywhere else, so a compromised sandbox cannot
+// reach DeliverPrompt — the verb that runs instructions through every agent on
+// the machine, and the reason the operator's own token is not what gets injected.
+//
+// Nil registry (the agent-server's gate, and every test gate) means no sandbox
+// credential exists, so this is a plain false rather than a special case.
+// It returns the OWNING SESSION alongside the decision (#3056). The registry has
+// always known it; discarding it after the bool is what left the scope unable to
+// express "the caller's own session", and therefore unable to admit any route at
+// all. servePosture puts it on the request context, and the route's own handler
+// enforces the constraint — see sandbox_owner.go, which states the rule and holds
+// the check that keeps the scope and the constraints in step.
+func (g *authGate) authorizeSandbox(r *http.Request, presented string) (string, bool) {
+	if g.sandboxTokens == nil || presented == "" {
+		return "", false
+	}
+	owner, ok := g.sandboxTokens.sessionFor(presented)
+	if !ok {
+		return "", false
+	}
+	if !sandboxAllowedPath(r.URL.Path) {
+		return "", false
+	}
+	// A credential with no owner must never authorize. The registry cannot mint one
+	// (mint refuses an empty session id), so this is unreachable today — but the
+	// whole binding downstream reads an empty owner as "the operator", so the one
+	// place that could introduce that confusion refuses instead of propagating it.
+	if owner == "" {
+		return "", false
+	}
+	return owner, true
 }
 
 // wantToken resolves the credential this request must present. A per-request
@@ -256,32 +303,42 @@ func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p r
 			return
 		}
 	}
-	if p.gate != nil && !p.gate.authorize(r) {
-		if p.previewOrigin {
-			// A preview origin's denial is RENDERED IN A PANE, so it must not be the
-			// JSON envelope. WHICH page depends on whether the address can still become
-			// valid, and getting that backwards strands the frame either way.
-			//
-			// WARMING UP: the listener binds long before RestoreInstances (#829), so an
-			// editor iframe can navigate while the daemon still has no sessions to
-			// recognise its label by. That address becomes valid the moment restore
-			// finishes, so this must be the RETRYING notice — the expired page never
-			// re-requests, and the frame would sit on it until a manual reload even
-			// though the daemon recovered seconds later.
-			if p.previewWarmingUp != nil && p.previewWarmingUp() {
-				writeTabNoticePage(w, "Starting up",
-					"af is starting up — this tab will load as soon as the daemon has restored its sessions.", true)
+	if p.gate != nil {
+		owner, ok := p.gate.authorize(r)
+		if ok {
+			// Bind the request to the session whose credential admitted it (#3056),
+			// so the route's own handler can constrain to "the caller's own". Empty
+			// owner = the operator's authority, which stays unconstrained.
+			if owner != "" {
+				r = r.WithContext(withSandboxOwner(r.Context(), owner))
+			}
+		} else {
+			if p.previewOrigin {
+				// A preview origin's denial is RENDERED IN A PANE, so it must not be the
+				// JSON envelope. WHICH page depends on whether the address can still become
+				// valid, and getting that backwards strands the frame either way.
+				//
+				// WARMING UP: the listener binds long before RestoreInstances (#829), so an
+				// editor iframe can navigate while the daemon still has no sessions to
+				// recognise its label by. That address becomes valid the moment restore
+				// finishes, so this must be the RETRYING notice — the expired page never
+				// re-requests, and the frame would sit on it until a manual reload even
+				// though the daemon recovered seconds later.
+				if p.previewWarmingUp != nil && p.previewWarmingUp() {
+					writeTabNoticePage(w, "Starting up",
+						"af is starting up — this tab will load as soon as the daemon has restored its sessions.", true)
+					return
+				}
+				// Otherwise the address really is dead: a web tab's label does not survive
+				// the secret rotating, and an editor label the restored daemon cannot place
+				// names no session it holds. Deliberately NON-retrying — nothing will make
+				// it valid — and the web client mints a fresh origin when it rebuilds.
+				writePreviewExpiredPage(w)
 				return
 			}
-			// Otherwise the address really is dead: a web tab's label does not survive
-			// the secret rotating, and an editor label the restored daemon cannot place
-			// names no session it holds. Deliberately NON-retrying — nothing will make
-			// it valid — and the web client mints a fresh origin when it rebuilds.
-			writePreviewExpiredPage(w)
+			writeHTTPError(w, r, http.StatusUnauthorized, errUnauthorized)
 			return
 		}
-		writeHTTPError(w, r, http.StatusUnauthorized, errUnauthorized)
-		return
 	}
 	next.ServeHTTP(w, r)
 }

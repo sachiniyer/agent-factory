@@ -39,6 +39,75 @@ type HTTPRoute struct {
 	// Unexported: net/json skips it (so it never leaks into the catalog) and
 	// importers cannot set it.
 	handler func(*controlServer) http.HandlerFunc
+	// sandboxAllowed opts this route into the SCOPED sandbox callback credential
+	// (#2999). Zero value false means DENIED, deliberately: a route added later is
+	// unreachable by a sandbox until someone consciously opts it in. A denylist
+	// would grant every future route by default, which is the wrong direction for
+	// a credential handed to a machine af provisioned but does not trust.
+	//
+	// THE RULE FOR ADDING ONE, and it took two review rounds to state correctly
+	// (#3012). A route may be opted in only if an attacker who has taken the
+	// sandbox cannot use it to gain authority over the HOST, or to learn the
+	// operator's private layout. What remains is capability DISCOVERY: what this
+	// daemon could offer, never what the operator has or what it will go do.
+	//
+	// The rule was first written as "it cannot name another session", which is a
+	// SYMPTOM of the real predicate and let CreateSession through — it names no
+	// session and still starts an agent on the host with an attacker's repo_path,
+	// program, and prompt, which is the host-side instruction authority denying
+	// DeliverPrompt exists to withhold. Naming is one route to that authority, not
+	// the definition of it. Test the authority, not the shape of the request.
+	//
+	// Denied by this rule, with the reason each is tempting:
+	//
+	//   - CreateSession — no session named; starts one on the host anyway.
+	//   - SendPrompt, CreateTab, AddTask (via Task.TargetSession) — reach an
+	//     existing agent, reproducing DeliverPrompt one at a time.
+	//   - Snapshot — the enumeration that makes the above aimable.
+	//   - ListProjects, ListDirectory — read-only, and still hand a compromised
+	//     sandbox the operator's absolute host paths and an arbitrary directory
+	//     walk of the daemon's filesystem. Reconnaissance is authority's
+	//     precursor, and a sandbox has no use for the HOST's tree: the picker
+	//     that consumes ListDirectory (#2788) is the operator's own client,
+	//     holding the operator's own token.
+	//   - ListBackends, ListPrograms — the same oracle in a quieter form, and the
+	//     reason this list is shorter than it looks like it should be. Both take a
+	//     caller-supplied repo_path and answer through config.RepoFromPath, which
+	//     wraps git's own stderr: a caller learns "No such file or directory" vs
+	//     "Permission denied" vs "not a git repository" for any path it guesses,
+	//     and on success learns where the enclosing git root is. Confirming a
+	//     guessed path is weaker than enumerating one, but it is the same class,
+	//     and a rule that admits it is a rule with an exception carved for
+	//     convenience.
+	//
+	//   - SuggestSessionName — the last one standing under the old scheme, and it
+	//     fell too. It takes no arguments and returns a random unused name, which
+	//     looks like the one harmless thing on the surface. But it avoids every live
+	//     title ACROSS ALL REPOS (its handler says so), the wordlist is finite, and
+	//     the sandbox holds that wordlist in the `af` binary af itself put there —
+	//     so sampling until the free combinations run out reveals which ones are
+	//     persistently missing, i.e. the operator's live session titles and their
+	//     activity. An oracle can be a route that returns nothing about its own
+	//     answer.
+	//
+	// THAT EMPTIED THE TABLE, which is what #3056 changed. Both halves of the
+	// surface had failed for opposite reasons: parameterised routes need "the
+	// caller's OWN repo/session", which a flag cannot express, and parameterless
+	// routes answer from global state because it is the only state they have.
+	//
+	// THE CONTRACT NOW, and it is two conditions, not one:
+	//
+	//  1. This flag admits a route to the SCOPE. It does not authorize a request.
+	//  2. The route's HANDLER must enforce its own owner constraint, reading
+	//     sandboxOwner(ctx) — the session the presented credential belongs to,
+	//     carried from the gate (see sandbox_owner.go).
+	//
+	// A route admitted under (1) without (2) is a boundary that reads as enforced
+	// and is not. That is not left to a reader: sandboxConstrainedRoutes names every
+	// route that has a constraint, and a test asserts it equals this table in both
+	// directions, so opting a route in without giving it one FAILS. The rule used to
+	// be prose here, and prose is exactly what the four rounds above drifted from.
+	sandboxAllowed bool
 	// requestType is the RPC request struct this route decodes, kept so a consumer
 	// that needs the FULL body shape can reflect it rather than re-deriving a
 	// second, driftable list. RequestFields above is computed FROM it (see
@@ -104,11 +173,14 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SuggestSessionName) },
 	},
 	{
-		Method:      http.MethodPost,
-		Path:        "/v1/Snapshot",
-		Description: "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
-		requestType: reflect.TypeOf(SnapshotRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.Snapshot) },
+		Method:         http.MethodPost,
+		Path:           "/v1/Snapshot",
+		sandboxAllowed: true,
+		Description:    "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
+		requestType:    reflect.TypeOf(SnapshotRequest{}),
+		// rpcHandlerCtx, not rpcHandler: the handler needs the request context to
+		// see whether the caller is a sandbox and narrow to its own session (#3056).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.snapshot) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -351,6 +423,26 @@ var internalHTTPRoutes = []HTTPRoute{
 	},
 }
 
+// sandboxAllowedPath reports whether a sandbox callback credential may call the
+// given request path (#2999).
+//
+// Derived from the served table rather than a second list: a route's capability
+// is declared beside the route, so there is no separate inventory to fall out of
+// step with it. Anything not in the table — the WS stream planes, the
+// config-assistant, the webtab proxy, the catch-all — is denied by falling
+// through, which is the same default the table itself applies.
+func sandboxAllowedPath(path string) bool {
+	return sandboxAllowedPaths[path]
+}
+
+// sandboxAllowedPaths is the derived lookup, filled in init() rather than by a
+// var initializer. That is not style: httpRoutes' initializer transitively
+// references the auth gate, which references this, and Go rejects the resulting
+// package-variable initialization cycle. Filling it in init() — which runs after
+// variable initialization — keeps the capability declared beside its route while
+// leaving the lookup a plain map read.
+var sandboxAllowedPaths = map[string]bool{}
+
 // servedHTTPRoutes is every route newHTTPMux registers: the public catalog plus
 // the internal routes. The mux serves this union; HTTPRoutes() exposes only the
 // public half. Keeping them as one concatenation here means "what is served" has
@@ -375,6 +467,11 @@ func servedHTTPRoutes() []HTTPRoute {
 func init() {
 	fillRequestFields(httpRoutes)
 	fillRequestFields(internalHTTPRoutes)
+	for _, rt := range servedHTTPRoutes() {
+		if rt.sandboxAllowed {
+			sandboxAllowedPaths[rt.Path] = true
+		}
+	}
 }
 
 func fillRequestFields(routes []HTTPRoute) {

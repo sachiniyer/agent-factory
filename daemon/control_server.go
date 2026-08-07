@@ -644,18 +644,6 @@ func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse)
 	return nil
 }
 
-func (s *controlServer) Snapshot(req SnapshotRequest, resp *SnapshotResponse) error {
-	if err := s.requireManagerReady(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	resp.Instances = s.manager.Snapshot(req.RepoID)
-	resp.DeliveryAlarms = s.deliveryAlarms(req.RepoID)
-	return nil
-}
-
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err

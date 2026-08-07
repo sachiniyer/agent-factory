@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Options for creating a new instance
@@ -27,6 +28,17 @@ type InstanceOptions struct {
 	// a user-created session. It is what lets the daemon count a task's in-flight
 	// sessions for the watch-task concurrency limit without guessing from titles.
 	TaskID string
+	// SandboxCredentials mints and revokes the per-session credential a provisioned
+	// sandbox uses to call back into the daemon (#2999, #3068). An INTERFACE rather
+	// than a pair of values so it runs only for off-box kinds — session cannot
+	// import daemon, and the daemon must not mint (or refuse) for a local create
+	// that will never use one — and rather than a bare mint function because the
+	// runtime's lifetime drives BOTH halves: a replacement sandbox mints, a reaped
+	// runtime revokes. Nil ⇒ no callback, which is every non-daemon caller.
+	//
+	// Held on the Instance too, so restore and recovery can provision a replacement
+	// through the same path as the original create (see sandbox_credentials.go).
+	SandboxCredentials SandboxCredentials
 	// Path is the path to the workspace.
 	Path string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
@@ -140,7 +152,61 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	if kind.ProvisionsOffBox() {
 		spec.CloneURL = originRemoteURL(absPath)
 	}
-	return rt.Provision(spec)
+	// Mint through the SHARED helper, which the replacement path uses too, so the
+	// two cannot diverge on which kinds get a credential or on what a refusal
+	// means. Scoped to off-box kinds inside it: minting unconditionally would make
+	// every local create fail whenever require_token is off, turning a sandbox-only
+	// refusal into a total outage.
+	cred, err := mintForProvision(&spec, kind, opts.SandboxCredentials)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	res, err := rt.Provision(spec)
+	if err != nil {
+		return res, err
+	}
+	// Revalidate now that the sandbox exists: provisioning is the long window, and
+	// a listener move or an auth change inside it leaves the sandbox holding a
+	// credential that was revoked while it was being written in.
+	//
+	// A failure here must REAP what was just provisioned. NewInstance discards the
+	// ProvisionResult of a failed factory call, so nothing downstream retains
+	// res.Teardown — returning the error alone leaks the sandbox with no handle
+	// left to reap it (#3065 review). This is the same discipline every other
+	// failure exit on a provisioned runtime already follows; a new exit does not
+	// get to skip it.
+	if rerr := revalidateAfterProvision(cred); rerr != nil {
+		return ProvisionResult{}, discardUnusableSandbox(res, opts.SandboxCredentials, rerr)
+	}
+	return res, nil
+}
+
+// discardUnusableSandbox reaps a sandbox that was provisioned but must not be
+// used, and revokes the credential minted for it.
+//
+// Both halves matter and both were missing. The runtime leaks without the reap,
+// because the caller drops the ProvisionResult on error and with it the only
+// cleanup handle. The credential leaks without the revoke, because it is
+// registered against a session whose sandbox no longer exists — a token minted
+// for a runtime that is gone, which is the state this feature exists to prevent.
+//
+// A teardown that reports an UNKNOWN outcome is joined into the returned error
+// rather than swallowed: the sandbox may still be running, and the operator is
+// the only one who can settle it.
+func discardUnusableSandbox(res ProvisionResult, creds SandboxCredentials, cause error) error {
+	if creds != nil {
+		creds.Revoke()
+	}
+	if res.Teardown == nil {
+		return cause
+	}
+	if terr := res.Teardown(); terr != nil {
+		if TeardownStateUnknown(terr) {
+			return fmt.Errorf("%w; and the sandbox provisioned for it could not be confirmed torn down, so it may still be running: %w", cause, terr)
+		}
+		log.WarningLog.Printf("discarded sandbox teardown reported a completed error: %v", terr)
+	}
+	return cause
 }
 
 // resolveBackendKind decides which runtime a new session uses, in precedence
@@ -394,9 +460,10 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	return &Instance{
-		ID:     id,
-		TaskID: opts.TaskID,
-		Title:  opts.Title,
+		ID:           id,
+		sandboxCreds: opts.SandboxCredentials,
+		TaskID:       opts.TaskID,
+		Title:        opts.Title,
 		// A task delivery's run begins here and ends when the agent goes idle
 		// (#1892). Only a task-spawned session has a run to bound; a user's session
 		// is never counted against a cap.

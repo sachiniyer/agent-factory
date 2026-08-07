@@ -138,7 +138,30 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
+		// Mints and revokes this session's credential, driven by the RUNTIME's
+		// lifetime rather than by this call site (#3068): the session runtime mints
+		// when it provisions a sandbox — original or replacement — and revokes when
+		// it reaps one. Invoked only for a kind that provisions off-box (#2999), so
+		// a local create neither mints nor inherits the require_token refusal.
+		//
+		// Post-provision revalidation lives with the mint, in session, so the create
+		// and replacement paths cannot differ on it.
+		SandboxCredentials: newSandboxCredentials(m, pending.ID),
 	})
+	// A create that does not finish must not leave a live credential behind
+	// (#3012 review). The mint happens INSIDE NewInstance, so a provisioning
+	// failure after it — or any later abandonment on this path — would otherwise
+	// leave an orphaned sandbox authenticating indefinitely, with no session left
+	// for an operator to kill. Deferred and armed rather than repeated at each
+	// exit: the exits are many and one forgotten `return` is a credential that
+	// never dies. Disarmed only once the session is committed to the roster,
+	// where KillSession and archive take over revocation.
+	createCommitted := false
+	defer func() {
+		if !createCommitted {
+			m.sandboxTokens.revoke(pending.ID)
+		}
+	}()
 	if err != nil {
 		return session.InstanceData{}, err
 	}
@@ -162,6 +185,19 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely — its workspace may still be on disk at %s and could not be recorded, so it must be inspected and cleaned up by hand: %w",
 					title, instance.GetWorktreePath(), errors.Join(serr, keepErr))
 			}
+			// A COMMITTED outcome, not an abandonment (#3012 review). The whole point
+			// of this branch is that the runtime may still be alive — that is why no
+			// cleanup runs — so revoking its callback credential would sever a
+			// possibly-running agent from the daemon while deliberately keeping its
+			// session for inspection and later lifecycle operations. KillSession and
+			// archive own its revocation now, exactly as for a clean start.
+			//
+			// Deliberately NOT applied to the keepFailedCreate branch below: there
+			// cleanup has been attempted and the daemon keeps retrying it, so that
+			// session is on its way out and its credential should go with it. And not
+			// applied when keepUncertainCreate FAILS, because a credential with no
+			// durable record is one no operator surface could ever revoke.
+			createCommitted = true
 			settleRetainedCreate(instance)
 			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely, so its workspace was left in place; the session is recorded for inspection and no automatic cleanup will run: %w",
 				title, serr)
@@ -243,6 +279,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return session.InstanceData{}, persistErr
 	}
 	creatingProjectionSettled = true
+	// The session is on the roster and persisted, so its credential is now owned
+	// by the ordinary lifecycle — KillSession and archive revoke it from here.
+	createCommitted = true
 	// Publish from the Manager, not only the control-server wrapper: task delivery
 	// and root-agent ensure call Manager.CreateSession directly. They announced the
 	// same pending row above and therefore must settle it on the same events plane.

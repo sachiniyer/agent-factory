@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -110,4 +112,63 @@ func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
 				key, config.KeyEffectClass(key))
 		}
 	}
+}
+
+// Turning require_token OFF must not leave sandbox callback credentials behind
+// (#2999, #3012 review).
+//
+// mintSandboxCallback refuses to ISSUE one while require_token is false, because a
+// scoped credential against a listener that authenticates nobody enforces nothing.
+// That check runs once, at provision time, and auth keys apply live with no rebind
+// — so without this, relaxing the key silently converts every already-issued
+// credential into exactly what the refusal exists to prevent.
+func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T) {
+	m := applyConfigTestManager(t)
+
+	_, err := config.SetGlobalConfigValue("require_token", "true")
+	require.NoError(t, err)
+	_, err = m.ApplyConfig()
+	require.NoError(t, err)
+	require.True(t, m.Config().RequireToken, "the premise of this test is that the key starts enabled")
+
+	secret, err := m.sandboxTokens.mint("sess-a")
+	require.NoError(t, err)
+	_, ok := m.sandboxTokens.sessionFor(secret)
+	require.True(t, ok, "anti-vacuous: the credential must be live before the flip, or the assertion below proves nothing")
+
+	_, err = config.SetGlobalConfigValue("require_token", "false")
+	require.NoError(t, err)
+	result, err := m.ApplyConfig()
+	require.NoError(t, err)
+
+	_, ok = m.sandboxTokens.sessionFor(secret)
+	assert.False(t, ok, "a credential issued under require_token=true must not outlive it: the gate short-circuits on the tokenless posture before consulting the registry, so its scope stops being enforced")
+
+	// And the operator must be TOLD, including that this does not re-isolate the
+	// sandboxes — revoking without saying so would read as a security action.
+	joined := strings.Join(result.Warnings, "\n")
+	assert.Contains(t, joined, "require_token is now false")
+	assert.Contains(t, joined, "does not re-isolate")
+}
+
+// The converse: an unrelated config change must leave credentials alone, or every
+// save would silently sever every sandbox's callback.
+func TestApplyConfig_UnrelatedChangeKeepsSandboxCredentials(t *testing.T) {
+	m := applyConfigTestManager(t)
+	_, err := config.SetGlobalConfigValue("require_token", "true")
+	require.NoError(t, err)
+	_, err = m.ApplyConfig()
+	require.NoError(t, err)
+
+	secret, err := m.sandboxTokens.mint("sess-a")
+	require.NoError(t, err)
+
+	_, err = config.SetGlobalConfigValue("default_program", "codex")
+	require.NoError(t, err)
+	_, err = m.ApplyConfig()
+	require.NoError(t, err)
+
+	owner, ok := m.sandboxTokens.sessionFor(secret)
+	assert.True(t, ok, "an unrelated save must not revoke callback credentials")
+	assert.Equal(t, "sess-a", owner)
 }
