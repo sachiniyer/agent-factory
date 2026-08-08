@@ -82,9 +82,22 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 	require.NoError(t, refuseOffBoxAccount(docker),
 		"docker can place the account, so an account-scoped create there must be allowed")
 
-	// The rest still cannot PLACE an account on the machine that runs the agent, so
-	// they must refuse rather than run on that host's ambient credentials.
+	// ssh, sandbox and hook place the account too now (#3082): all three provision
+	// through the shared sandboxWorkspace, over a shell that already carries a
+	// secret on stdin, so the account travels as a tar into the per-session dir
+	// that teardown reaps. hook is the same code path, not a fourth one — it
+	// delegates to the sandbox provisioner.
 	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
+		scoped := base
+		scoped.Backend = kind
+		require.NoErrorf(t, refuseOffBoxAccount(scoped),
+			"%s places the account through the shared workspace, so it must be allowed", kind)
+	}
+
+	// Nothing is left refusing today. The loop below keeps the SHAPE of the rule —
+	// a kind that cannot place an account must refuse — so a backend added later
+	// lands in it rather than defaulting into ambient credentials.
+	for _, kind := range []BackendKind{} {
 		scoped := base
 		scoped.Backend = kind
 		err := refuseOffBoxAccount(scoped)

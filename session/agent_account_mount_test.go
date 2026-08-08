@@ -64,8 +64,8 @@ func TestCarriesAccount_OnlyDockerIsProven(t *testing.T) {
 		t.Error("docker can place an account — it already bind-mounts host paths into the container")
 	}
 	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
-		if kind.CarriesAccount() {
-			t.Errorf("%s cannot prove it placed the account, so it must stay refused", kind)
+		if !kind.CarriesAccount() {
+			t.Errorf("%s places the account through the shared sandboxWorkspace, so it must carry one", kind)
 		}
 	}
 	// Local needs no placing and is handled by its own branch; answering true here
@@ -80,13 +80,8 @@ func TestRefuseOffBoxAccount_AllowsDockerRefusesTheRest(t *testing.T) {
 		t.Errorf("docker carries the account now, so it must not be refused: %v", err)
 	}
 	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
-		err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
-		if err == nil {
-			t.Errorf("%s must still refuse an account-scoped create", kind)
-			continue
-		}
-		if !strings.Contains(err.Error(), "cannot place a credential account") {
-			t.Errorf("%s refusal must say WHY (af cannot place the account there), got: %v", kind, err)
+		if err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind}); err != nil {
+			t.Errorf("%s places the account now, so it must not be refused: %v", kind, err)
 		}
 	}
 	// Unscoped creates are untouched on every kind.

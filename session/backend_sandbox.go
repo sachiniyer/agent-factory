@@ -156,6 +156,11 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := p.verifyCopiedBinary(); err != nil {
 		return ProvisionResult{}, err
 	}
+	// Place the credential account BEFORE the env file that points at it, so the
+	// variable never names a directory that does not exist yet (#3082).
+	if err := w.writeAccountHome(sshProvisionStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
 	if err := w.writeCallbackEnv(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}

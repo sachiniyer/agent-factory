@@ -1,9 +1,14 @@
 package session
 
 import (
+	"archive/tar"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -155,11 +160,21 @@ func (w *sandboxWorkspace) copyAfBinary(timeout time.Duration, binary io.Reader)
 // sandbox whose mint was refused — so the refusal reaches the operator as the
 // create error it already is, not as a half-written file here.
 func (w *sandboxWorkspace) writeCallbackEnv(timeout time.Duration) error {
-	if w.spec.CallbackToken == "" {
+	var body string
+	if w.spec.CallbackToken != "" {
+		body += fmt.Sprintf("AF_DAEMON_URL=%s\nAF_DAEMON_TOKEN=%s\n",
+			shellQuote(w.spec.CallbackURL), shellQuote(w.spec.CallbackToken))
+	}
+	// The account's config var rides the SAME file (#3082). The launch already
+	// sources it with `set -a`, so the variable is exported into the agent-server's
+	// environment without ever appearing in argv — the same reason the callback
+	// token travels this way rather than on the command line.
+	if v := w.accountEnvLine(); v != "" {
+		body += v
+	}
+	if body == "" {
 		return nil
 	}
-	body := fmt.Sprintf("AF_DAEMON_URL=%s\nAF_DAEMON_TOKEN=%s\n",
-		shellQuote(w.spec.CallbackURL), shellQuote(w.spec.CallbackToken))
 	script := "umask 077 && cat > " + shellQuote(w.CallbackEnvPath())
 	out, err := w.shell.Run(timeout, script, strings.NewReader(body), false)
 	if err != nil {
@@ -227,6 +242,122 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	return filteredInner, nil
 }
 
+// AccountHomePath is where a registered credential account's directory is placed
+// inside the workspace. It sits under the per-session dir, so the one `rm -rf`
+// that reaps the session removes the copied credentials with it (#3082).
+func (w *sandboxWorkspace) AccountHomePath() string {
+	return w.SessionDir + "/" + sshAccountHomeName
+}
+
+// accountEnvLine is the agent's own config var pointing at the placed account,
+// or "" when this session is not account-scoped.
+func (w *sandboxWorkspace) accountEnvLine() string {
+	if w.spec.Account.Dir == "" {
+		return ""
+	}
+	configVar, ok := sessionenv.SupportsAccounts(w.spec.Account.Agent)
+	if !ok {
+		return ""
+	}
+	return configVar + "=" + shellQuote(w.AccountHomePath()) + "\n"
+}
+
+// writeAccountHome places the account's directory inside the workspace (#3082).
+//
+// This is the off-box answer to "the account directory must exist on the machine
+// that runs the agent". The local path never needs it — its shim resolves the
+// account NAME against the local registry — but a provisioned machine has no
+// registry, so the directory itself has to travel.
+//
+// It travels as a TAR over the same stdin channel that already carries the
+// callback credential, because an account is a directory rather than a file:
+// codex and claude both treat it as a whole home (auth, history, settings,
+// skills), so copying only a credential file would produce a session with an
+// identity and no state.
+//
+// `umask 077` before extraction, under the per-session dir that teardown reaps —
+// the same two properties the callback credential file already relies on. The
+// operator's credentials do land on that machine, which is inherent to running
+// their agent there; what this controls is that they land private and are removed
+// with the session.
+func (w *sandboxWorkspace) writeAccountHome(timeout time.Duration) error {
+	if w.spec.Account.Dir == "" {
+		return nil
+	}
+	archive, err := tarDirectory(w.spec.Account.Dir)
+	if err != nil {
+		return fmt.Errorf("packaging account %q for the sandbox failed: %w", w.spec.Account.Name, err)
+	}
+	script := "umask 077 && mkdir -p " + shellQuote(w.AccountHomePath()) +
+		" && tar -xf - -C " + shellQuote(w.AccountHomePath())
+	out, err := w.shell.Run(timeout, script, archive, false)
+	if err != nil {
+		// Names the account and the path, never a credential: the bytes only ever
+		// travelled on stdin, exactly as writeCallbackEnv documents for its token.
+		return fmt.Errorf("placing account %q in the sandbox failed: %s: %w",
+			w.spec.Account.Name, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// tarDirectory packages dir's contents (not dir itself) as a tar stream.
+func tarDirectory(dir string) (io.Reader, error) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		// Symlinks are SKIPPED rather than followed or recorded. A link inside an
+		// account could name a path outside the registry, and copying either the
+		// link or its target would place something the registry never vouched for
+		// — the same rule Selected() enforces on the account's own ancestors.
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		// Ownership is deliberately not carried: the extracting side is a different
+		// machine with different uids, and tar would otherwise try to chown to an
+		// id that means nothing there.
+		header.Uid, header.Gid, header.Uname, header.Gname = 0, 0, "", ""
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(tw, f)
+		return err
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return &buf, nil
+}
+
 func (w *sandboxWorkspace) agentName() string {
 	agentName := sessionenv.AgentForCommand(w.program)
 	if agentName == "" && strings.TrimSpace(w.program) == "" {
@@ -268,5 +399,10 @@ func (w *sandboxWorkspace) BannerPath() string    { return w.SessionDir + "/" + 
 func (w *sandboxWorkspace) CallbackEnvPath() string { return w.SessionDir + "/" + sshCallbackEnvName }
 
 const sshCallbackEnvName = "af-callback.env"
+
+// sshAccountHomeName is the per-session directory a credential account is placed
+// in (#3082). Under SessionDir, so the one rm -rf that reaps the session removes
+// the copied credentials with it.
+const sshAccountHomeName = "account"
 
 func (w *sandboxWorkspace) LogPath() string { return w.SessionDir + "/" + sshLogName }

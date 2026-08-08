@@ -208,7 +208,20 @@ func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k]
 // through the exec shim, and is handled by its own branch. A kind that answers
 // true here is promising it will honour ProvisionSpec.Account.
 func (k BackendKind) CarriesAccount() bool {
-	return k == BackendDocker
+	switch k {
+	case BackendDocker:
+		// Mounts the account's directory into the container.
+		return true
+	case BackendSSH, BackendSandbox, BackendHook:
+		// All three provision through the shared sandboxWorkspace and reach it over
+		// a shell that already carries a secret on stdin (the callback credential),
+		// so the account travels the same way — as a tar into the per-session dir
+		// that teardown reaps (#3082). hook included: it delegates to the sandbox
+		// provisioner, so it is the same code path rather than a fourth one.
+		return true
+	default:
+		return false
+	}
 }
 
 // InjectsSandboxCallback reports whether this kind's provisioner actually
