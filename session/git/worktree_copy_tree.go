@@ -829,7 +829,7 @@ func copyRegularFileAtWithIdentity(
 		// other open failure still aborts, because it means something is wrong with
 		// the copy rather than with one file's mode (#3066).
 		if errors.Is(err, os.ErrPermission) {
-			return copiedEntry{}, &unreadableSourceError{path: sourcePath, operation: "copy", err: err}
+			return copiedEntry{}, &unreadableSourceError{path: sourcePath, err: err}
 		}
 		return copiedEntry{}, fmt.Errorf("cannot move worktree across filesystems: failed to open source file %s without following links: %w", sourcePath, err)
 	}

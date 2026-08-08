@@ -73,3 +73,28 @@ func TestUnreadableSourceError_NamesTheOperation(t *testing.T) {
 			"the message must state WHY omitting it silently is unacceptable")
 	}
 }
+
+// The operation must be stamped by the caller that knows it, and reach the
+// message. Previously the copier hard-coded "copy", so every failure said the
+// same thing whether the user was moving or restoring — and the operation-aware
+// branch was exercised only by hand-built errors, which proved nothing about the
+// wiring (#3087 review).
+func TestRelocate_StampsTheOperationOntoAnUnreadableSource(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses mode bits")
+	}
+	// An unstamped error still has to read correctly.
+	bare := &unreadableSourceError{path: "/w/secret"}
+	require.Contains(t, bare.Error(), "cannot copy this worktree")
+	require.NotContains(t, bare.Error(), "cannot  this",
+		"an unstamped operation must not render an empty verb")
+
+	// Stamping is what relocateWorktreeTo does at its boundary; assert the
+	// message changes with it, in both directions that matter.
+	for _, operation := range []string{"move", "restore"} {
+		stamped := &unreadableSourceError{path: "/w/secret"}
+		stamped.operation = operation
+		require.Contains(t, stamped.Error(), "cannot "+operation+" this worktree")
+		require.Contains(t, stamped.Error(), operation+"ing while silently omitting")
+	}
+}

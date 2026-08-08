@@ -171,7 +171,7 @@ var (
 // working directory is moved verbatim, never re-checked-out. On success
 // g.worktreePath / g.worktreeDir are updated to point at dest.
 func (g *GitWorktree) MoveWorktree(dest string) error {
-	return g.relocateWorktreeTo(dest)
+	return g.relocateWorktreeTo(dest, "move")
 }
 
 // RestoreWorktreeTo moves this (archived) worktree back to dest and re-registers
@@ -184,7 +184,7 @@ func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
 	if err := g.ensureRepoPresent(); err != nil {
 		return err
 	}
-	return g.relocateWorktreeTo(dest)
+	return g.relocateWorktreeTo(dest, "restore")
 }
 
 // relocateWorktreeTo is the shared move engine behind MoveWorktree and
@@ -208,7 +208,12 @@ func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
 // second must not finalize. A deadline that trips and is then RECOVERED (the
 // fallback moves the bytes and the repair succeeds) establishes the end state
 // and returns nil, so the marker never rides on a success.
-func (g *GitWorktree) relocateWorktreeTo(dest string) error {
+// operation names what the CALLER is doing, because this engine cannot tell:
+// MoveWorktree and RestoreWorktreeTo both arrive here, and an unreadable file
+// means something different in each — a move can be retried after a chmod, a
+// restore is reporting that the ARCHIVE holds a file af cannot read. The string
+// travels only into error messages (#3066).
+func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 	src := g.worktreePath
 	if g.externalWorktree {
 		return fmt.Errorf("cannot relocate an in-place/external worktree at %s (it is user-owned)", src)
@@ -282,6 +287,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		var sourceCleanupPathVerified bool
 		if !pathExists(dest) {
 			if mErr := moveDirCrossDevice(src, dest); mErr != nil {
+				// The copier does not know which operation it is serving, so the
+				// operation is stamped here, at the one boundary that does.
+				var unreadable *unreadableSourceError
+				if errors.As(mErr, &unreadable) {
+					unreadable.operation = operation
+				}
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
 					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))

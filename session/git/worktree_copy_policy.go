@@ -54,6 +54,16 @@ type unreadableSourceError struct {
 }
 
 func (e *unreadableSourceError) Error() string {
+	// The copier constructs this before anyone knows which operation is running;
+	// relocateWorktreeTo stamps it at the boundary that does. An unstamped error
+	// still has to read correctly, because a copy reached some other way would
+	// otherwise render "cannot  this worktree".
+	if e.operation == "" {
+		return fmt.Sprintf(
+			"cannot copy this worktree: af has no permission to read %s, and copying while silently omitting "+
+				"it would produce a tree that is missing a file without saying so; fix the file's permissions "+
+				"and retry", e.path)
+	}
 	return fmt.Sprintf(
 		"cannot %s this worktree: af has no permission to read %s, and %sing while silently omitting it "+
 			"would produce a tree that is missing a file without saying so; fix the file's permissions and retry",
