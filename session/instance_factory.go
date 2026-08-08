@@ -616,7 +616,11 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 //
 // It states the property af can ESTABLISH — that it cannot get the agent's
 // writes back — rather than a mechanism by which they are lost, and that is the
-// correction seven review findings on this PR converged on. Every earlier
+// correction TEN review findings on this PR converged on. The permanence clause
+// obeys the same rule: it says the GUARANTEE is missing, and deliberately does
+// NOT say "only a mount can return those writes" — an earlier draft did, and that
+// was the same over-claim one layer up, since a launch_cmd may run the
+// agent-server on the daemon host or against shared durable storage. Every earlier
 // version named a specific consequence ("destroyed with the session directory at
 // teardown", "af has no provable location", "omit --account to use that machine's
 // own credentials"), and each was false for at least one backend, because the
@@ -632,8 +636,8 @@ const offBoxRoundTripReason = "an account is a writable agent home, so the agent
 	"authentication back into it — and af cannot establish that those writes come back from a machine it " +
 	"does not own, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
 	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
-	"break it. af refuses this BY DESIGN and not as pending work: only a mount returns those writes, so " +
-	"adding a copy would be building the thing that reasoning rejects."
+	"break it. af refuses this BY DESIGN and not as pending work: what is missing is the GUARANTEE that " +
+	"those writes come back, and af will not present an account as writable without one."
 
 func offBoxAccountRefusal(kind BackendKind) string {
 	switch kind {

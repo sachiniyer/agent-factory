@@ -253,3 +253,25 @@ func TestOffBoxAccountRefusalReadsAsPermanentNotUnimplemented(t *testing.T) {
 		})
 	}
 }
+
+// Permanence must rest on the MISSING GUARANTEE, never on a claim that one
+// mechanism is the only possible one.
+//
+// The tenth finding on this change: justifying permanence with "only a mount
+// returns those writes" contradicted af's own reasoning one file over, where
+// CarriesAccount notes a launch_cmd may run the agent-server on the daemon host
+// or against shared durable storage. The refusal is permanent because af cannot
+// establish the guarantee — not because no mechanism could ever provide it.
+func TestPermanenceRestsOnTheMissingGuaranteeNotOnAMechanismClaim(t *testing.T) {
+	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
+		err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
+		require.Error(t, err)
+		msg := err.Error()
+
+		assert.Contains(t, msg, "GUARANTEE that those writes come back",
+			"%s: permanence must rest on the missing guarantee", kind)
+		assert.NotContains(t, msg, "only a mount",
+			"%s: a launch_cmd may use shared storage or run on the daemon host, so 'only a mount' "+
+				"rules out mechanisms af merely cannot establish", kind)
+	}
+}
