@@ -197,6 +197,21 @@ func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 // ssh can load as a key, so each would fall straight back to the agent, which is
 // the failure this exists to prevent.
 //
+// IT DOES NOT VALIDATE THE KEY'S CONTENT, and that is a decision rather than an
+// omission. A malformed file does reach the same silent fallback — measured,
+// `Load key "x": error in libcrypto` and ssh carries on with other identities —
+// but every way of checking content is worse than the gap it closes: parsing key
+// formats here would have to accept unencrypted and encrypted PEM, the OpenSSH
+// format, certificates, PKCS#11 and FIDO tokens, and whatever OpenSSH adds next,
+// and `ssh-keygen -y` cannot read an encrypted key without its passphrase. Any of
+// those would REJECT working configurations, which is a worse failure than the
+// one being prevented. Note also that ssh does print a diagnostic for a malformed
+// key, so that case is not silent in the way a missing path was.
+//
+// So the guard's scope is exactly what it can decide safely: this path names a
+// real, readable, regular file that af can hand to ssh. Catching a typo is the
+// job; adjudicating cryptography is not.
+//
 // CALLED FROM PROVISION ONLY, and deliberately not from the teardown path.
 // restoreRuntimeCleanup composes a closure while persisted handles are loading,
 // and a check there would capture a permanently dead cleanup the moment a key is

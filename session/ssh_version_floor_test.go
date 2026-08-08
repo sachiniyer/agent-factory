@@ -154,10 +154,17 @@ func TestSSHIdentityFileMustBeReadable(t *testing.T) {
 			"provision is worse than the silent fallback this check exists to prevent")
 	}
 
-	// A real, readable, regular file passes — so the check moved nothing else.
+	// A readable regular file passes. Its CONTENT is deliberately not validated —
+	// see verifySSHIdentityFile: every way of checking it would reject some working
+	// configuration (encrypted keys, certificates, PKCS#11, FIDO), which is a worse
+	// failure than the one being prevented, and ssh does print a diagnostic for a
+	// malformed key rather than failing silently the way a missing path did. This
+	// fixture is non-key bytes ON PURPOSE, to pin that boundary rather than imply
+	// af verified a key.
 	present := filepath.Join(dir, "id_ed25519")
-	require.NoError(t, os.WriteFile(present, []byte("key"), 0o600))
-	require.NoError(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: present}))
+	require.NoError(t, os.WriteFile(present, []byte("not-validated-on-purpose"), 0o600))
+	require.NoError(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: present}),
+		"af checks that the PATH names something it can hand to ssh, not that the bytes are a key")
 
 	// And an unset identity file is not an error: the agent is the intended path.
 	require.NoError(t, verifySSHIdentityFile(config.SSHConfig{Host: "h.example.com"}))
