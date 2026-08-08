@@ -194,8 +194,15 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
 
-// CarriesAccount reports whether this kind's provisioner can place a registered
-// credential account on the machine that runs the agent (#3082).
+// CarriesAccount reports whether this kind's provisioner will SAFELY HONOUR a
+// registered credential account — including the agent's persistent WRITES back
+// into it — on the machine that runs the agent (#3082, #3103).
+//
+// Deliberately not "can place". #3103 established that ssh can physically place
+// an account and still answers FALSE here, so callers depend on the stronger
+// predicate; leaving the contract phrased as placement would invite a future
+// backend author to answer true for a copy-only mechanism, which is precisely the
+// unsafe behaviour that decision rejects.
 //
 // THIS IS A CLAIM ABOUT A PROVEN MECHANISM, NOT A CAPABILITY, and the difference
 // decides what a per-KIND answer may say (#3103).

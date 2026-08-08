@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -38,19 +39,29 @@ func TestSSHAccountRefusalNamesTheRoundTripNotPlacement(t *testing.T) {
 	assert.Contains(t, msg, "--account", "and it must name the way out")
 }
 
-// sandbox and hook refuse for a genuinely different reason, so they must not
-// inherit ssh's: af does not decide the shape of those machines at all.
-func TestSandboxAndHookAccountRefusalNamesTheOperatorsOwnProvisioner(t *testing.T) {
+// sandbox and hook must give the ROUND-TRIP reason, not a location one.
+//
+// The first cut of this change said they "provision through your own command or
+// scripts, so af has no location it can prove is the account". That is false in
+// the same way the old blanket wording was false for ssh: sandbox and
+// provision-mode hook both run through sandboxProvisioner, which creates the
+// session directory itself and streams af's binary into it, so af controls those
+// locations exactly as it does for ssh. Only hook's launch_cmd mode leaves the
+// machine's shape to the operator — and the round trip is what refuses all of
+// them anyway.
+func TestSandboxAndHookAccountRefusalGivesTheRoundTripReason(t *testing.T) {
 	for _, kind := range []BackendKind{BackendSandbox, BackendHook} {
 		t.Run(string(kind), func(t *testing.T) {
 			err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
 			require.Error(t, err)
 			msg := err.Error()
 
-			assert.Contains(t, msg, "your own command or scripts",
-				"the reason is that the operator owns the machine's shape, not that af lacks a transfer")
-			assert.NotContains(t, msg, "rotates refresh tokens",
-				"that is ssh's reason; these two refuse before the round trip is even reachable")
+			assert.Contains(t, msg, "rotates refresh tokens",
+				"the reason these refuse is the round trip, the same one that refuses ssh")
+			assert.Contains(t, msg, "teardown")
+			assert.NotContains(t, msg, "no location it can prove",
+				"af DOES control the session dir for sandbox and provision-mode hook — sandboxProvisioner "+
+					"creates it — so a location-based reason is false the same way the old ssh wording was")
 			assert.Contains(t, msg, "--account")
 		})
 	}
@@ -85,4 +96,28 @@ func TestEachDecidedBackendHasItsOwnReason(t *testing.T) {
 		assert.NotEqual(t, generic, offBoxAccountRefusal(kind),
 			"%s was decided deliberately, so it must not fall through to the unassessed wording", kind)
 	}
+}
+
+// CarriesAccount's contract is SAFE WRITE-BACK, not physical placement (#3103
+// review). ssh can physically place an account and still answers false, so a
+// contract phrased as placement would invite a future backend author to answer
+// true for a copy-only mechanism — exactly the unsafe behaviour this refuses.
+//
+// Asserted against the doc comment because the contract IS the comment: nothing
+// else states what a `true` promises, and a future author reads it before adding
+// a case.
+func TestCarriesAccountContractIsStatedAsWriteBack(t *testing.T) {
+	src, err := os.ReadFile("runtime.go")
+	require.NoError(t, err)
+	doc := string(src)
+	i := strings.Index(doc, "// CarriesAccount reports whether")
+	require.GreaterOrEqual(t, i, 0, "the contract comment must exist")
+	contract := doc[i:min(i+900, len(doc))]
+
+	assert.Contains(t, contract, "SAFELY HONOUR",
+		"the predicate is safe honouring including writes, not physical placement")
+	assert.Contains(t, contract, "WRITES",
+		"and the writes are the part that makes ssh answer false despite being able to place one")
+	assert.NotContains(t, contract, "reports whether this kind's provisioner can place a registered",
+		"the placement phrasing invites a copy-only backend to answer true")
 }

@@ -588,18 +588,30 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 // per provider, and that unverifiability is the argument: this is a risk af would
 // be taking on the operator's behalf without being able to bound it.
 //
-// Copying back before teardown does not rescue it. This codebase treats an
-// unknown teardown outcome as a NORMAL state rather than an edge —
-// ErrWorkspaceStateUnknown, the retained-record machinery, CleanupRetry's
-// retry-and-retire all exist because reaps legitimately do not finish — so a
-// credential-carrying teardown is a credential that legitimately does not come
-// home, silently. It would also widen the window in which live credentials sit on
-// the remote, which per-session placement exists to bound.
+// COPY-BACK IS NOT RULED OUT BY TEARDOWN AMBIGUITY, and an earlier draft of this
+// comment claimed it was (#3103 review). The ordering is available: quiesce the
+// agent, copy, install the replacement locally, and only THEN start the
+// destructive reap — a write-back failure retains the record without tearing
+// anything down, and an unknown reap outcome afterwards no longer costs the token,
+// because it already arrived. So teardown uncertainty alone is not the argument.
 //
-// sandbox and hook refuse for a different and simpler reason: af does not decide
-// the shape of the machine at all. Their commands and scripts are the operator's,
-// so there is no location af can prove is the account rather than somewhere that
-// merely looks like it.
+// What survives that correction is narrower and is still enough:
+//
+//   - The remote can be LOST before write-back — an evaporated cloud instance, a
+//     revoked key, a network partition that outlives the session. Then the refresh
+//     is gone and the local copy is dead, which is the invalidation case again,
+//     reached by a route no ordering fixes.
+//   - Write-back needs the agent QUIESCED to copy a consistent home, and af has no
+//     mechanism to make an agent stop writing on request.
+//   - It widens the window in which live credentials sit on a machine af does not
+//     control, which per-session placement exists to bound.
+//
+// sandbox and hook get the SAME round-trip reason rather than a location one, and
+// that is a correction too: sandboxProvisioner.provision creates the session
+// directory and streams af's binary into it, and the provision-hook path reuses
+// that provisioner — so af controls those locations exactly as it does for ssh.
+// Only hook's launch_cmd mode genuinely leaves the machine's shape to the
+// operator, and the round-trip reason covers that mode as well.
 func offBoxAccountRefusal(kind BackendKind) string {
 	switch kind {
 	case BackendSSH:
@@ -609,9 +621,16 @@ func offBoxAccountRefusal(kind BackendKind) string {
 			"the copy on this machine. Use the docker or local backend for account-scoped sessions, or omit " +
 			"--account to use the remote host's own credentials"
 	case BackendSandbox, BackendHook:
-		return "that backend provisions through your own command or scripts, so af has no location it can " +
-			"prove is the account rather than somewhere that merely resembles it; use the docker or local " +
-			"backend for account-scoped sessions, or omit --account to use that machine's own credentials"
+		// The same round-trip reason as ssh, and NOT a "no provable location" one:
+		// sandbox and provision-mode hook both run through sandboxProvisioner, which
+		// creates the session directory itself, so af controls the location there too
+		// (#3103 review). The placement claim is simply left out rather than made in
+		// either direction, because it varies by hook mode and the round trip does not.
+		return "an account is a writable agent home, so the agent writes a refreshed token back into it — " +
+			"off-box that write lands on the other machine and is destroyed with the session directory at " +
+			"teardown, and if your provider rotates refresh tokens that would also invalidate the copy on " +
+			"this machine. Use the docker or local backend for account-scoped sessions, or omit --account " +
+			"to use that machine's own credentials"
 	default:
 		// A backend added later, refused by default. Naming it as unproven rather
 		// than as impossible keeps this honest for something nobody has assessed.
