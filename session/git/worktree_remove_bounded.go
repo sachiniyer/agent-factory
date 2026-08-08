@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Bounding the factory reset's worktree removal (#3096).
@@ -25,11 +26,27 @@ import (
 // Ctrl-C, the only escape, leaves the reset half-applied. An operation that never
 // returns is worse than one that fails clearly.
 //
-// WHAT A BOUND CANNOT DO, named because it matters on the destructive path: the
-// deadline works by SIGKILLing git, so it rescues stalls where git is killable. A
-// process wedged in an uninterruptible (D-state) syscall against a dead mount
-// ignores SIGKILL, and no in-process deadline fixes that. What the bound
-// guarantees is that af RETURNS and REPORTS, not that the removal succeeds.
+// A CONTEXT DEADLINE IS NOT ENOUGH, and this is the part that is easy to get
+// wrong — the first cut of this fix did. exec.Cmd.Wait blocks on
+// c.Process.Wait() BEFORE it ever consults the context or WaitDelay
+// (os/exec/exec.go: `state, err := c.Process.Wait()` is the first statement).
+// waitpid does not return until the process actually exits. So against the very
+// case this issue names — git wedged in an uninterruptible D-state syscall on a
+// dead mount, where SIGKILL is delivered but stays PENDING — the deadline fires,
+// Cancel signals, WaitDelay elapses, and Output() still blocks forever.
+//
+// Measured: with Cancel made a no-op, Output() returned only because Go's own
+// WaitDelay fallback kill SUCCEEDED on a killable child. A child that cannot be
+// reaped has nothing to make Wait return.
+//
+// So the wait is SUPERVISED: the command runs on its own goroutine and the caller
+// selects against a grace period beyond the deadline. If even that expires, af
+// ABANDONS the process and returns. That leaks one goroutine and one unreaped
+// git — unavoidable when the kernel will not let go — and it is strictly better
+// than an unresponsive CLI on a destructive path, which is the whole issue.
+//
+// What is guaranteed, precisely: af RETURNS and REPORTS what it could not remove.
+// Not that the removal succeeded, and not that the process died.
 
 // ErrWorktreeRemovalTimedOut marks a worktree operation that made no progress
 // before its deadline. It is deliberately reported ALONGSIDE
@@ -75,12 +92,12 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	// otherwise block the read on pipe EOF even after the deadline killed git.
 	cmd.WaitDelay = gitWaitDelay
 
-	var out []byte
-	var err error
-	if combined {
-		out, err = cmd.CombinedOutput()
-	} else {
-		out, err = cmd.Output()
+	out, err, reaped := awaitCommandFn(cmd, combined, localGitTimeout+waitAbandonGrace)
+	if !reaped {
+		return nil, fmt.Errorf("%w: git %s could not be killed after %s — it is most likely wedged in an "+
+			"uninterruptible syscall on a stalled filesystem, where SIGKILL stays pending and the process "+
+			"cannot be reaped. af gave up waiting and left it running rather than hanging",
+			ErrWorktreeRemovalTimedOut, strings.Join(args, " "), localGitTimeout+waitAbandonGrace)
 	}
 	if cmd.Process != nil {
 		// Reap a straggler on EVERY path, not just the timeout: the group is led by
@@ -101,6 +118,49 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 			ErrWorktreeRemovalTimedOut, strings.Join(args, " "), localGitTimeout, ctx.Err())
 	}
 	return out, err
+}
+
+// waitAbandonGrace is how long past the command's own deadline af waits for the
+// process to actually die before abandoning it. It must EXCEED gitWaitDelay so
+// the ordinary timeout path — which reaps properly and produces the better
+// message — always wins when the process is killable at all. A package var so
+// tests can shrink it.
+var waitAbandonGrace = 15 * time.Second
+
+// awaitCommandFn is the supervision seam. A killable child ALWAYS takes the
+// ordinary deadline path, by design — which means the abandon branch cannot be
+// reached with a real process, and a test that only exercised awaitCommand
+// directly would pass while nothing called it. Production leaves this alone.
+var awaitCommandFn = awaitCommand
+
+// awaitCommand runs cmd and returns its output, or reports that it could not be
+// reaped within limit. reaped=false means the caller must not touch cmd's state:
+// the goroutine still owns it.
+//
+// The channel is BUFFERED so the abandoned goroutine can finish writing and exit
+// if the process ever does die, rather than blocking forever on a receiver that
+// has already gone.
+func awaitCommand(cmd *exec.Cmd, combined bool, limit time.Duration) (out []byte, err error, reaped bool) {
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var r result
+		if combined {
+			r.out, r.err = cmd.CombinedOutput()
+		} else {
+			r.out, r.err = cmd.Output()
+		}
+		done <- r
+	}()
+	select {
+	case r := <-done:
+		return r.out, r.err, true
+	case <-time.After(limit):
+		return nil, nil, false
+	}
 }
 
 // worktreeStalledError is the failure a reset reports for a worktree it could not

@@ -162,3 +162,84 @@ func TestRemoveWorktreeDirStillRemovesWhenGitIsHealthy(t *testing.T) {
 	require.NoError(t, probeErr)
 	assert.False(t, stillThere, "the registration must be gone, or the branch delete that follows is blocked")
 }
+
+// A DEADLINE ALONE DOES NOT BOUND THIS, which is the trap the first cut of the
+// fix fell into. exec.Cmd.Wait blocks on c.Process.Wait() before it consults the
+// context or WaitDelay, and waitpid does not return until the process exits — so
+// against the issue's own motivating case (git wedged in an uninterruptible
+// syscall on a dead mount, SIGKILL delivered but pending) the deadline fires and
+// Output() still blocks forever.
+//
+// Tested at the supervision boundary rather than by simulating D-state, which is
+// not creatable portably from userspace: `run` here simply never returns, which
+// is exactly what an unreapable child produces.
+func TestAwaitCommandAbandonsAChildItCannotReap(t *testing.T) {
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+
+	// A command whose wait never completes, standing in for waitpid on a process
+	// that cannot be reaped.
+	cmd := exec.Command("sh", "-c", "sleep 300")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+
+	start := time.Now()
+	done := make(chan bool, 1)
+	go func() {
+		// Wait on a process nothing is going to kill, with a short abandon limit.
+		_, _, reaped := awaitCommand(exec.Command("sh", "-c", "sleep 300"), false, 300*time.Millisecond)
+		done <- reaped
+	}()
+
+	select {
+	case reaped := <-done:
+		assert.False(t, reaped, "a child that has not exited must be reported as UNREAPED, not waited on")
+		assert.Less(t, time.Since(start), 20*time.Second,
+			"the caller must return at its abandon limit rather than block on waitpid")
+	case <-time.After(30 * time.Second):
+		t.Fatal("awaitCommand BLOCKED on a child that never exits (#3096): Cmd.Wait waits on waitpid " +
+			"BEFORE consulting the context or WaitDelay, so a deadline alone cannot make it return — " +
+			"which is exactly the D-state case this issue is about")
+	}
+}
+
+// And the ordinary path still wins: a killable stall must produce the proper
+// timeout error, reaped and diagnosed, never the abandon message. The abandon
+// grace exceeds gitWaitDelay precisely so this ordering holds.
+func TestKillableStallTakesTheOrdinaryTimeoutPath(t *testing.T) {
+	sandboxHome(t)
+	repoRoot := createGitRepo(t)
+	runGit(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+
+	stallingGitFor(t, "list")
+	shortenLocalTimeout(t, 200*time.Millisecond)
+
+	_, err := worktreeRegisteredIn(repoRoot, filepath.Join(t.TempDir(), "wt"))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "made no progress",
+		"a KILLABLE stall must report the ordinary deadline, which reaps and diagnoses properly")
+	assert.NotContains(t, err.Error(), "could not be killed",
+		"the abandon path is for a child that cannot be reaped, and must not claim that of one that can")
+}
+
+// …and that runBoundedWorktreeGit actually USES the supervision. Separate from
+// the test above on purpose: a killable child always takes the ordinary deadline
+// path, so the abandon branch is unreachable with a real process — and a test of
+// awaitCommand alone passes just as well when nothing calls it. That gap was
+// real; removing the call site left the direct test green.
+func TestRunBoundedWorktreeGitReportsAnUnreapableChild(t *testing.T) {
+	prev := awaitCommandFn
+	awaitCommandFn = func(*exec.Cmd, bool, time.Duration) ([]byte, error, bool) {
+		return nil, nil, false // the child could not be reaped
+	}
+	t.Cleanup(func() { awaitCommandFn = prev })
+
+	_, err := runBoundedWorktreeGit(t.TempDir(), true, "worktree", "remove", "-f", "/somewhere")
+
+	require.Error(t, err, "an unreapable child must be REPORTED, never waited on")
+	assert.True(t, errors.Is(err, ErrWorktreeRemovalTimedOut),
+		"and must classify as a stall, so RemoveWorktreeDir retains the record, got %v", err)
+	assert.Contains(t, err.Error(), "could not be killed",
+		"the message must say the process is still running, not imply a clean failure")
+}
