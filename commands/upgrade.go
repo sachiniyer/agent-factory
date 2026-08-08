@@ -367,7 +367,14 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// the pid. Reporting unknown there would downgrade a determined answer, which
 		// is the same collapse this whole change is about, one source over. It would
 		// also send them to `af daemon restart`, which re-enters the failing check.
-		if h := daemonHealthFn(); h.PIDVerified {
+		// A daemon that ANSWERED the ping is the strongest evidence available, and
+		// it is independent of the pid file: PingErr is nil only when something
+		// responded on the control socket, and Health always attempts that ping. A
+		// transient stat error can leave the pid file unreadable — PIDVerified
+		// false — while the daemon is demonstrably alive, so checking the pid alone
+		// would report "unknown" about a daemon that just talked to us.
+		h := daemonHealthFn()
+		if h.PingErr == nil || h.PIDVerified {
 			fmt.Fprintf(errOut, "The running daemon could not be stopped: %v\n", restartErr)
 			fmt.Fprintln(errOut, "Its process is still verifiably alive, so it is still running the old binary.")
 			fmt.Fprintln(errOut, stopDaemonHint(h))

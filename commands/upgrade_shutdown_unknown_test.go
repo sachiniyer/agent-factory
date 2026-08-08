@@ -44,7 +44,10 @@ func TestReportUpgradeRestart_IndeterminateShutdownSaysSo(t *testing.T) {
 	prevHealth := daemonHealthFn
 	t.Cleanup(func() { daemonHealthFn = prevHealth })
 	// Health cannot verify a pid either — genuinely unknown.
-	daemonHealthFn = func() daemon.HealthStatus { return daemon.HealthStatus{} }
+	// Nothing answered the ping AND no pid could be verified — genuinely unknown.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{PingErr: errors.New("dial: no such file or directory")}
+	}
 
 	var out, errOut bytes.Buffer
 	outcome := restartOutcome{
@@ -89,4 +92,30 @@ func TestReportUpgradeRestart_IndeterminateButPIDVerifiedReportsRunning(t *testi
 		"and it earns the real remedy, naming the pid, rather than a check")
 	assert.NotContains(t, msg, "Could not determine",
 		"uncertainty is only for when the second source cannot answer either")
+}
+
+// A daemon that ANSWERED the ping is alive, whatever the pid file says. PingErr
+// is nil only when something responded on the control socket, and Health always
+// attempts that ping — so a transient stat error can leave PIDVerified false
+// while the daemon is demonstrably up. Reporting "unknown" about a daemon that
+// just talked to us is the same collapse one layer down.
+func TestReportUpgradeRestart_IndeterminateButPingAnsweredReportsRunning(t *testing.T) {
+	prevHealth := daemonHealthFn
+	t.Cleanup(func() { daemonHealthFn = prevHealth })
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{PingErr: nil} // answered; pid file unreadable
+	}
+
+	var out, errOut bytes.Buffer
+	outcome := restartOutcome{Shutdown: daemon.ShutdownNoDaemon, FailedPhase: restartPhaseShutdownUnknown}
+
+	reportUpgradeRestart(&out, &errOut, outcome, errors.New("stat: permission denied"), "/usr/local/bin/af")
+
+	msg := errOut.String()
+	assert.Contains(t, msg, "still running the old binary",
+		"the daemon answered the ping; that is a determined state, not an unknown one")
+	assert.NotContains(t, msg, "Could not determine",
+		"uncertainty is only for when neither the ping nor the pid can answer")
+	assert.Contains(t, msg, "af daemon status",
+		"with no verified pid to name, the hint points at the command that finds it")
 }
