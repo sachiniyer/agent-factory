@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -357,25 +358,103 @@ func TestTheDialProbeIsBounded(t *testing.T) {
 
 	// Now prove the deadline is APPLIED. A probe with no timeout at all would
 	// ignore this and hang, so the short value tests the mechanism rather than
-	// standing in for it — and it costs 300ms instead of the full 20s.
+	// standing in for it — and it costs milliseconds instead of the full 20s.
 	prev := sshDialProbeTimeout
 	sshDialProbeTimeout = 300 * time.Millisecond
 	defer func() { sshDialProbeTimeout = prev }()
 
-	done := make(chan string, 1)
-	start := time.Now()
-	go func() { done <- resolvePinnedSSHDialAddress("198.51.100.9", 22) }()
+	// NEITHER CASE MAY BE A REFUSED CONNECTION. ECONNREFUSED returns instantly
+	// whether or not a deadline exists, so a test built on one passes against an
+	// unbounded probe — it would assert nothing. Both cases below STALL.
 
-	select {
-	case pinned := <-done:
-		assert.Empty(t, pinned, "an unreachable address yields no pin")
+	// A stalled RESOLVER, which is deterministic and entirely in-process: the DNS
+	// server reads the query and never answers. Go's Dialer deadline covers name
+	// resolution as well as the connect, so this is the half a black-holed address
+	// cannot reach. Without a deadline Go's own resolver still gives up eventually
+	// (~2 attempts x 5s), which is why the assertion is "promptly", not "at all".
+	t.Run("a stalled resolver", func(t *testing.T) {
+		useStallingResolver(t)
+		start := time.Now()
+		assert.Empty(t, mustReturnWithin(t, 60*time.Second, func() string {
+			return resolvePinnedSSHDialAddress("stalled.test", 22)
+		}))
+		assert.Less(t, time.Since(start), 3*time.Second,
+			"the probe must give up on ITS OWN deadline; without one it waits out the resolver's retries")
+	})
+
+	// A black-holed ADDRESS: TEST-NET-2 (RFC 5737) is reserved for documentation and
+	// routed nowhere, so a SYN to it goes unanswered. Not every network agrees —
+	// some return an ICMP unreachable, which arrives instantly — so the precondition
+	// is checked and the case SKIPS rather than passing vacuously.
+	t.Run("a black-holed address", func(t *testing.T) {
+		const blackhole = "198.51.100.9:22"
+		probe, err := net.DialTimeout("tcp", blackhole, 750*time.Millisecond)
+		if probe != nil {
+			_ = probe.Close()
+		}
+		if err == nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() {
+				t.Skipf("%s is not black-holed on this network (%v); a refused address returns instantly "+
+					"and would make this assertion vacuous", blackhole, err)
+			}
+		}
+		start := time.Now()
+		assert.Empty(t, mustReturnWithin(t, 60*time.Second, func() string {
+			return resolvePinnedSSHDialAddress("198.51.100.9", 22)
+		}))
 		assert.Less(t, time.Since(start), 20*time.Second,
-			"the probe must give up on ITS OWN deadline rather than the kernel's")
-	case <-time.After(60 * time.Second):
-		t.Fatal("resolvePinnedSSHDialAddress ignored its deadline: an unbounded probe blocks a session create " +
-			"for the kernel's SYN-retry window, where an unpinned create fails at the first step's 30s " +
-			"deadline. It runs in-process, so unlike the relay there is no process group for a caller to kill")
+			"the probe must give up on ITS OWN deadline rather than the kernel's SYN-retry window")
+	})
+}
+
+// mustReturnWithin fails loudly instead of hanging the suite, because "blocks a
+// session create forever" is the defect under test and a timed-out `go test` would
+// report it as an unrelated package timeout.
+func mustReturnWithin(t *testing.T, limit time.Duration, fn func() string) string {
+	t.Helper()
+	done := make(chan string, 1)
+	go func() { done <- fn() }()
+	select {
+	case v := <-done:
+		return v
+	case <-time.After(limit):
+		t.Fatal("resolvePinnedSSHDialAddress ignored its deadline: an unbounded probe blocks a session create, " +
+			"where an unpinned create fails at the first ssh step's own 30s deadline. It runs IN-PROCESS, so " +
+			"unlike the relay there is no process group for a caller to kill")
+		return ""
 	}
+}
+
+// useStallingResolver points the process resolver at a DNS server that reads every
+// query and answers none — the "stalled resolver" half of the probe's deadline,
+// which no choice of address can exercise.
+func useStallingResolver(t *testing.T) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			if _, _, readErr := pc.ReadFrom(buf); readErr != nil {
+				return
+			}
+			// Deliberately no reply.
+		}
+	}()
+
+	prevResolver := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", pc.LocalAddr().String())
+		},
+	}
+	t.Cleanup(func() {
+		net.DefaultResolver = prevResolver
+		_ = pc.Close()
+	})
 }
 
 // proxyCommandValue extracts the ProxyCommand value from a composed command as

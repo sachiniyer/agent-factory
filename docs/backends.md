@@ -357,8 +357,8 @@ back (see [Archive & restore](#archive-restore)).
 
 > **A `ssh.host` with several addresses stays on one machine.** af runs a separate
 > `ssh` for each step — the setup commands, the port-forward, and the cleanup — so
-> a name answering with more than one address (a round-robin record, a load
-> balancer, a dual-stack host) could once put the workspace on one machine while
+> a name answering with more than one address (a round-robin record, several A
+> records, a dual-stack host) could once put the workspace on one machine while
 > the agent-server or the cleanup landed on another. Nothing looked wrong: every
 > step succeeded against a valid host, and the cleanup then removed the wrong
 > machine's directory and reported success while the real one leaked.
@@ -367,6 +367,24 @@ back (see [Archive & restore](#archive-restore)).
 > step dials that one address. The address is recorded with the session, so the
 > cleanup reaches the same machine even after the daemon restarts.
 >
+> **This fixes DNS multiplicity, and only DNS multiplicity.** Read the next
+> paragraph before assuming it covers you.
+
+> **Still a known limitation: a load-balancer VIP is not pinned, and can still
+> split a session.** If `ssh.host` resolves to an address that is a **virtual IP in
+> front of several machines** — an L4/TCP load balancer, an AWS NLB, a
+> keepalived/IPVS pair, a Kubernetes service — then pinning the address changes
+> nothing, because *the address is not a machine identity*. The balancer picks a
+> backend **per TCP connection**, and af opens a separate connection for every
+> provision command, for the tunnel, and for the cleanup. Those can still land on
+> different machines, and the failure is the same one described above: the cleanup
+> removes the wrong machine's directory, reports success, and the real workspace
+> leaks.
+>
+> af cannot detect this — a VIP looks exactly like an ordinary address — so there is
+> no warning to go on. The workaround is the same as before: **point `ssh.host` at
+> one machine**, not at the balancer. Tracked in #3086, which stays open for it.
+
 > **Your host key configuration is unaffected**, which is the part worth knowing:
 > `ssh` is still given the **name** as its destination, so `known_hosts` is matched
 > and host **certificate** principals are checked exactly as before. The pin
@@ -374,6 +392,16 @@ back (see [Archive & restore](#archive-restore)).
 > itself — nothing new to install. An earlier attempt pinned the address as ssh's
 > destination and had to restore the name with `HostKeyAlias`; that rejected host
 > certificates on every non-default port, and was reverted (#3086).
+>
+> One genuine, if small, reduction comes with it: **`CheckHostIP` is switched off**.
+> OpenSSH disables it whenever a `ProxyCommand` is in use, and it defaulted to *on*
+> for OpenSSH 7.6–8.4 (upstream turned the default off in 8.5). On those clients a
+> pinned session no longer records or cross-checks the host key against the
+> **address** in `known_hosts`, only against the **name**. Verification against the
+> name — the guarantee that matters, and the one certificates rely on — is
+> unchanged, and af resolving the address itself and reusing that one address for
+> every step covers the drift `CheckHostIP` was watching for. It is a trade, not a
+> free win: ssh's IP cross-check for af's single-resolution guarantee.
 >
 > **What this changes for an existing `ssh.host`, deliberately:** a session is tied
 > to the machine it was created on for its whole life. Before, if that machine went

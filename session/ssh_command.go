@@ -191,8 +191,31 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string) (string,
 		// certificates valid — and when af pins a session to one machine it does so
 		// with the ProxyCommand below, which leaves this destination alone.
 	}
-	// The pin, when there is one. A ProxyCommand replaces only ssh's TCP connect,
-	// so everything above — including how the host is IDENTIFIED — is untouched.
+	// The pin, when there is one. A ProxyCommand replaces ssh's TCP connect, so the
+	// destination above stays the NAME and the known_hosts key and certificate
+	// principal are computed from it exactly as they are unpinned.
+	//
+	// IT IS NOT ENTIRELY FREE, and an earlier version of this comment claimed it was
+	// ("how the host is IDENTIFIED is untouched"), which was false. OpenSSH turns
+	// CheckHostIP OFF whenever a ProxyCommand is set — sshconnect.c, unconditionally:
+	//
+	//	if (options.check_host_ip && (local ||
+	//	    strcmp(hostname, ip) == 0 || options.proxy_command != NULL))
+	//		options.check_host_ip = 0;
+	//
+	// and it DEFAULTED ON for 7.6-8.4, which is exactly the range this backend's
+	// floor commits to (readconf.c sets it to 1 at V_7_6_P1/V_8_2_P1/V_8_4_P1 and to
+	// 0 from V_8_5_P1, where upstream turned the default off). So on those clients a
+	// pinned session loses the secondary check of the host key against the ADDRESS.
+	//
+	// ACCEPTED DELIBERATELY, and stated as a trade rather than a nil cost. What
+	// CheckHostIP watches for is the address behind a name drifting between
+	// connections — which is the very thing af now settles once and reuses for every
+	// step, so the guarantee is replaced rather than dropped. Verification against
+	// the NAME, which is what certificates rest on, is untouched. ProxyUseFdpass
+	// does NOT recover it and was checked rather than assumed: it clears the version
+	// bar (present at V_7_6_P1) but is reached only INSIDE the branch where
+	// proxy_command is set, and the disable above keys on precisely that.
 	if pinned := strings.TrimSpace(dialAddr); pinned != "" {
 		proxy, proxyErr := sshPinnedProxyCommand(pinned, port)
 		if proxyErr != nil {
