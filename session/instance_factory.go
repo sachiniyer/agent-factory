@@ -612,21 +612,38 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 // that provisioner — so af controls those locations exactly as it does for ssh.
 // Only hook's launch_cmd mode genuinely leaves the machine's shape to the
 // operator, and the round-trip reason covers that mode as well.
-// offBoxRoundTripReason is the one reason every off-box kind refuses, stated
-// once because it is the same fact each time: the write cannot come home.
-const offBoxRoundTripReason = "an account is a writable agent home, so the agent writes a refreshed token " +
-	"back into it — off-box that write lands on the other machine and is destroyed with the session " +
-	"directory at teardown, and if your provider rotates refresh tokens that would also invalidate the " +
-	"copy on this machine."
+// offBoxRoundTripReason is the one reason ssh, sandbox and hook refuse.
+//
+// It states the property af can ESTABLISH — that it cannot get the agent's
+// writes back — rather than a mechanism by which they are lost, and that is the
+// correction seven review findings on this PR converged on. Every earlier
+// version named a specific consequence ("destroyed with the session directory at
+// teardown", "af has no provable location", "omit --account to use that machine's
+// own credentials"), and each was false for at least one backend, because the
+// consequence depends on each backend's own lifecycle and environment contract
+// while the refusal does not. hook's launch_cmd owns no session directory af can
+// delete; sandbox reads the operator's ssh_config; only ssh pins -F none.
+//
+// So: assert the thing that is true for all three and nothing further. It also
+// deliberately says "the other off-box backends" nowhere — docker is off-box in
+// this repo's taxonomy (backendProvisionsOffBox) and CARRIES an account, so
+// "off-box" is the wrong axis to name here at all.
+const offBoxRoundTripReason = "an account is a writable agent home, so the agent writes refreshed " +
+	"authentication back into it — and af cannot establish that those writes come back from a machine it " +
+	"does not own, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
+	"invalidates the copy on this machine."
 
 func offBoxAccountRefusal(kind BackendKind) string {
 	switch kind {
 	case BackendSSH:
-		return "af can put the account on that host, and deliberately does not: an account is a writable " +
-			"agent home, so a refreshed token would be written on the remote and destroyed with the session " +
-			"directory at teardown — and if your provider rotates refresh tokens, that would also invalidate " +
-			"the copy on this machine. Use the docker or local backend for account-scoped sessions, or omit " +
+		// ssh shares the invariant AND may add the concrete consequence, because it is
+		// the one refusing backend whose session-directory lifecycle af owns — so
+		// "teardown removes it" is established here and nowhere else (#3103 review).
+		return "af can put the account on that host, and deliberately does not: " + offBoxRoundTripReason +
+			" On this backend af owns the remote session directory, so the teardown that removes it removes " +
+			"the refresh with it. Use the docker or local backend for account-scoped sessions, or omit " +
 			"--account to use the remote host's own credentials"
+
 	case BackendSandbox:
 		// The same round-trip reason as ssh, and NOT a "no provable location" one:
 		// sandbox runs through sandboxProvisioner, which creates the session directory

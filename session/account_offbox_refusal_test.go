@@ -33,7 +33,8 @@ func TestSSHAccountRefusalNamesTheRoundTripNotPlacement(t *testing.T) {
 		"the refusal must read as a decision, not a gap")
 
 	// The actual reason, in the operator's terms: writes do not come home.
-	assert.Contains(t, msg, "teardown", "the reason is that a refreshed token dies with the session dir")
+	assert.Contains(t, msg, "cannot establish that those writes come back",
+		"the reason is the write-back af cannot guarantee, stated as the property rather than a mechanism")
 	assert.Contains(t, msg, "rotates refresh tokens",
 		"and the worst case — invalidating the copy on THIS machine — is the part that decides it")
 	assert.Contains(t, msg, "--account", "and it must name the way out")
@@ -58,7 +59,11 @@ func TestSandboxAndHookAccountRefusalGivesTheRoundTripReason(t *testing.T) {
 
 			assert.Contains(t, msg, "rotates refresh tokens",
 				"the reason these refuse is the round trip, the same one that refuses ssh")
-			assert.Contains(t, msg, "teardown")
+			assert.Contains(t, msg, "cannot establish that those writes come back",
+				"state the property af can ESTABLISH, not a mechanism of loss — hook's launch_cmd owns no "+
+					"session directory af deletes, so a definite teardown claim is false there")
+			assert.NotContains(t, msg, "destroyed with the session directory",
+				"that names a lifecycle af controls for some of these and not others")
 			assert.NotContains(t, msg, "no location it can prove",
 				"af DOES control the session dir for sandbox and provision-mode hook — sandboxProvisioner "+
 					"creates it — so a location-based reason is false the same way the old ssh wording was")
