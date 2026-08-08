@@ -460,7 +460,9 @@ func (t *TmuxSession) Restore(workDir string) error {
 			return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
-		t.setProgramCmd(resumeProgram(t.programCmd()))
+		// Program AND declaration together: the resume flags are af-authored, so a
+		// stale declaration would refuse an account-scoped restore (#3083 review).
+		t.rewriteProgramCmdByAf(resumeProgram)
 		return t.Start(workDir)
 	}
 

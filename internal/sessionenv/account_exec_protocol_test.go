@@ -84,3 +84,17 @@ func TestAccountExecProtocol_RefusesAMiscountedInvocation(t *testing.T) {
 		require.Error(t, execInvocation(args, true), "argv %v must be refused, not guessed at", args)
 	}
 }
+
+// A maximum-sized generated count must be REFUSED, not turned into a panic
+// (#3083 review, P2). Bounds-checking with `trailing+generatedCount` overflows to a
+// negative bound, the check passes, and the slice panics — so the protocol's
+// fail-closed promise breaks exactly where a malformed invocation is most likely to
+// be deliberate.
+func TestAccountExecProtocol_RefusesAnOverflowingGeneratedCount(t *testing.T) {
+	for _, count := range []string{"9223372036854775807", "9223372036854775806", "4611686018427387904"} {
+		require.NotPanics(t, func() {
+			require.Error(t, execInvocation([]string{"claude", "0", "work", count, "claude"}, true),
+				"generated count %s must be refused", count)
+		}, "a malformed count must return the generic refusal, never panic (count %s)", count)
+	}
+}

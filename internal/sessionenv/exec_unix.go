@@ -102,7 +102,12 @@ func execInvocation(args []string, scoped bool) error {
 	if scoped {
 		account = args[2]
 		generatedCount, gerr := strconv.Atoi(args[3])
-		if gerr != nil || generatedCount < 0 || len(args) < trailing+generatedCount {
+		// Compared against the REMAINING room, never `trailing+generatedCount`: a
+		// maximum-sized integer makes that addition overflow to a negative bound, the
+		// check passes, and the slice below PANICS instead of returning this
+		// function's generic refusal (#3083 review). Subtraction cannot overflow here
+		// because trailing is a constant no larger than len(args), already checked.
+		if gerr != nil || generatedCount < 0 || generatedCount > len(args)-trailing {
 			return fmt.Errorf("malformed internal session environment invocation")
 		}
 		generated = args[4 : 4+generatedCount]
