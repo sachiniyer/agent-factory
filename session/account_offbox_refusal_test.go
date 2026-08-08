@@ -84,14 +84,23 @@ func TestHookAccountRefusalDoesNotPromiseAnIdentityForTheWorkaround(t *testing.T
 	assert.Contains(t, hook.Error(), "up to your hooks",
 		"it must say the identity depends on the hooks rather than assert one")
 
-	// ssh and sandbox forward no daemon environment, so naming the machine's own
-	// credentials there is accurate and must stay.
-	for _, kind := range []BackendKind{BackendSSH, BackendSandbox} {
-		err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "own credentials",
-			"%s forwards no daemon environment, so the workaround CAN name the identity", kind)
-	}
+	// sandbox must not promise one either, and for its own reason: sandbox_ssh is
+	// the operator's command and that backend deliberately preserves their
+	// ssh_config, so a `SendEnv OPENAI_API_KEY` block copies the DAEMON's value to
+	// the sandbox verbatim (measured in #3092).
+	sandbox := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: BackendSandbox})
+	require.Error(t, sandbox)
+	assert.NotContains(t, sandbox.Error(), "to use that machine's own credentials",
+		"an operator's ssh_config can SendEnv the daemon's credentials into the sandbox")
+	assert.Contains(t, sandbox.Error(), "sandbox_ssh",
+		"the identity depends on their command, so name that rather than assert an outcome")
+
+	// ssh IS immune, because af pins -F none there so no ssh_config is read at all —
+	// so its accurate wording must stay rather than being deleted along with theirs.
+	ssh := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: BackendSSH})
+	require.Error(t, ssh)
+	assert.Contains(t, ssh.Error(), "own credentials",
+		"backend=ssh reads no ssh_config (-F none), so the workaround CAN name the identity there")
 }
 
 // CarriesAccount's rationale must not keep the premise the refusal dropped: af
