@@ -633,8 +633,8 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 // this repo's taxonomy (backendProvisionsOffBox) and CARRIES an account, so
 // "off-box" is the wrong axis to name here at all.
 const offBoxRoundTripReason = "an account is a writable agent home, so the agent writes refreshed " +
-	"authentication back into it — and af cannot establish that those writes come back from a machine it " +
-	"does not own, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
+	"authentication back into it — and af cannot establish that those writes come back, so a rotated token " +
+	"can be lost. If your provider rotates refresh tokens, losing it also " +
 	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
 	"break it. af refuses this BY DESIGN and not as pending work: what is missing is the GUARANTEE that " +
 	"those writes come back, and af will not present an account as writable without one."

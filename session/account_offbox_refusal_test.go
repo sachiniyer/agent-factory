@@ -275,3 +275,15 @@ func TestPermanenceRestsOnTheMissingGuaranteeNotOnAMechanismClaim(t *testing.T) 
 				"rules out mechanisms af merely cannot establish", kind)
 	}
 }
+
+// The reason shared by ssh, sandbox and hook can state only the missing
+// write-back guarantee. It cannot assert a location or mechanism: hook's
+// launch_cmd may use shared storage or run on the daemon host.
+func TestSharedRoundTripReasonDoesNotAssertLocationOrMechanism(t *testing.T) {
+	assert.Contains(t, offBoxRoundTripReason, "cannot establish that those writes come back",
+		"the common reason must state the missing guarantee")
+	assert.NotContains(t, offBoxRoundTripReason, "machine it does not own",
+		"the common reason cannot assert where hook runs")
+	assert.NotContains(t, offBoxRoundTripReason, "only a mount",
+		"the common reason cannot assert which mechanism would provide write-back")
+}
