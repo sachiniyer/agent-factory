@@ -42,6 +42,9 @@ type cfgValueKind int
 const (
 	cfgString cfgValueKind = iota
 	cfgInt
+	// cfgDuration accepts the preferred Go duration spelling and the legacy
+	// integer-millisecond spelling used by daemon_poll_interval.
+	cfgDuration
 	cfgBool
 	// cfgStringList is a []string key written as a single-line TOML array. The CLI
 	// value is comma-separated and REPLACES the whole list (the MergeListReplace
@@ -145,7 +148,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},
-	"daemon_poll_interval": {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("daemon_poll_interval", v) }},
+	"daemon_poll_interval": {kind: cfgDuration, validate: func(_, v string) error { return validateDaemonPollIntervalValue(v) }},
 	"log_max_size_mb":      {kind: cfgInt, validate: func(_, v string) error { return requirePositiveInt("log_max_size_mb", v) }},
 	"log_max_backups":      {kind: cfgInt, validate: func(_, v string) error { return requireNonNegativeInt("log_max_backups", v) }},
 	"branch_prefix":        {kind: cfgString},
@@ -716,6 +719,8 @@ func canonicalizeScalar(kind cfgValueKind, raw string) (canonical, encoded strin
 		}
 		s := strconv.Itoa(n)
 		return s, s, nil
+	case cfgDuration:
+		return canonicalizeDurationScalar(raw)
 	case cfgStringList:
 		elems := splitListValue(raw)
 		encoded := "[]"

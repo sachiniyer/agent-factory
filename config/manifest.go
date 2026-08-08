@@ -59,7 +59,9 @@ type ManifestEntry struct {
 	// It must match a decoded field in at least one supported schema —
 	// TestManifestCoversEveryConfigKey rejects a key that names no field.
 	Key string
-	// Type is the value's shape: "string", "bool", "int", "table", or "list".
+	// Type is the value's config shape: "string", "bool", "int", "duration",
+	// "table", or "list". It describes what a user writes, which can be more
+	// specific than the Go field used for the normalized in-memory value.
 	Type string
 	// Default is the default value rendered for a human. For a key whose default
 	// is deterministic, TestManifestDefaultsMatchDefaultConfig pins this against
@@ -239,9 +241,9 @@ var configManifest = []ManifestEntry{
 	},
 	{
 		Key:        "daemon_poll_interval",
-		Type:       "int",
+		Type:       "duration",
 		Default:    "1000",
-		Purpose:    "How often the background service checks sessions for new output, in milliseconds.",
+		Purpose:    "How often the background service checks sessions for new output · use a duration such as 1500ms or 30m; legacy integer milliseconds remain accepted.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,

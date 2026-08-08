@@ -141,7 +141,7 @@ func TestAllManifestScalarDefaultsMatchBuiltInResolution(t *testing.T) {
 	checked := 0
 	for i, entry := range entries {
 		switch entry.Type {
-		case "string", "bool", "int":
+		case "string", "bool", "int", "duration":
 		default:
 			continue
 		}
@@ -170,12 +170,12 @@ func formatsForManifestField(field reflect.StructField) FormatSet {
 	return formats
 }
 
-func expectedManifestTypeForField(field reflect.StructField) string {
+func expectedManifestTypeForField(key string, field reflect.StructField) string {
 	typeOf := field.Type
 	for typeOf.Kind() == reflect.Pointer {
 		typeOf = typeOf.Elem()
 	}
-	return expectedManifestType(typeOf.Kind())
+	return expectedManifestTypeForKey(key, typeOf.Kind())
 }
 
 // TestManifestFormatsAndTypesMatchSchemas pins metadata against the actual
@@ -199,7 +199,7 @@ func TestManifestFormatsAndTypesMatchSchemas(t *testing.T) {
 				continue // the coverage test owns the missing-field diagnostic
 			}
 			wantFormats |= formatsForManifestField(field)
-			wantType := expectedManifestTypeForField(field)
+			wantType := expectedManifestTypeForField(entry.Key, field)
 			if wantType == "" {
 				t.Errorf("%s: config.%s field %s has unsupported kind %s",
 					entry.Key, schema.name, field.Name, field.Type.Kind())
