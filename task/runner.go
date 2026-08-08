@@ -158,6 +158,27 @@ func defaultLimitDetectorForWait() LimitDetector {
 // full 60s timeout for anything that never prints "❯". This is the single
 // copy: the daemon reaches it via task.StartAndSendPrompt (daemon imports
 // task since #782 inverted the old task→daemon dependency).
+// lastNonEmptyLineContains reports whether the pane's last non-blank line carries
+// needle. It is the positional half of the codex readiness check (#3085): a
+// prompt glyph is meaningful because of WHERE it is, and a buffer-wide match
+// cannot tell a live composer from the same glyph sitting in scrollback or in a
+// modal's selected option.
+//
+// Blank lines are skipped from the end because a captured pane is padded to its
+// full height, so the drawn content's last line is almost never the buffer's.
+// CR is trimmed for the same reason capture output is normalized elsewhere.
+func lastNonEmptyLineContains(content, needle string) bool {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(lines[i], " \t\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		return strings.Contains(line, needle)
+	}
+	return false
+}
+
 func isReadyContent(content, agent string) bool {
 	switch agent {
 	case tmux.ProgramCodex:
@@ -172,7 +193,30 @@ func isReadyContent(content, agent string) bool {
 		// prompt can be sent (#2220). Its selected option also contains `›`, so
 		// name the handled case explicitly instead of pretending every glyph is
 		// necessarily the composer.
-		return tmux.CodexTrustPromptPresent(content) || strings.Contains(content, "›")
+		// The glyph must be on the LAST non-empty line, not loose in the buffer.
+		//
+		// `strings.Contains(content, "›")` asked a position-agnostic question, and
+		// this same comment already records that the answer is ambiguous: the trust
+		// modal's selected option is the literal line "› 1. Yes, continue", so the
+		// glyph is not proof of a composer. Anything else carrying it — scrollback
+		// from a previous program, a path, a branch name, an MOTD, or the OLDER
+		// "Do you trust this folder" dialog that #729 says is explicitly NOT
+		// ready — satisfied it too, and af then called a pane ready whose composer
+		// did not exist yet.
+		//
+		// The composer is the last thing drawn on a settled pane, so its POSITION
+		// is the invariant, and position is load-independent in the way #3050's
+		// tick count was: a slow box changes WHEN the last line becomes the
+		// composer, never WHETHER a matched line is one. Containment within that
+		// line (rather than a prefix) keeps the box-drawing and padding real codex
+		// renders around its prompt from reading as not-ready — a false negative
+		// here hangs a real session start for the full readiness budget, which is
+		// worse than the ambiguity being removed.
+		//
+		// CodexTrustPromptPresent still runs FIRST and is unchanged: it positively
+		// identifies the handled modal, whose selected option is line-leading too,
+		// so the glyph alone must never be asked to distinguish the two.
+		return tmux.CodexTrustPromptPresent(content) || lastNonEmptyLineContains(content, "›")
 	case tmux.ProgramAider:
 		// aider prints an "Aider v…" banner, then a line-start "> " prompt.
 		return strings.Contains(content, "\n> ") ||
