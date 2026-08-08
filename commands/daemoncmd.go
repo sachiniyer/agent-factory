@@ -566,6 +566,9 @@ type respawnResult struct {
 //   - restartPhaseShutdown: the old daemon would not stop, so it is STILL
 //     RUNNING THE OLD BINARY. That is #1947's own symptom — the upgrade did not
 //     reach the daemon.
+//   - restartPhaseShutdownUnknown: the check could not answer, so NOTHING is
+//     known about whether a daemon is running. Distinct from both above, because
+//     each of their remedies is wrong here.
 //   - restartPhaseRespawn: the old daemon stopped but no new one came up, so
 //     NOTHING IS RUNNING. Task schedules, watch scripts, and session monitoring
 //     are all stopped until something starts a daemon.
@@ -581,6 +584,13 @@ const (
 	restartPhaseNone restartPhase = iota
 	restartPhaseShutdown
 	restartPhaseRespawn
+	// restartPhaseShutdownUnknown: the shutdown CHECK itself failed, so whether a
+	// daemon is running was never established. A THIRD state, and folding it into
+	// restartPhaseShutdown is what #3097 reports: that phase asserts "it is still
+	// running the old binary", which sends the operator hunting for a process that
+	// may not exist — or, read the other way, lets them wait for one that is
+	// already gone. Both remedies are wrong when the answer is "we could not tell".
+	restartPhaseShutdownUnknown
 )
 
 // restartOutcome is the whole story of a shutdown-then-respawn: how the old
@@ -607,6 +617,14 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	result, shutdownErr := requestDaemonShutdownFn()
 	outcome := restartOutcome{Shutdown: result}
 	if shutdownErr != nil {
+		// ShutdownNoDaemon alongside an ERROR is not "no daemon" and not "a daemon
+		// refused to stop" — it is RequestShutdown saying it could not determine
+		// which (a socket it could not stat, for instance). Reporting it as a failed
+		// stop asserts a running daemon that was never observed (#3097).
+		if result == daemon.ShutdownNoDaemon {
+			outcome.FailedPhase = restartPhaseShutdownUnknown
+			return outcome, fmt.Errorf("could not determine whether a daemon is running: %w", shutdownErr)
+		}
 		outcome.FailedPhase = restartPhaseShutdown
 		return outcome, fmt.Errorf("failed to stop running daemon: %w", shutdownErr)
 	}

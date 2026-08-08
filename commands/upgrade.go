@@ -354,6 +354,16 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		fmt.Fprintln(errOut, "It is still running the old binary, so this upgrade has not reached it yet.")
 		fmt.Fprintln(errOut, stopDaemonHint(daemonHealthFn()))
 		return
+	case restartPhaseShutdownUnknown:
+		// Neither "it is still running" nor "nothing is running" — say the true
+		// thing, which is that we do not know, and give a check rather than a
+		// remedy. Asserting either state here is what sends someone hunting a
+		// daemon that is not there, or waiting for one that is (#3097).
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintf(errOut, "Could not determine whether a daemon is running: %v\n", restartErr)
+		fmt.Fprintln(errOut, "No daemon was found, but that check did not succeed, so this upgrade may or may not have reached one.")
+		fmt.Fprintln(errOut, "Check with `af daemon status`; if one is running on the old binary, restart it with `af daemon restart`.")
+		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.
 		fmt.Fprintln(out, "Upgraded successfully!")
