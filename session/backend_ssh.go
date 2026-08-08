@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The SSH remote-machine runtime (#1592 Phase 4 PR5) — the first-class remote
@@ -184,8 +185,34 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err := prepareSSHHostKeyStore(sshCfg, cfg.SSHHostKeyVerification); err != nil {
 		return ProvisionResult{}, err
 	}
-	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, config.ResolveProgram(&cfg.Config, spec.Program))
+	program := config.ResolveProgram(&cfg.Config, spec.Program)
+	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, program)
 	res, err := p.provision()
+	// THE PIN IS NON-FATAL. af resolves with Go's pure resolver and ssh resolves
+	// with getaddrinfo, so an nsswitch source Go does not implement (LDAP, sssd,
+	// mDNS) can make both succeed with DIFFERENT addresses — and af would then have
+	// pinned somewhere ssh would never have gone. That fails CLOSED on host-key
+	// verification, so nothing wrong is trusted; what it costs is the whole backend,
+	// for exactly the users whose resolver disagrees. One unpinned retry gives them
+	// back the behaviour af had before it pinned anything.
+	//
+	// Guarded on an EMPTY session dir, which proves the failed attempt created no
+	// remote state: re-provisioning over something already created is the leak this
+	// issue exists to prevent. See shouldRetryProvisionUnpinned.
+	if err != nil && shouldRetryProvisionUnpinned(dialAddr, p.sessionDir, err) {
+		log.WarningLog.Printf("backend=ssh: the pinned connection to %s failed host-key verification, which "+
+			"usually means af resolved %q differently from ssh (af uses Go's resolver, ssh uses getaddrinfo/NSS); "+
+			"retrying once WITHOUT the pin, so this session is not protected against a multi-address host "+
+			"splitting it across machines (#3086)", dialAddr, sshCfg.Host)
+		_ = p.reap() // a no-op while sessionDir is empty; called so nothing is assumed
+		dialAddr = ""
+		unpinned, cmdErr := sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, "")
+		if cmdErr != nil {
+			return ProvisionResult{}, cmdErr
+		}
+		p = newSSHSandboxProvisioner(spec, unpinned, afBin, program)
+		res, err = p.provision()
+	}
 	if err != nil {
 		// Best-effort reap whatever the failed provision left behind. Preserve any
 		// cleanup failure in the returned error: no Instance exists yet to own a

@@ -335,6 +335,27 @@ func TestAnUnusableRelayBinaryFallsBackToDiallingTheName(t *testing.T) {
 		})
 	}
 
+	// THE CASE A PERMISSION-BIT TEST MISSES. Mode 0o011 has execute bits set — for
+	// group and other — so "is any execute bit set?" says yes, while the kernel says
+	// EACCES because the OWNER class applies to the owner and it has none. That is
+	// the same shape as the root-owned 0700 binary the review named, constructible
+	// without root, and it is why the check asks faccessat(X_OK) instead of reading
+	// Mode().Perm().
+	t.Run("executable for another class but not for us", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses the permission check (CAP_DAC_OVERRIDE), so this case cannot be built here")
+		}
+		wrongClass := filepath.Join(t.TempDir(), "af")
+		require.NoError(t, os.WriteFile(wrongClass, []byte("#!/bin/sh\n"), 0o644))
+		require.NoError(t, os.Chmod(wrongClass, 0o011))
+		require.NotZero(t, 0o011&0o111, "the fixture must have SOME execute bit, or it proves nothing")
+
+		defer SetSSHRelayBinaryForTest(wrongClass)()
+		assert.Empty(t, pinForProvision("127.0.0.1", port),
+			"a binary this user cannot execute must cost the pin: accepting it turns the intended name-based "+
+				"fallback into an unusable backend, since every ProxyCommand then fails with EACCES")
+	})
+
 	// And a relay af cannot even name at all.
 	prev := sshRelayBinary
 	sshRelayBinary = func() (string, error) { return "", fmt.Errorf("no /proc/self/exe") }

@@ -1,10 +1,15 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -90,6 +95,75 @@ func pinForProvision(host string, port int) string {
 	return dialAddr
 }
 
+// AF'S RESOLVER IS NOT NECESSARILY SSH'S, and this is the escape hatch for when
+// they disagree.
+//
+// af resolves with Go's PURE resolver — af ships CGO_ENABLED=0 — which reads
+// /etc/hosts and DNS and nothing else. ssh resolves with getaddrinfo, which
+// follows nsswitch.conf. Under `hosts: ldap dns`, or sssd, or mDNS, both can
+// succeed and return DIFFERENT addresses, so af can pin somewhere ssh would never
+// have gone. The dial probe cannot detect this: it succeeded, so the fallback for
+// an unresolvable name never engages.
+//
+// THE SEVERITY IS AVAILABILITY, NOT SECURITY, and that is what decides the fix.
+// ssh's destination is still the NAME, so a pin that lands on a different machine
+// fails CLOSED on host-key verification rather than silently using the wrong host.
+// Nothing is trusted that should not be. What happens instead is that a backend
+// which worked before af pinned anything now fails every create — the #3092 shape,
+// where a class of users loses the whole backend.
+//
+// So the pin is made NON-FATAL rather than merely documented. A create whose
+// PINNED command failed host-key verification retries ONCE unpinned, which is
+// exactly what af did before this change, and records no pinned address so the
+// teardown matches. Documenting alone would leave those users with a dead backend
+// and a manual diagnosis; this recovers automatically and says so in the log.
+//
+// TWO GUARDS, both necessary:
+//
+//   - sessionDir must be EMPTY. It is set by the first provision step, so an empty
+//     one proves no remote state exists yet and re-provisioning cannot orphan a
+//     workspace. Re-provisioning after anything was created is precisely the leak
+//     #3086 exists to prevent, so this is a hard precondition rather than an
+//     optimisation.
+//   - A CHANGED host key is excluded. `REMOTE HOST IDENTIFICATION HAS CHANGED` is a
+//     security signal that deserves to surface immediately; retrying would only
+//     delay it, since the unpinned attempt verifies the same name against the same
+//     store and fails the same way.
+func shouldRetryProvisionUnpinned(dialAddr, sessionDir string, err error) bool {
+	if strings.TrimSpace(dialAddr) == "" {
+		return false // never pinned; there is nothing to retry differently
+	}
+	if sessionDir != "" {
+		return false // remote state exists — see the guard note above
+	}
+	return sshHostKeyVerificationFailed(err)
+}
+
+// sshHostKeyVerificationFailed reports ssh's own pre-authentication refusal.
+//
+// The marker is ssh's, not af's: OpenSSH prints `Host key verification failed.`
+// from a fatal() in sshconnect.c and does not localise its diagnostics, so the
+// string is stable across the releases this backend supports. It arrives on
+// STDERR, which for the non-combined steps lands in exec.ExitError.Stderr rather
+// than in the error's own text — so both are searched.
+//
+// It is also, usefully, a PRE-AUTH failure: no remote command has run, which is
+// the same fact sessionDir being empty records independently.
+func sshHostKeyVerificationFailed(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		text += "\n" + string(exitErr.Stderr)
+	}
+	if strings.Contains(text, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+		return false
+	}
+	return strings.Contains(text, "Host key verification failed")
+}
+
 // verifySSHRelayBinary reports whether af can actually run itself as the
 // ProxyCommand relay.
 //
@@ -123,8 +197,21 @@ func verifySSHRelayBinary() error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file (mode %s)", path, info.Mode())
 	}
-	if info.Mode().Perm()&0o111 == 0 {
-		return fmt.Errorf("%s is not executable (mode %s)", path, info.Mode())
+	// EFFECTIVE executability, not "some execute bit is set somewhere".
+	//
+	// An earlier version tested `Perm()&0o111 != 0`, which asks whether ANY class
+	// may execute the file — so a root-owned 0700 replacement of the daemon binary
+	// passed while every ProxyCommand then failed with EACCES. That is worse than no
+	// check at all: the guard exists to fall back to the name-based command, and a
+	// guard that says yes when exec will say no converts the intended fallback into
+	// an unusable backend.
+	//
+	// faccessat(X_OK) asks the kernel the question that actually matters, with
+	// AT_EACCESS so it answers for the EFFECTIVE identity the exec will run under.
+	// Hand-rolled uid/gid arithmetic would have to reimplement supplementary groups,
+	// ACLs and capabilities to get the same answer.
+	if err := unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS); err != nil {
+		return fmt.Errorf("%s is not executable by this user (mode %s): %w", path, info.Mode(), err)
 	}
 	return nil
 }

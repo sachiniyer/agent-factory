@@ -421,6 +421,16 @@ back (see [Archive & restore](#archive-restore)).
 > it says so in the log and connects by name, exactly as it did before — a host af
 > cannot look up still works. The pin is an improvement on connecting by name, so
 > when it cannot be applied af falls back rather than failing the session.
+>
+> **If your resolver and `ssh`'s disagree, af notices and gives up the pin.** af
+> resolves with Go's built-in resolver, which reads `/etc/hosts` and DNS; `ssh`
+> resolves with `getaddrinfo`, which follows `nsswitch.conf`. With a source Go does
+> not implement — LDAP, `sssd`, mDNS — both can succeed and return *different*
+> addresses, and af would then have pinned somewhere `ssh` would never have gone.
+> That fails host-key verification rather than connecting to the wrong host, so
+> nothing unverified is ever trusted; af retries **once without the pin**, which is
+> what it did before this existed, and logs that the session is unpinned. You do not
+> need to change anything — the note is here so the log line makes sense.
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
