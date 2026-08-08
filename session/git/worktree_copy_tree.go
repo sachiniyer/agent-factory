@@ -237,6 +237,16 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
 	links := map[pathIdentity]copiedFileLink{}
+	// The retained comparison descriptors die with the copy that opened them. Every
+	// exit from this function passes here, including the error returns below, so a
+	// failed copy cannot leak them either (#3063).
+	defer func() {
+		for _, link := range links {
+			if link.reader != nil {
+				_ = link.reader.Close()
+			}
+		}
+	}()
 	// Same scoping as links above: whether this DESTINATION holds extended
 	// attributes is learned once per copy and never leaks into another one.
 	xattrs := &xattrDestination{}
@@ -351,15 +361,41 @@ func copyDirectoryLevel(
 			// archive holding bytes that never existed at that path. Hard-linking
 			// is an optimisation, and one that can corrupt content is not worth its
 			// saving (#3046).
-			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity, inspected) {
+			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity, inspected, first.reader) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
-				entry, err = copyRegularFileAtWithIdentity(source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs)
-				if err == nil {
+				// Asked for only when the source was ALREADY seen with more than one
+				// link: those are the inodes a later sighting can hit, so the retained-fd
+				// count is bounded by genuinely shared inodes rather than by tree size and
+				// EMFILE does not become a new failure mode. An inode linked after this
+				// copy is still recorded (see above) and simply falls back to reopening,
+				// which is exactly today's behaviour.
+				var reader *os.File
+				var retain func(fd int)
+				if stat.Nlink > 1 {
+					retain = func(fd int) {
+						// dup(2), not a reopen: the point is a descriptor that predates the
+						// mode narrowing, and a reopen would hit the very denial this avoids.
+						// A dup failure is not fatal — the comparison falls back to reopening.
+						dupFD, dupErr := unix.Dup(fd)
+						if dupErr != nil {
+							return
+						}
+						reader = os.NewFile(uintptr(dupFD), childDestinationPath)
+					}
+				}
+				entry, err = copyRegularFileAtWithIdentity(
+					source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs, retain)
+				switch {
+				case err == nil:
 					links[inspected] = copiedFileLink{
 						path:     filepath.Join(relativeDirectory, name),
 						identity: entry.destination,
+						reader:   reader,
 					}
+				case reader != nil:
+					// Nothing will record it, so nothing else can close it.
+					_ = reader.Close()
 				}
 			}
 		default:
@@ -399,6 +435,12 @@ func relativeRoutePath(components []copiedEntry) string {
 type copiedFileLink struct {
 	path     string
 	identity pathIdentity
+	// reader is a descriptor on the copy, opened before its mode was narrowed, or
+	// nil. A root-owned 0004 file copied by a non-root user ends up owned by the
+	// copier with mode 0004, and owner bits win — so the copier cannot reopen a file
+	// it owns, and every later link to that inode was copied separately instead
+	// (#3063). Owned by copyDirectoryContents, which closes them all.
+	reader *os.File
 }
 
 func linkCopiedFile(
@@ -808,7 +850,7 @@ func copyFile(src, dst string) error {
 }
 
 func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
-	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil, &xattrDestination{})
+	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil, &xattrDestination{}, nil)
 	return err
 }
 
@@ -817,6 +859,7 @@ func copyRegularFileAtWithIdentity(
 	name, sourcePath, destinationPath string,
 	inspected *pathIdentity,
 	support *xattrDestination,
+	retainCopiedFD func(fd int),
 ) (copiedEntry, error) {
 	fd, err := unix.Openat(
 		int(source.Fd()), name,
@@ -851,7 +894,12 @@ func copyRegularFileAtWithIdentity(
 	}
 	outFD, err := unix.Openat(
 		int(destination.Fd()), filepath.Base(destinationPath),
-		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		// O_RDWR, not O_WRONLY: a descriptor retained past the mode narrowing below is
+		// how a later hard-link sighting compares this copy's bytes without reopening a
+		// path its own mode may deny (#3063). It works for the reason the mode comment
+		// below already gives — an open descriptor keeps the access it was opened with
+		// regardless of the new mode — applied to reading.
+		unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
 		workingFileMode(info.Mode()),
 	)
 	if err != nil {
@@ -905,6 +953,13 @@ func copyRegularFileAtWithIdentity(
 	); err != nil {
 		_ = out.Close()
 		return created, err
+	}
+	// SUCCESS ONLY, and before the close: the caller dups this descriptor to compare
+	// against later (#3063). A callback rather than a returned file keeps every error
+	// path above unchanged — each still closes `out` and returns without a descriptor
+	// the caller would have to remember to release.
+	if retainCopiedFD != nil {
+		retainCopiedFD(outFD)
 	}
 	if err := out.Close(); err != nil {
 		return created, err

@@ -48,7 +48,7 @@ func TestCopyRegularFile_ClassifiesAnUnreadableSource(t *testing.T) {
 	defer destination.Close()
 
 	_, err = copyRegularFileAtWithIdentity(
-		source, destination, "locked", locked, filepath.Join(destinationDir, "locked"), nil, nil)
+		source, destination, "locked", locked, filepath.Join(destinationDir, "locked"), nil, nil, nil)
 	require.Error(t, err)
 
 	var unreadable *unreadableSourceError

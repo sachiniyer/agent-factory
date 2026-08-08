@@ -186,11 +186,11 @@ func TestSourceMatchesCopiedFile_RefusesWhenTheDestinationCannotBeRead(t *testin
 	srcIdentity, err := identityAt(root, "src")
 	require.NoError(t, err)
 
-	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity),
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity, nil),
 		"a readable destination with identical bytes must still link")
 
 	require.NoError(t, os.Chmod(filepath.Join(dir, "dst"), 0o000))
-	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity),
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity, nil),
 		"an unreadable destination cannot be attested, so it must not be linked against")
 
 	// Identity, not just content: a matching-content impostor at a different inode
@@ -199,7 +199,7 @@ func TestSourceMatchesCopiedFile_RefusesWhenTheDestinationCannotBeRead(t *testin
 	impostor, err := identityAt(root, "impostor")
 	require.NoError(t, err)
 	require.NotEqual(t, dstIdentity, impostor, "precondition: the impostor must be a different inode")
-	require.False(t, sourceMatchesCopiedFile(root, "src", root, "impostor", dstIdentity, srcIdentity),
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "impostor", dstIdentity, srcIdentity, nil),
 		"content equality on a substituted inode must not be accepted")
 
 	// And symmetrically on the SOURCE side. statAt and the open in the comparison
@@ -216,9 +216,9 @@ func TestSourceMatchesCopiedFile_RefusesWhenTheDestinationCannotBeRead(t *testin
 	src2, err := identityAt(root, "src2")
 	require.NoError(t, err)
 	require.NotEqual(t, srcIdentity, src2, "precondition: the swapped source must be a different inode")
-	require.True(t, sourceMatchesCopiedFile(root, "src2", root, "dst2", dst2, src2),
+	require.True(t, sourceMatchesCopiedFile(root, "src2", root, "dst2", dst2, src2, nil),
 		"control: matching bytes and BOTH identities correct must link")
-	require.False(t, sourceMatchesCopiedFile(root, "src2", root, "dst2", dst2, srcIdentity),
+	require.False(t, sourceMatchesCopiedFile(root, "src2", root, "dst2", dst2, srcIdentity, nil),
 		"a source inode that is not the one the walk inspected must be refused, "+
 			"even when its bytes match and the destination is readable")
 }

@@ -32,7 +32,11 @@ import (
 //
 // Both sides are opened relative to a directory descriptor, never by rebuilt
 // path, keeping the copier descriptor-anchored throughout.
-func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, expected, expectedSource pathIdentity) bool {
+// retained is a descriptor on the copy kept from when it was written, or nil. When
+// present it is used INSTEAD of reopening, which is the whole of #3063: the copy's
+// own mode can deny the copier that owns it, and a descriptor older than the mode
+// is the only thing that still reads.
+func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, expected, expectedSource pathIdentity, retained *os.File) bool {
 	current, err := openAtForCompare(source, name)
 	if err != nil {
 		return false
@@ -65,11 +69,15 @@ func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.F
 	// is #3063 and is a fidelity cost, not a correctness one. Hard-linking is an
 	// optimisation, and one that can publish bytes that were never at that path is
 	// not worth its saving.
-	copied, err := openAtForCompare(destinationRoot, copiedPath)
-	if err != nil {
-		return false
+	copied := retained
+	if copied == nil {
+		reopened, err := openAtForCompare(destinationRoot, copiedPath)
+		if err != nil {
+			return false
+		}
+		defer reopened.Close()
+		copied = reopened
 	}
-	defer copied.Close()
 	copiedIdentity, err := identityFromFile(copied)
 	if err != nil || !expected.same(copiedIdentity) {
 		return false
@@ -87,12 +95,18 @@ func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.F
 		return false
 	}
 
+	// Read the copy through a SectionReader, never sequentially off the descriptor
+	// itself. A retained descriptor is a dup of the one the bytes were written
+	// through, so its offset sits at EOF — and dup(2) SHARES that offset, so a
+	// sequential read would both start at the end and move the writer's position.
+	// A section reader uses pread and touches neither.
+	copiedReader := io.NewSectionReader(copied, 0, copiedInfo.Size())
 	const chunk = 64 * 1024
 	currentChunk := make([]byte, chunk)
 	copiedChunk := make([]byte, chunk)
 	for {
 		readCurrent, currentErr := io.ReadFull(current, currentChunk)
-		readCopied, copiedErr := io.ReadFull(copied, copiedChunk)
+		readCopied, copiedErr := io.ReadFull(copiedReader, copiedChunk)
 		if readCurrent != readCopied || !bytes.Equal(currentChunk[:readCurrent], copiedChunk[:readCopied]) {
 			return false
 		}
