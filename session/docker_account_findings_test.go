@@ -240,7 +240,7 @@ func TestDockerAccount_ReprovisionCarriesThePersistedAccount(t *testing.T) {
 func TestDockerAccount_ReprovisionRefusesResolvedAgentDrift(t *testing.T) {
 	f := newDockerAccountFixture(t, "", "codex", nil)
 	cfg := config.DefaultConfig()
-	cfg.ProgramOverrides["codex"] = "opencode"
+	cfg.ProgramOverrides = map[string]string{"codex": "opencode"}
 	require.NoError(t, config.SaveConfig(cfg))
 	dockerCalled := false
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
