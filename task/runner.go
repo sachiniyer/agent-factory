@@ -158,23 +158,32 @@ func defaultLimitDetectorForWait() LimitDetector {
 // full 60s timeout for anything that never prints "❯". This is the single
 // copy: the daemon reaches it via task.StartAndSendPrompt (daemon imports
 // task since #782 inverted the old task→daemon dependency).
-// lastNonEmptyLineContains reports whether the pane's last non-blank line carries
-// needle. It is the positional half of the codex readiness check (#3085): a
-// prompt glyph is meaningful because of WHERE it is, and a buffer-wide match
-// cannot tell a live composer from the same glyph sitting in scrollback or in a
-// modal's selected option.
+// hasLineLeadingGlyph reports whether any line's first non-blank character is
+// needle — the composer is drawn at the START of its line, and a glyph anywhere
+// else on a line is something else (#3085).
 //
-// Blank lines are skipped from the end because a captured pane is padded to its
-// full height, so the drawn content's last line is almost never the buffer's.
-// CR is trimmed for the same reason capture output is normalized elsewhere.
-func lastNonEmptyLineContains(content, needle string) bool {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimRight(lines[i], " \t\r")
-		if strings.TrimSpace(line) == "" {
-			continue
+// Deliberately NOT "on the last non-empty line", which was the first attempt and
+// is false: real Codex draws a hint row BELOW the composer ("› [Pasted Content]"
+// then "esc to interrupt" — daemon/configagent_delivery_test.go), so requiring
+// the prompt to be last made a ready pane read as not-ready and spun the full
+// 60s readiness budget.
+//
+// This rules out the MID-LINE class definitively — a path like /src/a›b, a glyph
+// in prose — and nothing more. It cannot tell a live composer from a line-leading
+// glyph left in scrollback, and claiming otherwise would be the same overreach in
+// a new place: position answers "is this drawn as a prompt", not "is this prompt
+// current".
+func hasLineLeadingGlyph(content, needle string) bool {
+	// Strip ANSI first, with the same regex amp and opencode match on. A raw
+	// capture carries escapes INSIDE the line — real Codex emits
+	// "\x1b[2J\x1b[H› [Pasted Content]" — so a positional check against the raw
+	// bytes finds a control sequence where the prompt is and reports not-ready.
+	// This was caught by running the real fixtures, not by reading them.
+	plain := paneAnsiEscape.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), needle) {
+			return true
 		}
-		return strings.Contains(line, needle)
 	}
 	return false
 }
@@ -193,7 +202,7 @@ func isReadyContent(content, agent string) bool {
 		// prompt can be sent (#2220). Its selected option also contains `›`, so
 		// name the handled case explicitly instead of pretending every glyph is
 		// necessarily the composer.
-		// The glyph must be on the LAST non-empty line, not loose in the buffer.
+		// The glyph must be LINE-LEADING, not loose in the buffer.
 		//
 		// `strings.Contains(content, "›")` asked a position-agnostic question, and
 		// this same comment already records that the answer is ambiguous: the trust
@@ -204,19 +213,16 @@ func isReadyContent(content, agent string) bool {
 		// ready — satisfied it too, and af then called a pane ready whose composer
 		// did not exist yet.
 		//
-		// The composer is the last thing drawn on a settled pane, so its POSITION
-		// is the invariant, and position is load-independent in the way #3050's
-		// tick count was: a slow box changes WHEN the last line becomes the
-		// composer, never WHETHER a matched line is one. Containment within that
-		// line (rather than a prefix) keeps the box-drawing and padding real codex
-		// renders around its prompt from reading as not-ready — a false negative
-		// here hangs a real session start for the full readiness budget, which is
-		// worse than the ambiguity being removed.
+		// The composer is drawn at the START of a line, so its POSITION is the
+		// invariant, and position is load-independent in the way #3050's tick
+		// count was: a slow box changes WHEN the prompt is drawn, never WHETHER a
+		// matched line is drawn as one. See hasLineLeadingGlyph for what this
+		// deliberately does NOT claim.
 		//
 		// CodexTrustPromptPresent still runs FIRST and is unchanged: it positively
 		// identifies the handled modal, whose selected option is line-leading too,
 		// so the glyph alone must never be asked to distinguish the two.
-		return tmux.CodexTrustPromptPresent(content) || lastNonEmptyLineContains(content, "›")
+		return tmux.CodexTrustPromptPresent(content) || hasLineLeadingGlyph(content, "›")
 	case tmux.ProgramAider:
 		// aider prints an "Aider v…" banner, then a line-start "> " prompt.
 		return strings.Contains(content, "\n> ") ||

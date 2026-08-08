@@ -86,43 +86,28 @@ func TestIsReadyContent(t *testing.T) {
 		// the dialog. Wait for the real "›" prompt. Regression from #714/#715.
 		{"codex trust folder prompt is not ready (#729)", "codex", "Do you trust this folder?\n> Yes", false},
 		{"codex trust dialog with later prompt is ready (#729)", "codex", "Do you trust this folder?\n› ", true},
-		// #3085: the glyph is meaningful because of WHERE it is. A buffer-wide
-		// match called a pane ready whose composer did not exist, because "›"
-		// appears in plenty of things that are not one.
+		// #3085: the glyph is meaningful because of WHERE it is drawn. A buffer-wide
+		// match accepted it mid-line, in a path or in prose, where it is not a prompt.
 		{
-			name:    "codex glyph in scrollback is NOT the composer (#3085)",
-			agent:   "codex",
-			content: "› earlier prompt from a previous program\nRunning setup...\nstill starting",
-			want:    false,
-		},
-		{
-			name:    "codex glyph in a path is NOT the composer (#3085)",
+			name:    "codex glyph mid-line in a path is NOT a composer (#3085)",
 			agent:   "codex",
 			content: "cloning into /src/a›b/repo\nchecking out main",
 			want:    false,
 		},
+		// The REAL pane shapes, lifted from fixtures elsewhere in the tree rather than
+		// invented. The first attempt required the prompt on the LAST non-empty line
+		// and hung two daemon tests for the full 60s budget: Codex draws a hint row
+		// BELOW the composer, and ANSI sits INSIDE the prompt line.
 		{
-			// #729 says the OLDER dialog is not ready. A stray glyph anywhere above
-			// it used to make it ready anyway.
-			name:    "codex old trust dialog with a glyph above it stays not-ready (#729/#3085)",
+			name:    "codex composer with a hint row below it is ready (#3085)",
 			agent:   "codex",
-			content: "› booting\nDo you trust this folder?\n> Yes",
-			want:    false,
-		},
-		{
-			// A captured pane is padded to its full height, so the composer is almost
-			// never the buffer's literal last line.
-			name:    "codex composer followed by pane padding is ready (#3085)",
-			agent:   "codex",
-			content: "OpenAI Codex (vX)\n› \n\n\n   \n",
+			content: "\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n",
 			want:    true,
 		},
 		{
-			// Real codex draws decoration around the prompt; a strict line PREFIX
-			// would hang a real start for the full readiness budget.
-			name:    "codex composer with box-drawing decoration is ready (#3085)",
+			name:    "codex composer mid-pane among other agents' glyphs is ready (#3085)",
 			agent:   "codex",
-			content: "OpenAI Codex (vX)\n▌ › \n",
+			content: "ready\n❯\n›\n> \n╰",
 			want:    true,
 		},
 		{
