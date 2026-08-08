@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -912,27 +911,37 @@ exit 0
 
 // TestHookLaunchDoesNotKillBackgroundedChildren is the mechanism behind the test
 // above, pinned separately so a regression names its own cause: the capture must
-// not kill a process launch_cmd deliberately backgrounded. A heartbeat file is the
-// liveness probe — it keeps ticking only while the child lives, so requiring the
-// mtime to keep advancing after the script exits proves the capture left the child
-// alone.
+// not kill a process launch_cmd deliberately backgrounded. The child installs a
+// signal handler before launch_cmd exits; after the capture has returned, the test
+// signals that exact PID and requires its acknowledgement. That proves the child
+// is alive at the teardown boundary, rather than merely proving it ran earlier.
 //
-// The test also OWNS that child's lifetime (the t.Cleanup reap below): a
-// backgrounded writer left running races t.TempDir()'s os.RemoveAll and fails the
-// test in cleanup with an ENOTEMPTY — the actual flake this file hit on CI, which
-// looks like a passing body followed by "TempDir RemoveAll cleanup: ... directory
-// not empty".
+// The test also OWNS that child's lifetime (the t.Cleanup reap below), so a green
+// run cannot leave the shell behind. Cleanup runs before t.TempDir removal because
+// the child's signal handler writes its acknowledgement there.
 func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 	shrinkHookTimeouts(t, 5*time.Second, 5*time.Second)
 	dir := t.TempDir()
-	hb := filepath.Join(dir, "heartbeat")
+	pidFile := filepath.Join(dir, "child.pid")
+	readyFile := filepath.Join(dir, "child.ready")
+	ackFile := filepath.Join(dir, "child.ack")
 
 	h := hookState{dir: dir, launch: filepath.Join(dir, "launch.sh"), delete: filepath.Join(dir, "delete.sh")}
+	// The child deliberately inherits the captured stderr, as a real tunnel does.
+	// stdout stays endpoint-only; writing the chatter there would make this a
+	// failed launch and correctly send the child through failure-path reaping.
 	writeHookScript(t, h.launch, fmt.Sprintf(`
-( for i in $(seq 1 1000); do echo "still here"; echo tick >> %s; sleep 0.05; done ) &
+(
+  trap 'echo alive > %s' USR1
+  : > %s
+  while true; do echo "still here" >&2; sleep 0.05; done
+) &
+child_pid=$!
+echo "$child_pid" > %s
+while [[ ! -e %s ]]; do sleep 0.01; done
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
-`, shellsuggest.Arg(hb)))
+`, shellsuggest.Arg(ackFile), shellsuggest.Arg(readyFile), shellsuggest.Arg(pidFile), shellsuggest.Arg(readyFile)))
 	writeHookScript(t, h.delete, "true")
 
 	p := newHookProvisioner(h, "background child")
@@ -950,46 +959,34 @@ exit 0
 		}
 	})
 	_, err := p.provisionOrReap()
-	require.NoError(t, err)
+	pidData, readErr := os.ReadFile(pidFile)
+	require.NoError(t, readErr, "launch_cmd must record the exact background child it started")
+	var childPID int
+	_, scanErr := fmt.Sscan(strings.TrimSpace(string(pidData)), &childPID)
+	require.NoError(t, scanErr, "launch_cmd wrote an invalid child pid %q", pidData)
+	childStateErr := syscall.Kill(childPID, 0)
+	childPgid, childPgidErr := syscall.Getpgid(childPID)
+	require.NoError(t, err, "launch failed; child pid %d liveness after teardown: %v; process group: %v",
+		childPID, childStateErr, childPgidErr)
 
-	// provisionOrReap has returned, so launch_cmd itself is already gone and what
-	// follows measures only the BACKGROUNDED child.
-	//
-	// Counting TICKS, not mtime advances, and waiting on the count rather than
-	// inside a fixed window (#2879). The previous shape had two independent ways to
-	// fail on a healthy box, and neither had anything to do with the contract:
-	//
-	//   - It required three mtime ADVANCES within a fixed three seconds. mtime
-	//     granularity is a filesystem property, not a liveness property: on a
-	//     one-second-granularity filesystem three distinct advances need ~3s of
-	//     wall time all by themselves, which is the whole budget. This box reports
-	//     nanoseconds and never saw it; a macOS runner can.
-	//   - A loaded box stretches the child's `sleep 0.05` loop, so the same fixed
-	//     window buys fewer ticks exactly when the machine is busy.
-	//
-	// The child appends one "tick" per iteration, so the count is monotonic, has no
-	// granularity, and answers the actual question: did this child keep running
-	// AFTER the capture? Baselined at this instant, so ticks written before
-	// provisionOrReap returned cannot be mistaken for survival — a killed child
-	// contributes exactly zero more, no matter how slow the box is.
-	ticks := func() int {
-		data, readErr := os.ReadFile(hb)
-		if readErr != nil {
-			return 0
-		}
-		return bytes.Count(data, []byte("tick"))
-	}
-	baseline := ticks()
-
-	// The ceiling is a FAILURE deadline, not an expectation: this is normally
-	// satisfied in a few hundred milliseconds. It stays well inside the writer's own
-	// ~50s lifetime (1000 iterations x 0.05s) so a slow start cannot turn into a
-	// failure of this assertion instead.
-	const wantTicks = 3
+	// provisionOrReap has returned, so launch_cmd and the entire output-capture
+	// teardown are already gone. Probe the background child only now: kill(0)
+	// establishes that the PID still exists at the boundary, and the subsequent
+	// signal acknowledgement proves it is a running process that accepts work, not
+	// a stale heartbeat written before teardown or a zombie process-table entry.
+	require.NoError(t, childStateErr,
+		"the process launch_cmd backgrounded was dead when output capture returned")
+	require.NoError(t, childPgidErr,
+		"the process launch_cmd backgrounded had no process group after output capture returned")
+	require.Equal(t, p.launchPgid, childPgid,
+		"the recorded PID no longer belongs to launch_cmd's process group")
+	require.NoError(t, syscall.Kill(childPID, syscall.SIGUSR1),
+		"the process launch_cmd backgrounded died before accepting a post-capture probe")
 	require.Eventually(t, func() bool {
-		return ticks() >= baseline+wantTicks
-	}, 30*time.Second, 10*time.Millisecond,
-		"the process launch_cmd backgrounded stopped ticking — the output capture killed a child that was not ours to kill")
+		_, statErr := os.Stat(ackFile)
+		return statErr == nil
+	}, 5*time.Second, 10*time.Millisecond,
+		"the live background child never acknowledged the post-capture probe")
 }
 
 // TestHookLaunchIsBounded proves the launch bound fires at all. It is the
