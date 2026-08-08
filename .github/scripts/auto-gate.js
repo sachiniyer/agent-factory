@@ -254,8 +254,13 @@ async function findPullRequestNumber({ github, context, core, pullAssociationCac
   const payload = context.payload;
   const closedPullRequest =
     context.eventName === "pull_request" && payload.action === "closed";
+  const removedFromMaster =
+    context.eventName === "pull_request" &&
+    payload.action === "edited" &&
+    payload.changes?.base?.ref?.from === "master" &&
+    payload.pull_request?.base?.ref !== "master";
 
-  if (payload.pull_request?.number && !closedPullRequest) {
+  if (payload.pull_request?.number && !closedPullRequest && !removedFromMaster) {
     return payload.pull_request.number;
   }
 

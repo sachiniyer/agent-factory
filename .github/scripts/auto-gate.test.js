@@ -18,8 +18,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
     workflow,
     /pull_request:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled\]/,
   );
-  assert.match(workflow, /github\.event\.action == 'closed'/);
-  assert.match(workflow, /github\.event\.action == 'converted_to_draft'/);
+  assert.match(workflow, /github\.event_name == 'pull_request'/);
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
@@ -463,6 +462,31 @@ test("closing a shared-head PR reevaluates the surviving open PR", async () => {
         number: 1465,
         state: "closed",
         base: { ref: "master" },
+        head: { sha: HEAD_SHA },
+      },
+    }),
+    core: fakeCore(),
+    setOutputs: false,
+  });
+
+  assert.equal(result.prNumber, "2048");
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("moving a shared-head PR off master reevaluates the surviving master PR", async () => {
+  const result = await autoGate.evaluate({
+    github: fakeGateGithub({
+      associatedPullRequests: [
+        { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      ],
+    }),
+    context: fakeContext({
+      action: "edited",
+      changes: { base: { ref: { from: "master" } } },
+      pull_request: {
+        number: 1465,
+        state: "open",
+        base: { ref: "release" },
         head: { sha: HEAD_SHA },
       },
     }),
