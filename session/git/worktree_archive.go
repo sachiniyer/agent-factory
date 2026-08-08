@@ -286,13 +286,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 		var sourceCleanupPath string
 		var sourceCleanupPathVerified bool
 		if !pathExists(dest) {
-			if mErr := moveDirCrossDevice(src, dest); mErr != nil {
-				// The copier does not know which operation it is serving, so the
-				// operation is stamped here, at the one boundary that does.
-				var unreadable *unreadableSourceError
-				if errors.As(mErr, &unreadable) {
-					unreadable.operation = operation
-				}
+			if mErr := moveDirCrossDevice(src, dest, operation); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
 					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))
@@ -396,7 +390,11 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // common case when the archive root lives on a different device than the repo.
 // The copy preserves file contents, modes, and symlinks, so uncommitted changes
 // survive verbatim.
-func moveDirCrossDevice(src, dest string) (returnErr error) {
+// operation names the caller's action, purely for error text. It is stamped onto
+// an unreadableSourceError BEFORE that error is wrapped: fmt.Errorf formats and
+// CACHES the inner error's text at construction, so stamping after the wrap
+// changes the struct and not the message the user sees (#3087 review).
+func moveDirCrossDevice(src, dest, operation string) (returnErr error) {
 	renameErr := renamePath(src, dest)
 	if renameErr == nil {
 		return nil
@@ -413,6 +411,11 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 	}
 	copied, err := copyTreeWithIdentities(src, stagingPath)
 	if err != nil {
+		// Stamp first, wrap second. The order is the whole point.
+		var unreadable *unreadableSourceError
+		if errors.As(err, &unreadable) {
+			unreadable.operation = operation
+		}
 		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
 	}
 	defer copied.close()

@@ -59,7 +59,7 @@ func TestMoveDirCrossDevice_FarFutureMtimeIsNotWrapped(t *testing.T) {
 	t.Cleanup(func() { renamePath = original })
 
 	dest := filepath.Join(workspace, "dest")
-	require.NoError(t, moveDirCrossDevice(src, dest))
+	require.NoError(t, moveDirCrossDevice(src, dest, "move"))
 
 	copiedInfo, err := os.Lstat(filepath.Join(dest, "far-future.txt"))
 	require.NoError(t, err)

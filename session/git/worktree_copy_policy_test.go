@@ -2,6 +2,7 @@ package git
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,4 +98,31 @@ func TestRelocate_StampsTheOperationOntoAnUnreadableSource(t *testing.T) {
 		require.Contains(t, stamped.Error(), "cannot "+operation+" this worktree")
 		require.Contains(t, stamped.Error(), operation+"ing while silently omitting")
 	}
+}
+
+// The stamp must reach the USER-VISIBLE message, not just the struct.
+//
+// fmt.Errorf formats and CACHES the inner error's text when the wrapper is
+// constructed, so stamping the nested error afterwards updates the field and not
+// the message anyone reads. The first version of this fix did exactly that and
+// still printed "cannot copy this worktree" on a restore (#3087 review).
+func TestUnreadableSourceError_StampMustPrecedeWrapping(t *testing.T) {
+	// Wrapping BEFORE the stamp: the outer text is already frozen.
+	late := &unreadableSourceError{path: "/w/secret"}
+	wrappedFirst := fmt.Errorf("failed to copy worktree into private staging directory /s: %w", late)
+	late.operation = "restore"
+	require.NotContains(t, wrappedFirst.Error(), "cannot restore this worktree",
+		"precondition: a wrapper caches the inner text, so a late stamp cannot reach it")
+
+	// Stamping BEFORE the wrap, which is the order the copier now uses.
+	early := &unreadableSourceError{path: "/w/secret"}
+	early.operation = "restore"
+	wrappedAfter := fmt.Errorf("failed to copy worktree into private staging directory /s: %w", early)
+	require.Contains(t, wrappedAfter.Error(), "cannot restore this worktree",
+		"the operation must reach the message the user actually sees")
+
+	// And the typed error stays reachable through the wrapper either way.
+	var found *unreadableSourceError
+	require.True(t, errors.As(wrappedAfter, &found))
+	require.Equal(t, "restore", found.operation)
 }
