@@ -17,13 +17,22 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
-    /github\.event_name == 'workflow_dispatch' && github\.run_id/,
+    /concurrency:\s+group: auto-gate-\$\{\{ needs\.auto-gate\.outputs\.pr_number \}\}\s+cancel-in-progress: false/,
   );
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
   assert.match(workflow, /prNumber: explicitPrNumber/);
   assert.match(
     workflow,
-    /- name: Report gate decision[\s\S]*?continue-on-error: true[\s\S]*?github-token: \$\{\{ github\.token \}\}/,
+    /- name: Report gate decision[\s\S]*?github-token: \$\{\{ github\.token \}\}/,
+  );
+  assert.match(workflow, /const result = await autoGate\.evaluate\(/);
+  assert.match(
+    workflow,
+    /context\.eventName === "workflow_dispatch" && !result\.headSha/,
+  );
+  assert.match(
+    workflow,
+    /if \(context\.eventName === "workflow_dispatch"\) \{\s+throw error;/,
   );
 });
 
