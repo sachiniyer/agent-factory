@@ -186,8 +186,8 @@ func TestSSHCommandCompositionIgnoresAnUnreadableIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	missing := filepath.Join(t.TempDir(), "gone_id_ed25519")
 
-	cmd, err := sshCommandForConfig(
-		config.SSHConfig{Host: "h.example.com", IdentityFile: missing}, config.SSHHostKeyStrict)
+	cmd, err := sshCommandPinnedTo(
+		config.SSHConfig{Host: "h.example.com", IdentityFile: missing}, config.SSHHostKeyStrict, "")
 
 	require.NoError(t, err,
 		"restoreRuntimeCleanup composes while loading persisted handles; refusing here would capture a "+

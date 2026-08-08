@@ -128,7 +128,7 @@ func TestPinnedSessionStreamsStdinAndSeesEOF(t *testing.T) {
 // with no failing counterpart is untested.
 func hostKeyAliasPinnedCommand(t *testing.T, cfg config.SSHConfig, posture, dialAddr string) string {
 	t.Helper()
-	base, err := sshCommandForConfig(cfg, posture)
+	base, err := sshCommandPinnedTo(cfg, posture, "")
 	require.NoError(t, err)
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	require.NoError(t, err)

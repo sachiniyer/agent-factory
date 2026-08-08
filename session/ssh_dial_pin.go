@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -52,6 +53,71 @@ func SetSSHRelayBinaryForTest(path string) func() {
 // A var so a test can prove the bound is APPLIED without spending it —
 // TestTheDialProbeIsBounded shrinks it and separately asserts the shipped value.
 var sshDialProbeTimeout = sshDialTimeout
+
+// pinForProvision is the CREATE path's whole pin decision: the address to pin
+// this session to, or "" to connect by name exactly as af always has.
+//
+// Both ways of answering "" are fail-soft on purpose, and both are the same
+// lesson. A pin is an IMPROVEMENT on dialling by name; when af cannot compute one,
+// the session must still be created the way it was before rather than not at all.
+// #3092 is what the other choice looks like in production — a mechanism that
+// failed totally instead of partially, and took backend=ssh away from every Ubuntu
+// 20.04 and Debian 11 user until it was reverted.
+//
+// It lives here, as one function, so that decision is testable without a repo, a
+// config and a real sshd — see TestAnUnusableRelayBinaryFallsBackToDiallingTheName.
+func pinForProvision(host string, port int) string {
+	dialAddr := resolvePinnedSSHDialAddress(host, port)
+	if dialAddr == "" {
+		return ""
+	}
+	if err := verifySSHRelayBinary(); err != nil {
+		log.WarningLog.Printf("backend=ssh: not pinning this session to %s because af cannot run itself as "+
+			"ssh's ProxyCommand relay (%v); connecting by name instead, so a host with several addresses "+
+			"could still split this session across machines (#3086)", dialAddr, err)
+		return ""
+	}
+	return dialAddr
+}
+
+// verifySSHRelayBinary reports whether af can actually run itself as the
+// ProxyCommand relay.
+//
+// IT EXISTS SO A BROKEN PIN COSTS THE PIN, NOT THE BACKEND. A ProxyCommand that
+// cannot exec does not degrade: ssh has no transport at all, so every step dies on
+// its deadline with a timeout that names neither the relay nor the cause. That is
+// the shape of #3092 — a mechanism whose failure mode was total rather than
+// partial, discovered by users rather than by CI — and the lesson is not "avoid
+// that one option", it is that anything af adds to this command must fall back to
+// what worked before.
+//
+// So the CREATE path checks first and simply does not pin when the answer is no.
+// The TEARDOWN path deliberately does NOT get this treatment: there, a record
+// already knows which machine holds its workspace, so composing a name-based
+// command instead could reap a different one and retire the tombstone. It errors
+// and is retried. Fail-soft on the way in, fail-loud on the way out.
+//
+// os.Executable is reliable here in the case that actually happens — Go trims
+// Linux's " (deleted)" suffix, so a daemon whose binary was REPLACED in place by
+// an upgrade still names a path that exists and is the new af. A binary deleted
+// outright is what this catches.
+func verifySSHRelayBinary() error {
+	path, err := sshRelayBinary()
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file (mode %s)", path, info.Mode())
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("%s is not executable (mode %s)", path, info.Mode())
+	}
+	return nil
+}
 
 // resolvePinnedSSHDialAddress picks the ONE address this session will use, by
 // dialling the configured name once and reporting where the connection actually

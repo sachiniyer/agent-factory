@@ -66,8 +66,16 @@ import (
 // DECIDES, not by which ssh client runs.
 const sshNoConfigFile = "none"
 
-// sshCommandForConfig builds the ssh invocation for a repo's ssh.* settings and
-// the operator's host-key posture.
+// sshCommandPinnedTo builds the ssh invocation for a repo's ssh.* settings and the
+// operator's host-key posture, with the TCP dial pinned to one resolved address.
+//
+// THE ONE COMPOSER. Both the create path and the persisted-handle restore path
+// build through here, because a divergence between those two is how a legacy
+// handle stops being reapable (#3044) — and it is why an empty dialAddr composes
+// the ordinary name-based command rather than being a separate function. Every
+// caller with no address to pin wants exactly that: a cleanup handle written
+// before any of this, and a create whose one-off resolution could not settle. A
+// teardown that refused there would leak the workspace it exists to remove.
 //
 // IT TOUCHES NO FILESYSTEM STATE, which is what lets restoreRuntimeCleanup call
 // it while persisted handles are loading. Callers that need the accept-new store
@@ -97,32 +105,18 @@ const sshNoConfigFile = "none"
 //     SEPARATE create-path step for the same reason prepareSSHHostKeyStore is.
 //   - Host keys: the configured posture, mapped below.
 //
-// THE TARGET IS THE CONFIGURED NAME, never an address af resolved first. #3061
-// dialed a pinned literal address and restored the name with `-o HostKeyAlias`
-// (#3086); that rejected host certificates on every non-default port and removed
-// ssh's own multi-address fallback, and no alias value fixes both — see the block
-// on the NO HostKeyAlias line below. Pinning to one machine is done BELOW the
-// naming layer instead, with a ProxyCommand — see sshCommandPinnedTo.
-func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
-	return sshCommandPinnedTo(cfg, posture, "")
-}
-
-// sshCommandPinnedTo is sshCommandForConfig with the TCP dial pinned to one
-// address, which is how a session stops splitting across a multi-address host
-// (#3086).
+// THE TARGET IS THE CONFIGURED NAME, never an address af resolved first, PINNED OR
+// NOT. #3061 dialed a pinned literal address and restored the name with `-o
+// HostKeyAlias` (#3086); that rejected host certificates on every non-default port
+// and removed ssh's own multi-address fallback, and no alias value fixes both —
+// see the block on the NO HostKeyAlias line below.
 //
-// The destination stays the configured NAME whether or not an address is pinned —
-// the pin travels in `-o ProxyCommand`, which decides only where the socket goes.
-// So ssh computes the known_hosts key and the certificate principal from the name
-// exactly as it does unpinned, and constraint 2 of #3086 ("do not identify the
-// host by address") is satisfied by construction rather than by correction. See
-// internal/sshrelay for the measurement against a real certified sshd.
-//
-// AN EMPTY dialAddr COMPOSES THE ORDINARY NAME-BASED COMMAND, which is what every
-// caller that has no address wants: a persisted cleanup handle written before any
-// of this, and a create whose one-off resolution could not settle on an address.
-// A teardown that refused there would leak the workspace it exists to remove (the
-// #3044 lesson).
+// So the pin goes BELOW ssh's naming layer, in `-o ProxyCommand`, which decides
+// only where the socket goes. ssh computes the known_hosts key and the certificate
+// principal from the name exactly as it does unpinned, and constraint 2 of #3086
+// ("do not identify the host by address") is satisfied by construction rather than
+// by correction. See internal/sshrelay for the measurement against a real
+// certified sshd, and sshPinnedProxyCommand for what the option carries.
 func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {

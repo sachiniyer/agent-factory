@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -273,6 +274,71 @@ func TestUnresolvableHostFallsBackToDiallingTheName(t *testing.T) {
 	assert.Empty(t, resolvePinnedSSHDialAddress("no-such-host.invalid", 22),
 		"a probe that cannot answer must report no pin, so the composer emits the name-based command af has "+
 			"always emitted")
+}
+
+// A pin af cannot RUN must cost the pin, not the session.
+//
+// This is the failure #3118 hit in CI before it shipped, and it is worth stating
+// precisely because it is the exact shape of #3092. A ProxyCommand that cannot
+// exec does not degrade — ssh gets no transport at all, so every step dies on its
+// 30s deadline with a timeout naming neither the relay nor the cause. An unpinned
+// session in the same situation would simply have worked. So the create path
+// checks first and declines to pin.
+//
+// The reverse asymmetry is asserted by
+// TestUncomposablePinRetainsTheRecordRatherThanDiallingTheName: on TEARDOWN the
+// same condition must fail LOUD, because a record already knows which machine
+// holds its workspace and reaping a different one retires the tombstone for good.
+func TestAnUnusableRelayBinaryFallsBackToDiallingTheName(t *testing.T) {
+	// A listener that certainly answers, so the ONLY thing under test is the relay
+	// check — not whether the address resolved.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	// A usable relay pins.
+	usable := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(usable, []byte("#!/bin/sh\n"), 0o755))
+	restore := SetSSHRelayBinaryForTest(usable)
+	assert.Equal(t, "127.0.0.1", pinForProvision("127.0.0.1", port),
+		"an executable relay must pin, or this test proves nothing about the cases below")
+	restore()
+
+	dir := t.TempDir()
+	notThere := filepath.Join(dir, "deleted-af")
+	notExecutable := filepath.Join(dir, "not-executable")
+	require.NoError(t, os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0o644))
+
+	for name, path := range map[string]string{
+		// os.Executable trims Linux's " (deleted)" suffix, so a daemon whose binary
+		// was replaced in place still names a real file. One deleted outright does not.
+		"a binary that is gone":   notThere,
+		"a binary that is not +x": notExecutable,
+		"a directory, not a file": dir,
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer SetSSHRelayBinaryForTest(path)()
+			assert.Empty(t, pinForProvision("127.0.0.1", port),
+				"%s must cost the PIN, not the whole session: a ProxyCommand that cannot exec leaves ssh with "+
+					"no transport, so every step times out where an unpinned session would have connected", name)
+		})
+	}
+
+	// And a relay af cannot even name at all.
+	prev := sshRelayBinary
+	sshRelayBinary = func() (string, error) { return "", fmt.Errorf("no /proc/self/exe") }
+	defer func() { sshRelayBinary = prev }()
+	assert.Empty(t, pinForProvision("127.0.0.1", port))
 }
 
 // The probe is BOUNDED, because it is the one part of this that runs in-process.

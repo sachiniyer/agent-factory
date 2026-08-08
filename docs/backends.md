@@ -375,8 +375,24 @@ back (see [Archive & restore](#archive-restore)).
 > destination and had to restore the name with `HostKeyAlias`; that rejected host
 > certificates on every non-default port, and was reverted (#3086).
 >
-> If af cannot resolve the name at create time it says so in the log and connects
-> by name, exactly as it did before — a host af cannot look up still works.
+> **What this changes for an existing `ssh.host`, deliberately:** a session is tied
+> to the machine it was created on for its whole life. Before, if that machine went
+> away mid-session, the next step would resolve the name again and might reach a
+> different one and appear to keep working — which is the bug, not a feature: the
+> workspace it needed was on the first machine. Now that step fails against the
+> machine holding the workspace, which is the honest answer. Choosing a machine
+> still tries each address the name answers with, so a host with one dead address
+> and one live one is picked correctly at create time.
+>
+> Nothing else about connecting changes: same `known_hosts` matching, same
+> certificate principals, same keys, same `ssh_config`-is-not-read rule, and no new
+> software to install. There is nothing to migrate — existing sessions created
+> before this keep working and are cleaned up by name exactly as they were.
+>
+> If af cannot resolve the name at create time, or cannot run itself as the relay,
+> it says so in the log and connects by name, exactly as it did before — a host af
+> cannot look up still works. The pin is an improvement on connecting by name, so
+> when it cannot be applied af falls back rather than failing the session.
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can

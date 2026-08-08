@@ -184,6 +184,10 @@ func TestSSHBackendArchiveRestore(t *testing.T) {
 	afBin := buildStaticBinary(t)
 	restore := session.SetSSHSelfBinaryForTest(afBin)
 	defer restore()
+	// And the binary af runs locally as its ssh ProxyCommand (#3086) — see the
+	// companion note in backend_ssh_test.go.
+	restoreRelay := session.SetSSHRelayBinaryForTest(afBin)
+	defer restoreRelay()
 	image := buildSSHDRoundTripImage(t)
 
 	repo := setupGitRepo(t)

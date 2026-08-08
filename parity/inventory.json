@@ -397,7 +397,7 @@
         "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34; commands/legacy_tmuxguardcmd.go"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio\u2194TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes \u2014 running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "project.add",
@@ -1464,6 +1464,7 @@
       "af sessions tabs reorder": "session.tab.reorder",
       "af sessions watch": "session.watch",
       "af sessions whoami": "session.whoami",
+      "af ssh-relay": "meta.internal",
       "af tasks add": "task.add",
       "af tasks get": "task.get",
       "af tasks list": "task.list",
@@ -1746,6 +1747,7 @@
       "af sessions watch --interval": "session.watch",
       "af sessions watch --timeout": "session.watch",
       "af sessions whoami --help": "meta.discovery",
+      "af ssh-relay --help": "meta.internal",
       "af tasks --help": "meta.discovery",
       "af tasks --json": "cli.json-envelope",
       "af tasks --repo": "project.switch",

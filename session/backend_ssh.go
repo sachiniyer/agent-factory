@@ -174,7 +174,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if pinPort == 0 {
 		pinPort = sshDefaultPort
 	}
-	dialAddr := resolvePinnedSSHDialAddress(pinHost, pinPort)
+	dialAddr := pinForProvision(pinHost, pinPort)
 	sshCmd, err := sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, dialAddr)
 	if err != nil {
 		return ProvisionResult{}, err

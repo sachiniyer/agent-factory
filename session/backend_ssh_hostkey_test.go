@@ -22,7 +22,7 @@ import (
 
 func sshCmdFor(t *testing.T, cfg config.SSHConfig, posture string) string {
 	t.Helper()
-	cmd, err := sshCommandForConfig(cfg, posture)
+	cmd, err := sshCommandPinnedTo(cfg, posture, "")
 	require.NoError(t, err)
 	return cmd
 }
