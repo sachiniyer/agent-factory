@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -83,14 +84,17 @@ const sshNoConfigFile = "none"
 //     cannot disagree about an address (#3044).
 //   - IdentityFile: passed with -i when configured. Agent keys stay available,
 //     because the old authMethods offered identity-file keys AND agent keys —
-//     so IdentitiesOnly is deliberately NOT set.
+//     so IdentitiesOnly is deliberately NOT set. verifySSHIdentityFile is what
+//     keeps that from silently authenticating as something else, and it is a
+//     SEPARATE create-path step for the same reason prepareSSHHostKeyStore is.
 //   - Host keys: the configured posture, mapped below.
 //
-// dialAddr is the LITERAL address every step of this session must reach (#3086).
-// The caller resolves ssh.host once and passes the result here, so the pin lands
-// in the command itself and no individual step can forget it. Empty means "dial
-// the configured name", which is only correct where no address could be resolved
-// and refusing would leak a workspace — see restoreRuntimeCleanup.
+// THE TARGET IS THE CONFIGURED NAME, never an address af resolved first. #3061
+// dialed a pinned literal address and restored the name with `-o HostKeyAlias`
+// (#3086); that rejected host certificates on every non-default port and removed
+// ssh's own multi-address fallback, and no alias value fixes both — see the block
+// on the NO HostKeyAlias line below. The one exception is a teardown for a record
+// that was already provisioned under that pinning, in sshCommandForPinnedRecord.
 func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {
@@ -117,9 +121,20 @@ func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 		// The x/crypto client consulted ONE file, so this preserves today's
 		// semantics rather than tightening them.
 		//
+		// AND IT IS NOT REDUNDANT, which is exactly the distinction the deleted option
+		// below got wrong. `-F none` stops CONFIG FILES being read; it does not touch a
+		// COMPILED-IN default, and this option has one. Measured: `ssh -G -F none host`
+		// still reports `globalknownhostsfile /etc/ssh/ssh_known_hosts
+		// /etc/ssh/ssh_known_hosts2`, so without this a system-wide entry is consulted
+		// in ADDITION to the file af pinned. It is also accepted by OpenSSH 7.4
+		// (measured), so it costs no client compatibility.
+		//
 		// There is deliberately NO KnownHostsCommand=none beside it, and the reason
-		// is a shipped outage (#3092). That option arrived in OpenSSH 8.5, and an
-		// unrecognised -o is not a warning — ssh aborts during option parsing:
+		// is a shipped outage (#3092). Its default is EMPTY — absent from
+		// `ssh -G -F none` output entirely unless something sets it, and only a config
+		// file could — so under `-F none` it forbade nothing that was reachable. That
+		// option arrived in OpenSSH 8.5, and an unrecognised -o is not a warning — ssh
+		// aborts during option parsing:
 		//
 		//	$ ssh -o ThisOptionDoesNotExist=none host
 		//	command-line: line 0: Bad configuration option: thisoptiondoesnotexist
@@ -201,19 +216,31 @@ func verifySSHIdentityFile(cfg config.SSHConfig) error {
 			"(af refuses rather than silently falling back to your agent or default keys, "+
 			"which would authenticate as a different identity than the one configured)", path, why)
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return refuse(err)
-	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
+	// KIND FIRST, THEN READABILITY — this order is load-bearing, not tidiness.
+	// Opening a FIFO for reading BLOCKS until another process opens the write end,
+	// and there is no writer for a stray pipe in ~/.ssh. Checking the kind by
+	// OPENING first therefore hangs the provision forever instead of refusing it,
+	// which is strictly worse than the silent fallback this function exists to stop.
+	// Measured: the open-first form hung this package's own test on a named pipe
+	// until the suite was killed. A stat cannot block, so the kind is settled with
+	// one.
+	info, err := os.Stat(path)
 	if err != nil {
 		return refuse(err)
 	}
 	if !info.Mode().IsRegular() {
 		return refuse(fmt.Errorf("it is not a regular file (mode %s)", info.Mode()))
 	}
-	return nil
+
+	// Now prove the daemon can actually READ it — a mode-000 file stats perfectly
+	// well, and only an open distinguishes it. O_NONBLOCK because the stat above
+	// cannot rule out the path becoming a pipe in between: a daemon that refuses is
+	// recoverable, one that hangs is not.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return refuse(err)
+	}
+	return f.Close()
 }
 
 // sshCommandForPinnedRecord composes a TEARDOWN command for a persisted handle

@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,6 +133,25 @@ func TestSSHIdentityFileMustBeReadable(t *testing.T) {
 		require.NoError(t, os.WriteFile(unreadable, []byte("k"), 0o000))
 		assert.Error(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: unreadable}),
 			"an existing but unreadable file passes os.Stat and still cannot be loaded")
+	}
+
+	// A NAMED PIPE is the one that decides HOW the check is written, not just what
+	// it returns. os.Stat is happy with it and ssh cannot load it — but opening it
+	// to find that out BLOCKS until some process opens the write end, and nothing
+	// ever will. So this case fails an open-first implementation by HANGING rather
+	// than by returning the wrong answer, and a bounded subtest is what turns that
+	// into a red instead of a suite that never finishes.
+	fifo := filepath.Join(dir, "a-fifo")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+	done := make(chan error, 1)
+	go func() { done <- verifySSHIdentityFile(config.SSHConfig{IdentityFile: fifo}) }()
+	select {
+	case err := <-done:
+		assert.Error(t, err, "a named pipe is not a key, and os.Stat is happy with it")
+	case <-time.After(10 * time.Second):
+		t.Fatal("verifySSHIdentityFile BLOCKED on a named pipe: it must settle the file KIND with a " +
+			"stat before opening, because opening a FIFO waits for a writer that never comes — a hung " +
+			"provision is worse than the silent fallback this check exists to prevent")
 	}
 
 	// A real, readable, regular file passes — so the check moved nothing else.

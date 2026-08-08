@@ -50,6 +50,60 @@ func TestSSHCommandReadsNoConfigurationFileUnderEveryPosture(t *testing.T) {
 	}
 }
 
+// THE TWO ENDS OF THE IDENTITY-FILE SPLIT, asserted through the paths that
+// actually run rather than through the validator alone. A check on the right
+// function called from the wrong place is how this guarantee was lost once already
+// (#3092): it sat inside command composition, which the teardown-restore path also
+// calls, and turned a rotated key into an unreapable session.
+
+// The REAP end. restoreRuntimeCleanup reports an unusable handle by REJECTING it,
+// and instance_data.go then captures that rejection in unavailableRuntimeCleanup
+// for the daemon's whole lifetime — so a key that is missing, rotated, or on a home
+// directory not mounted yet must not be consulted here at all. The remote workspace
+// outlives the local key file, and a rejected handle leaks it with nothing left
+// pointing at it.
+func TestRestoredSSHTeardownSurvivesAMissingIdentityFile(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	data := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+		Config: config.SSHConfig{
+			Host:         "h.example.com",
+			IdentityFile: filepath.Join(t.TempDir(), "key-rotated-away"),
+		},
+		SessionDir:          "/home/af/.af-sessions/x.AbCdEf",
+		HostKeyVerification: config.SSHHostKeyStrict,
+	}}
+
+	backend, teardown, err := restoreRuntimeCleanup("missing-identity-restore", "ssh", data)
+	require.NoError(t, err,
+		"an ssh.identity_file that no longer exists locally must NOT make a persisted session "+
+			"unreapable — refusing a teardown protects nothing and leaks the workspace")
+	require.NotNil(t, teardown)
+	require.NotNil(t, backend)
+}
+
+// The CREATE end, driven through Provision rather than by calling the validator:
+// a validator nothing calls is precisely how this comes back. Hermetic — the
+// refusal lands before any dial, so no sshd is involved.
+func TestSSHProvisionRefusesAnUnreadableIdentityFile(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	repo := initTempGitRepo(t)
+	missing := filepath.Join(t.TempDir(), "typo-in-the-path")
+	writeInRepoConfig(t, repo, map[string]any{
+		"backend": "ssh",
+		"ssh":     map[string]any{"host": "build-box", "identity_file": missing},
+	})
+
+	_, err := sshRuntime{}.Provision(ProvisionSpec{RepoRoot: repo, Title: "s", CloneURL: "file:///x"})
+
+	require.Error(t, err, "a create with an unusable ssh.identity_file must not go on to authenticate as something else")
+	assert.Contains(t, err.Error(), missing,
+		"the error must NAME the path — the whole failure mode is a typo nobody can see")
+	assert.Contains(t, err.Error(), "identity_file",
+		"and name the setting, so the operator knows which key to fix")
+}
+
 // Composition must be a pure function of its arguments. restoreRuntimeCleanup
 // calls it while persisted instances are being LOADED, under a contract that I/O
 // happens only inside the returned teardown closure.
