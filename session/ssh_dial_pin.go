@@ -10,7 +10,17 @@ import (
 )
 
 // Resolving `ssh.host` to ONE address, once, so every later step of the session
-// reaches the same machine (#3086).
+// dials that same address (#3086).
+//
+// THAT IS AN ADDRESS, NOT A MACHINE, and the distinction is load-bearing rather
+// than pedantic. It closes DNS multiplicity — a round-robin record, several A
+// records, a dual-stack host — where each step resolving independently could reach
+// a different box. It does NOT close load-balancer multiplicity: an L4 VIP picks a
+// backend PER TCP CONNECTION, and af opens a separate connection for every
+// provision command, for the tunnel, and for the reap, so those can still land on
+// different machines. af cannot tell a VIP from an ordinary address, so there is
+// nothing to detect and nothing to warn about; docs/backends.md documents it as a
+// live limitation with the same workaround, and #3086 stays open for it.
 //
 // See internal/sshrelay for why the address is applied as a ProxyCommand rather
 // than as ssh's destination, and what the two previous attempts measured.

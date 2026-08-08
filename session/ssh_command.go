@@ -188,7 +188,7 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string) (string,
 		// name, and one string cannot be both.
 		//
 		// So the connection stays NAME-based: ssh resolves it, which is what keeps
-		// certificates valid — and when af pins a session to one machine it does so
+		// certificates valid — and when af pins a session to one address it does so
 		// with the ProxyCommand below, which leaves this destination alone.
 	}
 	// The pin, when there is one. A ProxyCommand replaces ssh's TCP connect, so the
@@ -354,7 +354,7 @@ func sshPinnedProxyCommand(dialAddr string, port int) (string, error) {
 	relay, err := sshRelayBinary()
 	if err != nil {
 		return "", fmt.Errorf("backend=ssh: cannot locate the af binary to relay this session's pinned "+
-			"connection to %s (af runs itself as ssh's ProxyCommand so every step reaches the one machine "+
+			"connection to %s (af runs itself as ssh's ProxyCommand so every step dials the one address "+
 			"the session was provisioned on): %w", dialAddr, err)
 	}
 	inner := shellQuoteSandbox(relay) +
