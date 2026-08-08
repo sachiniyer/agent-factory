@@ -579,6 +579,12 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		return fmt.Errorf("recover: %w", err)
 	}
 	resolvedProgram := resolveProgramForInstance(i)
+	// The base for the generated-args declaration, pinned BEFORE any af rewrite.
+	// resolvedProgram is reassigned below when a fresh worktree rebuild forces the
+	// exact-resume command, and that rewrite is af's own — so declaring against the
+	// rewritten value would omit `--resume <id>` and the boundary would refuse the
+	// recovered pane as carrying undeclared arguments (#3083 review).
+	declarationBase := resolvedProgram
 	if _, err := os.Stat(workDir); err != nil {
 		if !os.IsNotExist(err) {
 			// Surface the real cause instead of a generic tmux new-session error:
@@ -604,6 +610,10 @@ func (b *LocalBackend) respawn(i *Instance) error {
 						err, rebuildErr, freshErr),
 				}
 			}
+			// resolvedProgram becomes the exact-resume command, which is af's OWN
+			// rewrite — so the declaration base must stay the PRE-resume command or
+			// GeneratedArgsBetween describes only the later system-prompt additions and
+			// the account boundary refuses `--resume <id>` as undeclared (#3083 review).
 			resolvedProgram = exactProgram
 			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from recorded base and recreated branch %s", i.Title, workDir, gw.GetBranchName())
 		} else {
@@ -611,7 +621,7 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 	}
 
-	setLaunchProgram(ts, resolvedProgram, injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
+	setLaunchProgram(ts, declarationBase, injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}

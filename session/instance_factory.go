@@ -559,12 +559,22 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions) error {
 		return nil
 	}
 	agent := sessionenv.AgentForCommand(opts.Program)
-	if agent == "codex" {
+	// An EXPLICIT list, still, and claude is on it now because af's launch rewrite
+	// carries provenance the boundary verifies (#3083): the launcher declares
+	// `--session-id`/`--plugin-dir`, so the rewritten command is provable rather
+	// than refused. codex needs no declaration — af leaves its command unmodified.
+	//
+	// Deliberately NOT keyed on sessionenv.SupportsAccounts: that answers "does this
+	// agent have a credential-root variable", which is a different question from "can
+	// af prove its launch to the boundary". Keeping them separate is what makes an
+	// agent added to the first list unsupported here until someone checks the second,
+	// which fails in the safe direction (#3051, #3083).
+	if agent == "codex" || agent == "claude" {
 		return nil
 	}
 	return fmt.Errorf(
-		"account %q cannot be used with %s yet: af rewrites that agent's launch command (--session-id, "+
-			"--plugin-dir) and the account boundary only accepts an unmodified invocation, so the session "+
-			"would start and immediately exit; account scoping currently supports codex",
+		"account %q cannot be used with %s yet: af has not established that the account boundary can "+
+			"verify how it launches that agent, so the session could start on the ambient identity or exit "+
+			"immediately; account scoping currently supports claude and codex",
 		opts.Account, agent)
 }
