@@ -293,3 +293,31 @@ func TestGenerateAccountLaunchProof_TrustsOnlyTheBuiltInBase(t *testing.T) {
 	require.ErrorContains(t, err, "--model")
 	require.ErrorContains(t, err, "sonnet")
 }
+
+func TestGenerateAccountLaunchProof_DoesNotTrustRelativeDetectedExecutable(t *testing.T) {
+	base := "./bin/claude --dangerously-skip-permissions"
+	final := base + " --session-id " + genSessionID
+
+	proof, ok := GenerateAccountLaunchProof(base, final, []string{"--dangerously-skip-permissions"})
+	require.True(t, ok)
+	require.Empty(t, proof.TrustedExecutable,
+		"a relative executable is resolved again from the pane workdir and cannot inherit detection from the daemon cwd")
+	require.Equal(t, []string{"--dangerously-skip-permissions", "--session-id", genSessionID}, proof.GeneratedArgs,
+		"rejecting executable provenance must not lose the independently known af-authored words")
+	err := ValidateAccountCommand(final, Account{
+		Agent: "claude", Name: "work", TrustedExecutable: proof.TrustedExecutable,
+		GeneratedArgs: proof.GeneratedArgs,
+	})
+	require.Error(t, err, "the relative executable must fail closed before receiving the account directory")
+
+	bareBase := "claude --dangerously-skip-permissions"
+	bareFinal := bareBase + " --session-id " + genSessionID
+	bareProof, ok := GenerateAccountLaunchProof(bareBase, bareFinal, []string{"--dangerously-skip-permissions"})
+	require.True(t, ok)
+	require.Empty(t, bareProof.TrustedExecutable,
+		"the ordinary bare-name rule proves claude without manufacturing path provenance")
+	require.NoError(t, ValidateAccountCommand(bareFinal, Account{
+		Agent: "claude", Name: "work", TrustedExecutable: bareProof.TrustedExecutable,
+		GeneratedArgs: bareProof.GeneratedArgs,
+	}), "a bare agent name with only af-authored arguments remains safe")
+}

@@ -3,6 +3,7 @@ package sessionenv
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -41,8 +42,10 @@ func IsAccountCommandValidationError(err error) bool {
 
 // GenerateAccountLaunchProof describes the change from base to final. A nil
 // trustedBaseArgs means only words appended after base are af-authored. A
-// non-nil slice also trusts the exact base executable and the named trailing
-// base words. Any other base arguments stay undeclared.
+// non-nil slice also trusts an absolute base executable and the named trailing
+// base words. Relative executable spellings are resolved again from the pane's
+// workdir, so their arguments can be declared but their identity cannot. Any
+// other base arguments stay undeclared.
 func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (AccountLaunchProof, bool) {
 	added, ok := GeneratedArgsBetween(base, final)
 	if !ok {
@@ -70,8 +73,10 @@ func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (A
 			return AccountLaunchProof{}, false
 		}
 	}
-	proof.TrustedExecutable = words[0]
 	proof.GeneratedArgs = append(append([]string(nil), trustedBaseArgs...), added...)
+	if filepath.IsAbs(words[0]) {
+		proof.TrustedExecutable = words[0]
+	}
 	return proof, true
 }
 
