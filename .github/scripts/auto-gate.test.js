@@ -154,6 +154,18 @@ test("an absent required check blocks the gate", async () => {
   assert.match(result.reasons.join("\n"), /required check Lint.*missing/);
 });
 
+test("a head shared by multiple open master PRs blocks the commit-scoped decision", async () => {
+  const result = await evaluateGate({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" } },
+      { number: 2048, state: "open", base: { ref: "master" } },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), /head commit.*shared.*#2048.*commit-scoped/);
+});
+
 test("the synthetic decision check is not its own prerequisite", async () => {
   const result = await evaluateGate({
     checkRuns: [
@@ -553,6 +565,9 @@ function fakeGateGithub({
   reviews = [],
   reviewComments = [],
   files = [],
+  associatedPullRequests = [
+    { number: 1465, state: "open", base: { ref: "master" } },
+  ],
   requiredChecks = [
     { context: "Lint", integration_id: ACTIONS_APP_ID },
     { context: "Build", integration_id: ACTIONS_APP_ID },
@@ -564,6 +579,7 @@ function fakeGateGithub({
   const listComments = function listComments() {};
   const listReviews = function listReviews() {};
   const listReviewComments = function listReviewComments() {};
+  const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
   const merge = async function merge(options) {
     github.mergedWith = options;
     return { data: { sha: "merge-sha" } };
@@ -583,6 +599,7 @@ function fakeGateGithub({
     [listComments, issueComments],
     [listReviews, reviews],
     [listReviewComments, reviewComments],
+    [listPullRequestsAssociatedWithCommit, associatedPullRequests],
   ]);
 
   const github = {
@@ -593,7 +610,7 @@ function fakeGateGithub({
       actions: { createWorkflowDispatch: async () => {} },
       checks: { create: createCheck, listForRef, update: updateCheck },
       issues: { listComments },
-      repos: { listCommitStatusesForRef },
+      repos: { listCommitStatusesForRef, listPullRequestsAssociatedWithCommit },
       pulls: { listFiles, listReviews, listReviewComments, merge },
     },
     graphql: async () => ({

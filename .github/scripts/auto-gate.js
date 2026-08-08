@@ -35,7 +35,10 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
 }
 
 async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true }) {
-  const number = prNumber || (await findPullRequestNumber({ github, context, core }));
+  const pullAssociationCache = new Map();
+  const number =
+    prNumber ||
+    (await findPullRequestNumber({ github, context, core, pullAssociationCache }));
 
   if (!number) {
     return finish(core, setOutputs, {
@@ -78,6 +81,21 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push(`mergeability is blocked (${pr.mergeable}/${pr.mergeStateStatus})`);
   } else if (pr.mergeable !== "MERGEABLE") {
     reasons.push(`mergeability is still ${pr.mergeable}`);
+  }
+
+  const associatedPulls = await listOpenMasterPullRequestsForCommit({
+    github,
+    context,
+    sha: pr.headRefOid,
+    pullAssociationCache,
+  });
+  const otherPulls = associatedPulls.filter((pull) => pull.number !== pr.number);
+  if (otherPulls.length > 0) {
+    reasons.push(
+      `head commit ${pr.headRefOid} is shared with open master ` +
+        `PRs ${otherPulls.map((pull) => `#${pull.number}`).join(", ")}; ` +
+        "Auto Gate decisions are commit-scoped",
+    );
   }
 
   const files = await listPullRequestFiles({ github, context, number: pr.number });
@@ -232,7 +250,7 @@ async function merge({ github, context, core, prNumber }) {
   }
 }
 
-async function findPullRequestNumber({ github, context, core }) {
+async function findPullRequestNumber({ github, context, core, pullAssociationCache }) {
   const payload = context.payload;
 
   if (payload.pull_request?.number) {
@@ -255,6 +273,29 @@ async function findPullRequestNumber({ github, context, core }) {
     return null;
   }
 
+  const openMasterPulls = await listOpenMasterPullRequestsForCommit({
+    github,
+    context,
+    sha,
+    pullAssociationCache,
+  });
+  if (openMasterPulls.length > 1) {
+    core.warning(`Found multiple open master PRs for ${sha}; evaluating PR #${openMasterPulls[0].number}.`);
+  }
+
+  return openMasterPulls[0]?.number || null;
+}
+
+async function listOpenMasterPullRequestsForCommit({
+  github,
+  context,
+  sha,
+  pullAssociationCache,
+}) {
+  if (pullAssociationCache?.has(sha)) {
+    return pullAssociationCache.get(sha);
+  }
+
   const { owner, repo } = context.repo;
   const pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
     owner,
@@ -262,13 +303,11 @@ async function findPullRequestNumber({ github, context, core }) {
     commit_sha: sha,
     per_page: 100,
   });
-
-  const openMasterPulls = pulls.filter((pr) => pr.state === "open" && pr.base?.ref === "master");
-  if (openMasterPulls.length > 1) {
-    core.warning(`Found multiple open master PRs for ${sha}; evaluating PR #${openMasterPulls[0].number}.`);
-  }
-
-  return openMasterPulls[0]?.number || null;
+  const openMasterPulls = pulls.filter(
+    (pull) => pull.state === "open" && pull.base?.ref === "master",
+  );
+  pullAssociationCache?.set(sha, openMasterPulls);
+  return openMasterPulls;
 }
 
 async function getPullRequest({ github, context, number }) {
