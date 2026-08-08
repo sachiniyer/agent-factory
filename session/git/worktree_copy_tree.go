@@ -28,7 +28,7 @@ import (
 // nonblocking and no-follow, and every destination node is created exclusively.
 // This is only reached on the cross-device fallback.
 func copyTree(src, dest string) error {
-	copied, err := copyTreeWithIdentities(src, dest)
+	copied, err := copyTreeWithIdentities(src, dest, refuseUnreadable)
 	if copied != nil {
 		copied.close()
 	}
@@ -171,7 +171,7 @@ func directoryRoutePath(rootPath string, components []copiedEntry) string {
 	return path
 }
 
-func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
+func copyTreeWithIdentities(src, dest string, policy unreadablePolicy) (*copiedTreeIdentities, error) {
 	source, sourceInfo, err := openDirectoryPath(src, "source")
 	if err != nil {
 		return nil, err
@@ -239,7 +239,7 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		destinationIdentity:       destinationIdentity,
 	}
 
-	copied.root, err = copyDirectoryContents(source, destination, src, dest)
+	copied.root, err = copyDirectoryContents(source, destination, src, dest, policy)
 	if err != nil {
 		partialManifest := destinationCleanupManifest(copied.root)
 		cleanupErr := removeOpenedDirectory(destParent, destName, dest, destination, &partialManifest)
@@ -252,7 +252,7 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 	return copied, nil
 }
 
-func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) (copiedDirectory, error) {
+func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string, policy unreadablePolicy) (copiedDirectory, error) {
 	root := copiedDirectory{}
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
@@ -293,6 +293,7 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			relativeRoutePath(components),
 			links,
 			xattrs,
+			policy,
 		)
 		if err == nil {
 			// The level is complete, and nothing is ever written directly into
@@ -329,6 +330,7 @@ func copyDirectoryLevel(
 	relativeDirectory string,
 	links map[pathIdentity]copiedFileLink,
 	xattrs *xattrDestination,
+	policy unreadablePolicy,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -446,6 +448,18 @@ func copyDirectoryLevel(
 			}
 		default:
 			err = unsupportedSourceTypeError(childSourcePath, uint32(stat.Mode))
+		}
+		// An unreadable source under a policy that permits skipping becomes a
+		// RECORDED absence rather than a failure. Nothing was created, so no
+		// destination node exists for it; the entry carries the name and the source
+		// identity so validation can account for it, and the reason so the report
+		// can name it. Under refuseUnreadable — the zero value, and what move and
+		// restore always use — this branch never runs and the error propagates
+		// (#3066).
+		var unreadable *unreadableSourceError
+		if errors.As(err, &unreadable) && policy == skipUnreadable {
+			entry = copiedEntry{name: name, source: inspected, absentReason: "unreadable"}
+			err = nil
 		}
 		// A helper names its entry as soon as it has created the destination
 		// node and learned its identity, so record it even when the entry

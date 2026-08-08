@@ -71,3 +71,23 @@ func (e *unreadableSourceError) Error() string {
 }
 
 func (e *unreadableSourceError) Unwrap() error { return e.err }
+
+// unreadablePolicyFor maps an operation to what it may do with a source file it
+// cannot read.
+//
+// Only "archive" may skip, and the mapping is an ALLOWLIST rather than a
+// denylist: anything else — move, restore, or an operation added later that
+// forgets to appear here — gets refuseUnreadable. A new caller inherits refusal,
+// which is the same property that makes refuseUnreadable the zero value.
+//
+// The asymmetry is not stylistic. An archive leaves the original worktree where
+// it was, so a skipped file still exists somewhere. A move deletes the source on
+// success and a restore deletes the quarantined archive, so a file skipped there
+// is gone — which is exactly the silent permanent data loss the first attempt at
+// this feature shipped (#3066).
+func unreadablePolicyFor(operation string) unreadablePolicy {
+	if operation == "archive" {
+		return skipUnreadable
+	}
+	return refuseUnreadable
+}

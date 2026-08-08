@@ -720,7 +720,7 @@ func TestMoveDirCrossDevice_SourceRootReplacementIsNotDeleted(t *testing.T) {
 	}
 	t.Cleanup(func() { copyTreeBeforeSourceOpen = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err, "cleanup must fail closed when src no longer identifies the copied root")
 	assert.Contains(t, err.Error(), "source directory changed")
 	replacement, readErr := os.ReadFile(filepath.Join(src, "replacement.txt"))
@@ -759,7 +759,7 @@ func TestMoveDirCrossDevice_DestinationReplacementDoesNotCommit(t *testing.T) {
 	}
 	t.Cleanup(func() { moveDirBeforeDestCommit = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err, "a replacement destination must not be committed")
 	assert.Contains(t, err.Error(), "destination directory changed")
 	assert.FileExists(t, filepath.Join(src, "original.txt"), "source must remain when destination identity is lost")
@@ -793,7 +793,7 @@ func TestMoveDirCrossDevice_CopiedDescendantReplacementDoesNotCommit(t *testing.
 	}
 	t.Cleanup(func() { moveDirBeforeDestCommit = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err, "a replacement descendant must prevent destination commit")
 	assert.Contains(t, err.Error(), "destination tree changed")
 	assert.FileExists(t, filepath.Join(src, "sub", "original.txt"), "source must be restored intact")
@@ -827,7 +827,7 @@ func TestMoveDirCrossDevice_SourceReplacementAtCleanupIsNotDeleted(t *testing.T)
 	}
 	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err, "cleanup must fail closed when the source endpoint changes")
 	assert.Contains(t, err.Error(), "source directory changed")
 	assert.FileExists(t, filepath.Join(src, "replacement.txt"), "the uncopied replacement must not be deleted")
@@ -855,7 +855,7 @@ func TestMoveDirCrossDevice_DestinationParentReopenFailureRestoresSource(t *test
 	}
 	t.Cleanup(func() { moveDirBeforeDestParentOpen = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err, "the removed destination parent must abort the move")
 	assert.FileExists(t, filepath.Join(src, "original.txt"), "source must be restored after destination-parent reopen fails")
 }
@@ -889,7 +889,7 @@ func TestMoveDirCrossDevice_SourceParentReplacementInvalidatesRollback(t *testin
 	}
 	t.Cleanup(func() { moveDirBeforeDestParentOpen = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "source parent path changed")
 	assert.FileExists(t, filepath.Join(movedParent, "src", "original.txt"),
@@ -925,7 +925,7 @@ func TestMoveDirCrossDevice_ChangedPublishedDescendantIsNotDeleted(t *testing.T)
 	}
 	t.Cleanup(func() { moveDirAfterDestCommit = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err)
 	assert.FileExists(t, filepath.Join(src, "sub", "original.txt"), "source must be restored")
 	assert.FileExists(t, filepath.Join(dest, "sub", "replacement.txt"),
@@ -957,7 +957,7 @@ func TestMoveDirCrossDevice_FastRenameParentReplacementRollsBack(t *testing.T) {
 	}
 	t.Cleanup(func() { renamePathAfterCommit = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "destination parent path changed")
 	assert.FileExists(t, filepath.Join(src, "original.txt"), "failed fast rename must restore source")
@@ -990,7 +990,7 @@ func TestMoveDirCrossDevice_SecuredSourceOpenFailureDoesNotStrandSource(t *testi
 		_ = os.Chmod(src, 0700)
 	})
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	if err != nil {
 		_, statErr := os.Lstat(src)
 		require.NoError(t, statErr, "a failed move must restore the secured source pathname")
@@ -1021,7 +1021,7 @@ func TestMoveDirCrossDevice_PrePublicationFailureCleansPrivateStaging(t *testing
 	moveDirBeforeSourceCommit = func(string) error { return errors.New("forced failure after copy") }
 	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err)
 	entries, readErr := os.ReadDir(destinationParent)
 	require.NoError(t, readErr)
@@ -1061,7 +1061,7 @@ func TestMoveDirCrossDevice_ChangedStagingDescendantIsNotDeleted(t *testing.T) {
 	}
 	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
 
-	require.Error(t, moveDirCrossDevice(src, dest, "move"))
+	require.Error(t, moveDirCrossDevice(src, dest, "move", refuseUnreadable))
 	assert.FileExists(t, filepath.Join(stagingPath, "sub", "replacement.txt"))
 	assert.FileExists(t, filepath.Join(strandedCopy, "original.txt"))
 	assert.FileExists(t, filepath.Join(src, "sub", "original.txt"))
@@ -1091,7 +1091,7 @@ func TestMoveDirCrossDevice_SourceCleanupParentReplacementIsUnverified(t *testin
 	}
 	t.Cleanup(func() { removeDirectoryTree = originalRemoveTree })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	var cleanupErr *copiedWorktreeSourceCleanupError
 	require.ErrorAs(t, err, &cleanupErr)
 	assert.False(t, cleanupErr.cleanupPathVerified,
@@ -1133,7 +1133,7 @@ func TestMoveDirCrossDevice_SourceCleanupReplacementIsNotDeleted(t *testing.T) {
 	}
 	t.Cleanup(func() { removeDirectoryTree = originalRemoveTree })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	assert.NotEmpty(t, replacementPath, "the test must reach secured-source cleanup")
 	assert.Error(t, err, "losing the secured endpoint must be reported as an indeterminate cleanup")
 	assert.FileExists(t, filepath.Join(replacementPath, "replacement.txt"),
@@ -1156,7 +1156,7 @@ func TestMoveDirCrossDevice_CopyFailureCleansPrivateStaging(t *testing.T) {
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = originalRename })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err)
 	entries, readErr := os.ReadDir(destinationParent)
 	require.NoError(t, readErr)
@@ -1182,7 +1182,7 @@ func TestMoveDirCrossDevice_InitialStagingOpenFailureCleansCreatedName(t *testin
 	t.Cleanup(func() { renamePath = originalRename })
 	originalUmask := syscall.Umask(0777)
 	t.Cleanup(func() { syscall.Umask(originalUmask) })
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	syscall.Umask(originalUmask)
 
 	require.Error(t, err)
@@ -1217,7 +1217,7 @@ func TestMoveDirCrossDevice_BoundsDescriptorsAcrossDeepTree(t *testing.T) {
 	}
 	require.NoError(t, unix.Setrlimit(unix.RLIMIT_NOFILE, &limited))
 	t.Cleanup(func() { _ = unix.Setrlimit(unix.RLIMIT_NOFILE, &originalLimit) })
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.NoError(t, unix.Setrlimit(unix.RLIMIT_NOFILE, &originalLimit))
 
 	require.NoError(t, err, "valid deep moves must not exhaust descriptors")
@@ -1237,7 +1237,7 @@ func TestMoveDirCrossDevice_UnsupportedNoReplaceFailsClosed(t *testing.T) {
 	renamePath = func(_, _ string) error { return unix.ENOSYS }
 	t.Cleanup(func() { renamePath = originalRename })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.ErrorIs(t, err, unix.ENOSYS)
 	assert.FileExists(t, filepath.Join(src, "tracked.txt"), "unsupported atomic rename must preserve source")
 	assert.NoDirExists(t, dest, "unsupported atomic rename must not create destination")
@@ -1257,7 +1257,7 @@ func TestMoveDirCrossDevice_LongLeafFitsPrivateNames(t *testing.T) {
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = originalRename })
 
-	require.NoError(t, moveDirCrossDevice(src, dest, "move"))
+	require.NoError(t, moveDirCrossDevice(src, dest, "move", refuseUnreadable))
 	assert.FileExists(t, filepath.Join(dest, "tracked.txt"))
 	assert.NoDirExists(t, src)
 }
@@ -1279,14 +1279,14 @@ func TestMoveDirCrossDevice_CrossDeviceModesMatchSameDeviceRename(t *testing.T) 
 	writeModeProbeTree(t, copiedSource)
 
 	renamedDest := filepath.Join(workspace, "renamed-dest")
-	require.NoError(t, moveDirCrossDevice(renamedSource, renamedDest, "move"),
+	require.NoError(t, moveDirCrossDevice(renamedSource, renamedDest, "move", refuseUnreadable),
 		"same-device move must take the rename fast path")
 
 	originalRename := renamePath
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = originalRename })
 	copiedDest := filepath.Join(workspace, "copied-dest")
-	require.NoError(t, moveDirCrossDevice(copiedSource, copiedDest, "move"))
+	require.NoError(t, moveDirCrossDevice(copiedSource, copiedDest, "move", refuseUnreadable))
 
 	assert.Equal(t, collectTreeDescription(t, renamedDest), collectTreeDescription(t, copiedDest),
 		"the cross-device copy must land the same permissions the same-device rename does")
@@ -1380,7 +1380,7 @@ func TestMoveDirCrossDevice_CopiesIntoAReadOnlySourceDirectory(t *testing.T) {
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = originalRename })
 
-	require.NoError(t, moveDirCrossDevice(src, dest, "move"),
+	require.NoError(t, moveDirCrossDevice(src, dest, "move", refuseUnreadable),
 		"a read-only source directory must not fail the cross-device move")
 	assert.NoDirExists(t, src, "the source must be gone after a successful move")
 
@@ -1419,7 +1419,7 @@ func TestMoveDirCrossDevice_CleansStagingContainingAReadOnlyDirectory(t *testing
 	moveDirBeforeSourceCommit = func(string) error { return errors.New("forced failure after the copy") }
 	t.Cleanup(func() { moveDirBeforeSourceCommit = originalHook })
 
-	err := moveDirCrossDevice(src, dest, "move")
+	err := moveDirCrossDevice(src, dest, "move", refuseUnreadable)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "failed to clean private staging tree",
 		"a read-only directory in the copy must not defeat staging cleanup")

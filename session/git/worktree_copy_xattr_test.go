@@ -160,7 +160,7 @@ func TestCopyTree_CopiesXattrsOntoReadOnlyNodes(t *testing.T) {
 	require.NoError(t, unix.Setxattr(readOnlyDir, "user.af_lockeddir", []byte("kept"), 0))
 	require.NoError(t, os.Chmod(readOnlyDir, 0o555))
 
-	require.NoError(t, moveDirCrossDevice(source, destination, "move"))
+	require.NoError(t, moveDirCrossDevice(source, destination, "move", refuseUnreadable))
 
 	require.Equal(t, []byte("kept"), readAttr(t, filepath.Join(destination, "locked.txt"), "user.af_locked"),
 		"a 0444 file must keep its attributes — the mode must not be applied before they are written")
@@ -191,7 +191,7 @@ func TestCopyTree_DropsDestinationOnlyXattrs(t *testing.T) {
 		t.Skipf("this filesystem does not support user xattrs: %v", err)
 	}
 
-	require.NoError(t, moveDirCrossDevice(source, destination, "move"))
+	require.NoError(t, moveDirCrossDevice(source, destination, "move", refuseUnreadable))
 	copied := filepath.Join(destination, "plain.txt")
 
 	// Stand in for the inherited attribute, then re-run the copy step against a source
@@ -201,7 +201,7 @@ func TestCopyTree_DropsDestinationOnlyXattrs(t *testing.T) {
 	require.Contains(t, names, "user.af_inherited")
 
 	second := filepath.Join(filepath.Dir(destination), "dst2")
-	require.NoError(t, moveDirCrossDevice(destination, second, "move"))
+	require.NoError(t, moveDirCrossDevice(destination, second, "move", refuseUnreadable))
 	// The second copy's source DID have it, so it is carried — the prune must remove
 	// only what the source lacks, never what it has.
 	require.Contains(t, listAttrs(t, filepath.Join(second, "plain.txt")), "user.af_inherited")

@@ -234,7 +234,7 @@ func TestMoveDirCrossDevice_PostCreateFailureCleansPrivateStaging(t *testing.T) 
 	}
 	t.Cleanup(func() { copyTreeAfterDestCreate = originalHook })
 
-	err := moveDirCrossDevice(src, filepath.Join(destinationParent, "dest"), "move")
+	err := moveDirCrossDevice(src, filepath.Join(destinationParent, "dest"), "move", refuseUnreadable)
 	require.ErrorIs(t, err, syscall.ENOSPC)
 	entries, readErr := os.ReadDir(destinationParent)
 	require.NoError(t, readErr)
@@ -275,7 +275,7 @@ func TestMoveDirCrossDevice_InspectFailureNeverRestoresAReplacement(t *testing.T
 	}
 	t.Cleanup(func() { moveDirInspectClaimedSource = originalInspect })
 
-	err := moveDirCrossDevice(src, filepath.Join(destinationParent, "dest"), "move")
+	err := moveDirCrossDevice(src, filepath.Join(destinationParent, "dest"), "move", refuseUnreadable)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "restored it to",
 		"a replacement must never be reported as the restored source")

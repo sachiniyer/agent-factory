@@ -286,7 +286,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 		var sourceCleanupPath string
 		var sourceCleanupPathVerified bool
 		if !pathExists(dest) {
-			if mErr := moveDirCrossDevice(src, dest, operation); mErr != nil {
+			if mErr := moveDirCrossDevice(src, dest, operation, unreadablePolicyFor(operation)); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
 					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))
@@ -394,7 +394,7 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // an unreadableSourceError BEFORE that error is wrapped: fmt.Errorf formats and
 // CACHES the inner error's text at construction, so stamping after the wrap
 // changes the struct and not the message the user sees (#3087 review).
-func moveDirCrossDevice(src, dest, operation string) (returnErr error) {
+func moveDirCrossDevice(src, dest, operation string, policy unreadablePolicy) (returnErr error) {
 	renameErr := renamePath(src, dest)
 	if renameErr == nil {
 		return nil
@@ -409,7 +409,7 @@ func moveDirCrossDevice(src, dest, operation string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	copied, err := copyTreeWithIdentities(src, stagingPath)
+	copied, err := copyTreeWithIdentities(src, stagingPath, policy)
 	if err != nil {
 		// Stamp first, wrap second. The order is the whole point.
 		var unreadable *unreadableSourceError

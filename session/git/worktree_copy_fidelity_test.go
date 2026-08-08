@@ -55,7 +55,7 @@ func TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded(t *testing.T
 	writeFidelityProbeTree(t, renamedSource)
 	before := describeFidelity(t, renamedSource)
 	renamedDest := filepath.Join(workspace, "renamed-dest")
-	require.NoError(t, moveDirCrossDevice(renamedSource, renamedDest, "move"),
+	require.NoError(t, moveDirCrossDevice(renamedSource, renamedDest, "move", refuseUnreadable),
 		"same-device move must take the rename fast path")
 	afterRename := describeFidelity(t, renamedDest)
 
@@ -65,7 +65,7 @@ func TestMoveDirCrossDevice_CopyDivergesFromRenameOnlyWhereRecorded(t *testing.T
 	renamePath = func(_, _ string) error { return syscall.EXDEV }
 	t.Cleanup(func() { renamePath = originalRename })
 	copiedDest := filepath.Join(workspace, "copied-dest")
-	require.NoError(t, moveDirCrossDevice(copiedSource, copiedDest, "move"))
+	require.NoError(t, moveDirCrossDevice(copiedSource, copiedDest, "move", refuseUnreadable))
 	afterCopy := describeFidelity(t, copiedDest)
 
 	// The rename leg is the oracle, and this is what makes it one: if rename
