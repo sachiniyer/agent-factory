@@ -148,13 +148,17 @@ jobs:
             if (!result.headSha) {
               throw new Error(result.summary);
             }
-            await autoGate.reportDecision({
-              github,
-              context,
-              core,
-              result,
-              manual: context.eventName === "workflow_dispatch",
-            });
+            if (typeof autoGate.reportDecision === "function") {
+              await autoGate.reportDecision({
+                github,
+                context,
+                core,
+                result,
+                manual: context.eventName === "workflow_dispatch",
+              });
+            } else {
+              core.notice("Decision reporting activates after this workflow lands on master.");
+            }
 
       - name: Report disabled merge
         if: steps.decision.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED != 'true'

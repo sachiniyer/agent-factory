@@ -28,6 +28,10 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /const result = await autoGate\.evaluate\(/);
   assert.match(
     workflow,
+    /if \(typeof autoGate\.reportDecision === "function"\)/,
+  );
+  assert.match(
+    workflow,
     /context\.eventName === "workflow_dispatch" && !result\.headSha/,
   );
   assert.match(
