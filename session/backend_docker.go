@@ -398,8 +398,15 @@ func (p *dockerProvisioner) runContainer() error {
 	// The account's mount and its config var. Placed before run_args like the
 	// credential mounts, so an operator's own run_args still come last.
 	args = append(args, p.accountMount...)
-	args = append(args, p.accountEnv...)
 	args = append(args, p.runArgs...)
+	// The account's env goes LAST, after run_args, and that ordering is the boundary
+	// rather than a preference. docker.run_args is repository-controlled and checked
+	// in; appended after the account it could set `-e CODEX_HOME=/another/home` and
+	// silently move the agent off the account the operator named, which is the
+	// wrong-identity failure this feature exists to prevent. Docker gives the LAST
+	// -e for a name precedence, so putting the account there makes it dominate an
+	// assembly that is otherwise additive by design.
+	args = append(args, p.accountEnv...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
 	out, err := p.docker(dockerProvisionStepTimeout, args...)

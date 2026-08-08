@@ -131,6 +131,15 @@ func accountMountAndEnv(account sessionenv.Account) (mount []string, env []strin
 	if !ok {
 		return nil, nil
 	}
-	return []string{"-v", account.Dir + ":" + dockerAccountHome},
+	// ABSOLUTE, always. Docker reads a relative -v source by its own rules — it is
+	// not resolved against af's working directory — so a relative AGENT_FACTORY_HOME
+	// (a supported configuration) would bind something that is not the account, or
+	// create a volume named after the path. Abs failing means af cannot say where
+	// the account is, which must refuse rather than mount a guess.
+	source, err := filepath.Abs(account.Dir)
+	if err != nil {
+		return nil, nil
+	}
+	return []string{"-v", source + ":" + dockerAccountHome},
 		[]string{"-e", configVar + "=" + dockerAccountHome}
 }
