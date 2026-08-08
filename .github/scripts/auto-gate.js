@@ -1,6 +1,8 @@
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
+const AUTO_GATE_DECISION_CHECK = "Auto Gate decision";
+const GITHUB_ACTIONS_APP_ID = 15368;
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
@@ -127,6 +129,62 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons,
     notes,
   });
+}
+
+async function reportDecision({ github, context, core, result, manual = false }) {
+  if (!result?.headSha || !result.prNumber) {
+    core.info("Auto Gate decision was not reported because no pull-request head was resolved.");
+    return { state: "unreported", priorDecision: false };
+  }
+
+  const { owner, repo } = context.repo;
+  const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+    owner,
+    repo,
+    ref: result.headSha,
+    per_page: 100,
+  });
+  const priorDecision = checkRuns
+    .filter(
+      (run) =>
+        run.name === AUTO_GATE_DECISION_CHECK && run.app?.id === GITHUB_ACTIONS_APP_ID,
+    )
+    .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+  const state =
+    manual && !priorDecision ? "never-ran" : result.shouldMerge ? "pass" : "waiting";
+  const title =
+    state === "never-ran"
+      ? `NEVER_RAN: no prior decision; recovery ${result.shouldMerge ? "passed" : "is waiting"}`
+      : result.shouldMerge
+        ? "PASS: Auto Gate requirements are satisfied"
+        : "WAITING: Auto Gate requirements are not yet satisfied";
+
+  const decision = {
+    status: "completed",
+    conclusion: result.shouldMerge ? "success" : "failure",
+    output: {
+      title,
+      summary: result.summary,
+    },
+  };
+  if (priorDecision) {
+    await github.rest.checks.update({
+      owner,
+      repo,
+      check_run_id: priorDecision.id,
+      ...decision,
+    });
+  } else {
+    await github.rest.checks.create({
+      owner,
+      repo,
+      head_sha: result.headSha,
+      name: AUTO_GATE_DECISION_CHECK,
+      ...decision,
+    });
+  }
+  core.notice(`${title} for PR #${result.prNumber}.`);
+  return { state, priorDecision: Boolean(priorDecision) };
 }
 
 async function merge({ github, context, core, prNumber }) {
@@ -649,6 +707,7 @@ function formatError(error) {
 module.exports = {
   evaluate,
   merge,
+  reportDecision,
   __test: {
     evaluateCodex,
     evaluateRequiredChecks,

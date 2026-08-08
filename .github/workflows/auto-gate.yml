@@ -11,17 +11,25 @@ on:
   pull_request:
     types: [labeled]
   status:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to evaluate
+        required: true
+        type: number
 
 permissions:
   contents: write
   pull-requests: write
   actions: write
-  checks: read
+  checks: write
   statuses: read
   issues: write
 
 concurrency:
-  group: auto-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.check_suite.pull_requests[0].number || github.event.check_suite.head_sha || github.event.sha || github.run_id }}
+  # Manual recovery must not be displaced by an event burst. Event-driven runs
+  # still coalesce by PR/SHA, with the newest pending evaluation retained.
+  group: auto-gate-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.number || github.event.issue.number || github.event.check_suite.pull_requests[0].number || github.event.check_suite.head_sha || github.event.sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -49,6 +57,8 @@ jobs:
       - name: Evaluate gate
         id: evaluate
         uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || '' }}
         with:
           github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
           script: |
@@ -61,6 +71,7 @@ jobs:
               core.notice(summary);
               core.setOutput("pr_number", "");
               core.setOutput("should_merge", "false");
+              core.setOutput("head_sha", "");
               core.setOutput("docs_changed", "false");
               core.setOutput("summary", summary);
               return;
@@ -68,7 +79,20 @@ jobs:
 
             try {
               const autoGate = require(helperPath);
-              await autoGate.evaluate({ github, context, core });
+              const rawPrNumber = process.env.PR_NUMBER.trim();
+              const explicitPrNumber = rawPrNumber ? Number(rawPrNumber) : undefined;
+              if (
+                rawPrNumber &&
+                (!Number.isSafeInteger(explicitPrNumber) || explicitPrNumber <= 0)
+              ) {
+                throw new Error(`Invalid PR number: ${rawPrNumber}`);
+              }
+              await autoGate.evaluate({
+                github,
+                context,
+                core,
+                prNumber: explicitPrNumber,
+              });
             } catch (error) {
               const message = error && error.message ? error.message : String(error);
               const summary = `BLOCKED: auto-gate evaluation error: ${message}`;
@@ -76,9 +100,40 @@ jobs:
               core.notice(summary);
               core.setOutput("pr_number", "");
               core.setOutput("should_merge", "false");
+              core.setOutput("head_sha", "");
               core.setOutput("docs_changed", "false");
               core.setOutput("summary", summary);
             }
+
+      - name: Report gate decision
+        if: steps.evaluate.outputs.head_sha != ''
+        continue-on-error: true
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ steps.evaluate.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.evaluate.outputs.head_sha }}
+          SHOULD_MERGE: ${{ steps.evaluate.outputs.should_merge }}
+          SUMMARY: ${{ steps.evaluate.outputs.summary }}
+        with:
+          # Check runs require an App installation token. Keep this separate
+          # from the optional maintainer token used by the existing merge path.
+          github-token: ${{ github.token }}
+          script: |
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            const autoGate = require(helperPath);
+            await autoGate.reportDecision({
+              github,
+              context,
+              core,
+              result: {
+                prNumber: process.env.PR_NUMBER,
+                headSha: process.env.HEAD_SHA,
+                shouldMerge: process.env.SHOULD_MERGE === "true",
+                summary: process.env.SUMMARY,
+              },
+              manual: context.eventName === "workflow_dispatch",
+            });
 
       - name: Report disabled merge
         if: steps.evaluate.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED != 'true'

@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const autoGate = require("./auto-gate.js");
 const { __test } = autoGate;
@@ -6,6 +8,74 @@ const { __test } = autoGate;
 const HEAD_SHA = "0a5393dd71ddbbf66486d31939728f9947c843bb";
 const OTHER_SHA = "da0a05ea3b9036a12f67a3b3877d16dd0dac893d";
 const ACTIONS_APP_ID = 15368;
+const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
+
+test("Auto Gate can be recovered manually by PR number", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+
+  assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
+  assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
+  assert.match(
+    workflow,
+    /github\.event_name == 'workflow_dispatch' && github\.run_id/,
+  );
+  assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
+  assert.match(workflow, /prNumber: explicitPrNumber/);
+  assert.match(
+    workflow,
+    /- name: Report gate decision[\s\S]*?continue-on-error: true[\s\S]*?github-token: \$\{\{ github\.token \}\}/,
+  );
+});
+
+test("manual recovery reports a previously absent gate distinctly", async () => {
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  const result = {
+    prNumber: "1465",
+    headSha: HEAD_SHA,
+    shouldMerge: false,
+    summary: "BLOCKED: waiting on review",
+  };
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: true,
+  });
+
+  assert.equal(report.state, "never-ran");
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.match(github.createdChecks[0].output.title, /^NEVER_RAN:/);
+});
+
+test("an evaluated but blocked gate reports WAITING rather than NEVER_RAN", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ id: 321, name: "Auto Gate decision", conclusion: "failure" }),
+    ],
+  });
+  const result = {
+    prNumber: "1465",
+    headSha: HEAD_SHA,
+    shouldMerge: false,
+    summary: "BLOCKED: waiting on review",
+  };
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(report.state, "waiting");
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(github.updatedChecks[0].check_run_id, 321);
+  assert.match(github.updatedChecks[0].output.title, /^WAITING:/);
+});
 
 test("required check matching respects the required source app", () => {
   const spec = { context: "Build", sourceAppId: ACTIONS_APP_ID };
@@ -387,6 +457,14 @@ function fakeGateGithub({
     github.mergedWith = options;
     return { data: { sha: "merge-sha" } };
   };
+  const createCheck = async function createCheck(options) {
+    github.createdChecks.push(options);
+    return { data: options };
+  };
+  const updateCheck = async function updateCheck(options) {
+    github.updatedChecks.push(options);
+    return { data: options };
+  };
   const responses = new Map([
     [listFiles, files.map((filename) => ({ filename }))],
     [listForRef, checkRuns],
@@ -398,9 +476,11 @@ function fakeGateGithub({
 
   const github = {
     mergedWith: null,
+    createdChecks: [],
+    updatedChecks: [],
     rest: {
       actions: { createWorkflowDispatch: async () => {} },
-      checks: { listForRef },
+      checks: { create: createCheck, listForRef, update: updateCheck },
       issues: { listComments },
       repos: { listCommitStatusesForRef },
       pulls: { listFiles, listReviews, listReviewComments, merge },
@@ -487,6 +567,7 @@ function requiredSuccessRuns() {
 }
 
 function checkRun({
+  id = 100,
   name,
   status = "completed",
   conclusion,
@@ -494,6 +575,7 @@ function checkRun({
   appSlug = "github-actions",
 }) {
   return {
+    id,
     name,
     app: { id: appId, slug: appSlug },
     status,
