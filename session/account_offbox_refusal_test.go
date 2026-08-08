@@ -113,11 +113,7 @@ func TestHookAccountRefusalDoesNotPromiseAnIdentityForTheWorkaround(t *testing.T
 // not decide the shape of those machines" is false there too. Their false answer
 // is the missing write-back, same as ssh's.
 func TestCarriesAccountRationaleDoesNotClaimAfLacksControl(t *testing.T) {
-	src, err := os.ReadFile("runtime.go")
-	require.NoError(t, err)
-	i := strings.Index(string(src), "// CarriesAccount reports whether")
-	require.GreaterOrEqual(t, i, 0)
-	rationale := string(src)[i:min(i+1600, len(string(src)))]
+	rationale := carriesAccountDoc(t)
 
 	assert.NotContains(t, rationale, "af does not decide the shape of those machines",
 		"sandboxProvisioner.provision creates the session dir, and provision-mode hook reuses it — "+
@@ -166,12 +162,7 @@ func TestEachDecidedBackendHasItsOwnReason(t *testing.T) {
 // else states what a `true` promises, and a future author reads it before adding
 // a case.
 func TestCarriesAccountContractIsStatedAsWriteBack(t *testing.T) {
-	src, err := os.ReadFile("runtime.go")
-	require.NoError(t, err)
-	doc := string(src)
-	i := strings.Index(doc, "// CarriesAccount reports whether")
-	require.GreaterOrEqual(t, i, 0, "the contract comment must exist")
-	contract := doc[i:min(i+900, len(doc))]
+	contract := carriesAccountDoc(t)
 
 	assert.Contains(t, contract, "SAFELY HONOUR",
 		"the predicate is safe honouring including writes, not physical placement")
@@ -187,24 +178,37 @@ func TestCarriesAccountContractIsStatedAsWriteBack(t *testing.T) {
 // mount-like transport for ssh or sandbox would qualify too. What af lacks is the
 // GUARANTEE of write-back, not the possibility of some mechanism providing it.
 //
-// This is the ninth finding in the same class on this change, and they all share
-// a shape: the message asserted something af had not established. So the test
-// asserts the absence of the over-claim rather than a particular phrasing.
+// Asserted on the REFUSAL MESSAGE only. An earlier version of this test also
+// grepped CarriesAccount's doc comment for phrases, and that was a mistake twice
+// over: it matched the comment's own QUOTATION of the wrong phrasing (the text
+// says `Nor is this "every off-box kind"` in order to reject it), and it pinned
+// exact casing of prose. A doc comment is not a behaviour, and a substring test
+// over source text collides with the text that explains the substring — the same
+// trap as naming a test after the option it forbids.
 func TestRefusalDoesNotPresentCopyingAsUnavoidable(t *testing.T) {
 	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
 		err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot establish that those writes come back",
-			"%s must refuse on the missing GUARANTEE, which is the part af can state", kind)
+			"%s must refuse on the missing GUARANTEE — the part af can state — rather than on a claim "+
+				"that copying is the only mechanism those backends could ever have", kind)
 	}
+}
 
+// carriesAccountDoc returns CarriesAccount's WHOLE doc comment, bounded by the
+// declaration it documents rather than by a byte count.
+//
+// A fixed-size window is how the first version of these assertions broke: the
+// comment grew, the phrase being asserted fell outside the slice, and the test
+// failed against correct code. Bounding on the `func` line cannot truncate.
+func carriesAccountDoc(t *testing.T) string {
+	t.Helper()
 	src, err := os.ReadFile("runtime.go")
 	require.NoError(t, err)
-	i := strings.Index(string(src), "// CarriesAccount reports whether")
-	require.GreaterOrEqual(t, i, 0)
-	rationale := string(src)[i:min(i+1800, len(string(src)))]
-	assert.NotContains(t, rationale, "every off-box kind",
-		"docker is off-box and answers TRUE, so off-box is the wrong axis")
-	assert.Contains(t, rationale, "not because a copy is the only thing they could ever do",
-		"a future mount-like transport or a launch_cmd using shared storage would qualify")
+	doc := string(src)
+	start := strings.Index(doc, "// CarriesAccount reports whether")
+	require.GreaterOrEqual(t, start, 0, "the contract comment must exist")
+	end := strings.Index(doc[start:], "func (k BackendKind) CarriesAccount()")
+	require.Greater(t, end, 0, "the comment must be followed by the declaration it documents")
+	return doc[start : start+end]
 }
