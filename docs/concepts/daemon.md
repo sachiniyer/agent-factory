@@ -37,8 +37,10 @@ paragraph because it's why `af` doesn't corrupt itself:
   conversation and its tabs are carried across, so it comes back on the same
   context with the same tab strip. When that conversation cannot be resumed the
   root still comes back, on a fresh context — an always-on root that exists
-  outranks one that keeps its history — and the application log says which
-  happened.
+  outranks one that keeps its history — and every rail marks the replacement's
+  row with a one-shot note (`fresh context`, or `context unknown` when af cannot
+  tell) that clears the first time you open the pane; the application log says
+  which happened.
 - **Runs the scheduler.** All [tasks](../tasks.md) — cron schedules and
   watch-script triggers — are hosted by the daemon. It arms the timers, watches
   the scripts, and delivers prompts on time, whether or not a TUI is open.
