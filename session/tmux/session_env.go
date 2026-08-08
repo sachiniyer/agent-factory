@@ -36,10 +36,24 @@ func (t *TmuxSession) SetAccount(name string) {
 	t.programMu.Unlock()
 }
 
+// SetGeneratedArgs declares the argument words af's own launcher appended to this
+// session's program (#3083). Set it with SetProgram, from the site that produced
+// both strings; see session.setLaunchProgram, which pairs them so the two cannot
+// drift apart.
+//
+// Empty is the correct declaration for a launch af did not rewrite, and it leaves
+// the boundary's no-arguments rule exactly as it was.
+func (t *TmuxSession) SetGeneratedArgs(generated []string) {
+	t.programMu.Lock()
+	t.generatedArgs = append([]string(nil), generated...)
+	t.programMu.Unlock()
+}
+
 func (t *TmuxSession) launchEnvironment(program string) (string, []string, []string, error) {
 	t.programMu.RLock()
 	extra := append([]string(nil), t.envPassthrough...)
 	account := t.account
+	generated := append([]string(nil), t.generatedArgs...)
 	t.programMu.RUnlock()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
@@ -56,7 +70,7 @@ func (t *TmuxSession) launchEnvironment(program string) (string, []string, []str
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
 		}
-		wrapped, err = sessionenv.WrapAccountCommand(executable, agent, account, extra, program)
+		wrapped, err = sessionenv.WrapAccountCommand(executable, agent, account, generated, extra, program)
 	} else {
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
 	}

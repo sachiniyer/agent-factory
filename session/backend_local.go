@@ -332,7 +332,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
 		if workDir != "" {
-			tmuxSession.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))
+			resolved := resolveProgramForInstance(i)
+			setLaunchProgram(tmuxSession, resolved, injectSystemPrompt(resolved))
 		}
 		if err := tmuxSession.Restore(workDir); err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
@@ -353,20 +354,24 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// path supplies a command frozen after provisioning and before process
 		// launch; direct Start callers retain the established inline preparation.
 		var program string
+		// The pre-rewrite command, kept so the launch can declare what af added to it
+		// (#3083). The prepared path carries its own, frozen with the program.
+		base := resolveProgramForInstance(i)
 		if prepared != nil {
 			if prepared.workDir != gw.GetWorktreePath() || strings.TrimSpace(prepared.program) == "" {
 				setupErr = fmt.Errorf("prepared create launch no longer matches session %q", i.Title)
 				return setupErr
 			}
 			program = prepared.program
+			base = prepared.base
 			if prepared.conversation.HasID() {
 				i.SetAgentConversation(prepared.conversation)
 			}
 		} else {
-			program = prepareLaunchConversation(i, resolveProgramForInstance(i))
+			program = prepareLaunchConversation(i, base)
 			program = injectSystemPrompt(program)
 		}
-		tmuxSession.SetProgram(program)
+		setLaunchProgram(tmuxSession, base, program)
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
@@ -606,7 +611,7 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 	}
 
-	ts.SetProgram(injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
+	setLaunchProgram(ts, resolvedProgram, injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
