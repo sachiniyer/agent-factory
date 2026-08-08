@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -100,9 +99,21 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 		// allowance for the factory reset (it matched for Cleanup, which folds stderr via
 		// runGitCommandContext) and leaving the os.RemoveAll fallback below unreachable.
 		// Fold stderr into the error so both callers see the same evidence (#2531 review).
-		if out, runErr := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", worktreePath).CombinedOutput(); runErr != nil {
+		// BOUNDED (#3096). This recursive unlink is the one local git command that
+		// genuinely stalls forever, which Cleanup has known since #1917 — and this
+		// path, the factory reset's only removal path, ran it unbounded. `af reset`
+		// could therefore wedge with no completion time and no message.
+		if out, runErr := runBoundedWorktreeGit(repoRoot, true, "worktree", "remove", "-f", worktreePath); runErr != nil {
 			err := fmt.Errorf("git worktree remove failed: %s (%w)", strings.TrimSpace(string(out)), runErr)
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", worktreePath, err)
+
+			// A STALL is not an answer. On a deadline nothing is known about the
+			// registration, so stop here rather than let the ownership gate below decide
+			// from a probe that is about to stall the same way — and report what could
+			// not be removed, which is the whole point of bounding a destructive path.
+			if errors.Is(runErr, ErrWorktreeRemovalTimedOut) {
+				return false, worktreeStalledError(worktreePath, err)
+			}
 
 			// Ownership check, restored from Cleanup (#2110). The reset's fallback
 			// used to delete unconditionally, which is how a LOCKED worktree — a
@@ -135,7 +146,10 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 
 	// Prune stale metadata so a subsequent `git branch -D` for this session's
 	// branch isn't blocked by a lingering worktree registration.
-	if err := exec.Command("git", "-C", repoRoot, "worktree", "prune").Run(); err != nil {
+	// Bounded like the remove above: prune walks the same admin files a stalled
+	// mount can block on. Best-effort either way — the VERIFY below is what decides
+	// the outcome, and it does not trust prune's exit code.
+	if _, err := runBoundedWorktreeGit(repoRoot, true, "worktree", "prune"); err != nil {
 		log.ErrorLog.Printf("failed to prune worktrees for %s: %v", repoRoot, err)
 	}
 
@@ -206,7 +220,14 @@ func repoRegistersNothing(repoRoot string) bool {
 // GitWorktree.isWorktreeRegistered, for callers (the factory reset) that hold
 // only two paths; both read the answer through worktreeListed.
 func worktreeRegisteredIn(repoRoot, worktreePath string) (bool, error) {
-	out, err := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain").Output()
+	// Bounded (#3096), and the SUBTLEST of the three. This is the verification read
+	// on the error path, so an unbounded stall here hangs a reset that has already
+	// decided something went wrong — and a bound that let a stalled probe answer
+	// "not registered" would be worse still, converting a hang into silent data
+	// loss: mayDeleteWorktreeDir would then treat git's own worktree as ours to
+	// delete. A failed read is not an empty result, so the error is RETURNED and
+	// every caller checks it before trusting the boolean.
+	out, err := runBoundedWorktreeGit(repoRoot, false, "worktree", "list", "--porcelain")
 	if err != nil {
 		return false, err
 	}
