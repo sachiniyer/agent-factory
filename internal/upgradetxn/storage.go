@@ -787,6 +787,14 @@ func (t *Transaction) cleanupInactiveArtifacts() error {
 	if err := removeDurableFile(t.journal.PreviousBinaryPath); err != nil {
 		return fmt.Errorf("remove previous-binary cleanup actor: %w", err)
 	}
+	// The sidecar goes with the binaries it describes, and AFTER them on purpose: if
+	// this crashes between the two, what survives is an artifact-less owner record,
+	// which blocks nothing. Removing it first would leave the reverse — a `.previous`
+	// with no owner, which blocks this executable forever, i.e. the very leftover
+	// this contract exists to make impossible (#2212 gate 4).
+	if err := removeArtifactOwner(t.journal.ExecutablePath, t.journal.ID); err != nil {
+		return err
+	}
 	if err := removeDurableFile(recoveryLockPath(t.journal.HomeDir, t.journal.ID)); err != nil {
 		return fmt.Errorf("remove inactive recovery lock: %w", err)
 	}

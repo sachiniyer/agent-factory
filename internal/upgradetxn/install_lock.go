@@ -399,7 +399,7 @@ func withExecutableLock(executablePath string, nonblocking bool, fn func() error
 	return fn()
 }
 
-// foreignTransactionOver returns the id of a transaction other than selfID that
+// foreignTransactionOver returns the id of a LIVE transaction other than selfID that
 // has staged a preserved-previous binary beside executable, or "" when none has.
 //
 // It exists because a transaction is home-scoped while the executable is not.
@@ -431,6 +431,18 @@ func foreignTransactionOver(executable, selfID string) (string, error) {
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".previous")
 		if id == "" || id == selfID {
+			continue
+		}
+		// Present is not the same as LIVE. Cleanup that died after removing
+		// active.json but before deleting PreviousBinaryPath leaves this exact file
+		// with nothing behind it, and treating the name as proof blocks every future
+		// upgrade over this executable forever — with no escape hatch for a
+		// daemon-owned upgrade (#2212 gate 4). Ask the artifact instead.
+		inert, err := artifactIsInert(executable, id)
+		if err != nil {
+			return "", err
+		}
+		if inert {
 			continue
 		}
 		return id, nil
