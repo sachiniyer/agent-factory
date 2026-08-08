@@ -224,12 +224,22 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		}
 		proof := accountLaunchProof(resolvedProgram, resolvedProgram,
 			builtInProgramOverride(cfg, spec.Program, resolvedProgram))
-		spec.Account.TrustedExecutable = proof.TrustedExecutable
+		// The built-in proof is established in the host namespace. Docker may not
+		// contain that path (or may contain a different file there), so never grant
+		// its executable identity across the container boundary. A bare agent name
+		// remains independently provable; a host-qualified path fails closed below.
+		hostExecutable := proof.TrustedExecutable
+		spec.Account.TrustedExecutable = ""
 		spec.Account.GeneratedArgs = proof.GeneratedArgs
 		// Reuse the local shim's authoritative validation for cloud modes and
 		// command-local identity assignments. The returned host environment is not
 		// installed in Docker; accountMountAndEnv builds the container boundary.
 		if _, aerr := sessionenv.ApplyAccount(os.Environ(), resolvedProgram, spec.Account); aerr != nil {
+			if hostExecutable != "" && sessionenv.IsAccountCommandValidationError(aerr) {
+				return ProvisionResult{}, fmt.Errorf(
+					"backend=docker: resolved program names host executable %q, whose identity cannot be established inside the container: %w",
+					hostExecutable, aerr)
+			}
 			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", aerr)
 		}
 		if aerr := validateAccountDockerRunArgs(runArgs, spec.Account.Agent); aerr != nil {

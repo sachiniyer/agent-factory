@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,6 +115,28 @@ func TestDockerAccount_RefusesCloudAuthenticationMode(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "CLAUDE_CODE_USE_BEDROCK")
 	require.False(t, dockerCalled, "cloud-mode refusal must happen before provisioning")
+}
+
+func TestDockerAccount_RefusesHostDetectedExecutableProvenance(t *testing.T) {
+	binDir := t.TempDir()
+	claudePath := filepath.Join(binDir, "claude")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", t.TempDir())
+
+	f := newDockerAccountFixture(t, "", "claude", nil)
+	dockerCalled := false
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		dockerCalled = true
+		return fakeLocalDockerResponse(args)
+	}))
+
+	_, err := createDockerAccountSession(f, "claude", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), claudePath)
+	require.False(t, dockerCalled,
+		"a host-qualified executable must be refused before its provenance crosses into Docker")
 }
 
 func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {

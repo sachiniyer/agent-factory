@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,6 +16,27 @@ import (
 type AccountLaunchProof struct {
 	TrustedExecutable string
 	GeneratedArgs     []string
+}
+
+type accountCommandValidationError struct {
+	message string
+}
+
+func (e *accountCommandValidationError) Error() string {
+	return e.message
+}
+
+func accountCommandValidationErrorf(format string, args ...any) error {
+	return &accountCommandValidationError{message: fmt.Sprintf(format, args...)}
+}
+
+// IsAccountCommandValidationError reports whether err came from the
+// command-shape half of the account boundary. Provisioners use this to add
+// runtime-specific context without changing the priority of earlier account
+// refusals such as cloud authentication mode.
+func IsAccountCommandValidationError(err error) bool {
+	var target *accountCommandValidationError
+	return errors.As(err, &target)
 }
 
 // GenerateAccountLaunchProof describes the change from base to final. A nil
@@ -64,7 +86,7 @@ func ValidateAccountCommand(command string, account Account) error {
 	}
 	overrides, provable := commandOverridesName(command, proof)
 	if overrides {
-		return fmt.Errorf(
+		return accountCommandValidationErrorf(
 			"account %q cannot scope agent %q: its program sets an identity variable itself, which overrides the account directory",
 			account.Name, account.Agent)
 	}
@@ -72,12 +94,12 @@ func ValidateAccountCommand(command string, account Account) error {
 		return nil
 	}
 	if args, ok := undeclaredAccountArguments(command, proof); ok {
-		return fmt.Errorf(
+		return accountCommandValidationErrorf(
 			"account %q cannot scope agent %q: its resolved program contains undeclared arguments %s; "+
 				"only arguments af authored for this launch can accompany an account-scoped agent, so this program could not be proven safe",
 			account.Name, account.Agent, quoteArguments(args))
 	}
-	return fmt.Errorf(
+	return accountCommandValidationErrorf(
 		"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+
 			"identity assignments, and an unverifiable program is not evidence that the account would be used",
 		account.Name, account.Agent, account.Agent)
