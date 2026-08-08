@@ -143,15 +143,52 @@ func openAtForCompare(parent *os.File, name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), name), nil
 }
 
-// maxRetainedLinkReaders caps the descriptors held for hard-link comparison.
-//
-// Chosen well under any default RLIMIT_NOFILE (1024 on most systems, and af also
-// holds tmux pipes, sockets and the walk's own directory descriptors), because
-// exceeding it does not fail loudly — it degrades hard-link fidelity on exactly
-// the large trees where the optimisation is worth most. A tree with more than this
-// many distinct shared inodes falls back to reopening for the remainder, which is
-// the behaviour before this change.
+// maxRetainedLinkReaders caps the descriptors held for hard-link comparison even
+// when RLIMIT_NOFILE is very large. retainedLinkReaderBudget narrows it to the
+// process's actual spare capacity for each copy.
 const maxRetainedLinkReaders = 256
+
+// The copy needs descriptors after the retained-reader budget is chosen: two
+// directory routes, a source and destination file, validation, and unrelated
+// daemon work can all overlap it. Keep an explicit reserve instead of consuming
+// every slot RLIMIT_NOFILE currently exposes.
+const retainedLinkReaderFDReserve = 16
+
+func retainedLinkReaderBudget() int {
+	var limit unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+		return 0
+	}
+	open, ok := openFileDescriptorCount()
+	if !ok {
+		// An unknown table is not evidence that 256 slots are available. Falling
+		// back to reopen loses fidelity only for copies that later become unreadable;
+		// guessing can exhaust the daemon's descriptor table for every session.
+		return 0
+	}
+	usedAndReserved := uint64(open) + retainedLinkReaderFDReserve
+	if limit.Cur <= usedAndReserved {
+		return 0
+	}
+	available := limit.Cur - usedAndReserved
+	if available > maxRetainedLinkReaders {
+		return maxRetainedLinkReaders
+	}
+	return int(available)
+}
+
+// openFileDescriptorCount reads the process descriptor filesystem available on
+// Linux and macOS. The directory read can count its own transient descriptor;
+// that is deliberately conservative by one slot.
+func openFileDescriptorCount() (int, bool) {
+	for _, path := range []string{"/dev/fd", "/proc/self/fd"} {
+		entries, err := os.ReadDir(path)
+		if err == nil {
+			return len(entries), true
+		}
+	}
+	return 0, false
+}
 
 type copiedFileLink struct {
 	path     string

@@ -241,6 +241,7 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 	// A pointer is threaded to the level walker because the budget spans the WHOLE
 	// traversal, not one directory: shared inodes are found wherever their names are.
 	retainedReaders := 0
+	retainedReaderBudget := retainedLinkReaderBudget()
 	// The retained comparison descriptors die with the copy that opened them. Every
 	// exit from this function passes here, including the error returns below, so a
 	// failed copy cannot leak them either (#3063).
@@ -278,6 +279,7 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			links,
 			xattrs,
 			&retainedReaders,
+			retainedReaderBudget,
 		)
 		if err == nil {
 			// The level is complete, and nothing is ever written directly into
@@ -315,6 +317,7 @@ func copyDirectoryLevel(
 	links map[pathIdentity]copiedFileLink,
 	xattrs *xattrDestination,
 	retainedReaders *int,
+	retainedReaderBudget int,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -389,7 +392,7 @@ func copyDirectoryLevel(
 				// (reopen, and fall back to a fresh copy if the mode denies it). Degrading
 				// to the old path is acceptable; degrading to it unpredictably at whatever
 				// point the fd table happens to fill is not.
-				if stat.Nlink > 1 && *retainedReaders < maxRetainedLinkReaders {
+				if stat.Nlink > 1 && *retainedReaders < retainedReaderBudget {
 					retain = func(fd int) {
 						// dup(2), not a reopen: the point is a descriptor that predates the
 						// mode narrowing, and a reopen would hit the very denial this avoids.
