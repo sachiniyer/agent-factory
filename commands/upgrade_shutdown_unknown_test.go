@@ -41,6 +41,11 @@ func TestRestartDaemon_NoDaemonWithAnErrorIsIndeterminate(t *testing.T) {
 // The message must state the uncertainty and offer a CHECK rather than a
 // remedy — a remedy presumes the state the check could not establish.
 func TestReportUpgradeRestart_IndeterminateShutdownSaysSo(t *testing.T) {
+	prevHealth := daemonHealthFn
+	t.Cleanup(func() { daemonHealthFn = prevHealth })
+	// Health cannot verify a pid either — genuinely unknown.
+	daemonHealthFn = func() daemon.HealthStatus { return daemon.HealthStatus{} }
+
 	var out, errOut bytes.Buffer
 	outcome := restartOutcome{
 		Shutdown:    daemon.ShutdownNoDaemon,
@@ -56,4 +61,32 @@ func TestReportUpgradeRestart_IndeterminateShutdownSaysSo(t *testing.T) {
 	assert.Contains(t, msg, "af daemon status", "an unknown state earns a check, not a remedy")
 	assert.False(t, strings.Contains(msg, "It is still running the old binary"),
 		"that sentence asserts a daemon nobody observed — the whole defect")
+}
+
+// A failed shutdown CHECK does not mean nothing knows. Health reads the pid file
+// directly, so a socket that could not be statted can still sit beside a VERIFIED
+// live pid — and then the state is determined, not unknown.
+//
+// Reporting uncertainty there would downgrade a determined answer, which is the
+// same collapse this change exists to fix, one source over. It would also send the
+// operator to `af daemon restart`, which re-enters the very check that failed.
+func TestReportUpgradeRestart_IndeterminateButPIDVerifiedReportsRunning(t *testing.T) {
+	prevHealth := daemonHealthFn
+	t.Cleanup(func() { daemonHealthFn = prevHealth })
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{PIDVerified: true, PIDFilePID: 4242}
+	}
+
+	var out, errOut bytes.Buffer
+	outcome := restartOutcome{Shutdown: daemon.ShutdownNoDaemon, FailedPhase: restartPhaseShutdownUnknown}
+
+	reportUpgradeRestart(&out, &errOut, outcome, errors.New("permission denied"), "/usr/local/bin/af")
+
+	msg := errOut.String()
+	assert.Contains(t, msg, "still running the old binary",
+		"a verified live pid IS an answer; reporting it as unknown throws away a determined state")
+	assert.Contains(t, msg, "kill 4242",
+		"and it earns the real remedy, naming the pid, rather than a check")
+	assert.NotContains(t, msg, "Could not determine",
+		"uncertainty is only for when the second source cannot answer either")
 }
