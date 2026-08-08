@@ -171,7 +171,7 @@ var (
 // working directory is moved verbatim, never re-checked-out. On success
 // g.worktreePath / g.worktreeDir are updated to point at dest.
 func (g *GitWorktree) MoveWorktree(dest string) error {
-	return g.relocateWorktreeTo(dest)
+	return g.relocateWorktreeTo(dest, "move")
 }
 
 // RestoreWorktreeTo moves this (archived) worktree back to dest and re-registers
@@ -184,7 +184,7 @@ func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
 	if err := g.ensureRepoPresent(); err != nil {
 		return err
 	}
-	return g.relocateWorktreeTo(dest)
+	return g.relocateWorktreeTo(dest, "restore")
 }
 
 // relocateWorktreeTo is the shared move engine behind MoveWorktree and
@@ -208,7 +208,12 @@ func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
 // second must not finalize. A deadline that trips and is then RECOVERED (the
 // fallback moves the bytes and the repair succeeds) establishes the end state
 // and returns nil, so the marker never rides on a success.
-func (g *GitWorktree) relocateWorktreeTo(dest string) error {
+// operation names what the CALLER is doing, because this engine cannot tell:
+// MoveWorktree and RestoreWorktreeTo both arrive here, and an unreadable file
+// means something different in each — a move can be retried after a chmod, a
+// restore is reporting that the ARCHIVE holds a file af cannot read. The string
+// travels only into error messages (#3066).
+func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 	src := g.worktreePath
 	if g.externalWorktree {
 		return fmt.Errorf("cannot relocate an in-place/external worktree at %s (it is user-owned)", src)
@@ -281,7 +286,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest string) error {
 		var sourceCleanupPath string
 		var sourceCleanupPathVerified bool
 		if !pathExists(dest) {
-			if mErr := moveDirCrossDevice(src, dest); mErr != nil {
+			if mErr := moveDirCrossDevice(src, dest, operation); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
 					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))
@@ -385,7 +390,11 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // common case when the archive root lives on a different device than the repo.
 // The copy preserves file contents, modes, and symlinks, so uncommitted changes
 // survive verbatim.
-func moveDirCrossDevice(src, dest string) (returnErr error) {
+// operation names the caller's action, purely for error text. It is stamped onto
+// an unreadableSourceError BEFORE that error is wrapped: fmt.Errorf formats and
+// CACHES the inner error's text at construction, so stamping after the wrap
+// changes the struct and not the message the user sees (#3087 review).
+func moveDirCrossDevice(src, dest, operation string) (returnErr error) {
 	renameErr := renamePath(src, dest)
 	if renameErr == nil {
 		return nil
@@ -402,6 +411,11 @@ func moveDirCrossDevice(src, dest string) (returnErr error) {
 	}
 	copied, err := copyTreeWithIdentities(src, stagingPath)
 	if err != nil {
+		// Stamp first, wrap second. The order is the whole point.
+		var unreadable *unreadableSourceError
+		if errors.As(err, &unreadable) {
+			unreadable.operation = operation
+		}
 		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
 	}
 	defer copied.close()
