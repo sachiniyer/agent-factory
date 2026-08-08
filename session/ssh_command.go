@@ -85,7 +85,13 @@ const sshNoConfigFile = "none"
 //     because the old authMethods offered identity-file keys AND agent keys —
 //     so IdentitiesOnly is deliberately NOT set.
 //   - Host keys: the configured posture, mapped below.
-func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
+//
+// dialAddr is the LITERAL address every step of this session must reach (#3086).
+// The caller resolves ssh.host once and passes the result here, so the pin lands
+// in the command itself and no individual step can forget it. Empty means "dial
+// the configured name", which is only correct where no address could be resolved
+// and refusing would leak a workspace — see restoreRuntimeCleanup.
+func sshCommandForConfig(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {
 		return "", err
@@ -97,6 +103,11 @@ func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 	knownHosts, strictOpt, err := sshHostKeyOptions(cfg, posture, host)
 	if err != nil {
 		return "", err
+	}
+
+	target := strings.TrimSpace(dialAddr)
+	if target == "" {
+		target = host
 	}
 
 	parts := []string{
@@ -117,13 +128,28 @@ func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 		"-o", "KnownHostsCommand=none",
 		// af never had a human to ask. A prompt would hang a provision forever.
 		"-o", "BatchMode=yes",
+		// The command dials a literal address (#3086), so without this the host key
+		// would be looked up under that ADDRESS instead of the configured name —
+		// silently invalidating every existing known_hosts entry and, under
+		// accept-new, writing a second one per address. HostKeyAlias restores the
+		// name as the lookup key while the connection still goes to the pinned
+		// address.
+		//
+		// The alias must be the EXACT string OpenSSH would otherwise have computed,
+		// because it is used VERBATIM: measured against OpenSSH_9.6p1, a plain
+		// connection on port 2201 records `[127.0.0.1]:2201`, while the same
+		// connection with `HostKeyAlias=real.example` records `real.example` — the
+		// port is NOT appended to an alias. So the alias is knownHostsLookupName's
+		// output, which is bare on the default port and bracketed otherwise, and the
+		// stored key is byte-identical to what a non-pinned connection wrote.
+		"-o", "HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)),
 	}
 	if identity := strings.TrimSpace(cfg.IdentityFile); identity != "" {
 		// No IdentitiesOnly: authMethods offered the identity file AND agent keys,
 		// and dropping the agent would break setups that rely on it.
 		parts = append(parts, "-i", shellQuoteSandbox(expandUserPath(identity)))
 	}
-	parts = append(parts, shellQuoteSandbox(host))
+	parts = append(parts, shellQuoteSandbox(target))
 	return strings.Join(parts, " "), nil
 }
 
