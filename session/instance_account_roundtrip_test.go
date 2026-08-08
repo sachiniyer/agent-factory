@@ -72,15 +72,27 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 	require.NoError(t, refuseOffBoxAccount(base))
 	require.NoError(t, refuseUnsupportedAccountAgent(base, base.Path))
 
-	// Off-box backends cannot carry the account, so they must refuse rather than
-	// run on the remote host's ambient credentials.
-	for _, kind := range []BackendKind{BackendDocker, BackendSSH, BackendSandbox, BackendHook} {
+	// Docker CARRIES the account now (#3082): the runtime already bind-mounts host
+	// paths into the container, so the account's directory is mounted where the
+	// in-container agent reads its home and the ambient credential mounts are
+	// dropped. Asserted explicitly rather than by removing it from the loop below,
+	// so a reader who finds this list does not "restore" docker to it.
+	docker := base
+	docker.Backend = BackendDocker
+	require.NoError(t, refuseOffBoxAccount(docker),
+		"docker can place the account, so an account-scoped create there must be allowed")
+
+	// The rest still cannot PLACE an account on the machine that runs the agent, so
+	// they must refuse rather than run on that host's ambient credentials.
+	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
 		scoped := base
 		scoped.Backend = kind
 		err := refuseOffBoxAccount(scoped)
 		require.Error(t, err, "backend %s must refuse an account-scoped create", kind)
 		require.Contains(t, err.Error(), string(kind))
 		require.Contains(t, err.Error(), "ambient credentials")
+		require.Contains(t, err.Error(), "cannot place a credential account",
+			"the refusal must say af cannot PLACE the account there — the reason is now per-kind, not a blanket off-box rule")
 	}
 
 	// claude is ADMITTED now (#3083): af declares the arguments it appends to that

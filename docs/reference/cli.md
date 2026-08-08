@@ -153,7 +153,7 @@ real: an ambient ANTHROPIC_API_KEY or OPENAI_API_KEY outranks the config
 directory, so without it a session would authenticate as whoever that key belongs
 to while every visible signal reported the selected account.
 
-Account-scoped sessions require the local backend and tmux 3.2 or newer. af
+Account-scoped sessions require the local or docker backend, and tmux 3.2 or newer. af
 refuses rather than falling back, because a fallback would run on the ambient
 account while reporting the one you asked for.
 

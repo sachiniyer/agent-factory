@@ -472,6 +472,22 @@ func GuardedSelectors() []string {
 	return out
 }
 
+// AgentAuthSelectors returns the conditional authentication-mode selectors for
+// one agent. Container provisioners use this narrower list when neutralizing an
+// image environment: another agent's selector cannot affect the selected CLI.
+func AgentAuthSelectors(agent string) []string {
+	set := make(map[string]struct{})
+	for _, group := range conditionalAgentNames[agent] {
+		set[group.selector] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for selector := range set {
+		out = append(out, selector)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // NormalizeAuthSelectors validates a stored selector-name snapshot against the
 // selected agent's known conditional modes. Errors identify only the position,
 // never the untrusted stored text, so an accidental NAME=value record cannot

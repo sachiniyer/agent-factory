@@ -1,9 +1,14 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -98,4 +103,149 @@ func resolveAgentCredentialMounts(agent string) []string {
 	// Each mount is two args ("-v", "<spec>"), so the file count is len/2.
 	log.InfoLog.Printf("backend=docker: docker_mount_agent_credentials: mounting %d credential file(s) for agent %q read-only into the container", len(mounts)/2, agent)
 	return mounts
+}
+
+// dockerAccountHome is where an account's directory is mounted inside the
+// container. A fixed path, not derived from the host's, so nothing about the
+// operator's filesystem layout crosses the boundary.
+const dockerAccountHome = "/af-account"
+
+func hostSELinuxEnforcing() (bool, error) {
+	if runtime.GOOS != "linux" {
+		return false, nil
+	}
+	for _, enforcePath := range []string{"/sys/fs/selinux/enforce", "/selinux/enforce"} {
+		value, err := os.ReadFile(enforcePath)
+		if err == nil {
+			switch strings.TrimSpace(string(value)) {
+			case "1":
+				return true, nil
+			case "0":
+				return false, nil
+			default:
+				return false, fmt.Errorf("unexpected value in %s", enforcePath)
+			}
+		}
+		if !os.IsNotExist(err) {
+			return false, fmt.Errorf("read %s: %w", enforcePath, err)
+		}
+	}
+	return false, nil
+}
+
+func dockerAccountMount(accountName, source string, selinuxEnforcing bool) ([]string, error) {
+	if !strings.Contains(source, ":") {
+		// z is the shared SELinux label: the same account may be used by more than
+		// one live session. Docker accepts it when SELinux is disabled as well.
+		return []string{"-v", source + ":" + dockerAccountHome + ":z"}, nil
+	}
+	if selinuxEnforcing {
+		return nil, fmt.Errorf(
+			"account %q path %q contains a colon and cannot be relabeled for an SELinux-enforcing Docker host; move AGENT_FACTORY_HOME to a path without ':'",
+			accountName, source)
+	}
+	// --volume uses ':' as a field delimiter. --mount keeps ':' ordinary, but its
+	// own comma delimiter cannot be escaped.
+	if strings.Contains(source, ",") {
+		return nil, fmt.Errorf("account %q path %q contains a comma, which Docker --mount cannot encode safely", accountName, source)
+	}
+	return []string{"--mount", "type=bind,src=" + source + ",dst=" + dockerAccountHome}, nil
+}
+
+// accountMountAndEnv returns the bind mount that places an account's agent HOME
+// inside the container, and the `-e VAR=value` that points the agent at it
+// (#3082).
+//
+// It REPLACES the ambient credential mounts rather than joining them, and that is
+// the exclusivity property the feature exists for: a container built for an
+// account must carry nothing resolved from the daemon user's home, or the session
+// would hold two identities and the agent would pick one by path precedence.
+//
+// The mount is read-WRITE, unlike the ambient credential mounts. An account is the
+// agent's whole home — auth, history, settings, discovered skills — not a
+// credential file, so an agent that cannot write to it cannot record a session.
+// That is a real consequence of the account model rather than a looser posture:
+// the operator asked this session to BE that account.
+//
+// Returns nothing for an agent that does not support accounts; the create path
+// refuses that case earlier, so this is defence rather than a branch anyone takes.
+func accountMountAndEnv(account sessionenv.Account) (mount []string, env []string, err error) {
+	if account.Dir == "" {
+		return nil, nil, nil
+	}
+	configVar, ok := sessionenv.SupportsAccounts(account.Agent)
+	if !ok {
+		return nil, nil, nil
+	}
+	// ABSOLUTE, always. Docker reads a relative bind source by its own rules — it is
+	// not resolved against af's working directory — so a relative AGENT_FACTORY_HOME
+	// (a supported configuration) would bind something that is not the account, or
+	// create a volume named after the path. Abs failing means af cannot say where
+	// the account is, which must refuse rather than mount a guess.
+	// A failure here must REFUSE, not return an empty mount. Returning nothing was
+	// the shape of this function's first version and it is the exact failure this
+	// feature exists to prevent: the container would start with no account and no
+	// error, running on whatever identity it could find while the session reported
+	// the one the operator named. "af cannot say where the account is" has to reach
+	// the create as an error.
+	source, err := filepath.Abs(account.Dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot resolve an absolute path for account %q (%s): %w", account.Name, account.Dir, err)
+	}
+	selinuxEnforcing := false
+	if strings.Contains(source, ":") {
+		selinuxEnforcing, err = hostSELinuxEnforcing()
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot establish SELinux state for account %q mount: %w", account.Name, err)
+		}
+	}
+	mount, err = dockerAccountMount(account.Name, source, selinuxEnforcing)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Blank every alternate identity source, including values baked into the
+	// image, then install the selected credential root last. The host environment
+	// is separately validated with ApplyAccount before this argv is assembled.
+	blank := make(map[string]struct{})
+	for _, name := range sessionenv.AccountIdentityNames(account.Agent) {
+		if name != configVar {
+			blank[name] = struct{}{}
+		}
+	}
+	for _, name := range sessionenv.AgentAuthSelectors(account.Agent) {
+		blank[name] = struct{}{}
+	}
+	names := make([]string, 0, len(blank))
+	for name := range blank {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		env = append(env, "-e", name+"=")
+	}
+	env = append(env, "-e", configVar+"="+dockerAccountHome)
+	return mount, env, nil
+}
+
+// refuseAccountAgentDrift refuses when the RESOLVED program runs a different
+// agent than the account was scoped to (#3082, #3108).
+//
+// Shared by the create path and the reprovision path deliberately. Both have to
+// answer the same question — "has the program changed out from under this
+// account?" — and two call sites deciding it independently is how they drift
+// apart; #3044 is the precedent for what that costs.
+//
+// It compares the RESOLVED command's agent, never the configured program name.
+// program_overrides can map the `codex` key to another agent's command, so the
+// name says codex while the container runs opencode — and a session that reports
+// one identity while spending another is the failure this whole feature exists to
+// prevent, arriving through config rather than through a backend.
+func refuseAccountAgentDrift(accountName, scopedAgent, resolvedProgram string) error {
+	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
+	if resolvedAgent == scopedAgent {
+		return nil
+	}
+	return fmt.Errorf(
+		"account %q is a %s account, but the resolved program runs %s; refusing a session that would report one identity and use another",
+		accountName, scopedAgent, resolvedAgent)
 }
