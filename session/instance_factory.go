@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -161,6 +162,24 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	// means. Scoped to off-box kinds inside it: minting unconditionally would make
 	// every local create fail whenever require_token is off, turning a sandbox-only
 	// refusal into a total outage.
+	// Resolve the account to its DIRECTORY here, on the host, for a kind that can
+	// place it (#3082). The local path never needs this — its shim resolves the name
+	// inside the target process against that process's own AF home — but a
+	// provisioned machine has no registry to resolve against, so the host must
+	// resolve it and the provisioner must place it.
+	//
+	// Resolving here rather than in the provisioner is deliberate: Selected is what
+	// enforces the registry's guarantees (the account exists, and no ancestor of its
+	// path is a symlink out of the registry), and those must be checked on THIS
+	// machine, where the registry lives, before a path derived from them is handed
+	// to a runtime that will mount it.
+	if kind.CarriesAccount() && strings.TrimSpace(opts.Account) != "" {
+		account, aerr := resolveAccountForProvision(opts)
+		if aerr != nil {
+			return ProvisionResult{}, aerr
+		}
+		spec.Account = account
+	}
 	cred, err := mintForProvision(&spec, kind, opts.SandboxCredentials)
 	if err != nil {
 		return ProvisionResult{}, err
@@ -522,9 +541,28 @@ func resolvedProgramMarker(opts InstanceOptions) string {
 // refuseOffBoxAccount rejects an account-scoped session on a backend that cannot
 // yet carry the account.
 //
-// It gates on the backend being NOT local rather than on a list of remote kinds:
-// a backend added later is off-box until someone proves otherwise, so the
-// default for anything new is refusal rather than silent ambient credentials.
+// It still gates on the backend being NOT local rather than on a list of remote
+// kinds, and #3082 did not weaken that: a backend added later is off-box until
+// someone proves otherwise, so the default for anything new remains refusal
+// rather than silent ambient credentials. What changed is that docker can now
+// PROVE it, so it is exempted by name.
+//
+// WHY DOCKER AND NOT THE OTHERS, decided per backend rather than defaulted
+// (#3082):
+//
+//   - docker CAN place the account, and already has the mechanism. An account is
+//     an agent HOME directory, and the runtime already bind-mounts host paths into
+//     the container — today it mounts the operator's AMBIENT credentials, which is
+//     precisely the wrong-identity failure this refusal was protecting against.
+//     Pointing that mount at the account's directory is the whole fix.
+//   - ssh could transfer one — the runtime already streams the af binary to the
+//     remote — but that means writing the operator's live credentials onto a
+//     machine whose filesystem, other users and backups af does not control, for a
+//     feature whose purpose is to NARROW where an identity may be used. That is a
+//     posture decision, not wiring, and it is not taken here.
+//   - sandbox and hook run the operator's own provisioner. Nothing in that contract
+//     promises a place to put an account, so refusing is the permanent answer
+//     rather than a temporary one.
 func refuseOffBoxAccount(opts InstanceOptions) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil
@@ -533,13 +571,13 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 	if kind == "" {
 		kind = BackendLocal
 	}
-	if kind == BackendLocal {
+	if kind == BackendLocal || kind.CarriesAccount() {
 		return nil
 	}
 	return fmt.Errorf(
-		"account %q cannot be used with the %s backend: af cannot yet carry a credential account into an "+
-			"off-box session, and running it there would use that host's ambient credentials while reporting "+
-			"the account you asked for; create this session on the local backend, or omit --account",
+		"account %q cannot be used with the %s backend: af cannot place a credential account on that machine, "+
+			"and running there would use its ambient credentials while reporting the account you asked for; "+
+			"create this session on the local or docker backend, or omit --account",
 		opts.Account, kind)
 }
 
@@ -616,4 +654,29 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 			"verify how it launches that agent, so the session could start on the ambient identity or exit "+
 			"immediately; account scoping currently supports claude and codex",
 		opts.Account, agent)
+}
+
+// resolveAccountForProvision resolves opts.Account to the registered account's
+// directory on this host.
+//
+// The agent is derived from the session's program, matching how every other
+// account surface names one: an account belongs to an agent, and "codex" and
+// "claude" keep separate registries.
+func resolveAccountForProvision(opts InstanceOptions) (sessionenv.Account, error) {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", opts.Account, err)
+	}
+	agent := sessionenv.AgentForCommand(opts.Program)
+	account, err := agentaccount.Selected(home, agent, opts.Account, "")
+	if err != nil {
+		return sessionenv.Account{}, err
+	}
+	if account.Dir == "" {
+		// Selected returns a zero Account for an empty name, which the caller has
+		// already excluded. A zero Dir here would mean an unscoped provision that
+		// still reported an account, so refuse rather than proceed.
+		return sessionenv.Account{}, fmt.Errorf("account %q resolved to no directory", opts.Account)
+	}
+	return account, nil
 }

@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // BackendKind names a session runtime family (#1592 Phase 4 PR3). It is the
@@ -96,6 +97,15 @@ type ProvisionSpec struct {
 	// Only off-box runtimes (docker/ssh/hook) honor it; the in-process local
 	// runtime never clones, so it is a no-op there.
 	RestoreBranch string
+	// Account scopes this session to a registered credential account (#3082), for
+	// the off-box kinds that can carry one. Zero value means unscoped.
+	//
+	// The whole Account travels, not just its name, and that is the point: only the
+	// NAME goes into argv on the local path, because the `af` shim there resolves it
+	// against its own AF home. A provisioned machine has no such registry — the
+	// container's `af` would look up an account that does not exist in it — so an
+	// off-box backend has to carry the resolved DIRECTORY and place it itself.
+	Account sessionenv.Account
 	// SessionEnvPassthrough contains exact global-only variable names approved
 	// for the agent. Sandboxed runtimes pass names, never values, to their
 	// version-matched agent-server.
@@ -183,6 +193,23 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // An unregistered kind reports false, which is the conservative answer —
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
+
+// CarriesAccount reports whether this kind's provisioner can place a registered
+// credential account on the machine that runs the agent (#3082).
+//
+// Only docker, and the reason is a mechanism rather than a preference: an account
+// is an agent HOME directory, and the docker runtime already bind-mounts host
+// paths into the container, so the account's directory can be mounted where the
+// in-container agent reads its home. ssh, sandbox and hook have no way to place a
+// directory they can prove is the account — see refuseOffBoxAccount for why that
+// is a decision and not a gap.
+//
+// Local is deliberately NOT listed: it needs no placing, applies the account
+// through the exec shim, and is handled by its own branch. A kind that answers
+// true here is promising it will honour ProvisionSpec.Account.
+func (k BackendKind) CarriesAccount() bool {
+	return k == BackendDocker
+}
 
 // InjectsSandboxCallback reports whether this kind's provisioner actually
 // delivers the #2999 callback credential into the workspace.
