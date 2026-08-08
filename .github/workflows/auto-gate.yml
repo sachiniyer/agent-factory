@@ -1,6 +1,12 @@
 name: Auto Gate
 
 on:
+  # These events cover every input read by evaluate(): required checks,
+  # reviews/findings, labels, base, draft/state, and head. Repository-ruleset
+  # changes and mergeability changes caused only by master advancing are not
+  # evented here. workflow_dispatch repairs stale observational state, and this
+  # is safe for Auto Gate because merge() always performs a fresh full
+  # evaluation immediately before its destructive write.
   check_suite:
     types: [completed]
   issue_comment:

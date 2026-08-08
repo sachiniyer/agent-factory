@@ -523,6 +523,33 @@ test("the happy path squash-merges the exact evaluated head", async () => {
   assert.equal(github.mergedWith.merge_method, "squash");
 });
 
+test("merge reevaluates fresh instead of trusting a stale PASS decision", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+    }),
+    /gate no longer passes.*unresolved live Codex inline finding/,
+  );
+
+  assert.equal(github.reviewCommentReads, 1, "merge must read current finding state");
+  assert.equal(github.mergedWith, null);
+});
+
 test("merge refuses a head that escaped its serialized decision lane", async () => {
   const github = fakeGateGithub();
 
@@ -696,6 +723,7 @@ function fakeGateGithub({
 
   const github = {
     mergedWith: null,
+    reviewCommentReads: 0,
     createdChecks: [],
     updatedChecks: [],
     rest: {
@@ -729,7 +757,12 @@ function fakeGateGithub({
         },
       };
     },
-    paginate: async (fn) => responses.get(fn) || [],
+    paginate: async (fn) => {
+      if (fn === listReviewComments) {
+        github.reviewCommentReads += 1;
+      }
+      return responses.get(fn) || [];
+    },
     request: async (route) => {
       if (route.includes("/rules/branches/")) {
         return {
