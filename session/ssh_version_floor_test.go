@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,24 +101,106 @@ func TestSSHCommandDialsTheConfiguredNameNotAnAddress(t *testing.T) {
 }
 
 // A typo in ssh.identity_file must REFUSE, not silently authenticate as somebody
-// else. ssh treats `-i /missing` as a warning and falls through to agent/default
-// keys, and IdentitiesOnly is deliberately off here, so the fallback is silent.
+// else. ssh treats an unusable `-i` as a warning and falls through to
+// agent/default keys, and IdentitiesOnly is deliberately off here.
+//
+// Asserted against verifySSHIdentityFile, NOT the composer: composition has to
+// stay filesystem-pure because restoreRuntimeCleanup calls it while persisted
+// handles are loading, and a check there captures a permanently dead cleanup the
+// moment a key is briefly unavailable — the defect this file already fixed once
+// for the accept-new store.
 func TestSSHIdentityFileMustBeReadable(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	missing := filepath.Join(t.TempDir(), "typo_id_ed25519")
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "typo_id_ed25519")
 
-	_, err := sshCommandForConfig(
-		config.SSHConfig{Host: "h.example.com", IdentityFile: missing}, config.SSHHostKeyStrict)
-
-	require.Error(t, err, "an unreadable identity file must fail the command, not warn inside ssh")
+	err := verifySSHIdentityFile(config.SSHConfig{Host: "h.example.com", IdentityFile: missing})
+	require.Error(t, err, "an unreadable identity file must be refused")
 	assert.Contains(t, err.Error(), missing, "the operator needs to see WHICH path")
 	assert.Contains(t, err.Error(), "backend=ssh")
 
-	// …and a readable one still composes, so the check is the only thing this moved.
-	present := filepath.Join(t.TempDir(), "id_ed25519")
+	// os.Stat SUCCEEDS for all three of these, and ssh can load none of them as a
+	// key — so an existence check would pass them straight through to the silent
+	// agent fallback this exists to prevent.
+	asDir := filepath.Join(dir, "a-directory")
+	require.NoError(t, os.Mkdir(asDir, 0o700))
+	assert.Error(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: asDir}),
+		"a directory is not a key, and os.Stat is happy with it")
+
+	if os.Geteuid() != 0 {
+		unreadable := filepath.Join(dir, "mode000")
+		require.NoError(t, os.WriteFile(unreadable, []byte("k"), 0o000))
+		assert.Error(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: unreadable}),
+			"an existing but unreadable file passes os.Stat and still cannot be loaded")
+	}
+
+	// A real, readable, regular file passes — so the check moved nothing else.
+	present := filepath.Join(dir, "id_ed25519")
 	require.NoError(t, os.WriteFile(present, []byte("key"), 0o600))
+	require.NoError(t, verifySSHIdentityFile(config.SSHConfig{IdentityFile: present}))
+
+	// And an unset identity file is not an error: the agent is the intended path.
+	require.NoError(t, verifySSHIdentityFile(config.SSHConfig{Host: "h.example.com"}))
+}
+
+// Composition must not touch the filesystem, whatever the identity file says.
+func TestSSHCommandCompositionIgnoresAnUnreadableIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	missing := filepath.Join(t.TempDir(), "gone_id_ed25519")
+
 	cmd, err := sshCommandForConfig(
-		config.SSHConfig{Host: "h.example.com", IdentityFile: present}, config.SSHHostKeyStrict)
+		config.SSHConfig{Host: "h.example.com", IdentityFile: missing}, config.SSHHostKeyStrict)
+
+	require.NoError(t, err,
+		"restoreRuntimeCleanup composes while loading persisted handles; refusing here would capture a "+
+			"permanently dead teardown the moment a key is briefly unavailable")
+	assert.Contains(t, cmd, "-i '"+missing+"'")
+}
+
+// A cleanup record written by the short-lived #3090 pinning knows the exact
+// machine its workspace is on. Dropping that would let a multi-address name
+// re-resolve to a DIFFERENT machine, remove nothing, report success and retire
+// the only tombstone — a permanent leak. So it is still decoded and honoured.
+func TestPinnedCleanupRecordStillDialsItsRecordedAddress(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	raw, err := json.Marshal(&RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+		Config:              config.SSHConfig{Host: "many.example.com", Port: 2222},
+		SessionDir:          "/home/af/.af-sessions/x.AbCdEf",
+		DialAddress:         "198.51.100.8",
+		HostKeyVerification: config.SSHHostKeyStrict,
+	}})
 	require.NoError(t, err)
-	assert.Contains(t, cmd, "-i '"+present+"'")
+	var back RuntimeCleanupData
+	require.NoError(t, json.Unmarshal(raw, &back))
+	require.Equal(t, "198.51.100.8", back.SSH.DialAddress, "the field must still DECODE")
+
+	backend, _, err := restoreRuntimeCleanup("pinned-legacy", "ssh", &back)
+	require.NoError(t, err)
+	sb, ok := backend.(*sshBackend)
+	require.True(t, ok)
+
+	fields := strings.Fields(sb.provisioner.sshCmd)
+	assert.Equal(t, "'198.51.100.8'", fields[len(fields)-1],
+		"the teardown must reach the machine the session actually ran on")
+	assert.Contains(t, sb.provisioner.sshCmd, "HostKeyAlias='[many.example.com]:2222'",
+		"and keep known_hosts keyed by name, which is what dialling an address requires")
+}
+
+// Every other record — before #3090 and after #3092 — dials the name, with no
+// alias, because that is what keeps certificates and dialer fallback working.
+func TestUnpinnedCleanupRecordDialsTheName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	backend, _, err := restoreRuntimeCleanup("ordinary", "ssh", &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+		Config:              config.SSHConfig{Host: "h.example.com", Port: 2222},
+		SessionDir:          "/home/af/.af-sessions/x.AbCdEf",
+		HostKeyVerification: config.SSHHostKeyStrict,
+	}})
+	require.NoError(t, err)
+	sb, ok := backend.(*sshBackend)
+	require.True(t, ok)
+
+	fields := strings.Fields(sb.provisioner.sshCmd)
+	assert.Equal(t, "'h.example.com'", fields[len(fields)-1])
+	assert.NotContains(t, sb.provisioner.sshCmd, "HostKeyAlias")
 }

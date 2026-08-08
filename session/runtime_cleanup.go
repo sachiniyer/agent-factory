@@ -50,10 +50,23 @@ type DockerRuntimeCleanupData struct {
 }
 
 type SSHRuntimeCleanupData struct {
-	Config              config.SSHConfig `json:"config"`
-	SessionDir          string           `json:"session_dir"`
-	RemotePID           string           `json:"remote_pid,omitempty"`
-	HostKeyVerification string           `json:"host_key_verification,omitempty"`
+	Config     config.SSHConfig `json:"config"`
+	SessionDir string           `json:"session_dir"`
+	RemotePID  string           `json:"remote_pid,omitempty"`
+	// DialAddress is the literal address a session was provisioned on, recorded
+	// ONLY by the short-lived pinning in #3090 and never written again (#3092
+	// reverted it, because dialling an address forces a HostKeyAlias and no alias
+	// value satisfies both a plain [host]:port entry and a certificate principal).
+	//
+	// It is still DECODED, and still honoured on teardown. Dropping the field would
+	// silently discard the one thing such a record knows and nothing else does: the
+	// exact machine its workspace is on. Re-resolving a multi-address name could
+	// then reap a DIFFERENT machine, find nothing, report success and retire the
+	// only tombstone — a permanent leak. Honouring it can at worst fail
+	// verification for a certificate host on a non-default port, which RETAINS and
+	// retries. Retained-and-retried beats silently-wrong-and-retired.
+	DialAddress         string `json:"dial_address,omitempty"`
+	HostKeyVerification string `json:"host_key_verification,omitempty"`
 }
 
 type HookRuntimeCleanupData struct {
@@ -209,7 +222,9 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// ssh.* settings, not a command — and refusing to reap it because the
 		// transport changed underneath would leak the workspace it exists to
 		// remove (the #3044 lesson).
-		sshCmd, cmdErr := sshCommandForConfig(legacyCfg, data.SSH.HostKeyVerification)
+		// A handle written by #3090 carries the address its session actually ran on.
+		// Reach THAT machine rather than re-resolving the name — see DialAddress.
+		sshCmd, cmdErr := sshCommandForPinnedRecord(legacyCfg, data.SSH.HostKeyVerification, data.SSH.DialAddress)
 		if cmdErr != nil {
 			return nil, nil, fmt.Errorf("ssh cleanup handle has an unusable address: %w", cmdErr)
 		}

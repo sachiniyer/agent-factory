@@ -156,28 +156,110 @@ func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 		// approach is not tried again.
 	}
 	if identity := strings.TrimSpace(cfg.IdentityFile); identity != "" {
-		path := expandUserPath(identity)
-		// REFUSE an identity file that cannot be read, rather than let ssh warn and
-		// carry on (#3092). ssh treats `-i /missing` as advisory:
-		//
-		//	Warning: Identity file /missing not accessible: No such file or directory.
-		//	…and it proceeds, authenticating with agent/default keys instead.
-		//
-		// IdentitiesOnly is deliberately OFF here (the old authMethods offered the
-		// identity file AND agent keys), so that fallback is silent and a typo in
-		// ssh.identity_file authenticates as somebody else. The old in-process client
-		// errored on an explicit file it could not read; this restores that.
-		if _, statErr := os.Stat(path); statErr != nil {
-			return "", fmt.Errorf("backend=ssh: ssh.identity_file %q cannot be read: %w "+
-				"(af refuses rather than silently falling back to your agent or default keys, "+
-				"which would authenticate as a different identity than the one configured)", path, statErr)
-		}
-		// No IdentitiesOnly: authMethods offered the identity file AND agent keys,
-		// and dropping the agent would break setups that rely on it.
-		parts = append(parts, "-i", shellQuoteSandbox(path))
+		// Composition stays FILESYSTEM-PURE — the readability check lives in
+		// verifySSHIdentityFile, called from the provision path. See there.
+		parts = append(parts, "-i", shellQuoteSandbox(expandUserPath(identity)))
 	}
 	parts = append(parts, shellQuoteSandbox(host))
 	return strings.Join(parts, " "), nil
+}
+
+// verifySSHIdentityFile refuses an ssh.identity_file af cannot actually hand to
+// ssh, rather than letting ssh warn and carry on (#3092).
+//
+// ssh treats an unusable -i as advisory:
+//
+//	Warning: Identity file /missing not accessible: No such file or directory.
+//	…and it proceeds, authenticating with agent/default keys instead.
+//
+// IdentitiesOnly is deliberately OFF (the old authMethods offered the identity
+// file AND agent keys), so that fallback is silent: a typo in ssh.identity_file
+// authenticates as somebody else. The old in-process client errored on an
+// explicit file it could not read.
+//
+// It OPENS the file rather than stat-ing it, and requires a regular file. A stat
+// succeeds for a directory, for a mode-000 file, and for a socket — none of which
+// ssh can load as a key, so each would fall straight back to the agent, which is
+// the failure this exists to prevent.
+//
+// CALLED FROM PROVISION ONLY, and deliberately not from the teardown path.
+// restoreRuntimeCleanup composes a closure while persisted handles are loading,
+// and a check there would capture a permanently dead cleanup the moment a key is
+// briefly unavailable — the #3061 defect this file already fixed once for the
+// accept-new store. Nor does the teardown gain from it: a reap authenticating
+// with the wrong identity fails and RETAINS, while refusing to compose a teardown
+// leaks the workspace it exists to remove (the #3044 lesson). The wrong-identity
+// risk is a CREATE-time risk, so the check lives at create time.
+func verifySSHIdentityFile(cfg config.SSHConfig) error {
+	identity := strings.TrimSpace(cfg.IdentityFile)
+	if identity == "" {
+		return nil
+	}
+	path := expandUserPath(identity)
+	refuse := func(why error) error {
+		return fmt.Errorf("backend=ssh: ssh.identity_file %q cannot be used as an ssh key: %w "+
+			"(af refuses rather than silently falling back to your agent or default keys, "+
+			"which would authenticate as a different identity than the one configured)", path, why)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return refuse(err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return refuse(err)
+	}
+	if !info.Mode().IsRegular() {
+		return refuse(fmt.Errorf("it is not a regular file (mode %s)", info.Mode()))
+	}
+	return nil
+}
+
+// sshCommandForPinnedRecord composes a TEARDOWN command for a persisted handle
+// that recorded a literal dial address (#3090), which #3092 stopped writing.
+//
+// Such a record knows something no re-resolution can recover: the exact machine
+// its workspace is on. So it dials that address, and restores the name as the
+// host-key lookup key with HostKeyAlias — the pairing #3090 measured, and the one
+// #3092 removed from the CREATE path because no alias value satisfies both a
+// plain [host]:port entry and a certificate principal.
+//
+// That conflict is accepted HERE and nowhere else, because the failure modes are
+// not symmetric. A certificate host on a non-default port fails verification, so
+// the reap fails and the record is RETAINED and retried — visible, recoverable.
+// Re-resolving a multi-address name instead can reach a different machine, remove
+// nothing, report success and retire the only tombstone — silent, permanent.
+//
+// An empty address (every record written before #3090 and after #3092) takes the
+// ordinary name-based command, unchanged.
+func sshCommandForPinnedRecord(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
+	base, err := sshCommandForConfig(cfg, posture)
+	if err != nil {
+		return "", err
+	}
+	pinned := strings.TrimSpace(dialAddr)
+	if pinned == "" {
+		return base, nil
+	}
+	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
+	if err != nil {
+		return "", err
+	}
+	if port == 0 {
+		port = sshDefaultPort
+	}
+	// The destination is the LAST token of the composed command; swap it for the
+	// recorded address and add the alias that keeps known_hosts keyed by name.
+	suffix := " " + shellQuoteSandbox(host)
+	if !strings.HasSuffix(base, suffix) {
+		// The composer changed shape underneath this; dial by name rather than
+		// guess, since a wrong destination on a teardown is the whole hazard.
+		return base, nil
+	}
+	return strings.TrimSuffix(base, suffix) +
+		" -o HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)) +
+		" " + shellQuoteSandbox(pinned), nil
 }
 
 // sshHostKeyOptions maps ssh_host_key_verification onto the ssh binary's own

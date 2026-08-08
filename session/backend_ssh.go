@@ -151,6 +151,11 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// client, and having two paths is what produced #3044 — the same address
 	// resolving differently depending on which read it. The composed command is
 	// handed to the same sandboxProvisioner `backend=sandbox` uses (#3052).
+	// Create time is where an identity typo must be refused — see
+	// verifySSHIdentityFile for why the teardown path deliberately does not.
+	if err := verifySSHIdentityFile(sshCfg); err != nil {
+		return ProvisionResult{}, err
+	}
 	sshCmd, err := sshCommandForConfig(sshCfg, cfg.SSHHostKeyVerification)
 	if err != nil {
 		return ProvisionResult{}, err
