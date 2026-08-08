@@ -4,8 +4,11 @@ package git
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"math"
 	"os"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
@@ -32,7 +35,11 @@ import (
 //
 // Both sides are opened relative to a directory descriptor, never by rebuilt
 // path, keeping the copier descriptor-anchored throughout.
-func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, expected, expectedSource pathIdentity) bool {
+// retained is a descriptor on the copy kept from when it was written, or nil. When
+// present it is used INSTEAD of reopening, which is the whole of #3063: the copy's
+// own mode can deny the copier that owns it, and a descriptor older than the mode
+// is the only thing that still reads.
+func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.File, copiedPath string, expected, expectedSource pathIdentity, retained *os.File) bool {
 	current, err := openAtForCompare(source, name)
 	if err != nil {
 		return false
@@ -65,11 +72,15 @@ func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.F
 	// is #3063 and is a fidelity cost, not a correctness one. Hard-linking is an
 	// optimisation, and one that can publish bytes that were never at that path is
 	// not worth its saving.
-	copied, err := openAtForCompare(destinationRoot, copiedPath)
-	if err != nil {
-		return false
+	copied := retained
+	if copied == nil {
+		reopened, err := openAtForCompare(destinationRoot, copiedPath)
+		if err != nil {
+			return false
+		}
+		defer reopened.Close()
+		copied = reopened
 	}
-	defer copied.Close()
 	copiedIdentity, err := identityFromFile(copied)
 	if err != nil || !expected.same(copiedIdentity) {
 		return false
@@ -87,12 +98,28 @@ func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.F
 		return false
 	}
 
+	// Offset-based reads, and NOT capped at copiedInfo.Size() (#3063 review).
+	//
+	// Two separate reasons, and the second is a correctness bug rather than a
+	// nicety. pread is required because a retained descriptor is a dup of the one
+	// the bytes were written through: its offset sits at EOF, and dup(2) SHARES that
+	// offset, so a sequential read would start at the end and move the writer's
+	// position. But sizing a SectionReader from the earlier Stat imposes a STALE EOF:
+	// a same-UID process appending to the destination between that Stat and here
+	// makes the copy stop early, both sides appear to end together, and the function
+	// returns true — publishing destination bytes that were never at the source path,
+	// which is precisely the #3046 guarantee this must not break.
+	//
+	// math.MaxInt64 lets the section reader run to the inode's ACTUAL end, so a
+	// destination that grew reads longer than the source and the length check below
+	// refuses it.
+	copiedReader := io.NewSectionReader(copied, 0, math.MaxInt64)
 	const chunk = 64 * 1024
 	currentChunk := make([]byte, chunk)
 	copiedChunk := make([]byte, chunk)
 	for {
 		readCurrent, currentErr := io.ReadFull(current, currentChunk)
-		readCopied, copiedErr := io.ReadFull(copied, copiedChunk)
+		readCopied, copiedErr := io.ReadFull(copiedReader, copiedChunk)
 		if readCurrent != readCopied || !bytes.Equal(currentChunk[:readCurrent], copiedChunk[:readCopied]) {
 			return false
 		}
@@ -115,4 +142,155 @@ func openAtForCompare(parent *os.File, name string) (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), name), nil
+}
+
+// maxRetainedLinkReaders caps the descriptors held for hard-link comparison even
+// when RLIMIT_NOFILE is very large. The cap is process-wide: separate archive
+// restores share one descriptor table and cannot each spend the same capacity.
+const maxRetainedLinkReaders = 256
+
+// The copy needs descriptors after the retained-reader budget is chosen: two
+// directory routes, a source and destination file, validation, and unrelated
+// daemon work can all overlap it. Keep an explicit reserve instead of consuming
+// every slot RLIMIT_NOFILE currently exposes.
+const retainedLinkReaderFDReserve = 16
+
+var retainedLinkReaderCapacity struct {
+	sync.Mutex
+	held      int
+	available int
+}
+
+// retainedLinkReader owns both the duplicated descriptor and its process-wide
+// reservation. Keeping them in one value makes it impossible for a map
+// replacement or error cleanup to close the fd without returning the slot.
+type retainedLinkReader struct {
+	file     *os.File
+	once     sync.Once
+	closeErr error
+}
+
+func (r *retainedLinkReader) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.once.Do(func() {
+		r.closeErr = r.file.Close()
+		retainedLinkReaderCapacity.Lock()
+		retainedLinkReaderCapacity.held--
+		retainedLinkReaderCapacity.available++
+		if retainedLinkReaderCapacity.held == 0 {
+			// No reservation wave is active. Recompute against the live process
+			// table when the next copy asks, rather than carrying a stale snapshot.
+			retainedLinkReaderCapacity.available = 0
+		}
+		retainedLinkReaderCapacity.Unlock()
+	})
+	return r.closeErr
+}
+
+// retainLinkReader duplicates fd only after atomically reserving room in the
+// process descriptor table. The measurement and dup stay under the same lock so
+// concurrent copies cannot both spend one observed spare slot.
+func retainLinkReader(fd int, path string) *retainedLinkReader {
+	retainedLinkReaderCapacity.Lock()
+	defer retainedLinkReaderCapacity.Unlock()
+	if retainedLinkReaderCapacity.held == 0 && retainedLinkReaderCapacity.available == 0 {
+		var limit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+			return nil
+		}
+		open, ok := openFileDescriptorCount(limit.Cur)
+		if !ok || limit.Cur <= uint64(open)+retainedLinkReaderFDReserve {
+			// An unknown or full table is not evidence that a slot is available.
+			// Falling back to a fresh copy can lose hard-link fidelity, but it never
+			// publishes unverified bytes and cannot exhaust the daemon for other work.
+			return nil
+		}
+		available := limit.Cur - uint64(open) - retainedLinkReaderFDReserve
+		if available > maxRetainedLinkReaders {
+			available = maxRetainedLinkReaders
+		}
+		retainedLinkReaderCapacity.available = int(available)
+	}
+	if retainedLinkReaderCapacity.available == 0 {
+		return nil
+	}
+	dupFD, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil
+	}
+	file := os.NewFile(uintptr(dupFD), path)
+	if file == nil {
+		_ = unix.Close(dupFD)
+		return nil
+	}
+	retainedLinkReaderCapacity.held++
+	retainedLinkReaderCapacity.available--
+	return &retainedLinkReader{file: file}
+}
+
+// openFileDescriptorCount first reads the process descriptor filesystem. Linux
+// exposes /proc/self/fd; some systems expose a readable /dev/fd. macOS exposes
+// /dev/fd but does not support enumerating it, so a low-limit portable fallback
+// probes each possible descriptor with F_GETFD instead. The scan is deliberately
+// capped: on a platform with neither descriptor filesystem nor a reasonably
+// small limit, retaining nothing is safer than an unbounded scan in the daemon.
+func openFileDescriptorCount(limit uint64) (int, bool) {
+	for _, path := range []string{"/dev/fd", "/proc/self/fd"} {
+		entries, err := os.ReadDir(path)
+		if err == nil {
+			return len(entries), true
+		}
+	}
+	const maxPortableFDScan = 64 * 1024
+	if limit > maxPortableFDScan {
+		return 0, false
+	}
+	open := 0
+	for fd := 0; uint64(fd) < limit; fd++ {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			open++
+		}
+	}
+	return open, true
+}
+
+type copiedFileLink struct {
+	path     string
+	identity pathIdentity
+	// reader is a descriptor on the copy, opened before its mode was narrowed, or
+	// nil. A root-owned 0004 file copied by a non-root user ends up owned by the
+	// copier with mode 0004, and owner bits win — so the copier cannot reopen a file
+	// it owns, and every later link to that inode was copied separately instead
+	// (#3063). Owned by copyDirectoryContents, which closes them all.
+	reader *retainedLinkReader
+}
+
+func linkCopiedFile(
+	destination, destinationRoot *os.File,
+	first copiedFileLink,
+	name, destinationPath string,
+	sourceIdentity pathIdentity,
+) (copiedEntry, error) {
+	if err := unix.Linkat(int(destinationRoot.Fd()), first.path, int(destination.Fd()), name, 0); err != nil {
+		return copiedEntry{}, fmt.Errorf(
+			"cannot move worktree across filesystems: failed to reproduce the hard link at %s: %w", destinationPath, err)
+	}
+	// Named and identified before anything else can fail, exactly like every
+	// other node this copier creates — cleanup can only remove what the manifest
+	// describes, so the OBSERVED identity is recorded even on the refusal below.
+	destinationIdentity, err := identityAt(destination, name)
+	if err != nil {
+		return copiedEntry{name: name, source: sourceIdentity}, fmt.Errorf(
+			"cannot move worktree across filesystems: failed to identify hard link %s after creating it: %w",
+			destinationPath, err)
+	}
+	created := copiedEntry{name: name, source: sourceIdentity, destination: destinationIdentity}
+	if !first.identity.same(destinationIdentity) {
+		return created, fmt.Errorf(
+			"cannot move worktree across filesystems: hard link %s resolved to a different inode than the file it was linked from",
+			destinationPath)
+	}
+	return created, nil
 }
