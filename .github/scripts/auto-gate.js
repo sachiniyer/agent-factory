@@ -344,7 +344,11 @@ async function listPullRequestFiles({ github, context, number }) {
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core });
-  const specs = required.specs.filter((spec) => spec.context !== AUTO_GATE_DECISION_CHECK);
+  const specs = required.specs.filter(
+    (spec) =>
+      spec.context !== AUTO_GATE_DECISION_CHECK ||
+      spec.sourceAppId !== GITHUB_ACTIONS_APP_ID,
+  );
   const notes = [];
   const reasons = [...required.errors];
 
