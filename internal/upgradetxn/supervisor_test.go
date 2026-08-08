@@ -601,3 +601,38 @@ func TestSupervisorRestartsPreviousBeforeLedgerBookkeeping(t *testing.T) {
 	require.False(t, runtime.jobDisabled, "cleanup must not run while the rejection is unrecorded")
 	require.NoError(t, takeover.Release())
 }
+
+// TestRollbackFailedRecordFailureLeavesTheJobArmedForRetry is the supervisor half
+// of #3098: the phase must SAY it ended with the recovery job still armed, and it
+// must not disarm it, so a restarted actor can re-enter and retry the ledger write.
+func TestRollbackFailedRecordFailureLeavesTheJobArmedForRetry(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+
+	txn.mu.Lock()
+	// CandidateInstalled reaches the record; an empty digest makes RecordRejectedCandidate
+	// fail deterministically ("cannot reject an upgrade candidate with no digest"),
+	// standing in for the transient disk error this exists to make retryable.
+	txn.journal.CandidateInstalled = true
+	txn.journal.CandidateSHA256 = ""
+	require.NoError(t, txn.persistPhaseLocked(PhaseRollbackFailed))
+	txn.mu.Unlock()
+
+	runtime := &fakeSupervisorRuntime{}
+	err = (Supervisor{Operations: runtime.operations()}).Run(context.Background(), txn, lease)
+
+	require.ErrorIs(t, err, ErrRollbackRecoveryFailed)
+	require.ErrorIs(t, err, ErrRecoveryJobStillArmed,
+		"the result must state that the job was never disarmed; without it the actor exits 0 and systemd never retries")
+	require.False(t, runtime.jobDisabled,
+		"disarming here would strand the candidate un-disqualified with nothing left to retry it")
+	require.NotContains(t, runtime.calls, "disable-recovery-job")
+
+	require.NoError(t, lease.Release())
+	// Deliberately no reload assertion here: the empty digest that makes the
+	// record fail also makes the journal fail its own load validation, and phase
+	// durability across a reload is already covered by
+	// TestRollbackFailedDisablesRecoveryLoopAndRetainsArtifacts. What this test
+	// owns is the OUTCOME the actor reads.
+}

@@ -26,6 +26,21 @@ var (
 	// and the active journal remain for explicit repair while the persistent job
 	// is disabled, so a corrupt snapshot cannot create a restart loop.
 	ErrRollbackRecoveryFailed = errors.New("automatic upgrade rollback failed; recovery artifacts retained")
+	// ErrRecoveryJobStillArmed marks a terminal-looking result that was reached
+	// BEFORE the persistent recovery job was disarmed, so the work is not finished
+	// and the actor must not exit 0 (#3098).
+	//
+	// ErrRollbackRecoveryFailed alone cannot answer this. It is returned both after
+	// a successful DisableRecoveryJob — the circuit breaker is in place, nothing is
+	// owed — and from the record-rejection failures below, where the job is still
+	// enabled and a retry is exactly what should happen. One value, two outcomes,
+	// and the actor was reading the wrong one: it exited 0 for both, so systemd's
+	// Restart=on-failure never fired and a transient write error waited for the
+	// next boot instead of the next second.
+	//
+	// The same shape as #3036's committed-mutation envelope: a caller cannot infer
+	// what completed from an error that does not say.
+	ErrRecoveryJobStillArmed = errors.New("recovery job was still armed when the phase ended")
 	// ErrRecoveryJobDisableFailed distinguishes a durable rollback circuit
 	// breaker from failure to disarm the service manager. A recovery actor may
 	// exit cleanly for the former, but must fail so the manager retries the
@@ -359,7 +374,9 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 					journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
 					"the candidate was rolled back and the rollback did not complete",
 				); err != nil {
-					return errors.Join(ErrRollbackRecoveryFailed,
+					// Still armed: the disable below has NOT run, so a restart can
+					// re-enter this phase and retry the ledger write (#3098).
+					return errors.Join(ErrRollbackRecoveryFailed, ErrRecoveryJobStillArmed,
 						fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
 				}
 			}
@@ -542,7 +559,9 @@ func (s Supervisor) finishFailedRollback(
 			journal.ExecutablePath, journal.CandidateSHA256, journal.ToVersion,
 			"the candidate was rolled back and the rollback did not complete",
 		); err != nil {
-			return errors.Join(ErrRollbackRecoveryFailed, cause,
+			// Same as the PhaseRollbackFailed arm: reached before the disable, so
+			// the job is still armed and this is retryable, not terminal (#3098).
+			return errors.Join(ErrRollbackRecoveryFailed, ErrRecoveryJobStillArmed, cause,
 				fmt.Errorf("record the rolled-back candidate as rejected: %w", err))
 		}
 	}
