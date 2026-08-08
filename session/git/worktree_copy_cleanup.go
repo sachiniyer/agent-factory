@@ -174,13 +174,34 @@ func validateCopiedDirectoryLevel(
 	for _, entry := range expected.entries {
 		expectedByName[entry.name] = entry
 	}
-	if len(names) != len(expectedByName) {
+	// A known-absent entry names a SOURCE path that was deliberately not
+	// reproduced, so it is expected on the source side and must not be expected on
+	// the destination side. Counting it correctly per side is what lets a
+	// deliberately incomplete tree validate WITHOUT weakening the check: an
+	// unexplained mismatch still fails here, which is the property that catches
+	// real corruption (#3066).
+	expectedCount := len(expectedByName)
+	if !source {
+		for _, entry := range expected.entries {
+			if entry.absent() {
+				expectedCount--
+			}
+		}
+	}
+	if len(names) != expectedCount {
 		return fmt.Errorf("tree entry set changed at %s", path)
 	}
 	for _, name := range names {
 		entry, ok := expectedByName[name]
 		if !ok {
 			return fmt.Errorf("unexpected tree entry %s", filepath.Join(path, name))
+		}
+		if entry.absent() && !source {
+			// Present in the source, deliberately not copied, so there is no
+			// destination node to identify. Reaching this on the destination side
+			// means something CREATED it, which is not the state that was recorded.
+			return fmt.Errorf("tree entry %s was recorded as not copied but exists in the destination",
+				filepath.Join(path, name))
 		}
 		current, err := identityAt(directory, name)
 		if err != nil {

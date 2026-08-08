@@ -54,7 +54,27 @@ type copiedEntry struct {
 	source      pathIdentity
 	destination pathIdentity
 	directory   *copiedDirectory
+	// absentReason, when non-empty, means this name exists in the SOURCE and was
+	// deliberately not copied — today only because the copier had no permission to
+	// read it and the operation's policy allowed skipping (#3066).
+	//
+	// The entry is RECORDED rather than omitted, and that distinction is the whole
+	// slice. validateSource requires the manifest and the source directory to hold
+	// exactly the same name set, so omitting a skipped file fails with "tree entry
+	// set changed" and rejects the archive — which is what made the first attempt
+	// non-functional in every real invocation.
+	//
+	// The alternative repair, loosening the name-set check, would disarm the thing
+	// that catches real corruption in order to serve a case that should be
+	// DESCRIBED instead. A deliberately incomplete tree is representable; an
+	// unexplained one must still fail.
+	absentReason string
 }
+
+// absent reports whether this entry names a source path that was deliberately
+// not reproduced. Such an entry has a name and a source identity but no
+// destination node, so cleanup has nothing to remove for it.
+func (e copiedEntry) absent() bool { return e.absentReason != "" }
 
 type copiedDirectoryRoute struct {
 	parent    int
