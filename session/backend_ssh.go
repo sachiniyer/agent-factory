@@ -193,7 +193,7 @@ func newSSHSandboxProvisioner(spec ProvisionSpec, sshCmd, afBin, program string)
 		program: program,
 		// Errors from the shared transport must name THIS backend. An operator whose
 		// ssh.host clone failed should not be sent to look up sandbox_ssh.
-		backend: string(BackendSSH),
+		backendLabel: string(BackendSSH),
 	}
 }
 

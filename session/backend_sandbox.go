@@ -106,11 +106,16 @@ type sandboxProvisioner struct {
 	sshCmd  string
 	afBin   string
 	program string
-	// backend is the label the OWNING backend puts on this transport's errors.
+	// backendLabel is the name the OWNING backend puts on this transport's errors.
 	// Empty means "sandbox". Since #3052 `backend = "ssh"` provisions through this
 	// same type, and an auth, host-key, clone, tunnel or cleanup failure reported
 	// as `backend=sandbox` sends the operator to a config key they never set.
-	backend string
+	//
+	// NOT named `backend`: it holds a LABEL, not a Backend, and the #2096 source
+	// guard is deliberately syntactic — it asks who names that field, package-wide.
+	// A second field sharing the name would make the guard's question ambiguous,
+	// and the honest fix is the precise name rather than an allowlist entry.
+	backendLabel string
 
 	sessionDir string
 	remotePID  string
@@ -190,10 +195,10 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 // value to "sandbox" keeps every existing construction site correct without a
 // flag day, while the ssh backend sets it explicitly.
 func (p *sandboxProvisioner) label() string {
-	if p.backend == "" {
+	if p.backendLabel == "" {
 		return string(BackendSandbox)
 	}
-	return p.backend
+	return p.backendLabel
 }
 
 func (p *sandboxProvisioner) sandboxErr(err error) error {
