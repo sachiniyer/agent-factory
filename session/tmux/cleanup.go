@@ -613,8 +613,15 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// reap synchronously at the end because `af reset` is a short-lived CLI
 	// process — a goroutine would die with it before the sweep ran.
 	leakedBySession := make(map[string][]proctree.Process, len(matches))
+	leakedCaptureErrs := make(map[string]error, len(matches))
 	for _, match := range matches {
-		leakedBySession[match] = SessionProcessTrees(cmdExec, match)
+		// captureSessionProcessTrees, not SessionProcessTrees: the latter drops the
+		// error, and dropping it here is the #3093 defect. A session that vanishes
+		// between the ownership check above and this capture yields an EMPTY slice
+		// that is indistinguishable from "this session had no processes" — and the
+		// reap loop below then skips it, so anything that escaped the pane tree
+		// survives `af reset` while it reports success.
+		leakedBySession[match], leakedCaptureErrs[match] = captureSessionProcessTrees(cmdExec, match)
 	}
 
 	// Only sessions that are actually gone get their captured trees reaped —
@@ -663,21 +670,87 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// Sweep concurrently: the grace waits overlap instead of serializing,
 	// and the whole reset still blocks until every sweep finishes.
 	var wg sync.WaitGroup
+	var sweepMu sync.Mutex
+	var sweepErr error
 	for _, match := range killed {
 		leaked := leakedBySession[match]
-		if len(leaked) == 0 {
+		captureErr := leakedCaptureErrs[match]
+		// An EMPTY capture means "nothing to reap" only when the capture SUCCEEDED
+		// (#3093). With an error it means af does not know what this session was
+		// running, which is not the same answer and must not take the same branch:
+		// check-then-act on a destructive path, where the failure mode is a process
+		// that outlives the reset with nothing left pointing at it — the residue
+		// class of #2842/#2998.
+		// Scoped to the VANISH sentinel, which captureSessionProcessTrees mints for
+		// exactly this race — tmux answering that the session is gone. Any other
+		// capture failure keeps today's behaviour: it is a different question (a
+		// wedged server, an unparseable answer), the pre-existing code already
+		// tolerated it, and widening `af reset` to fail on all of them is a separate
+		// decision from fixing this race.
+		vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
+		if !vanished && len(leaked) == 0 {
 			continue
 		}
 		wg.Add(1)
-		go func(match string, leaked []proctree.Process) {
+		go func(match string, leaked []proctree.Process, captureErr error, vanished bool) {
 			defer wg.Done()
+			if vanished {
+				// INDETERMINATE, so fall back to the snapshot taken before the
+				// ownership check — the one the pre-marker pass exists to provide, and
+				// which this path previously discarded.
+				//
+				// Routed through reapVanishedSessionProcesses rather than reaping the
+				// stale list directly, and that is the load-bearing choice: it REFRESHES
+				// each candidate and keeps only processes still carrying this session's
+				// markers, so a PID recycled since the snapshot is not signalled. Killing
+				// a stale PID list would trade a leaked process for someone else's
+				// process, which is a worse bug than the one being fixed.
+				candidates := mergeProcessCandidates(preMarkerProcesses[match], leaked)
+				if reapErr := reapVanishedSessionProcesses(match, ownHome, candidates, captureErr); reapErr != nil {
+					sweepMu.Lock()
+					sweepErr = errors.Join(sweepErr, fmt.Errorf(
+						"tmux session %s was killed but vanished before its processes could be captured, and the "+
+							"marked-orphan sweep over the pre-ownership snapshot is incomplete: %w", match, reapErr))
+					sweepMu.Unlock()
+					return
+				}
+				log.InfoLog.Printf("tmux session %s vanished before its post-kill process capture; marked orphan sweep over the pre-ownership snapshot completed", match)
+				return
+			}
 			// These sessions were just killed BY this sweep, on request: their
 			// processes are being destroyed with them, not caught escaping (#2765).
 			reapSessionProcesses(reapOnRequest, match, leaked, reapGraceWait, reapTermWait)
-		}(match, leaked)
+		}(match, leaked, captureErr, vanished)
 	}
 	wg.Wait()
-	return killErr
+	// Joined rather than swallowed: "Factory reset complete" over an incomplete
+	// sweep is what sends someone to `af doctor` a fortnight later, and doctor's
+	// own grace period means even that does not reap immediately. The
+	// vanished-during-ownership branch above already reports the same way.
+	return errors.Join(killErr, sweepErr)
+}
+
+// mergeProcessCandidates unions two snapshots of one session's processes,
+// deduplicated by PID, preserving the order of the first.
+//
+// Both halves are needed for an indeterminate capture: the pre-ownership snapshot
+// is the older and more complete one, while a failed capture can still have
+// returned partial results naming a process that started after it. Neither is
+// authoritative on its own, and the caller re-verifies markers before signalling
+// anything, so a superset here costs a refresh rather than a wrong kill.
+func mergeProcessCandidates(first, second []proctree.Process) []proctree.Process {
+	merged := make([]proctree.Process, 0, len(first)+len(second))
+	seen := make(map[int]struct{}, len(first)+len(second))
+	for _, group := range [][]proctree.Process{first, second} {
+		for _, process := range group {
+			if _, dup := seen[process.PID]; dup {
+				continue
+			}
+			seen[process.PID] = struct{}{}
+			merged = append(merged, process)
+		}
+	}
+	return merged
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
