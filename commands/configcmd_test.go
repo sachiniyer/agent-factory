@@ -111,6 +111,103 @@ func TestFormatConfigValue(t *testing.T) {
 	}
 }
 
+func TestFormatConfigListValue(t *testing.T) {
+	cases := []struct {
+		name       string
+		value      any
+		configured bool
+		want       string
+	}{
+		{"unset string", "", false, "(unset)"},
+		{"unset nil list", []string(nil), false, "(unset)"},
+		{"unset empty map", map[string]string{}, false, "(unset)"},
+		{"configured empty string", "", true, `""`},
+		{"configured nil list", []string(nil), true, "null"},
+		{"configured empty list", []string{}, true, "[]"},
+		{"configured empty map", map[string]string{}, true, "{}"},
+		{"false is a value", false, false, "false"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			entry := configEntry{Value: c.value, configured: c.configured}
+			if got := formatConfigListValue(entry); got != c.want {
+				t.Fatalf("formatConfigListValue(%#v) = %q, want %q", entry, got, c.want)
+			}
+		})
+	}
+}
+
+func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
+	tempAFHome(t)
+
+	list := func() string {
+		t.Helper()
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		if err := configListCmd.RunE(cmd, nil); err != nil {
+			t.Fatalf("config list: %v", err)
+		}
+		return out.String()
+	}
+	valueFor := func(output, key string) string {
+		t.Helper()
+		for line := range strings.SplitSeq(output, "\n") {
+			if strings.HasPrefix(line, key) {
+				return strings.TrimSpace(strings.TrimPrefix(line, key))
+			}
+		}
+		t.Fatalf("config list does not contain %q:\n%s", key, output)
+		return ""
+	}
+
+	initial := list()
+	for _, key := range []string{
+		"session_env_passthrough",
+		"preview_listen_addr",
+		"cors_allowed_origins",
+		"on_archive_command",
+		"vscode_server_binary",
+		"root_agents",
+		"sandbox_ssh",
+		"limit_patterns",
+		"keys",
+	} {
+		if got := valueFor(initial, key); got != "(unset)" {
+			t.Errorf("default %s = %q, want (unset)", key, got)
+		}
+	}
+	if got := valueFor(initial, "require_token"); got != "false" {
+		t.Errorf("require_token = %q, want false", got)
+	}
+
+	if _, err := config.SetGlobalConfigValue("on_archive_command", ""); err != nil {
+		t.Fatalf("set explicit empty on_archive_command: %v", err)
+	}
+	if got := valueFor(list(), "on_archive_command"); got != `""` {
+		t.Fatalf("configured empty on_archive_command = %q, want explicit empty string", got)
+	}
+
+	var getOut bytes.Buffer
+	getCmd := &cobra.Command{}
+	getCmd.SetOut(&getOut)
+	if err := configGetCmd.RunE(getCmd, []string{"on_archive_command"}); err != nil {
+		t.Fatalf("config get on_archive_command: %v", err)
+	}
+	if got := getOut.String(); got != "\n" {
+		t.Fatalf("config get changed its empty-value output to %q", got)
+	}
+
+	configPath := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), config.TomlConfigFileName)
+	invalidPattern := "schema_version = 1\n[limit_patterns]\nclaude = '('\n"
+	if err := os.WriteFile(configPath, []byte(invalidPattern), 0644); err != nil {
+		t.Fatalf("write config with ignored pattern: %v", err)
+	}
+	if got := valueFor(list(), "limit_patterns"); got != "(unset)" {
+		t.Fatalf("ignored nonempty limit_patterns = %q, want (unset)", got)
+	}
+}
+
 // configEntriesInternalKeys are the toml-tagged config.Config fields that are
 // deliberately NOT readable through `af config get/list`. Every entry needs a
 // reason: this is the only escape hatch from the reflective coverage check, so
@@ -560,13 +657,21 @@ func TestConfigListJSONEnvelope(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("envelope error should be null, got %v", env.Error)
 	}
-	var haveDefaultProgram bool
+	var haveDefaultProgram, haveEmptyString, haveNilList bool
 	for _, e := range env.Data {
-		if e.Key == "default_program" {
+		switch e.Key {
+		case "default_program":
 			haveDefaultProgram = true
+		case "preview_listen_addr":
+			haveEmptyString = e.Value == ""
+		case "session_env_passthrough":
+			haveNilList = e.Value == nil
 		}
 	}
 	if !haveDefaultProgram {
 		t.Fatalf("config list --json missing default_program: %s", out.String())
+	}
+	if !haveEmptyString || !haveNilList {
+		t.Fatalf("config list --json changed typed empty values: %s", out.String())
 	}
 }

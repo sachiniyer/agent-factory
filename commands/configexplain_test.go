@@ -291,6 +291,21 @@ func TestConfigListProjectIncludesRepoOnlyKeysButBareListDoesNot(t *testing.T) {
 	assert.Contains(t, projectOutput, "post_worktree_commands")
 }
 
+func TestConfigListProjectDistinguishesUnsetFromExplicitEmpty(t *testing.T) {
+	_, repoRoot := setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
+	setConfigListReadFlags(t, repoRoot, false, false)
+
+	output, err := runConfigListForTest(t)
+	require.NoError(t, err)
+	assert.Regexp(t, `(?m)^docker\s+\(unset\)$`, output)
+	assert.Regexp(t, `(?m)^post_worktree_commands\s+\(unset\)$`, output)
+
+	writeCommandTestInRepoConfig(t, repoRoot, "post_worktree_commands = []\n")
+	output, err = runConfigListForTest(t)
+	require.NoError(t, err)
+	assert.Regexp(t, `(?m)^post_worktree_commands\s+\[\]$`, output)
+}
+
 func TestConfigGetProjectReportsLocalForAbsentBackend(t *testing.T) {
 	_, repoRoot := setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
 	setConfigGetReadFlags(t, repoRoot, false, false)

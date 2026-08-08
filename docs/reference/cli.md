@@ -633,7 +633,9 @@ legacy, checked-in, and personal layers participate; outside git, the command
 falls back to global defaults. Pass --repo <repository-path> to inspect another
 project. --project remains accepted as a deprecated alias. --explain prints
 every source candidate and the reason it won, was shadowed, was absent, or is
-disallowed for that key.
+disallowed for that key. Human output renders an empty built-in value as
+"(unset)"; an explicitly configured empty value remains visible as "", [], {},
+or null. JSON output preserves the typed effective values.
 
 ```
 af config list [flags]
