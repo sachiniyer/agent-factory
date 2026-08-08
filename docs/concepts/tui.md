@@ -44,9 +44,10 @@ matching the 1-9 jump keys; it was removed in #3023):
 - **`t`** opens a new-tab picker. Choose **Terminal** for a shell in the
   worktree, or **VS Code** for a browser editor on that worktree (the TUI shows
   its placeholder; open the web client to use the editor).
+- **`1`–`9`** jump straight to a tab by number. **`g`** opens a prompt that jumps
+  to any tab by number or name — past the ninth, or to the one called `deploy`.
 - **`w`** closes the focused tab (the agent's own tab can't be closed — kill the
   session instead).
-- **`1`–`9`** jump straight to a tab by number.
 
 Tabs persist across restarts, and each is a real process the daemon tracks.
 (Remote sessions are more limited — see [Remote hooks](../remote-hooks.md).)
