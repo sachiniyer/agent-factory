@@ -107,3 +107,21 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 	require.NoError(t, refuseOffBoxAccount(plain))
 	require.NoError(t, refuseUnsupportedAccountAgent(plain))
 }
+
+// An account-scoped session must REFUSE a handoff (#3083 review, P1).
+//
+// Clearing the generated-args declaration was not enough: refreshSessionEnvironment
+// reapplies the unchanged Account, so handing a claude session scoped to "work" to
+// codex would launch codex under a codex account also named "work" — a different
+// identity, selected by a name collision rather than by the user. Bare codex needs
+// no declaration, so nothing downstream refuses it.
+func TestSwapAgent_RefusesAnAccountScopedSession(t *testing.T) {
+	backend := &LocalBackend{}
+	inst := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
+
+	err := backend.SwapAgent(inst, AgentSwapPlan{target: "codex", program: "codex"})
+
+	require.Error(t, err, "an account-scoped handoff must refuse rather than reuse the account name")
+	require.Contains(t, err.Error(), "belongs to one agent")
+	require.Contains(t, err.Error(), "work", "the refusal must name the account it is protecting")
+}
