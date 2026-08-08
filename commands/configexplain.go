@@ -139,7 +139,7 @@ func rootAgentAwareResolution(resolved *config.ResolvedConfig, projectSelector s
 func configEntriesFromResolution(values []config.ResolvedValue) []configEntry {
 	entries := make([]configEntry, 0, len(values))
 	for _, value := range values {
-		entries = append(entries, configEntry{Key: value.Key, Value: value.Value})
+		entries = append(entries, configEntryFromResolvedValue(value))
 	}
 	return entries
 }

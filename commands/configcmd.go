@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -88,6 +89,12 @@ var (
 type configEntry struct {
 	Key   string `json:"key"`
 	Value any    `json:"value"`
+
+	// configured is presentation-only provenance. JSON callers keep receiving
+	// the effective typed value above; human `config list` uses this bit to tell
+	// a missing value (the compiled default applies) from an explicitly
+	// configured empty value.
+	configured bool
 }
 
 // globalConfigReadOrder preserves the historical `af config list` order. It is
@@ -141,7 +148,7 @@ func loadGlobalConfigEntries() ([]configEntry, error) {
 		if !ok {
 			return nil, fmt.Errorf("global config read order contains unknown manifest key %q", key)
 		}
-		entries = append(entries, configEntry{Key: key, Value: value.Value})
+		entries = append(entries, configEntryFromResolvedValue(value))
 	}
 	return entries, nil
 }
@@ -164,6 +171,51 @@ func formatConfigValue(v any) string {
 		}
 		return string(b)
 	}
+}
+
+// formatConfigListValue makes absence visible without hiding an explicit
+// empty value. Empty built-in values are not configured anywhere, so the human
+// list labels them consistently. An explicit empty string/list/table/null is
+// rendered literally, preserving the distinction between "use the default"
+// and "I configured the empty/off value". `config get` and JSON output keep
+// their existing script-facing representations.
+func formatConfigListValue(entry configEntry) string {
+	if !isEmptyConfigValue(entry.Value) {
+		return formatConfigValue(entry.Value)
+	}
+	if !entry.configured {
+		return "(unset)"
+	}
+	return formatConfigExplanationValue(entry.Value)
+}
+
+func isEmptyConfigValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	if text, ok := value.(string); ok {
+		return text == ""
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Map, reflect.Slice:
+		return reflected.Len() == 0
+	case reflect.Pointer:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
+func configEntryFromResolvedValue(value config.ResolvedValue) configEntry {
+	entry := configEntry{Key: value.Key, Value: value.Value}
+	for _, candidate := range value.Candidates {
+		if candidate.Layer != config.SourceBuiltIn.String() && candidate.Allowed && candidate.Present {
+			entry.configured = true
+			break
+		}
+	}
+	return entry
 }
 
 var configCmd = &cobra.Command{
@@ -274,7 +326,9 @@ legacy, checked-in, and personal layers participate; outside git, the command
 falls back to global defaults. Pass --repo <repository-path> to inspect another
 project. --project remains accepted as a deprecated alias. --explain prints
 every source candidate and the reason it won, was shadowed, was absent, or is
-disallowed for that key.`,
+disallowed for that key. Human output renders an empty built-in value as
+"(unset)"; an explicitly configured empty value remains visible as "", [], {},
+or null. JSON output preserves the typed effective values.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -310,7 +364,7 @@ disallowed for that key.`,
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			for _, entry := range entries {
-				fmt.Fprintf(tw, "%s\t%s\n", entry.Key, formatConfigValue(entry.Value))
+				fmt.Fprintf(tw, "%s\t%s\n", entry.Key, formatConfigListValue(entry))
 			}
 			return tw.Flush()
 		}
@@ -324,7 +378,7 @@ disallowed for that key.`,
 		}
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 		for _, e := range entries {
-			fmt.Fprintf(tw, "%s\t%s\n", e.Key, formatConfigValue(e.Value))
+			fmt.Fprintf(tw, "%s\t%s\n", e.Key, formatConfigListValue(e))
 		}
 		return tw.Flush()
 	},
