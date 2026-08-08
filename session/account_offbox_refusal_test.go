@@ -212,3 +212,44 @@ func carriesAccountDoc(t *testing.T) string {
 	require.Greater(t, end, 0, "the comment must be followed by the declaration it documents")
 	return doc[start : start+end]
 }
+
+// THE REFUSAL MUST READ AS PERMANENT, not as "not supported yet".
+//
+// This is the difference between a decision and a backlog item, and getting it
+// wrong has a specific cost: a message that implies unimplemented invites the
+// next person to implement precisely what the #3103 analysis ruled out — a copy,
+// which cannot return the agent's refreshed token and can therefore invalidate
+// the operator's local credential.
+//
+// Only ssh said "deliberately does not" before this; sandbox and hook stated a
+// limitation and read as a capability gap.
+func TestOffBoxAccountRefusalReadsAsPermanentNotUnimplemented(t *testing.T) {
+	// Hedges that would turn a decision into a queue item. "yet" is the load-bearing
+	// one — "af cannot yet carry an account" was the ORIGINAL wording this whole
+	// change moved away from.
+	hedges := []string{"not yet", "cannot yet", "does not yet", "for now", "currently unsupported",
+		"coming soon", "planned", "in the future", "temporarily"}
+
+	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
+		t.Run(string(kind), func(t *testing.T) {
+			err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
+			require.Error(t, err)
+			msg := err.Error()
+			lower := strings.ToLower(msg)
+
+			assert.Contains(t, msg, "BY DESIGN",
+				"the refusal must name itself a decision, or the next reader treats it as unfinished work")
+			for _, hedge := range hedges {
+				assert.NotContains(t, lower, hedge,
+					"%q makes a permanent safety decision read as a backlog item", hedge)
+			}
+
+			// It must also still say WHY it is permanent and WHAT to do instead —
+			// permanence without either is just a wall.
+			assert.Contains(t, msg, "invalidates the copy on this machine",
+				"the why: a rotated token lost off-box breaks the identity on the machine af DOES control")
+			assert.Contains(t, msg, "docker or local backend",
+				"the alternative: run the account-scoped session where the directory is mounted, not copied")
+		})
+	}
+}

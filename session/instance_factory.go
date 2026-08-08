@@ -631,7 +631,9 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 const offBoxRoundTripReason = "an account is a writable agent home, so the agent writes refreshed " +
 	"authentication back into it — and af cannot establish that those writes come back from a machine it " +
 	"does not own, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
-	"invalidates the copy on this machine."
+	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
+	"break it. af refuses this BY DESIGN and not as pending work: only a mount returns those writes, so " +
+	"adding a copy would be building the thing that reasoning rejects."
 
 func offBoxAccountRefusal(kind BackendKind) string {
 	switch kind {
