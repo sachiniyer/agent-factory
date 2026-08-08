@@ -26,6 +26,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
     return finish(core, setOutputs, {
       prNumber: prNumber ? String(prNumber) : "",
       shouldMerge: false,
+      isOpen: false,
       docsChanged: false,
       reasons: [`auto-gate evaluation error: ${message}`],
       notes: [],
@@ -40,6 +41,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     return finish(core, setOutputs, {
       prNumber: "",
       shouldMerge: false,
+      isOpen: false,
       docsChanged: false,
       reasons: ["No open pull request found for this event."],
       notes: [],
@@ -124,6 +126,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
     shouldMerge: reasons.length === 0,
+    isOpen: pr.state === "OPEN" && !pr.merged,
     headSha: pr.headRefOid,
     docsChanged,
     reasons,
@@ -135,6 +138,10 @@ async function reportDecision({ github, context, core, result, manual = false })
   if (!result?.headSha || !result.prNumber) {
     core.info("Auto Gate decision was not reported because no pull-request head was resolved.");
     return { state: "unreported", priorDecision: false };
+  }
+  if (result.isOpen === false) {
+    core.notice(`Leaving the existing Auto Gate decision unchanged for closed PR #${result.prNumber}.`);
+    return { state: "closed", priorDecision: false };
   }
 
   const { owner, repo } = context.repo;
@@ -337,9 +344,13 @@ async function listPullRequestFiles({ github, context, number }) {
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core });
-  const specs = required.specs;
+  const specs = required.specs.filter((spec) => spec.context !== AUTO_GATE_DECISION_CHECK);
   const notes = [];
   const reasons = [...required.errors];
+
+  if (specs.length !== required.specs.length) {
+    notes.push("Auto Gate decision is enforced after this prerequisite evaluation");
+  }
 
   if (specs.length === 0) {
     notes.push("No required status checks configured for branch");

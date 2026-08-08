@@ -9,7 +9,7 @@ on:
   pull_request_review_comment:
     types: [created, edited, deleted]
   pull_request:
-    types: [labeled]
+    types: [labeled, unlabeled]
   status:
   workflow_dispatch:
     inputs:
@@ -92,8 +92,16 @@ jobs:
                 core,
                 prNumber: explicitPrNumber,
               });
-              if (context.eventName === "workflow_dispatch" && !result.headSha) {
-                throw new Error(result.summary);
+              const evaluationFailed = result.reasons.some((reason) =>
+                reason.startsWith("auto-gate evaluation error:"),
+              );
+              if (
+                evaluationFailed ||
+                (context.eventName === "workflow_dispatch" && !result.headSha)
+              ) {
+                const failure = new Error(result.summary);
+                failure.failWorkflow = true;
+                throw failure;
               }
             } catch (error) {
               const message = error && error.message ? error.message : String(error);
@@ -105,7 +113,7 @@ jobs:
               core.setOutput("head_sha", "");
               core.setOutput("docs_changed", "false");
               core.setOutput("summary", summary);
-              if (context.eventName === "workflow_dispatch") {
+              if (error.failWorkflow || context.eventName === "workflow_dispatch") {
                 throw error;
               }
             }

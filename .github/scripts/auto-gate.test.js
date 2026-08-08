@@ -14,6 +14,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
 
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
+  assert.match(workflow, /pull_request:\s+types: \[labeled, unlabeled\]/);
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
@@ -34,9 +35,11 @@ test("Auto Gate can be recovered manually by PR number", () => {
     workflow,
     /context\.eventName === "workflow_dispatch" && !result\.headSha/,
   );
+  assert.match(workflow, /evaluationFailed = result\.reasons\.some/);
+  assert.match(workflow, /evaluationFailed \|\|/);
   assert.match(
     workflow,
-    /if \(context\.eventName === "workflow_dispatch"\) \{\s+throw error;/,
+    /if \(error\.failWorkflow \|\| context\.eventName === "workflow_dispatch"\) \{\s+throw error;/,
   );
 });
 
@@ -90,6 +93,32 @@ test("an evaluated but blocked gate reports WAITING rather than NEVER_RAN", asyn
   assert.match(github.updatedChecks[0].output.title, /^WAITING:/);
 });
 
+test("a queued evaluation cannot overwrite PASS after the PR merges", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ id: 321, name: "Auto Gate decision", conclusion: "success" }),
+    ],
+  });
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "1465",
+      headSha: HEAD_SHA,
+      isOpen: false,
+      shouldMerge: false,
+      summary: "BLOCKED: PR is already merged, not open",
+    },
+  });
+
+  assert.equal(report.state, "closed");
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(github.updatedChecks.length, 0);
+});
+
 test("required check matching respects the required source app", () => {
   const spec = { context: "Build", sourceAppId: ACTIONS_APP_ID };
   const checkRuns = [
@@ -123,6 +152,22 @@ test("an absent required check blocks the gate", async () => {
 
   assert.equal(result.shouldMerge, false);
   assert.match(result.reasons.join("\n"), /required check Lint.*missing/);
+});
+
+test("the synthetic decision check is not its own prerequisite", async () => {
+  const result = await evaluateGate({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ name: "Auto Gate decision", conclusion: "failure" }),
+    ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Auto Gate decision", integration_id: ACTIONS_APP_ID },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
 });
 
 test("terminal non-success conclusions never verify a required check", () => {
