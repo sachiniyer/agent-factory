@@ -353,6 +353,22 @@ back (see [Archive & restore](#archive-restore)).
 > yourself, and there your `ssh_config` and `known_hosts` are the whole authority.
 > See the sandbox section below.
 
+> **`ssh.host` is resolved once per session, and every step uses that address.**
+> af runs a separate `ssh` for each step — the setup commands, the port-forward,
+> and the cleanup — so a name with several addresses could otherwise put the
+> workspace on one machine and the agent-server or the cleanup on another. Nothing
+> would look wrong: each step succeeds against a valid host, and the cleanup then
+> removes the wrong machine's directory and reports success while the real one
+> leaks. So af resolves the name once, dials that literal address everywhere, and
+> records it with the session's cleanup handle so a daemon restart still reaches
+> the same machine.
+>
+> Host-key verification is unaffected — the connection carries
+> `HostKeyAlias`, so your `known_hosts` entry is still matched by name, exactly as
+> before. If `ssh.host` does not resolve, session creation **fails with that
+> reason** rather than falling back · a name af cannot pin is a session it cannot
+> keep on one machine.
+
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
 relax it with the global-only **`ssh_host_key_verification`** key:
