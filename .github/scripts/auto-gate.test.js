@@ -157,13 +157,24 @@ test("an absent required check blocks the gate", async () => {
 test("a head shared by multiple open master PRs blocks the commit-scoped decision", async () => {
   const result = await evaluateGate({
     associatedPullRequests: [
-      { number: 1465, state: "open", base: { ref: "master" } },
-      { number: 2048, state: "open", base: { ref: "master" } },
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
     ],
   });
 
   assert.equal(result.shouldMerge, false);
   assert.match(result.reasons.join("\n"), /head commit.*shared.*#2048.*commit-scoped/);
+});
+
+test("an associated PR with a newer head does not trigger the shared-head guard", async () => {
+  const result = await evaluateGate({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: OTHER_SHA } },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
 });
 
 test("the synthetic decision check is not its own prerequisite", async () => {
@@ -566,7 +577,7 @@ function fakeGateGithub({
   reviewComments = [],
   files = [],
   associatedPullRequests = [
-    { number: 1465, state: "open", base: { ref: "master" } },
+    { number: 1465, state: "open", base: { ref: "master" }, head: { sha: headSha } },
   ],
   requiredChecks = [
     { context: "Lint", integration_id: ACTIONS_APP_ID },

@@ -304,7 +304,10 @@ async function listOpenMasterPullRequestsForCommit({
     per_page: 100,
   });
   const openMasterPulls = pulls.filter(
-    (pull) => pull.state === "open" && pull.base?.ref === "master",
+    (pull) =>
+      pull.state === "open" &&
+      pull.base?.ref === "master" &&
+      pull.head?.sha === sha,
   );
   pullAssociationCache?.set(sha, openMasterPulls);
   return openMasterPulls;
