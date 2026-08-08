@@ -157,6 +157,18 @@ func TestDockerAccount_AllowsSimilarlyNamedMountTargets(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDockerAccount_RejectsNormalizedProtectedMountTargets(t *testing.T) {
+	tests := [][]string{
+		{"--mount", "type=bind,src=/tmp/other,dst=/af-account/"},
+		{"--mount", "type=bind,src=/tmp/other,dst=/af-account/auth.json"},
+		{"--volume", "/tmp/other:/af-home/."},
+	}
+	for _, args := range tests {
+		err := validateAccountDockerRunArgs(args, "codex")
+		require.Error(t, err, "normalized protected target escaped validation: %v", args)
+	}
+}
+
 func TestDockerAccount_UsesAMountFormThatAcceptsColonPaths(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "af:home")
 	f := newDockerAccountFixture(t, home, "codex", nil)

@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -49,22 +50,31 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		return nil
 	}
 	checkMount := func(value string) error {
+		protectedPath := func(target string) string {
+			target = path.Clean(target)
+			for _, protected := range []string{dockerAccountHome, dockerAccountRuntimeHome} {
+				if target == protected || strings.HasPrefix(target, protected+"/") {
+					return protected
+				}
+			}
+			return ""
+		}
 		mountsProtectedPath := func() string {
 			for _, field := range strings.Split(value, ",") {
 				key, target, ok := strings.Cut(field, "=")
 				if !ok || (key != "dst" && key != "destination" && key != "target") {
 					continue
 				}
-				if target == dockerAccountHome || target == dockerAccountRuntimeHome {
-					return target
+				if protected := protectedPath(target); protected != "" {
+					return protected
 				}
 			}
 			// --volume and --tmpfs use ':' between fields. Looking for an
 			// exact field avoids refusing harmless paths such as
 			// /af-account-cache.
 			for _, field := range strings.Split(value, ":") {
-				if field == dockerAccountHome || field == dockerAccountRuntimeHome {
-					return field
+				if protected := protectedPath(field); protected != "" {
+					return protected
 				}
 			}
 			return ""
