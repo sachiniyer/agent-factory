@@ -701,6 +701,18 @@ func TestHookOutputSuffixRedactsJSONEscapedToken(t *testing.T) {
 	assert.Contains(t, suffix, "[REDACTED]")
 }
 
+// TestHookOutputSuffixRedactsTruncatedJSONEscapedToken covers a structured log
+// whose string field contains only the prefix of an endpoint document. The
+// complete outer log must not make the incomplete inner token safe to report.
+func TestHookOutputSuffixRedactsTruncatedJSONEscapedToken(t *testing.T) {
+	const secret = "truncated-json-escaped-token-must-not-leak"
+	output := `{"endpoint":"{\"url\":\"\",\"token\":\"truncated-json-escaped-token-must-not-leak\""}`
+
+	suffix := hookOutputSuffix([]byte(output))
+	assert.NotContains(t, suffix, secret, "a truncated serialized endpoint must not expose its bearer token")
+	assert.Contains(t, suffix, "[REDACTED]")
+}
+
 // TestHookOutputSuffixRedactsTopLevelSerializedEndpoint covers log pipelines
 // that JSON-encode the endpoint document itself as a complete string record.
 // It has no enclosing object for the recursive map walk to discover.

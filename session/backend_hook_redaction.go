@@ -89,12 +89,19 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		return value, changed
 	case string:
-		// A string may itself be one complete serialized JSON value. Preserve the
-		// existing exact path for those values, but do not guess that an arbitrary
-		// string which fails JSON validation was intended to be structured data.
+		// A string beginning with a JSON container opener may itself be a
+		// serialized document. Objects and arrays are the closed set of JSON values
+		// that can structurally contain a token field; ordinary diagnostic strings
+		// are not reinterpreted as payloads.
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+			return value, false
+		}
 		redacted, parsed := redactHookJSONDocument(value)
 		if !parsed {
-			return value, false
+			// Its opening establishes that this is a structured child payload, but a
+			// failed parse leaves no trustworthy field boundaries inside it.
+			return hookOutputRedaction, true
 		}
 		return redacted, redacted != value
 	default:
