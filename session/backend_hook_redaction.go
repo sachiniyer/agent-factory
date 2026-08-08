@@ -48,10 +48,10 @@ func redactHookJSONDocument(document string) (string, bool) {
 		return "", false
 	}
 
-	value, changed := redactHookJSONValue(value)
-	if !changed {
-		return document, true
-	}
+	value, _ = redactHookJSONValue(value)
+	// Always re-encode, even when traversal found no surviving token field. The
+	// decoder collapses duplicate object members; returning the original bytes
+	// would resurrect an overwritten earlier member that traversal could not see.
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		// Values produced by encoding/json are marshalable, but fail closed if that
@@ -89,12 +89,13 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		return value, changed
 	case string:
-		// A string beginning with a JSON container opener may itself be a
-		// serialized document. Objects and arrays are the closed set of JSON values
-		// that can structurally contain a token field; ordinary diagnostic strings
-		// are not reinterpreted as payloads.
+		// A string beginning with a JSON container or string opener may itself be a
+		// serialized document. Objects and arrays can structurally contain a token
+		// field, while a string can wrap either one through further serialization.
+		// Those three openers are the closed set that can eventually reach a token
+		// field; ordinary diagnostic strings are not reinterpreted as payloads.
 		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[' && trimmed[0] != '"') {
 			return value, false
 		}
 		redacted, parsed := redactHookJSONDocument(value)

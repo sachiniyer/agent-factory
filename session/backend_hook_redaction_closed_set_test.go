@@ -1,9 +1,11 @@
 package session
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // An input that is not exactly one JSON value has no trustworthy field
@@ -31,6 +33,11 @@ func TestRedactHookOutputTokensClosesOverParseOutcome(t *testing.T) {
 			output: "provisioning failed: quota exceeded",
 			want:   "[REDACTED]",
 		},
+		{
+			name:   "overwritten duplicate member cannot survive from raw input",
+			output: `{"message":{"token":"overwritten-secret"},"message":"ok"}`,
+			want:   `{"message":"ok"}`,
+		},
 	}
 
 	for _, test := range tests {
@@ -38,4 +45,15 @@ func TestRedactHookOutputTokensClosesOverParseOutcome(t *testing.T) {
 			assert.Equal(t, test.want, redactHookOutputTokens(test.output))
 		})
 	}
+}
+
+func TestRedactHookOutputTokensRecursesThroughSerializedJSON(t *testing.T) {
+	document := `{"token":"nested-secret"}`
+	for range 4 {
+		encoded, err := json.Marshal(document)
+		require.NoError(t, err)
+		document = string(encoded)
+	}
+
+	assert.NotContains(t, redactHookOutputTokens(document), "nested-secret")
 }
