@@ -221,10 +221,10 @@ func TestEditorRejectsInvalidValueWithTheCLIsOwnError(t *testing.T) {
 	}{
 		{"default_program", "emacs", "default_program"},
 		{"update_channel", "nightly", "update_channel must be one of"},
-		{"daemon_poll_interval", "0", "must be a positive integer"},
-		// A non-integer is caught by canonicalizeScalar before the range
-		// validator ever runs, so the message differs from the "0" case above.
-		{"daemon_poll_interval", "abc", `expected an integer, got "abc"`},
+		{"daemon_poll_interval", "0", "must be positive"},
+		// A syntactically invalid duration is caught by canonicalizeScalar before
+		// the range validator ever runs, so the message differs from "0" above.
+		{"daemon_poll_interval", "abc", `expected a Go duration`},
 		{"log_max_backups", "-1", "must be a non-negative integer"},
 		{"auto_yes", "yes-please", "auto_yes was removed"},
 		{"worktree_root", "somewhere-else", "worktree_root must be one of"},

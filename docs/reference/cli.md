@@ -680,7 +680,7 @@ Settable keys:
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from listen_addr on purpose: it serves previews/editors only, never
                              the control API. Same address grammar as listen_addr.
-  daemon_poll_interval       positive integer (ms)
+  daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
   branch_prefix              string

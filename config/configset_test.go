@@ -407,6 +407,57 @@ func TestValidateLimitRetryIntervalValue(t *testing.T) {
 	}
 }
 
+func TestValidateDaemonPollIntervalValue(t *testing.T) {
+	cases := []struct {
+		value   string
+		wantErr bool
+	}{
+		{"1500", false}, // legacy integer milliseconds
+		{"1500ms", false},
+		{"30m", false},
+		{"0", true},
+		{"0s", true},
+		{"-1s", true},
+		{"500us", true},
+		{"soon", true},
+	}
+	for _, tc := range cases {
+		err := validateDaemonPollIntervalValue(tc.value)
+		if tc.wantErr && err == nil {
+			t.Errorf("validateDaemonPollIntervalValue(%q) = nil, want an error", tc.value)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("validateDaemonPollIntervalValue(%q) = %v, want nil", tc.value, err)
+		}
+	}
+}
+
+func TestSetGlobalConfigValueAcceptsDaemonPollDuration(t *testing.T) {
+	path := writeTempConfig(t, "default_program = 'claude'\n")
+
+	result, err := SetGlobalConfigValue("daemon_poll_interval", "1500ms")
+	if err != nil {
+		t.Fatalf("set duration: %v", err)
+	}
+	if result.Value != "1500ms" {
+		t.Fatalf("set result value = %q, want 1500ms", result.Value)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "daemon_poll_interval = '1500ms'") {
+		t.Fatalf("duration was not written as a TOML string:\n%s", content)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("config written with duration does not load: %v", err)
+	}
+	if cfg.DaemonPollInterval != 1500 {
+		t.Fatalf("loaded daemon_poll_interval = %d, want 1500", cfg.DaemonPollInterval)
+	}
+}
+
 // TestSetGlobalConfigValueNewlySettableKeys is the end-to-end proof for the five
 // keys added to the allowlist after they had silently drifted out of it.
 // Each must write, survive a real load, and come back as the value that was set

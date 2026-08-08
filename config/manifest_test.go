@@ -208,7 +208,7 @@ func TestManifestDefaultsMatchDefaultConfig(t *testing.T) {
 	checked := 0
 	for _, e := range Manifest() {
 		switch e.Type {
-		case "string", "bool", "int":
+		case "string", "bool", "int", "duration":
 		default:
 			continue // composite: Default is prose, nothing to pin
 		}
@@ -248,6 +248,13 @@ func expectedManifestType(k reflect.Kind) string {
 	}
 }
 
+func expectedManifestTypeForKey(key string, kind reflect.Kind) string {
+	if key == daemonPollIntervalKey {
+		return "duration"
+	}
+	return expectedManifestType(kind)
+}
+
 // TestManifestTypeMatchesTheRealField pins each entry's declared Type against the
 // actual Go kind of the field it names.
 //
@@ -274,7 +281,7 @@ func TestManifestTypeMatchesTheRealField(t *testing.T) {
 			// don't double-report it here.
 			continue
 		}
-		want := expectedManifestType(field.Type.Kind())
+		want := expectedManifestTypeForKey(e.Key, field.Type.Kind())
 		if want == "" {
 			t.Errorf("%s: field %s has kind %s, which no manifest Type describes — teach "+
 				"expectedManifestType about it rather than leaving Type unchecked", e.Key, field.Name, field.Type.Kind())
@@ -299,7 +306,7 @@ func TestManifestTypeMatchesTheRealField(t *testing.T) {
 // read by an agent as prose, so a malformed Purpose is a user-facing defect, not
 // a style nit.
 func TestManifestEntriesAreWellFormed(t *testing.T) {
-	validTypes := map[string]bool{"string": true, "bool": true, "int": true, "table": true, "list": true}
+	validTypes := map[string]bool{"string": true, "bool": true, "int": true, "duration": true, "table": true, "list": true}
 	validTiers := map[ConfigTier]bool{TierCore: true, TierCommon: true, TierAdvanced: true}
 
 	for _, e := range AllManifest() {
@@ -307,7 +314,7 @@ func TestManifestEntriesAreWellFormed(t *testing.T) {
 			t.Fatalf("manifest entry with an empty key: %+v", e)
 		}
 		if !validTypes[e.Type] {
-			t.Errorf("%s: type %q is not one of string/bool/int/table/list", e.Key, e.Type)
+			t.Errorf("%s: type %q is not one of string/bool/int/duration/table/list", e.Key, e.Type)
 		}
 		if !validTiers[e.Tier] {
 			t.Errorf("%s: tier %d is not one of TierCore/TierCommon/TierAdvanced", e.Key, e.Tier)

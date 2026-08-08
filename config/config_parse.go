@@ -26,9 +26,13 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
+	decodedData, err := normalizeJSONDurationValues(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
+	}
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
-	if err := json.Unmarshal(data, config); err != nil {
+	if err := json.Unmarshal(decodedData, config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", prettyConfigPath, err)
 	}
 	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
@@ -81,9 +85,13 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	if isEffectivelyEmptyToml(data) {
 		return nil, fmt.Errorf("config file %s is empty; add valid TOML, or delete it to fall back to config.json or defaults", prettyConfigPath)
 	}
+	decodedData, err := normalizeTOMLDurationValues(data)
+	if err != nil {
+		return nil, tomlParseError("config file "+prettyConfigPath, err)
+	}
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
-	if err := toml.Unmarshal(data, config); err != nil {
+	if err := toml.Unmarshal(decodedData, config); err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}
 	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
@@ -92,7 +100,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatTOML); err == nil {
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 	}
-	warnUnknownTomlKeys(data, prettyConfigPath)
+	warnUnknownTomlKeys(decodedData, prettyConfigPath)
 
 	return validateConfig(config, prettyConfigPath)
 }

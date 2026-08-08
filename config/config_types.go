@@ -220,7 +220,9 @@ type Config struct {
 	// af checks the configured release channel on launch and applies newer
 	// releases automatically. Set false to opt out on this machine.
 	AutoUpdate bool `json:"auto_update" toml:"auto_update"`
-	// DaemonPollInterval is the interval (ms) at which the daemon polls session status.
+	// DaemonPollInterval is the interval at which the daemon polls session status,
+	// stored internally in milliseconds. Config accepts a Go duration string such
+	// as "1500ms" or "30m"; the legacy integer-millisecond form remains valid.
 	DaemonPollInterval int `json:"daemon_poll_interval" toml:"daemon_poll_interval"`
 	// LogMaxSizeMB is the size cap (MB) for agent-factory.log. When the log
 	// exceeds it, the file is rotated (renamed to .1, older backups shifted
