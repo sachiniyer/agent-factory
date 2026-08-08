@@ -248,3 +248,36 @@ func TestSSHCleanupHandleCarriesTheDialAddressThroughStorage(t *testing.T) {
 	assert.Contains(t, sb.provisioner.sshCmd, "'198.51.100.9'",
 		"after a restart the teardown must still reach the machine the session is on")
 }
+
+// ssh.host may carry its port inline, and a resolver handed the whole
+// "127.0.0.1:32770" string looks up a NAME that does not exist. This is the
+// fixture that was missing: every unit test above used a bare host, so they all
+// passed while TestSSHBackendRoundTrip and TestSSHBackendArchiveRestore — whose
+// sshd containers are addressed exactly this way — failed against a real sshd.
+//
+// A bare-host fixture asserts the claim while checking something weaker. This one
+// fails against the defect.
+func TestSSHDialAddressSplitsAnEmbeddedPortBeforeResolving(t *testing.T) {
+	asked := ""
+	restore := SetSSHAddressResolverForTest(func(_ context.Context, host string) ([]net.IPAddr, error) {
+		asked = host
+		return []net.IPAddr{{IP: net.ParseIP("203.0.113.11")}}, nil
+	})
+	defer restore()
+
+	got, err := resolveSSHDialAddressFor(config.SSHConfig{Host: "many.example.com:32770"})
+	require.NoError(t, err)
+	assert.Equal(t, "many.example.com", asked, "the PORT must be split off before the lookup")
+	assert.Equal(t, "203.0.113.11", got)
+
+	// The separate port field is equally fine, and a literal host with an inline
+	// port must not be resolved at all — the round-trip tests' exact shape.
+	restore2 := SetSSHAddressResolverForTest(func(context.Context, string) ([]net.IPAddr, error) {
+		t.Fatal("a literal address must not be sent to the resolver, inline port or not")
+		return nil, nil
+	})
+	defer restore2()
+	literal, err := resolveSSHDialAddressFor(config.SSHConfig{Host: "127.0.0.1:32770"})
+	require.NoError(t, err, "this is exactly how TestSSHBackendRoundTrip addresses its sshd container")
+	assert.Equal(t, "127.0.0.1", literal)
+}

@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // Pinning one resolved address for a session's whole lifetime (#3086).
@@ -55,8 +57,27 @@ func SetSSHAddressResolverForTest(f func(context.Context, string) ([]net.IPAddr,
 	return func() { lookupSSHHostAddrs = prev }
 }
 
-// resolveSSHDialAddress turns a configured ssh.host into the ONE literal address
-// every step of this session will dial.
+// resolveSSHDialAddressFor is the ONLY entry point callers should use. ssh.host
+// may carry its port inline ("10.0.0.7:2222"), and handing that whole string to a
+// resolver asks it to look up a name that does not exist — which is exactly what
+// broke TestSSHBackendRoundTrip and TestSSHBackendArchiveRestore, whose sshd
+// containers are addressed as "127.0.0.1:<mapped port>".
+//
+// So the split happens HERE, through the same shared resolver the composed
+// command uses (#3044), rather than at each call site where one of them will
+// eventually forget. resolveSSHDialAddress below takes a BARE host and is not
+// called directly by production code.
+func resolveSSHDialAddressFor(cfg config.SSHConfig) (string, error) {
+	host, _, err := resolveSSHHostPort(cfg.Host, cfg.Port)
+	if err != nil {
+		return "", err
+	}
+	return resolveSSHDialAddress(host)
+}
+
+// resolveSSHDialAddress turns a BARE ssh host into the ONE literal address every
+// step of this session will dial. Callers pass cfg to resolveSSHDialAddressFor
+// instead of reaching for this directly.
 //
 // A host that is already a literal is returned unchanged — there is nothing to
 // pin and nothing that could fail, and re-resolving it would be a lookup of a

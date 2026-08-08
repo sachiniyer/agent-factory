@@ -156,7 +156,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// address goes into the command so no step can forget it. A failure here is
 	// explicit — af does not fall back to the name, because that is precisely the
 	// behaviour being removed.
-	dialAddr, err := resolveSSHDialAddress(sshCfg.Host)
+	dialAddr, err := resolveSSHDialAddressFor(sshCfg)
 	if err != nil {
 		return ProvisionResult{}, err
 	}

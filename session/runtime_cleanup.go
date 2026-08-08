@@ -228,7 +228,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// wrong host would be actively harmful, refuses instead.
 		dialAddr := strings.TrimSpace(data.SSH.DialAddress)
 		if dialAddr == "" {
-			resolved, resolveErr := resolveSSHDialAddress(legacyCfg.Host)
+			resolved, resolveErr := resolveSSHDialAddressFor(legacyCfg)
 			if resolveErr != nil {
 				log.WarningLog.Printf("ssh cleanup handle for %q records no dial address and %q does not resolve (%v); "+
 					"the teardown will dial the name, which may reach a different host than the session is on", title, legacyCfg.Host, resolveErr)
