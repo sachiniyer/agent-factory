@@ -22,7 +22,7 @@ import (
 
 func sshCmdFor(t *testing.T, cfg config.SSHConfig, posture string) string {
 	t.Helper()
-	cmd, err := sshCommandForConfig(cfg, posture, "")
+	cmd, err := sshCommandForConfig(cfg, posture)
 	require.NoError(t, err)
 	return cmd
 }
@@ -37,8 +37,6 @@ func TestSSHStrictPostureVerifiesAgainstTheConfiguredFile(t *testing.T) {
 	assert.Contains(t, cmd, "UserKnownHostsFile='"+kh+"'")
 	assert.Contains(t, cmd, "GlobalKnownHostsFile=/dev/null",
 		"the old client read ONE file; a system-wide entry must not satisfy verification now")
-	assert.Contains(t, cmd, "KnownHostsCommand=none",
-		"nor may an ssh_config helper program supply a key af never vouched for")
 }
 
 func TestSSHStrictPostureFallsBackToTheUserKnownHosts(t *testing.T) {
@@ -122,6 +120,9 @@ func TestSSHLoginUserIsPinnedAgainstSSHConfig(t *testing.T) {
 func TestSSHIdentityFileDoesNotDisableTheAgent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	key := filepath.Join(t.TempDir(), "id_ed25519")
+	// A REAL file: an unreadable one is now refused outright (#3092), so a
+	// nonexistent path here would be testing that instead.
+	require.NoError(t, os.WriteFile(key, []byte("not-a-real-key"), 0o600))
 	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com", IdentityFile: key}, config.SSHHostKeyStrict)
 
 	assert.Contains(t, cmd, "-i '"+key+"'")

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -83,15 +84,18 @@ const sshNoConfigFile = "none"
 //     cannot disagree about an address (#3044).
 //   - IdentityFile: passed with -i when configured. Agent keys stay available,
 //     because the old authMethods offered identity-file keys AND agent keys —
-//     so IdentitiesOnly is deliberately NOT set.
+//     so IdentitiesOnly is deliberately NOT set. verifySSHIdentityFile is what
+//     keeps that from silently authenticating as something else, and it is a
+//     SEPARATE create-path step for the same reason prepareSSHHostKeyStore is.
 //   - Host keys: the configured posture, mapped below.
 //
-// dialAddr is the LITERAL address every step of this session must reach (#3086).
-// The caller resolves ssh.host once and passes the result here, so the pin lands
-// in the command itself and no individual step can forget it. Empty means "dial
-// the configured name", which is only correct where no address could be resolved
-// and refusing would leak a workspace — see restoreRuntimeCleanup.
-func sshCommandForConfig(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
+// THE TARGET IS THE CONFIGURED NAME, never an address af resolved first. #3061
+// dialed a pinned literal address and restored the name with `-o HostKeyAlias`
+// (#3086); that rejected host certificates on every non-default port and removed
+// ssh's own multi-address fallback, and no alias value fixes both — see the block
+// on the NO HostKeyAlias line below. The one exception is a teardown for a record
+// that was already provisioned under that pinning, in sshCommandForPinnedRecord.
+func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {
 		return "", err
@@ -105,11 +109,6 @@ func sshCommandForConfig(cfg config.SSHConfig, posture, dialAddr string) (string
 		return "", err
 	}
 
-	target := strings.TrimSpace(dialAddr)
-	if target == "" {
-		target = host
-	}
-
 	parts := []string{
 		"ssh",
 		// FIRST, and the reason the rest of these pins are sufficient rather than a
@@ -119,38 +118,190 @@ func sshCommandForConfig(cfg config.SSHConfig, posture, dialAddr string) (string
 		"-p", strconv.Itoa(port),
 		"-o", "StrictHostKeyChecking=" + strictOpt,
 		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHosts),
-		// The x/crypto client consulted ONE file and never a helper program, so
-		// both of these preserve today's semantics rather than tighten them.
-		// Redundant under -F none, and kept deliberately: they state the invariant
-		// at the only place a reader looks for it, and they survive someone later
-		// deciding a config file may be read after all.
+		// The x/crypto client consulted ONE file, so this preserves today's
+		// semantics rather than tightening them.
+		//
+		// AND IT IS NOT REDUNDANT, which is exactly the distinction the deleted option
+		// below got wrong. `-F none` stops CONFIG FILES being read; it does not touch a
+		// COMPILED-IN default, and this option has one. Measured: `ssh -G -F none host`
+		// still reports `globalknownhostsfile /etc/ssh/ssh_known_hosts
+		// /etc/ssh/ssh_known_hosts2`, so without this a system-wide entry is consulted
+		// in ADDITION to the file af pinned. It is also accepted by OpenSSH 7.4
+		// (measured), so it costs no client compatibility.
+		//
+		// There is deliberately NO KnownHostsCommand=none beside it, and the reason
+		// is a shipped outage (#3092). Its default is EMPTY — absent from
+		// `ssh -G -F none` output entirely unless something sets it, and only a config
+		// file could — so under `-F none` it forbade nothing that was reachable. That
+		// option arrived in OpenSSH 8.5, and an unrecognised -o is not a warning — ssh
+		// aborts during option parsing:
+		//
+		//	$ ssh -o ThisOptionDoesNotExist=none host
+		//	command-line: line 0: Bad configuration option: thisoptiondoesnotexist
+		//
+		// So on Ubuntu 20.04 (8.2) or Debian 11 (8.4) it killed every provision,
+		// tunnel and reap before a connection was attempted, whatever the posture.
+		// It was pure belt-and-braces: -F none means no config file is read, so
+		// nothing can install a KnownHostsCommand helper in the first place. It was
+		// kept with a comment saying it "states the invariant" — which is exactly
+		// how a redundant option became a hard version floor nothing documented.
+		//
+		// The rule this leaves behind: every option here costs a MINIMUM OpenSSH
+		// VERSION, so an option that guards against nothing is not free.
 		"-o", "GlobalKnownHostsFile=/dev/null",
-		"-o", "KnownHostsCommand=none",
 		// af never had a human to ask. A prompt would hang a provision forever.
 		"-o", "BatchMode=yes",
-		// The command dials a literal address (#3086), so without this the host key
-		// would be looked up under that ADDRESS instead of the configured name —
-		// silently invalidating every existing known_hosts entry and, under
-		// accept-new, writing a second one per address. HostKeyAlias restores the
-		// name as the lookup key while the connection still goes to the pinned
-		// address.
+		// NO HostKeyAlias, and NO pinned literal address. #3090 added both to keep a
+		// multi-address host from splitting a session across machines; #3092 reverted
+		// them, because dialling an address forces an alias and NO ALIAS VALUE IS
+		// CORRECT. Measured against a real sshd whose host key is certified for the
+		// principal `real.example`:
 		//
-		// The alias must be the EXACT string OpenSSH would otherwise have computed,
-		// because it is used VERBATIM: measured against OpenSSH_9.6p1, a plain
-		// connection on port 2201 records `[127.0.0.1]:2201`, while the same
-		// connection with `HostKeyAlias=real.example` records `real.example` — the
-		// port is NOT appended to an alias. So the alias is knownHostsLookupName's
-		// output, which is bare on the default port and bracketed otherwise, and the
-		// stored key is byte-identical to what a non-pinned connection wrote.
-		"-o", "HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)),
+		//	HostKeyAlias=[real.example]:2202  -> cert REJECTED (alias is the principal)
+		//	HostKeyAlias=real.example         -> cert accepted
+		//
+		// and for a PLAIN known_hosts entry on a non-default port the requirement is
+		// the opposite, because OpenSSH keys those as [host]:port and uses the alias
+		// verbatim. Plain entries want the bracketed form, certificates want the bare
+		// name, and one string cannot be both.
+		//
+		// So the connection stays NAME-based: ssh resolves it, which also keeps the
+		// dialer's try-each-address fallback that pinning removed. The split-session
+		// risk is real and unfixed — #3086 tracks it, with this result recorded so the
+		// approach is not tried again.
 	}
 	if identity := strings.TrimSpace(cfg.IdentityFile); identity != "" {
-		// No IdentitiesOnly: authMethods offered the identity file AND agent keys,
-		// and dropping the agent would break setups that rely on it.
+		// Composition stays FILESYSTEM-PURE — the readability check lives in
+		// verifySSHIdentityFile, called from the provision path. See there.
 		parts = append(parts, "-i", shellQuoteSandbox(expandUserPath(identity)))
 	}
-	parts = append(parts, shellQuoteSandbox(target))
+	parts = append(parts, shellQuoteSandbox(host))
 	return strings.Join(parts, " "), nil
+}
+
+// verifySSHIdentityFile refuses an ssh.identity_file af cannot actually hand to
+// ssh, rather than letting ssh warn and carry on (#3092).
+//
+// ssh treats an unusable -i as advisory:
+//
+//	Warning: Identity file /missing not accessible: No such file or directory.
+//	…and it proceeds, authenticating with agent/default keys instead.
+//
+// IdentitiesOnly is deliberately OFF (the old authMethods offered the identity
+// file AND agent keys), so that fallback is silent: a typo in ssh.identity_file
+// authenticates as somebody else. The old in-process client errored on an
+// explicit file it could not read.
+//
+// It OPENS the file rather than stat-ing it, and requires a regular file. A stat
+// succeeds for a directory, for a mode-000 file, and for a socket — none of which
+// ssh can load as a key, so each would fall straight back to the agent, which is
+// the failure this exists to prevent.
+//
+// IT DOES NOT VALIDATE THE KEY'S CONTENT, and that is a decision rather than an
+// omission. A malformed file does reach the same silent fallback — measured,
+// `Load key "x": error in libcrypto` and ssh carries on with other identities —
+// but every way of checking content is worse than the gap it closes: parsing key
+// formats here would have to accept unencrypted and encrypted PEM, the OpenSSH
+// format, certificates, PKCS#11 and FIDO tokens, and whatever OpenSSH adds next,
+// and `ssh-keygen -y` cannot read an encrypted key without its passphrase. Any of
+// those would REJECT working configurations, which is a worse failure than the
+// one being prevented. Note also that ssh does print a diagnostic for a malformed
+// key, so that case is not silent in the way a missing path was.
+//
+// So the guard's scope is exactly what it can decide safely: this path names a
+// real, readable, regular file that af can hand to ssh. Catching a typo is the
+// job; adjudicating cryptography is not.
+//
+// CALLED FROM PROVISION ONLY, and deliberately not from the teardown path.
+// restoreRuntimeCleanup composes a closure while persisted handles are loading,
+// and a check there would capture a permanently dead cleanup the moment a key is
+// briefly unavailable — the #3061 defect this file already fixed once for the
+// accept-new store. Nor does the teardown gain from it: a reap authenticating
+// with the wrong identity fails and RETAINS, while refusing to compose a teardown
+// leaks the workspace it exists to remove (the #3044 lesson). The wrong-identity
+// risk is a CREATE-time risk, so the check lives at create time.
+func verifySSHIdentityFile(cfg config.SSHConfig) error {
+	identity := strings.TrimSpace(cfg.IdentityFile)
+	if identity == "" {
+		return nil
+	}
+	path := expandUserPath(identity)
+	refuse := func(why error) error {
+		return fmt.Errorf("backend=ssh: ssh.identity_file %q cannot be used as an ssh key: %w "+
+			"(af refuses rather than silently falling back to your agent or default keys, "+
+			"which would authenticate as a different identity than the one configured)", path, why)
+	}
+	// KIND FIRST, THEN READABILITY — this order is load-bearing, not tidiness.
+	// Opening a FIFO for reading BLOCKS until another process opens the write end,
+	// and there is no writer for a stray pipe in ~/.ssh. Checking the kind by
+	// OPENING first therefore hangs the provision forever instead of refusing it,
+	// which is strictly worse than the silent fallback this function exists to stop.
+	// Measured: the open-first form hung this package's own test on a named pipe
+	// until the suite was killed. A stat cannot block, so the kind is settled with
+	// one.
+	info, err := os.Stat(path)
+	if err != nil {
+		return refuse(err)
+	}
+	if !info.Mode().IsRegular() {
+		return refuse(fmt.Errorf("it is not a regular file (mode %s)", info.Mode()))
+	}
+
+	// Now prove the daemon can actually READ it — a mode-000 file stats perfectly
+	// well, and only an open distinguishes it. O_NONBLOCK because the stat above
+	// cannot rule out the path becoming a pipe in between: a daemon that refuses is
+	// recoverable, one that hangs is not.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return refuse(err)
+	}
+	return f.Close()
+}
+
+// sshCommandForPinnedRecord composes a TEARDOWN command for a persisted handle
+// that recorded a literal dial address (#3090), which #3092 stopped writing.
+//
+// Such a record knows something no re-resolution can recover: the exact machine
+// its workspace is on. So it dials that address, and restores the name as the
+// host-key lookup key with HostKeyAlias — the pairing #3090 measured, and the one
+// #3092 removed from the CREATE path because no alias value satisfies both a
+// plain [host]:port entry and a certificate principal.
+//
+// That conflict is accepted HERE and nowhere else, because the failure modes are
+// not symmetric. A certificate host on a non-default port fails verification, so
+// the reap fails and the record is RETAINED and retried — visible, recoverable.
+// Re-resolving a multi-address name instead can reach a different machine, remove
+// nothing, report success and retire the only tombstone — silent, permanent.
+//
+// An empty address (every record written before #3090 and after #3092) takes the
+// ordinary name-based command, unchanged.
+func sshCommandForPinnedRecord(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
+	base, err := sshCommandForConfig(cfg, posture)
+	if err != nil {
+		return "", err
+	}
+	pinned := strings.TrimSpace(dialAddr)
+	if pinned == "" {
+		return base, nil
+	}
+	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
+	if err != nil {
+		return "", err
+	}
+	if port == 0 {
+		port = sshDefaultPort
+	}
+	// The destination is the LAST token of the composed command; swap it for the
+	// recorded address and add the alias that keeps known_hosts keyed by name.
+	suffix := " " + shellQuoteSandbox(host)
+	if !strings.HasSuffix(base, suffix) {
+		// The composer changed shape underneath this; dial by name rather than
+		// guess, since a wrong destination on a teardown is the whole hazard.
+		return base, nil
+	}
+	return strings.TrimSuffix(base, suffix) +
+		" -o HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)) +
+		" " + shellQuoteSandbox(pinned), nil
 }
 
 // sshHostKeyOptions maps ssh_host_key_verification onto the ssh binary's own

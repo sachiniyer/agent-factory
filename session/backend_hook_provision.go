@@ -156,6 +156,19 @@ func hookProvisionSSHCommand(knownHostsPath string, record *hookProvisionRecord)
 		// ssh_config(5) consults KnownHostsCommand IN ADDITION to both files, so an
 		// operator's matching Host block could hand OpenSSH a different key and
 		// satisfy verification without our pin ever deciding anything.
+		//
+		// KEPT HERE ON PURPOSE, having been deleted from the backend=ssh command for
+		// making that backend unusable below OpenSSH 8.5 (#3092). The two calls are
+		// not the same: ssh_command.go passes `-F none`, so no config file is read and
+		// nothing could install such a helper — the option guarded nothing there. THIS
+		// command deliberately DOES read the operator's ssh_config, so the helper is
+		// genuinely reachable and this option is the only thing between a `Host` block
+		// and af's per-session pin. Deleting it by symmetry would trade a version floor
+		// for a key-substitution hole.
+		//
+		// The cost is real and now documented rather than left to be rediscovered:
+		// hook provisioning that returns a host_key needs OpenSSH >= 8.5 on the daemon
+		// host. See docs/remote-hooks.md.
 		"-o", "KnownHostsCommand=none",
 		"-o", "StrictHostKeyChecking=yes",
 		// The script vouches for the key, so there is nobody to ask. Refuse

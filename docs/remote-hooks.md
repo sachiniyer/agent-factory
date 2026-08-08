@@ -44,7 +44,17 @@ Progress goes on **stderr**; anything else on stdout fails the provision with th
 
 A machine created seconds ago has no `known_hosts` entry, and the resulting prompt is precisely what an unattended provision cannot answer. None of af's host-key postures solves it: `strict` refuses an unknown host, `accept-new` is trust-on-first-use where **every** session is a first contact (and its store later refuses a legitimate VM once an address is recycled), and `insecure` invites the man-in-the-middle who would then see the bearer token.
 
-Your script is the only party with an **authentic** channel to that key — it is talking to the provider's control plane, which af cannot reach. So it returns the key, and af writes a **per-session** `known_hosts` containing exactly it, then connects with `StrictHostKeyChecking=yes` and `GlobalKnownHostsFile=/dev/null`. That is a real verification rather than trust on sight, and it is stronger than what `backend = "ssh"` can do.
+Your script is the only party with an **authentic** channel to that key — it is talking to the provider's control plane, which af cannot reach. So it returns the key, and af writes a **per-session** `known_hosts` containing exactly it, then connects with `StrictHostKeyChecking=yes`, `GlobalKnownHostsFile=/dev/null` and `KnownHostsCommand=none`. That is a real verification rather than trust on sight, and it is stronger than what `backend = "ssh"` can do.
+
+> **This path needs OpenSSH 8.5 or newer on the daemon host** — a higher floor than
+> the 7.6 that `backend = "ssh"` asks for. `KnownHostsCommand` arrived in 8.5, and an
+> unrecognised option makes `ssh` abort while parsing its arguments, so on an older
+> client every hook provision that returns a `host_key` fails before it connects.
+> The option is kept here deliberately: unlike `backend = "ssh"`, this command
+> **does** read your `ssh_config`, so without it a matching `Host` block could hand
+> OpenSSH a different key and satisfy verification without af's per-session pin ever
+> deciding anything. Dropping it would trade a version floor for a key-substitution
+> hole, which is the worse bargain.
 
 Two ways to get the key, both ordinary practice:
 
