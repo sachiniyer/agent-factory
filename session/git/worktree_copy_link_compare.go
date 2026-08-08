@@ -5,6 +5,7 @@ package git
 import (
 	"bytes"
 	"io"
+	"math"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -95,12 +96,22 @@ func sourceMatchesCopiedFile(source *os.File, name string, destinationRoot *os.F
 		return false
 	}
 
-	// Read the copy through a SectionReader, never sequentially off the descriptor
-	// itself. A retained descriptor is a dup of the one the bytes were written
-	// through, so its offset sits at EOF — and dup(2) SHARES that offset, so a
-	// sequential read would both start at the end and move the writer's position.
-	// A section reader uses pread and touches neither.
-	copiedReader := io.NewSectionReader(copied, 0, copiedInfo.Size())
+	// Offset-based reads, and NOT capped at copiedInfo.Size() (#3063 review).
+	//
+	// Two separate reasons, and the second is a correctness bug rather than a
+	// nicety. pread is required because a retained descriptor is a dup of the one
+	// the bytes were written through: its offset sits at EOF, and dup(2) SHARES that
+	// offset, so a sequential read would start at the end and move the writer's
+	// position. But sizing a SectionReader from the earlier Stat imposes a STALE EOF:
+	// a same-UID process appending to the destination between that Stat and here
+	// makes the copy stop early, both sides appear to end together, and the function
+	// returns true — publishing destination bytes that were never at the source path,
+	// which is precisely the #3046 guarantee this must not break.
+	//
+	// math.MaxInt64 lets the section reader run to the inode's ACTUAL end, so a
+	// destination that grew reads longer than the source and the length check below
+	// refuses it.
+	copiedReader := io.NewSectionReader(copied, 0, math.MaxInt64)
 	const chunk = 64 * 1024
 	currentChunk := make([]byte, chunk)
 	copiedChunk := make([]byte, chunk)

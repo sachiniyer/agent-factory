@@ -88,3 +88,39 @@ func TestSourceMatchesCopiedFile_RetainedReaderStillRefusesChangedBytes(t *testi
 		"the retained descriptor reads the COPY; a source that no longer matches it must still refuse, "+
 			"or #3046's stale-content guarantee is lost through the new path")
 }
+
+// A destination LONGER than the source must not compare equal.
+//
+// NAMED for what it actually covers, after a mutation showed it does not cover
+// what I first claimed. It exercises the SIZE GUARD, which already worked: with
+// the copy at 15 bytes and the source at 6, `currentInfo.Size() != copiedInfo.Size()`
+// refuses before any byte is read, so it passes with or without the stale-EOF cap.
+//
+// The P1 that prompted the reader change is an append landing BETWEEN
+// `copied.Stat()` and the comparison, and that interleaving is not reachable from
+// outside the function — there is no seam to land a write in that window. The fix
+// (reading to the inode's real end instead of the size read a moment earlier) is
+// therefore NOT covered by a test, and saying so is better than leaving this one
+// looking like it is.
+func TestSourceMatchesCopiedFile_RefusesADestinationLongerThanTheSource(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.Open(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src"), []byte("SHARED"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dst"), []byte("SHARED"), 0o600))
+	srcIdentity, err := identityAt(root, "src")
+	require.NoError(t, err)
+	dstIdentity, err := identityAt(root, "dst")
+	require.NoError(t, err)
+	require.True(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity, nil),
+		"precondition: identical bytes compare equal")
+
+	// The destination now holds MORE than the source. Same inode, same identity.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dst"), []byte("SHARED-AND-MORE"), 0o600))
+
+	require.False(t, sourceMatchesCopiedFile(root, "src", root, "dst", dstIdentity, srcIdentity, nil),
+		"the copy is longer than the source, so linking to it would publish bytes that were never at "+
+			"this path; a reader capped at the earlier size reports a false match")
+}

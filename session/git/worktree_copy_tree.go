@@ -237,6 +237,10 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
 	links := map[pathIdentity]copiedFileLink{}
+	// How many comparison descriptors are currently held, against the cap above.
+	// A pointer is threaded to the level walker because the budget spans the WHOLE
+	// traversal, not one directory: shared inodes are found wherever their names are.
+	retainedReaders := 0
 	// The retained comparison descriptors die with the copy that opened them. Every
 	// exit from this function passes here, including the error returns below, so a
 	// failed copy cannot leak them either (#3063).
@@ -273,6 +277,7 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			relativeRoutePath(components),
 			links,
 			xattrs,
+			&retainedReaders,
 		)
 		if err == nil {
 			// The level is complete, and nothing is ever written directly into
@@ -309,6 +314,7 @@ func copyDirectoryLevel(
 	relativeDirectory string,
 	links map[pathIdentity]copiedFileLink,
 	xattrs *xattrDestination,
+	retainedReaders *int,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -372,22 +378,49 @@ func copyDirectoryLevel(
 				// which is exactly today's behaviour.
 				var reader *os.File
 				var retain func(fd int)
-				if stat.Nlink > 1 {
+				// BOUNDED (#3063 review). A valid static tree can hold more distinct
+				// hard-linked inodes than the process has spare descriptors, and an
+				// unbounded cache does not merely waste them: once dup starts failing, the
+				// later groups get a nil reader, cannot be reopened, and are copied as
+				// separate inodes — reintroducing the exact fidelity loss this change
+				// exists to remove, silently and only on big trees.
+				//
+				// Past the budget af simply does not retain, which is today's behaviour
+				// (reopen, and fall back to a fresh copy if the mode denies it). Degrading
+				// to the old path is acceptable; degrading to it unpredictably at whatever
+				// point the fd table happens to fill is not.
+				if stat.Nlink > 1 && *retainedReaders < maxRetainedLinkReaders {
 					retain = func(fd int) {
 						// dup(2), not a reopen: the point is a descriptor that predates the
 						// mode narrowing, and a reopen would hit the very denial this avoids.
 						// A dup failure is not fatal — the comparison falls back to reopening.
-						dupFD, dupErr := unix.Dup(fd)
+						// F_DUPFD_CLOEXEC, never unix.Dup: dup(2) CLEARS FD_CLOEXEC on the new
+						// descriptor even though the original was opened O_CLOEXEC (#3063
+						// review). The daemon forks hooks and session processes while a copy is
+						// running, and any of them would inherit an O_RDWR handle to a staging
+						// inode — able to read or modify archived content past the preserved
+						// mode and past this function's own close. Setting the flag after the
+						// dup would leave that window open between the two calls.
+						dupFD, dupErr := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
 						if dupErr != nil {
 							return
 						}
 						reader = os.NewFile(uintptr(dupFD), childDestinationPath)
+						*retainedReaders++
 					}
 				}
 				entry, err = copyRegularFileAtWithIdentity(
 					source, destination, name, childSourcePath, childDestinationPath, &inspected, xattrs, retain)
 				switch {
 				case err == nil:
+					// The entry being REPLACED owns a descriptor, and overwriting the map
+					// value would strand it: the deferred cleanup only sees the final value,
+					// so an inode rewritten between sightings would leak one descriptor per
+					// fallback and exhaust the table before any finalizer ran (#3063 review).
+					if previous, seen := links[inspected]; seen && previous.reader != nil {
+						_ = previous.reader.Close()
+						*retainedReaders--
+					}
 					links[inspected] = copiedFileLink{
 						path:     filepath.Join(relativeDirectory, name),
 						identity: entry.destination,
@@ -396,6 +429,7 @@ func copyDirectoryLevel(
 				case reader != nil:
 					// Nothing will record it, so nothing else can close it.
 					_ = reader.Close()
+					*retainedReaders--
 				}
 			}
 		default:
@@ -432,6 +466,16 @@ func relativeRoutePath(components []copiedEntry) string {
 // against, and the destination inode that path resolved to at the time. Both are
 // needed — the path to make the link, the identity to prove the link landed on
 // the right inode.
+// maxRetainedLinkReaders caps the descriptors held for hard-link comparison.
+//
+// Chosen well under any default RLIMIT_NOFILE (1024 on most systems, and af also
+// holds tmux pipes, sockets and the walk's own directory descriptors), because
+// exceeding it does not fail loudly — it degrades hard-link fidelity on exactly
+// the large trees where the optimisation is worth most. A tree with more than this
+// many distinct shared inodes falls back to reopening for the remainder, which is
+// the behaviour before this change.
+const maxRetainedLinkReaders = 256
+
 type copiedFileLink struct {
 	path     string
 	identity pathIdentity
