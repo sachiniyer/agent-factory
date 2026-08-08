@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"os"
 	"path/filepath"
 
@@ -98,4 +99,38 @@ func resolveAgentCredentialMounts(agent string) []string {
 	// Each mount is two args ("-v", "<spec>"), so the file count is len/2.
 	log.InfoLog.Printf("backend=docker: docker_mount_agent_credentials: mounting %d credential file(s) for agent %q read-only into the container", len(mounts)/2, agent)
 	return mounts
+}
+
+// dockerAccountHome is where an account's directory is mounted inside the
+// container. A fixed path, not derived from the host's, so nothing about the
+// operator's filesystem layout crosses the boundary.
+const dockerAccountHome = dockerContainerHome + "/.af-account"
+
+// accountMountAndEnv returns the `-v` mount that places an account's agent HOME
+// inside the container, and the `-e VAR=value` that points the agent at it
+// (#3082).
+//
+// It REPLACES the ambient credential mounts rather than joining them, and that is
+// the exclusivity property the feature exists for: a container built for an
+// account must carry nothing resolved from the daemon user's home, or the session
+// would hold two identities and the agent would pick one by path precedence.
+//
+// The mount is read-WRITE, unlike the ambient credential mounts. An account is the
+// agent's whole home — auth, history, settings, discovered skills — not a
+// credential file, so an agent that cannot write to it cannot record a session.
+// That is a real consequence of the account model rather than a looser posture:
+// the operator asked this session to BE that account.
+//
+// Returns nothing for an agent that does not support accounts; the create path
+// refuses that case earlier, so this is defence rather than a branch anyone takes.
+func accountMountAndEnv(account sessionenv.Account) (mount []string, env []string) {
+	if account.Dir == "" {
+		return nil, nil
+	}
+	configVar, ok := sessionenv.SupportsAccounts(account.Agent)
+	if !ok {
+		return nil, nil
+	}
+	return []string{"-v", account.Dir + ":" + dockerAccountHome},
+		[]string{"-e", configVar + "=" + dockerAccountHome}
 }

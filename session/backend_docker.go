@@ -236,7 +236,21 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// repo-selected image never sees another agent's credential or anything else the
 	// operator did not grant. Resolved here in the host process (it stats the daemon
 	// user's home) so runContainer's argv assembly stays pure.
-	if cfg.DockerMountAgentCredentials {
+	// An ACCOUNT replaces the ambient credential mounts entirely (#3082).
+	//
+	// Independent of docker.mount_agent_credentials on purpose: that key is the
+	// opt-in for lending the container the operator's ambient identity, and an
+	// account is the opposite request — a specific identity, named explicitly at
+	// create time. Gating the account on it would leave an account-scoped session
+	// with no credentials at all whenever the key is off, which reads as "the
+	// account did not work".
+	//
+	// The `else` is the exclusivity guarantee: when an account is in play, nothing
+	// resolved from the daemon user's home is mounted, so the container cannot hold
+	// two identities.
+	if spec.Account.Dir != "" {
+		p.accountMount, p.accountEnv = accountMountAndEnv(spec.Account)
+	} else if cfg.DockerMountAgentCredentials {
 		p.credentialMounts = resolveAgentCredentialMounts(p.agentName())
 	}
 	res, err := p.provision()
@@ -267,6 +281,11 @@ type dockerProvisioner struct {
 	spec    ProvisionSpec
 	image   string
 	runArgs []string
+	// accountMount and accountEnv place a registered credential account inside the
+	// container and point the agent at it (#3082). Set only for an account-scoped
+	// session, and mutually exclusive with credentialMounts.
+	accountMount []string
+	accountEnv   []string
 	// credentialMounts are the read-only `-v host:container:ro` agent-credential
 	// bind mounts (docker.mount_agent_credentials, #2194), resolved once in
 	// Provision and appended to the `docker run` argv before runArgs.
@@ -376,6 +395,10 @@ func (p *dockerProvisioner) runContainer() error {
 	// Read-only agent credential mounts (docker.mount_agent_credentials, #2194) go
 	// before run_args so an operator's own run_args can still be appended after.
 	args = append(args, p.credentialMounts...)
+	// The account's mount and its config var. Placed before run_args like the
+	// credential mounts, so an operator's own run_args still come last.
+	args = append(args, p.accountMount...)
+	args = append(args, p.accountEnv...)
 	args = append(args, p.runArgs...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
