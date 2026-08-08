@@ -14,7 +14,12 @@ test("Auto Gate can be recovered manually by PR number", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
 
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
-  assert.match(workflow, /pull_request:\s+types: \[labeled, unlabeled\]/);
+  assert.match(
+    workflow,
+    /pull_request:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled\]/,
+  );
+  assert.match(workflow, /github\.event\.action == 'closed'/);
+  assert.match(workflow, /github\.event\.action == 'converted_to_draft'/);
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
@@ -445,6 +450,30 @@ test("issue-comment events resolve their pull request number", async () => {
   assert.equal(result.shouldMerge, true);
 });
 
+test("closing a shared-head PR reevaluates the surviving open PR", async () => {
+  const result = await autoGate.evaluate({
+    github: fakeGateGithub({
+      associatedPullRequests: [
+        { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      ],
+    }),
+    context: fakeContext({
+      action: "closed",
+      pull_request: {
+        number: 1465,
+        state: "closed",
+        base: { ref: "master" },
+        head: { sha: HEAD_SHA },
+      },
+    }),
+    core: fakeCore(),
+    setOutputs: false,
+  });
+
+  assert.equal(result.prNumber, "2048");
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
 test("the happy path squash-merges the exact evaluated head", async () => {
   const github = fakeGateGithub();
 
@@ -624,10 +653,10 @@ function fakeGateGithub({
       repos: { listCommitStatusesForRef, listPullRequestsAssociatedWithCommit },
       pulls: { listFiles, listReviews, listReviewComments, merge },
     },
-    graphql: async () => ({
+    graphql: async (_query, variables) => ({
       repository: {
         pullRequest: {
-          number: 1465,
+          number: variables.number,
           title: "Gate test",
           url: "https://example.invalid/pr/1465",
           baseRefName: "master",

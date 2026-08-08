@@ -252,8 +252,10 @@ async function merge({ github, context, core, prNumber }) {
 
 async function findPullRequestNumber({ github, context, core, pullAssociationCache }) {
   const payload = context.payload;
+  const closedPullRequest =
+    context.eventName === "pull_request" && payload.action === "closed";
 
-  if (payload.pull_request?.number) {
+  if (payload.pull_request?.number && !closedPullRequest) {
     return payload.pull_request.number;
   }
 
@@ -267,7 +269,7 @@ async function findPullRequestNumber({ github, context, core, pullAssociationCac
     return checkSuitePr.number;
   }
 
-  const sha = payload.check_suite?.head_sha || payload.sha;
+  const sha = payload.check_suite?.head_sha || payload.pull_request?.head?.sha || payload.sha;
   if (!sha) {
     core.info(`Event ${context.eventName} did not include a PR or SHA to evaluate.`);
     return null;
