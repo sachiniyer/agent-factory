@@ -612,6 +612,13 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 // that provisioner — so af controls those locations exactly as it does for ssh.
 // Only hook's launch_cmd mode genuinely leaves the machine's shape to the
 // operator, and the round-trip reason covers that mode as well.
+// offBoxRoundTripReason is the one reason every off-box kind refuses, stated
+// once because it is the same fact each time: the write cannot come home.
+const offBoxRoundTripReason = "an account is a writable agent home, so the agent writes a refreshed token " +
+	"back into it — off-box that write lands on the other machine and is destroyed with the session " +
+	"directory at teardown, and if your provider rotates refresh tokens that would also invalidate the " +
+	"copy on this machine."
+
 func offBoxAccountRefusal(kind BackendKind) string {
 	switch kind {
 	case BackendSSH:
@@ -620,17 +627,26 @@ func offBoxAccountRefusal(kind BackendKind) string {
 			"directory at teardown — and if your provider rotates refresh tokens, that would also invalidate " +
 			"the copy on this machine. Use the docker or local backend for account-scoped sessions, or omit " +
 			"--account to use the remote host's own credentials"
-	case BackendSandbox, BackendHook:
+	case BackendSandbox:
 		// The same round-trip reason as ssh, and NOT a "no provable location" one:
-		// sandbox and provision-mode hook both run through sandboxProvisioner, which
-		// creates the session directory itself, so af controls the location there too
-		// (#3103 review). The placement claim is simply left out rather than made in
-		// either direction, because it varies by hook mode and the round trip does not.
-		return "an account is a writable agent home, so the agent writes a refreshed token back into it — " +
-			"off-box that write lands on the other machine and is destroyed with the session directory at " +
-			"teardown, and if your provider rotates refresh tokens that would also invalidate the copy on " +
-			"this machine. Use the docker or local backend for account-scoped sessions, or omit --account " +
-			"to use that machine's own credentials"
+		// sandbox runs through sandboxProvisioner, which creates the session directory
+		// itself, so af controls the location there too (#3103 review).
+		return offBoxRoundTripReason +
+			" Use the docker or local backend for account-scoped sessions, or omit --account to use that " +
+			"machine's own credentials"
+
+	case BackendHook:
+		// Same reason, but the WORKAROUND must not promise an identity here.
+		// runHookScriptWithResolvedEnvironment hands launch_cmd the DAEMON's filtered
+		// agent-authentication environment and the script decides what reaches the
+		// machine — so "omit --account to use that machine's own credentials" would be
+		// false, and false in the exact direction account scoping exists to prevent:
+		// the session could run as the daemon host's ambient identity while the
+		// operator believes it is the remote's (#3103 review).
+		return offBoxRoundTripReason +
+			" Use the docker or local backend for account-scoped sessions, or omit --account — though which " +
+			"identity the session then runs as is up to your hooks, since af passes the daemon's filtered " +
+			"agent credentials to them"
 	default:
 		// A backend added later, refused by default. Naming it as unproven rather
 		// than as impossible keeps this honest for something nobody has assessed.

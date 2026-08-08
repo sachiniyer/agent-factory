@@ -67,6 +67,51 @@ func TestSandboxAndHookAccountRefusalGivesTheRoundTripReason(t *testing.T) {
 	}
 }
 
+// The workaround must not promise WHICH identity omitting --account produces on
+// hook, and this is the one place a wrong promise is dangerous rather than
+// untidy: runHookScriptWithResolvedEnvironment hands launch_cmd the DAEMON's
+// filtered agent-authentication environment, and the script decides what reaches
+// the machine. So an operator told "omit --account to use that machine's own
+// credentials" can end up running as the DAEMON HOST's ambient identity — the
+// exact wrong-identity outcome account scoping exists to prevent — while
+// believing the remote's identity was used.
+func TestHookAccountRefusalDoesNotPromiseAnIdentityForTheWorkaround(t *testing.T) {
+	hook := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: BackendHook})
+	require.Error(t, hook)
+	assert.NotContains(t, hook.Error(), "to use that machine's own credentials",
+		"af passes the daemon's filtered agent credentials to launch_cmd, so this would be false in the "+
+			"direction account scoping exists to prevent")
+	assert.Contains(t, hook.Error(), "up to your hooks",
+		"it must say the identity depends on the hooks rather than assert one")
+
+	// ssh and sandbox forward no daemon environment, so naming the machine's own
+	// credentials there is accurate and must stay.
+	for _, kind := range []BackendKind{BackendSSH, BackendSandbox} {
+		err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "own credentials",
+			"%s forwards no daemon environment, so the workaround CAN name the identity", kind)
+	}
+}
+
+// CarriesAccount's rationale must not keep the premise the refusal dropped: af
+// DOES control the session dir for sandbox and provision-mode hook, so "af does
+// not decide the shape of those machines" is false there too. Their false answer
+// is the missing write-back, same as ssh's.
+func TestCarriesAccountRationaleDoesNotClaimAfLacksControl(t *testing.T) {
+	src, err := os.ReadFile("runtime.go")
+	require.NoError(t, err)
+	i := strings.Index(string(src), "// CarriesAccount reports whether")
+	require.GreaterOrEqual(t, i, 0)
+	rationale := string(src)[i:min(i+1600, len(string(src)))]
+
+	assert.NotContains(t, rationale, "af does not decide the shape of those machines",
+		"sandboxProvisioner.provision creates the session dir, and provision-mode hook reuses it — "+
+			"this is the same false premise the refusal message dropped")
+	assert.Contains(t, rationale, "writes",
+		"the reason every off-box kind answers false is that the agent's writes cannot come home")
+}
+
 // An unassessed backend added later must still refuse, and must say it is
 // UNPROVEN rather than impossible — nobody has evaluated it.
 func TestUnknownBackendAccountRefusalStaysConservative(t *testing.T) {

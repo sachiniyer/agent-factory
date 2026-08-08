@@ -213,10 +213,17 @@ func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k]
 // including a refreshed token, land in the operator's real registry rather than
 // in a copy that teardown deletes.
 //
-// A COPY IS NOT A MOUNT, which is why ssh answers false even though it could
-// physically transfer one: its writes cannot come home. sandbox and hook answer
-// false because af does not decide the shape of those machines at all. See
-// offBoxAccountRefusal for each reason in full.
+// A COPY IS NOT A MOUNT, and that — not placement — is why every off-box kind
+// answers false. ssh, sandbox and provision-mode hook can all physically place a
+// directory: sandboxProvisioner.provision creates the session dir and streams
+// af's binary into it, and the provision-hook path reuses that provisioner. What
+// none of them has is a way to get the agent's WRITES back, so a refreshed token
+// would die with the session dir.
+//
+// hook's launch_cmd mode is the only one where af additionally does not control
+// placement at all — but it answers false for the same write-back reason, so the
+// distinction changes the explanation and not the answer. See
+// offBoxAccountRefusal.
 //
 // Because a kind that answers FALSE promises nothing, a per-KIND answer is safe
 // here even for hook, whose modes differ from one another — the objection to a
