@@ -107,13 +107,14 @@ type InstanceOptions struct {
 	ProvisionSessionEnvPassthrough []string
 }
 
-// backendFactory provisions the runtime for a new Instance, returning the
-// in-process Backend plus (for a sandboxed runtime) the authed remote endpoint
-// and the sandbox-reap teardown. It is a package-level variable (not a
-// hard-coded branch) so tests can inject a FakeBackend through
-// SetBackendFactoryForTest without touching production code paths. Defaults to
-// the real runtime resolution.
-var backendFactory = defaultBackendFactory
+// backendFactory provisions the already-resolved runtime for a new Instance,
+// returning the in-process Backend plus (for a sandboxed runtime) the authed
+// remote endpoint and the sandbox-reap teardown. It is a package-level variable
+// (not a hard-coded branch) so tests can inject a FakeBackend through
+// SetBackendFactoryForTest without touching production code paths. NewInstance
+// passes the same resolved kind its pre-provision gates inspected, so config
+// cannot produce a different answer between the guard and provisioning.
+var backendFactory = defaultBackendFactoryForKind
 
 // defaultBackendFactory resolves the session's runtime from the requested
 // backend kind (the `--backend` flag / repo `backend` config, or ForceRemote for
@@ -131,6 +132,10 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	if err != nil {
 		return ProvisionResult{}, err
 	}
+	return defaultBackendFactoryForKind(opts, absPath, kind)
+}
+
+func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
 		return ProvisionResult{}, err
@@ -379,7 +384,7 @@ func LocalPrereqsRequired(opts InstanceOptions, absPath string) (bool, error) {
 // wants to inject a backend needs no knowledge of the endpoint/teardown seam.
 func SetBackendFactoryForTest(f func(opts InstanceOptions, absPath string) (Backend, error)) func() {
 	prev := backendFactory
-	backendFactory = func(opts InstanceOptions, absPath string) (ProvisionResult, error) {
+	backendFactory = func(opts InstanceOptions, absPath string, _ BackendKind) (ProvisionResult, error) {
 		b, err := f(opts, absPath)
 		if err != nil {
 			return ProvisionResult{}, err
@@ -428,8 +433,12 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	if err := InPlaceBackendConflict(opts, absPath); err != nil {
-		return nil, err
+	// Resolve once, before any gate that depends on the effective backend. Keep a
+	// resolution error until the point where backendFactory used to report it so
+	// invalid config retains its established error precedence.
+	kind, resolveBackendErr := resolveBackendKind(opts, absPath)
+	if resolveBackendErr == nil && opts.InPlace && kind != BackendLocal {
+		return nil, inPlaceBackendConflict(kind, opts)
 	}
 	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(opts.SessionEnvPassthrough)
 	if err != nil {
@@ -442,27 +451,29 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 	opts.ProvisionSessionEnvPassthrough = normalizedProvisionEnv
 
-	// An account-scoped session must run LOCALLY, for now.
-	//
-	// The off-box backends provision and start agent-server before the account is
-	// applied, and ProvisionSpec does not carry it — so a docker, ssh, sandbox or
-	// hook session would run on the sandbox's ambient credentials while the
-	// instance recorded the requested account. That is the silent wrong-identity
-	// outcome this feature exists to prevent, reached through a backend instead of
-	// through the environment, and it is worse than not offering the combination.
-	//
-	// Refusing is the first slice deliberately: threading the account through
-	// provisioning and the headless launch is real work, and until it is done an
-	// honest error beats a session that reports one identity and spends another
-	// (#3051, #3082).
-	if err := refuseOffBoxAccount(opts); err != nil {
-		return nil, err
+	// Judge account support on the RESOLVED backend. An empty opts.Backend means
+	// "read the repo config", not local; checking the request field let the most
+	// common ssh/sandbox/hook path provision on ambient credentials while the
+	// instance recorded the requested account (#3082, #3103).
+	accountBackendErr := error(nil)
+	if resolveBackendErr == nil {
+		accountBackendErr = refuseOffBoxAccountForKind(opts, kind)
+	} else {
+		// Preserve the direct guard's established answer for an explicitly invalid
+		// backend; the resolver error remains authoritative for repo-config errors.
+		accountBackendErr = refuseOffBoxAccount(opts)
+	}
+	if accountBackendErr != nil {
+		return nil, accountBackendErr
 	}
 	if err := refuseUnsupportedAccountAgent(opts, absPath); err != nil {
 		return nil, err
 	}
+	if resolveBackendErr != nil {
+		return nil, resolveBackendErr
+	}
 
-	res, err := backendFactory(opts, absPath)
+	res, err := backendFactory(opts, absPath, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -539,30 +550,14 @@ func resolvedProgramMarker(opts InstanceOptions) string {
 }
 
 // refuseOffBoxAccount rejects an account-scoped session on a backend that cannot
-// yet carry the account.
+// carry the account. For ssh, sandbox and hook this is a DECISION, not a gap
+// (#3103) — see offBoxAccountRefusal for each backend's reason.
 //
 // It still gates on the backend being NOT local rather than on a list of remote
 // kinds, and #3082 did not weaken that: a backend added later is off-box until
 // someone proves otherwise, so the default for anything new remains refusal
 // rather than silent ambient credentials. What changed is that docker can now
 // PROVE it, so it is exempted by name.
-//
-// WHY DOCKER AND NOT THE OTHERS, decided per backend rather than defaulted
-// (#3082):
-//
-//   - docker CAN place the account, and already has the mechanism. An account is
-//     an agent HOME directory, and the runtime already bind-mounts host paths into
-//     the container — today it mounts the operator's AMBIENT credentials, which is
-//     precisely the wrong-identity failure this refusal was protecting against.
-//     Pointing that mount at the account's directory is the whole fix.
-//   - ssh could transfer one — the runtime already streams the af binary to the
-//     remote — but that means writing the operator's live credentials onto a
-//     machine whose filesystem, other users and backups af does not control, for a
-//     feature whose purpose is to NARROW where an identity may be used. That is a
-//     posture decision, not wiring, and it is not taken here.
-//   - sandbox and hook run the operator's own provisioner. Nothing in that contract
-//     promises a place to put an account, so refusing is the permanent answer
-//     rather than a temporary one.
 func refuseOffBoxAccount(opts InstanceOptions) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil
@@ -571,14 +566,73 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 	if kind == "" {
 		kind = BackendLocal
 	}
+	return refuseOffBoxAccountForKind(opts, kind)
+}
+
+func refuseOffBoxAccountForKind(opts InstanceOptions, kind BackendKind) error {
+	if strings.TrimSpace(opts.Account) == "" {
+		return nil
+	}
 	if kind == BackendLocal || kind.CarriesAccount() {
 		return nil
 	}
-	return fmt.Errorf(
-		"account %q cannot be used with the %s backend: af cannot place a credential account on that machine, "+
-			"and running there would use its ambient credentials while reporting the account you asked for; "+
-			"create this session on the local or docker backend, or omit --account",
-		opts.Account, kind)
+	return fmt.Errorf("account %q cannot be used with the %s backend: %s", opts.Account, kind, offBoxAccountRefusal(kind))
+}
+
+// offBoxAccountRefusal appends only backend-specific facts to the shared
+// AccountWriteBackRationale. The common reason must remain location- and
+// mechanism-neutral because hook may use shared storage or run on the daemon
+// host; see CarriesAccount.
+const offBoxRoundTripReason = AccountWriteBackRationale +
+	" af refuses this BY DESIGN and not as pending work: what is missing is the GUARANTEE that " +
+	"those writes come back, and af will not present an account as writable without one."
+
+func offBoxAccountRefusal(kind BackendKind) string {
+	switch kind {
+	case BackendSSH:
+		// ssh shares the invariant AND may add the concrete consequence, because it is
+		// the one refusing backend whose session-directory lifecycle af owns — so
+		// "teardown removes it" is established here and nowhere else (#3103 review).
+		return "af can put the account on that host, and deliberately does not: " + offBoxRoundTripReason +
+			" On this backend af owns the remote session directory, so the teardown that removes it removes " +
+			"the refresh with it. Use the docker or local backend for account-scoped sessions, or omit " +
+			"--account to use the remote host's own credentials"
+
+	case BackendSandbox:
+		// The same round-trip reason as ssh, and NOT a "no provable location" one:
+		// sandbox runs through sandboxProvisioner, which creates the session directory
+		// itself, so af controls the location there too (#3103 review).
+		//
+		// And like hook, the workaround must NOT name an identity. sandbox_ssh is the
+		// operator's own command and this backend deliberately preserves their
+		// ssh_config — so a `SendEnv OPENAI_API_KEY` block copies the DAEMON's value
+		// to the sandbox verbatim (measured in #3092), and the session would run on
+		// the daemon host's identity while the operator believed otherwise. Only
+		// backend=ssh is immune, because af pins -F none there.
+		return offBoxRoundTripReason +
+			" Use the docker or local backend for account-scoped sessions, or omit --account — though which " +
+			"identity the session then runs as depends on your sandbox_ssh command and the ssh_config it " +
+			"reads, which af does not override"
+
+	case BackendHook:
+		// Same reason, but the WORKAROUND must not promise an identity here.
+		// runHookScriptWithResolvedEnvironment hands launch_cmd the DAEMON's filtered
+		// agent-authentication environment and the script decides what reaches the
+		// machine — so "omit --account to use that machine's own credentials" would be
+		// false, and false in the exact direction account scoping exists to prevent:
+		// the session could run as the daemon host's ambient identity while the
+		// operator believes it is the remote's (#3103 review).
+		return offBoxRoundTripReason +
+			" Use the docker or local backend for account-scoped sessions, or omit --account — though which " +
+			"identity the session then runs as is up to your hooks, since af passes the daemon's filtered " +
+			"agent credentials to them"
+	default:
+		// A backend added later, refused by default. Naming it as unproven rather
+		// than as impossible keeps this honest for something nobody has assessed.
+		return "af has not established that it can carry a credential account onto that machine, and " +
+			"running there would use its ambient credentials while reporting the account you asked for; " +
+			"use the docker or local backend for account-scoped sessions, or omit --account"
+	}
 }
 
 // refuseUnsupportedAccountAgent rejects an account on an agent whose launch af

@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // `af accounts` manages the credential DIRECTORIES a session can be scoped to
@@ -94,6 +95,10 @@ to while every visible signal reported the selected account.
 Account-scoped sessions require the local or docker backend, and tmux 3.2 or newer. af
 refuses rather than falling back, because a fallback would run on the ambient
 account while reporting the one you asked for.
+
+ssh, sandbox and hook refuse by design, not because the work is pending. docker
+bind-MOUNTS the directory, so account writes land in your real account. ` +
+		session.AccountWriteBackRationale + `
 
 af never switches accounts on its own — not on a rate limit, not on a failure.
 A session runs as the account it was started with.`,

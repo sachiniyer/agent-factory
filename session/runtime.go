@@ -194,15 +194,54 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
 
-// CarriesAccount reports whether this kind's provisioner can place a registered
-// credential account on the machine that runs the agent (#3082).
+// AccountWriteBackRationale is the single operator-facing reason ssh, sandbox
+// and hook cannot safely honour a writable credential account. It states only
+// the guarantee af lacks, without asserting where a hook runs or which
+// mechanism could supply that guarantee.
+const AccountWriteBackRationale = "An account is a writable agent home, so the agent writes refreshed " +
+	"authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come " +
+	"back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
+	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
+	"break it."
+
+// CarriesAccount reports whether this kind's provisioner will SAFELY HONOUR a
+// registered credential account — including the agent's persistent WRITES back
+// into it — on the machine that runs the agent (#3082, #3103).
 //
-// Only docker, and the reason is a mechanism rather than a preference: an account
-// is an agent HOME directory, and the docker runtime already bind-mounts host
-// paths into the container, so the account's directory can be mounted where the
-// in-container agent reads its home. ssh, sandbox and hook have no way to place a
-// directory they can prove is the account — see refuseOffBoxAccount for why that
-// is a decision and not a gap.
+// Deliberately not "can place". #3103 established that ssh can physically place
+// an account and still answers FALSE here, so callers depend on the stronger
+// predicate; leaving the contract phrased as placement would invite a future
+// backend author to answer true for a copy-only mechanism, which is precisely the
+// unsafe behaviour that decision rejects.
+//
+// THIS IS A CLAIM ABOUT A PROVEN MECHANISM, NOT A CAPABILITY, and the difference
+// decides what a per-KIND answer may say (#3103).
+//
+// Only docker, because only docker has one: an account is an agent HOME
+// directory, the docker runtime already bind-mounts host paths into the
+// container, and a MOUNT is shared with the host — so the agent's writes,
+// including a refreshed token, land in the operator's real registry rather than
+// in a copy that teardown deletes.
+//
+// ssh, sandbox and hook answer false for AccountWriteBackRationale — NOT because
+// a copy is the only thing they could ever do. hook's launch_cmd may provision
+// anything and only has to hand back an agent-server endpoint, so it could use
+// shared storage or even run on the daemon host; a mount-like transport for ssh
+// or sandbox would qualify too. What is missing is the guarantee, not the
+// possibility (#3103 review).
+//
+// Nor is this "every off-box kind": docker is off-box (backendProvisionsOffBox)
+// and answers TRUE, so off-box is the wrong axis to reason on here.
+//
+// Placement is not the axis either — sandboxProvisioner.provision creates the
+// session dir and streams af's binary into it, and the provision-hook path reuses
+// that provisioner. See offBoxAccountRefusal.
+//
+// Because a kind that answers FALSE promises nothing, a per-KIND answer is safe
+// here even for hook, whose modes differ from one another — the objection to a
+// blanket per-kind answer only bites for a kind claiming TRUE, where the kind
+// would have to determine the machine's shape in order to be making a promise it
+// can keep.
 //
 // Local is deliberately NOT listed: it needs no placing, applies the account
 // through the exec shim, and is handled by its own branch. A kind that answers
