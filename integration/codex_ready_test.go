@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -25,6 +26,55 @@ import (
 // gets reported as a readiness regression (#2879), which is the bug these tests
 // had — so the distinction is a sentinel rather than a comment.
 var errHangGuardExpired = errors.New("hang guard expired before the CLI answered")
+
+func runAFUntilDaemonAdmits(ctx context.Context, retryDelay time.Duration, run func() (string, error)) (string, error) {
+	for {
+		out, err := run()
+		if !daemon.IsDaemonStartingErr(err) {
+			return out, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return out, err
+		case <-time.After(retryDelay):
+		}
+	}
+}
+
+func runAFWithin(limit time.Duration, bin, repo, home string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+
+	// Capture stdout separately from stderr: the CLI writes the session JSON
+	// to stdout but a "wrote logs to …" line to stderr, so CombinedOutput
+	// would corrupt the JSON parse.
+	run := func() (string, error) {
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "AGENT_FACTORY_HOME="+home, "TERM=xterm")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err != nil {
+			return stdout.String(), fmt.Errorf("%w; stderr=%s", err, stderr.String())
+		}
+		return stdout.String(), nil
+	}
+
+	// #3111's fourth and fifth sightings ended before a session existed: the
+	// first CLI call started a fresh daemon, its bounded internal admission retry
+	// expired while restore was still running, and CreateSession was refused.
+	// The refusal happens before any create work, so retry only that documented
+	// condition. The readiness verdict and launch-marker assertions below remain
+	// untouched and still get exactly one successfully admitted create.
+	out, err := runAFUntilDaemonAdmits(ctx, 100*time.Millisecond, run)
+	if ctx.Err() == context.DeadlineExceeded {
+		return out, fmt.Errorf("%w after %s; last error=%v", errHangGuardExpired, limit, err)
+	}
+	return out, err
+}
 
 // TestCLICreateCodexSessionBecomesReady is the regression test for
 // sachiniyer/agent-factory#714. Before isReadyContent became agent-aware, a
@@ -102,30 +152,9 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 	writeFile(t, filepath.Join(home, config.ConfigFileName), string(raw), 0644)
 
 	bin := buildBinary(t)
-	// Capture stdout separately from stderr: the CLI writes the session JSON
-	// to stdout but a "wrote logs to …" line to stderr, so CombinedOutput
-	// would corrupt the JSON parse.
-	runAFWithin := func(limit time.Duration, args ...string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), limit)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.Dir = repo
-		cmd.Env = append(os.Environ(), "AGENT_FACTORY_HOME="+home, "TERM=xterm")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		if ctx.Err() == context.DeadlineExceeded {
-			return stdout.String(), fmt.Errorf("%w after %s; stderr=%s", errHangGuardExpired, limit, stderr.String())
-		}
-		if err != nil {
-			return stdout.String(), fmt.Errorf("%w; stderr=%s", err, stderr.String())
-		}
-		return stdout.String(), nil
-	}
 
 	t.Cleanup(func() {
-		_, _ = runAFWithin(30*time.Second, "sessions", "kill", "codex-ready")
+		_, _ = runAFWithin(30*time.Second, bin, repo, home, "sessions", "kill", "codex-ready")
 		killDaemonFromHome(home)
 	})
 
@@ -137,7 +166,7 @@ func TestCLICreateCodexSessionBecomesReady(t *testing.T) {
 	// this test had.
 	const createHangGuard = 4 * time.Minute
 
-	out, err := runAFWithin(createHangGuard, "sessions", "--repo", repo, "create", "--name", "codex-ready", "--program", tmux.ProgramCodex)
+	out, err := runAFWithin(createHangGuard, bin, repo, home, "sessions", "--repo", repo, "create", "--name", "codex-ready", "--program", tmux.ProgramCodex)
 
 	// Read the count BEFORE judging the error, so the three outcomes stay
 	// distinguishable (#2879).
@@ -252,27 +281,9 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 	writeFile(t, filepath.Join(home, config.ConfigFileName), string(raw), 0644)
 
 	bin := buildBinary(t)
-	runAFWithin := func(limit time.Duration, args ...string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), limit)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.Dir = repo
-		cmd.Env = append(os.Environ(), "AGENT_FACTORY_HOME="+home, "TERM=xterm")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		if ctx.Err() == context.DeadlineExceeded {
-			return stdout.String(), fmt.Errorf("%w after %s; stderr=%s", errHangGuardExpired, limit, stderr.String())
-		}
-		if err != nil {
-			return stdout.String(), fmt.Errorf("%w; stderr=%s", err, stderr.String())
-		}
-		return stdout.String(), nil
-	}
 
 	t.Cleanup(func() {
-		_, _ = runAFWithin(30*time.Second, "sessions", "kill", "codex-trust")
+		_, _ = runAFWithin(30*time.Second, bin, repo, home, "sessions", "kill", "codex-trust")
 		killDaemonFromHome(home)
 	})
 
@@ -304,7 +315,7 @@ func TestCLICreateCodexWaitsPastTrustPrompt(t *testing.T) {
 	//
 	// If you are about to add a timing assertion back here, add a case there
 	// instead.
-	out, err := runAFWithin(createHangGuard, "sessions", "--repo", repo, "create", "--name", "codex-trust", "--program", tmux.ProgramCodex)
+	out, err := runAFWithin(createHangGuard, bin, repo, home, "sessions", "--repo", repo, "create", "--name", "codex-trust", "--program", tmux.ProgramCodex)
 	if errors.Is(err, errHangGuardExpired) {
 		t.Fatalf("the create never returned within the %s hang guard, so af rendered no verdict — "+
 			"a hang or environment failure: %v\n%s", createHangGuard, err, out)
