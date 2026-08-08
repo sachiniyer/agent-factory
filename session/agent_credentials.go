@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -109,6 +110,48 @@ func resolveAgentCredentialMounts(agent string) []string {
 // operator's filesystem layout crosses the boundary.
 const dockerAccountHome = "/af-account"
 
+func hostSELinuxEnforcing() (bool, error) {
+	if runtime.GOOS != "linux" {
+		return false, nil
+	}
+	for _, enforcePath := range []string{"/sys/fs/selinux/enforce", "/selinux/enforce"} {
+		value, err := os.ReadFile(enforcePath)
+		if err == nil {
+			switch strings.TrimSpace(string(value)) {
+			case "1":
+				return true, nil
+			case "0":
+				return false, nil
+			default:
+				return false, fmt.Errorf("unexpected value in %s", enforcePath)
+			}
+		}
+		if !os.IsNotExist(err) {
+			return false, fmt.Errorf("read %s: %w", enforcePath, err)
+		}
+	}
+	return false, nil
+}
+
+func dockerAccountMount(accountName, source string, selinuxEnforcing bool) ([]string, error) {
+	if !strings.Contains(source, ":") {
+		// z is the shared SELinux label: the same account may be used by more than
+		// one live session. Docker accepts it when SELinux is disabled as well.
+		return []string{"-v", source + ":" + dockerAccountHome + ":z"}, nil
+	}
+	if selinuxEnforcing {
+		return nil, fmt.Errorf(
+			"account %q path %q contains a colon and cannot be relabeled for an SELinux-enforcing Docker host; move AGENT_FACTORY_HOME to a path without ':'",
+			accountName, source)
+	}
+	// --volume uses ':' as a field delimiter. --mount keeps ':' ordinary, but its
+	// own comma delimiter cannot be escaped.
+	if strings.Contains(source, ",") {
+		return nil, fmt.Errorf("account %q path %q contains a comma, which Docker --mount cannot encode safely", accountName, source)
+	}
+	return []string{"--mount", "type=bind,src=" + source + ",dst=" + dockerAccountHome}, nil
+}
+
 // accountMountAndEnv returns the bind mount that places an account's agent HOME
 // inside the container, and the `-e VAR=value` that points the agent at it
 // (#3082).
@@ -149,14 +192,17 @@ func accountMountAndEnv(account sessionenv.Account) (mount []string, env []strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot resolve an absolute path for account %q (%s): %w", account.Name, account.Dir, err)
 	}
-	// --volume uses ':' as a field delimiter, so a valid Unix account path such as
-	// /srv/af:work is misparsed. --mount keeps ':' ordinary. Its own delimiter is
-	// a comma, which Docker cannot quote inside the CSV-style option; refuse that
-	// rare path explicitly instead of mounting a different directory.
-	if strings.Contains(source, ",") {
-		return nil, nil, fmt.Errorf("account %q path %q contains a comma, which Docker --mount cannot encode safely", account.Name, source)
+	selinuxEnforcing := false
+	if strings.Contains(source, ":") {
+		selinuxEnforcing, err = hostSELinuxEnforcing()
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot establish SELinux state for account %q mount: %w", account.Name, err)
+		}
 	}
-	mount = []string{"--mount", "type=bind,src=" + source + ",dst=" + dockerAccountHome}
+	mount, err = dockerAccountMount(account.Name, source, selinuxEnforcing)
+	if err != nil {
+		return nil, nil, err
+	}
 	// Blank every alternate identity source, including values baked into the
 	// image, then install the selected credential root last. The host environment
 	// is separately validated with ApplyAccount before this argv is assembled.

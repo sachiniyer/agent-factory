@@ -24,13 +24,13 @@ func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
 	if a[1] == b[1] {
 		t.Fatalf("two accounts resolved to the SAME container source %q — they would share an identity", a[1])
 	}
-	if !strings.Contains(a[1], "src=/home/op/.agent-factory/accounts/codex/work") {
+	if !strings.HasPrefix(a[1], "/home/op/.agent-factory/accounts/codex/work:") {
 		t.Errorf("the mount source must be the account's own directory; got %q", a[1])
 	}
 	// Both land on the same fixed path INSIDE the container, so nothing about the
 	// host's layout crosses the boundary and the agent's config var is stable.
-	if a[0] != "--mount" || b[0] != "--mount" ||
-		!strings.Contains(a[1], "dst="+dockerAccountHome) || !strings.Contains(b[1], "dst="+dockerAccountHome) {
+	if a[0] != "-v" || b[0] != "-v" ||
+		!strings.HasSuffix(a[1], ":"+dockerAccountHome+":z") || !strings.HasSuffix(b[1], ":"+dockerAccountHome+":z") {
 		t.Errorf("both accounts must mount at the fixed container path %q; got %q and %q", dockerAccountHome, a[1], b[1])
 	}
 	want := "CODEX_HOME=" + dockerAccountHome
@@ -39,6 +39,26 @@ func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
 	}
 	if strings.Join(aEnv, "\x00") != strings.Join(bEnv, "\x00") {
 		t.Errorf("the container-side environment must not depend on which account it is; got %v and %v", aEnv, bEnv)
+	}
+}
+
+func TestAccountMountAndEnv_RelabelsOrdinaryPathsForSELinux(t *testing.T) {
+	mount, _, err := accountMountAndEnv(sessionenv.Account{
+		Agent: "codex", Name: "work", Dir: "/acct/codex/work",
+	})
+	if err != nil {
+		t.Fatalf("ordinary account mount failed: %v", err)
+	}
+	want := []string{"-v", "/acct/codex/work:" + dockerAccountHome + ":z"}
+	if strings.Join(mount, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("account bind must request Docker shared SELinux relabeling: want %v, got %v", want, mount)
+	}
+}
+
+func TestDockerAccountMount_RefusesColonPathOnSELinux(t *testing.T) {
+	_, err := dockerAccountMount("work", "/srv/af:work/accounts/codex/work", true)
+	if err == nil || !strings.Contains(err.Error(), "SELinux-enforcing") {
+		t.Fatalf("colon path on enforcing host must refuse with a workaround, got %v", err)
 	}
 }
 
