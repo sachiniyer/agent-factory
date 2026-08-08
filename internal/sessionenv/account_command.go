@@ -33,7 +33,19 @@ import (
 // agent, and a modelled `env` wrapper around one — and reports everything else
 // as UNPROVABLE. New syntax then arrives as a refusal to scope rather than as a
 // silent bypass, which is the direction this repo can afford to be wrong in.
-func commandOverridesName(command, agent, trustedWrapper string, names map[string]struct{}) (overrides, provable bool) {
+// commandProof is what the CALLER knows and the string cannot say: which agent
+// this account scopes, which af binary generated the handoff, and which argument
+// words af's own launcher appended. Grouped because all three are provenance
+// supplied from outside, and a five-argument recursion invited passing them in
+// the wrong order.
+type commandProof struct {
+	agent          string
+	trustedWrapper string
+	generated      []string
+	names          map[string]struct{}
+}
+
+func commandOverridesName(command string, proof commandProof) (overrides, provable bool) {
 	if command == "" {
 		return false, true
 	}
@@ -41,10 +53,10 @@ func commandOverridesName(command, agent, trustedWrapper string, names map[strin
 	if !ok {
 		return false, false
 	}
-	return callOverridesName(call, agent, trustedWrapper, names, 0)
+	return callOverridesName(call, proof, 0)
 }
 
-func callOverridesName(call *syntax.CallExpr, agent, trustedWrapper string, names map[string]struct{}, depth int) (overrides, provable bool) {
+func callOverridesName(call *syntax.CallExpr, proof commandProof, depth int) (overrides, provable bool) {
 	if depth > maxNestedProgramDepth {
 		return false, false
 	}
@@ -59,7 +71,6 @@ func callOverridesName(call *syntax.CallExpr, agent, trustedWrapper string, name
 		if assign != nil && assign.Name != nil {
 			return true, true
 		}
-		_ = names
 	}
 
 	words := call.Args
@@ -90,16 +101,16 @@ func callOverridesName(call *syntax.CallExpr, agent, trustedWrapper string, name
 	// a bare name refuses af's own launch on those backends — the same
 	// name-is-not-provenance problem in reverse: here the path IS trusted and the
 	// spelling cannot say so, which is why the caller supplies it.
-	if nested, ok := literalAgentServerProgram(call); ok && isTrustedAfBinary(words[0], trustedWrapper) {
+	if nested, ok := literalAgentServerProgram(call); ok && isTrustedAfBinary(words[0], proof.trustedWrapper) {
 		inner, ok := singleSimpleCall(nested)
 		if !ok {
 			return false, false
 		}
-		return callOverridesName(inner, agent, trustedWrapper, names, depth+1)
+		return callOverridesName(inner, proof, depth+1)
 	}
 
 	if isBareName(words[0], "env") {
-		return envOverridesName(words[1:], agent, names)
+		return envOverridesName(words[1:], proof)
 	}
 
 	// Anything else is unprovable, and that includes commands that look
@@ -124,12 +135,61 @@ func callOverridesName(call *syntax.CallExpr, agent, trustedWrapper string, name
 	// help points at --settings for auth. Enumerating those per agent is the same
 	// losing game as enumerating shell forms, one layer down, so a scoped
 	// invocation carries no arguments at all (#2983 review).
+	// af's OWN generated arguments are removed here, by PROVENANCE rather than by
+	// shape (#3083). What remains must still satisfy the no-arguments rule below
+	// unchanged — this widens what af can prove about its own output, not what the
+	// rule accepts from anywhere else.
+	words, ok := stripGeneratedArgs(words, proof.generated)
+	if !ok {
+		return false, false
+	}
 	if len(words) == 1 {
-		if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, agent) {
+		if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, proof.agent) {
 			return false, true
 		}
 	}
 	return false, false
+}
+
+// stripGeneratedArgs removes the launcher's declared trailing argument words and
+// reports whether the command ended in exactly them.
+//
+// EXACT, POSITIONAL, and ANCHORED TO THE END — three properties that together are
+// what makes this provenance instead of an allowlist:
+//
+//   - Exact: each word is compared whole against the value the launcher generated
+//     on THIS launch — a specific uuid, a specific plugin directory. A repository
+//     writing `--session-id` into program_overrides does not match, because it
+//     cannot know the uuid. Matching the FLAG NAME instead would be the allowlist
+//     this guard exists to avoid, and would accept any value including one that
+//     redirects identity.
+//   - Positional: order is fixed, so nothing can be reordered to slip an extra
+//     word between two declared ones.
+//   - Anchored, with the COUNT required to match: the command must be the agent
+//     plus these words and nothing else. Merely "contains" or "ends with" would
+//     leave room for an argument in front of them.
+//
+// Every word must also be a shell LITERAL. callIsLiteral has already established
+// that for the whole call, so this is the narrower restatement that survives if
+// that check ever moves: a word whose text matches after expansion is not the
+// word af generated.
+func stripGeneratedArgs(words []*syntax.Word, generated []string) ([]*syntax.Word, bool) {
+	if len(generated) == 0 {
+		return words, true
+	}
+	// The executable plus exactly the declared words. Anything else is unprovable,
+	// including FEWER words than declared: that means the command is not the one the
+	// launcher described, so its description does not apply to it.
+	if len(words) != len(generated)+1 {
+		return nil, false
+	}
+	for idx, want := range generated {
+		got, ok := literalShellWord(words[idx+1])
+		if !ok || got != want {
+			return nil, false
+		}
+	}
+	return words[:1], true
 }
 
 // envOverridesName decides an `env` wrapper through envcommand.Parse, the
@@ -141,7 +201,7 @@ func callOverridesName(call *syntax.CallExpr, agent, trustedWrapper string, name
 // and a second implementation of the same grammar is a second thing to keep in
 // step. Anything Parse rejects is unprovable by definition, because Parse's own
 // contract is to refuse rather than silently model a different environment.
-func envOverridesName(args []*syntax.Word, agent string, names map[string]struct{}) (overrides, provable bool) {
+func envOverridesName(args []*syntax.Word, proof commandProof) (overrides, provable bool) {
 	literals, ok := literalCommandArgs(args)
 	if !ok {
 		return false, false
@@ -174,7 +234,6 @@ func envOverridesName(args []*syntax.Word, agent string, names map[string]struct
 	if invocation.Chdir != "" {
 		return true, true
 	}
-	_ = names
 	if invocation.CommandIndex < 0 || invocation.CommandIndex >= len(literals) {
 		// env with no command to run: nothing launches, so nothing is redirected.
 		return false, true
@@ -192,10 +251,18 @@ func envOverridesName(args []*syntax.Word, agent string, names map[string]struct
 	// account after af and tmux believe the session ended. Enumerating signal
 	// options would be the fifth grammar this guard tried to enumerate; this is
 	// the last one it needs (#2983 review).
-	if invocation.CommandIndex != 0 || len(literals) != 1 {
+	// The command operand plus exactly af's declared generated words, and nothing
+	// else — the same provenance rule the direct branch applies, so `env` does not
+	// become the wrapper that reaches a laxer version of it (#3083).
+	if invocation.CommandIndex != 0 || len(literals) != len(proof.generated)+1 {
 		return false, false
 	}
-	if executableIsAgent(literals[invocation.CommandIndex], agent) {
+	for idx, want := range proof.generated {
+		if literals[idx+1] != want {
+			return false, false
+		}
+	}
+	if executableIsAgent(literals[invocation.CommandIndex], proof.agent) {
 		return false, true
 	}
 	return false, false
