@@ -190,6 +190,39 @@ test("a same-named decision check from another app remains required", async () =
   );
 });
 
+test("a source-less decision requirement fails with an actionable configuration error", async () => {
+  const result = await evaluateGate({
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Auto Gate decision" },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(
+    result.reasons.join("\n"),
+    /Auto Gate decision.*must be bound to GitHub Actions app 15368/,
+  );
+});
+
+test("a source-less legacy duplicate does not deadlock an app-bound decision requirement", async () => {
+  const result = await evaluateGate({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ name: "Auto Gate decision", conclusion: "failure" }),
+    ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Auto Gate decision" },
+      { context: "Auto Gate decision", integration_id: ACTIONS_APP_ID },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
 test("terminal non-success conclusions never verify a required check", () => {
   const spec = { context: "Lint", sourceAppId: ACTIONS_APP_ID };
 

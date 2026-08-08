@@ -344,16 +344,30 @@ async function listPullRequestFiles({ github, context, number }) {
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core });
+  const hasOwnedDecisionSpec = required.specs.some(
+    (spec) =>
+      spec.context === AUTO_GATE_DECISION_CHECK &&
+      spec.sourceAppId === GITHUB_ACTIONS_APP_ID,
+  );
+  const hasAmbiguousDecisionSpec = required.specs.some(
+    (spec) => spec.context === AUTO_GATE_DECISION_CHECK && !spec.sourceAppId,
+  );
   const specs = required.specs.filter(
     (spec) =>
       spec.context !== AUTO_GATE_DECISION_CHECK ||
-      spec.sourceAppId !== GITHUB_ACTIONS_APP_ID,
+      (spec.sourceAppId && spec.sourceAppId !== GITHUB_ACTIONS_APP_ID),
   );
   const notes = [];
   const reasons = [...required.errors];
 
-  if (specs.length !== required.specs.length) {
+  if (hasOwnedDecisionSpec) {
     notes.push("Auto Gate decision is enforced after this prerequisite evaluation");
+  }
+  if (hasAmbiguousDecisionSpec && !hasOwnedDecisionSpec) {
+    reasons.push(
+      `required check ${AUTO_GATE_DECISION_CHECK} without a source app is ambiguous; ` +
+        `it must be bound to GitHub Actions app ${GITHUB_ACTIONS_APP_ID}`,
+    );
   }
 
   if (specs.length === 0) {
