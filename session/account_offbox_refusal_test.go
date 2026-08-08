@@ -115,6 +115,8 @@ func TestHookAccountRefusalDoesNotPromiseAnIdentityForTheWorkaround(t *testing.T
 func TestCarriesAccountRationaleDoesNotClaimAfLacksControl(t *testing.T) {
 	rationale := carriesAccountDoc(t)
 
+	assert.Contains(t, rationale, "AccountWriteBackRationale",
+		"the runtime contract must reference the single shared operator-facing rationale")
 	assert.NotContains(t, rationale, "af does not decide the shape of those machines",
 		"sandboxProvisioner.provision creates the session dir, and provision-mode hook reuses it — "+
 			"this is the same false premise the refusal message dropped")
@@ -280,10 +282,70 @@ func TestPermanenceRestsOnTheMissingGuaranteeNotOnAMechanismClaim(t *testing.T) 
 // write-back guarantee. It cannot assert a location or mechanism: hook's
 // launch_cmd may use shared storage or run on the daemon host.
 func TestSharedRoundTripReasonDoesNotAssertLocationOrMechanism(t *testing.T) {
+	assert.Contains(t, offBoxRoundTripReason, AccountWriteBackRationale,
+		"the refusal must render the shared runtime rationale rather than copy it")
 	assert.Contains(t, offBoxRoundTripReason, "cannot establish that those writes come back",
 		"the common reason must state the missing guarantee")
 	assert.NotContains(t, offBoxRoundTripReason, "machine it does not own",
 		"the common reason cannot assert where hook runs")
 	assert.NotContains(t, offBoxRoundTripReason, "only a mount",
 		"the common reason cannot assert which mechanism would provide write-back")
+}
+
+// An empty opts.Backend means "resolve the repo config", not local. The
+// explicit-backend tests above missed that default path, so the account guard
+// appeared complete while a repo-configured ssh create reached provisioning.
+func TestNewInstance_AccountRefusalUsesRepoConfiguredBackend(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := initTempGitRepo(t)
+	writeInRepoConfig(t, repo, map[string]any{
+		"backend": "ssh",
+		"ssh":     map[string]any{"host": "example.invalid"},
+	})
+
+	factoryReached := false
+	restore := SetBackendFactoryForTest(func(InstanceOptions, string) (Backend, error) {
+		factoryReached = true
+		return &LocalBackend{}, nil
+	})
+	defer restore()
+
+	_, err := NewInstance(InstanceOptions{
+		Title:   "scoped",
+		Path:    repo,
+		Program: "codex",
+		Account: "work",
+	})
+	require.Error(t, err,
+		"a repo-configured ssh backend must refuse an account even when --backend was omitted")
+	assert.False(t, factoryReached,
+		"the account guard must run on the resolved backend before provisioning")
+	assert.Contains(t, err.Error(), "ssh",
+		"the refusal must name the backend selected by repo config")
+}
+
+func TestNewInstance_UnscopedRepoConfiguredBackendStillReachesFactory(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := initTempGitRepo(t)
+	writeInRepoConfig(t, repo, map[string]any{
+		"backend": "ssh",
+		"ssh":     map[string]any{"host": "example.invalid"},
+	})
+
+	factoryReached := false
+	restore := SetBackendFactoryForTest(func(InstanceOptions, string) (Backend, error) {
+		factoryReached = true
+		return &LocalBackend{}, nil
+	})
+	defer restore()
+
+	inst, err := NewInstance(InstanceOptions{
+		Title:   "plain",
+		Path:    repo,
+		Program: "codex",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, inst)
+	assert.True(t, factoryReached,
+		"resolving the guard must not refuse an unscoped repo-configured backend")
 }

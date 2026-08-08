@@ -107,13 +107,14 @@ type InstanceOptions struct {
 	ProvisionSessionEnvPassthrough []string
 }
 
-// backendFactory provisions the runtime for a new Instance, returning the
-// in-process Backend plus (for a sandboxed runtime) the authed remote endpoint
-// and the sandbox-reap teardown. It is a package-level variable (not a
-// hard-coded branch) so tests can inject a FakeBackend through
-// SetBackendFactoryForTest without touching production code paths. Defaults to
-// the real runtime resolution.
-var backendFactory = defaultBackendFactory
+// backendFactory provisions the already-resolved runtime for a new Instance,
+// returning the in-process Backend plus (for a sandboxed runtime) the authed
+// remote endpoint and the sandbox-reap teardown. It is a package-level variable
+// (not a hard-coded branch) so tests can inject a FakeBackend through
+// SetBackendFactoryForTest without touching production code paths. NewInstance
+// passes the same resolved kind its pre-provision gates inspected, so config
+// cannot produce a different answer between the guard and provisioning.
+var backendFactory = defaultBackendFactoryForKind
 
 // defaultBackendFactory resolves the session's runtime from the requested
 // backend kind (the `--backend` flag / repo `backend` config, or ForceRemote for
@@ -131,6 +132,10 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	if err != nil {
 		return ProvisionResult{}, err
 	}
+	return defaultBackendFactoryForKind(opts, absPath, kind)
+}
+
+func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
 	rt, err := ResolveRuntime(kind)
 	if err != nil {
 		return ProvisionResult{}, err
@@ -379,7 +384,7 @@ func LocalPrereqsRequired(opts InstanceOptions, absPath string) (bool, error) {
 // wants to inject a backend needs no knowledge of the endpoint/teardown seam.
 func SetBackendFactoryForTest(f func(opts InstanceOptions, absPath string) (Backend, error)) func() {
 	prev := backendFactory
-	backendFactory = func(opts InstanceOptions, absPath string) (ProvisionResult, error) {
+	backendFactory = func(opts InstanceOptions, absPath string, _ BackendKind) (ProvisionResult, error) {
 		b, err := f(opts, absPath)
 		if err != nil {
 			return ProvisionResult{}, err
@@ -428,8 +433,12 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	if err := InPlaceBackendConflict(opts, absPath); err != nil {
-		return nil, err
+	// Resolve once, before any gate that depends on the effective backend. Keep a
+	// resolution error until the point where backendFactory used to report it so
+	// invalid config retains its established error precedence.
+	kind, resolveBackendErr := resolveBackendKind(opts, absPath)
+	if resolveBackendErr == nil && opts.InPlace && kind != BackendLocal {
+		return nil, inPlaceBackendConflict(kind, opts)
 	}
 	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(opts.SessionEnvPassthrough)
 	if err != nil {
@@ -442,27 +451,29 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 	opts.ProvisionSessionEnvPassthrough = normalizedProvisionEnv
 
-	// An account-scoped session must run LOCALLY, for now.
-	//
-	// The off-box backends provision and start agent-server before the account is
-	// applied, and ProvisionSpec does not carry it — so a docker, ssh, sandbox or
-	// hook session would run on the sandbox's ambient credentials while the
-	// instance recorded the requested account. That is the silent wrong-identity
-	// outcome this feature exists to prevent, reached through a backend instead of
-	// through the environment, and it is worse than not offering the combination.
-	//
-	// Refusing is the first slice deliberately: threading the account through
-	// provisioning and the headless launch is real work, and until it is done an
-	// honest error beats a session that reports one identity and spends another
-	// (#3051, #3082).
-	if err := refuseOffBoxAccount(opts); err != nil {
-		return nil, err
+	// Judge account support on the RESOLVED backend. An empty opts.Backend means
+	// "read the repo config", not local; checking the request field let the most
+	// common ssh/sandbox/hook path provision on ambient credentials while the
+	// instance recorded the requested account (#3082, #3103).
+	accountBackendErr := error(nil)
+	if resolveBackendErr == nil {
+		accountBackendErr = refuseOffBoxAccountForKind(opts, kind)
+	} else {
+		// Preserve the direct guard's established answer for an explicitly invalid
+		// backend; the resolver error remains authoritative for repo-config errors.
+		accountBackendErr = refuseOffBoxAccount(opts)
+	}
+	if accountBackendErr != nil {
+		return nil, accountBackendErr
 	}
 	if err := refuseUnsupportedAccountAgent(opts, absPath); err != nil {
 		return nil, err
 	}
+	if resolveBackendErr != nil {
+		return nil, resolveBackendErr
+	}
 
-	res, err := backendFactory(opts, absPath)
+	res, err := backendFactory(opts, absPath, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -555,88 +566,25 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 	if kind == "" {
 		kind = BackendLocal
 	}
+	return refuseOffBoxAccountForKind(opts, kind)
+}
+
+func refuseOffBoxAccountForKind(opts InstanceOptions, kind BackendKind) error {
+	if strings.TrimSpace(opts.Account) == "" {
+		return nil
+	}
 	if kind == BackendLocal || kind.CarriesAccount() {
 		return nil
 	}
 	return fmt.Errorf("account %q cannot be used with the %s backend: %s", opts.Account, kind, offBoxAccountRefusal(kind))
 }
 
-// offBoxAccountRefusal is WHY a given backend refuses an account, in the
-// operator's words.
-//
-// It is per backend because the reasons are genuinely different, and a merged
-// message was actively misleading (#3103). The old wording said af "cannot place
-// a credential account on that machine" for all of them — which is FALSE for ssh
-// and provably so: that runtime streams af's own binary to the remote, creates a
-// per-session directory and starts a process there. Placement was never the
-// obstacle. An operator who knows the ssh backend reads that and reasonably
-// concludes af simply has not wired it up.
-//
-// THE ACTUAL OBSTACLE FOR SSH IS THE ROUND TRIP. An account is a writable agent
-// HOME (sessionenv.Account.Dir becomes CODEX_HOME / CLAUDE_CONFIG_DIR), not a
-// credential file, and the agent writes REFRESHED AUTHENTICATION into it when a
-// token rotates. A copy's writes live on the remote and the teardown `rm -rf`
-// destroys them, so the account would present as writable while being read-only
-// in practice.
-//
-// And the worst case is not a stale credential, it is an INVALIDATED one. OAuth
-// refresh tokens are commonly single-use: presenting one returns a replacement
-// and kills the old. If that holds for a given provider, a remote refresh
-// invalidates the token the operator still holds LOCALLY while the replacement is
-// deleted with the session dir — so a session on a machine af does not control
-// breaks the identity on the machine it does. af cannot verify rotation behaviour
-// per provider, and that unverifiability is the argument: this is a risk af would
-// be taking on the operator's behalf without being able to bound it.
-//
-// COPY-BACK IS NOT RULED OUT BY TEARDOWN AMBIGUITY, and an earlier draft of this
-// comment claimed it was (#3103 review). The ordering is available: quiesce the
-// agent, copy, install the replacement locally, and only THEN start the
-// destructive reap — a write-back failure retains the record without tearing
-// anything down, and an unknown reap outcome afterwards no longer costs the token,
-// because it already arrived. So teardown uncertainty alone is not the argument.
-//
-// What survives that correction is narrower and is still enough:
-//
-//   - The remote can be LOST before write-back — an evaporated cloud instance, a
-//     revoked key, a network partition that outlives the session. Then the refresh
-//     is gone and the local copy is dead, which is the invalidation case again,
-//     reached by a route no ordering fixes.
-//   - Write-back needs the agent QUIESCED to copy a consistent home, and af has no
-//     mechanism to make an agent stop writing on request.
-//   - It widens the window in which live credentials sit on a machine af does not
-//     control, which per-session placement exists to bound.
-//
-// sandbox and hook get the SAME round-trip reason rather than a location one, and
-// that is a correction too: sandboxProvisioner.provision creates the session
-// directory and streams af's binary into it, and the provision-hook path reuses
-// that provisioner — so af controls those locations exactly as it does for ssh.
-// Only hook's launch_cmd mode genuinely leaves the machine's shape to the
-// operator, and the round-trip reason covers that mode as well.
-// offBoxRoundTripReason is the one reason ssh, sandbox and hook refuse.
-//
-// It states the property af can ESTABLISH — that it cannot get the agent's
-// writes back — rather than a mechanism by which they are lost, and that is the
-// correction TEN review findings on this PR converged on. The permanence clause
-// obeys the same rule: it says the GUARANTEE is missing, and deliberately does
-// NOT say "only a mount can return those writes" — an earlier draft did, and that
-// was the same over-claim one layer up, since a launch_cmd may run the
-// agent-server on the daemon host or against shared durable storage. Every earlier
-// version named a specific consequence ("destroyed with the session directory at
-// teardown", "af has no provable location", "omit --account to use that machine's
-// own credentials"), and each was false for at least one backend, because the
-// consequence depends on each backend's own lifecycle and environment contract
-// while the refusal does not. hook's launch_cmd owns no session directory af can
-// delete; sandbox reads the operator's ssh_config; only ssh pins -F none.
-//
-// So: assert the thing that is true for all three and nothing further. It also
-// deliberately says "the other off-box backends" nowhere — docker is off-box in
-// this repo's taxonomy (backendProvisionsOffBox) and CARRIES an account, so
-// "off-box" is the wrong axis to name here at all.
-const offBoxRoundTripReason = "an account is a writable agent home, so the agent writes refreshed " +
-	"authentication back into it — and af cannot establish that those writes come back, so a rotated token " +
-	"can be lost. If your provider rotates refresh tokens, losing it also " +
-	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
-	"break it. af refuses this BY DESIGN and not as pending work: what is missing is the GUARANTEE that " +
+// offBoxAccountRefusal appends only backend-specific facts to the shared
+// AccountWriteBackRationale. The common reason must remain location- and
+// mechanism-neutral because hook may use shared storage or run on the daemon
+// host; see CarriesAccount.
+const offBoxRoundTripReason = AccountWriteBackRationale +
+	" af refuses this BY DESIGN and not as pending work: what is missing is the GUARANTEE that " +
 	"those writes come back, and af will not present an account as writable without one."
 
 func offBoxAccountRefusal(kind BackendKind) string {

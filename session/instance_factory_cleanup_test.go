@@ -22,7 +22,7 @@ func TestNewInstance_BindFailureSurfacesCleanupOutcome(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			previousFactory := backendFactory
-			backendFactory = func(InstanceOptions, string) (ProvisionResult, error) {
+			backendFactory = func(InstanceOptions, string, BackendKind) (ProvisionResult, error) {
 				return ProvisionResult{
 					Backend:  newInertSandboxBackend("docker"),
 					Endpoint: &AgentServerEndpoint{URL: "://invalid", Token: "tok"},

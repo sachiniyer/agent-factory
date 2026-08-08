@@ -194,6 +194,16 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
 
+// AccountWriteBackRationale is the single operator-facing reason ssh, sandbox
+// and hook cannot safely honour a writable credential account. It states only
+// the guarantee af lacks, without asserting where a hook runs or which
+// mechanism could supply that guarantee.
+const AccountWriteBackRationale = "An account is a writable agent home, so the agent writes refreshed " +
+	"authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come " +
+	"back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also " +
+	"invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could " +
+	"break it."
+
 // CarriesAccount reports whether this kind's provisioner will SAFELY HONOUR a
 // registered credential account — including the agent's persistent WRITES back
 // into it — on the machine that runs the agent (#3082, #3103).
@@ -213,14 +223,12 @@ func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k]
 // including a refreshed token, land in the operator's real registry rather than
 // in a copy that teardown deletes.
 //
-// WHAT MAKES DOCKER DIFFERENT IS THE MOUNT, and it is the only mechanism af
-// currently has that returns the agent's writes to the operator's real registry.
-// ssh, sandbox and hook answer false because af cannot establish that write-back
-// for them — NOT because a copy is the only thing they could ever do. hook's
-// launch_cmd may provision anything and only has to hand back an agent-server
-// endpoint, so it could use shared storage or even run on the daemon host; a
-// mount-like transport for ssh or sandbox would qualify too. What is missing is
-// the guarantee, not the possibility (#3103 review).
+// ssh, sandbox and hook answer false for AccountWriteBackRationale — NOT because
+// a copy is the only thing they could ever do. hook's launch_cmd may provision
+// anything and only has to hand back an agent-server endpoint, so it could use
+// shared storage or even run on the daemon host; a mount-like transport for ssh
+// or sandbox would qualify too. What is missing is the guarantee, not the
+// possibility (#3103 review).
 //
 // Nor is this "every off-box kind": docker is off-box (backendProvisionsOffBox)
 // and answers TRUE, so off-box is the wrong axis to reason on here.

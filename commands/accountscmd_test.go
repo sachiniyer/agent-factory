@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // `af accounts` had no test file at all while its --json failure path was
@@ -25,6 +26,21 @@ type accountsEnvelope struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// Hook launch_cmd may use shared storage or run on the daemon host, so the
+// shared account help can state only the missing write-back guarantee — never
+// a location or a mechanism.
+func TestAccountsHelpDoesNotAssertRefusingBackendLocation(t *testing.T) {
+	if !strings.Contains(accountsCmd.Long, session.AccountWriteBackRationale) {
+		t.Fatalf("account help drifted from the shared runtime rationale:\n%s", accountsCmd.Long)
+	}
+	if strings.Contains(accountsCmd.Long, "machine it does not own") {
+		t.Fatalf("account help asserts where hook runs:\n%s", accountsCmd.Long)
+	}
+	if strings.Contains(accountsCmd.Long, "only a mount") {
+		t.Fatalf("account help asserts which mechanism could provide write-back:\n%s", accountsCmd.Long)
+	}
 }
 
 // runAccounts drives `af accounts …` through the real root command and returns
