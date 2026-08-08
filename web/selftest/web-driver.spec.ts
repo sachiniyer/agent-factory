@@ -48,6 +48,7 @@ import {
   test,
 } from "@playwright/test";
 import { decode, Op } from "../src/frame.js";
+import { openAfterInitialResync } from "./initial-resync.js";
 
 const SESSION_A = process.env.AF_WEB_SESSION_A ?? "probe-a";
 const SESSION_B = process.env.AF_WEB_SESSION_B ?? "probe-b";
@@ -8742,7 +8743,13 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     const cdp = await ctx.newCDPSession(win);
     await cdp.send("Network.enable");
 
-    await openTokenless(win);
+    // Wait for BOTH startup Snapshots before manufacturing the outage. openTokenless
+    // proves the seed Snapshot rendered the rail, but the event socket's first-open
+    // resync is debounced separately. If that older request is still pending, it can
+    // sample the real deleted-only roster between tab-delete and tab-create, repaint
+    // the bar, and make the fused-reconnect assertion fail even though the reconnect
+    // Snapshot itself carries the intended same-name replacement (#3081).
+    await openAfterInitialResync(win, () => openTokenless(win));
     await row(win, SESSION_ORDER).click();
     await expect(win.locator(".af-tabbar .af-tab")).toHaveCount(4, { timeout: 15_000 });
     // A tab of this test's OWN, appended LAST: a recreate appends, so closing and
@@ -8814,23 +8821,33 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
       timeout: 30_000,
     });
     await cdp.send("Network.setBlockedURLs", { urls: [] });
-    await resync;
+    const resyncResponse = await resync;
+    const resyncEnvelope = (await resyncResponse.json()) as {
+      data?: {
+        instances?: { title?: string; tabs?: { id?: string; name?: string }[] }[];
+      } | null;
+    };
+    const replacementID = resyncEnvelope.data?.instances
+      ?.find((instance) => instance.title === SESSION_ORDER)
+      ?.tabs?.find((tab) => tab.name === VICTIM)?.id;
+    expect(replacementID, "the reconnect Snapshot must carry the recreated tab's stable id").toMatch(/\S/);
+    expect(replacementID, "the daemon must never reuse the closed tab's identity").not.toBe(editedPaneID);
     // waitForResponse resolves at the response headers, before the app necessarily
     // reads the body and applies it. Poll the pane's production identity instead: it
     // changes only when the reconnect Snapshot has reached store.set → split reconcile,
     // so Enter below cannot race a stale client cache under a loaded test box (#2387).
+    // Compare with the replacement's EXACT id, not merely `id !== editedPaneID`: a
+    // deleted-only intermediate roster clamps this last-slot pane onto its neighbour,
+    // whose different id would otherwise satisfy the wait while proving the wrong bind.
     await expect
       .poll(
-        async () => {
-          const id = await editedPane.getAttribute("data-tab-id");
-          return id !== null && id !== "" && id !== editedPaneID;
-        },
+        async () => await editedPane.getAttribute("data-tab-id"),
         {
           message: "the reconnect Snapshot must bind the pane to the replacement tab id",
           timeout: 15_000,
         },
       )
-      .toBe(true);
+      .toBe(replacementID);
 
     // The bar held still across all of it — the precondition the bug needs, asserted
     // rather than assumed: had the roster change repainted, the input would be gone and
