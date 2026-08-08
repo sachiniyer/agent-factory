@@ -157,7 +157,8 @@ const retainedLinkReaderFDReserve = 16
 
 var retainedLinkReaderCapacity struct {
 	sync.Mutex
-	held int
+	held      int
+	available int
 }
 
 // retainedLinkReader owns both the duplicated descriptor and its process-wide
@@ -177,6 +178,12 @@ func (r *retainedLinkReader) Close() error {
 		r.closeErr = r.file.Close()
 		retainedLinkReaderCapacity.Lock()
 		retainedLinkReaderCapacity.held--
+		retainedLinkReaderCapacity.available++
+		if retainedLinkReaderCapacity.held == 0 {
+			// No reservation wave is active. Recompute against the live process
+			// table when the next copy asks, rather than carrying a stale snapshot.
+			retainedLinkReaderCapacity.available = 0
+		}
 		retainedLinkReaderCapacity.Unlock()
 	})
 	return r.closeErr
@@ -188,18 +195,25 @@ func (r *retainedLinkReader) Close() error {
 func retainLinkReader(fd int, path string) *retainedLinkReader {
 	retainedLinkReaderCapacity.Lock()
 	defer retainedLinkReaderCapacity.Unlock()
-	if retainedLinkReaderCapacity.held >= maxRetainedLinkReaders {
-		return nil
+	if retainedLinkReaderCapacity.held == 0 && retainedLinkReaderCapacity.available == 0 {
+		var limit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+			return nil
+		}
+		open, ok := openFileDescriptorCount(limit.Cur)
+		if !ok || limit.Cur <= uint64(open)+retainedLinkReaderFDReserve {
+			// An unknown or full table is not evidence that a slot is available.
+			// Falling back to a fresh copy can lose hard-link fidelity, but it never
+			// publishes unverified bytes and cannot exhaust the daemon for other work.
+			return nil
+		}
+		available := limit.Cur - uint64(open) - retainedLinkReaderFDReserve
+		if available > maxRetainedLinkReaders {
+			available = maxRetainedLinkReaders
+		}
+		retainedLinkReaderCapacity.available = int(available)
 	}
-	var limit unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
-		return nil
-	}
-	open, ok := openFileDescriptorCount()
-	if !ok || limit.Cur <= uint64(open)+retainedLinkReaderFDReserve {
-		// An unknown or full table is not evidence that a slot is available.
-		// Falling back to a fresh copy can lose hard-link fidelity, but it never
-		// publishes unverified bytes and cannot exhaust the daemon for other work.
+	if retainedLinkReaderCapacity.available == 0 {
 		return nil
 	}
 	dupFD, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
@@ -212,20 +226,34 @@ func retainLinkReader(fd int, path string) *retainedLinkReader {
 		return nil
 	}
 	retainedLinkReaderCapacity.held++
+	retainedLinkReaderCapacity.available--
 	return &retainedLinkReader{file: file}
 }
 
-// openFileDescriptorCount reads the process descriptor filesystem available on
-// Linux and macOS. The directory read can count its own transient descriptor;
-// that is deliberately conservative by one slot.
-func openFileDescriptorCount() (int, bool) {
+// openFileDescriptorCount first reads the process descriptor filesystem. Linux
+// exposes /proc/self/fd; some systems expose a readable /dev/fd. macOS exposes
+// /dev/fd but does not support enumerating it, so a low-limit portable fallback
+// probes each possible descriptor with F_GETFD instead. The scan is deliberately
+// capped: on a platform with neither descriptor filesystem nor a reasonably
+// small limit, retaining nothing is safer than an unbounded scan in the daemon.
+func openFileDescriptorCount(limit uint64) (int, bool) {
 	for _, path := range []string{"/dev/fd", "/proc/self/fd"} {
 		entries, err := os.ReadDir(path)
 		if err == nil {
 			return len(entries), true
 		}
 	}
-	return 0, false
+	const maxPortableFDScan = 64 * 1024
+	if limit > maxPortableFDScan {
+		return 0, false
+	}
+	open := 0
+	for fd := 0; uint64(fd) < limit; fd++ {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			open++
+		}
+	}
+	return open, true
 }
 
 type copiedFileLink struct {
