@@ -132,6 +132,27 @@ func TestAgentNameUsedAsDataDoesNotSelectCredentialAllowlist(t *testing.T) {
 	}
 }
 
+// An account name belongs to the agent namespace selected when the user chose
+// it. A later program rewrite must not reinterpret that same string in another
+// agent's account registry.
+func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	forceNewSessionEnvMarkers(t, true)
+
+	// The persisted instance still says Claude, while restore has re-resolved the
+	// current override to Codex before refreshing the account selection.
+	session := NewTmuxSession("cross-agent-account", "codex")
+	session.SetAccountForAgent("claude", "work")
+
+	_, _, _, err := session.launchEnvironment()
+	if err == nil {
+		t.Fatal("a Claude account was reinterpreted as a same-named Codex account after the program changed")
+	}
+	if !strings.Contains(err.Error(), "selected for claude") || !strings.Contains(err.Error(), "resolves to codex") {
+		t.Fatalf("cross-agent refusal did not name both namespaces: %v", err)
+	}
+}
+
 func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")

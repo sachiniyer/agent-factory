@@ -159,6 +159,10 @@ type TmuxSession struct {
 	// account is the credential account this session runs its agent as, or empty
 	// for the ambient identity. Guarded by programMu with envPassthrough (#3051).
 	account string
+	// accountAgent is the namespace in which account was selected. It is kept
+	// separately from the resolved program so a program_overrides change cannot
+	// reinterpret the same account name as another agent's identity (#3083 review).
+	accountAgent string
 	// generatedArgs are the argument words af's own launcher appended to program,
 	// declared so the account boundary can verify af's output instead of refusing
 	// it (#3083). Guarded by programMu with program itself, because a launch reads

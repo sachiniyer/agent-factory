@@ -92,7 +92,7 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	// Refreshed alongside the pass-through, on the same paths, so a restored or
 	// re-provisioned session carries the account it was created with rather than
 	// quietly reverting to the ambient identity (#3051).
-	tmuxSession.SetAccount(i.Account)
+	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(i.AgentProgram()), i.Account)
 	return nil
 }
 

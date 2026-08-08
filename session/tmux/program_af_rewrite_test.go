@@ -122,7 +122,7 @@ func TestLaunchSnapshot_NeverTearsTheCommandFromItsDeclaration(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 500; i++ {
-		program, generated, _, _ := session.launchSnapshot()
+		program, generated, _, _, _ := session.launchSnapshot()
 		// Every legal pair: bare with no declaration, or resumed with --continue
 		// declared. A torn read produces one without the other.
 		switch program {
@@ -150,7 +150,7 @@ func TestSetProgram_ClearsAPreviousDeclaration(t *testing.T) {
 	// A handoff target that happens to end in the very same words.
 	session.SetProgram("other-agent --session-id sid-1 --plugin-dir /p")
 
-	program, generated, _, _ := session.launchSnapshot()
+	program, generated, _, _, _ := session.launchSnapshot()
 	require.Equal(t, "other-agent --session-id sid-1 --plugin-dir /p", program)
 	require.Empty(t, generated,
 		"the outgoing launch's declaration survived into the replacement, so af would vouch for "+
