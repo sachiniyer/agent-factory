@@ -259,6 +259,25 @@ async function findPullRequestNumber({ github, context, core, pullAssociationCac
     payload.action === "edited" &&
     payload.changes?.base?.ref?.from === "master" &&
     payload.pull_request?.base?.ref !== "master";
+  const synchronizedPullRequest =
+    context.eventName === "pull_request" &&
+    payload.action === "synchronize" &&
+    payload.before;
+
+  if (synchronizedPullRequest) {
+    const previousHeadPulls = await listOpenMasterPullRequestsForCommit({
+      github,
+      context,
+      sha: payload.before,
+      pullAssociationCache,
+    });
+    if (previousHeadPulls.length > 0) {
+      core.info(
+        `Head moved from ${payload.before}; reevaluating surviving PR #${previousHeadPulls[0].number}.`,
+      );
+      return previousHeadPulls[0].number;
+    }
+  }
 
   if (payload.pull_request?.number && !closedPullRequest && !removedFromMaster) {
     return payload.pull_request.number;

@@ -22,7 +22,11 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
-    /concurrency:\s+group: auto-gate-\$\{\{ needs\.auto-gate\.outputs\.pr_number \}\}\s+cancel-in-progress: false/,
+    /head_sha: \$\{\{ steps\.evaluate\.outputs\.head_sha \}\}/,
+  );
+  assert.match(
+    workflow,
+    /concurrency:\s+group: auto-gate-\$\{\{ needs\.auto-gate\.outputs\.head_sha \}\}\s+cancel-in-progress: false/,
   );
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
   assert.match(workflow, /prNumber: explicitPrNumber/);
@@ -488,6 +492,32 @@ test("moving a shared-head PR off master reevaluates the surviving master PR", a
         state: "open",
         base: { ref: "release" },
         head: { sha: HEAD_SHA },
+      },
+    }),
+    core: fakeCore(),
+    setOutputs: false,
+  });
+
+  assert.equal(result.prNumber, "2048");
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("synchronizing away from a shared head reevaluates the previous-head survivor", async () => {
+  const result = await autoGate.evaluate({
+    github: fakeGateGithub({
+      associatedPullRequests: [
+        { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      ],
+    }),
+    context: fakeContext({
+      action: "synchronize",
+      before: HEAD_SHA,
+      after: OTHER_SHA,
+      pull_request: {
+        number: 1465,
+        state: "open",
+        base: { ref: "master" },
+        head: { sha: OTHER_SHA },
       },
     }),
     core: fakeCore(),

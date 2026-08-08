@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pr_number: ${{ steps.evaluate.outputs.pr_number }}
+      head_sha: ${{ steps.evaluate.outputs.head_sha }}
     # Late review comments on a merged/closed PR keep re-triggering the gate
     # against a stale head (#1876). Drafts are never merge-eligible, so review
     # review traffic on a held-open draft is pure evaluation waste (#1907), but
@@ -122,12 +123,15 @@ jobs:
   apply-gate:
     name: Apply auto-merge gate
     needs: auto-gate
-    if: needs.auto-gate.result == 'success' && needs.auto-gate.outputs.pr_number != ''
+    if: >-
+      needs.auto-gate.result == 'success' &&
+      needs.auto-gate.outputs.pr_number != '' &&
+      needs.auto-gate.outputs.head_sha != ''
     runs-on: ubuntu-latest
-    # Every event resolves the PR before entering this lane. That gives status,
-    # review, comment, and manual events one stable destructive/reporting key.
+    # Decision checks are commit-scoped, so every PR/event sharing a head must
+    # enter one reporting and destructive lane.
     concurrency:
-      group: auto-gate-${{ needs.auto-gate.outputs.pr_number }}
+      group: auto-gate-${{ needs.auto-gate.outputs.head_sha }}
       cancel-in-progress: false
     steps:
       - name: Check out gate logic
