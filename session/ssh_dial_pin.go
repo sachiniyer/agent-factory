@@ -37,6 +37,22 @@ func SetSSHRelayBinaryForTest(path string) func() {
 	return func() { sshRelayBinary = prev }
 }
 
+// sshDialProbeTimeout bounds the one dial resolvePinnedSSHDialAddress performs.
+//
+// IT IS THE ONE PART OF THIS PIN THAT RUNS IN-PROCESS, which is why it needs a
+// deadline at all when the relay's own dial deliberately has none. The relay is a
+// child in a process group its caller SIGKILLs on the step's deadline, so matching
+// ssh's no-timeout behaviour is safe there. This runs inside sshRuntime.Provision,
+// which carries no context — so an unbounded dial to an address that silently
+// drops packets would hold a session create for the kernel's SYN-retry window
+// (~130s on Linux), where an unpinned create fails at the first ssh step's own 30s
+// deadline. Giving up here costs only the pin: the composer falls back to the
+// name-based command and that step reports the real error.
+//
+// A var so a test can prove the bound is APPLIED without spending it —
+// TestTheDialProbeIsBounded shrinks it and separately asserts the shipped value.
+var sshDialProbeTimeout = sshDialTimeout
+
 // resolvePinnedSSHDialAddress picks the ONE address this session will use, by
 // dialling the configured name once and reporting where the connection actually
 // landed.
@@ -68,7 +84,16 @@ func SetSSHRelayBinaryForTest(path string) func() {
 // So the pin is an IMPROVEMENT over dialling by name, and where it cannot be
 // computed af degrades to what it did before rather than to nothing.
 func resolvePinnedSSHDialAddress(host string, port int) string {
-	conn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	// BOUNDED, unlike the relay's own dial, and the difference is where each one
+	// runs. The relay is a child in a process group the caller SIGKILLs on its
+	// deadline, so ssh's own no-timeout behaviour is safe there. This probe runs
+	// IN-PROCESS, inside a Provision that carries no context — so an unbounded dial
+	// to a black-holed address would block the create for the kernel's SYN-retry
+	// window (~130s on Linux) where the first ssh step would have failed at its own
+	// 30s deadline. Timing out here just means no pin, which composes the ordinary
+	// name-based command and lets that step report the real error.
+	dialer := net.Dialer{Timeout: sshDialProbeTimeout}
+	conn, err := dialer.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		log.WarningLog.Printf("backend=ssh: could not resolve %q to a single address to pin this session to "+
 			"(%v); every step will resolve the name independently, so a host with several addresses could still "+

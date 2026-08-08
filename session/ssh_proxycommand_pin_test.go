@@ -275,6 +275,43 @@ func TestUnresolvableHostFallsBackToDiallingTheName(t *testing.T) {
 			"always emitted")
 }
 
+// The probe is BOUNDED, because it is the one part of this that runs in-process.
+//
+// sshRuntime.Provision carries no context, so an unbounded dial to an address that
+// silently drops packets would hold a session create for the kernel's SYN-retry
+// window — well past the 30s deadline the first ssh step would have failed at.
+// 198.51.100.0/24 is TEST-NET-2 (RFC 5737): reserved for documentation, routed
+// nowhere, so a connect to it hangs rather than being refused, which is exactly
+// the shape this bounds.
+func TestTheDialProbeIsBounded(t *testing.T) {
+	// The SHIPPED value, asserted separately from the behaviour, so shrinking the
+	// timeout below cannot quietly become the only thing this test checks.
+	assert.Equal(t, sshDialTimeout, sshDialProbeTimeout,
+		"the probe must ship with a real deadline, not a test's")
+
+	// Now prove the deadline is APPLIED. A probe with no timeout at all would
+	// ignore this and hang, so the short value tests the mechanism rather than
+	// standing in for it — and it costs 300ms instead of the full 20s.
+	prev := sshDialProbeTimeout
+	sshDialProbeTimeout = 300 * time.Millisecond
+	defer func() { sshDialProbeTimeout = prev }()
+
+	done := make(chan string, 1)
+	start := time.Now()
+	go func() { done <- resolvePinnedSSHDialAddress("198.51.100.9", 22) }()
+
+	select {
+	case pinned := <-done:
+		assert.Empty(t, pinned, "an unreachable address yields no pin")
+		assert.Less(t, time.Since(start), 20*time.Second,
+			"the probe must give up on ITS OWN deadline rather than the kernel's")
+	case <-time.After(60 * time.Second):
+		t.Fatal("resolvePinnedSSHDialAddress ignored its deadline: an unbounded probe blocks a session create " +
+			"for the kernel's SYN-retry window, where an unpinned create fails at the first step's 30s " +
+			"deadline. It runs in-process, so unlike the relay there is no process group for a caller to kill")
+	}
+}
+
 // proxyCommandValue extracts the ProxyCommand value from a composed command as
 // the outer `sh -c` would hand it to ssh: unwrapped one layer, still carrying the
 // inner quoting and the doubled percents ssh has yet to expand.
