@@ -237,11 +237,6 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
 	links := map[pathIdentity]copiedFileLink{}
-	// How many comparison descriptors are currently held, against the cap above.
-	// A pointer is threaded to the level walker because the budget spans the WHOLE
-	// traversal, not one directory: shared inodes are found wherever their names are.
-	retainedReaders := 0
-	retainedReaderBudget := retainedLinkReaderBudget()
 	// The retained comparison descriptors die with the copy that opened them. Every
 	// exit from this function passes here, including the error returns below, so a
 	// failed copy cannot leak them either (#3063).
@@ -278,8 +273,6 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			relativeRoutePath(components),
 			links,
 			xattrs,
-			&retainedReaders,
-			retainedReaderBudget,
 		)
 		if err == nil {
 			// The level is complete, and nothing is ever written directly into
@@ -316,8 +309,6 @@ func copyDirectoryLevel(
 	relativeDirectory string,
 	links map[pathIdentity]copiedFileLink,
 	xattrs *xattrDestination,
-	retainedReaders *int,
-	retainedReaderBudget int,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -370,7 +361,12 @@ func copyDirectoryLevel(
 			// archive holding bytes that never existed at that path. Hard-linking
 			// is an optimisation, and one that can corrupt content is not worth its
 			// saving (#3046).
-			if first, seen := links[inspected]; seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity, inspected, first.reader) {
+			first, seen := links[inspected]
+			var retained *os.File
+			if seen && first.reader != nil {
+				retained = first.reader.file
+			}
+			if seen && sourceMatchesCopiedFile(source, name, destinationRoot, first.path, first.identity, inspected, retained) {
 				entry, err = linkCopiedFile(destination, destinationRoot, first, name, childDestinationPath, inspected)
 			} else {
 				// Asked for only when the source was ALREADY seen with more than one
@@ -379,9 +375,9 @@ func copyDirectoryLevel(
 				// EMFILE does not become a new failure mode. An inode linked after this
 				// copy is still recorded (see above) and simply falls back to reopening,
 				// which is exactly today's behaviour.
-				var reader *os.File
+				var reader *retainedLinkReader
 				var retain func(fd int)
-				// BOUNDED (#3063 review). A valid static tree can hold more distinct
+				// PROCESS-WIDE BOUNDED (#3063 review). A valid static tree can hold more distinct
 				// hard-linked inodes than the process has spare descriptors, and an
 				// unbounded cache does not merely waste them: once dup starts failing, the
 				// later groups get a nil reader, cannot be reopened, and are copied as
@@ -392,7 +388,7 @@ func copyDirectoryLevel(
 				// (reopen, and fall back to a fresh copy if the mode denies it). Degrading
 				// to the old path is acceptable; degrading to it unpredictably at whatever
 				// point the fd table happens to fill is not.
-				if stat.Nlink > 1 && *retainedReaders < retainedReaderBudget {
+				if stat.Nlink > 1 {
 					retain = func(fd int) {
 						// dup(2), not a reopen: the point is a descriptor that predates the
 						// mode narrowing, and a reopen would hit the very denial this avoids.
@@ -404,12 +400,7 @@ func copyDirectoryLevel(
 						// inode — able to read or modify archived content past the preserved
 						// mode and past this function's own close. Setting the flag after the
 						// dup would leave that window open between the two calls.
-						dupFD, dupErr := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
-						if dupErr != nil {
-							return
-						}
-						reader = os.NewFile(uintptr(dupFD), childDestinationPath)
-						*retainedReaders++
+						reader = retainLinkReader(fd, childDestinationPath)
 					}
 				}
 				entry, err = copyRegularFileAtWithIdentity(
@@ -422,7 +413,6 @@ func copyDirectoryLevel(
 					// fallback and exhaust the table before any finalizer ran (#3063 review).
 					if previous, seen := links[inspected]; seen && previous.reader != nil {
 						_ = previous.reader.Close()
-						*retainedReaders--
 					}
 					links[inspected] = copiedFileLink{
 						path:     filepath.Join(relativeDirectory, name),
@@ -432,7 +422,6 @@ func copyDirectoryLevel(
 				case reader != nil:
 					// Nothing will record it, so nothing else can close it.
 					_ = reader.Close()
-					*retainedReaders--
 				}
 			}
 		default:

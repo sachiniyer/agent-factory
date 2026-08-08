@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
@@ -144,8 +145,8 @@ func openAtForCompare(parent *os.File, name string) (*os.File, error) {
 }
 
 // maxRetainedLinkReaders caps the descriptors held for hard-link comparison even
-// when RLIMIT_NOFILE is very large. retainedLinkReaderBudget narrows it to the
-// process's actual spare capacity for each copy.
+// when RLIMIT_NOFILE is very large. The cap is process-wide: separate archive
+// restores share one descriptor table and cannot each spend the same capacity.
 const maxRetainedLinkReaders = 256
 
 // The copy needs descriptors after the retained-reader budget is chosen: two
@@ -154,27 +155,64 @@ const maxRetainedLinkReaders = 256
 // every slot RLIMIT_NOFILE currently exposes.
 const retainedLinkReaderFDReserve = 16
 
-func retainedLinkReaderBudget() int {
+var retainedLinkReaderCapacity struct {
+	sync.Mutex
+	held int
+}
+
+// retainedLinkReader owns both the duplicated descriptor and its process-wide
+// reservation. Keeping them in one value makes it impossible for a map
+// replacement or error cleanup to close the fd without returning the slot.
+type retainedLinkReader struct {
+	file     *os.File
+	once     sync.Once
+	closeErr error
+}
+
+func (r *retainedLinkReader) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.once.Do(func() {
+		r.closeErr = r.file.Close()
+		retainedLinkReaderCapacity.Lock()
+		retainedLinkReaderCapacity.held--
+		retainedLinkReaderCapacity.Unlock()
+	})
+	return r.closeErr
+}
+
+// retainLinkReader duplicates fd only after atomically reserving room in the
+// process descriptor table. The measurement and dup stay under the same lock so
+// concurrent copies cannot both spend one observed spare slot.
+func retainLinkReader(fd int, path string) *retainedLinkReader {
+	retainedLinkReaderCapacity.Lock()
+	defer retainedLinkReaderCapacity.Unlock()
+	if retainedLinkReaderCapacity.held >= maxRetainedLinkReaders {
+		return nil
+	}
 	var limit unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
-		return 0
+		return nil
 	}
 	open, ok := openFileDescriptorCount()
-	if !ok {
-		// An unknown table is not evidence that 256 slots are available. Falling
-		// back to reopen loses fidelity only for copies that later become unreadable;
-		// guessing can exhaust the daemon's descriptor table for every session.
-		return 0
+	if !ok || limit.Cur <= uint64(open)+retainedLinkReaderFDReserve {
+		// An unknown or full table is not evidence that a slot is available.
+		// Falling back to a fresh copy can lose hard-link fidelity, but it never
+		// publishes unverified bytes and cannot exhaust the daemon for other work.
+		return nil
 	}
-	usedAndReserved := uint64(open) + retainedLinkReaderFDReserve
-	if limit.Cur <= usedAndReserved {
-		return 0
+	dupFD, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil
 	}
-	available := limit.Cur - usedAndReserved
-	if available > maxRetainedLinkReaders {
-		return maxRetainedLinkReaders
+	file := os.NewFile(uintptr(dupFD), path)
+	if file == nil {
+		_ = unix.Close(dupFD)
+		return nil
 	}
-	return int(available)
+	retainedLinkReaderCapacity.held++
+	return &retainedLinkReader{file: file}
 }
 
 // openFileDescriptorCount reads the process descriptor filesystem available on
@@ -198,7 +236,7 @@ type copiedFileLink struct {
 	// copier with mode 0004, and owner bits win — so the copier cannot reopen a file
 	// it owns, and every later link to that inode was copied separately instead
 	// (#3063). Owned by copyDirectoryContents, which closes them all.
-	reader *os.File
+	reader *retainedLinkReader
 }
 
 func linkCopiedFile(
