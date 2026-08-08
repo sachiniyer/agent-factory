@@ -466,54 +466,6 @@ func relativeRoutePath(components []copiedEntry) string {
 // against, and the destination inode that path resolved to at the time. Both are
 // needed — the path to make the link, the identity to prove the link landed on
 // the right inode.
-// maxRetainedLinkReaders caps the descriptors held for hard-link comparison.
-//
-// Chosen well under any default RLIMIT_NOFILE (1024 on most systems, and af also
-// holds tmux pipes, sockets and the walk's own directory descriptors), because
-// exceeding it does not fail loudly — it degrades hard-link fidelity on exactly
-// the large trees where the optimisation is worth most. A tree with more than this
-// many distinct shared inodes falls back to reopening for the remainder, which is
-// the behaviour before this change.
-const maxRetainedLinkReaders = 256
-
-type copiedFileLink struct {
-	path     string
-	identity pathIdentity
-	// reader is a descriptor on the copy, opened before its mode was narrowed, or
-	// nil. A root-owned 0004 file copied by a non-root user ends up owned by the
-	// copier with mode 0004, and owner bits win — so the copier cannot reopen a file
-	// it owns, and every later link to that inode was copied separately instead
-	// (#3063). Owned by copyDirectoryContents, which closes them all.
-	reader *os.File
-}
-
-func linkCopiedFile(
-	destination, destinationRoot *os.File,
-	first copiedFileLink,
-	name, destinationPath string,
-	sourceIdentity pathIdentity,
-) (copiedEntry, error) {
-	if err := unix.Linkat(int(destinationRoot.Fd()), first.path, int(destination.Fd()), name, 0); err != nil {
-		return copiedEntry{}, fmt.Errorf(
-			"cannot move worktree across filesystems: failed to reproduce the hard link at %s: %w", destinationPath, err)
-	}
-	// Named and identified before anything else can fail, exactly like every
-	// other node this copier creates — cleanup can only remove what the manifest
-	// describes, so the OBSERVED identity is recorded even on the refusal below.
-	destinationIdentity, err := identityAt(destination, name)
-	if err != nil {
-		return copiedEntry{name: name, source: sourceIdentity}, fmt.Errorf(
-			"cannot move worktree across filesystems: failed to identify hard link %s after creating it: %w",
-			destinationPath, err)
-	}
-	created := copiedEntry{name: name, source: sourceIdentity, destination: destinationIdentity}
-	if !first.identity.same(destinationIdentity) {
-		return created, fmt.Errorf(
-			"cannot move worktree across filesystems: hard link %s resolved to a different inode than the file it was linked from",
-			destinationPath)
-	}
-	return created, nil
-}
 
 func copyDirectoryEntry(
 	source, destination *os.File,
