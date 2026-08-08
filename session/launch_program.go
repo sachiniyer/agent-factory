@@ -28,10 +28,11 @@ import (
 // fails closed: an account-scoped launch is then refused rather than proceeding
 // unverified, and an unscoped launch is unaffected because nothing reads this.
 func setLaunchProgram(ts *tmux.TmuxSession, base, final string) {
-	ts.SetProgram(final)
 	generated, ok := sessionenv.GeneratedArgsBetween(base, final)
 	if !ok {
 		generated = nil
 	}
-	ts.SetGeneratedArgs(generated)
+	// ONE call, so the two are written under one lock. Adjacent setters would still
+	// let a concurrent launch observe a torn pair (#3083 review).
+	ts.SetLaunchProgram(final, generated)
 }

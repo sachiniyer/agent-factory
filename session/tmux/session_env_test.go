@@ -120,7 +120,7 @@ func TestAgentNameUsedAsDataDoesNotSelectCredentialAllowlist(t *testing.T) {
 		"/srv/af agent-server --listen :43110 --repo /workspace --title codex",
 	} {
 		session := NewTmuxSession("agent-name-data", program)
-		_, environ, imports, err := session.launchEnvironment(program)
+		_, environ, imports, err := session.launchEnvironment()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +139,7 @@ func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
 
 	session := NewTmuxSession("inline-cloud-mode", "CLAUDE_CODE_USE_BEDROCK=1 claude")
-	_, environ, imports, err := session.launchEnvironment("CLAUDE_CODE_USE_BEDROCK=1 claude")
+	_, environ, imports, err := session.launchEnvironment()
 	if err != nil {
 		t.Fatal(err)
 	}

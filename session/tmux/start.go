@@ -36,8 +36,10 @@ func (t *TmuxSession) Start(workDir string) error {
 	// Create a new detached tmux session and start claude in it. The -e
 	// markers (when supported) let `af doctor` trace any process the pane
 	// spawns back to this session even after it is orphaned (#1104).
-	program := t.programCmd()
-	wrappedProgram, launchEnv, importNames, envErr := t.launchEnvironment(program)
+	// No separate program read here: launchEnvironment snapshots the command and
+	// its generated-args declaration together, so the two cannot be torn apart by a
+	// concurrent rewrite (#3083 review).
+	wrappedProgram, launchEnv, importNames, envErr := t.launchEnvironment()
 	if envErr != nil {
 		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
 		// can exist behind it and a teardown need not gate on liveness (#2985).

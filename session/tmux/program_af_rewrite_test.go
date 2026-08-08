@@ -99,3 +99,41 @@ func TestRestoreUsesTheDeclarationPreservingRewrite(t *testing.T) {
 	require.Contains(t, string(source), "rewriteProgramCmdByAf(resumeProgram)",
 		"and it must still be doing that rewrite at all")
 }
+
+// The command and its declaration must be observable only as a PAIR (#3083
+// review, P2). Two independently-locked setters, or a launch that reads the
+// program through one lock and the declaration through another, let a concurrent
+// rewrite hand the boundary an old command with a new declaration — and the
+// boundary requires the command to be the agent plus EXACTLY the declared words,
+// so either half of that tear refuses the launch and the pane exits at once.
+//
+// Run under -race, with a rewriter racing a reader: any snapshot that pairs a
+// command with a declaration that does not describe it fails.
+func TestLaunchSnapshot_NeverTearsTheCommandFromItsDeclaration(t *testing.T) {
+	session := &TmuxSession{}
+	session.SetLaunchProgram("claude", nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			session.SetLaunchProgram("claude", nil)
+			session.rewriteProgramCmdByAf(resumeProgram)
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		program, generated, _, _ := session.launchSnapshot()
+		// Every legal pair: bare with no declaration, or resumed with --continue
+		// declared. A torn read produces one without the other.
+		switch program {
+		case "claude":
+			require.Empty(t, generated, "a bare command was paired with a declaration describing a rewrite")
+		case "claude --continue":
+			require.Equal(t, []string{"--continue"}, generated,
+				"the resumed command was paired with a declaration that does not describe it")
+		default:
+			t.Fatalf("unexpected program %q", program)
+		}
+	}
+	<-done
+}

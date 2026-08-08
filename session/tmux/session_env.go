@@ -36,25 +36,41 @@ func (t *TmuxSession) SetAccount(name string) {
 	t.programMu.Unlock()
 }
 
-// SetGeneratedArgs declares the argument words af's own launcher appended to this
-// session's program (#3083). Set it with SetProgram, from the site that produced
-// both strings; see session.setLaunchProgram, which pairs them so the two cannot
-// drift apart.
+// SetLaunchProgram sets the pane command AND the declaration of which argument
+// words af appended to reach it, under ONE programMu hold (#3083 review).
 //
-// Empty is the correct declaration for a launch af did not rewrite, and it leaves
-// the boundary's no-arguments rule exactly as it was.
-func (t *TmuxSession) SetGeneratedArgs(generated []string) {
+// Paired because a reader between two independently-locked setters sees a torn
+// pair — the old command with the new declaration, or the reverse — and the
+// account boundary requires the command to be the agent plus EXACTLY the declared
+// words, so either half of that tear refuses the launch and the pane exits
+// immediately. The call site pairing them is not enough: it makes the two writes
+// adjacent, not atomic.
+func (t *TmuxSession) SetLaunchProgram(program string, generated []string) {
 	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.program = program
 	t.generatedArgs = append([]string(nil), generated...)
-	t.programMu.Unlock()
 }
 
-func (t *TmuxSession) launchEnvironment(program string) (string, []string, []string, error) {
+// launchSnapshot reads every field a launch needs in ONE hold, for the same
+// reason SetLaunchProgram writes them in one: Start used to read program through
+// its own lock and the declaration through another, so a rewrite landing between
+// them paired an old command with a new declaration.
+func (t *TmuxSession) launchSnapshot() (program string, generated, extras []string, account string) {
 	t.programMu.RLock()
-	extra := append([]string(nil), t.envPassthrough...)
-	account := t.account
-	generated := append([]string(nil), t.generatedArgs...)
-	t.programMu.RUnlock()
+	defer t.programMu.RUnlock()
+	return t.program,
+		append([]string(nil), t.generatedArgs...),
+		append([]string(nil), t.envPassthrough...),
+		t.account
+}
+
+// It SNAPSHOTS rather than taking the program as a parameter: the caller used to
+// read program through its own lock and this read the declaration through
+// another, so a rewrite landing between them wrapped an old command with a new
+// declaration (#3083 review).
+func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
+	program, generated, extra, account := t.launchSnapshot()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
