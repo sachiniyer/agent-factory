@@ -114,12 +114,20 @@ func runRecoveryActorWith(
 	if errors.Is(err, ErrRecoveryJobDisableFailed) {
 		return err
 	}
+	// Checked BEFORE the terminal list, because a terminal-looking sentinel is not
+	// a statement that the work finished. A phase that ended before disarming the
+	// persistent job still owes that work, and exiting 0 there is what stopped
+	// systemd from retrying a transient ledger write until the next boot (#3098).
+	if errors.Is(err, ErrRecoveryJobStillArmed) {
+		return err
+	}
 	if errors.Is(err, ErrUpgradeAborted) ||
 		errors.Is(err, ErrUpgradeRolledBack) ||
 		errors.Is(err, ErrRollbackRecoveryFailed) {
-		// Each expected terminal result is returned by Supervisor only after
-		// the persistent job was disarmed. Exit 0 so the loaded unit's runtime
-		// Restart policy cannot undo that circuit breaker.
+		// Each expected terminal result reaching HERE was returned after the
+		// persistent job was disarmed — the still-armed cases are intercepted
+		// above. Exit 0 so the loaded unit's runtime Restart policy cannot undo
+		// that circuit breaker.
 		return nil
 	}
 	return err

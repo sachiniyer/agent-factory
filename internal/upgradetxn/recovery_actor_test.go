@@ -203,3 +203,56 @@ func TestRecoveryLease_ReleaseFailsOnAClosedHandle(t *testing.T) {
 	require.NoError(t, lease.file.Close())
 	require.Error(t, lease.Release(), "closing the handle must make Release fail")
 }
+
+// TestRecoveryActorRetriesWhenThePhaseEndedWithTheJobStillArmed is the #3098
+// regression, at the layer that decides the process exit code.
+//
+// ErrRollbackRecoveryFailed is returned BOTH after the recovery job was disarmed
+// (nothing is owed — exit 0 so Restart=on-failure cannot undo the circuit
+// breaker) and from a record-rejection failure reached BEFORE the disarm, where
+// the job is still enabled and a restart is exactly what should happen. The
+// actor read one value for two outcomes and exited 0 for both, so a transient
+// ledger write error waited for the next boot instead of the next second.
+func TestRecoveryActorRetriesWhenThePhaseEndedWithTheJobStillArmed(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
+
+	stillArmed := errors.Join(
+		ErrRollbackRecoveryFailed,
+		ErrRecoveryJobStillArmed,
+		errors.New("record the rolled-back candidate as rejected: disk full"),
+	)
+
+	err := runRecoveryActorWith(
+		context.Background(), invocation,
+		func(t *Transaction) (*RecoveryLease, error) {
+			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
+		},
+		func(context.Context, *Transaction, *RecoveryLease) error { return stillArmed },
+	)
+
+	require.Error(t, err,
+		"the phase ended before the recovery job was disarmed, so the actor still owes that work; "+
+			"exiting 0 here is what stopped systemd from retrying it")
+	require.ErrorIs(t, err, ErrRecoveryJobStillArmed)
+}
+
+// The other half, and the reason the check is ordered before the terminal list:
+// a genuinely finished rollback failure — one that DID disarm the job — must
+// still exit 0, or the unit restart-loops against a circuit breaker that is
+// already in place (#2960).
+func TestRecoveryActorStillExitsZeroOnceTheJobIsDisarmed(t *testing.T) {
+	txn, home, _ := prepareFixture(t)
+	invocation := RecoveryInvocation{HomeDir: home, TransactionID: txn.Journal().ID}
+
+	err := runRecoveryActorWith(
+		context.Background(), invocation,
+		func(t *Transaction) (*RecoveryLease, error) {
+			return t.tryAcquireRecoveryAs(t.Journal().PreviousBinaryPath)
+		},
+		func(context.Context, *Transaction, *RecoveryLease) error { return ErrRollbackRecoveryFailed },
+	)
+
+	require.NoError(t, err,
+		"a terminal rollback failure reached AFTER the disarm must not restart-loop the unit")
+}
