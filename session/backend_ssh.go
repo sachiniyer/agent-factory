@@ -151,16 +151,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// client, and having two paths is what produced #3044 — the same address
 	// resolving differently depending on which read it. The composed command is
 	// handed to the same sandboxProvisioner `backend=sandbox` uses (#3052).
-	// Resolve ONCE (#3086). Every step below runs its own `ssh`, so a name is an
-	// invitation for each of them to land on a different machine; the literal
-	// address goes into the command so no step can forget it. A failure here is
-	// explicit — af does not fall back to the name, because that is precisely the
-	// behaviour being removed.
-	dialAddr, err := resolveSSHDialAddressFor(sshCfg)
-	if err != nil {
-		return ProvisionResult{}, err
-	}
-	sshCmd, err := sshCommandForConfig(sshCfg, cfg.SSHHostKeyVerification, dialAddr)
+	sshCmd, err := sshCommandForConfig(sshCfg, cfg.SSHHostKeyVerification)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
@@ -181,14 +172,9 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		remoteAgentBackend: remoteAgentBackend{reap: res.Teardown},
 		provisioner:        p,
 		cleanup: &SSHRuntimeCleanupData{
-			Config:     sshCfg,
-			SessionDir: p.sessionDir,
-			RemotePID:  p.remotePID,
-			// The address this session was actually provisioned on. Without it a
-			// teardown after a daemon restart would resolve the name again and could
-			// reap a DIFFERENT machine — removing nothing, reporting success, and
-			// leaking the workspace it exists to remove (#3086).
-			DialAddress:         dialAddr,
+			Config:              sshCfg,
+			SessionDir:          p.sessionDir,
+			RemotePID:           p.remotePID,
 			HostKeyVerification: cfg.SSHHostKeyVerification,
 		},
 	}

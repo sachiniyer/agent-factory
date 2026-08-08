@@ -91,7 +91,7 @@ const sshNoConfigFile = "none"
 // in the command itself and no individual step can forget it. Empty means "dial
 // the configured name", which is only correct where no address could be resolved
 // and refusing would leak a workspace — see restoreRuntimeCleanup.
-func sshCommandForConfig(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
+func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {
 		return "", err
@@ -105,11 +105,6 @@ func sshCommandForConfig(cfg config.SSHConfig, posture, dialAddr string) (string
 		return "", err
 	}
 
-	target := strings.TrimSpace(dialAddr)
-	if target == "" {
-		target = host
-	}
-
 	parts := []string{
 		"ssh",
 		// FIRST, and the reason the rest of these pins are sufficient rather than a
@@ -119,37 +114,69 @@ func sshCommandForConfig(cfg config.SSHConfig, posture, dialAddr string) (string
 		"-p", strconv.Itoa(port),
 		"-o", "StrictHostKeyChecking=" + strictOpt,
 		"-o", "UserKnownHostsFile=" + shellQuoteSandbox(knownHosts),
-		// The x/crypto client consulted ONE file and never a helper program, so
-		// both of these preserve today's semantics rather than tighten them.
-		// Redundant under -F none, and kept deliberately: they state the invariant
-		// at the only place a reader looks for it, and they survive someone later
-		// deciding a config file may be read after all.
+		// The x/crypto client consulted ONE file, so this preserves today's
+		// semantics rather than tightening them.
+		//
+		// There is deliberately NO KnownHostsCommand=none beside it, and the reason
+		// is a shipped outage (#3092). That option arrived in OpenSSH 8.5, and an
+		// unrecognised -o is not a warning — ssh aborts during option parsing:
+		//
+		//	$ ssh -o ThisOptionDoesNotExist=none host
+		//	command-line: line 0: Bad configuration option: thisoptiondoesnotexist
+		//
+		// So on Ubuntu 20.04 (8.2) or Debian 11 (8.4) it killed every provision,
+		// tunnel and reap before a connection was attempted, whatever the posture.
+		// It was pure belt-and-braces: -F none means no config file is read, so
+		// nothing can install a KnownHostsCommand helper in the first place. It was
+		// kept with a comment saying it "states the invariant" — which is exactly
+		// how a redundant option became a hard version floor nothing documented.
+		//
+		// The rule this leaves behind: every option here costs a MINIMUM OpenSSH
+		// VERSION, so an option that guards against nothing is not free.
 		"-o", "GlobalKnownHostsFile=/dev/null",
-		"-o", "KnownHostsCommand=none",
 		// af never had a human to ask. A prompt would hang a provision forever.
 		"-o", "BatchMode=yes",
-		// The command dials a literal address (#3086), so without this the host key
-		// would be looked up under that ADDRESS instead of the configured name —
-		// silently invalidating every existing known_hosts entry and, under
-		// accept-new, writing a second one per address. HostKeyAlias restores the
-		// name as the lookup key while the connection still goes to the pinned
-		// address.
+		// NO HostKeyAlias, and NO pinned literal address. #3090 added both to keep a
+		// multi-address host from splitting a session across machines; #3092 reverted
+		// them, because dialling an address forces an alias and NO ALIAS VALUE IS
+		// CORRECT. Measured against a real sshd whose host key is certified for the
+		// principal `real.example`:
 		//
-		// The alias must be the EXACT string OpenSSH would otherwise have computed,
-		// because it is used VERBATIM: measured against OpenSSH_9.6p1, a plain
-		// connection on port 2201 records `[127.0.0.1]:2201`, while the same
-		// connection with `HostKeyAlias=real.example` records `real.example` — the
-		// port is NOT appended to an alias. So the alias is knownHostsLookupName's
-		// output, which is bare on the default port and bracketed otherwise, and the
-		// stored key is byte-identical to what a non-pinned connection wrote.
-		"-o", "HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)),
+		//	HostKeyAlias=[real.example]:2202  -> cert REJECTED (alias is the principal)
+		//	HostKeyAlias=real.example         -> cert accepted
+		//
+		// and for a PLAIN known_hosts entry on a non-default port the requirement is
+		// the opposite, because OpenSSH keys those as [host]:port and uses the alias
+		// verbatim. Plain entries want the bracketed form, certificates want the bare
+		// name, and one string cannot be both.
+		//
+		// So the connection stays NAME-based: ssh resolves it, which also keeps the
+		// dialer's try-each-address fallback that pinning removed. The split-session
+		// risk is real and unfixed — #3086 tracks it, with this result recorded so the
+		// approach is not tried again.
 	}
 	if identity := strings.TrimSpace(cfg.IdentityFile); identity != "" {
+		path := expandUserPath(identity)
+		// REFUSE an identity file that cannot be read, rather than let ssh warn and
+		// carry on (#3092). ssh treats `-i /missing` as advisory:
+		//
+		//	Warning: Identity file /missing not accessible: No such file or directory.
+		//	…and it proceeds, authenticating with agent/default keys instead.
+		//
+		// IdentitiesOnly is deliberately OFF here (the old authMethods offered the
+		// identity file AND agent keys), so that fallback is silent and a typo in
+		// ssh.identity_file authenticates as somebody else. The old in-process client
+		// errored on an explicit file it could not read; this restores that.
+		if _, statErr := os.Stat(path); statErr != nil {
+			return "", fmt.Errorf("backend=ssh: ssh.identity_file %q cannot be read: %w "+
+				"(af refuses rather than silently falling back to your agent or default keys, "+
+				"which would authenticate as a different identity than the one configured)", path, statErr)
+		}
 		// No IdentitiesOnly: authMethods offered the identity file AND agent keys,
 		// and dropping the agent would break setups that rely on it.
-		parts = append(parts, "-i", shellQuoteSandbox(expandUserPath(identity)))
+		parts = append(parts, "-i", shellQuoteSandbox(path))
 	}
-	parts = append(parts, shellQuoteSandbox(target))
+	parts = append(parts, shellQuoteSandbox(host))
 	return strings.Join(parts, " "), nil
 }
 

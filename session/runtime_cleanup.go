@@ -7,7 +7,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -51,16 +50,10 @@ type DockerRuntimeCleanupData struct {
 }
 
 type SSHRuntimeCleanupData struct {
-	Config     config.SSHConfig `json:"config"`
-	SessionDir string           `json:"session_dir"`
-	RemotePID  string           `json:"remote_pid,omitempty"`
-	// DialAddress is the literal address this session was provisioned on (#3086).
-	// A teardown must reach the SAME machine the workspace is on, and re-resolving
-	// ssh.host can answer differently — so the answer is recorded rather than
-	// recomputed. Empty means a record written before #3086; those resolve once at
-	// restore, which is still one address for the handle's lifetime.
-	DialAddress         string `json:"dial_address,omitempty"`
-	HostKeyVerification string `json:"host_key_verification,omitempty"`
+	Config              config.SSHConfig `json:"config"`
+	SessionDir          string           `json:"session_dir"`
+	RemotePID           string           `json:"remote_pid,omitempty"`
+	HostKeyVerification string           `json:"host_key_verification,omitempty"`
 }
 
 type HookRuntimeCleanupData struct {
@@ -216,26 +209,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// ssh.* settings, not a command — and refusing to reap it because the
 		// transport changed underneath would leak the workspace it exists to
 		// remove (the #3044 lesson).
-		// Reach the machine this session is actually ON (#3086). A recorded address
-		// is used as-is; a record written before #3086 has none, so resolve once
-		// here — still one address for this handle's whole life, rather than a fresh
-		// answer per step.
-		//
-		// And if THAT resolution fails, fall back to the name rather than refusing.
-		// This is the one place the fallback is right: there is no session being
-		// created that could land on the wrong host, and refusing a TEARDOWN leaks
-		// the workspace it exists to remove (the #3044 lesson). Provision, where a
-		// wrong host would be actively harmful, refuses instead.
-		dialAddr := strings.TrimSpace(data.SSH.DialAddress)
-		if dialAddr == "" {
-			resolved, resolveErr := resolveSSHDialAddressFor(legacyCfg)
-			if resolveErr != nil {
-				log.WarningLog.Printf("ssh cleanup handle for %q records no dial address and %q does not resolve (%v); "+
-					"the teardown will dial the name, which may reach a different host than the session is on", title, legacyCfg.Host, resolveErr)
-			}
-			dialAddr = resolved
-		}
-		sshCmd, cmdErr := sshCommandForConfig(legacyCfg, data.SSH.HostKeyVerification, dialAddr)
+		sshCmd, cmdErr := sshCommandForConfig(legacyCfg, data.SSH.HostKeyVerification)
 		if cmdErr != nil {
 			return nil, nil, fmt.Errorf("ssh cleanup handle has an unusable address: %w", cmdErr)
 		}

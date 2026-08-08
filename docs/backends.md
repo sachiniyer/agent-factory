@@ -292,7 +292,9 @@ someone's session.
 With `backend = "ssh"`, a session runs on a remote host you reach over SSH — the
 built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 
-1. The daemon runs `ssh` (the OpenSSH binary must be on the daemon host's PATH),
+1. The daemon runs `ssh` (OpenSSH 7.6 or newer must be on the daemon host's PATH;
+   7.6 is what `ssh_host_key_verification = "accept-new"` needs, and the other
+   postures need less),
    with every setting af owns passed explicitly and **no configuration file read
    at all** — reusing your keys and verifying the host key against `known_hosts`.
 2. It creates a fresh per-session directory under `~/.af-sessions` on the remote
@@ -353,21 +355,20 @@ back (see [Archive & restore](#archive-restore)).
 > yourself, and there your `ssh_config` and `known_hosts` are the whole authority.
 > See the sandbox section below.
 
-> **`ssh.host` is resolved once per session, and every step uses that address.**
+> **Known limitation: a `ssh.host` with several addresses can split a session.**
 > af runs a separate `ssh` for each step — the setup commands, the port-forward,
-> and the cleanup — so a name with several addresses could otherwise put the
-> workspace on one machine and the agent-server or the cleanup on another. Nothing
-> would look wrong: each step succeeds against a valid host, and the cleanup then
-> removes the wrong machine's directory and reports success while the real one
-> leaks. So af resolves the name once, dials that literal address everywhere, and
-> records it with the session's cleanup handle so a daemon restart still reaches
-> the same machine.
+> and the cleanup — and each one resolves the name independently. If the name
+> answers with more than one address (a round-robin record, a load balancer, a
+> dual-stack host), the workspace can end up on one machine while the agent-server
+> or the cleanup lands on another. Nothing looks wrong: every step succeeds against
+> a valid host, and the cleanup then removes the wrong machine's directory and
+> reports success while the real one leaks.
 >
-> Host-key verification is unaffected — the connection carries
-> `HostKeyAlias`, so your `known_hosts` entry is still matched by name, exactly as
-> before. If `ssh.host` does not resolve, session creation **fails with that
-> reason** rather than falling back · a name af cannot pin is a session it cannot
-> keep on one machine.
+> Point `ssh.host` at a single machine — a literal address, or a name with one
+> address — if that is a risk for your setup. Tracking issue: #3086. A previous fix
+> pinned one resolved address, but it had to identify the host by address, which
+> broke host **certificates** and removed ssh's own try-each-address fallback · it
+> was reverted rather than kept with those costs.
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
