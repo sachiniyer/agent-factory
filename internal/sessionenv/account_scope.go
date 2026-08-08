@@ -20,7 +20,7 @@ var AccountLookup func(agent, name string) (Account, error)
 // installed, or a boundary that rejects the command all mean af cannot prove the
 // session will use the requested identity — and an unprovable launch is not
 // evidence of a correct one.
-func applyAccountScope(environ []string, agent, account, command string) ([]string, error) {
+func applyAccountScope(environ []string, agent, account, command string, generated []string) ([]string, error) {
 	if AccountLookup == nil {
 		return nil, fmt.Errorf("account-scoped launch requested but no account lookup is installed")
 	}
@@ -28,6 +28,10 @@ func applyAccountScope(environ []string, agent, account, command string) ([]stri
 	if err != nil {
 		return nil, fmt.Errorf("resolve account %q for %s: %w", account, agent, err)
 	}
+	// The launcher's claim about its OWN additions, attached to the scope the
+	// lookup resolved. AccountLookup answers "which directory", never "which
+	// arguments" — that fact travels with the launch, not with the registry (#3083).
+	scope.GeneratedArgs = generated
 	scoped, err := ApplyAccount(environ, command, scope)
 	if err != nil {
 		return nil, fmt.Errorf("scope session to account %q: %w", account, err)

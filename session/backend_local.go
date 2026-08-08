@@ -92,7 +92,7 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	// Refreshed alongside the pass-through, on the same paths, so a restored or
 	// re-provisioned session carries the account it was created with rather than
 	// quietly reverting to the ambient identity (#3051).
-	tmuxSession.SetAccount(i.Account)
+	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(i.AgentProgram()), i.Account)
 	return nil
 }
 
@@ -332,7 +332,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
 		if workDir != "" {
-			tmuxSession.SetProgram(injectSystemPrompt(resolveProgramForInstance(i)))
+			resolved := resolveProgramForInstance(i)
+			setLaunchProgram(tmuxSession, resolved, injectSystemPrompt(resolved))
 		}
 		if err := tmuxSession.Restore(workDir); err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
@@ -353,20 +354,24 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// path supplies a command frozen after provisioning and before process
 		// launch; direct Start callers retain the established inline preparation.
 		var program string
+		// The pre-rewrite command, kept so the launch can declare what af added to it
+		// (#3083). The prepared path carries its own, frozen with the program.
+		base := resolveProgramForInstance(i)
 		if prepared != nil {
 			if prepared.workDir != gw.GetWorktreePath() || strings.TrimSpace(prepared.program) == "" {
 				setupErr = fmt.Errorf("prepared create launch no longer matches session %q", i.Title)
 				return setupErr
 			}
 			program = prepared.program
+			base = prepared.base
 			if prepared.conversation.HasID() {
 				i.SetAgentConversation(prepared.conversation)
 			}
 		} else {
-			program = prepareLaunchConversation(i, resolveProgramForInstance(i))
+			program = prepareLaunchConversation(i, base)
 			program = injectSystemPrompt(program)
 		}
-		tmuxSession.SetProgram(program)
+		setLaunchProgram(tmuxSession, base, program)
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
@@ -478,6 +483,27 @@ func (b *LocalBackend) Respawn(i *Instance) error {
 // otherwise mirrors: on a create, a failed Start means the workspace holds
 // nothing worth keeping; here it holds everything the outgoing agent did.
 func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
+	// REFUSED for an account-scoped session (#3083 review).
+	//
+	// Clearing the generated-args declaration is not enough, and that was the gap:
+	// refreshSessionEnvironment below reapplies the UNCHANGED i.Account, so handing a
+	// claude session scoped to "work" over to codex launches codex under a codex
+	// account also called "work" — a different identity the user never selected for
+	// that agent, chosen by a name collision. Bare codex needs no declaration, so
+	// nothing downstream refuses it.
+	//
+	// An account names one identity of one agent; it does not survive a change of
+	// agent, and af cannot pick the replacement's account for the user. Refusing is
+	// the honest answer, and it names the way through.
+	if account := i.Account; strings.TrimSpace(account) != "" {
+		return fmt.Errorf(
+			"swap agent: session %q is scoped to the %s account %q, and an account belongs to one agent — "+
+				"af cannot know which %s identity you meant. Create a new session on the account you want "+
+				"instead of handing this one over",
+			i.Title, sessionenv.AgentForCommand(i.Program), account, plan.target)
+	}
+	// Checked BEFORE any runtime state: this is about intent, not about whether the
+	// session currently has a tmux binding, and a missing binding must not mask it.
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	gw := i.gitWorktree
@@ -574,6 +600,12 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		return fmt.Errorf("recover: %w", err)
 	}
 	resolvedProgram := resolveProgramForInstance(i)
+	// The base for the generated-args declaration, pinned BEFORE any af rewrite.
+	// resolvedProgram is reassigned below when a fresh worktree rebuild forces the
+	// exact-resume command, and that rewrite is af's own — so declaring against the
+	// rewritten value would omit `--resume <id>` and the boundary would refuse the
+	// recovered pane as carrying undeclared arguments (#3083 review).
+	declarationBase := resolvedProgram
 	if _, err := os.Stat(workDir); err != nil {
 		if !os.IsNotExist(err) {
 			// Surface the real cause instead of a generic tmux new-session error:
@@ -599,6 +631,10 @@ func (b *LocalBackend) respawn(i *Instance) error {
 						err, rebuildErr, freshErr),
 				}
 			}
+			// resolvedProgram becomes the exact-resume command, which is af's OWN
+			// rewrite — so the declaration base must stay the PRE-resume command or
+			// GeneratedArgsBetween describes only the later system-prompt additions and
+			// the account boundary refuses `--resume <id>` as undeclared (#3083 review).
 			resolvedProgram = exactProgram
 			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from recorded base and recreated branch %s", i.Title, workDir, gw.GetBranchName())
 		} else {
@@ -606,7 +642,7 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 	}
 
-	ts.SetProgram(injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
+	setLaunchProgram(ts, declarationBase, injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}

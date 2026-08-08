@@ -70,7 +70,7 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 
 	// Local + codex is the supported combination and must stay allowed.
 	require.NoError(t, refuseOffBoxAccount(base))
-	require.NoError(t, refuseUnsupportedAccountAgent(base))
+	require.NoError(t, refuseUnsupportedAccountAgent(base, base.Path))
 
 	// Off-box backends cannot carry the account, so they must refuse rather than
 	// run on the remote host's ambient credentials.
@@ -83,16 +83,67 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 		require.Contains(t, err.Error(), "ambient credentials")
 	}
 
-	// claude's launch is rewritten before the boundary sees it, so it exits 127
-	// today. Refuse with the reason instead.
+	// claude is ADMITTED now (#3083): af declares the arguments it appends to that
+	// launch, so the boundary verifies the rewritten command instead of refusing it.
+	// This assertion is inverted from what it was, and deliberately — the refusal it
+	// used to guard existed only because the launch was unprovable, and it is the
+	// front door to every generated-args path in this package. Left as a refusal, all
+	// of that wiring is unreachable to users no matter how well it works (#3083 review).
 	claude := base
 	claude.Program = "claude"
-	err := refuseUnsupportedAccountAgent(claude)
-	require.Error(t, err, "claude must refuse an account-scoped create until its launch is supported")
-	require.Contains(t, err.Error(), "codex", "the error must name what does work")
+	require.NoError(t, refuseUnsupportedAccountAgent(claude, claude.Path),
+		"an account-scoped claude create must reach the launch that carries its declaration")
+
+	// An agent nobody has established the boundary can verify still refuses, and the
+	// error names what does work rather than only what does not.
+	unproven := base
+	unproven.Program = "gemini"
+	err := refuseUnsupportedAccountAgent(unproven, unproven.Path)
+	require.Error(t, err, "an unproven agent must refuse rather than start on the ambient identity")
+	require.Contains(t, err.Error(), "claude and codex", "the error must name what does work")
 
 	// No account selected leaves every path untouched.
 	plain := InstanceOptions{Title: "t", Path: t.TempDir(), Program: "claude", Backend: BackendDocker}
 	require.NoError(t, refuseOffBoxAccount(plain))
-	require.NoError(t, refuseUnsupportedAccountAgent(plain))
+	require.NoError(t, refuseUnsupportedAccountAgent(plain, plain.Path))
+}
+
+// An account-scoped session must REFUSE a handoff (#3083 review, P1).
+//
+// Clearing the generated-args declaration was not enough: refreshSessionEnvironment
+// reapplies the unchanged Account, so handing a claude session scoped to "work" to
+// codex would launch codex under a codex account also named "work" — a different
+// identity, selected by a name collision rather than by the user. Bare codex needs
+// no declaration, so nothing downstream refuses it.
+func TestSwapAgent_RefusesAnAccountScopedSession(t *testing.T) {
+	backend := &LocalBackend{}
+	inst := &Instance{Title: "scoped", Path: t.TempDir(), Program: "claude", Account: "work"}
+
+	err := backend.SwapAgent(inst, AgentSwapPlan{target: "codex", program: "codex"})
+
+	require.Error(t, err, "an account-scoped handoff must refuse rather than reuse the account name")
+	require.Contains(t, err.Error(), "belongs to one agent")
+	require.Contains(t, err.Error(), "work", "the refusal must name the account it is protecting")
+}
+
+// A cross-agent program_overrides must refuse BEFORE launch (#3083 review, P1).
+//
+// The account name is validated in the REQUESTED agent's namespace, but the launch
+// derives the agent from the RESOLVED command. So Program=claude with
+// program_overrides.claude=codex validates "work" as a claude account and then runs
+// codex under CODEX's "work" — two namespaces, one name, and the session silently
+// authenticates as someone the user never selected. A gate reading the label cannot
+// see it, which is why this one resolves first.
+func TestAccountScoping_RefusesACrossAgentOverride(t *testing.T) {
+	// A GLOBAL override, deliberately: it is the case a repo-only lookup would miss
+	// while the launch still applied it.
+	saveOverrideConfig(t, "codex")
+	path := t.TempDir()
+
+	err := refuseUnsupportedAccountAgent(
+		InstanceOptions{Title: "t", Path: path, Program: "claude", Account: "work"}, path)
+
+	require.Error(t, err, "a cross-agent override must refuse: the validated namespace is not the one that would be used")
+	require.Contains(t, err.Error(), "namespaces are separate")
+	require.Contains(t, err.Error(), "work")
 }

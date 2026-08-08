@@ -95,3 +95,45 @@ func envLookup(t *testing.T, env []string, name string) string {
 	t.Fatalf("%s is not present in the scoped environment", name)
 	return ""
 }
+
+// The END-TO-END fix for #3083, through af's real launch seam rather than through
+// ApplyAccount directly: setLaunchProgram is what every launch path now calls, so
+// this asserts the declaration it installs is the one the boundary needs.
+//
+// It exercises the pairing rather than the guard — the guard is covered in
+// internal/sessionenv — because the pairing is where this could silently break: a
+// declaration describing a different program string than the one installed would be
+// a false claim about the command that runs.
+func TestSetLaunchProgram_DeclaresWhatTheAccountBoundaryNeeds(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	base := "claude"
+	final := injectSystemPrompt(base)
+	require.NotEqual(t, base, final, "precondition: claude's launch is rewritten, or this proves nothing")
+
+	generated, ok := sessionenv.GeneratedArgsBetween(base, final)
+	require.True(t, ok)
+
+	// What the pane shim will hand the boundary, and it must be accepted.
+	_, err := sessionenv.ApplyAccount(
+		[]string{"PATH=/usr/bin", "ANTHROPIC_API_KEY=sk-ambient"},
+		final,
+		sessionenv.Account{Agent: "claude", Name: "work", Dir: t.TempDir(), GeneratedArgs: generated},
+	)
+	require.NoError(t, err, "af's own launch rewrite must be provable end to end (#3083)")
+}
+
+// A base af cannot relate to the final command declares NOTHING, so an
+// account-scoped launch is refused rather than proceeding unverified. This is the
+// fail-closed direction, and it is the one a reader is most likely to assume works
+// the other way.
+func TestSetLaunchProgram_UnrelatableBaseDeclaresNothing(t *testing.T) {
+	generated, ok := sessionenv.GeneratedArgsBetween("claude", "ANTHROPIC_API_KEY=sk claude --session-id x")
+	require.False(t, ok, "an assignment prefix is not an appended argument")
+	require.Empty(t, generated)
+
+	_, err := sessionenv.ApplyAccount([]string{"PATH=/usr/bin"},
+		"ANTHROPIC_API_KEY=sk claude --session-id x",
+		sessionenv.Account{Agent: "claude", Name: "work", Dir: "/d", GeneratedArgs: generated})
+	require.Error(t, err, "refused, not launched unverified")
+}

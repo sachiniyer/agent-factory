@@ -32,15 +32,66 @@ func (t *TmuxSession) SetEnvPassthrough(names []string) error {
 // feature existed.
 func (t *TmuxSession) SetAccount(name string) {
 	t.programMu.Lock()
+	defer t.programMu.Unlock()
 	t.account = name
-	t.programMu.Unlock()
+	if name == "" {
+		t.accountAgent = ""
+		return
+	}
+	t.accountAgent = sessionenv.AgentForCommand(t.program)
 }
 
-func (t *TmuxSession) launchEnvironment(program string) (string, []string, []string, error) {
+// SetAccountForAgent selects name in the namespace the caller validated. The
+// namespace is explicit because program is override-resolved and may later be
+// rewritten; deriving it again would let the same string silently select a
+// different agent's account.
+func (t *TmuxSession) SetAccountForAgent(agent, name string) {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.account = name
+	if name == "" {
+		t.accountAgent = ""
+		return
+	}
+	t.accountAgent = agent
+}
+
+// SetLaunchProgram sets the pane command AND the declaration of which argument
+// words af appended to reach it, under ONE programMu hold (#3083 review).
+//
+// Paired because a reader between two independently-locked setters sees a torn
+// pair — the old command with the new declaration, or the reverse — and the
+// account boundary requires the command to be the agent plus EXACTLY the declared
+// words, so either half of that tear refuses the launch and the pane exits
+// immediately. The call site pairing them is not enough: it makes the two writes
+// adjacent, not atomic.
+func (t *TmuxSession) SetLaunchProgram(program string, generated []string) {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.program = program
+	t.generatedArgs = append([]string(nil), generated...)
+}
+
+// launchSnapshot reads every field a launch needs in ONE hold, for the same
+// reason SetLaunchProgram writes them in one: Start used to read program through
+// its own lock and the declaration through another, so a rewrite landing between
+// them paired an old command with a new declaration.
+func (t *TmuxSession) launchSnapshot() (program string, generated, extras []string, account, accountAgent string) {
 	t.programMu.RLock()
-	extra := append([]string(nil), t.envPassthrough...)
-	account := t.account
-	t.programMu.RUnlock()
+	defer t.programMu.RUnlock()
+	return t.program,
+		append([]string(nil), t.generatedArgs...),
+		append([]string(nil), t.envPassthrough...),
+		t.account,
+		t.accountAgent
+}
+
+// It SNAPSHOTS rather than taking the program as a parameter: the caller used to
+// read program through its own lock and this read the declaration through
+// another, so a rewrite landing between them wrapped an old command with a new
+// declaration (#3083 review).
+func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
+	program, generated, extra, account, accountAgent := t.launchSnapshot()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
@@ -48,6 +99,16 @@ func (t *TmuxSession) launchEnvironment(program string) (string, []string, []str
 	}
 	var wrapped string
 	if account != "" {
+		if agent != accountAgent {
+			resolved := agent
+			if resolved == "" {
+				resolved = "an unrecognized command"
+			}
+			return "", nil, nil, fmt.Errorf(
+				"account %q was selected for %s, but the launch program resolves to %s; refusing rather than "+
+					"looking up the same account name in another agent's namespace",
+				account, accountAgent, resolved)
+		}
 		// tmux < 3.2 REFUSES rather than falling back. A fallback would launch on
 		// the ambient account while every visible signal reported the selected one,
 		// spending someone else's quota (#3051).
@@ -56,7 +117,7 @@ func (t *TmuxSession) launchEnvironment(program string) (string, []string, []str
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
 		}
-		wrapped, err = sessionenv.WrapAccountCommand(executable, agent, account, extra, program)
+		wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, generated, extra, program)
 	} else {
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
 	}

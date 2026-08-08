@@ -159,6 +159,16 @@ type TmuxSession struct {
 	// account is the credential account this session runs its agent as, or empty
 	// for the ambient identity. Guarded by programMu with envPassthrough (#3051).
 	account string
+	// accountAgent is the namespace in which account was selected. It is kept
+	// separately from the resolved program so a program_overrides change cannot
+	// reinterpret the same account name as another agent's identity (#3083 review).
+	accountAgent string
+	// generatedArgs are the argument words af's own launcher appended to program,
+	// declared so the account boundary can verify af's output instead of refusing
+	// it (#3083). Guarded by programMu with program itself, because a launch reads
+	// the two together and a declaration that described a DIFFERENT program string
+	// than the one being wrapped would be worse than none.
+	generatedArgs []string
 	// inputMu serializes every multi-command transaction that injects pane input.
 	// A submit must not clear/paste between a prompt handler's selected-row
 	// capture and Enter, two submits must not clear each other's freshly pasted

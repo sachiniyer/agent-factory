@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -438,7 +439,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	if err := refuseOffBoxAccount(opts); err != nil {
 		return nil, err
 	}
-	if err := refuseUnsupportedAccountAgent(opts); err != nil {
+	if err := refuseUnsupportedAccountAgent(opts, absPath); err != nil {
 		return nil, err
 	}
 
@@ -554,17 +555,65 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 // This is deliberately an ALLOWLIST of agents known to work, not a denylist of
 // broken ones: an agent added later is unsupported until someone proves the
 // boundary accepts its launch, which fails in the safe direction (#3051, #3083).
-func refuseUnsupportedAccountAgent(opts InstanceOptions) error {
+func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil
 	}
-	agent := sessionenv.AgentForCommand(opts.Program)
-	if agent == "codex" {
+	// RESOLVE FIRST, then decide (#3083 review, #3108).
+	//
+	// opts.Program is a LABEL, and program_overrides can point it at another agent
+	// entirely. The account name was validated in the namespace of the REQUESTED
+	// agent (api/sessions.go), but the launch derives the agent from the RESOLVED
+	// command — so `Program=claude` + `program_overrides.claude=codex` validates
+	// "work" as a claude account and then runs codex under CODEX's "work". Two
+	// namespaces, one name, and the session silently authenticates as someone the
+	// user never selected. That is the exact failure this feature exists to prevent,
+	// and a gate reading the label cannot see it.
+	//
+	// config.ResolveProgram is the resolver the launch itself uses
+	// (resolveProgramForAgent), so this gate and the launch cannot disagree about
+	// what the command is.
+	// The config is resolved HERE rather than threaded in, because the gate must read
+	// the same overrides the launch will: resolveRepoConfig is what the launch path
+	// uses too. A failure to resolve leaves cfg nil, and config.ResolveProgram on a
+	// nil config returns the label unchanged — which is the pre-override answer, so an
+	// unreadable config cannot silently admit a cross-agent override.
+	// Repo config, then GLOBAL — mirroring resolveConfigForInstance exactly, because
+	// that is what the launch uses. Trying only the repo would miss a global
+	// program_overrides entry that the launch then applies, which is the very
+	// gate-disagrees-with-launch divergence this check exists to close.
+	var cfg *config.Config
+	if resolved, rerr := resolveRepoConfig(absPath); rerr == nil {
+		cfg = &resolved.Config
+	} else if loaded, lerr := config.LoadConfig(); lerr == nil {
+		cfg = loaded
+	}
+	requested := sessionenv.AgentForCommand(opts.Program)
+	agent := sessionenv.AgentForCommand(config.ResolveProgram(cfg, opts.Program))
+	if agent != requested {
+		return fmt.Errorf(
+			"account %q was validated as a %s account, but this session's program_overrides resolves %s to "+
+				"a %s command — the account namespaces are separate, so a same-named %s account would be "+
+				"used instead of the %s one you selected. Remove the override, or create the session on the "+
+				"agent whose account you mean",
+			opts.Account, requested, requested, agent, agent, requested)
+	}
+	// An EXPLICIT list, still, and claude is on it now because af's launch rewrite
+	// carries provenance the boundary verifies (#3083): the launcher declares
+	// `--session-id`/`--plugin-dir`, so the rewritten command is provable rather
+	// than refused. codex needs no declaration — af leaves its command unmodified.
+	//
+	// Deliberately NOT keyed on sessionenv.SupportsAccounts: that answers "does this
+	// agent have a credential-root variable", which is a different question from "can
+	// af prove its launch to the boundary". Keeping them separate is what makes an
+	// agent added to the first list unsupported here until someone checks the second,
+	// which fails in the safe direction (#3051, #3083).
+	if agent == "codex" || agent == "claude" {
 		return nil
 	}
 	return fmt.Errorf(
-		"account %q cannot be used with %s yet: af rewrites that agent's launch command (--session-id, "+
-			"--plugin-dir) and the account boundary only accepts an unmodified invocation, so the session "+
-			"would start and immediately exit; account scoping currently supports codex",
+		"account %q cannot be used with %s yet: af has not established that the account boundary can "+
+			"verify how it launches that agent, so the session could start on the ambient identity or exit "+
+			"immediately; account scoping currently supports claude and codex",
 		opts.Account, agent)
 }

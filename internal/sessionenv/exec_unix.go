@@ -18,7 +18,7 @@ var processExec = syscall.Exec
 // executable path, the selected agent, explicit variable NAMES, and the
 // original pane command; environment values never enter argv.
 func WrapCommand(executable, agent string, extras []string, command string) (string, error) {
-	return wrapCommand(executable, agent, "", extras, command)
+	return wrapCommand(executable, agent, "", nil, extras, command)
 }
 
 // WrapAccountCommand is WrapCommand for a session scoped to a named account.
@@ -26,14 +26,18 @@ func WrapCommand(executable, agent string, extras []string, command string) (str
 // Only the account NAME travels in argv — never its directory and never a
 // credential. The shim resolves the name against its own AF home, so argv stays
 // free of anything worth reading out of `ps` (#3051).
-func WrapAccountCommand(executable, agent, account string, extras []string, command string) (string, error) {
+// generated carries the argument words af's own launcher appended to the pane
+// command, so the boundary can verify its own output instead of refusing it
+// (#3083). These are not secrets and are already visible in the command operand
+// beside them; what argv gains is the CLAIM that af authored them.
+func WrapAccountCommand(executable, agent, account string, generated, extras []string, command string) (string, error) {
 	if strings.TrimSpace(account) == "" {
 		return "", fmt.Errorf("account-scoped launch requires an account name")
 	}
-	return wrapCommand(executable, agent, account, extras, command)
+	return wrapCommand(executable, agent, account, generated, extras, command)
 }
 
-func wrapCommand(executable, agent, account string, extras []string, command string) (string, error) {
+func wrapCommand(executable, agent, account string, generated, extras []string, command string) (string, error) {
 	normalized, err := NormalizeExtraNames(extras)
 	if err != nil {
 		return "", err
@@ -44,7 +48,13 @@ func wrapCommand(executable, agent, account string, extras []string, command str
 	}
 	args := []string{executable, marker, agent, strconv.Itoa(len(normalized))}
 	if account != "" {
-		args = append(args, account)
+		// Both COUNTS are length-prefixed rather than delimiter-separated, for the
+		// reason the extras count already is: a generated argument is an arbitrary
+		// string (a path can contain anything), so any sentinel could appear inside
+		// one and a mis-split would hand the guard a different claim than the
+		// launcher made.
+		args = append(args, account, strconv.Itoa(len(generated)))
+		args = append(args, generated...)
 	}
 	args = append(args, normalized...)
 	args = append(args, command)
@@ -76,21 +86,38 @@ func HandleInternalExec() {
 func execInvocation(args []string, scoped bool) error {
 	trailing := 3
 	if scoped {
-		trailing = 4
+		trailing = 5
 	}
 	if len(args) < trailing {
 		return fmt.Errorf("malformed internal session environment invocation")
 	}
 	agent := args[0]
 	count, err := strconv.Atoi(args[1])
-	if err != nil || count < 0 || len(args) != count+trailing {
+	if err != nil || count < 0 {
 		return fmt.Errorf("malformed internal session environment invocation")
 	}
 	offset := 2
 	account := ""
+	var generated []string
 	if scoped {
 		account = args[2]
-		offset = 3
+		generatedCount, gerr := strconv.Atoi(args[3])
+		// Compared against the REMAINING room, never `trailing+generatedCount`: a
+		// maximum-sized integer makes that addition overflow to a negative bound, the
+		// check passes, and the slice below PANICS instead of returning this
+		// function's generic refusal (#3083 review). Subtraction cannot overflow here
+		// because trailing is a constant no larger than len(args), already checked.
+		if gerr != nil || generatedCount < 0 || generatedCount > len(args)-trailing {
+			return fmt.Errorf("malformed internal session environment invocation")
+		}
+		generated = args[4 : 4+generatedCount]
+		offset = 4 + generatedCount
+	}
+	// The exact total, checked AFTER both counts are known. A length that merely
+	// fits leaves room for an unaccounted argument between the two lists, and this
+	// argv is what the boundary's whole claim rests on.
+	if len(args) != offset+count+1 {
+		return fmt.Errorf("malformed internal session environment invocation")
 	}
 	extras, err := NormalizeExtraNames(args[offset : offset+count])
 	if err != nil {
@@ -104,7 +131,7 @@ func execInvocation(args []string, scoped bool) error {
 	// through to the ambient identity, which would be the silent wrong-account
 	// outcome the whole feature exists to prevent (#3051).
 	if scoped {
-		environ, err = applyAccountScope(environ, agent, account, command)
+		environ, err = applyAccountScope(environ, agent, account, command, generated)
 		if err != nil {
 			return err
 		}
