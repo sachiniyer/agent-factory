@@ -109,20 +109,6 @@ func pasteBufferName(processToken, sanitizedName string, seq uint64) string {
 	return fmt.Sprintf("af_paste_%s_%s_%d", processToken, sanitizedName, seq)
 }
 
-// SendKeysCommand sends text to the tmux pane using tmux commands instead of
-// writing to the PTY. This is more reliable for headless/scheduled runs where
-// the PTY connection may not persist. Text is loaded into a tmux paste buffer,
-// pasted into the pane as a BRACKETED paste, followed by a pause to let terminal
-// control sequences drain, then Enter to submit.
-//
-// Every pane gets the bracketed paste — there is no per-agent exception list.
-// See sendKeysPasteBuffer for why that is both necessary and safe (#1956).
-func (t *TmuxSession) SendKeysCommand(text string) error {
-	t.inputMu.Lock()
-	defer t.inputMu.Unlock()
-	return t.sendKeysPasteBuffer(text)
-}
-
 // sendKeysPasteBuffer delivers text to the pane through a BRACKETED tmux paste
 // buffer (`load-buffer` + `paste-buffer -p`) and then sends Enter to submit.
 // Text is streamed via stdin rather than an argv argument so arbitrarily large
@@ -147,7 +133,7 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 // needs an explicit end-of-paste marker before the trailing Enter counts as a
 // submit (#1254/#1256) — and keeps working unchanged; it was never special, it was
 // just the only agent whose breakage was loud enough to notice.
-func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
+func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, error) {
 	// A per-call unique buffer name: two concurrent deliveries to the same
 	// session must not share a buffer, or one call's load-buffer could overwrite
 	// the other's content between its load and paste and corrupt the submit. The
@@ -202,9 +188,9 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 			log.WarningLog.Printf("could not delete paste buffer %q after a failed load (it may never have been created): %v", buf, derr)
 		}
 		if loadTimedOut {
-			return fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return PromptCouldNotConfirm, fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return fmt.Errorf("error loading paste buffer: %w", err)
+		return PromptCouldNotConfirm, fmt.Errorf("error loading paste buffer: %w", err)
 	}
 
 	// Clear any draft stranded in the composer BEFORE this paste (#2070/#1982
@@ -292,9 +278,9 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 			log.ErrorLog.Printf("failed to delete paste buffer %q after paste error: %v", buf, derr)
 		}
 		if pasteTimedOut {
-			return fmt.Errorf("%w: paste-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return PromptCouldNotConfirm, fmt.Errorf("%w: paste-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return fmt.Errorf("error pasting buffer: %w", pasteErr)
+		return PromptCouldNotConfirm, fmt.Errorf("error pasting buffer: %w", pasteErr)
 	}
 	// Remember only a payload tmux actually accepted. Reusing the delivery
 	// probe's exact completion suffix keeps one source of truth for what tmux was
@@ -320,7 +306,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 
 	// Send Enter separately to submit.
 	if err := t.sendEnter(); err != nil {
-		return err
+		return PromptCouldNotConfirm, err
 	}
 
 	if observation.outcome == deliveryObservedAbsent {
@@ -333,7 +319,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) error {
 			"Enter sent best-effort. Pane tail: %s",
 			t.sanitizedName, pasteDeliveryMaxWait, oneLineTail(observation.pane))
 	}
-	return nil
+	return observation.outcome.promptDeliveryStatus(), nil
 }
 
 // sendEnter submits whatever is pending in the pane. Bounded by

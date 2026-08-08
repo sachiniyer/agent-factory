@@ -148,6 +148,31 @@ func (b recordingBackend) SendPromptCommand(_ *session.Instance, prompt string) 
 	return nil
 }
 
+type observedPromptBackend struct {
+	readyFakeBackend
+	status session.PromptDeliveryStatus
+}
+
+func (b observedPromptBackend) SendPromptCommandWithStatus(_ *session.Instance, _ string) (session.PromptDeliveryStatus, error) {
+	return b.status, nil
+}
+
+func TestSendPromptWithStatusPreservesObservedAbsence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := observedPromptBackend{
+		readyFakeBackend: readyFakeBackend{FakeBackend: session.NewFakeBackend()},
+		status:           session.PromptNotDelivered,
+	}
+	registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Ready)
+
+	status, err := manager.SendPromptWithStatus(SendPromptRequest{
+		Title: "worker", RepoID: repoID, Prompt: "ship it",
+	})
+	require.NoError(t, err)
+	require.Equal(t, session.PromptNotDelivered, status,
+		"the daemon must not collapse the runtime's observed absence into delivery")
+}
+
 // failingPromptBackend returns the low-level send error that should never leak
 // once daemon delivery has rejected an undeliverable liveness state.
 type failingPromptBackend struct {

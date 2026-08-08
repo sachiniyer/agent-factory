@@ -16,6 +16,7 @@ type probeBackend struct {
 	provisionFirst *bool
 	launchFirst    *bool
 	sentPrompt     string
+	deliveryStatus PromptDeliveryStatus
 	killed         bool
 	modelChange    *AgentModelChange
 	diagnosticRead bool
@@ -45,6 +46,11 @@ func (b *probeBackend) PreviewFullHistory(*Instance) (string, error) { return "f
 func (b *probeBackend) SendPromptCommand(_ *Instance, prompt string) error {
 	b.sentPrompt = prompt
 	return nil
+}
+
+func (b *probeBackend) SendPromptCommandWithStatus(_ *Instance, prompt string) (PromptDeliveryStatus, error) {
+	b.sentPrompt = prompt
+	return b.deliveryStatus, nil
 }
 
 func (b *probeBackend) Provision(_ *Instance, firstTimeSetup bool) error {
@@ -111,11 +117,19 @@ func TestLocalAgentServerPreview(t *testing.T) {
 
 func TestLocalAgentServerSendPrompt(t *testing.T) {
 	inst, b := newProbeInstance(t)
+	b.deliveryStatus = PromptNotDelivered
 	if err := inst.AgentServer().SendPrompt("hello"); err != nil {
 		t.Fatalf("SendPrompt: %v", err)
 	}
 	if b.sentPrompt != "hello" {
 		t.Errorf("SendPrompt must route to the reliable command path; got %q", b.sentPrompt)
+	}
+	status, err := SendPromptWithStatus(inst.AgentServer(), "observe me")
+	if err != nil {
+		t.Fatalf("SendPromptWithStatus: %v", err)
+	}
+	if status != PromptNotDelivered {
+		t.Errorf("delivery status = %q, want %q", status, PromptNotDelivered)
 	}
 }
 

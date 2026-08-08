@@ -232,14 +232,14 @@ func TestSendPromptCreatePreflightFollowsResolvedBackend(t *testing.T) {
 
 			delivered := false
 			prevDeliver := deliverPromptViaDaemon
-			deliverPromptViaDaemon = func(daemon.DeliverPromptRequest) (string, error) {
+			deliverPromptViaDaemon = func(daemon.DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
 				delivered = true
-				return "started", nil
+				return "started", session.PromptCouldNotConfirm, nil
 			}
 			prevSend := sendPromptViaDaemon
-			sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+			sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 				t.Fatalf("--create must stay on the deliver path; got %+v", req)
-				return nil
+				return session.PromptCouldNotConfirm, nil
 			}
 			t.Cleanup(func() {
 				deliverPromptViaDaemon = prevDeliver

@@ -110,6 +110,47 @@ func TestRemoteAgentServerSnapshotCarriesModelChange(t *testing.T) {
 	}
 }
 
+func TestRemoteAgentServerCarriesPromptDeliveryStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		wire   PromptDeliveryStatus
+		wanted PromptDeliveryStatus
+	}{
+		{name: "delivered", wire: PromptDelivered, wanted: PromptDelivered},
+		{name: "not delivered", wire: PromptNotDelivered, wanted: PromptNotDelivered},
+		{name: "could not confirm", wire: PromptCouldNotConfirm, wanted: PromptCouldNotConfirm},
+		{name: "older server omitted status", wanted: PromptCouldNotConfirm},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/agent/send-prompt" {
+					t.Errorf("path = %q, want send-prompt route", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"data":  agentSendPromptResp{OK: true, Status: tc.wire},
+					"error": nil,
+				}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			as, err := NewRemoteAgentServer(AgentServerEndpoint{URL: server.URL, Token: "test-token"}, "remote")
+			if err != nil {
+				t.Fatalf("NewRemoteAgentServer: %v", err)
+			}
+			status, err := SendPromptWithStatus(as, "ship it")
+			if err != nil {
+				t.Fatalf("SendPromptWithStatus: %v", err)
+			}
+			if status != tc.wanted {
+				t.Fatalf("status = %q, want %q", status, tc.wanted)
+			}
+		})
+	}
+}
+
 // TestSplitHTTPBaseURL_RejectsEmptyHost is the agent-server half of the #1784
 // contract, mirroring apiclient's TestParseDaemonURL_RejectsEmptyHost: a hostless
 // URL fails at validation with an actionable message rather than at dial time. The

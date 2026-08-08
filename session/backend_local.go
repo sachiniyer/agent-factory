@@ -919,18 +919,23 @@ func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, co
 }
 
 func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
+	_, err := b.SendPromptCommandWithStatus(i, prompt)
+	return err
+}
+
+func (b *LocalBackend) SendPromptCommandWithStatus(i *Instance, prompt string) (PromptDeliveryStatus, error) {
 	i.mu.RLock()
 	s := i.started
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s {
-		return fmt.Errorf("instance not started")
+		return PromptCouldNotConfirm, fmt.Errorf("instance not started")
 	}
 	if ts == nil {
-		return fmt.Errorf("tmux session not initialized")
+		return PromptCouldNotConfirm, fmt.Errorf("tmux session not initialized")
 	}
-	return ts.SendKeysCommand(prompt)
+	return ts.SendKeysCommandObserved(prompt)
 }
 
 func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {

@@ -728,10 +728,12 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	if err := s.manager.SendPrompt(req); err != nil {
+	status, err := s.manager.SendPromptWithStatus(req)
+	if err != nil {
 		return err
 	}
 	resp.OK = true
+	resp.Status = status
 	return nil
 }
 
@@ -833,11 +835,12 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	status, err := s.manager.DeliverPrompt(req)
+	status, deliveryStatus, err := s.manager.DeliverPromptWithStatus(req)
 	if err != nil {
 		return err
 	}
 	resp.Status = status
+	resp.DeliveryStatus = deliveryStatus
 	return nil
 }
 

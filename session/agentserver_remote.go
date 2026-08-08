@@ -172,7 +172,21 @@ func (s *remoteAgentServer) Alive() (bool, error) {
 }
 
 func (s *remoteAgentServer) SendPrompt(prompt string) error {
-	return s.rc.call("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, nil)
+	_, err := s.SendPromptWithStatus(prompt)
+	return err
+}
+
+func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
+	var resp agentSendPromptResp
+	if err := s.rc.call("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, &resp); err != nil {
+		return PromptCouldNotConfirm, err
+	}
+	if !resp.Status.Valid() {
+		// An older sandbox returns only {"ok":true}. That confirms the RPC, not
+		// pane delivery, so version skew is honest uncertainty.
+		return PromptCouldNotConfirm, nil
+	}
+	return resp.Status, nil
 }
 
 // --- data plane: one remote WS per tab, fanned by the shared ptyBroker ---
@@ -744,6 +758,11 @@ type agentAliveResp struct {
 
 type agentSendPromptReq struct {
 	Prompt string `json:"prompt"`
+}
+
+type agentSendPromptResp struct {
+	OK     bool                 `json:"ok"`
+	Status PromptDeliveryStatus `json:"status"`
 }
 
 type agentArchiveResp struct {

@@ -374,9 +374,9 @@ func TestSessionsSendPromptCreate_RefusesCloneInsideAfHome(t *testing.T) {
 	t.Chdir(clone)
 
 	prevDeliver := deliverPromptViaDaemon
-	deliverPromptViaDaemon = func(req daemon.DeliverPromptRequest) (string, error) {
+	deliverPromptViaDaemon = func(req daemon.DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
 		t.Fatalf("daemon received refused send-prompt --create binding: %+v", req)
-		return "", nil
+		return "", session.PromptCouldNotConfirm, nil
 	}
 	t.Cleanup(func() { deliverPromptViaDaemon = prevDeliver })
 	sendPromptCreateFlag = true
