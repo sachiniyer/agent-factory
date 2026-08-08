@@ -109,7 +109,7 @@ func resolveAgentCredentialMounts(agent string) []string {
 // operator's filesystem layout crosses the boundary.
 const dockerAccountHome = "/af-account"
 
-// accountMountAndEnv returns the `-v` mount that places an account's agent HOME
+// accountMountAndEnv returns the bind mount that places an account's agent HOME
 // inside the container, and the `-e VAR=value` that points the agent at it
 // (#3082).
 //
@@ -134,7 +134,7 @@ func accountMountAndEnv(account sessionenv.Account) (mount []string, env []strin
 	if !ok {
 		return nil, nil, nil
 	}
-	// ABSOLUTE, always. Docker reads a relative -v source by its own rules — it is
+	// ABSOLUTE, always. Docker reads a relative bind source by its own rules — it is
 	// not resolved against af's working directory — so a relative AGENT_FACTORY_HOME
 	// (a supported configuration) would bind something that is not the account, or
 	// create a volume named after the path. Abs failing means af cannot say where

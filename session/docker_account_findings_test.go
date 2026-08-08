@@ -149,6 +149,14 @@ func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {
 	}
 }
 
+func TestDockerAccount_AllowsSimilarlyNamedMountTargets(t *testing.T) {
+	err := validateAccountDockerRunArgs(
+		[]string{"--mount", "type=bind,src=/tmp/cache,dst=/af-account-cache"},
+		"codex",
+	)
+	require.NoError(t, err)
+}
+
 func TestDockerAccount_UsesAMountFormThatAcceptsColonPaths(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "af:home")
 	f := newDockerAccountFixture(t, home, "codex", nil)

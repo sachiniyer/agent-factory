@@ -49,15 +49,30 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		return nil
 	}
 	checkMount := func(value string) error {
-		for _, protected := range []string{dockerAccountHome, dockerAccountRuntimeHome} {
-			if strings.Contains(value, ":"+protected) ||
-				strings.Contains(value, "dst="+protected) ||
-				strings.Contains(value, "destination="+protected) ||
-				strings.Contains(value, "target="+protected) {
-				return fmt.Errorf(
-					"backend=docker: docker.run_args cannot install an account mount over %s because it would replace af's selected account boundary",
-					protected)
+		mountsProtectedPath := func() string {
+			for _, field := range strings.Split(value, ",") {
+				key, target, ok := strings.Cut(field, "=")
+				if !ok || (key != "dst" && key != "destination" && key != "target") {
+					continue
+				}
+				if target == dockerAccountHome || target == dockerAccountRuntimeHome {
+					return target
+				}
 			}
+			// --volume and --tmpfs use ':' between fields. Looking for an
+			// exact field avoids refusing harmless paths such as
+			// /af-account-cache.
+			for _, field := range strings.Split(value, ":") {
+				if field == dockerAccountHome || field == dockerAccountRuntimeHome {
+					return field
+				}
+			}
+			return ""
+		}
+		if protected := mountsProtectedPath(); protected != "" {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot install an account mount over %s because it would replace af's selected account boundary",
+				protected)
 		}
 		return nil
 	}
