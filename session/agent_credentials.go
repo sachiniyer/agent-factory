@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"os"
 	"path/filepath"
@@ -123,23 +124,29 @@ const dockerAccountHome = dockerContainerHome + "/.af-account"
 //
 // Returns nothing for an agent that does not support accounts; the create path
 // refuses that case earlier, so this is defence rather than a branch anyone takes.
-func accountMountAndEnv(account sessionenv.Account) (mount []string, env []string) {
+func accountMountAndEnv(account sessionenv.Account) (mount []string, env []string, err error) {
 	if account.Dir == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	configVar, ok := sessionenv.SupportsAccounts(account.Agent)
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// ABSOLUTE, always. Docker reads a relative -v source by its own rules — it is
 	// not resolved against af's working directory — so a relative AGENT_FACTORY_HOME
 	// (a supported configuration) would bind something that is not the account, or
 	// create a volume named after the path. Abs failing means af cannot say where
 	// the account is, which must refuse rather than mount a guess.
+	// A failure here must REFUSE, not return an empty mount. Returning nothing was
+	// the shape of this function's first version and it is the exact failure this
+	// feature exists to prevent: the container would start with no account and no
+	// error, running on whatever identity it could find while the session reported
+	// the one the operator named. "af cannot say where the account is" has to reach
+	// the create as an error.
 	source, err := filepath.Abs(account.Dir)
 	if err != nil {
-		return nil, nil
+		return nil, nil, fmt.Errorf("cannot resolve an absolute path for account %q (%s): %w", account.Name, account.Dir, err)
 	}
 	return []string{"-v", source + ":" + dockerAccountHome},
-		[]string{"-e", configVar + "=" + dockerAccountHome}
+		[]string{"-e", configVar + "=" + dockerAccountHome}, nil
 }

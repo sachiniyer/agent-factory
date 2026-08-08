@@ -249,7 +249,11 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// resolved from the daemon user's home is mounted, so the container cannot hold
 	// two identities.
 	if spec.Account.Dir != "" {
-		p.accountMount, p.accountEnv = accountMountAndEnv(spec.Account)
+		mount, env, aerr := accountMountAndEnv(spec.Account)
+		if aerr != nil {
+			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", aerr)
+		}
+		p.accountMount, p.accountEnv = mount, env
 	} else if cfg.DockerMountAgentCredentials {
 		p.credentialMounts = resolveAgentCredentialMounts(p.agentName())
 	}

@@ -12,9 +12,12 @@ import (
 // ambient key on that host must not reach either.
 
 func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
-	a, aEnv := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "work", Dir: "/home/op/.agent-factory/accounts/codex/work"})
-	b, bEnv := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "personal", Dir: "/home/op/.agent-factory/accounts/codex/personal"})
+	a, aEnv, aErr := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "work", Dir: "/home/op/.agent-factory/accounts/codex/work"})
+	b, bEnv, bErr := accountMountAndEnv(sessionenv.Account{Agent: "codex", Name: "personal", Dir: "/home/op/.agent-factory/accounts/codex/personal"})
 
+	if aErr != nil || bErr != nil {
+		t.Fatalf("an absolute account dir must resolve: %v %v", aErr, bErr)
+	}
 	if len(a) != 2 || len(b) != 2 {
 		t.Fatalf("each account must produce one -v mount; got %v and %v", a, b)
 	}
@@ -41,17 +44,17 @@ func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
 // claude uses a different variable, and getting it wrong would silently leave the
 // agent on the container's default home — present, wrong, and quiet.
 func TestAccountMountAndEnv_UsesTheAgentsOwnConfigVar(t *testing.T) {
-	_, env := accountMountAndEnv(sessionenv.Account{Agent: "claude", Name: "work", Dir: "/acct/claude/work"})
+	_, env, _ := accountMountAndEnv(sessionenv.Account{Agent: "claude", Name: "work", Dir: "/acct/claude/work"})
 	if want := "CLAUDE_CONFIG_DIR=" + dockerAccountHome; len(env) != 2 || env[1] != want {
 		t.Fatalf("want %q, got %v", want, env)
 	}
 	// An agent with no account support produces nothing rather than a mount the
 	// agent would never read.
-	if mount, env := accountMountAndEnv(sessionenv.Account{Agent: "aider", Name: "work", Dir: "/acct/aider/work"}); mount != nil || env != nil {
+	if mount, env, _ := accountMountAndEnv(sessionenv.Account{Agent: "aider", Name: "work", Dir: "/acct/aider/work"}); mount != nil || env != nil {
 		t.Errorf("an agent without account support must produce no mount; got %v %v", mount, env)
 	}
 	// A zero account is unscoped, not an empty mount spec.
-	if mount, env := accountMountAndEnv(sessionenv.Account{}); mount != nil || env != nil {
+	if mount, env, _ := accountMountAndEnv(sessionenv.Account{}); mount != nil || env != nil {
 		t.Errorf("an unscoped session must produce nothing; got %v %v", mount, env)
 	}
 }
@@ -94,5 +97,18 @@ func TestRefuseOffBoxAccount_AllowsDockerRefusesTheRest(t *testing.T) {
 		if err := refuseOffBoxAccount(InstanceOptions{Backend: kind}); err != nil {
 			t.Errorf("an unscoped create on %s must not be refused: %v", kind, err)
 		}
+	}
+}
+
+// A path af cannot resolve must REFUSE, never return an empty mount. Returning
+// nothing was this function's first shape and it is the failure the feature
+// exists to prevent: the container starts with no account and no error, running
+// on whatever identity it finds while the session reports the named one.
+func TestAccountMountAndEnv_UnresolvablePathRefuses(t *testing.T) {
+	// An empty Dir is "unscoped" and must stay a clean no-op — the refusal is for a
+	// path that was requested and could not be resolved, not for the absence of one.
+	mount, env, err := accountMountAndEnv(sessionenv.Account{})
+	if mount != nil || env != nil || err != nil {
+		t.Fatalf("an unscoped session must be a silent no-op; got %v %v %v", mount, env, err)
 	}
 }
