@@ -422,15 +422,26 @@ back (see [Archive & restore](#archive-restore)).
 > cannot look up still works. The pin is an improvement on connecting by name, so
 > when it cannot be applied af falls back rather than failing the session.
 >
-> **If your resolver and `ssh`'s disagree, af notices and gives up the pin.** af
-> resolves with Go's built-in resolver, which reads `/etc/hosts` and DNS; `ssh`
-> resolves with `getaddrinfo`, which follows `nsswitch.conf`. With a source Go does
-> not implement — LDAP, `sssd`, mDNS — both can succeed and return *different*
-> addresses, and af would then have pinned somewhere `ssh` would never have gone.
-> That fails host-key verification rather than connecting to the wrong host, so
-> nothing unverified is ever trusted; af retries **once without the pin**, which is
-> what it did before this existed, and logs that the session is unpinned. You do not
-> need to change anything — the note is here so the log line makes sense.
+> **Which resolver picks the address, and when it matters.** af resolves with Go's
+> built-in resolver, which reads `/etc/hosts` and DNS. `ssh` resolves with
+> `getaddrinfo`, which follows `nsswitch.conf` and so can also use LDAP, `sssd` or
+> mDNS. Once af pins, `ssh` does no resolving at all — the connection is made for
+> it — so every step of a session goes to the same place regardless.
+>
+> The one place this can bite is a `known_hosts` entry recorded **earlier**, by a
+> plain `ssh` or an older session, against whichever machine `getaddrinfo` picked.
+> If your resolvers select different machines *and* those machines have different
+> host keys, the pinned one presents a key that entry does not match and the session
+> fails to start, naming the host. Nothing runs on the wrong machine — verification
+> refuses it before authenticating. Point `ssh.host` at one machine if you hit this.
+>
+> **`accept-new` pins only once it knows the host.** On the very first connection to
+> a host there is no entry to check against, so `accept-new` would simply record
+> whatever key the pinned machine presented — and if that were the wrong machine,
+> the session would run there silently and the name would stay bound to it. af
+> therefore does not pin that first connection, and pins normally afterwards.
+> `insecure` verifies nothing, so it is never pinned. Both cases are logged, and
+> both keep the multi-address exposure this section describes.
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can

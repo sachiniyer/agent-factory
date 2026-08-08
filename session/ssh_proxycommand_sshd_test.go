@@ -119,68 +119,6 @@ func TestPinnedSessionStreamsStdinAndSeesEOF(t *testing.T) {
 		"the whole stream must reach the far side and the remote command must then see EOF")
 }
 
-// The pin's escape hatch, against REAL ssh output rather than an invented string.
-//
-// af resolves with Go's pure resolver and ssh resolves with getaddrinfo, so an
-// nsswitch source Go does not implement (LDAP, sssd, mDNS) can make both succeed
-// with DIFFERENT addresses — and af would have pinned somewhere ssh would never
-// have gone. That fails CLOSED on host-key verification, so it is an availability
-// bug rather than a security one: nothing wrong is trusted, but the backend stops
-// working for exactly those users. The recovery is one unpinned retry, and this is
-// the detector it turns on.
-//
-// Both branches are driven through the real transport, because the whole point is
-// that the marker is OpenSSH's wording and not af's guess about it.
-func TestHostKeyFailureIsDetectedFromRealSSHOutput(t *testing.T) {
-	lab := startSSHLab(t)
-	defer SetSSHRelayBinaryForTest(afRelayBinary(t))()
-
-	t.Run("an unknown host key retries", func(t *testing.T) {
-		// known_hosts holds an entry for a DIFFERENT name, so this host is unknown.
-		cfg := lab.sshConfig(lab.writeKnownHosts(t,
-			fmt.Sprintf("[other.invalid]:%d %s", lab.port, lab.hostPub)))
-		cmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1")
-		require.NoError(t, err)
-
-		p := newSSHSandboxProvisioner(ProvisionSpec{Title: "unknown"}, cmd, "", "")
-		// combined=false, which is what the FIRST provision step uses — so ssh's
-		// diagnostic lands in exec.ExitError.Stderr rather than in the error text,
-		// and a detector reading only err.Error() would miss it.
-		_, runErr := p.Run(30*time.Second, "echo SHOULD_NOT_HAPPEN", nil, false)
-		require.Error(t, runErr)
-		assert.True(t, sshHostKeyVerificationFailed(runErr),
-			"OpenSSH's own `Host key verification failed.` must be recognised through the real error chain; "+
-				"got %v", runErr)
-		assert.True(t, shouldRetryProvisionUnpinned("127.0.0.1", "", runErr),
-			"a pinned attempt that never created a session dir must be retryable unpinned")
-	})
-
-	t.Run("a CHANGED host key does not retry", func(t *testing.T) {
-		// A different key under the RIGHT name: ssh reports the identification as
-		// changed, which is a security signal that must surface immediately rather
-		// than be delayed by a retry that would fail the same way.
-		other := filepath.Join(t.TempDir(), "impostor")
-		out, genErr := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "impostor",
-			"-f", other).CombinedOutput()
-		require.NoError(t, genErr, "%s", out)
-		impostor, readErr := os.ReadFile(other + ".pub")
-		require.NoError(t, readErr)
-
-		cfg := lab.sshConfig(lab.writeKnownHosts(t,
-			fmt.Sprintf("[pinned.invalid]:%d %s", lab.port, strings.TrimSpace(string(impostor)))))
-		cmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1")
-		require.NoError(t, err)
-
-		p := newSSHSandboxProvisioner(ProvisionSpec{Title: "changed"}, cmd, "", "")
-		_, runErr := p.Run(30*time.Second, "echo SHOULD_NOT_HAPPEN", nil, false)
-		require.Error(t, runErr)
-		assert.False(t, sshHostKeyVerificationFailed(runErr),
-			"a CHANGED identification must NOT be treated as the retryable case: it is a security signal, and "+
-				"the unpinned attempt verifies the same name against the same store and fails identically")
-		assert.False(t, shouldRetryProvisionUnpinned("127.0.0.1", "", runErr))
-	})
-}
-
 // hostKeyAliasPinnedCommand reproduces the mechanism #3090 shipped and #3100
 // reverted: dial the resolved address as ssh's DESTINATION, and restore the name
 // as the host-key lookup key with an alias.

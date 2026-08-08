@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -311,7 +312,7 @@ func TestAnUnusableRelayBinaryFallsBackToDiallingTheName(t *testing.T) {
 	usable := filepath.Join(t.TempDir(), "af")
 	require.NoError(t, os.WriteFile(usable, []byte("#!/bin/sh\n"), 0o755))
 	restore := SetSSHRelayBinaryForTest(usable)
-	assert.Equal(t, "127.0.0.1", pinForProvision("127.0.0.1", port),
+	assert.Equal(t, "127.0.0.1", pinForProvision(config.SSHConfig{Host: "127.0.0.1"}, "127.0.0.1", port, config.SSHHostKeyStrict),
 		"an executable relay must pin, or this test proves nothing about the cases below")
 	restore()
 
@@ -329,7 +330,7 @@ func TestAnUnusableRelayBinaryFallsBackToDiallingTheName(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			defer SetSSHRelayBinaryForTest(path)()
-			assert.Empty(t, pinForProvision("127.0.0.1", port),
+			assert.Empty(t, pinForProvision(config.SSHConfig{Host: "127.0.0.1"}, "127.0.0.1", port, config.SSHHostKeyStrict),
 				"%s must cost the PIN, not the whole session: a ProxyCommand that cannot exec leaves ssh with "+
 					"no transport, so every step times out where an unpinned session would have connected", name)
 		})
@@ -351,7 +352,7 @@ func TestAnUnusableRelayBinaryFallsBackToDiallingTheName(t *testing.T) {
 		require.NotZero(t, 0o011&0o111, "the fixture must have SOME execute bit, or it proves nothing")
 
 		defer SetSSHRelayBinaryForTest(wrongClass)()
-		assert.Empty(t, pinForProvision("127.0.0.1", port),
+		assert.Empty(t, pinForProvision(config.SSHConfig{Host: "127.0.0.1"}, "127.0.0.1", port, config.SSHHostKeyStrict),
 			"a binary this user cannot execute must cost the pin: accepting it turns the intended name-based "+
 				"fallback into an unusable backend, since every ProxyCommand then fails with EACCES")
 	})
@@ -360,7 +361,115 @@ func TestAnUnusableRelayBinaryFallsBackToDiallingTheName(t *testing.T) {
 	prev := sshRelayBinary
 	sshRelayBinary = func() (string, error) { return "", fmt.Errorf("no /proc/self/exe") }
 	defer func() { sshRelayBinary = prev }()
-	assert.Empty(t, pinForProvision("127.0.0.1", port))
+	assert.Empty(t, pinForProvision(config.SSHConfig{Host: "127.0.0.1"}, "127.0.0.1", port, config.SSHHostKeyStrict))
+}
+
+// af pins ONLY where ssh would REFUSE a machine whose key it does not already
+// trust.
+//
+// With a ProxyCommand ssh does not resolve the name at all — the relay connects —
+// so there is no live resolver disagreement during a session; every step goes where
+// af pinned. What remains is that a known_hosts entry recorded EARLIER may have
+// been written against whichever machine getaddrinfo/NSS selected, while af pins
+// one Go's resolver selected.
+//
+// Under `strict`, and under `accept-new` once the host is in the store, that
+// mismatch is refused: loud, pre-auth, nothing runs anywhere. Under `accept-new`
+// with NO entry it is SILENT — ssh adds the pinned machine's key, the session
+// provisions there, and the name is bound to that machine from then on. `insecure`
+// verifies nothing at all.
+//
+// So this is a precondition rather than a preference, and it is what makes "a wrong
+// pin fails closed" true by construction. #3086 stays open for the exposure it
+// leaves behind.
+func TestPinningFollowsTheVerifyingPostureExactly(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	usable := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(usable, []byte("#!/bin/sh\n"), 0o755))
+	defer SetSSHRelayBinaryForTest(usable)()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	// An accept-new store that already holds this host, written in the HASHED form
+	// Debian and Ubuntu produce by default — so the lookup is exercised against the
+	// shape a hand-rolled parser would get wrong, not just the easy one.
+	seeded := filepath.Join(t.TempDir(), "known_hosts")
+	keyPath := filepath.Join(t.TempDir(), "k")
+	if out, genErr := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); genErr != nil {
+		t.Skipf("ssh-keygen unavailable, so the store lookup cannot be exercised: %v: %s", genErr, out)
+	}
+	pub, readErr := os.ReadFile(keyPath + ".pub")
+	require.NoError(t, readErr)
+	require.NoError(t, os.WriteFile(seeded,
+		[]byte(fmt.Sprintf("[127.0.0.1]:%d %s\n", port, strings.TrimSpace(string(pub)))), 0o600))
+	hashOut, hashErr := exec.Command("ssh-keygen", "-q", "-H", "-f", seeded).CombinedOutput()
+	require.NoError(t, hashErr, "%s", hashOut)
+	require.NoError(t, os.Remove(seeded+".old"))
+	seededCfg := config.SSHConfig{Host: "127.0.0.1", Port: port, KnownHosts: seeded}
+
+	empty := filepath.Join(t.TempDir(), "empty_known_hosts")
+	require.NoError(t, os.WriteFile(empty, nil, 0o600))
+	emptyCfg := config.SSHConfig{Host: "127.0.0.1", Port: port, KnownHosts: empty}
+
+	cases := []struct {
+		name    string
+		cfg     config.SSHConfig
+		posture string
+		wantPin bool
+	}{
+		{"strict", emptyCfg, config.SSHHostKeyStrict, true},
+		// config defaults the posture to strict at parse time; an empty value must not
+		// silently relax, and sshHostKeyOptions fails safe the same way.
+		{"empty posture is strict", emptyCfg, "", true},
+		{"unknown posture is strict", emptyCfg, "unknown-future-posture", true},
+		{"insecure never pins", seededCfg, config.SSHHostKeyInsecure, false},
+		// The case with no verification signal at all: ssh would ADD the pinned
+		// machine's key and provision there, silently and durably.
+		{"accept-new with no entry", emptyCfg, config.SSHHostKeyAcceptNew, false},
+		// Once the host is known, accept-new refuses a CHANGED key, so a wrong pin is
+		// loud and pinning is sound again.
+		{"accept-new with the host known", seededCfg, config.SSHHostKeyAcceptNew, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pinForProvision(tc.cfg, "127.0.0.1", port, tc.posture) != ""
+			assert.Equal(t, tc.wantPin, got,
+				"%s: af may pin only where ssh would REFUSE a machine whose key it does not already trust — "+
+					"that refusal is the only thing standing between a wrong pin and a session silently "+
+					"provisioned on the wrong machine", tc.name)
+
+			// AND THE POSTURE MAPPINGS MUST AGREE. sshHostKeyOptions decides what ssh is
+			// actually told; sshPinIsCheckable decides whether af pins. A comment claiming
+			// they agree would be false the moment either moved, so the relationship is
+			// asserted: strict pins, insecure never does, accept-new follows its store.
+			_, strictOpt, optErr := sshHostKeyOptions(tc.cfg, tc.posture, "127.0.0.1")
+			require.NoError(t, optErr)
+			switch strictOpt {
+			case "yes":
+				assert.True(t, sshPinIsCheckable(tc.cfg, tc.posture), "StrictHostKeyChecking=yes refuses an unknown key")
+			case "no":
+				assert.False(t, sshPinIsCheckable(tc.cfg, tc.posture), "StrictHostKeyChecking=no verifies nothing")
+			case "accept-new":
+				assert.Equal(t, tc.wantPin, sshPinIsCheckable(tc.cfg, tc.posture),
+					"accept-new pins exactly when the store already knows the host")
+			default:
+				t.Fatalf("unexpected StrictHostKeyChecking=%s; the pin rule must be extended to cover it", strictOpt)
+			}
+		})
+	}
 }
 
 // The probe is BOUNDED, because it is the one part of this that runs in-process.

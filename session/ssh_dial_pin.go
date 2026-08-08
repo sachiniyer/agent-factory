@@ -1,16 +1,17 @@
 package session
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -81,7 +82,17 @@ var sshDialProbeTimeout = sshDialTimeout
 //
 // It lives here, as one function, so that decision is testable without a repo, a
 // config and a real sshd — see TestAnUnusableRelayBinaryFallsBackToDiallingTheName.
-func pinForProvision(host string, port int) string {
+func pinForProvision(cfg config.SSHConfig, host string, port int, posture string) string {
+	// FIRST, because it is a precondition rather than a preference, and checked
+	// before the probe so a session that cannot be pinned costs no dial at all.
+	if !sshPinIsCheckable(cfg, posture) {
+		log.InfoLog.Printf("backend=ssh: not pinning this session's address under ssh_host_key_verification=%q, "+
+			"because ssh would not refuse a host key it has not been told to expect — so a pin landing on a "+
+			"machine this host's known_hosts entry was not recorded against would be accepted silently. A host "+
+			"with several addresses can therefore still split this session across machines (#3086); point "+
+			"ssh.host at one machine, or use the default strict posture", posture)
+		return ""
+	}
 	dialAddr := resolvePinnedSSHDialAddress(host, port)
 	if dialAddr == "" {
 		return ""
@@ -95,74 +106,99 @@ func pinForProvision(host string, port int) string {
 	return dialAddr
 }
 
-// AF'S RESOLVER IS NOT NECESSARILY SSH'S, and this is the escape hatch for when
-// they disagree.
+// sshPinIsCheckable reports whether ssh will check the machine af pinned against
+// a host key it ALREADY trusts. It is the precondition for pinning at all.
 //
-// af resolves with Go's PURE resolver — af ships CGO_ENABLED=0 — which reads
-// /etc/hosts and DNS and nothing else. ssh resolves with getaddrinfo, which
-// follows nsswitch.conf. Under `hosts: ldap dns`, or sssd, or mDNS, both can
-// succeed and return DIFFERENT addresses, so af can pin somewhere ssh would never
-// have gone. The dial probe cannot detect this: it succeeded, so the fallback for
-// an unresolvable name never engages.
+// FIRST, THE THING THAT NARROWS THIS. With a ProxyCommand, ssh does not resolve
+// the name — measured in ssh.c, where the resolution site is guarded by
+// `if (addrs == NULL && options.proxy_command == NULL)`, and the only other site
+// is gated on CanonicalizeHostname, which `-F none` leaves off. The relay makes
+// the connection. So there is no live "af's resolver vs ssh's resolver"
+// disagreement during a session: every step goes where af pinned, consistently,
+// which is exactly what #3086 asked for.
 //
-// THE SEVERITY IS AVAILABILITY, NOT SECURITY, and that is what decides the fix.
-// ssh's destination is still the NAME, so a pin that lands on a different machine
-// fails CLOSED on host-key verification rather than silently using the wrong host.
-// Nothing is trusted that should not be. What happens instead is that a backend
-// which worked before af pinned anything now fails every create — the #3092 shape,
-// where a class of users loses the whole backend.
+// What remains is narrower and static: a known_hosts entry recorded EARLIER — by a
+// plain `ssh`, or a previous af session — may have been written against whichever
+// machine getaddrinfo/NSS selected, while af pins one Go's resolver selected. If
+// those differ, the pinned machine presents a key the entry does not match.
 //
-// So the pin is made NON-FATAL rather than merely documented. A create whose
-// PINNED command failed host-key verification retries ONCE unpinned, which is
-// exactly what af did before this change, and records no pinned address so the
-// teardown matches. Documenting alone would leave those users with a dead backend
-// and a manual diagnosis; this recovers automatically and says so in the log.
+// WHY THAT DECIDES WHERE AF MAY PIN. Under `strict`, ssh refuses any key it has
+// not been told to expect, so a mismatch is LOUD: the create fails before
+// authenticating, names the host, and nothing runs anywhere. Under `accept-new`
+// with an entry already present, a mismatch is loud in the same way, because
+// accept-new still refuses a CHANGED key. But under `accept-new` with NO entry for
+// the name, there is no signal at all: ssh adds whatever key the pinned machine
+// presents, the session provisions THERE, and the name is now bound to that
+// machine's key — silent, and durable, since the intended host then looks changed
+// forever. `insecure` verifies nothing, so it has no signal either.
 //
-// TWO GUARDS, both necessary:
+// So af pins only where a wrong pin would be refused. That is a precondition, not
+// a preference: it is what makes "a wrong pin fails closed" true by construction
+// rather than a claim that happens to hold for one posture.
 //
-//   - sessionDir must be EMPTY. It is set by the first provision step, so an empty
-//     one proves no remote state exists yet and re-provisioning cannot orphan a
-//     workspace. Re-provisioning after anything was created is precisely the leak
-//     #3086 exists to prevent, so this is a hard precondition rather than an
-//     optimisation.
-//   - A CHANGED host key is excluded. `REMOTE HOST IDENTIFICATION HAS CHANGED` is a
-//     security signal that deserves to surface immediately; retrying would only
-//     delay it, since the unpinned attempt verifies the same name against the same
-//     store and fails the same way.
-func shouldRetryProvisionUnpinned(dialAddr, sessionDir string, err error) bool {
-	if strings.TrimSpace(dialAddr) == "" {
-		return false // never pinned; there is nothing to retry differently
+// AN EARLIER ATTEMPT INFERRED THIS FROM AN ERROR instead — retry unpinned when the
+// create failed host-key verification — and it could not work. The error channel is
+// overloaded (a changed key means both "wrong machine" and "genuine key change")
+// and sometimes silent (accept-new with no entry produces no error at all, which is
+// precisely the case with the worst consequence). It was deleted rather than given
+// a third condition.
+func sshPinIsCheckable(cfg config.SSHConfig, posture string) bool {
+	switch posture {
+	case config.SSHHostKeyInsecure:
+		return false
+	case config.SSHHostKeyAcceptNew:
+		return acceptNewStoreKnowsHost(cfg)
+	default:
+		// strict, and any unrecognised value — sshHostKeyOptions fails safe to strict,
+		// and TestPinningFollowsTheVerifyingPostureExactly asserts the two agree rather
+		// than a comment claiming they do.
+		return true
 	}
-	if sessionDir != "" {
-		return false // remote state exists — see the guard note above
-	}
-	return sshHostKeyVerificationFailed(err)
 }
 
-// sshHostKeyVerificationFailed reports ssh's own pre-authentication refusal.
+// acceptNewStoreKnowsHost reports whether the accept-new store already holds a key
+// for this host, which is what turns a wrong pin from silent into refused.
 //
-// The marker is ssh's, not af's: OpenSSH prints `Host key verification failed.`
-// from a fatal() in sshconnect.c and does not localise its diagnostics, so the
-// string is stable across the releases this backend supports. It arrives on
-// STDERR, which for the non-combined steps lands in exec.ExitError.Stderr rather
-// than in the error's own text — so both are searched.
+// It asks `ssh-keygen -F`, and does not parse known_hosts itself, because the file
+// may be HASHED — Debian and Ubuntu ship HashKnownHosts=yes — and a hand-rolled
+// parser would have to reproduce the HMAC-SHA1 keying, plus @cert-authority,
+// @revoked and wildcard lines, to reach the same answer. Measured: `ssh-keygen -F`
+// resolves plain and hashed entries alike and distinguishes the `[host]:port` key
+// form that a non-default port requires.
 //
-// It is also, usefully, a PRE-AUTH failure: no remote command has run, which is
-// the same fact sessionDir being empty records independently.
-func sshHostKeyVerificationFailed(err error) bool {
-	if err == nil {
+// ANY DOUBT MEANS NO PIN. A missing ssh-keygen, an unreadable store, a non-zero
+// exit: all answer "not known", so af declines to pin rather than pinning without
+// the check that makes it safe. ssh-keygen ships beside ssh on Debian/Ubuntu but is
+// a separate package on Alpine, so its absence is a real case and must degrade
+// rather than break — the same rule the relay binary follows.
+func acceptNewStoreKnowsHost(cfg config.SSHConfig) bool {
+	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
+	if err != nil {
 		return false
 	}
-	text := err.Error()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		text += "\n" + string(exitErr.Stderr)
+	if port == 0 {
+		port = sshDefaultPort
 	}
-	if strings.Contains(text, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+	store, err := acceptNewKnownHostsPathFor(cfg)
+	if err != nil {
 		return false
 	}
-	return strings.Contains(text, "Host key verification failed")
+	bin, err := lookPath("ssh-keygen")
+	if err != nil {
+		log.InfoLog.Printf("backend=ssh: ssh-keygen is not on PATH, so af cannot tell whether %q is already in "+
+			"the accept-new host-key store; not pinning this session's address (#3086)", host)
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sshKnownHostsLookupTimeout)
+	defer cancel()
+	// -F searches, and exits non-zero when the host is absent.
+	return exec.CommandContext(ctx, bin, "-F", knownHostsLookupName(host, port), "-f", store).Run() == nil
 }
+
+// sshKnownHostsLookupTimeout bounds the one `ssh-keygen -F`. It reads a local file,
+// so this is a stuck-filesystem guard rather than a network one — but it runs
+// in-process during a create, which carries no context of its own.
+const sshKnownHostsLookupTimeout = 10 * time.Second
 
 // verifySSHRelayBinary reports whether af can actually run itself as the
 // ProxyCommand relay.
