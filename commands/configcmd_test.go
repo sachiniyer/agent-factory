@@ -197,6 +197,15 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	if got := getOut.String(); got != "\n" {
 		t.Fatalf("config get changed its empty-value output to %q", got)
 	}
+
+	configPath := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), config.TomlConfigFileName)
+	invalidPattern := "schema_version = 1\n[limit_patterns]\nclaude = '('\n"
+	if err := os.WriteFile(configPath, []byte(invalidPattern), 0644); err != nil {
+		t.Fatalf("write config with ignored pattern: %v", err)
+	}
+	if got := valueFor(list(), "limit_patterns"); got != "(unset)" {
+		t.Fatalf("ignored nonempty limit_patterns = %q, want (unset)", got)
+	}
 }
 
 // configEntriesInternalKeys are the toml-tagged config.Config fields that are

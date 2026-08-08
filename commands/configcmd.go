@@ -209,8 +209,17 @@ func isEmptyConfigValue(value any) bool {
 
 func configEntryFromResolvedValue(value config.ResolvedValue) configEntry {
 	entry := configEntry{Key: value.Key, Value: value.Value}
+	if value.Winner != nil && value.Winner.Layer != config.SourceBuiltIn.String() {
+		entry.configured = true
+		return entry
+	}
+
+	// Empty composites have no leaf origin or winner. Their candidate result
+	// still distinguishes an intentionally empty/replacing value from a
+	// nonempty value that validation discarded as "ignored".
 	for _, candidate := range value.Candidates {
-		if candidate.Layer != config.SourceBuiltIn.String() && candidate.Allowed && candidate.Present {
+		if candidate.Layer != config.SourceBuiltIn.String() && candidate.Allowed && candidate.Present &&
+			(candidate.Result == "empty" || candidate.Result == "replaced") {
 			entry.configured = true
 			break
 		}
