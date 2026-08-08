@@ -213,16 +213,21 @@ func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k]
 // including a refreshed token, land in the operator's real registry rather than
 // in a copy that teardown deletes.
 //
-// A COPY IS NOT A MOUNT, and that — not placement — is why ssh, sandbox and hook
-// answer false. NOT "every off-box kind": docker is off-box too
-// (backendProvisionsOffBox) and answers TRUE, so off-box is the wrong axis to
-// reason on here.
+// WHAT MAKES DOCKER DIFFERENT IS THE MOUNT, and it is the only mechanism af
+// currently has that returns the agent's writes to the operator's real registry.
+// ssh, sandbox and hook answer false because af cannot establish that write-back
+// for them — NOT because a copy is the only thing they could ever do. hook's
+// launch_cmd may provision anything and only has to hand back an agent-server
+// endpoint, so it could use shared storage or even run on the daemon host; a
+// mount-like transport for ssh or sandbox would qualify too. What is missing is
+// the guarantee, not the possibility (#3103 review).
 //
-// All three can place a directory — sandboxProvisioner.provision creates the
+// Nor is this "every off-box kind": docker is off-box (backendProvisionsOffBox)
+// and answers TRUE, so off-box is the wrong axis to reason on here.
+//
+// Placement is not the axis either — sandboxProvisioner.provision creates the
 // session dir and streams af's binary into it, and the provision-hook path reuses
-// that provisioner. What none of them has is a way to get the agent's WRITES
-// back. hook's launch_cmd additionally leaves placement to the operator, which
-// changes the explanation and not the answer. See offBoxAccountRefusal.
+// that provisioner. See offBoxAccountRefusal.
 //
 // Because a kind that answers FALSE promises nothing, a per-KIND answer is safe
 // here even for hook, whose modes differ from one another — the objection to a

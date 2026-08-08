@@ -180,3 +180,31 @@ func TestCarriesAccountContractIsStatedAsWriteBack(t *testing.T) {
 	assert.NotContains(t, contract, "reports whether this kind's provisioner can place a registered",
 		"the placement phrasing invites a copy-only backend to answer true")
 }
+
+// The refusal must not present COPYING as unavoidable (#3103 review). hook's
+// launch_cmd may provision anything and only has to return an agent-server
+// endpoint — it could use shared storage, or run on the daemon host — and a
+// mount-like transport for ssh or sandbox would qualify too. What af lacks is the
+// GUARANTEE of write-back, not the possibility of some mechanism providing it.
+//
+// This is the ninth finding in the same class on this change, and they all share
+// a shape: the message asserted something af had not established. So the test
+// asserts the absence of the over-claim rather than a particular phrasing.
+func TestRefusalDoesNotPresentCopyingAsUnavoidable(t *testing.T) {
+	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
+		err := refuseOffBoxAccount(InstanceOptions{Account: "work", Backend: kind})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot establish that those writes come back",
+			"%s must refuse on the missing GUARANTEE, which is the part af can state", kind)
+	}
+
+	src, err := os.ReadFile("runtime.go")
+	require.NoError(t, err)
+	i := strings.Index(string(src), "// CarriesAccount reports whether")
+	require.GreaterOrEqual(t, i, 0)
+	rationale := string(src)[i:min(i+1800, len(string(src)))]
+	assert.NotContains(t, rationale, "every off-box kind",
+		"docker is off-box and answers TRUE, so off-box is the wrong axis")
+	assert.Contains(t, rationale, "not because a copy is the only thing they could ever do",
+		"a future mount-like transport or a launch_cmd using shared storage would qualify")
+}
