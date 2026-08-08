@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const autoGate = require("./auto-gate.js");
 const { __test } = autoGate;
@@ -6,6 +8,269 @@ const { __test } = autoGate;
 const HEAD_SHA = "0a5393dd71ddbbf66486d31939728f9947c843bb";
 const OTHER_SHA = "da0a05ea3b9036a12f67a3b3877d16dd0dac893d";
 const ACTIONS_APP_ID = 15368;
+const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
+
+test("Auto Gate can be recovered manually by PR number", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const helper = fs.readFileSync(path.join(__dirname, "auto-gate.js"), "utf8");
+
+  assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
+  assert.match(
+    workflow,
+    /pull_request:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled\]/,
+  );
+  assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
+  assert.match(
+    workflow,
+    /targets: \$\{\{ steps\.evaluate\.outputs\.targets \}\}/,
+  );
+  assert.match(
+    workflow,
+    /concurrency:\s+group: auto-gate-\$\{\{ matrix\.target\.decision_key \}\}\s+cancel-in-progress: false/,
+  );
+  assert.match(workflow, /decision_key: target\.decisionKey/);
+  assert.match(workflow, /strategy:\s+fail-fast: false\s+matrix:\s+target:/);
+  assert.match(workflow, /EXPECTED_HEAD_SHA: \$\{\{ matrix\.target\.head_sha \}\}/);
+  assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
+  assert.match(workflow, /prNumber: explicitPrNumber/);
+  assert.match(
+    workflow,
+    /- name: Report gate decision[\s\S]*?github-token: \$\{\{ github\.token \}\}/,
+  );
+  assert.match(workflow, /const result = await autoGate\.evaluate\(/);
+  assert.match(
+    workflow,
+    /if \(typeof autoGate\.reportDecision === "function"\)/,
+  );
+  assert.match(workflow, /typeof autoGate\.resolveTargets === "function"/);
+  assert.match(workflow, /context\.eventName === "workflow_dispatch" && targets\.length === 0/);
+  assert.match(workflow, /evaluationFailed = result\.reasons\.some/);
+  assert.match(workflow, /core\.setOutput\("targets", "\[\]"\)/);
+  assert.match(workflow, /core\.setOutput\("targets", "\[\]"\);\s+throw error;/);
+  assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
+});
+
+test("manual recovery reports a previously absent gate distinctly", async () => {
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  const result = {
+    prNumber: "1465",
+    headSha: HEAD_SHA,
+    shouldMerge: false,
+    summary: "BLOCKED: waiting on review",
+  };
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: true,
+  });
+
+  assert.equal(report.state, "never-ran");
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.match(github.createdChecks[0].output.title, /^NEVER_RAN:/);
+});
+
+test("an evaluated but blocked gate reports WAITING rather than NEVER_RAN", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        id: 321,
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "failure",
+      }),
+    ],
+  });
+  const result = {
+    prNumber: "1465",
+    headSha: HEAD_SHA,
+    shouldMerge: false,
+    summary: "BLOCKED: waiting on review",
+  };
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(report.state, "waiting");
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(github.updatedChecks[0].check_run_id, 321);
+  assert.match(github.updatedChecks[0].output.title, /^WAITING:/);
+});
+
+test("a read-only fork token leaves the decision unreported without failing the gate", async () => {
+  const error = new Error("Resource not accessible by integration");
+  error.status = 403;
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns(), checkWriteError: error });
+  const warnings = [];
+  const core = { ...fakeCore(), warning: (message) => warnings.push(message) };
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext({ pull_request: { head: { repo: { fork: true } } } }),
+    core,
+    result: {
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      baseRefName: "master",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: author is not an allowed maintainer/app",
+    },
+  });
+
+  assert.equal(report.state, "read-only");
+  assert.equal(github.createdChecks.length, 0);
+  assert.match(warnings.join("\n"), /could not publish.*read-only token/i);
+
+  const baseGithub = fakeGateGithub({ checkRuns: happyCheckRuns(), checkWriteError: error });
+  await assert.rejects(
+    autoGate.reportDecision({
+      github: baseGithub,
+      context: fakeContext(),
+      core: fakeCore(),
+      result: {
+        prNumber: 1465,
+        headSha: HEAD_SHA,
+        baseRefName: "master",
+        isOpen: true,
+        shouldMerge: false,
+        summary: "BLOCKED: waiting",
+      },
+    }),
+    /Resource not accessible by integration/,
+  );
+});
+
+test("a PR cannot read another PR's decision when both share one head", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    pullRequestsByNumber: {
+      1465: { headRefOid: HEAD_SHA },
+      2048: { headRefOid: HEAD_SHA },
+    },
+    checkRuns: [
+      ...happyCheckRuns(),
+      {
+        ...checkRun({
+          id: 321,
+          name: decisionName(1465, HEAD_SHA),
+          externalId: decisionExternalId(1465, HEAD_SHA),
+          conclusion: "success",
+        }),
+        output: { title: "PASS: PR #1465 requirements are satisfied" },
+      },
+    ],
+  });
+
+  const targets = await autoGate.resolveTargets({
+    github,
+    context: fakeContext({ sha: HEAD_SHA }),
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets, [
+    { prNumber: 1465, headSha: HEAD_SHA, decisionKey: decisionKey(1465, HEAD_SHA) },
+    { prNumber: 2048, headSha: HEAD_SHA, decisionKey: decisionKey(2048, HEAD_SHA) },
+  ]);
+
+  await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "2048",
+      headSha: HEAD_SHA,
+      baseRefName: "master",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: 1 unresolved live Codex inline finding",
+    },
+  });
+
+  assert.equal(github.updatedChecks.length, 0);
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(
+    github.createdChecks[0].name,
+    decisionName(2048, HEAD_SHA),
+  );
+  assert.equal(github.createdChecks[0].external_id, decisionExternalId(2048, HEAD_SHA));
+});
+
+test("the queued legacy evaluator keeps resolved PR numbers numeric", async () => {
+  const github = fakeGateGithub();
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    assert.equal(typeof variables.number, "number");
+    return graphql(query, variables);
+  };
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext({ sha: HEAD_SHA }),
+    core: fakeCore(),
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("a queued evaluation cannot overwrite PASS after the PR merges", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ id: 321, name: "Auto Gate decision", conclusion: "success" }),
+    ],
+  });
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "1465",
+      headSha: HEAD_SHA,
+      isOpen: false,
+      shouldMerge: false,
+      summary: "BLOCKED: PR is already merged, not open",
+    },
+  });
+
+  assert.equal(report.state, "closed");
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(github.updatedChecks.length, 0);
+});
+
+test("a non-master PR event cannot overwrite a master decision on the same commit", async () => {
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "1465",
+      headSha: HEAD_SHA,
+      baseRefName: "release",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: base branch is release, not master",
+    },
+  });
+
+  assert.equal(report.state, "ineligible");
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(github.updatedChecks.length, 0);
+});
 
 test("required check matching respects the required source app", () => {
   const spec = { context: "Build", sourceAppId: ACTIONS_APP_ID };
@@ -40,6 +305,71 @@ test("an absent required check blocks the gate", async () => {
 
   assert.equal(result.shouldMerge, false);
   assert.match(result.reasons.join("\n"), /required check Lint.*missing/);
+});
+
+test("the synthetic decision check is not its own prerequisite", async () => {
+  const result = await evaluateGate({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ name: decisionName(1465, HEAD_SHA), conclusion: "failure" }),
+    ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: decisionName(1465, HEAD_SHA), integration_id: ACTIONS_APP_ID },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("a same-named decision check from another app remains required", async () => {
+  const result = await evaluateGate({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ name: "Auto Gate decision", conclusion: "failure" }),
+    ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Auto Gate decision", integration_id: 999 },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(
+    result.reasons.join("\n"),
+    /required check Auto Gate decision \(app 999\).*missing/,
+  );
+});
+
+test("a source-less synthetic decision is not its own prerequisite", async () => {
+  const result = await evaluateGate({
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Auto Gate decision" },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
+});
+
+test("a source-less legacy duplicate does not deadlock an app-bound decision requirement", async () => {
+  const result = await evaluateGate({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({ name: "Auto Gate decision", conclusion: "failure" }),
+    ],
+    requiredChecks: [
+      { context: "Lint", integration_id: ACTIONS_APP_ID },
+      { context: "Build", integration_id: ACTIONS_APP_ID },
+      { context: "Auto Gate decision" },
+      { context: "Auto Gate decision", integration_id: ACTIONS_APP_ID },
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
 });
 
 test("terminal non-success conclusions never verify a required check", () => {
@@ -255,6 +585,49 @@ test("the happy path squash-merges the exact evaluated head", async () => {
   assert.equal(github.mergedWith.merge_method, "squash");
 });
 
+test("merge reevaluates fresh instead of trusting a stale PASS decision", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+    }),
+    /gate no longer passes.*unresolved live Codex inline finding/,
+  );
+
+  assert.equal(github.reviewCommentReads, 1, "merge must read current finding state");
+  assert.equal(github.mergedWith, null);
+});
+
+test("merge refuses a head that escaped its serialized decision lane", async () => {
+  const github = fakeGateGithub();
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+      expectedHeadSha: OTHER_SHA,
+    }),
+    /serialized head.*does not match evaluated head/,
+  );
+  assert.equal(github.mergedWith, null);
+});
+
 test("draft and closed pull requests cannot merge", async () => {
   const draft = await evaluateGate({ isDraft: true });
   assert.equal(draft.shouldMerge, false);
@@ -372,10 +745,15 @@ function fakeGateGithub({
   reviews = [],
   reviewComments = [],
   files = [],
+  associatedPullRequests = [
+    { number: 1465, state: "open", base: { ref: "master" }, head: { sha: headSha } },
+  ],
   requiredChecks = [
     { context: "Lint", integration_id: ACTIONS_APP_ID },
     { context: "Build", integration_id: ACTIONS_APP_ID },
   ],
+  pullRequestsByNumber = {},
+  checkWriteError = null,
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -383,9 +761,24 @@ function fakeGateGithub({
   const listComments = function listComments() {};
   const listReviews = function listReviews() {};
   const listReviewComments = function listReviewComments() {};
+  const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
   const merge = async function merge(options) {
     github.mergedWith = options;
     return { data: { sha: "merge-sha" } };
+  };
+  const createCheck = async function createCheck(options) {
+    if (checkWriteError) {
+      throw checkWriteError;
+    }
+    github.createdChecks.push(options);
+    return { data: options };
+  };
+  const updateCheck = async function updateCheck(options) {
+    if (checkWriteError) {
+      throw checkWriteError;
+    }
+    github.updatedChecks.push(options);
+    return { data: options };
   };
   const responses = new Map([
     [listFiles, files.map((filename) => ({ filename }))],
@@ -394,39 +787,51 @@ function fakeGateGithub({
     [listComments, issueComments],
     [listReviews, reviews],
     [listReviewComments, reviewComments],
+    [listPullRequestsAssociatedWithCommit, associatedPullRequests],
   ]);
 
   const github = {
     mergedWith: null,
+    reviewCommentReads: 0,
+    createdChecks: [],
+    updatedChecks: [],
     rest: {
       actions: { createWorkflowDispatch: async () => {} },
-      checks: { listForRef },
+      checks: { create: createCheck, listForRef, update: updateCheck },
       issues: { listComments },
-      repos: { listCommitStatusesForRef },
+      repos: { listCommitStatusesForRef, listPullRequestsAssociatedWithCommit },
       pulls: { listFiles, listReviews, listReviewComments, merge },
     },
-    graphql: async () => ({
-      repository: {
-        pullRequest: {
-          number: 1465,
-          title: "Gate test",
-          url: "https://example.invalid/pr/1465",
-          baseRefName: "master",
-          headRefOid: headSha,
-          isDraft,
-          state,
-          merged,
-          mergeable,
-          mergeStateStatus,
-          author: { login: "sachiniyer" },
-          labels: { nodes: [] },
-          commits: {
-            nodes: [{ commit: { committedDate: headCommittedDate } }],
+    graphql: async (_query, variables) => {
+      const pullRequestOverride = pullRequestsByNumber[variables.number] || {};
+      return {
+        repository: {
+          pullRequest: {
+            number: variables.number,
+            title: "Gate test",
+            url: "https://example.invalid/pr/1465",
+            baseRefName: "master",
+            headRefOid: pullRequestOverride.headRefOid || headSha,
+            isDraft,
+            state,
+            merged,
+            mergeable,
+            mergeStateStatus,
+            author: { login: "sachiniyer" },
+            labels: { nodes: [] },
+            commits: {
+              nodes: [{ commit: { committedDate: headCommittedDate } }],
+            },
           },
         },
-      },
-    }),
-    paginate: async (fn) => responses.get(fn) || [],
+      };
+    },
+    paginate: async (fn) => {
+      if (fn === listReviewComments) {
+        github.reviewCommentReads += 1;
+      }
+      return responses.get(fn) || [];
+    },
     request: async (route) => {
       if (route.includes("/rules/branches/")) {
         return {
@@ -487,14 +892,18 @@ function requiredSuccessRuns() {
 }
 
 function checkRun({
+  id = 100,
   name,
   status = "completed",
   conclusion,
   appId = ACTIONS_APP_ID,
   appSlug = "github-actions",
+  externalId = null,
 }) {
   return {
+    id,
     name,
+    external_id: externalId,
     app: { id: appId, slug: appSlug },
     status,
     conclusion,
@@ -502,6 +911,18 @@ function checkRun({
     started_at: "2026-07-09T01:06:00Z",
     completed_at: status === "completed" ? "2026-07-09T01:10:00Z" : null,
   };
+}
+
+function decisionName(prNumber, headSha) {
+  return `Auto Gate decision / PR #${prNumber} / ${headSha}`;
+}
+
+function decisionExternalId(prNumber, headSha) {
+  return `auto-gate:pr:${prNumber}:head:${headSha}`;
+}
+
+function decisionKey(prNumber, headSha) {
+  return `pr-${prNumber}-head-${headSha}`;
 }
 
 function codexVerdict(sha, timestamp = "2026-07-09T01:20:00Z") {

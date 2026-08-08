@@ -1,6 +1,12 @@
 name: Auto Gate
 
 on:
+  # These events cover every input read by evaluate(): required checks,
+  # reviews/findings, labels, base, draft/state, and head. Repository-ruleset
+  # changes and mergeability changes caused only by master advancing are not
+  # evented here. workflow_dispatch repairs stale observational state, and this
+  # is safe for Auto Gate because merge() always performs a fresh full
+  # evaluation immediately before its destructive write.
   check_suite:
     types: [completed]
   issue_comment:
@@ -9,37 +15,32 @@ on:
   pull_request_review_comment:
     types: [created, edited, deleted]
   pull_request:
-    types: [labeled]
+    types: [opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled]
   status:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to evaluate
+        required: true
+        type: number
 
 permissions:
   contents: write
   pull-requests: write
   actions: write
-  checks: read
+  checks: write
   statuses: read
   issues: write
-
-concurrency:
-  group: auto-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.check_suite.pull_requests[0].number || github.event.check_suite.head_sha || github.event.sha || github.run_id }}
-  cancel-in-progress: false
 
 jobs:
   auto-gate:
     name: Evaluate auto-merge gate
     runs-on: ubuntu-latest
-    # Late review comments on a merged/closed PR keep re-triggering the gate
-    # against a stale head (#1876). Drafts are never merge-eligible, so review
-    # traffic on a held-open draft is pure evaluation waste (#1907) — the helper
-    # blocks them anyway, this just skips before the checkout and API calls.
-    # check_suite/status events resolve the PR by head SHA and already filter to
-    # open PRs. issue_comment events are limited to comments on open PRs here.
-    # The helper's own state/draft checks remain the backstop for every event.
-    if: >-
-      (github.event_name != 'issue_comment' ||
-       (github.event.issue.pull_request != null && github.event.issue.state == 'open')) &&
-      (github.event.pull_request == null ||
-       (github.event.pull_request.state == 'open' && github.event.pull_request.draft != true))
+    outputs:
+      targets: ${{ steps.evaluate.outputs.targets }}
+    # One resolver handles every subscribed input change. It does not branch on
+    # activity type: PR/review/comment events identify a PR, while check/status
+    # events identify every exact (PR, head) pair associated with their SHA.
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6
@@ -49,6 +50,8 @@ jobs:
       - name: Evaluate gate
         id: evaluate
         uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || '' }}
         with:
           github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
           script: |
@@ -59,43 +62,170 @@ jobs:
             if (!fs.existsSync(helperPath)) {
               const summary = "BLOCKED: auto-gate helper is not present on the default branch yet.";
               core.notice(summary);
-              core.setOutput("pr_number", "");
-              core.setOutput("should_merge", "false");
-              core.setOutput("docs_changed", "false");
-              core.setOutput("summary", summary);
+              core.setOutput("targets", "[]");
+              if (context.eventName === "workflow_dispatch") {
+                throw new Error(summary);
+              }
               return;
             }
 
             try {
               const autoGate = require(helperPath);
-              await autoGate.evaluate({ github, context, core });
+              const rawPrNumber = process.env.PR_NUMBER.trim();
+              const explicitPrNumber = rawPrNumber ? Number(rawPrNumber) : undefined;
+              if (
+                rawPrNumber &&
+                (!Number.isSafeInteger(explicitPrNumber) || explicitPrNumber <= 0)
+              ) {
+                throw new Error(`Invalid PR number: ${rawPrNumber}`);
+              }
+              let targets;
+              if (typeof autoGate.resolveTargets === "function") {
+                targets = await autoGate.resolveTargets({
+                  github,
+                  context,
+                  core,
+                  prNumber: explicitPrNumber,
+                });
+              } else {
+                // The workflow file takes effect before its default-branch helper
+                // on the landing run. Preserve one-target behavior for that run.
+                const result = await autoGate.evaluate({
+                  github,
+                  context,
+                  core,
+                  prNumber: explicitPrNumber,
+                });
+                const evaluationFailed = result.reasons.some((reason) =>
+                  reason.startsWith("auto-gate evaluation error:"),
+                );
+                if (evaluationFailed) {
+                  const failure = new Error(result.summary);
+                  failure.failWorkflow = true;
+                  throw failure;
+                }
+                targets = result.headSha
+                  ? [{
+                      prNumber: result.prNumber,
+                      headSha: result.headSha,
+                      decisionKey: `pr-${result.prNumber}-head-${result.headSha}`,
+                    }]
+                  : [];
+              }
+              core.setOutput(
+                "targets",
+                JSON.stringify(
+                  targets.map((target) => ({
+                    pr_number: target.prNumber,
+                    head_sha: target.headSha,
+                    decision_key: target.decisionKey,
+                  })),
+                ),
+              );
+              if (context.eventName === "workflow_dispatch" && targets.length === 0) {
+                const failure = new Error("No pull-request head was resolved for manual recovery.");
+                failure.failWorkflow = true;
+                throw failure;
+              }
             } catch (error) {
               const message = error && error.message ? error.message : String(error);
               const summary = `BLOCKED: auto-gate evaluation error: ${message}`;
               core.warning(error && error.stack ? error.stack : message);
               core.notice(summary);
-              core.setOutput("pr_number", "");
+              core.setOutput("targets", "[]");
+              throw error;
+            }
+
+  apply-gate:
+    name: Apply auto-merge gate
+    needs: auto-gate
+    if: >-
+      needs.auto-gate.result == 'success' &&
+      needs.auto-gate.outputs.targets != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.auto-gate.outputs.targets) }}
+    # Decision identity is the pair, never the commit alone. Two PRs may point
+    # at the same commit without sharing a check or serialization lane.
+    concurrency:
+      group: auto-gate-${{ matrix.target.decision_key }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Report gate decision
+        id: decision
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ matrix.target.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ matrix.target.head_sha }}
+        with:
+          # Check runs require an App installation token. Keep this separate
+          # from the optional maintainer token used by the existing merge path.
+          github-token: ${{ github.token }}
+          script: |
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            const autoGate = require(helperPath);
+            const result = await autoGate.evaluate({
+              github,
+              context,
+              core,
+              prNumber: Number(process.env.PR_NUMBER),
+              setOutputs: false,
+            });
+            if (!result.headSha) {
+              throw new Error(result.summary);
+            }
+            if (result.headSha !== process.env.EXPECTED_HEAD_SHA) {
+              core.notice(
+                `Skipping stale target for PR #${process.env.PR_NUMBER}: serialized head ` +
+                  `${process.env.EXPECTED_HEAD_SHA}, current head ${result.headSha}.`,
+              );
               core.setOutput("should_merge", "false");
               core.setOutput("docs_changed", "false");
-              core.setOutput("summary", summary);
+              core.setOutput("summary", "BLOCKED: pull-request head changed before serialized evaluation");
+              return;
+            }
+            core.setOutput("pr_number", result.prNumber);
+            core.setOutput("should_merge", result.shouldMerge ? "true" : "false");
+            core.setOutput("head_sha", result.headSha);
+            core.setOutput("docs_changed", result.docsChanged ? "true" : "false");
+            core.setOutput("summary", result.summary);
+            if (typeof autoGate.reportDecision === "function") {
+              await autoGate.reportDecision({
+                github,
+                context,
+                core,
+                result,
+                manual: context.eventName === "workflow_dispatch",
+              });
+            } else {
+              core.notice("Decision reporting activates after this workflow lands on master.");
             }
 
       - name: Report disabled merge
-        if: steps.evaluate.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED != 'true'
+        if: steps.decision.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED != 'true'
         env:
-          PR_NUMBER: ${{ steps.evaluate.outputs.pr_number }}
-          DOCS_CHANGED: ${{ steps.evaluate.outputs.docs_changed }}
-          SUMMARY: ${{ steps.evaluate.outputs.summary }}
+          PR_NUMBER: ${{ matrix.target.pr_number }}
+          DOCS_CHANGED: ${{ steps.decision.outputs.docs_changed }}
+          SUMMARY: ${{ steps.decision.outputs.summary }}
         run: |
           echo "::notice::AUTO_GATE_ENABLED is not true; would squash-merge PR #${PR_NUMBER}."
           echo "::notice::Docs workflow dispatch after merge: ${DOCS_CHANGED}."
           printf '%s\n' "$SUMMARY"
 
       - name: Squash merge PR
-        if: steps.evaluate.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED == 'true'
+        if: steps.decision.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED == 'true'
         uses: actions/github-script@v8
         env:
-          PR_NUMBER: ${{ steps.evaluate.outputs.pr_number }}
+          PR_NUMBER: ${{ matrix.target.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ matrix.target.head_sha }}
         with:
           github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
           script: |
@@ -107,4 +237,5 @@ jobs:
               context,
               core,
               prNumber: Number(process.env.PR_NUMBER),
+              expectedHeadSha: process.env.EXPECTED_HEAD_SHA,
             });

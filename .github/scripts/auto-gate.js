@@ -1,6 +1,12 @@
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
+// GitHub check runs live on commits, but the gate evidence is PR-scoped. The
+// full (PR, head) pair is therefore part of every decision identifier. These
+// checks are observability records; a future required-check policy needs a
+// separate static aggregate because rulesets cannot require dynamic names.
+const AUTO_GATE_DECISION_CHECK = "Auto Gate decision";
+const GITHUB_ACTIONS_APP_ID = 15368;
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
@@ -24,6 +30,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
     return finish(core, setOutputs, {
       prNumber: prNumber ? String(prNumber) : "",
       shouldMerge: false,
+      isOpen: false,
       docsChanged: false,
       reasons: [`auto-gate evaluation error: ${message}`],
       notes: [],
@@ -38,6 +45,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     return finish(core, setOutputs, {
       prNumber: "",
       shouldMerge: false,
+      isOpen: false,
       docsChanged: false,
       reasons: ["No open pull request found for this event."],
       notes: [],
@@ -122,6 +130,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
     shouldMerge: reasons.length === 0,
+    isOpen: pr.state === "OPEN" && !pr.merged,
+    baseRefName: pr.baseRefName,
     headSha: pr.headRefOid,
     docsChanged,
     reasons,
@@ -129,7 +139,117 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   });
 }
 
-async function merge({ github, context, core, prNumber }) {
+async function reportDecision({ github, context, core, result, manual = false }) {
+  if (!result?.headSha || !result.prNumber) {
+    core.info("Auto Gate decision was not reported because no pull-request head was resolved.");
+    return { state: "unreported", priorDecision: false };
+  }
+  if (result.isOpen === false) {
+    core.notice(`Leaving the existing Auto Gate decision unchanged for closed PR #${result.prNumber}.`);
+    return { state: "closed", priorDecision: false };
+  }
+  if (result.baseRefName && result.baseRefName !== "master") {
+    core.notice(
+      `Auto Gate decision was not reported for PR #${result.prNumber} because its base is ` +
+        `${result.baseRefName}, not master.`,
+    );
+    return { state: "ineligible", priorDecision: false };
+  }
+
+  const identity = decisionIdentity(result.prNumber, result.headSha);
+  const { owner, repo } = context.repo;
+  const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+    owner,
+    repo,
+    ref: result.headSha,
+    per_page: 100,
+  });
+  const priorDecision = checkRuns
+    .filter(
+      (run) =>
+        run.name === identity.checkName &&
+        run.external_id === identity.externalId &&
+        run.app?.id === GITHUB_ACTIONS_APP_ID,
+    )
+    .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+  const state =
+    manual && !priorDecision ? "never-ran" : result.shouldMerge ? "pass" : "waiting";
+  const title =
+    state === "never-ran"
+      ? `NEVER_RAN: no prior decision; recovery ${result.shouldMerge ? "passed" : "is waiting"}`
+      : result.shouldMerge
+        ? "PASS: Auto Gate requirements are satisfied"
+        : "WAITING: Auto Gate requirements are not yet satisfied";
+
+  const decision = {
+    status: "completed",
+    conclusion: result.shouldMerge ? "success" : "failure",
+    output: {
+      title,
+      summary: result.summary,
+    },
+  };
+  try {
+    if (priorDecision) {
+      await github.rest.checks.update({
+        owner,
+        repo,
+        check_run_id: priorDecision.id,
+        ...decision,
+      });
+    } else {
+      await github.rest.checks.create({
+        owner,
+        repo,
+        head_sha: result.headSha,
+        name: identity.checkName,
+        external_id: identity.externalId,
+        ...decision,
+      });
+    }
+  } catch (error) {
+    // pull_request-family events from forks can receive a read-only GITHUB_TOKEN
+    // even though this workflow requests checks: write. Leave absence observable
+    // and recoverable by a base-repository workflow_dispatch; other write errors
+    // remain fatal so a repository permission regression cannot pass silently.
+    if (!isReadOnlyForkCheckError(error, context)) {
+      throw error;
+    }
+    core.warning(
+      `Auto Gate could not publish the decision for fork PR #${result.prNumber} with its ` +
+        "read-only token; run workflow_dispatch from the base repository to recover it.",
+    );
+    return { state: "read-only", priorDecision: Boolean(priorDecision) };
+  }
+  core.notice(`${title} for PR #${result.prNumber}.`);
+  return { state, priorDecision: Boolean(priorDecision) };
+}
+
+function isReadOnlyForkCheckError(error, context) {
+  return (
+    error?.status === 403 &&
+    /Resource not accessible by integration/i.test(error.message || "") &&
+    context.payload.pull_request?.head?.repo?.fork === true
+  );
+}
+
+function decisionIdentity(prNumber, headSha) {
+  const number = Number(prNumber);
+  const sha = String(headSha || "").toLowerCase();
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`Invalid PR number for Auto Gate decision: ${prNumber}`);
+  }
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error(`Invalid head SHA for Auto Gate decision: ${headSha}`);
+  }
+  return {
+    checkName: `${AUTO_GATE_DECISION_CHECK} / PR #${number} / ${sha}`,
+    externalId: `auto-gate:pr:${number}:head:${sha}`,
+    key: `pr-${number}-head-${sha}`,
+  };
+}
+
+async function merge({ github, context, core, prNumber, expectedHeadSha }) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
   }
@@ -140,6 +260,12 @@ async function merge({ github, context, core, prNumber }) {
   }
   if (!gate.headSha) {
     throw new Error(`Refusing to merge PR #${prNumber}; evaluated head SHA is missing`);
+  }
+  if (expectedHeadSha && gate.headSha !== expectedHeadSha) {
+    throw new Error(
+      `Refusing to merge PR #${prNumber}; serialized head ${expectedHeadSha} ` +
+        `does not match evaluated head ${gate.headSha}`,
+    );
   }
 
   const { owner, repo } = context.repo;
@@ -167,43 +293,70 @@ async function merge({ github, context, core, prNumber }) {
   }
 }
 
-async function findPullRequestNumber({ github, context, core }) {
+async function resolveTargets({ github, context, core, prNumber }) {
+  const numbers = [];
   const payload = context.payload;
 
-  if (payload.pull_request?.number) {
-    return payload.pull_request.number;
+  if (prNumber) {
+    numbers.push(prNumber);
+  } else if (payload.pull_request?.number) {
+    numbers.push(payload.pull_request.number);
+  } else if (payload.issue?.pull_request && payload.issue.number) {
+    numbers.push(payload.issue.number);
+  } else {
+    const sha = payload.check_suite?.head_sha || payload.sha;
+    if (sha) {
+      const { owner, repo } = context.repo;
+      const pulls = await github.paginate(
+        github.rest.repos.listPullRequestsAssociatedWithCommit,
+        {
+          owner,
+          repo,
+          commit_sha: sha,
+          per_page: 100,
+        },
+      );
+      numbers.push(
+        ...pulls
+          .filter(
+            (pull) =>
+              pull.state === "open" &&
+              pull.base?.ref === "master" &&
+              pull.head?.sha === sha,
+          )
+          .map((pull) => pull.number),
+      );
+    } else {
+      core.info(`Event ${context.eventName} did not identify a PR/head pair to evaluate.`);
+    }
   }
 
-  if (payload.issue?.pull_request && payload.issue.number) {
-    return payload.issue.number;
+  const sourceSha = payload.check_suite?.head_sha || payload.sha;
+  const targets = [];
+  for (const number of [...new Set(numbers.filter(Boolean))]) {
+    const pr = await getPullRequest({ github, context, number });
+    if (
+      sourceSha &&
+      (pr.state !== "OPEN" || pr.merged || pr.baseRefName !== "master" || pr.headRefOid !== sourceSha)
+    ) {
+      continue;
+    }
+    targets.push({
+      prNumber: Number(pr.number),
+      headSha: pr.headRefOid,
+      decisionKey: decisionIdentity(pr.number, pr.headRefOid).key,
+    });
   }
+  return targets;
+}
 
-  const checkSuitePrs = payload.check_suite?.pull_requests || [];
-  const checkSuitePr = checkSuitePrs.find((pr) => pr.base?.ref === "master") || checkSuitePrs[0];
-  if (checkSuitePr?.number) {
-    return checkSuitePr.number;
-  }
-
-  const sha = payload.check_suite?.head_sha || payload.sha;
-  if (!sha) {
-    core.info(`Event ${context.eventName} did not include a PR or SHA to evaluate.`);
-    return null;
-  }
-
-  const { owner, repo } = context.repo;
-  const pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
-    owner,
-    repo,
-    commit_sha: sha,
-    per_page: 100,
+async function findPullRequestNumber({ github, context, core }) {
+  const targets = await resolveTargets({
+    github,
+    context,
+    core,
   });
-
-  const openMasterPulls = pulls.filter((pr) => pr.state === "open" && pr.base?.ref === "master");
-  if (openMasterPulls.length > 1) {
-    core.warning(`Found multiple open master PRs for ${sha}; evaluating PR #${openMasterPulls[0].number}.`);
-  }
-
-  return openMasterPulls[0]?.number || null;
+  return targets[0]?.prNumber || null;
 }
 
 async function getPullRequest({ github, context, number }) {
@@ -279,9 +432,22 @@ async function listPullRequestFiles({ github, context, number }) {
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core });
-  const specs = required.specs;
+  const syntheticDecisionSpecs = required.specs.filter(
+    (spec) =>
+      isSyntheticDecisionContext(spec.context) &&
+      (!spec.sourceAppId || spec.sourceAppId === GITHUB_ACTIONS_APP_ID),
+  );
+  const specs = required.specs.filter(
+    (spec) =>
+      !isSyntheticDecisionContext(spec.context) ||
+      (spec.sourceAppId && spec.sourceAppId !== GITHUB_ACTIONS_APP_ID),
+  );
   const notes = [];
   const reasons = [...required.errors];
+
+  if (syntheticDecisionSpecs.length > 0) {
+    notes.push("Synthetic Auto Gate decisions are excluded from their own prerequisites");
+  }
 
   if (specs.length === 0) {
     notes.push("No required status checks configured for branch");
@@ -318,6 +484,13 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   }
 
   return { ok: reasons.length === 0, reasons, notes };
+}
+
+function isSyntheticDecisionContext(contextName) {
+  return (
+    contextName === AUTO_GATE_DECISION_CHECK ||
+    /^Auto Gate decision \/ PR #\d+ \/ [0-9a-f]{40}$/.test(contextName)
+  );
 }
 
 async function getRequiredCheckSpecs({ github, context, branch, core }) {
@@ -649,6 +822,8 @@ function formatError(error) {
 module.exports = {
   evaluate,
   merge,
+  reportDecision,
+  resolveTargets,
   __test: {
     evaluateCodex,
     evaluateRequiredChecks,
