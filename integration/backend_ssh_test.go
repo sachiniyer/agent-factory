@@ -54,6 +54,13 @@ func TestSSHBackendRoundTrip(t *testing.T) {
 	afBin := buildStaticBinary(t)
 	restore := session.SetSSHSelfBinaryForTest(afBin)
 	defer restore()
+	// The SAME reason, for the binary af runs LOCALLY as its ssh ProxyCommand
+	// (#3086): the pin dials through `af ssh-relay`, and the test binary has no
+	// such subcommand — so without this the proxy never connects and every step
+	// dies on its 30s deadline. Production resolves both from os.Executable, which
+	// is af; a test has to say so.
+	restoreRelay := session.SetSSHRelayBinaryForTest(afBin)
+	defer restoreRelay()
 
 	image := buildSSHDRoundTripImage(t)
 

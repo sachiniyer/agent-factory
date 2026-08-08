@@ -355,20 +355,93 @@ back (see [Archive & restore](#archive-restore)).
 > yourself, and there your `ssh_config` and `known_hosts` are the whole authority.
 > See the sandbox section below.
 
-> **Known limitation: a `ssh.host` with several addresses can split a session.**
-> af runs a separate `ssh` for each step — the setup commands, the port-forward,
-> and the cleanup — and each one resolves the name independently. If the name
-> answers with more than one address (a round-robin record, a load balancer, a
-> dual-stack host), the workspace can end up on one machine while the agent-server
-> or the cleanup lands on another. Nothing looks wrong: every step succeeds against
-> a valid host, and the cleanup then removes the wrong machine's directory and
-> reports success while the real one leaks.
+> **A `ssh.host` with several addresses stays on one machine.** af runs a separate
+> `ssh` for each step — the setup commands, the port-forward, and the cleanup — so
+> a name answering with more than one address (a round-robin record, several A
+> records, a dual-stack host) could once put the workspace on one machine while
+> the agent-server or the cleanup landed on another. Nothing looked wrong: every
+> step succeeded against a valid host, and the cleanup then removed the wrong
+> machine's directory and reported success while the real one leaked.
 >
-> Point `ssh.host` at a single machine — a literal address, or a name with one
-> address — if that is a risk for your setup. Tracking issue: #3086. A previous fix
-> pinned one resolved address, but it had to identify the host by address, which
-> broke host **certificates** and removed ssh's own try-each-address fallback · it
-> was reverted rather than kept with those costs.
+> af now resolves `ssh.host` **once**, when the session is created, and every later
+> step dials that one address. The address is recorded with the session, so the
+> cleanup reaches the same machine even after the daemon restarts.
+>
+> **This fixes DNS multiplicity, and only DNS multiplicity.** Read the next
+> paragraph before assuming it covers you.
+
+> **Still a known limitation: a load-balancer VIP is not pinned, and can still
+> split a session.** If `ssh.host` resolves to an address that is a **virtual IP in
+> front of several machines** — an L4/TCP load balancer, an AWS NLB, a
+> keepalived/IPVS pair, a Kubernetes service — then pinning the address changes
+> nothing, because *the address is not a machine identity*. The balancer picks a
+> backend **per TCP connection**, and af opens a separate connection for every
+> provision command, for the tunnel, and for the cleanup. Those can still land on
+> different machines, and the failure is the same one described above: the cleanup
+> removes the wrong machine's directory, reports success, and the real workspace
+> leaks.
+>
+> af cannot detect this — a VIP looks exactly like an ordinary address — so there is
+> no warning to go on. The workaround is the same as before: **point `ssh.host` at
+> one machine**, not at the balancer. Tracked in #3086, which stays open for it.
+
+> **Your host key configuration is unaffected**, which is the part worth knowing:
+> `ssh` is still given the **name** as its destination, so `known_hosts` is matched
+> and host **certificate** principals are checked exactly as before. The pin
+> applies only to the TCP connection, through a `ProxyCommand` that runs `af`
+> itself — nothing new to install. An earlier attempt pinned the address as ssh's
+> destination and had to restore the name with `HostKeyAlias`; that rejected host
+> certificates on every non-default port, and was reverted (#3086).
+>
+> One genuine, if small, reduction comes with it: **`CheckHostIP` is switched off**.
+> OpenSSH disables it whenever a `ProxyCommand` is in use, and it defaulted to *on*
+> for OpenSSH 7.6–8.4 (upstream turned the default off in 8.5). On those clients a
+> pinned session no longer records or cross-checks the host key against the
+> **address** in `known_hosts`, only against the **name**. Verification against the
+> name — the guarantee that matters, and the one certificates rely on — is
+> unchanged, and af resolving the address itself and reusing that one address for
+> every step covers the drift `CheckHostIP` was watching for. It is a trade, not a
+> free win: ssh's IP cross-check for af's single-resolution guarantee.
+>
+> **What this changes for an existing `ssh.host`, deliberately:** a session is tied
+> to the machine it was created on for its whole life. Before, if that machine went
+> away mid-session, the next step would resolve the name again and might reach a
+> different one and appear to keep working — which is the bug, not a feature: the
+> workspace it needed was on the first machine. Now that step fails against the
+> machine holding the workspace, which is the honest answer. Choosing a machine
+> still tries each address the name answers with, so a host with one dead address
+> and one live one is picked correctly at create time.
+>
+> Nothing else about connecting changes: same `known_hosts` matching, same
+> certificate principals, same keys, same `ssh_config`-is-not-read rule, and no new
+> software to install. There is nothing to migrate — existing sessions created
+> before this keep working and are cleaned up by name exactly as they were.
+>
+> If af cannot resolve the name at create time, or cannot run itself as the relay,
+> it says so in the log and connects by name, exactly as it did before — a host af
+> cannot look up still works. The pin is an improvement on connecting by name, so
+> when it cannot be applied af falls back rather than failing the session.
+>
+> **Which resolver picks the address, and when it matters.** af resolves with Go's
+> built-in resolver, which reads `/etc/hosts` and DNS. `ssh` resolves with
+> `getaddrinfo`, which follows `nsswitch.conf` and so can also use LDAP, `sssd` or
+> mDNS. Once af pins, `ssh` does no resolving at all — the connection is made for
+> it — so every step of a session goes to the same place regardless.
+>
+> The one place this can bite is a `known_hosts` entry recorded **earlier**, by a
+> plain `ssh` or an older session, against whichever machine `getaddrinfo` picked.
+> If your resolvers select different machines *and* those machines have different
+> host keys, the pinned one presents a key that entry does not match and the session
+> fails to start, naming the host. Nothing runs on the wrong machine — verification
+> refuses it before authenticating. Point `ssh.host` at one machine if you hit this.
+>
+> **`accept-new` pins only once it knows the host.** On the very first connection to
+> a host there is no entry to check against, so `accept-new` would simply record
+> whatever key the pinned machine presented — and if that were the wrong machine,
+> the session would run there silently and the name would stay bound to it. af
+> therefore does not pin that first connection, and pins normally afterwards.
+> `insecure` verifies nothing, so it is never pinned. Both cases are logged, and
+> both keep the multi-address exposure this section describes.
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
@@ -443,6 +516,47 @@ case commits real work, **archives** it (branch pushed to `origin`, remote
 sandbox reaped), then **restores** it (a fresh remote clones the branch back, the
 commit is present, the session is drivable) — the identical push/pull-branch
 flow, over ssh. It skips cleanly where Docker is unavailable.
+
+---
+
+## Sandbox backend
+
+`backend = "sandbox"` reaches the target through **your own** ssh invocation. The
+global `sandbox_ssh` key holds a free-form command line — whatever already works
+in your terminal, including a jump host, a `ProxyCommand`, a bastion, or any flag
+`backend = "ssh"` does not model — and af runs the same provision, tunnel, and
+cleanup steps over it. Your `ssh_config`, `known_hosts`, and host-key posture are
+the whole authority here; af adds none of its own. It is global-only and
+operator-owned, because af **executes** it on the daemon host (see
+[Configuration](configuration.md)).
+
+> **Known limitation: af cannot pin a `sandbox_ssh` target to one machine.**
+> af runs a separate invocation of your command for each step — the setup
+> commands, the port-forward, and the cleanup. If it reaches a name with several
+> addresses (a round-robin record, a load balancer, a dual-stack host), each
+> invocation resolves independently, so the workspace can end up on one machine
+> while the agent-server or the cleanup lands on another. Nothing looks wrong:
+> every step succeeds against a valid host, and the cleanup then removes the wrong
+> machine's directory and reports success while the real one leaks.
+>
+> `backend = "ssh"` no longer has this problem because af composes that command
+> and knows which token is the host. `sandbox_ssh` is **your** command, and af
+> cannot know which of its words is a hostname — an argument to `-o`, a jump-host
+> spec, a wrapper's own flag, or the target — so there is nothing it can safely
+> substitute. Guessing would silently rewrite the command you asked for.
+>
+> Two workarounds, both under your control:
+>
+> - **Point the command at a single machine** — a literal address, or a name with
+>   one address. This is the simplest fix and needs no other change.
+> - **Pin it yourself**, the same way af does for `backend = "ssh"`: keep the name
+>   as ssh's destination so `known_hosts` and certificate principals still match,
+>   and put the address in a `ProxyCommand` — for example
+>   `ssh -o ProxyCommand='nc 198.51.100.8 22' build-box.example.com`. Do not pin by
+>   making the address the destination: that forces a `HostKeyAlias`, and no alias
+>   value satisfies both a plain `[name]:port` entry and a certificate principal.
+>
+> Tracked in #3086, which is deliberately left open for this half.
 
 ---
 

@@ -41,7 +41,7 @@ import (
 // store. That reads like a widening, and the "host merely DOWN" case is the one
 // worth checking — but it cannot fire here, for a reason worth stating:
 //
-//	posture "" restores as STRICT, and sshCommandForConfig pins
+//	posture "" restores as STRICT, and sshCommandPinnedTo pins
 //	StrictHostKeyChecking=yes against that one store, with
 //	GlobalKnownHostsFile=/dev/null and KnownHostsCommand=none. So reaching the
 //	remote at all REQUIRES the host to be in that file. A down-but-known host
@@ -123,7 +123,7 @@ func knownHostsLookupName(host string, port int) string {
 // all — is inconclusive on purpose.
 //
 // The store path comes from strictKnownHostsPathFor, the same resolver
-// sshCommandForConfig hands to UserKnownHostsFile, so this lookup cannot disagree
+// sshCommandPinnedTo hands to UserKnownHostsFile, so this lookup cannot disagree
 // with the file the composed command actually reads.
 //
 // AND THE NAME CANNOT DISAGREE EITHER, because the composed command carries

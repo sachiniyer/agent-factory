@@ -53,18 +53,22 @@ type SSHRuntimeCleanupData struct {
 	Config     config.SSHConfig `json:"config"`
 	SessionDir string           `json:"session_dir"`
 	RemotePID  string           `json:"remote_pid,omitempty"`
-	// DialAddress is the literal address a session was provisioned on, recorded
-	// ONLY by the short-lived pinning in #3090 and never written again (#3092
-	// reverted it, because dialling an address forces a HostKeyAlias and no alias
-	// value satisfies both a plain [host]:port entry and a certificate principal).
+	// DialAddress is the literal address this session was provisioned on: the one
+	// thing the record knows and no re-resolution can recover. Without it, reaping a
+	// multi-address name could reach a DIFFERENT machine, find nothing, report
+	// success and retire the only tombstone — a permanent, silent leak (#3086).
 	//
-	// It is still DECODED, and still honoured on teardown. Dropping the field would
-	// silently discard the one thing such a record knows and nothing else does: the
-	// exact machine its workspace is on. Re-resolving a multi-address name could
-	// then reap a DIFFERENT machine, find nothing, report success and retire the
-	// only tombstone — a permanent leak. Honouring it can at worst fail
-	// verification for a certificate host on a non-default port, which RETAINS and
-	// retries. Retained-and-retried beats silently-wrong-and-retired.
+	// HOW IT IS APPLIED CHANGED, WHAT IT MEANS DID NOT. #3090 wrote this field and
+	// dialled it as ssh's destination, which forced a `-o HostKeyAlias` and rejected
+	// host certificates on every non-default port; #3100 reverted the writing but
+	// kept honouring it. It is now applied as a `-o ProxyCommand` that pins only the
+	// TCP dial while ssh's destination stays the configured NAME, so the certificate
+	// conflict is gone and there is nothing left to accept as a cost.
+	//
+	// So a record from EITHER era reads the same way, and both reap correctly under
+	// the current mechanism. An empty value — a record written before #3090, or
+	// between #3100 and this change, or one whose provision could not settle on an
+	// address — dials the name, exactly as it always did.
 	DialAddress         string `json:"dial_address,omitempty"`
 	HostKeyVerification string `json:"host_key_verification,omitempty"`
 }
@@ -222,9 +226,11 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// ssh.* settings, not a command — and refusing to reap it because the
 		// transport changed underneath would leak the workspace it exists to
 		// remove (the #3044 lesson).
-		// A handle written by #3090 carries the address its session actually ran on.
-		// Reach THAT machine rather than re-resolving the name — see DialAddress.
-		sshCmd, cmdErr := sshCommandForPinnedRecord(legacyCfg, data.SSH.HostKeyVerification, data.SSH.DialAddress)
+		// A handle carrying a dial address knows the machine its session actually ran
+		// on. Reach THAT machine rather than re-resolving the name — see DialAddress.
+		// An empty one composes the ordinary name-based command, so a record from
+		// before any of this reaps exactly as it always did.
+		sshCmd, cmdErr := sshCommandPinnedTo(legacyCfg, data.SSH.HostKeyVerification, data.SSH.DialAddress)
 		if cmdErr != nil {
 			return nil, nil, fmt.Errorf("ssh cleanup handle has an unusable address: %w", cmdErr)
 		}
@@ -234,7 +240,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently
-		// dead cleanup. sshCommandForConfig above is pure for the same reason.
+		// dead cleanup. sshCommandPinnedTo above touches no filesystem state for the
+		// same reason.
 		teardown := sshTeardownWithStore(p.reap, legacyCfg, data.SSH.HostKeyVerification)
 		if strings.TrimSpace(data.SSH.HostKeyVerification) == "" {
 			// The ONLY way an empty posture reaches here is a record written before
