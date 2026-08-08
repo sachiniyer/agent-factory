@@ -32,19 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       targets: ${{ steps.evaluate.outputs.targets }}
-    # Late review comments on a merged/closed PR keep re-triggering the gate
-    # against a stale head (#1876). Drafts are never merge-eligible, so review
-    # review traffic on a held-open draft is pure evaluation waste (#1907), but
-    # every subscribed pull_request state transition must reach the helper.
-    # check_suite/status events resolve the PR by head SHA and already filter to
-    # open PRs. issue_comment events are limited to comments on open PRs here.
-    # The helper's own state/draft checks remain the backstop for every event.
-    if: >-
-      (github.event_name != 'issue_comment' ||
-       (github.event.issue.pull_request != null && github.event.issue.state == 'open')) &&
-      (github.event.pull_request == null ||
-       github.event_name == 'pull_request' ||
-       (github.event.pull_request.state == 'open' && github.event.pull_request.draft != true))
+    # One resolver handles every subscribed input change. It does not branch on
+    # activity type: PR/review/comment events identify a PR, while check/status
+    # events identify every exact (PR, head) pair associated with their SHA.
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6
@@ -109,7 +99,11 @@ jobs:
                   throw failure;
                 }
                 targets = result.headSha
-                  ? [{ prNumber: result.prNumber, headSha: result.headSha }]
+                  ? [{
+                      prNumber: result.prNumber,
+                      headSha: result.headSha,
+                      decisionKey: `pr-${result.prNumber}-head-${result.headSha}`,
+                    }]
                   : [];
               }
               core.setOutput(
@@ -118,6 +112,7 @@ jobs:
                   targets.map((target) => ({
                     pr_number: target.prNumber,
                     head_sha: target.headSha,
+                    decision_key: target.decisionKey,
                   })),
                 ),
               );
@@ -146,10 +141,10 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.auto-gate.outputs.targets) }}
-    # Decision checks are commit-scoped, so every PR/event sharing a head must
-    # enter one reporting and destructive lane.
+    # Decision identity is the pair, never the commit alone. Two PRs may point
+    # at the same commit without sharing a check or serialization lane.
     concurrency:
-      group: auto-gate-${{ matrix.target.head_sha }}
+      group: auto-gate-${{ matrix.target.decision_key }}
       cancel-in-progress: false
     steps:
       - name: Check out gate logic

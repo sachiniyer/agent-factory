@@ -1,6 +1,10 @@
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
+// GitHub check runs live on commits, but the gate evidence is PR-scoped. The
+// full (PR, head) pair is therefore part of every decision identifier. These
+// checks are observability records; a future required-check policy needs a
+// separate static aggregate because rulesets cannot require dynamic names.
 const AUTO_GATE_DECISION_CHECK = "Auto Gate decision";
 const GITHUB_ACTIONS_APP_ID = 15368;
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
@@ -35,10 +39,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
 }
 
 async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true }) {
-  const pullAssociationCache = new Map();
-  const number =
-    prNumber ||
-    (await findPullRequestNumber({ github, context, core, pullAssociationCache }));
+  const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
     return finish(core, setOutputs, {
@@ -81,21 +82,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push(`mergeability is blocked (${pr.mergeable}/${pr.mergeStateStatus})`);
   } else if (pr.mergeable !== "MERGEABLE") {
     reasons.push(`mergeability is still ${pr.mergeable}`);
-  }
-
-  const associatedPulls = await listOpenMasterPullRequestsForCommit({
-    github,
-    context,
-    sha: pr.headRefOid,
-    pullAssociationCache,
-  });
-  const otherPulls = associatedPulls.filter((pull) => pull.number !== pr.number);
-  if (otherPulls.length > 0) {
-    reasons.push(
-      `head commit ${pr.headRefOid} is shared with open master ` +
-        `PRs ${otherPulls.map((pull) => `#${pull.number}`).join(", ")}; ` +
-        "Auto Gate decisions are commit-scoped",
-    );
   }
 
   const files = await listPullRequestFiles({ github, context, number: pr.number });
@@ -170,6 +156,7 @@ async function reportDecision({ github, context, core, result, manual = false })
     return { state: "ineligible", priorDecision: false };
   }
 
+  const identity = decisionIdentity(result.prNumber, result.headSha);
   const { owner, repo } = context.repo;
   const checkRuns = await github.paginate(github.rest.checks.listForRef, {
     owner,
@@ -180,7 +167,9 @@ async function reportDecision({ github, context, core, result, manual = false })
   const priorDecision = checkRuns
     .filter(
       (run) =>
-        run.name === AUTO_GATE_DECISION_CHECK && run.app?.id === GITHUB_ACTIONS_APP_ID,
+        run.name === identity.checkName &&
+        run.external_id === identity.externalId &&
+        run.app?.id === GITHUB_ACTIONS_APP_ID,
     )
     .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
   const state =
@@ -212,12 +201,29 @@ async function reportDecision({ github, context, core, result, manual = false })
       owner,
       repo,
       head_sha: result.headSha,
-      name: AUTO_GATE_DECISION_CHECK,
+      name: identity.checkName,
+      external_id: identity.externalId,
       ...decision,
     });
   }
   core.notice(`${title} for PR #${result.prNumber}.`);
   return { state, priorDecision: Boolean(priorDecision) };
+}
+
+function decisionIdentity(prNumber, headSha) {
+  const number = Number(prNumber);
+  const sha = String(headSha || "").toLowerCase();
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`Invalid PR number for Auto Gate decision: ${prNumber}`);
+  }
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error(`Invalid head SHA for Auto Gate decision: ${headSha}`);
+  }
+  return {
+    checkName: `${AUTO_GATE_DECISION_CHECK} / PR #${number} / ${sha}`,
+    externalId: `auto-gate:pr:${number}:head:${sha}`,
+    key: `pr-${number}-head-${sha}`,
+  };
 }
 
 async function merge({ github, context, core, prNumber, expectedHeadSha }) {
@@ -265,135 +271,69 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
 }
 
 async function resolveTargets({ github, context, core, prNumber }) {
-  const pullAssociationCache = new Map();
   const numbers = [];
+  const payload = context.payload;
 
   if (prNumber) {
     numbers.push(prNumber);
+  } else if (payload.pull_request?.number) {
+    numbers.push(payload.pull_request.number);
+  } else if (payload.issue?.pull_request && payload.issue.number) {
+    numbers.push(payload.issue.number);
   } else {
-    const synchronizedPullRequest =
-      context.eventName === "pull_request" &&
-      context.payload.action === "synchronize" &&
-      context.payload.before;
-    if (synchronizedPullRequest) {
-      if (context.payload.pull_request?.number) {
-        numbers.push(context.payload.pull_request.number);
-      }
-      const previousHeadPulls = await listOpenMasterPullRequestsForCommit({
-        github,
-        context,
-        sha: context.payload.before,
-        pullAssociationCache,
-      });
-      numbers.push(...previousHeadPulls.map((pull) => pull.number));
+    const sha = payload.check_suite?.head_sha || payload.sha;
+    if (sha) {
+      const { owner, repo } = context.repo;
+      const pulls = await github.paginate(
+        github.rest.repos.listPullRequestsAssociatedWithCommit,
+        {
+          owner,
+          repo,
+          commit_sha: sha,
+          per_page: 100,
+        },
+      );
+      numbers.push(
+        ...pulls
+          .filter(
+            (pull) =>
+              pull.state === "open" &&
+              pull.base?.ref === "master" &&
+              pull.head?.sha === sha,
+          )
+          .map((pull) => pull.number),
+      );
     } else {
-      const number = await findPullRequestNumber({
-        github,
-        context,
-        core,
-        pullAssociationCache,
-      });
-      if (number) {
-        numbers.push(number);
-      }
+      core.info(`Event ${context.eventName} did not identify a PR/head pair to evaluate.`);
     }
   }
 
+  const sourceSha = payload.check_suite?.head_sha || payload.sha;
   const targets = [];
-  for (const number of [...new Set(numbers)]) {
+  for (const number of [...new Set(numbers.filter(Boolean))]) {
     const pr = await getPullRequest({ github, context, number });
-    targets.push({ prNumber: String(pr.number), headSha: pr.headRefOid });
+    if (
+      sourceSha &&
+      (pr.state !== "OPEN" || pr.merged || pr.baseRefName !== "master" || pr.headRefOid !== sourceSha)
+    ) {
+      continue;
+    }
+    targets.push({
+      prNumber: String(pr.number),
+      headSha: pr.headRefOid,
+      decisionKey: decisionIdentity(pr.number, pr.headRefOid).key,
+    });
   }
   return targets;
 }
 
-async function findPullRequestNumber({ github, context, core, pullAssociationCache }) {
-  const payload = context.payload;
-  const closedPullRequest =
-    context.eventName === "pull_request" && payload.action === "closed";
-  const removedFromMaster =
-    context.eventName === "pull_request" &&
-    payload.action === "edited" &&
-    payload.changes?.base?.ref?.from === "master" &&
-    payload.pull_request?.base?.ref !== "master";
-  const synchronizedPullRequest =
-    context.eventName === "pull_request" &&
-    payload.action === "synchronize" &&
-    payload.before;
-
-  if (synchronizedPullRequest) {
-    const previousHeadPulls = await listOpenMasterPullRequestsForCommit({
-      github,
-      context,
-      sha: payload.before,
-      pullAssociationCache,
-    });
-    if (previousHeadPulls.length > 0) {
-      core.info(
-        `Head moved from ${payload.before}; reevaluating surviving PR #${previousHeadPulls[0].number}.`,
-      );
-      return previousHeadPulls[0].number;
-    }
-  }
-
-  if (payload.pull_request?.number && !closedPullRequest && !removedFromMaster) {
-    return payload.pull_request.number;
-  }
-
-  if (payload.issue?.pull_request && payload.issue.number) {
-    return payload.issue.number;
-  }
-
-  const checkSuitePrs = payload.check_suite?.pull_requests || [];
-  const checkSuitePr = checkSuitePrs.find((pr) => pr.base?.ref === "master") || checkSuitePrs[0];
-  if (checkSuitePr?.number) {
-    return checkSuitePr.number;
-  }
-
-  const sha = payload.check_suite?.head_sha || payload.pull_request?.head?.sha || payload.sha;
-  if (!sha) {
-    core.info(`Event ${context.eventName} did not include a PR or SHA to evaluate.`);
-    return null;
-  }
-
-  const openMasterPulls = await listOpenMasterPullRequestsForCommit({
+async function findPullRequestNumber({ github, context, core }) {
+  const targets = await resolveTargets({
     github,
     context,
-    sha,
-    pullAssociationCache,
+    core,
   });
-  if (openMasterPulls.length > 1) {
-    core.warning(`Found multiple open master PRs for ${sha}; evaluating PR #${openMasterPulls[0].number}.`);
-  }
-
-  return openMasterPulls[0]?.number || null;
-}
-
-async function listOpenMasterPullRequestsForCommit({
-  github,
-  context,
-  sha,
-  pullAssociationCache,
-}) {
-  if (pullAssociationCache?.has(sha)) {
-    return pullAssociationCache.get(sha);
-  }
-
-  const { owner, repo } = context.repo;
-  const pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
-    owner,
-    repo,
-    commit_sha: sha,
-    per_page: 100,
-  });
-  const openMasterPulls = pulls.filter(
-    (pull) =>
-      pull.state === "open" &&
-      pull.base?.ref === "master" &&
-      pull.head?.sha === sha,
-  );
-  pullAssociationCache?.set(sha, openMasterPulls);
-  return openMasterPulls;
+  return targets[0]?.prNumber || null;
 }
 
 async function getPullRequest({ github, context, number }) {
@@ -469,30 +409,21 @@ async function listPullRequestFiles({ github, context, number }) {
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core });
-  const hasOwnedDecisionSpec = required.specs.some(
+  const syntheticDecisionSpecs = required.specs.filter(
     (spec) =>
-      spec.context === AUTO_GATE_DECISION_CHECK &&
-      spec.sourceAppId === GITHUB_ACTIONS_APP_ID,
-  );
-  const hasAmbiguousDecisionSpec = required.specs.some(
-    (spec) => spec.context === AUTO_GATE_DECISION_CHECK && !spec.sourceAppId,
+      isSyntheticDecisionContext(spec.context) &&
+      (!spec.sourceAppId || spec.sourceAppId === GITHUB_ACTIONS_APP_ID),
   );
   const specs = required.specs.filter(
     (spec) =>
-      spec.context !== AUTO_GATE_DECISION_CHECK ||
+      !isSyntheticDecisionContext(spec.context) ||
       (spec.sourceAppId && spec.sourceAppId !== GITHUB_ACTIONS_APP_ID),
   );
   const notes = [];
   const reasons = [...required.errors];
 
-  if (hasOwnedDecisionSpec) {
-    notes.push("Auto Gate decision is enforced after this prerequisite evaluation");
-  }
-  if (hasAmbiguousDecisionSpec && !hasOwnedDecisionSpec) {
-    reasons.push(
-      `required check ${AUTO_GATE_DECISION_CHECK} without a source app is ambiguous; ` +
-        `it must be bound to GitHub Actions app ${GITHUB_ACTIONS_APP_ID}`,
-    );
+  if (syntheticDecisionSpecs.length > 0) {
+    notes.push("Synthetic Auto Gate decisions are excluded from their own prerequisites");
   }
 
   if (specs.length === 0) {
@@ -530,6 +461,13 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   }
 
   return { ok: reasons.length === 0, reasons, notes };
+}
+
+function isSyntheticDecisionContext(contextName) {
+  return (
+    contextName === AUTO_GATE_DECISION_CHECK ||
+    /^Auto Gate decision \/ PR #\d+ \/ [0-9a-f]{40}$/.test(contextName)
+  );
 }
 
 async function getRequiredCheckSpecs({ github, context, branch, core }) {
