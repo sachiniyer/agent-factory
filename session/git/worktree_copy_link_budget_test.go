@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -112,6 +113,20 @@ func TestCopyTree_ConcurrentCopiesShareRetainedReaderCapacity(t *testing.T) {
 			reachedFirst.Done()
 			<-releaseFirst
 		case "m-observe":
+			// Make the already-written copies unreadable before their second names
+			// are visited. Only a descriptor retained from the write can preserve
+			// those hard links now; master falls back to fresh copies instead.
+			for _, paths := range copies {
+				if !strings.HasPrefix(path, paths.source+string(os.PathSeparator)) {
+					continue
+				}
+				for linkIndex := range limitedFDs {
+					if err := os.Chmod(filepath.Join(paths.destination, fmt.Sprintf("a-%03d", linkIndex)), 0); err != nil {
+						return err
+					}
+				}
+				break
+			}
 			openNow := countOpenFileDescriptors(limitedFDs)
 			observedMu.Lock()
 			if openNow > maxOpenAtMarker {
@@ -148,6 +163,23 @@ func TestCopyTree_ConcurrentCopiesShareRetainedReaderCapacity(t *testing.T) {
 	const minimumSpare = 12
 	require.GreaterOrEqual(t, limitedFDs-maxOpenAtMarker, minimumSpare,
 		"concurrent copies consumed overlapping descriptor budgets")
+	preservedLinks := 0
+	for _, paths := range copies {
+		for linkIndex := range limitedFDs {
+			first := filepath.Join(paths.destination, fmt.Sprintf("a-%03d", linkIndex))
+			second := filepath.Join(paths.destination, fmt.Sprintf("z-%03d", linkIndex))
+			firstInfo, firstErr := os.Stat(first)
+			secondInfo, secondErr := os.Stat(second)
+			require.NoError(t, firstErr)
+			require.NoError(t, secondErr)
+			if os.SameFile(firstInfo, secondInfo) {
+				preservedLinks++
+			}
+			require.NoError(t, os.Chmod(first, 0o600))
+		}
+	}
+	require.Positive(t, preservedLinks,
+		"the copies retained no readers and lost every unreadable hard-link relationship")
 }
 
 func countOpenFileDescriptors(limit int) int {
