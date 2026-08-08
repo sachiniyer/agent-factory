@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -28,6 +29,45 @@ var ErrTabGone = errors.New("no tab with that id")
 // distinction is opt-in for the one caller that renders it, and no existing
 // errors.Is(err, io.EOF) check has to learn about tabs.
 var ErrTabClosed = fmt.Errorf("tab closed: %w", io.EOF)
+
+// PromptDeliveryStatus is the closed, wire-visible result of observing a
+// prompt submission. It is an alias of the tmux-layer type so the observation
+// can cross the runtime boundary without duplicating a second vocabulary.
+type PromptDeliveryStatus = tmux.PromptDeliveryStatus
+
+const (
+	PromptDelivered       = tmux.PromptDelivered
+	PromptNotDelivered    = tmux.PromptNotDelivered
+	PromptCouldNotConfirm = tmux.PromptCouldNotConfirm
+)
+
+// PromptDeliveryReporter is the additive status-bearing form of SendPrompt.
+// Keeping it separate preserves compatibility for test and third-party
+// AgentServer implementations while every production runtime can report the
+// observation it actually made.
+type PromptDeliveryReporter interface {
+	SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error)
+}
+
+// SendPromptWithStatus uses a runtime's observation when available. A legacy
+// runtime that only implements SendPrompt is honest uncertainty, not delivery:
+// nil error proves the command completed, not that the pane received the text.
+func SendPromptWithStatus(server AgentServer, prompt string) (PromptDeliveryStatus, error) {
+	if reporter, ok := server.(PromptDeliveryReporter); ok {
+		status, err := reporter.SendPromptWithStatus(prompt)
+		if err != nil {
+			return PromptCouldNotConfirm, err
+		}
+		if status.Valid() {
+			return status, nil
+		}
+		return PromptCouldNotConfirm, nil
+	}
+	if err := server.SendPrompt(prompt); err != nil {
+		return PromptCouldNotConfirm, err
+	}
+	return PromptCouldNotConfirm, nil
+}
 
 // TabAddressableServer is implemented by an agent-server whose data plane can be
 // addressed by a tab's STABLE id (#1738) instead of a shifting ordinal. It is the

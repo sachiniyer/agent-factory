@@ -321,7 +321,9 @@ func TestSuccessfulPasteSuppliesProvenanceForTheNextClear(t *testing.T) {
 	}
 	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), cmdExec)
 
-	require.NoError(t, session.SendKeysCommand(prompt))
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+	require.Equal(t, PromptDelivered, status)
 	require.Equal(t, newDeliveryProbe(prompt).completion, session.lastPastedTail,
 		"only the exact tail of a paste tmux accepted may identify content on the next clear")
 }
@@ -784,7 +786,9 @@ func TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent(t *testing.T)
 			prompt := "deliver this long briefing\nwith enough hidden lines\nthat Claude may elide it\n" +
 				"while retaining a distinctive DELIVERY_TAIL_THAT_IS_NOT_RENDERED"
 
-			require.NoError(t, session.SendKeysCommand(prompt))
+			status, err := session.SendKeysCommandObserved(prompt)
+			require.NoError(t, err)
+			require.Equal(t, PromptCouldNotConfirm, status)
 			require.True(t, enterSent, "could-not-observe must retain the best-effort Enter")
 			require.NotContains(t, errors.String(), "prompt delivery observed absent",
 				"a pane that did not render prompt-specific text cannot prove the prompt absent")
@@ -831,7 +835,10 @@ func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 	}
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
 
-	require.NoError(t, session.SendKeysCommand(prompt))
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+	require.Equal(t, PromptNotDelivered, status,
+		"an observed-absent prompt must be reported to the caller, not collapsed into success")
 	require.True(t, enterSent, "observed-absent must retain the best-effort Enter")
 	got := errors.String()
 	require.Equal(t, 1, strings.Count(got, "prompt delivery observed absent"),

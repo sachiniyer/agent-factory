@@ -109,6 +109,10 @@ var sessionsSendPromptCmd = &cobra.Command{
 If the session does not exist, use --create to automatically create it first,
 or use 'af sessions create --name <title> --prompt <prompt>' instead.
 
+For one target, the JSON acknowledgement includes status: delivered,
+not-delivered, or could-not-confirm. This is the observation made by the
+existing bounded submit; the command adds no second confirmation wait.
+
 With --all, broadcast a single prompt to every live session in scope:
 
     af sessions send-prompt --all "<prompt>"
@@ -117,9 +121,10 @@ Broadcast scope defaults to the current repo (honoring --repo). Pass --all-repos
 to broadcast across every repo. The reserved root session is excluded unless
 --include-root is given. Delivery is best-effort per session: unreachable (Lost,
 Dead) and Archived sessions are skipped and reported, and one failure never
-aborts the rest. The command prints a JSON summary (delivered / failed / skipped)
-and exits 0 even when some sessions fail, so scripts can inspect per-session
-results.`,
+aborts the rest. The command prints a JSON summary whose delivery observations
+are delivered / not-delivered / could-not-confirm, alongside failed and skipped
+targets. It exits 0 even when some sessions fail, so scripts can inspect
+per-session results.`,
 	// Validate flag combinations before arity (cobra runs Args before RunE):
 	// a broadcast-implying flag without --all must surface its actionable
 	// message here, not cobra's generic "accepts 2 arg(s)" (#658/#734: public
@@ -200,15 +205,16 @@ results.`,
 				}
 			}
 
-			if _, err := deliverPromptViaDaemon(daemon.DeliverPromptRequest{
+			_, status, err := deliverPromptViaDaemon(daemon.DeliverPromptRequest{
 				Title:    title,
 				RepoPath: repo.Root,
 				Program:  program,
 				Prompt:   prompt,
-			}); err != nil {
+			})
+			if err != nil {
 				return jsonError(err)
 			}
-			return jsonOut(map[string]bool{"ok": true})
+			return jsonOut(sendPromptResult{OK: true, Status: status})
 		}
 
 		exists, err := instanceTitleExistsInScope(repoID, title)
@@ -219,28 +225,37 @@ results.`,
 			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))
 		}
 
-		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: prompt}); err != nil {
+		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: prompt})
+		if err != nil {
 			return jsonError(err)
 		}
-		return jsonOut(map[string]bool{"ok": true})
+		return jsonOut(sendPromptResult{OK: true, Status: status})
 	},
+}
+
+type sendPromptResult struct {
+	OK     bool                         `json:"ok"`
+	Status session.PromptDeliveryStatus `json:"status"`
 }
 
 // broadcastResult is the JSON summary `send-prompt --all` prints: aggregate
 // counts plus a per-session breakdown so scripts can tell exactly which
 // sessions received the prompt and why any did not.
 type broadcastResult struct {
-	Prompt    string            `json:"prompt"`
-	Scope     string            `json:"scope"`
-	Delivered int               `json:"delivered"`
-	Failed    int               `json:"failed"`
-	Skipped   int               `json:"skipped"`
-	Results   []broadcastTarget `json:"results"`
+	Prompt          string            `json:"prompt"`
+	Scope           string            `json:"scope"`
+	Delivered       int               `json:"delivered"`
+	NotDelivered    int               `json:"not_delivered"`
+	CouldNotConfirm int               `json:"could_not_confirm"`
+	Failed          int               `json:"failed"`
+	Skipped         int               `json:"skipped"`
+	Results         []broadcastTarget `json:"results"`
 }
 
 // broadcastTarget is one session's outcome in a broadcast. Status is one of
-// "delivered", "failed", or "skipped"; Error carries the daemon's reason on a
-// failure and Reason explains an intentional skip (root excluded, session lost).
+// "delivered", "not-delivered", "could-not-confirm", "failed", or "skipped";
+// Error carries the daemon's reason on a failure and Reason explains an
+// intentional skip (root excluded, session lost).
 type broadcastTarget struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
@@ -375,7 +390,8 @@ func runBroadcast(prompt string) error {
 			})
 			continue
 		}
-		if err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: t.Title, RepoID: t.RepoID, Prompt: prompt}); err != nil {
+		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: t.Title, RepoID: t.RepoID, Prompt: prompt})
+		if err != nil {
 			result.Failed++
 			result.Results = append(result.Results, broadcastTarget{
 				Title:  t.Title,
@@ -385,11 +401,19 @@ func runBroadcast(prompt string) error {
 			})
 			continue
 		}
-		result.Delivered++
+		switch status {
+		case session.PromptDelivered:
+			result.Delivered++
+		case session.PromptNotDelivered:
+			result.NotDelivered++
+		default:
+			status = session.PromptCouldNotConfirm
+			result.CouldNotConfirm++
+		}
 		result.Results = append(result.Results, broadcastTarget{
 			Title:  t.Title,
 			RepoID: t.RepoID,
-			Status: "delivered",
+			Status: string(status),
 		})
 	}
 	return jsonOut(result)

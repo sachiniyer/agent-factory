@@ -268,6 +268,13 @@ type Backend interface {
 	Capabilities() Capabilities
 }
 
+// promptDeliveryStatusBackend is the additive observation-bearing delivery
+// capability used by the local agent-server. Backends without it retain the
+// legacy error-only contract and are reported as could-not-confirm.
+type promptDeliveryStatusBackend interface {
+	SendPromptCommandWithStatus(instance *Instance, prompt string) (PromptDeliveryStatus, error)
+}
+
 // AgentSwapPlan is the immutable boundary between handoff preflight and runtime
 // replacement. Its fields are intentionally private: only a Backend can produce
 // a plan, and callers can only hand that same value back to SwapAgent. That makes

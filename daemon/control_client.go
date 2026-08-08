@@ -557,11 +557,23 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 
 // SendPrompt asks the daemon to send a prompt to an existing session.
 func SendPrompt(req SendPromptRequest) error {
+	_, err := SendPromptWithStatus(req)
+	return err
+}
+
+// SendPromptWithStatus asks the daemon to send a prompt and returns the
+// delivery observation made by the runtime's existing bounded submit path.
+func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
 	var resp SendPromptResponse
 	if err := callDaemon("SendPrompt", req, &resp); err != nil {
-		return err
+		return session.PromptCouldNotConfirm, err
 	}
-	return nil
+	if !resp.Status.Valid() {
+		// A pre-upgrade daemon has no Status field. Its nil RPC result proves
+		// only that submission returned, so never manufacture "delivered".
+		return session.PromptCouldNotConfirm, nil
+	}
+	return resp.Status, nil
 }
 
 // DeliverPrompt asks the daemon to deliver a prompt to a target session,
@@ -570,11 +582,22 @@ func SendPrompt(req SendPromptRequest) error {
 // whole create-or-send decision runs under the daemon's per-target lock, so
 // concurrent deliveries to the same shared target never drop a prompt (#865).
 func DeliverPrompt(req DeliverPromptRequest) (string, error) {
+	status, _, err := DeliverPromptWithStatus(req)
+	return status, err
+}
+
+// DeliverPromptWithStatus returns both the task lifecycle status and the
+// delivery observation. Older daemons omit DeliveryStatus, which is honest
+// could-not-confirm rather than an inferred success.
+func DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
 	var resp DeliverPromptResponse
 	if err := callDaemon("DeliverPrompt", req, &resp); err != nil {
-		return "", err
+		return "", session.PromptCouldNotConfirm, err
 	}
-	return resp.Status, nil
+	if !resp.DeliveryStatus.Valid() {
+		resp.DeliveryStatus = session.PromptCouldNotConfirm
+	}
+	return resp.Status, resp.DeliveryStatus, nil
 }
 
 // ListTasksNoSpawn returns the daemon's authoritative task list WITHOUT

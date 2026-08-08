@@ -265,8 +265,17 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 }
 
 func (m *Manager) SendPrompt(req SendPromptRequest) error {
+	_, err := m.SendPromptWithStatus(req)
+	return err
+}
+
+// SendPromptWithStatus preserves SendPrompt's error contract and additionally
+// carries the runtime's closed delivery observation back to command callers.
+// It performs no extra wait: local tmux and remote agent-server paths return
+// the observation their existing submit already made.
+func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
 	if req.Prompt == "" {
-		return fmt.Errorf("prompt is required")
+		return session.PromptCouldNotConfirm, fmt.Errorf("prompt is required")
 	}
 	// Every return below, up to the AgentServer().SendPrompt at the bottom, fails
 	// BEFORE any byte reaches a pane — a resolution/restore failure, or the target
@@ -278,13 +287,13 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	if err != nil {
 		// Carry the marker so the tag survives the RPC hop (#2501/#2512); the phrase
 		// is natural user text, not an appended token.
-		return notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("%w; %s", err, notDeliveredMarker))
 	}
 	// Canonicalize to the resolved session's title so the killsInFlight gate and
 	// delivery target key off the id-resolved identity, not the request's title.
 	req.Title = title
 	if instance == nil {
-		return notAttempted(fmt.Errorf("failed to restore instance %q; %s", req.Title, notDeliveredMarker))
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("failed to restore instance %q; %s", req.Title, notDeliveredMarker))
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
@@ -292,7 +301,7 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
 
 	opLock := m.opLockFor(key)
@@ -304,32 +313,33 @@ func (m *Manager) SendPrompt(req SendPromptRequest) error {
 	_, killing = m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing {
-		return notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
 	if current == nil {
-		return notAttempted(fmt.Errorf("target session %q was deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q was deleted; prompt not delivered", req.Title))
 	}
 	if current != instance {
 		if instance.ID != "" && current.ID != "" && current.ID != instance.ID {
-			return notAttempted(fmt.Errorf("target session %q changed while preparing prompt; prompt not delivered", req.Title))
+			return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q changed while preparing prompt; prompt not delivered", req.Title))
 		}
 		instance = current
 	}
 	if instance.IsTearingDown() {
-		return notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf("target session %q is being deleted; prompt not delivered", req.Title))
 	}
 	if err := promptTargetLivenessError(req.Title, instance.GetLiveness()); err != nil {
-		return notAttempted(err)
+		return session.PromptCouldNotConfirm, notAttempted(err)
 	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
 	// is the reliable command path automated deliveries need. This crosses the
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
-	if err := instance.AgentServer().SendPrompt(req.Prompt); err != nil {
-		return fmt.Errorf("failed to send prompt: %w", err)
+	status, err := session.SendPromptWithStatus(instance.AgentServer(), req.Prompt)
+	if err != nil {
+		return session.PromptCouldNotConfirm, fmt.Errorf("failed to send prompt: %w", err)
 	}
-	return nil
+	return status, nil
 }
 
 func promptTargetLivenessError(title string, liveness session.Liveness) error {

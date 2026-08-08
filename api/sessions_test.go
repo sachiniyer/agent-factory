@@ -416,12 +416,12 @@ func TestSessionsSendPrompt_HonorsRepoScoping(t *testing.T) {
 
 	var gotReq daemon.SendPromptRequest
 	prevSend := sendPromptViaDaemon
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		gotReq = req
 		if req.RepoID == "" {
-			return errors.New("RepoID empty: --repo scoping was dropped")
+			return session.PromptCouldNotConfirm, errors.New("RepoID empty: --repo scoping was dropped")
 		}
-		return nil
+		return session.PromptDelivered, nil
 	}
 	defer func() { sendPromptViaDaemon = prevSend }()
 
@@ -492,14 +492,14 @@ func TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt(t *testing.T) {
 	called := false
 	prevDeliver := deliverPromptViaDaemon
 	prevSend := sendPromptViaDaemon
-	deliverPromptViaDaemon = func(req daemon.DeliverPromptRequest) (string, error) {
+	deliverPromptViaDaemon = func(req daemon.DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
 		gotReq = req
 		called = true
-		return "started", nil
+		return "started", session.PromptCouldNotConfirm, nil
 	}
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		t.Fatalf("--create must not fall back to the plain send path; got %+v", req)
-		return nil
+		return session.PromptCouldNotConfirm, nil
 	}
 	defer func() {
 		deliverPromptViaDaemon = prevDeliver
@@ -859,6 +859,7 @@ func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
 	rawA, err := json.Marshal([]session.InstanceData{
 		{Title: "a1", Status: session.Running},
 		{Title: "a2", Status: session.Ready},
+		{Title: "a3", Status: session.Running},
 	})
 	if err != nil {
 		t.Fatalf("marshal repo A: %v", err)
@@ -878,10 +879,17 @@ func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
 
 	var gotRepoIDs, gotTitles []string
 	prevSend := sendPromptViaDaemon
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		gotRepoIDs = append(gotRepoIDs, req.RepoID)
 		gotTitles = append(gotTitles, req.Title)
-		return nil
+		switch req.Title {
+		case "a1":
+			return session.PromptDelivered, nil
+		case "a2":
+			return session.PromptNotDelivered, nil
+		default:
+			return session.PromptCouldNotConfirm, nil
+		}
 	}
 	defer func() { sendPromptViaDaemon = prevSend }()
 
@@ -889,8 +897,9 @@ func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broadcast returned error: %v", err)
 	}
-	if res.Delivered != 2 || res.Failed != 0 || res.Skipped != 0 {
-		t.Fatalf("counts = delivered %d / failed %d / skipped %d, want 2/0/0", res.Delivered, res.Failed, res.Skipped)
+	if res.Delivered != 1 || res.NotDelivered != 1 || res.CouldNotConfirm != 1 || res.Failed != 0 || res.Skipped != 0 {
+		t.Fatalf("counts = delivered %d / not-delivered %d / could-not-confirm %d / failed %d / skipped %d, want 1/1/1/0/0",
+			res.Delivered, res.NotDelivered, res.CouldNotConfirm, res.Failed, res.Skipped)
 	}
 	for _, id := range gotRepoIDs {
 		if id != repoA.ID {
@@ -942,9 +951,9 @@ func TestSessionsSendPrompt_BroadcastExcludesRoot(t *testing.T) {
 		repoFlag = repoRoot
 		var got []string
 		prevSend := sendPromptViaDaemon
-		sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 			got = append(got, req.Title)
-			return nil
+			return session.PromptDelivered, nil
 		}
 		defer func() { sendPromptViaDaemon = prevSend }()
 
@@ -979,9 +988,9 @@ func TestSessionsSendPrompt_BroadcastExcludesRoot(t *testing.T) {
 		sendPromptIncludeRootFlag = true
 		var got []string
 		prevSend := sendPromptViaDaemon
-		sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+		sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 			got = append(got, req.Title)
-			return nil
+			return session.PromptDelivered, nil
 		}
 		defer func() { sendPromptViaDaemon = prevSend }()
 
@@ -1040,12 +1049,12 @@ func TestSessionsSendPrompt_BroadcastToleratesLost(t *testing.T) {
 
 	var attempted []string
 	prevSend := sendPromptViaDaemon
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		attempted = append(attempted, req.Title)
 		if req.Title == "boom" {
-			return errors.New("daemon: session not reachable")
+			return session.PromptCouldNotConfirm, errors.New("daemon: session not reachable")
 		}
-		return nil
+		return session.PromptDelivered, nil
 	}
 	defer func() { sendPromptViaDaemon = prevSend }()
 
@@ -1113,12 +1122,12 @@ func TestSessionsSendPrompt_BroadcastSkipsArchived(t *testing.T) {
 
 	var attempted []string
 	prevSend := sendPromptViaDaemon
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		attempted = append(attempted, req.Title)
 		if req.Title == "parked-away" {
-			return errors.New("instance not started")
+			return session.PromptCouldNotConfirm, errors.New("instance not started")
 		}
-		return nil
+		return session.PromptDelivered, nil
 	}
 	defer func() { sendPromptViaDaemon = prevSend }()
 
@@ -1170,9 +1179,9 @@ func TestSessionsSendPrompt_BroadcastRequiresScope(t *testing.T) {
 	defer func() { _ = os.Chdir(prevWd) }()
 
 	prevSend := sendPromptViaDaemon
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		t.Fatalf("broadcast must not deliver without a resolved scope; got %+v", req)
-		return nil
+		return session.PromptCouldNotConfirm, nil
 	}
 	defer func() { sendPromptViaDaemon = prevSend }()
 
@@ -1218,9 +1227,9 @@ func TestSessionsSendPrompt_BroadcastAllReposSpansRepos(t *testing.T) {
 
 	var got []string
 	prevSend := sendPromptViaDaemon
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		got = append(got, req.RepoID+"/"+req.Title)
-		return nil
+		return session.PromptDelivered, nil
 	}
 	defer func() { sendPromptViaDaemon = prevSend }()
 

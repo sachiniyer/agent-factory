@@ -31,8 +31,8 @@ var (
 	archiveSessionViaDaemon = daemon.ArchiveSession
 	restoreSessionViaDaemon = daemon.RestoreSession
 	sessionsArchiveSelf     bool
-	sendPromptViaDaemon     = daemon.SendPrompt
-	deliverPromptViaDaemon  = daemon.DeliverPrompt
+	sendPromptViaDaemon     = daemon.SendPromptWithStatus
+	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
 	createTabViaDaemon      = daemon.CreateTab
 	closeTabViaDaemon       = daemon.CloseTab
 	renameTabViaDaemon      = daemon.RenameTab

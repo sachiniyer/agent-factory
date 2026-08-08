@@ -223,9 +223,21 @@ func (s *localAgentServer) Alive() (bool, error) {
 }
 
 func (s *localAgentServer) SendPrompt(prompt string) error {
+	_, err := s.SendPromptWithStatus(prompt)
+	return err
+}
+
+func (s *localAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
 	// The reliable command path (tmux send-keys), which is what automated/scheduled
 	// deliveries need — it lands whether or not a PTY is currently attached.
-	return s.inst.currentBackend().SendPromptCommand(s.inst, prompt)
+	backend := s.inst.currentBackend()
+	if reporter, ok := backend.(promptDeliveryStatusBackend); ok {
+		return reporter.SendPromptCommandWithStatus(s.inst, prompt)
+	}
+	if err := backend.SendPromptCommand(s.inst, prompt); err != nil {
+		return PromptCouldNotConfirm, err
+	}
+	return PromptCouldNotConfirm, nil
 }
 
 // --- data plane: WS PTY broker + clientless tmux fan-out (#1592 PR5) ---

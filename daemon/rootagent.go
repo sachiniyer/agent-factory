@@ -515,26 +515,27 @@ func reportRootConversationCarry(repoRoot string, carried session.AgentConversat
 // when the target is not a re-emerging root, so DeliverPrompt falls through to
 // its normal create path; on a wait timeout it returns handled=true with an
 // accurate "being recreated" error rather than the misleading reserved-name one.
-func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverPromptRequest) (string, bool, error) {
+func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverPromptRequest) (string, session.PromptDeliveryStatus, bool, error) {
 	if !session.IsReservedTitle(req.Title) || !m.repoRootAgentWillMaterialize(repo.ID) {
-		return "", false, nil
+		return "", session.PromptCouldNotConfirm, false, nil
 	}
 	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
 		// Pre-flight: the root never reappeared within the wait, so nothing was
 		// sent — refund the rate slot (#2501). This is the reserved-root outage
 		// path a monitor task targeting `root` hits during a tmux blip.
-		return "", true, notAttempted(fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); event not delivered this attempt: %w", repo.Root, err))
+		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); event not delivered this attempt: %w", repo.Root, err))
 	}
 	// A TUI can attach to root during the wait above, so re-check the defer lease
 	// before sending — otherwise this path pastes into an attached pane the
 	// "exists" path would have deferred (#1638).
 	if m.deferWhileAttached(repo.ID, req) {
-		return StatusDeferredAttached, true, nil
+		return StatusDeferredAttached, session.PromptNotDelivered, true, nil
 	}
-	if err := m.SendPrompt(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt}); err != nil {
-		return "", true, err
+	status, err := m.SendPromptWithStatus(SendPromptRequest{Title: req.Title, RepoID: repo.ID, Prompt: req.Prompt})
+	if err != nil {
+		return "", session.PromptCouldNotConfirm, true, err
 	}
-	return "sent", true, nil
+	return "sent", status, true, nil
 }
 
 // repoRootAgentWillMaterialize reports whether the daemon's ensure loop is

@@ -448,11 +448,18 @@ type agentSendPromptRequest struct {
 	Prompt string `json:"prompt"`
 }
 
-func (hs *headlessServer) SendPrompt(req agentSendPromptRequest, resp *agentOKResponse) error {
-	if err := hs.as.SendPrompt(req.Prompt); err != nil {
+type agentSendPromptResponse struct {
+	OK     bool                         `json:"ok"`
+	Status session.PromptDeliveryStatus `json:"status"`
+}
+
+func (hs *headlessServer) SendPrompt(req agentSendPromptRequest, resp *agentSendPromptResponse) error {
+	status, err := session.SendPromptWithStatus(hs.as, req.Prompt)
+	if err != nil {
 		return err
 	}
 	resp.OK = true
+	resp.Status = status
 	return nil
 }
 

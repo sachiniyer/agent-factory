@@ -334,7 +334,8 @@ type SendPromptRequest struct {
 }
 
 type SendPromptResponse struct {
-	OK bool `json:"ok"`
+	OK     bool                         `json:"ok"`
+	Status session.PromptDeliveryStatus `json:"status"`
 }
 
 // DeliverPromptRequest asks the daemon to deliver a prompt to a target session,
@@ -371,7 +372,8 @@ type DeliverPromptRequest struct {
 // initial prompt) and "sent" when it was sent into a session that already
 // existed — the same status vocabulary deliverTaskPrompt records on a task.
 type DeliverPromptResponse struct {
-	Status string `json:"status"`
+	Status         string                       `json:"status"`
+	DeliveryStatus session.PromptDeliveryStatus `json:"delivery_status"`
 }
 
 // CreateTabRequest asks the daemon to spawn a tab in the target session's

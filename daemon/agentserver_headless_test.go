@@ -73,6 +73,13 @@ func (f *fakeHeadlessAgentServer) SendPrompt(p string) error {
 	f.lastPrompt = p
 	return nil
 }
+
+func (f *fakeHeadlessAgentServer) SendPromptWithStatus(p string) (session.PromptDeliveryStatus, error) {
+	if err := f.SendPrompt(p); err != nil {
+		return session.PromptCouldNotConfirm, err
+	}
+	return session.PromptNotDelivered, nil
+}
 func (f *fakeHeadlessAgentServer) Subscribe(_ int, _ session.Seq) (session.PTYSubscription, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -222,8 +229,10 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 
 	resp, err = post("/v1/agent/send-prompt", `{"prompt":"hello world"}`)
 	require.NoError(t, err)
-	decodeData(resp, nil)
+	var sent agentSendPromptResponse
+	decodeData(resp, &sent)
 	require.Equal(t, "hello world", fake.lastPrompt)
+	require.Equal(t, session.PromptNotDelivered, sent.Status)
 
 	// --- control REST: archive returns the pushed branch (#1592 Phase 4 PR6) --
 	resp, err = post("/v1/agent/archive", ``)

@@ -185,9 +185,9 @@ func TestSendPromptDeliveryHonorsPromptFlag(t *testing.T) {
 
 	var gotReq daemon.SendPromptRequest
 	prevSend := sendPromptViaDaemon
-	sendPromptViaDaemon = func(req daemon.SendPromptRequest) error {
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
 		gotReq = req
-		return nil
+		return session.PromptDelivered, nil
 	}
 	t.Cleanup(func() { sendPromptViaDaemon = prevSend })
 
@@ -233,6 +233,60 @@ func TestSendPromptDeliveryHonorsPromptFlag(t *testing.T) {
 			t.Fatalf("delivered (title %q, prompt %q), want (mytitle, \"\")", flagReq.Title, flagReq.Prompt)
 		}
 	})
+}
+
+func TestSendPromptReportsClosedDeliveryOutcome(t *testing.T) {
+	tmp := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetSendPromptState(t)
+
+	repoRoot := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	raw, err := json.Marshal([]session.InstanceData{{Title: "worker", Status: session.Running}})
+	if err != nil {
+		t.Fatalf("marshal instances: %v", err)
+	}
+	if err := config.SaveRepoInstances(repo.ID, raw); err != nil {
+		t.Fatalf("save instances: %v", err)
+	}
+	repoFlag = repoRoot
+
+	prevSend := sendPromptViaDaemon
+	t.Cleanup(func() { sendPromptViaDaemon = prevSend })
+	for _, want := range []session.PromptDeliveryStatus{
+		session.PromptDelivered,
+		session.PromptNotDelivered,
+		session.PromptCouldNotConfirm,
+	} {
+		t.Run(string(want), func(t *testing.T) {
+			sendPromptViaDaemon = func(daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
+				return want, nil
+			}
+			out, runErr := runCmdCaptureStdout(t, sessionsSendPromptCmd, []string{"worker", "ship it"})
+			if runErr != nil {
+				t.Fatalf("send-prompt returned error: %v", runErr)
+			}
+			var got sendPromptResult
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("output is not JSON (%q): %v", string(out), err)
+			}
+			if got.Status != want {
+				t.Fatalf("status = %q, want %q", got.Status, want)
+			}
+			if !got.OK {
+				t.Fatal("send-prompt dropped its existing ok acknowledgement")
+			}
+		})
+	}
 }
 
 // silenceCLIOutput points stdout/stderr at /dev/null for the test: the command
