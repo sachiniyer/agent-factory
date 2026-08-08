@@ -65,6 +65,11 @@ const (
 	// own config land under it; a constant keeps those mount targets in lockstep
 	// with the runContainer env so the two never drift.
 	dockerContainerHome = "/root"
+	// Account sessions run as the owner the bind mount reports inside the
+	// container, with a separate writable HOME for af/git state. The account
+	// itself remains mounted at dockerAccountHome and is selected by CODEX_HOME or
+	// CLAUDE_CONFIG_DIR.
+	dockerAccountRuntimeHome = "/af-home"
 	// dockerAfBinaryPath is where the daemon's `af` binary is copied in the
 	// container so `af agent-server` is on PATH for the exec below.
 	dockerAfBinaryPath = "/usr/local/bin/af"
@@ -213,6 +218,24 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// Resolve once in the trusted host process. The agent-server receives this
 	// exact command with --program-resolved and must not reinterpret its enum.
 	resolvedProgram := config.ResolveProgram(&cfg.Config, spec.Program)
+	if spec.Account.Dir != "" {
+		resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
+		if resolvedAgent != spec.Account.Agent {
+			return ProvisionResult{}, fmt.Errorf(
+				"backend=docker: account %q is a %s account, but the resolved Docker program runs %s; refusing a container that would report one identity and use another",
+				spec.Account.Name, spec.Account.Agent, resolvedAgent)
+		}
+		// Reuse the local shim's authoritative validation for cloud modes and
+		// command-local identity assignments. The returned host environment is not
+		// installed in Docker; accountMountAndEnv builds the container boundary.
+		if _, aerr := sessionenv.ApplyAccount(os.Environ(), resolvedProgram, spec.Account); aerr != nil {
+			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", aerr)
+		}
+		if aerr := validateAccountDockerRunArgs(runArgs, spec.Account.Agent); aerr != nil {
+			return ProvisionResult{}, aerr
+		}
+		spec.SessionEnvPassthrough = filterAccountPassthrough(spec.SessionEnvPassthrough, spec.Account.Agent)
+	}
 	// Stamp the AF home onto the container (af.home label) so the orphan sweeper
 	// can scope to this daemon's home. If it can't be resolved, omit the label —
 	// the container just won't be sweep-tracked, which is the safe direction.
@@ -290,6 +313,10 @@ type dockerProvisioner struct {
 	// session, and mutually exclusive with credentialMounts.
 	accountMount []string
 	accountEnv   []string
+	// containerUser is the numeric uid:gid that owns dockerAccountHome as seen by
+	// the container. On rootful Docker that is the host af user; on rootless Docker
+	// it is commonly 0:0, which maps back to that same host user.
+	containerUser string
 	// credentialMounts are the read-only `-v host:container:ro` agent-credential
 	// bind mounts (docker.mount_agent_credentials, #2194), resolved once in
 	// Provision and appended to the `docker run` argv before runArgs.
@@ -323,12 +350,20 @@ type dockerProvisioner struct {
 // session needs. Each step wraps docker's combined output in the error so a
 // failure is self-diagnosing.
 func (p *dockerProvisioner) provision() (ProvisionResult, error) {
+	if p.spec.Account.Dir != "" {
+		if err := p.ensureAccountDockerEngineLocal(); err != nil {
+			return ProvisionResult{}, err
+		}
+	}
 	engineID, err := p.currentEngineID(dockerShortStepTimeout)
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err)
 	}
 	p.engineID = engineID
 	if err := p.runContainer(); err != nil {
+		return ProvisionResult{}, err
+	}
+	if err := p.prepareAccountUser(); err != nil {
 		return ProvisionResult{}, err
 	}
 	if err := p.configureGit(); err != nil {
@@ -383,7 +418,7 @@ func (p *dockerProvisioner) runContainer() error {
 	args := []string{
 		"run", "-d",
 		"--label", dockerSessionLabel + "=" + Slugify(p.spec.Title),
-		"-e", "HOME=" + dockerContainerHome,
+		"-e", "HOME=" + p.sessionHome(),
 		"-p", "127.0.0.1::" + dockerAgentPort,
 	}
 	// Scope the container to this daemon's AF home for the orphan sweeper (#2194).
@@ -411,6 +446,12 @@ func (p *dockerProvisioner) runContainer() error {
 	// -e for a name precedence, so putting the account there makes it dominate an
 	// assembly that is otherwise additive by design.
 	args = append(args, p.accountEnv...)
+	if p.spec.Account.Dir != "" {
+		// docker.run_args may set HOME too. It is not an identity source once the
+		// agent's config root is explicit, but the non-root agent-server still needs
+		// its writable runtime home, so make this execution invariant win last.
+		args = append(args, "-e", "HOME="+p.sessionHome())
+	}
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
 	out, err := p.docker(dockerProvisionStepTimeout, args...)
@@ -449,7 +490,7 @@ func (p *dockerProvisioner) configureGit() error {
 	script := `git config --global user.email "af@agent-factory.local" && ` +
 		`git config --global user.name "Agent Factory" && ` +
 		`git config --global --add safe.directory "*"`
-	out, err := p.execSh(dockerShortStepTimeout, script)
+	out, err := p.execSessionSh(dockerShortStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: git config in container failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -463,13 +504,13 @@ func (p *dockerProvisioner) configureGit() error {
 // pushed session branch as a local ref so the in-container Setup checks it out.
 func (p *dockerProvisioner) cloneWorkspace() error {
 	script := gitCloneCommand(p.spec.CloneURL, dockerWorkspaceDir)
-	out, err := p.execSh(dockerProvisionStepTimeout, script)
+	out, err := p.execSessionSh(dockerProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: cloning %q into the container failed (is git in the image, and the URL reachable from inside the container?): %s: %w",
 			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
 	}
 	if credentialCommand := gitPersistCredentialCommand(p.spec.CloneURL, dockerWorkspaceDir); credentialCommand != "" {
-		out, err = p.execSh(dockerShortStepTimeout, credentialCommand)
+		out, err = p.execSessionSh(dockerShortStepTimeout, credentialCommand)
 		if err != nil {
 			return fmt.Errorf("backend=docker: configuring value-free GitHub credentials in the clone failed: %s: %w",
 				strings.TrimSpace(string(out)), err)
@@ -492,7 +533,7 @@ func (p *dockerProvisioner) cloneWorkspace() error {
 func (p *dockerProvisioner) fetchRestoreBranch(branch string) error {
 	script := fmt.Sprintf("git -C %s fetch origin %s:%s",
 		shellQuote(dockerWorkspaceDir), shellQuote(branch), shellQuote(branch))
-	out, err := p.execSh(dockerProvisionStepTimeout, script)
+	out, err := p.execSessionSh(dockerProvisionStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: restoring archived branch %q into the container failed (was it pushed to origin?): %s: %w",
 			branch, strings.TrimSpace(string(out)), err)
@@ -529,7 +570,10 @@ func (p *dockerProvisioner) startAgentServer() error {
 
 	// -d: detach. The agent-server keeps running in the container after this exec
 	// client returns; we read its banner from the file below.
-	out, err := p.docker(dockerShortStepTimeout, "exec", "-d", p.containerID, "sh", "-c", filteredInner)
+	args := []string{"exec", "-d"}
+	args = append(args, p.sessionExecOptions()...)
+	args = append(args, p.containerID, "sh", "-c", filteredInner)
+	out, err := p.docker(dockerShortStepTimeout, args...)
 	if err != nil {
 		return fmt.Errorf("backend=docker: starting af agent-server in the container failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -735,7 +779,12 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 
 // execSh runs a `sh -c <script>` inside the container.
 func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte, error) {
-	return p.docker(timeout, "exec", p.containerID, "sh", "-c", script)
+	args := []string{"exec"}
+	if p.spec.Account.Dir != "" {
+		args = append(args, "--user", "0:0")
+	}
+	args = append(args, p.containerID, "sh", "-c", script)
+	return p.docker(timeout, args...)
 }
 
 func (p *dockerProvisioner) shortID() string {

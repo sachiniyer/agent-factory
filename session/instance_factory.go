@@ -174,7 +174,7 @@ func defaultBackendFactory(opts InstanceOptions, absPath string) (ProvisionResul
 	// machine, where the registry lives, before a path derived from them is handed
 	// to a runtime that will mount it.
 	if kind.CarriesAccount() && strings.TrimSpace(opts.Account) != "" {
-		account, aerr := resolveAccountForProvision(opts)
+		account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
 		if aerr != nil {
 			return ProvisionResult{}, aerr
 		}
@@ -662,13 +662,24 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 // The agent is derived from the session's program, matching how every other
 // account surface names one: an account belongs to an agent, and "codex" and
 // "claude" keep separate registries.
-func resolveAccountForProvision(opts InstanceOptions) (sessionenv.Account, error) {
+func resolveAccountForProvision(repoRoot, program, accountName string) (sessionenv.Account, error) {
 	home, err := config.GetConfigDir()
 	if err != nil {
-		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", opts.Account, err)
+		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q: %w", accountName, err)
 	}
-	agent := sessionenv.AgentForCommand(opts.Program)
-	account, err := agentaccount.Selected(home, agent, opts.Account, "")
+	requestedAgent := sessionenv.AgentForCommand(program)
+	resolved, err := resolveRepoConfig(repoRoot)
+	if err != nil {
+		return sessionenv.Account{}, fmt.Errorf("cannot resolve account %q against the session program: %w", accountName, err)
+	}
+	resolvedProgram := config.ResolveProgram(&resolved.Config, program)
+	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
+	if resolvedAgent != requestedAgent {
+		return sessionenv.Account{}, fmt.Errorf(
+			"account %q is a %s account, but this session resolves %s to a %s command; account namespaces are separate, so the Docker session would not use the identity you selected",
+			accountName, requestedAgent, requestedAgent, resolvedAgent)
+	}
+	account, err := agentaccount.Selected(home, requestedAgent, accountName, "")
 	if err != nil {
 		return sessionenv.Account{}, err
 	}
@@ -676,7 +687,7 @@ func resolveAccountForProvision(opts InstanceOptions) (sessionenv.Account, error
 		// Selected returns a zero Account for an empty name, which the caller has
 		// already excluded. A zero Dir here would mean an unscoped provision that
 		// still reported an account, so refuse rather than proceed.
-		return sessionenv.Account{}, fmt.Errorf("account %q resolved to no directory", opts.Account)
+		return sessionenv.Account{}, fmt.Errorf("account %q resolved to no directory", accountName)
 	}
 	return account, nil
 }

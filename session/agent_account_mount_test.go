@@ -24,20 +24,21 @@ func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
 	if a[1] == b[1] {
 		t.Fatalf("two accounts resolved to the SAME container source %q — they would share an identity", a[1])
 	}
-	if !strings.HasPrefix(a[1], "/home/op/.agent-factory/accounts/codex/work:") {
+	if !strings.Contains(a[1], "src=/home/op/.agent-factory/accounts/codex/work") {
 		t.Errorf("the mount source must be the account's own directory; got %q", a[1])
 	}
 	// Both land on the same fixed path INSIDE the container, so nothing about the
 	// host's layout crosses the boundary and the agent's config var is stable.
-	if !strings.HasSuffix(a[1], ":"+dockerAccountHome) || !strings.HasSuffix(b[1], ":"+dockerAccountHome) {
+	if a[0] != "--mount" || b[0] != "--mount" ||
+		!strings.Contains(a[1], "dst="+dockerAccountHome) || !strings.Contains(b[1], "dst="+dockerAccountHome) {
 		t.Errorf("both accounts must mount at the fixed container path %q; got %q and %q", dockerAccountHome, a[1], b[1])
 	}
 	want := "CODEX_HOME=" + dockerAccountHome
-	if len(aEnv) != 2 || aEnv[1] != want {
+	if got, found := dockerEnvArg(aEnv, "CODEX_HOME"); !found || got != want {
 		t.Errorf("the agent must be pointed at the mounted account home: want %q, got %v", want, aEnv)
 	}
-	if aEnv[1] != bEnv[1] {
-		t.Errorf("the container-side config var must not depend on which account it is; got %q and %q", aEnv[1], bEnv[1])
+	if strings.Join(aEnv, "\x00") != strings.Join(bEnv, "\x00") {
+		t.Errorf("the container-side environment must not depend on which account it is; got %v and %v", aEnv, bEnv)
 	}
 }
 
@@ -45,7 +46,8 @@ func TestAccountMountAndEnv_TwoAccountsGetDifferentRoots(t *testing.T) {
 // agent on the container's default home — present, wrong, and quiet.
 func TestAccountMountAndEnv_UsesTheAgentsOwnConfigVar(t *testing.T) {
 	_, env, _ := accountMountAndEnv(sessionenv.Account{Agent: "claude", Name: "work", Dir: "/acct/claude/work"})
-	if want := "CLAUDE_CONFIG_DIR=" + dockerAccountHome; len(env) != 2 || env[1] != want {
+	want := "CLAUDE_CONFIG_DIR=" + dockerAccountHome
+	if got, found := dockerEnvArg(env, "CLAUDE_CONFIG_DIR"); !found || got != want {
 		t.Fatalf("want %q, got %v", want, env)
 	}
 	// An agent with no account support produces nothing rather than a mount the

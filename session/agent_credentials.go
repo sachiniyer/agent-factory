@@ -2,10 +2,12 @@ package session
 
 import (
 	"fmt"
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -105,7 +107,7 @@ func resolveAgentCredentialMounts(agent string) []string {
 // dockerAccountHome is where an account's directory is mounted inside the
 // container. A fixed path, not derived from the host's, so nothing about the
 // operator's filesystem layout crosses the boundary.
-const dockerAccountHome = dockerContainerHome + "/.af-account"
+const dockerAccountHome = "/af-account"
 
 // accountMountAndEnv returns the `-v` mount that places an account's agent HOME
 // inside the container, and the `-e VAR=value` that points the agent at it
@@ -147,6 +149,34 @@ func accountMountAndEnv(account sessionenv.Account) (mount []string, env []strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot resolve an absolute path for account %q (%s): %w", account.Name, account.Dir, err)
 	}
-	return []string{"-v", source + ":" + dockerAccountHome},
-		[]string{"-e", configVar + "=" + dockerAccountHome}, nil
+	// --volume uses ':' as a field delimiter, so a valid Unix account path such as
+	// /srv/af:work is misparsed. --mount keeps ':' ordinary. Its own delimiter is
+	// a comma, which Docker cannot quote inside the CSV-style option; refuse that
+	// rare path explicitly instead of mounting a different directory.
+	if strings.Contains(source, ",") {
+		return nil, nil, fmt.Errorf("account %q path %q contains a comma, which Docker --mount cannot encode safely", account.Name, source)
+	}
+	mount = []string{"--mount", "type=bind,src=" + source + ",dst=" + dockerAccountHome}
+	// Blank every alternate identity source, including values baked into the
+	// image, then install the selected credential root last. The host environment
+	// is separately validated with ApplyAccount before this argv is assembled.
+	blank := make(map[string]struct{})
+	for _, name := range sessionenv.AccountIdentityNames(account.Agent) {
+		if name != configVar {
+			blank[name] = struct{}{}
+		}
+	}
+	for _, name := range sessionenv.AgentAuthSelectors(account.Agent) {
+		blank[name] = struct{}{}
+	}
+	names := make([]string, 0, len(blank))
+	for name := range blank {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		env = append(env, "-e", name+"=")
+	}
+	env = append(env, "-e", configVar+"="+dockerAccountHome)
+	return mount, env, nil
 }

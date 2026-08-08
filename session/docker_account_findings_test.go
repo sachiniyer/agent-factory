@@ -26,6 +26,8 @@ func newDockerAccountFixture(t *testing.T, home, agent string, runArgs []string)
 		home = t.TempDir()
 	}
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("DOCKER_HOST", "")
+	t.Setenv("DOCKER_CONTEXT", "")
 	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 	accountDir, err := agentaccount.Register(home, agent, "work")
 	require.NoError(t, err)
@@ -121,8 +123,11 @@ func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {
 		wantErr string
 	}{
 		{name: "short env", args: []string{"-e", "OPENAI_API_KEY=repo-identity"}, wantErr: "OPENAI_API_KEY"},
+		{name: "short env equals", args: []string{"-e=CODEX_API_KEY=repo-identity"}, wantErr: "CODEX_API_KEY"},
 		{name: "long env", args: []string{"--env=CODEX_ACCESS_TOKEN=repo-identity"}, wantErr: "CODEX_ACCESS_TOKEN"},
 		{name: "env file", args: []string{"--env-file", "repo.env"}, wantErr: "env-file"},
+		{name: "account mount", args: []string{"--mount", "type=bind,src=/tmp/other,dst=/af-account"}, wantErr: "account mount"},
+		{name: "account volume", args: []string{"-v", "/tmp/other:/af-account"}, wantErr: "account mount"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -186,6 +187,7 @@ func recoverSandbox(i *Instance) error {
 func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	backend := i.backend
+	accountName := i.Account
 	spec := ProvisionSpec{
 		RepoRoot:              i.Path,
 		Title:                 i.Title,
@@ -201,6 +203,17 @@ func (i *Instance) reprovisionRemote() error {
 	kind, err := backendKindForType(backend.Type())
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+	}
+	// Resolve the persisted account before reaping the old sandbox. A missing or
+	// cross-agent account makes the replacement unusable, and that is not a reason
+	// to destroy the only runtime the session still has. The initial create uses
+	// this same resolver, so restore cannot drift onto ambient credentials.
+	if kind.CarriesAccount() && strings.TrimSpace(accountName) != "" {
+		account, accountErr := resolveAccountForProvision(spec.RepoRoot, spec.Program, accountName)
+		if accountErr != nil {
+			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
+		}
+		spec.Account = account
 	}
 	rt, err := ResolveRuntime(kind)
 	if err != nil {

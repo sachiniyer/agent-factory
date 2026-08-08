@@ -143,6 +143,25 @@ func AccountAgents() []string {
 	return out
 }
 
+// AccountIdentityNames lists every environment variable whose value can select
+// an identity instead of the named account: the agent's credential variables
+// and its credential-root variable. Provisioners use the same classification as
+// ApplyAccount so a remote/container launch cannot drift from the local shim's
+// account boundary.
+func AccountIdentityNames(agent string) []string {
+	configVar, ok := SupportsAccounts(agent)
+	if !ok {
+		return nil
+	}
+	denied := accountScopedNames(agent, configVar)
+	out := make([]string, 0, len(denied))
+	for name := range denied {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ApplyAccount scopes an already-filtered session environment to exactly one
 // account: it INJECTS that account's credential root and REMOVES every other
 // identity-bearing variable for the agent.
