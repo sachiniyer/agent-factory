@@ -145,6 +145,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     prNumber: String(pr.number),
     shouldMerge: reasons.length === 0,
     isOpen: pr.state === "OPEN" && !pr.merged,
+    baseRefName: pr.baseRefName,
     headSha: pr.headRefOid,
     docsChanged,
     reasons,
@@ -160,6 +161,13 @@ async function reportDecision({ github, context, core, result, manual = false })
   if (result.isOpen === false) {
     core.notice(`Leaving the existing Auto Gate decision unchanged for closed PR #${result.prNumber}.`);
     return { state: "closed", priorDecision: false };
+  }
+  if (result.baseRefName && result.baseRefName !== "master") {
+    core.notice(
+      `Auto Gate decision was not reported for PR #${result.prNumber} because its base is ` +
+        `${result.baseRefName}, not master.`,
+    );
+    return { state: "ineligible", priorDecision: false };
   }
 
   const { owner, repo } = context.repo;
@@ -212,7 +220,7 @@ async function reportDecision({ github, context, core, result, manual = false })
   return { state, priorDecision: Boolean(priorDecision) };
 }
 
-async function merge({ github, context, core, prNumber }) {
+async function merge({ github, context, core, prNumber, expectedHeadSha }) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
   }
@@ -223,6 +231,12 @@ async function merge({ github, context, core, prNumber }) {
   }
   if (!gate.headSha) {
     throw new Error(`Refusing to merge PR #${prNumber}; evaluated head SHA is missing`);
+  }
+  if (expectedHeadSha && gate.headSha !== expectedHeadSha) {
+    throw new Error(
+      `Refusing to merge PR #${prNumber}; serialized head ${expectedHeadSha} ` +
+        `does not match evaluated head ${gate.headSha}`,
+    );
   }
 
   const { owner, repo } = context.repo;
@@ -248,6 +262,49 @@ async function merge({ github, context, core, prNumber }) {
     });
     core.notice(`Dispatched Docs workflow for PR #${prNumber} docs-path merge.`);
   }
+}
+
+async function resolveTargets({ github, context, core, prNumber }) {
+  const pullAssociationCache = new Map();
+  const numbers = [];
+
+  if (prNumber) {
+    numbers.push(prNumber);
+  } else {
+    const synchronizedPullRequest =
+      context.eventName === "pull_request" &&
+      context.payload.action === "synchronize" &&
+      context.payload.before;
+    if (synchronizedPullRequest) {
+      if (context.payload.pull_request?.number) {
+        numbers.push(context.payload.pull_request.number);
+      }
+      const previousHeadPulls = await listOpenMasterPullRequestsForCommit({
+        github,
+        context,
+        sha: context.payload.before,
+        pullAssociationCache,
+      });
+      numbers.push(...previousHeadPulls.map((pull) => pull.number));
+    } else {
+      const number = await findPullRequestNumber({
+        github,
+        context,
+        core,
+        pullAssociationCache,
+      });
+      if (number) {
+        numbers.push(number);
+      }
+    }
+  }
+
+  const targets = [];
+  for (const number of [...new Set(numbers)]) {
+    const pr = await getPullRequest({ github, context, number });
+    targets.push({ prNumber: String(pr.number), headSha: pr.headRefOid });
+  }
+  return targets;
 }
 
 async function findPullRequestNumber({ github, context, core, pullAssociationCache }) {
@@ -805,6 +862,7 @@ module.exports = {
   evaluate,
   merge,
   reportDecision,
+  resolveTargets,
   __test: {
     evaluateCodex,
     evaluateRequiredChecks,

@@ -22,12 +22,14 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
-    /head_sha: \$\{\{ steps\.evaluate\.outputs\.head_sha \}\}/,
+    /targets: \$\{\{ steps\.evaluate\.outputs\.targets \}\}/,
   );
   assert.match(
     workflow,
-    /concurrency:\s+group: auto-gate-\$\{\{ needs\.auto-gate\.outputs\.head_sha \}\}\s+cancel-in-progress: false/,
+    /concurrency:\s+group: auto-gate-\$\{\{ matrix\.target\.head_sha \}\}\s+cancel-in-progress: false/,
   );
+  assert.match(workflow, /strategy:\s+fail-fast: false\s+matrix:\s+target:/);
+  assert.match(workflow, /EXPECTED_HEAD_SHA: \$\{\{ matrix\.target\.head_sha \}\}/);
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
   assert.match(workflow, /prNumber: explicitPrNumber/);
   assert.match(
@@ -39,16 +41,11 @@ test("Auto Gate can be recovered manually by PR number", () => {
     workflow,
     /if \(typeof autoGate\.reportDecision === "function"\)/,
   );
-  assert.match(
-    workflow,
-    /context\.eventName === "workflow_dispatch" && !result\.headSha/,
-  );
+  assert.match(workflow, /typeof autoGate\.resolveTargets === "function"/);
+  assert.match(workflow, /context\.eventName === "workflow_dispatch" && targets\.length === 0/);
   assert.match(workflow, /evaluationFailed = result\.reasons\.some/);
-  assert.match(workflow, /evaluationFailed \|\|/);
-  assert.match(
-    workflow,
-    /if \(error\.failWorkflow \|\| context\.eventName === "workflow_dispatch"\) \{\s+throw error;/,
-  );
+  assert.match(workflow, /core\.setOutput\("targets", "\[\]"\)/);
+  assert.match(workflow, /core\.setOutput\("targets", "\[\]"\);\s+throw error;/);
 });
 
 test("manual recovery reports a previously absent gate distinctly", async () => {
@@ -123,6 +120,28 @@ test("a queued evaluation cannot overwrite PASS after the PR merges", async () =
   });
 
   assert.equal(report.state, "closed");
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(github.updatedChecks.length, 0);
+});
+
+test("a non-master PR event cannot overwrite a master decision on the same commit", async () => {
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "1465",
+      headSha: HEAD_SHA,
+      baseRefName: "release",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: base branch is release, not master",
+    },
+  });
+
+  assert.equal(report.state, "ineligible");
   assert.equal(github.createdChecks.length, 0);
   assert.equal(github.updatedChecks.length, 0);
 });
@@ -528,6 +547,37 @@ test("synchronizing away from a shared head reevaluates the previous-head surviv
   assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
 });
 
+test("synchronizing away from a shared head targets both affected decisions", async () => {
+  const targets = await autoGate.resolveTargets({
+    github: fakeGateGithub({
+      associatedPullRequests: [
+        { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      ],
+      pullRequestsByNumber: {
+        1465: { headRefOid: OTHER_SHA },
+        2048: { headRefOid: HEAD_SHA },
+      },
+    }),
+    context: fakeContext({
+      action: "synchronize",
+      before: HEAD_SHA,
+      after: OTHER_SHA,
+      pull_request: {
+        number: 1465,
+        state: "open",
+        base: { ref: "master" },
+        head: { sha: OTHER_SHA },
+      },
+    }),
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets, [
+    { prNumber: "1465", headSha: OTHER_SHA },
+    { prNumber: "2048", headSha: HEAD_SHA },
+  ]);
+});
+
 test("the happy path squash-merges the exact evaluated head", async () => {
   const github = fakeGateGithub();
 
@@ -540,6 +590,22 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 
   assert.equal(github.mergedWith.sha, HEAD_SHA);
   assert.equal(github.mergedWith.merge_method, "squash");
+});
+
+test("merge refuses a head that escaped its serialized decision lane", async () => {
+  const github = fakeGateGithub();
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+      expectedHeadSha: OTHER_SHA,
+    }),
+    /serialized head.*does not match evaluated head/,
+  );
+  assert.equal(github.mergedWith, null);
 });
 
 test("draft and closed pull requests cannot merge", async () => {
@@ -666,6 +732,7 @@ function fakeGateGithub({
     { context: "Lint", integration_id: ACTIONS_APP_ID },
     { context: "Build", integration_id: ACTIONS_APP_ID },
   ],
+  pullRequestsByNumber = {},
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -707,27 +774,30 @@ function fakeGateGithub({
       repos: { listCommitStatusesForRef, listPullRequestsAssociatedWithCommit },
       pulls: { listFiles, listReviews, listReviewComments, merge },
     },
-    graphql: async (_query, variables) => ({
-      repository: {
-        pullRequest: {
-          number: variables.number,
-          title: "Gate test",
-          url: "https://example.invalid/pr/1465",
-          baseRefName: "master",
-          headRefOid: headSha,
-          isDraft,
-          state,
-          merged,
-          mergeable,
-          mergeStateStatus,
-          author: { login: "sachiniyer" },
-          labels: { nodes: [] },
-          commits: {
-            nodes: [{ commit: { committedDate: headCommittedDate } }],
+    graphql: async (_query, variables) => {
+      const pullRequestOverride = pullRequestsByNumber[variables.number] || {};
+      return {
+        repository: {
+          pullRequest: {
+            number: variables.number,
+            title: "Gate test",
+            url: "https://example.invalid/pr/1465",
+            baseRefName: "master",
+            headRefOid: pullRequestOverride.headRefOid || headSha,
+            isDraft,
+            state,
+            merged,
+            mergeable,
+            mergeStateStatus,
+            author: { login: "sachiniyer" },
+            labels: { nodes: [] },
+            commits: {
+              nodes: [{ commit: { committedDate: headCommittedDate } }],
+            },
           },
         },
-      },
-    }),
+      };
+    },
     paginate: async (fn) => responses.get(fn) || [],
     request: async (route) => {
       if (route.includes("/rules/branches/")) {
