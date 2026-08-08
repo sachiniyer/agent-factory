@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sshrelay"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -68,11 +69,18 @@ const sshNoConfigFile = "none"
 // sshCommandForConfig builds the ssh invocation for a repo's ssh.* settings and
 // the operator's host-key posture.
 //
-// It is PURE: it composes a string and touches nothing. Callers that need the
-// accept-new store to exist on disk call prepareSSHHostKeyStore separately, at
-// the point they are about to run the command — restoreRuntimeCleanup composes a
-// teardown during storage load and must not do I/O there (a transiently
-// unwritable AF home would otherwise be captured as a permanently dead closure).
+// IT TOUCHES NO FILESYSTEM STATE, which is what lets restoreRuntimeCleanup call
+// it while persisted handles are loading. Callers that need the accept-new store
+// to exist on disk call prepareSSHHostKeyStore separately, at the point they are
+// about to run the command — a teardown composed during storage load must not do
+// I/O there, or a transiently unwritable AF home is captured as a permanently
+// dead closure.
+//
+// A PINNED command reads one thing: os.Executable, for the relay path (see
+// sshPinnedProxyCommand). That is deliberately inside the boundary above rather
+// than an exception to it — it names the running binary, not a path under AF home,
+// so there is no transient failure for a closure to capture. Reading it fresh on
+// every composition is also what keeps a teardown correct across an upgrade.
 //
 // WHAT IS PRESERVED, option by option:
 //
@@ -93,9 +101,29 @@ const sshNoConfigFile = "none"
 // dialed a pinned literal address and restored the name with `-o HostKeyAlias`
 // (#3086); that rejected host certificates on every non-default port and removed
 // ssh's own multi-address fallback, and no alias value fixes both — see the block
-// on the NO HostKeyAlias line below. The one exception is a teardown for a record
-// that was already provisioned under that pinning, in sshCommandForPinnedRecord.
+// on the NO HostKeyAlias line below. Pinning to one machine is done BELOW the
+// naming layer instead, with a ProxyCommand — see sshCommandPinnedTo.
 func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
+	return sshCommandPinnedTo(cfg, posture, "")
+}
+
+// sshCommandPinnedTo is sshCommandForConfig with the TCP dial pinned to one
+// address, which is how a session stops splitting across a multi-address host
+// (#3086).
+//
+// The destination stays the configured NAME whether or not an address is pinned —
+// the pin travels in `-o ProxyCommand`, which decides only where the socket goes.
+// So ssh computes the known_hosts key and the certificate principal from the name
+// exactly as it does unpinned, and constraint 2 of #3086 ("do not identify the
+// host by address") is satisfied by construction rather than by correction. See
+// internal/sshrelay for the measurement against a real certified sshd.
+//
+// AN EMPTY dialAddr COMPOSES THE ORDINARY NAME-BASED COMMAND, which is what every
+// caller that has no address wants: a persisted cleanup handle written before any
+// of this, and a create whose one-off resolution could not settle on an address.
+// A teardown that refused there would leak the workspace it exists to remove (the
+// #3044 lesson).
+func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {
 		return "", err
@@ -165,10 +193,18 @@ func sshCommandForConfig(cfg config.SSHConfig, posture string) (string, error) {
 		// verbatim. Plain entries want the bracketed form, certificates want the bare
 		// name, and one string cannot be both.
 		//
-		// So the connection stays NAME-based: ssh resolves it, which also keeps the
-		// dialer's try-each-address fallback that pinning removed. The split-session
-		// risk is real and unfixed — #3086 tracks it, with this result recorded so the
-		// approach is not tried again.
+		// So the connection stays NAME-based: ssh resolves it, which is what keeps
+		// certificates valid — and when af pins a session to one machine it does so
+		// with the ProxyCommand below, which leaves this destination alone.
+	}
+	// The pin, when there is one. A ProxyCommand replaces only ssh's TCP connect,
+	// so everything above — including how the host is IDENTIFIED — is untouched.
+	if pinned := strings.TrimSpace(dialAddr); pinned != "" {
+		proxy, proxyErr := sshPinnedProxyCommand(pinned, port)
+		if proxyErr != nil {
+			return "", proxyErr
+		}
+		parts = append(parts, "-o", proxy)
 	}
 	if identity := strings.TrimSpace(cfg.IdentityFile); identity != "" {
 		// Composition stays FILESYSTEM-PURE — the readability check lives in
@@ -258,50 +294,63 @@ func verifySSHIdentityFile(cfg config.SSHConfig) error {
 	return f.Close()
 }
 
-// sshCommandForPinnedRecord composes a TEARDOWN command for a persisted handle
-// that recorded a literal dial address (#3090), which #3092 stopped writing.
+// sshPinnedProxyCommand builds the `-o ProxyCommand=…` that makes ssh's TCP
+// connect land on ONE address while ssh's destination stays the configured name.
 //
-// Such a record knows something no re-resolution can recover: the exact machine
-// its workspace is on. So it dials that address, and restores the name as the
-// host-key lookup key with HostKeyAlias — the pairing #3090 measured, and the one
-// #3092 removed from the CREATE path because no alias value satisfies both a
-// plain [host]:port entry and a certificate principal.
+// The relay is af's OWN binary. `nc`/`socat` would be the same failure class as an
+// ssh option that is too new — a dependency af cannot guarantee, whose absence
+// breaks the whole backend rather than degrading — while af is present by
+// definition, since af is the process composing this command. It is resolved
+// fresh rather than persisted, so a daemon that restarted into an upgraded binary
+// names the one it is actually running.
 //
-// That conflict is accepted HERE and nowhere else, because the failure modes are
-// not symmetric. A certificate host on a non-default port fails verification, so
-// the reap fails and the record is RETAINED and retried — visible, recoverable.
-// Re-resolving a multi-address name instead can reach a different machine, remove
-// nothing, report success and retire the only tombstone — silent, permanent.
+// A FAILURE HERE IS RETURNED, not swallowed, and that is the opposite of the
+// empty-dialAddr case above. Reaching this function means a session IS pinned to a
+// machine — on the teardown path, a record that knows the exact host its workspace
+// is on. Quietly composing a name-based command there could reap a DIFFERENT
+// machine, find nothing, report success and retire the only tombstone: silent and
+// permanent. The error instead reaches restoreRuntimeCleanup, which classifies the
+// handle as unavailable, so the record is RETAINED and retried. Retained-and-
+// retried beats silently-wrong-and-retired.
 //
-// An empty address (every record written before #3090 and after #3092) takes the
-// ordinary name-based command, unchanged.
-func sshCommandForPinnedRecord(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
-	base, err := sshCommandForConfig(cfg, posture)
+// TWO LAYERS OF QUOTING, because the string passes through two shells, and NEITHER
+// is optional:
+//
+//   - ssh runs a ProxyCommand as `/bin/sh -c <value>`, so the relay path is
+//     shell-quoted INSIDE the value — an AF home with a space would otherwise
+//     split into a command and a stray argument.
+//   - af runs the whole ssh invocation as `sh -c '<sshCmd> "$@"'`, so the value is
+//     shell-quoted AGAIN for that outer shell, which is what keeps it one argv
+//     element on the way to ssh.
+//
+// AND A THIRD ESCAPE THAT IS NOT QUOTING AT ALL. ssh percent-expands a
+// ProxyCommand before running it, so a literal `%` in the relay path or in a
+// zoned IPv6 address (`fe80::1%eth0`) is read as a token. Measured on
+// OpenSSH_9.6p1: an unescaped `%d` aborts with `vdollar_percent_expand: unknown
+// key %d` and the connection never starts, while `%%` yields a literal `%`. The
+// `%%` case is in percent_expand at the 7.6 floor, so the escape costs no version.
+//
+// NO `%h`/`%p` TOKENS, deliberately: they expand to the values ssh is dialling,
+// which is the name — and the entire point is that the socket goes somewhere the
+// name does not necessarily lead.
+func sshPinnedProxyCommand(dialAddr string, port int) (string, error) {
+	relay, err := sshRelayBinary()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("backend=ssh: cannot locate the af binary to relay this session's pinned "+
+			"connection to %s (af runs itself as ssh's ProxyCommand so every step reaches the one machine "+
+			"the session was provisioned on): %w", dialAddr, err)
 	}
-	pinned := strings.TrimSpace(dialAddr)
-	if pinned == "" {
-		return base, nil
-	}
-	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
-	if err != nil {
-		return "", err
-	}
-	if port == 0 {
-		port = sshDefaultPort
-	}
-	// The destination is the LAST token of the composed command; swap it for the
-	// recorded address and add the alias that keeps known_hosts keyed by name.
-	suffix := " " + shellQuoteSandbox(host)
-	if !strings.HasSuffix(base, suffix) {
-		// The composer changed shape underneath this; dial by name rather than
-		// guess, since a wrong destination on a teardown is the whole hazard.
-		return base, nil
-	}
-	return strings.TrimSuffix(base, suffix) +
-		" -o HostKeyAlias=" + shellQuoteSandbox(knownHostsLookupName(host, port)) +
-		" " + shellQuoteSandbox(pinned), nil
+	inner := shellQuoteSandbox(relay) +
+		" " + sshrelay.Subcommand +
+		" " + shellQuoteSandbox(dialAddr) +
+		" " + strconv.Itoa(port)
+	return "ProxyCommand=" + shellQuoteSandbox(escapeSSHPercent(inner)), nil
+}
+
+// escapeSSHPercent doubles every `%` so ssh's percent expansion yields the literal
+// string back. See sshPinnedProxyCommand for the measurement.
+func escapeSSHPercent(s string) string {
+	return strings.ReplaceAll(s, "%", "%%")
 }
 
 // sshHostKeyOptions maps ssh_host_key_verification onto the ssh binary's own

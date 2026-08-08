@@ -355,20 +355,28 @@ back (see [Archive & restore](#archive-restore)).
 > yourself, and there your `ssh_config` and `known_hosts` are the whole authority.
 > See the sandbox section below.
 
-> **Known limitation: a `ssh.host` with several addresses can split a session.**
-> af runs a separate `ssh` for each step — the setup commands, the port-forward,
-> and the cleanup — and each one resolves the name independently. If the name
-> answers with more than one address (a round-robin record, a load balancer, a
-> dual-stack host), the workspace can end up on one machine while the agent-server
-> or the cleanup lands on another. Nothing looks wrong: every step succeeds against
-> a valid host, and the cleanup then removes the wrong machine's directory and
-> reports success while the real one leaks.
+> **A `ssh.host` with several addresses stays on one machine.** af runs a separate
+> `ssh` for each step — the setup commands, the port-forward, and the cleanup — so
+> a name answering with more than one address (a round-robin record, a load
+> balancer, a dual-stack host) could once put the workspace on one machine while
+> the agent-server or the cleanup landed on another. Nothing looked wrong: every
+> step succeeded against a valid host, and the cleanup then removed the wrong
+> machine's directory and reported success while the real one leaked.
 >
-> Point `ssh.host` at a single machine — a literal address, or a name with one
-> address — if that is a risk for your setup. Tracking issue: #3086. A previous fix
-> pinned one resolved address, but it had to identify the host by address, which
-> broke host **certificates** and removed ssh's own try-each-address fallback · it
-> was reverted rather than kept with those costs.
+> af now resolves `ssh.host` **once**, when the session is created, and every later
+> step dials that one address. The address is recorded with the session, so the
+> cleanup reaches the same machine even after the daemon restarts.
+>
+> **Your host key configuration is unaffected**, which is the part worth knowing:
+> `ssh` is still given the **name** as its destination, so `known_hosts` is matched
+> and host **certificate** principals are checked exactly as before. The pin
+> applies only to the TCP connection, through a `ProxyCommand` that runs `af`
+> itself — nothing new to install. An earlier attempt pinned the address as ssh's
+> destination and had to restore the name with `HostKeyAlias`; that rejected host
+> certificates on every non-default port, and was reverted (#3086).
+>
+> If af cannot resolve the name at create time it says so in the log and connects
+> by name, exactly as it did before — a host af cannot look up still works.
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
@@ -443,6 +451,47 @@ case commits real work, **archives** it (branch pushed to `origin`, remote
 sandbox reaped), then **restores** it (a fresh remote clones the branch back, the
 commit is present, the session is drivable) — the identical push/pull-branch
 flow, over ssh. It skips cleanly where Docker is unavailable.
+
+---
+
+## Sandbox backend
+
+`backend = "sandbox"` reaches the target through **your own** ssh invocation. The
+global `sandbox_ssh` key holds a free-form command line — whatever already works
+in your terminal, including a jump host, a `ProxyCommand`, a bastion, or any flag
+`backend = "ssh"` does not model — and af runs the same provision, tunnel, and
+cleanup steps over it. Your `ssh_config`, `known_hosts`, and host-key posture are
+the whole authority here; af adds none of its own. It is global-only and
+operator-owned, because af **executes** it on the daemon host (see
+[Configuration](configuration.md)).
+
+> **Known limitation: af cannot pin a `sandbox_ssh` target to one machine.**
+> af runs a separate invocation of your command for each step — the setup
+> commands, the port-forward, and the cleanup. If it reaches a name with several
+> addresses (a round-robin record, a load balancer, a dual-stack host), each
+> invocation resolves independently, so the workspace can end up on one machine
+> while the agent-server or the cleanup lands on another. Nothing looks wrong:
+> every step succeeds against a valid host, and the cleanup then removes the wrong
+> machine's directory and reports success while the real one leaks.
+>
+> `backend = "ssh"` no longer has this problem because af composes that command
+> and knows which token is the host. `sandbox_ssh` is **your** command, and af
+> cannot know which of its words is a hostname — an argument to `-o`, a jump-host
+> spec, a wrapper's own flag, or the target — so there is nothing it can safely
+> substitute. Guessing would silently rewrite the command you asked for.
+>
+> Two workarounds, both under your control:
+>
+> - **Point the command at a single machine** — a literal address, or a name with
+>   one address. This is the simplest fix and needs no other change.
+> - **Pin it yourself**, the same way af does for `backend = "ssh"`: keep the name
+>   as ssh's destination so `known_hosts` and certificate principals still match,
+>   and put the address in a `ProxyCommand` — for example
+>   `ssh -o ProxyCommand='nc 198.51.100.8 22' build-box.example.com`. Do not pin by
+>   making the address the destination: that forces a `HostKeyAlias`, and no alias
+>   value satisfies both a plain `[name]:port` entry and a certificate principal.
+>
+> Tracked in #3086, which is deliberately left open for this half.
 
 ---
 

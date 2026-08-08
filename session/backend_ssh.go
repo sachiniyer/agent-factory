@@ -156,7 +156,26 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err := verifySSHIdentityFile(sshCfg); err != nil {
 		return ProvisionResult{}, err
 	}
-	sshCmd, err := sshCommandForConfig(sshCfg, cfg.SSHHostKeyVerification)
+	// ONE resolution, here, feeding EVERY later step. Each provision command, the
+	// `ssh -L` tunnel and the reap are separate ssh invocations that would each
+	// resolve `ssh.host` independently, so a name with several addresses could put
+	// the workspace on one machine and the agent-server, tunnel or reap on another —
+	// and the reap would then remove the wrong directory, report success, and leave
+	// the real workspace leaking with nothing pointing at it (#3086). Pinning it
+	// into the composed command means all of them ride the same address, because
+	// they all ride this one string.
+	//
+	// An empty result means af could not settle on an address and this session
+	// behaves exactly as it did before the pin — see resolvePinnedSSHDialAddress.
+	pinHost, pinPort, err := resolveSSHHostPort(sshCfg.Host, sshCfg.Port)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	if pinPort == 0 {
+		pinPort = sshDefaultPort
+	}
+	dialAddr := resolvePinnedSSHDialAddress(pinHost, pinPort)
+	sshCmd, err := sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, dialAddr)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
@@ -177,9 +196,14 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		remoteAgentBackend: remoteAgentBackend{reap: res.Teardown},
 		provisioner:        p,
 		cleanup: &SSHRuntimeCleanupData{
-			Config:              sshCfg,
-			SessionDir:          p.sessionDir,
-			RemotePID:           p.remotePID,
+			Config:     sshCfg,
+			SessionDir: p.sessionDir,
+			RemotePID:  p.remotePID,
+			// The one fact no re-resolution can recover: which machine this
+			// session's workspace is actually on. A reap after a daemon restart
+			// composes its command from this, in a fresh process, which is the
+			// constraint that ruled out a ControlMaster multiplex (#3086).
+			DialAddress:         dialAddr,
 			HostKeyVerification: cfg.SSHHostKeyVerification,
 		},
 	}

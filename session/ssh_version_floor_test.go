@@ -43,24 +43,35 @@ func TestSSHCommandEmitsOnlyLongEstablishedOptions(t *testing.T) {
 		"GlobalKnownHostsFile":  "1.2",
 		"BatchMode":             "1.2",
 		"ExitOnForwardFailure":  "4.4",
+		// #3086's pin. Priced by reading readconf.c at the earliest release-era tag
+		// that has it (V_1_2_2_P1), where `proxycommand` sits in the same keyword
+		// table as `user` and `batchmode` — the options already priced 1.2 above.
+		// The `%%` escape the value relies on is in percent_expand at the 7.6 floor.
+		"ProxyCommand": "1.2",
 	}
 
 	for _, posture := range []string{
 		config.SSHHostKeyStrict, config.SSHHostKeyAcceptNew, config.SSHHostKeyInsecure, "unknown-future",
 	} {
-		cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com", Port: 2222}, posture)
-		fields := strings.Fields(cmd)
-		for i, f := range fields {
-			if f != "-o" || i+1 >= len(fields) {
-				continue
+		// BOTH shapes. A pinned session emits an option an unpinned one does not, so
+		// checking only the unpinned command would leave the allowlist blind at
+		// exactly the place the newest option lives.
+		for _, dialAddr := range []string{"", "198.51.100.8"} {
+			cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com", Port: 2222}, posture, dialAddr)
+			require.NoError(t, err)
+			fields := strings.Fields(cmd)
+			for i, f := range fields {
+				if f != "-o" || i+1 >= len(fields) {
+					continue
+				}
+				name, _, _ := strings.Cut(strings.Trim(fields[i+1], "'"), "=")
+				_, ok := allowed[name]
+				assert.True(t, ok,
+					"posture %q (pin %q) emits -o %s=…, which is not in the priced allowlist. Every option costs a "+
+						"MINIMUM OpenSSH VERSION: `KnownHostsCommand` (8.5) made backend=ssh unusable on Ubuntu 20.04 "+
+						"and Debian 11 because an unrecognised -o aborts option parsing rather than warning (#3092). "+
+						"Add it here with the release that introduced it, or drop it.", posture, dialAddr, name)
 			}
-			name, _, _ := strings.Cut(strings.Trim(fields[i+1], "'"), "=")
-			_, ok := allowed[name]
-			assert.True(t, ok,
-				"posture %q emits -o %s=…, which is not in the priced allowlist. Every option costs a MINIMUM "+
-					"OpenSSH VERSION: `KnownHostsCommand` (8.5) made backend=ssh unusable on Ubuntu 20.04 and "+
-					"Debian 11 because an unrecognised -o aborts option parsing rather than warning (#3092). "+
-					"Add it here with the release that introduced it, or drop it.", posture, name)
 		}
 	}
 }
@@ -184,12 +195,19 @@ func TestSSHCommandCompositionIgnoresAnUnreadableIdentity(t *testing.T) {
 	assert.Contains(t, cmd, "-i '"+missing+"'")
 }
 
-// A cleanup record written by the short-lived #3090 pinning knows the exact
-// machine its workspace is on. Dropping that would let a multi-address name
-// re-resolve to a DIFFERENT machine, remove nothing, report success and retire
-// the only tombstone — a permanent leak. So it is still decoded and honoured.
+// A cleanup record that carries a dial address knows the exact machine its
+// workspace is on. Dropping that would let a multi-address name re-resolve to a
+// DIFFERENT machine, remove nothing, report success and retire the only
+// tombstone — a permanent leak. So it is still decoded and honoured.
+//
+// Records exist from two eras and this covers both: #3090 wrote the field and
+// dialled it as ssh's DESTINATION (with the HostKeyAlias that rejected host
+// certificates), and #3086 writes it again but applies it as a ProxyCommand. Both
+// decode to the same field and both must now reap through the current mechanism —
+// there is no second code path for the older shape.
 func TestPinnedCleanupRecordStillDialsItsRecordedAddress(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	defer SetSSHRelayBinaryForTest("/opt/af/af")()
 
 	raw, err := json.Marshal(&RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
 		Config:              config.SSHConfig{Host: "many.example.com", Port: 2222},
@@ -207,15 +225,19 @@ func TestPinnedCleanupRecordStillDialsItsRecordedAddress(t *testing.T) {
 	sb, ok := backend.(*sshBackend)
 	require.True(t, ok)
 
-	fields := strings.Fields(sb.provisioner.sshCmd)
-	assert.Equal(t, "'198.51.100.8'", fields[len(fields)-1],
+	assert.Contains(t, proxyCommandValue(t, sb.provisioner.sshCmd), "ssh-relay '198.51.100.8' 2222",
 		"the teardown must reach the machine the session actually ran on")
-	assert.Contains(t, sb.provisioner.sshCmd, "HostKeyAlias='[many.example.com]:2222'",
-		"and keep known_hosts keyed by name, which is what dialling an address requires")
+	fields := strings.Fields(sb.provisioner.sshCmd)
+	assert.Equal(t, "'many.example.com'", fields[len(fields)-1],
+		"and reach it WITHOUT making the address ssh's destination: that is what forced a HostKeyAlias, and "+
+			"no alias value satisfies both a plain [name]:port entry and a certificate principal (#3090)")
+	assert.NotContains(t, sb.provisioner.sshCmd, "HostKeyAlias")
 }
 
-// Every other record — before #3090 and after #3092 — dials the name, with no
-// alias, because that is what keeps certificates and dialer fallback working.
+// Every record with nothing to pin — written before #3090, between #3100 and
+// #3086, or by a provision whose one-off resolution could not settle — dials the
+// name exactly as it always has. A teardown that refused would leak the workspace
+// it exists to remove.
 func TestUnpinnedCleanupRecordDialsTheName(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -231,6 +253,7 @@ func TestUnpinnedCleanupRecordDialsTheName(t *testing.T) {
 	fields := strings.Fields(sb.provisioner.sshCmd)
 	assert.Equal(t, "'h.example.com'", fields[len(fields)-1])
 	assert.NotContains(t, sb.provisioner.sshCmd, "HostKeyAlias")
+	assert.NotContains(t, sb.provisioner.sshCmd, "-o ProxyCommand")
 }
 
 // A picker is a promise. ssh.identity_file is a local, side-effect-free fact, so
