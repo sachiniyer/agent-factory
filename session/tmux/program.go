@@ -28,6 +28,7 @@ func (t *TmuxSession) SetProgram(program string) {
 	defer t.programMu.Unlock()
 	t.program = program
 	t.generatedArgs = nil
+	t.trustedExecutable = ""
 }
 
 // Program returns the command this session's pane runs — after SetProgram,
@@ -79,6 +80,7 @@ func (t *TmuxSession) rewriteProgramCmdByAf(rewrite func(string) string) {
 	added, ok := sessionenv.GeneratedArgsBetween(before, after)
 	if !ok {
 		t.generatedArgs = nil
+		t.trustedExecutable = ""
 		return
 	}
 	t.generatedArgs = append(t.generatedArgs, added...)

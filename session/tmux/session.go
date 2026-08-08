@@ -163,12 +163,16 @@ type TmuxSession struct {
 	// separately from the resolved program so a program_overrides change cannot
 	// reinterpret the same account name as another agent's identity (#3083 review).
 	accountAgent string
-	// generatedArgs are the argument words af's own launcher appended to program,
-	// declared so the account boundary can verify af's output instead of refusing
-	// it (#3083). Guarded by programMu with program itself, because a launch reads
+	// generatedArgs are the argument words af authored for program, declared so
+	// the account boundary can verify af's output instead of refusing it (#3083,
+	// #3108). Guarded by programMu with program itself, because a launch reads
 	// the two together and a declaration that described a DIFFERENT program string
 	// than the one being wrapped would be worse than none.
 	generatedArgs []string
+	// trustedExecutable is the exact path af's built-in program detection chose
+	// for an account-scoped launch. Empty keeps the ordinary bare-name rule.
+	// Guarded and snapshotted with program/generatedArgs: all three are one proof.
+	trustedExecutable string
 	// inputMu serializes every multi-command transaction that injects pane input.
 	// A submit must not clear/paste between a prompt handler's selected-row
 	// capture and Enter, two submits must not clear each other's freshly pasted

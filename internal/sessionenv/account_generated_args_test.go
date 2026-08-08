@@ -251,3 +251,45 @@ func TestGeneratedArgsBetween_NoRewriteDeclaresNothing(t *testing.T) {
 	require.True(t, ok)
 	require.Empty(t, generated)
 }
+
+func TestGenerateAccountLaunchProof_TrustsOnlyTheBuiltInBase(t *testing.T) {
+	const executable = "/opt/af-detected/claude"
+	base := executable + " --dangerously-skip-permissions"
+	final := base + " --session-id " + genSessionID
+
+	builtIn, ok := GenerateAccountLaunchProof(base, final, []string{"--dangerously-skip-permissions"})
+	require.True(t, ok)
+	require.Equal(t, executable, builtIn.TrustedExecutable)
+	require.Equal(t, []string{"--dangerously-skip-permissions", "--session-id", genSessionID}, builtIn.GeneratedArgs)
+	require.NoError(t, ValidateAccountCommand(final, Account{
+		Agent:             "claude",
+		Name:              "work",
+		TrustedExecutable: builtIn.TrustedExecutable,
+		GeneratedArgs:     builtIn.GeneratedArgs,
+	}))
+
+	aliasBase := executable + " --settings /operator/auth.json --dangerously-skip-permissions"
+	aliasFinal := aliasBase + " --session-id " + genSessionID
+	aliasProof, ok := GenerateAccountLaunchProof(aliasBase, aliasFinal,
+		[]string{"--dangerously-skip-permissions"})
+	require.True(t, ok)
+	err := ValidateAccountCommand(aliasFinal, Account{
+		Agent: "claude", Name: "work", TrustedExecutable: aliasProof.TrustedExecutable,
+		GeneratedArgs: aliasProof.GeneratedArgs,
+	})
+	require.ErrorContains(t, err, "--settings",
+		"arguments from the detected shell alias are operator-authored, not af-authored")
+	require.ErrorContains(t, err, "/operator/auth.json")
+
+	userOverride, ok := GenerateAccountLaunchProof("claude --model sonnet",
+		"claude --model sonnet --session-id "+genSessionID, nil)
+	require.True(t, ok)
+	require.Empty(t, userOverride.TrustedExecutable)
+	require.Equal(t, []string{"--session-id", genSessionID}, userOverride.GeneratedArgs,
+		"a user override's arguments must not be laundered into af-authored provenance")
+	err = ValidateAccountCommand("claude --model sonnet --session-id "+genSessionID, Account{
+		Agent: "claude", Name: "work", GeneratedArgs: userOverride.GeneratedArgs,
+	})
+	require.ErrorContains(t, err, "--model")
+	require.ErrorContains(t, err, "sonnet")
+}

@@ -124,6 +124,69 @@ func TestPrepareCreateLaunchUsesProvisionedLinkedWorktreeCwd(t *testing.T) {
 	require.Equal(t, filepath.Join(plan.workDir, "relative-store"), plan.conversationCapture.codexHome)
 }
 
+// #3108: account admission must judge the command the create will actually
+// launch, not the bare agent label the request carried. The old NewInstance
+// gate saw only Program="claude", while prepareCreateLaunch later applied this
+// repo override; it admitted a session the pane boundary could only reject with
+// exit 127. An explicit Program containing these arguments exercises the path
+// the old gate already handled and would not reproduce the defect.
+func TestPrepareCreateLaunchRefusesRepoOverrideArgumentsByName(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initInPlaceRepo(t, "account-override-args")
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"program_overrides": map[string]string{
+			tmux.ProgramClaude: "claude --model sonnet",
+		},
+	})
+
+	inst, err := NewInstance(InstanceOptions{
+		Title:   "account-override-args",
+		Path:    repoRoot,
+		Program: tmux.ProgramClaude,
+		Account: "work",
+		InPlace: true,
+	})
+	require.NoError(t, err, "the request stays bare; the repo override is resolved downstream")
+
+	_, err = inst.PrepareCreateLaunch()
+	require.Error(t, err, "a create whose resolved command cannot honor the account must be refused before pane launch")
+	require.ErrorContains(t, err, "--model")
+	require.ErrorContains(t, err, "sonnet")
+}
+
+// The refusal above must not turn the ordinary first-run Claude command into a
+// universal account refusal. af itself detects this executable and adds
+// --dangerously-skip-permissions in the built-in config layer, so both facts
+// carry provenance; a user-authored override with the same shape does not.
+func TestPrepareCreateLaunchAcceptsBuiltInDetectedClaudeCommand(t *testing.T) {
+	afHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+	binDir := t.TempDir()
+	claudePath := filepath.Join(binDir, "claude")
+	require.NoError(t, os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Leave the AF home empty: LoadConfig's real first-run path materializes the
+	// detected override. Its source metadata must still distinguish that generated
+	// default from an override the operator or repository supplied.
+
+	repoRoot := initInPlaceRepo(t, "account-built-in-command")
+	inst, err := NewInstance(InstanceOptions{
+		Title:   "account-built-in-command",
+		Path:    repoRoot,
+		Program: tmux.ProgramClaude,
+		Account: "work",
+		InPlace: true,
+	})
+	require.NoError(t, err)
+
+	plan, err := inst.PrepareCreateLaunch()
+	require.NoError(t, err, "af's own detected executable and arguments must remain usable with --account")
+	require.Equal(t, claudePath, plan.accountProof.TrustedExecutable)
+	require.Contains(t, plan.accountProof.GeneratedArgs, "--dangerously-skip-permissions")
+}
+
 func TestPreparedCreateLaunchConsumesFrozenCommand(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())

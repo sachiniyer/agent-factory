@@ -14,57 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// resolveProgramForInstance returns the actual tmux command for an instance.
-// Resolution chain: agent enum -> cfg.ProgramOverrides[agent] (if set) ->
-// bare agent name. The overrides come from the repo-resolved config (global
-// program_overrides merged with the repo's .agent-factory/config.json) when
-// the instance path belongs to a git repo; outside a repo, or when repo
-// resolution fails, the global config alone applies. A nil cfg (e.g. tests
-// that don't materialize a config) falls back to the raw Program string so
-// legacy free-form values still reach tmux verbatim.
-func resolveProgramForInstance(i *Instance) string {
-	i.mu.RLock()
-	agent := i.Program
-	alreadyResolved := agent != "" && agent == i.preResolvedProgram
-	i.mu.RUnlock()
-	if alreadyResolved {
-		return agent
-	}
-	return resolveProgramForAgent(i, agent)
-}
-
-// resolveProgramForAgent is the target-explicit form used by handoff preflight.
-// It resolves configuration before Instance.Program is rewritten, so an invalid
-// incoming override can be rejected while the outgoing process is still alive.
-func resolveProgramForAgent(i *Instance, agent string) string {
-	cfg := resolveConfigForInstance(i)
-	// Read the enum through the accessor, not the bare field: a handoff (#2013)
-	// rewrites Program in place while the instance is live and shared, so this
-	// is a genuinely concurrent read now. Every other reader of the field
-	// (ToInstanceData, ReconcileTabsFromData) already holds the instance lock.
-	return config.ResolveProgram(cfg, agent)
-}
-
-func resolveConfigForInstance(i *Instance) *config.Config {
-	var cfg *config.Config
-	if repo, err := config.RepoFromPath(i.Path); err == nil {
-		if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
-			cfg = &resolved.Config
-		} else {
-			log.WarningLog.Printf("failed to resolve repo config when resolving program for %q: %v", i.Title, rerr)
-		}
-	}
-	if cfg == nil {
-		loaded, err := config.LoadConfig()
-		if err != nil {
-			log.WarningLog.Printf("failed to load config when resolving program for %q: %v", i.Title, err)
-			loaded = nil
-		}
-		cfg = loaded
-	}
-	return cfg
-}
-
 func configuredSessionEnvPassthrough(explicit []string) []string {
 	names := append([]string(nil), explicit...)
 	if cfg, err := config.LoadConfig(); err == nil && cfg != nil {
@@ -332,8 +281,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
 		if workDir != "" {
-			resolved := resolveProgramForInstance(i)
-			setLaunchProgram(tmuxSession, resolved, injectSystemPrompt(resolved))
+			resolution := resolveLaunchProgramForInstance(i)
+			program := injectSystemPrompt(resolution.command)
+			setLaunchProgram(tmuxSession, program,
+				accountLaunchProof(resolution.command, program, resolution.trustBase))
 		}
 		if err := tmuxSession.Restore(workDir); err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
@@ -354,24 +305,27 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// path supplies a command frozen after provisioning and before process
 		// launch; direct Start callers retain the established inline preparation.
 		var program string
-		// The pre-rewrite command, kept so the launch can declare what af added to it
-		// (#3083). The prepared path carries its own, frozen with the program.
-		base := resolveProgramForInstance(i)
+		var proof sessionenv.AccountLaunchProof
 		if prepared != nil {
 			if prepared.workDir != gw.GetWorktreePath() || strings.TrimSpace(prepared.program) == "" {
 				setupErr = fmt.Errorf("prepared create launch no longer matches session %q", i.Title)
 				return setupErr
 			}
 			program = prepared.program
-			base = prepared.base
+			proof = prepared.accountProof
 			if prepared.conversation.HasID() {
 				i.SetAgentConversation(prepared.conversation)
 			}
 		} else {
+			// The pre-rewrite command is resolved once and kept with the proof it
+			// produces. A prepared create carries both from its earlier freeze.
+			resolution := resolveLaunchProgramForInstance(i)
+			base := resolution.command
 			program = prepareLaunchConversation(i, base)
 			program = injectSystemPrompt(program)
+			proof = accountLaunchProof(base, program, resolution.trustBase)
 		}
-		setLaunchProgram(tmuxSession, base, program)
+		setLaunchProgram(tmuxSession, program, proof)
 
 		// Create new session
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
@@ -599,7 +553,8 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	if err := refreshWorktreeEnvironment(i, gw); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
-	resolvedProgram := resolveProgramForInstance(i)
+	resolution := resolveLaunchProgramForInstance(i)
+	resolvedProgram := resolution.command
 	// The base for the generated-args declaration, pinned BEFORE any af rewrite.
 	// resolvedProgram is reassigned below when a fresh worktree rebuild forces the
 	// exact-resume command, and that rewrite is af's own — so declaring against the
@@ -642,7 +597,9 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 	}
 
-	setLaunchProgram(ts, declarationBase, injectSystemPrompt(prepareResumeConversation(i, resolvedProgram)))
+	program := injectSystemPrompt(prepareResumeConversation(i, resolvedProgram))
+	setLaunchProgram(ts, program,
+		accountLaunchProof(declarationBase, program, resolution.trustBase))
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}

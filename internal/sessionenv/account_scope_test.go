@@ -23,9 +23,9 @@ func TestApplyAccountScope_TwoAccountsSeeDifferentRootsAndNotEachOther(t *testin
 	})
 	ambient := []string{"PATH=/usr/bin", "OPENAI_API_KEY=sk-ambient", "CODEX_HOME=/home/op/.codex"}
 
-	a, err := applyAccountScope(ambient, "codex", "alpha", "codex", nil)
+	a, err := applyAccountScope(ambient, "codex", "alpha", "codex", AccountLaunchProof{})
 	require.NoError(t, err)
-	b, err := applyAccountScope(ambient, "codex", "beta", "codex", nil)
+	b, err := applyAccountScope(ambient, "codex", "beta", "codex", AccountLaunchProof{})
 	require.NoError(t, err)
 
 	joinedA, joinedB := strings.Join(a, "\n"), strings.Join(b, "\n")
@@ -54,14 +54,14 @@ func TestApplyAccountScope_RefusesRatherThanFallingBack(t *testing.T) {
 
 	// No lookup installed at all.
 	withLookup(t, nil)
-	_, err := applyAccountScope(ambient, "codex", "alpha", "codex", nil)
+	_, err := applyAccountScope(ambient, "codex", "alpha", "codex", AccountLaunchProof{})
 	require.Error(t, err, "a build with no lookup installed must refuse, not run unscoped")
 
 	// Lookup fails (unregistered account).
 	withLookup(t, func(string, string) (Account, error) {
 		return Account{}, errNotRegistered
 	})
-	_, err = applyAccountScope(ambient, "codex", "ghost", "codex", nil)
+	_, err = applyAccountScope(ambient, "codex", "ghost", "codex", AccountLaunchProof{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ghost")
 
@@ -70,7 +70,7 @@ func TestApplyAccountScope_RefusesRatherThanFallingBack(t *testing.T) {
 	withLookup(t, func(agent, name string) (Account, error) {
 		return Account{Agent: agent, Name: name, Dir: "/home/op/.af/accounts/codex/" + name}, nil
 	})
-	_, err = applyAccountScope(ambient, "codex", "alpha", "sh -c 'codex'", nil)
+	_, err = applyAccountScope(ambient, "codex", "alpha", "sh -c 'codex'", AccountLaunchProof{})
 	require.Error(t, err, "an unprovable program must refuse rather than launch scoped-in-name-only")
 }
 

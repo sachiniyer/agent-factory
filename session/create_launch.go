@@ -1,6 +1,10 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+)
 
 // CreateLaunchPlan freezes the provider-local facts that must be decided after
 // provisioning fixes the final workspace path but before the agent process is
@@ -11,11 +15,11 @@ type CreateLaunchPlan struct {
 	launcher Backend
 	prepared bool
 	program  string
-	// base is the command before af's own rewrites, frozen WITH program so the
-	// launch can declare which words af appended (#3083). Frozen rather than
-	// re-resolved at launch: program_overrides could be re-read differently by
-	// then, and a declaration must describe the program actually installed.
-	base                string
+	// accountProof is frozen WITH program so the launch declares only the
+	// executable/arguments af authored (#3083, #3108). Re-resolving at launch
+	// could read a different override and make the proof describe a command other
+	// than the one installed.
+	accountProof        sessionenv.AccountLaunchProof
 	workDir             string
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot

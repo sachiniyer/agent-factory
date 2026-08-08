@@ -111,26 +111,59 @@ func TestRestoreUsesTheDeclarationPreservingRewrite(t *testing.T) {
 // command with a declaration that does not describe it fails.
 func TestLaunchSnapshot_NeverTearsTheCommandFromItsDeclaration(t *testing.T) {
 	session := &TmuxSession{}
-	session.SetLaunchProgram("claude", nil)
+	session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 500; i++ {
-			session.SetLaunchProgram("claude", nil)
+			session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
 			session.rewriteProgramCmdByAf(resumeProgram)
 		}
 	}()
 	for i := 0; i < 500; i++ {
-		program, generated, _, _, _ := session.launchSnapshot()
+		program, proof, _, _, _ := session.launchSnapshot()
 		// Every legal pair: bare with no declaration, or resumed with --continue
 		// declared. A torn read produces one without the other.
 		switch program {
 		case "claude":
-			require.Empty(t, generated, "a bare command was paired with a declaration describing a rewrite")
+			require.Empty(t, proof.GeneratedArgs, "a bare command was paired with a declaration describing a rewrite")
 		case "claude --continue":
-			require.Equal(t, []string{"--continue"}, generated,
+			require.Equal(t, []string{"--continue"}, proof.GeneratedArgs,
 				"the resumed command was paired with a declaration that does not describe it")
+		default:
+			t.Fatalf("unexpected program %q", program)
+		}
+	}
+	<-done
+}
+
+func TestLaunchSnapshot_NeverTearsTrustedExecutableFromCommand(t *testing.T) {
+	const trusted = "/opt/af-detected/claude"
+	session := &TmuxSession{}
+	detectedProof := sessionenv.AccountLaunchProof{
+		TrustedExecutable: trusted,
+		GeneratedArgs:     []string{"--dangerously-skip-permissions"},
+	}
+	session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
+			session.SetLaunchProgram(trusted+" --dangerously-skip-permissions", detectedProof)
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		program, proof, _, _, _ := session.launchSnapshot()
+		switch program {
+		case "claude":
+			require.Empty(t, proof.TrustedExecutable)
+			require.Empty(t, proof.GeneratedArgs)
+		case trusted + " --dangerously-skip-permissions":
+			require.Equal(t, detectedProof, proof,
+				"a trusted path is provenance for one exact command and must snapshot atomically with it")
 		default:
 			t.Fatalf("unexpected program %q", program)
 		}
@@ -145,14 +178,19 @@ func TestLaunchSnapshot_NeverTearsTheCommandFromItsDeclaration(t *testing.T) {
 // accepted, carrying the account across a handoff meant to fail closed.
 func TestSetProgram_ClearsAPreviousDeclaration(t *testing.T) {
 	session := &TmuxSession{}
-	session.SetLaunchProgram("claude --session-id sid-1 --plugin-dir /p", []string{"--session-id", "sid-1", "--plugin-dir", "/p"})
+	session.SetLaunchProgram("claude --session-id sid-1 --plugin-dir /p", sessionenv.AccountLaunchProof{
+		TrustedExecutable: "/opt/af-detected/claude",
+		GeneratedArgs:     []string{"--session-id", "sid-1", "--plugin-dir", "/p"},
+	})
 
 	// A handoff target that happens to end in the very same words.
 	session.SetProgram("other-agent --session-id sid-1 --plugin-dir /p")
 
-	program, generated, _, _, _ := session.launchSnapshot()
+	program, proof, _, _, _ := session.launchSnapshot()
 	require.Equal(t, "other-agent --session-id sid-1 --plugin-dir /p", program)
-	require.Empty(t, generated,
+	require.Empty(t, proof.GeneratedArgs,
 		"the outgoing launch's declaration survived into the replacement, so af would vouch for "+
 			"arguments it did not author for this command and the account would transfer across the handoff")
+	require.Empty(t, proof.TrustedExecutable,
+		"an exact executable path is part of the old launch's proof and must not survive replacement")
 }

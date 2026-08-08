@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -13,12 +14,29 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 		return CreateLaunchPlan{}, fmt.Errorf("cannot prepare session %q: local provisioning produced no launch directory", i.Title)
 	}
 
-	resolved := resolveProgramForInstance(i)
+	resolution := resolveLaunchProgramForInstance(i)
+	resolved := resolution.command
 	program, conversation := planCreateConversation(i, resolved)
 	program = injectSystemPrompt(program)
+	proof := accountLaunchProof(resolved, program, resolution.trustBase)
+	if account := strings.TrimSpace(i.Account); account != "" {
+		accountAgent := sessionenv.AgentForCommand(i.AgentProgram())
+		if err := refuseAccountAgentDrift(account, accountAgent, program); err != nil {
+			return CreateLaunchPlan{}, fmt.Errorf("cannot create account-scoped session: %w", err)
+		}
+		err := sessionenv.ValidateAccountCommand(program, sessionenv.Account{
+			Agent:             accountAgent,
+			Name:              account,
+			TrustedExecutable: proof.TrustedExecutable,
+			GeneratedArgs:     proof.GeneratedArgs,
+		})
+		if err != nil {
+			return CreateLaunchPlan{}, fmt.Errorf("cannot create account-scoped session: %w", err)
+		}
+	}
 	plan := CreateLaunchPlan{
 		program:      program,
-		base:         resolved,
+		accountProof: proof,
 		workDir:      workDir,
 		conversation: conversation,
 	}

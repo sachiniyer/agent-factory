@@ -56,8 +56,19 @@ type Account struct {
 	// Only an EXACT match is honoured — never a basename — so a repository file
 	// that merely shares the name is still refused (#2983 review).
 	TrustedWrapper string
-	// GeneratedArgs are the argument words af's OWN launcher appended to this
-	// session's program, in order, unquoted.
+	// TrustedExecutable is the exact agent executable af selected for this
+	// launch, or empty when PATH must resolve the bare agent name.
+	//
+	// A path-qualified executable is otherwise unprovable: ./claude may be a
+	// repository file that receives the selected credential root. The one safe
+	// exception is an exact path from af's built-in auto-detected program
+	// override. Like TrustedWrapper, this is provenance supplied by the launcher,
+	// never inferred from a basename.
+	TrustedExecutable string
+	// GeneratedArgs are the argument words af authored for this session's
+	// program, in order, unquoted. Usually those are launch-time additions; for
+	// af's built-in detected Claude command they also include the detected
+	// override's built-in arguments (#3108).
 	//
 	// This is the same shape of claim as TrustedWrapper, for the same reason. The
 	// local launch rewrites a bare `claude` into `claude --session-id <uuid>
@@ -75,8 +86,8 @@ type Account struct {
 	// repository can write into program_overrides matches them, and a flag af did
 	// not generate is still refused however harmless it looks.
 	//
-	// Empty means af appended nothing, which is every non-claude agent today and
-	// the only behaviour before this field existed.
+	// Empty means af authored no arguments, which is every non-claude agent today
+	// and the only behaviour before this field existed.
 	GeneratedArgs []string
 }
 
@@ -222,26 +233,8 @@ func ApplyAccount(env []string, command string, account Account) ([]string, erro
 	// never fires while the shell expands it to a non-empty string and Claude
 	// authenticates through ~/.aws instead. Refusing any command-local assignment
 	// to a selector removes the need to evaluate it (#2983 review).
-	refused := accountScopedNames(account.Agent, configVar)
-	for _, selector := range GuardedSelectors() {
-		refused[selector] = struct{}{}
-	}
-	proof := commandProof{
-		agent:          account.Agent,
-		trustedWrapper: account.TrustedWrapper,
-		generated:      account.GeneratedArgs,
-		names:          refused,
-	}
-	if overrides, provable := commandOverridesName(command, proof); overrides || !provable {
-		if !provable {
-			return nil, fmt.Errorf(
-				"account %q cannot scope agent %q: its program could not be proven to be a direct %s invocation free of "+
-					"identity assignments, and an unverifiable program is not evidence that the account would be used",
-				account.Name, account.Agent, account.Agent)
-		}
-		return nil, fmt.Errorf(
-			"account %q cannot scope agent %q: its program sets an identity variable itself, which overrides the account directory",
-			account.Name, account.Agent)
+	if err := ValidateAccountCommand(command, account); err != nil {
+		return nil, err
 	}
 
 	denied := accountScopedNames(account.Agent, configVar)

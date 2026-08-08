@@ -222,6 +222,10 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		if err := refuseAccountAgentDrift(spec.Account.Name, spec.Account.Agent, resolvedProgram); err != nil {
 			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", err)
 		}
+		proof := accountLaunchProof(resolvedProgram, resolvedProgram,
+			builtInProgramOverride(cfg, spec.Program, resolvedProgram))
+		spec.Account.TrustedExecutable = proof.TrustedExecutable
+		spec.Account.GeneratedArgs = proof.GeneratedArgs
 		// Reuse the local shim's authoritative validation for cloud modes and
 		// command-local identity assignments. The returned host environment is not
 		// installed in Docker; accountMountAndEnv builds the container boundary.

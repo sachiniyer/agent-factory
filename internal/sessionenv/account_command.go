@@ -34,15 +34,15 @@ import (
 // as UNPROVABLE. New syntax then arrives as a refusal to scope rather than as a
 // silent bypass, which is the direction this repo can afford to be wrong in.
 // commandProof is what the CALLER knows and the string cannot say: which agent
-// this account scopes, which af binary generated the handoff, and which argument
-// words af's own launcher appended. Grouped because all three are provenance
-// supplied from outside, and a five-argument recursion invited passing them in
-// the wrong order.
+// this account scopes, which af binary generated a handoff, which exact detected
+// agent executable af selected, and which argument words af authored. Grouped
+// because all are provenance supplied from outside, and a positional recursion
+// invited passing them in the wrong order.
 type commandProof struct {
-	agent          string
-	trustedWrapper string
-	generated      []string
-	names          map[string]struct{}
+	agent             string
+	trustedWrapper    string
+	trustedExecutable string
+	generated         []string
 }
 
 func commandOverridesName(command string, proof commandProof) (overrides, provable bool) {
@@ -144,7 +144,7 @@ func callOverridesName(call *syntax.CallExpr, proof commandProof, depth int) (ov
 		return false, false
 	}
 	if len(words) == 1 {
-		if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, proof.agent) {
+		if executable, ok := literalShellWord(words[0]); ok && executableIsAgent(executable, proof.agent, proof.trustedExecutable) {
 			return false, true
 		}
 	}
@@ -262,7 +262,7 @@ func envOverridesName(args []*syntax.Word, proof commandProof) (overrides, prova
 			return false, false
 		}
 	}
-	if executableIsAgent(literals[invocation.CommandIndex], proof.agent) {
+	if executableIsAgent(literals[invocation.CommandIndex], proof.agent, proof.trustedExecutable) {
 		return false, true
 	}
 	return false, false
@@ -279,9 +279,12 @@ func envOverridesName(args []*syntax.Word, proof commandProof) (overrides, prova
 // override (`account.Agent` claude, command `codex`) would otherwise be called
 // provable, after which the injected CLAUDE_CONFIG_DIR means nothing to codex and
 // it authenticates from its own default home (#2983 review).
-func executableIsAgent(executable, agent string) bool {
+func executableIsAgent(executable, agent, trustedExecutable string) bool {
 	if executable == "" || agent == "" {
 		return false
+	}
+	if trustedExecutable != "" && executable == trustedExecutable {
+		return true
 	}
 	// A BARE name only. `./codex` shares a basename with the real CLI and is an
 	// arbitrary repository-provided file: the shell would hand it the selected

@@ -535,6 +535,12 @@ func ResolveProgram(cfg *Config, agent string) string {
 	return agent
 }
 
+// DetectedClaudePermissionsFlag is the argument af appends to the Claude
+// command it auto-detects for the built-in program override. Launch admission
+// uses the same constant to declare exactly this af-authored word without
+// trusting any additional arguments that came from an operator's shell alias.
+const DetectedClaudePermissionsFlag = "--dangerously-skip-permissions"
+
 // DefaultConfig returns the default configuration. The auto-detected claude
 // command (e.g. "/home/user/.local/bin/claude") is stored in
 // ProgramOverrides["claude"] together with --dangerously-skip-permissions
@@ -576,7 +582,7 @@ func DefaultConfig() *Config {
 		// the alias-provided argument suffix (#569, #2323).
 		command := shellQuoteDetectedCommand(claudePath)
 		cfg.ProgramOverrides = map[string]string{
-			tmux.ProgramClaude: command + " --dangerously-skip-permissions",
+			tmux.ProgramClaude: command + " " + DetectedClaudePermissionsFlag,
 		}
 	} else if err != nil {
 		log.ErrorLog.Printf("failed to get claude command: %v", err)
