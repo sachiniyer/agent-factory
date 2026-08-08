@@ -292,9 +292,9 @@ someone's session.
 With `backend = "ssh"`, a session runs on a remote host you reach over SSH — the
 built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 
-1. The daemon dials `ssh.host` with the Go SSH client (`golang.org/x/crypto/ssh`
-   — it does **not** shell out to the `ssh` binary), reusing your keys and
-   verifying the host key against `known_hosts`.
+1. The daemon runs `ssh` (the OpenSSH binary must be on the daemon host's PATH),
+   with every setting af owns passed explicitly and **no configuration file read
+   at all** — reusing your keys and verifying the host key against `known_hosts`.
 2. It creates a fresh per-session directory under `~/.af-sessions` on the remote
    and clones the repo (from the repo's `origin` remote) into `workspace/` there.
 3. It streams the `af` binary onto the remote and starts an **`af agent-server`**
@@ -338,6 +338,37 @@ back (see [Archive & restore](#archive-restore)).
 | `ssh.identity_file` | no | Path to the private key for auth. Empty ⇒ `ssh-agent` (`SSH_AUTH_SOCK`) and the default `~/.ssh` keys are tried. `~` is expanded. |
 | `ssh.known_hosts` | no | Path to the `known_hosts` file the remote's host key is verified against (default: `~/.ssh/known_hosts`). `~` is expanded. |
 
+> **Your `~/.ssh/config` does not apply, and never has.** af runs `ssh` with
+> `-F none`, so neither `~/.ssh/config` nor `/etc/ssh/ssh_config` is read. Only
+> the `ssh.*` settings above, `ssh_host_key_verification`, and your keys decide
+> how af connects. This is unchanged behaviour — the backend has always ignored
+> `ssh_config` — and it is deliberate: this backend's contract is that af enforces
+> the host-key posture in code, and a `Host` block could otherwise supply
+> `ProxyJump`, `RemoteCommand`, `SendEnv` or `ForwardAgent` behaviours that no af
+> setting can override.
+>
+> **If you need a bastion, a `ProxyJump`, a `ProxyCommand`, or any transport af
+> does not model, use `backend = "sandbox"`** with a free-form `sandbox_ssh`
+> command — that backend exists precisely so you can express the connection
+> yourself, and there your `ssh_config` and `known_hosts` are the whole authority.
+> See the sandbox section below.
+
+> **`ssh.host` is resolved once per session, and every step uses that address.**
+> af runs a separate `ssh` for each step — the setup commands, the port-forward,
+> and the cleanup — so a name with several addresses could otherwise put the
+> workspace on one machine and the agent-server or the cleanup on another. Nothing
+> would look wrong: each step succeeds against a valid host, and the cleanup then
+> removes the wrong machine's directory and reports success while the real one
+> leaks. So af resolves the name once, dials that literal address everywhere, and
+> records it with the session's cleanup handle so a daemon restart still reaches
+> the same machine.
+>
+> Host-key verification is unaffected — the connection carries
+> `HostKeyAlias`, so your `known_hosts` entry is still matched by name, exactly as
+> before. If `ssh.host` does not resolve, session creation **fails with that
+> reason** rather than falling back · a name af cannot pin is a session it cannot
+> keep on one machine.
+
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
 relax it with the global-only **`ssh_host_key_verification`** key:
@@ -363,7 +394,16 @@ either switch that host to `accept-new` for the first connect, or add its key to
 your `known_hosts` out of band (`ssh-keyscan -H host >> ~/.ssh/known_hosts`, or
 point `ssh.known_hosts` at a dedicated file), then create the session.
 
-The Go SSH client never forwards the daemon's environment. The remote
+**Legacy cleanup records.** `ssh_host_key_verification` is stored alongside a
+killed session's cleanup record, but records written before that field existed
+carry no posture, so they are cleaned up strictly. If such a record's host is not
+in the strict `known_hosts` file, no retry can ever complete it — af says so once
+and stops retrying, naming the host to add, rather than backing off and retrying
+forever. Restarting the daemon re-attempts it, so adding the key is enough to let
+the cleanup finish. This applies only to those pre-existing records · every
+session created since records its posture and is unaffected.
+
+af's `ssh` invocation never forwards the daemon's environment. The remote
 agent-server and pane use credentials already present for the remote login
 account, filtered through the same built-in allowlist. Names in the daemon's
 global `session_env_passthrough` list are sent to the remote as names only; if a

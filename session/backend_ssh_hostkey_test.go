@@ -1,131 +1,136 @@
 package session
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/ssh"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-func testSSHPublicKey(t *testing.T) ssh.PublicKey {
+// The host-key guarantees of `backend = "ssh"`, restated against the composed
+// ssh command after the transport converged onto the sandbox one (#3052).
+//
+// These previously asserted x/crypto callbacks directly. That mechanism is gone,
+// so they now assert the OPTIONS that carry the same meaning — which is the only
+// honest translation: the posture is no longer af's code to execute, it is af's
+// instruction to OpenSSH. What must not change is which posture each setting
+// produces and, just as importantly, WHICH FILE it reads and writes (#2556).
+
+func sshCmdFor(t *testing.T, cfg config.SSHConfig, posture string) string {
 	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	cmd, err := sshCommandForConfig(cfg, posture, "")
 	require.NoError(t, err)
-	sshPub, err := ssh.NewPublicKey(pub)
-	require.NoError(t, err)
-	return sshPub
+	return cmd
 }
 
-// TestSSHAcceptNewWritesToAFHomeNotUserKnownHosts is the #2556 destination
-// guarantee: with no ssh.known_hosts configured, accept-new records the learned
-// key in the af-owned store under AF_HOME and NEVER touches the user's shared
-// ~/.ssh/known_hosts. This is the "a test must pin WHERE the key lands" contract.
+// strict is the default posture and verifies against ssh.known_hosts, else the
+// user's ~/.ssh/known_hosts — unchanged from before #2556.
+func TestSSHStrictPostureVerifiesAgainstTheConfiguredFile(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "my_known_hosts")
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com", KnownHosts: kh}, config.SSHHostKeyStrict)
+
+	assert.Contains(t, cmd, "StrictHostKeyChecking=yes", "strict must refuse an unknown or changed key")
+	assert.Contains(t, cmd, "UserKnownHostsFile='"+kh+"'")
+	assert.Contains(t, cmd, "GlobalKnownHostsFile=/dev/null",
+		"the old client read ONE file; a system-wide entry must not satisfy verification now")
+	assert.Contains(t, cmd, "KnownHostsCommand=none",
+		"nor may an ssh_config helper program supply a key af never vouched for")
+}
+
+func TestSSHStrictPostureFallsBackToTheUserKnownHosts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict)
+	assert.Contains(t, cmd, "UserKnownHostsFile='"+filepath.Join(home, ".ssh", "known_hosts")+"'")
+}
+
+// An unexpected posture value must still fail SAFE to strict, exactly as the old
+// default branch did.
+func TestSSHUnknownPostureFailsSafeToStrict(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com"}, "not-a-real-posture")
+	assert.Contains(t, cmd, "StrictHostKeyChecking=yes")
+}
+
+// #2556's destination guarantee, and the one most worth preserving: accept-new
+// records learned keys in the af-owned store, NEVER the user's shared
+// ~/.ssh/known_hosts.
 func TestSSHAcceptNewWritesToAFHomeNotUserKnownHosts(t *testing.T) {
 	afHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", afHome)
 	userHome := t.TempDir()
 	t.Setenv("HOME", userHome)
 
-	p := &sshProvisioner{
-		cfg:                 config.SSHConfig{Host: "ephemeral.example.com", Port: 22},
-		hostKeyVerification: config.SSHHostKeyAcceptNew,
-	}
-	cb, err := p.hostKeyCallback()
-	require.NoError(t, err)
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyAcceptNew)
 
-	require.NoError(t,
-		cb("ephemeral.example.com:22", &net.TCPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 22}, testSSHPublicKey(t)),
-		"accept-new must trust an unknown host on first connect")
+	assert.Contains(t, cmd, "StrictHostKeyChecking=accept-new",
+		"accept-new trusts an unknown key but must still refuse a CHANGED one")
+	assert.Contains(t, cmd, "UserKnownHostsFile='"+filepath.Join(afHome, sshKnownHostsFileName)+"'")
+	assert.NotContains(t, cmd, filepath.Join(userHome, ".ssh", "known_hosts"),
+		"accept-new must never be pointed at the user's shared known_hosts (#2556)")
 
-	data, err := os.ReadFile(filepath.Join(afHome, "ssh_known_hosts"))
-	require.NoError(t, err, "accept-new must record the key in the af-owned store")
-	assert.Contains(t, string(data), "ephemeral.example.com")
-
-	_, statErr := os.Stat(filepath.Join(userHome, ".ssh", "known_hosts"))
-	assert.True(t, os.IsNotExist(statErr), "accept-new must NOT write to ~/.ssh/known_hosts")
+	// The store must exist before ssh runs, or the first connection fails — but
+	// creating it is NOT composition's job, because composition also runs while
+	// persisted cleanup handles are being loaded. prepareSSHHostKeyStore is the
+	// step that does it, immediately before the command runs.
+	_, statErr := os.Stat(filepath.Join(afHome, sshKnownHostsFileName))
+	assert.True(t, os.IsNotExist(statErr), "composing the command must not create the store")
+	require.NoError(t, prepareSSHHostKeyStore(config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyAcceptNew))
+	_, statErr = os.Stat(filepath.Join(afHome, sshKnownHostsFileName))
+	assert.NoError(t, statErr, "the af-owned store must exist by the time ssh runs")
 }
 
-// TestSSHAcceptNewRefusesChangedKey: TOFU still protects against MITM — once a
-// host's key is learned, a DIFFERENT key for that host is refused.
-func TestSSHAcceptNewRefusesChangedKey(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-
-	p := &sshProvisioner{
-		cfg:                 config.SSHConfig{Host: "h.example.com", Port: 22},
-		hostKeyVerification: config.SSHHostKeyAcceptNew,
-	}
-	addr := &net.TCPAddr{IP: net.IPv4(198, 51, 100, 3), Port: 22}
-
-	cb1, err := p.hostKeyCallback()
-	require.NoError(t, err)
-	require.NoError(t, cb1("h.example.com:22", addr, testSSHPublicKey(t)))
-
-	// A fresh callback reloads the learned key; a changed key must be refused.
-	cb2, err := p.hostKeyCallback()
-	require.NoError(t, err)
-	assert.Error(t, cb2("h.example.com:22", addr, testSSHPublicKey(t)),
-		"accept-new must refuse a CHANGED host key")
-}
-
-// TestSSHAcceptNewUsesConfiguredKnownHosts: when the operator set ssh.known_hosts,
-// accept-new writes THERE, and the af store is not created.
 func TestSSHAcceptNewUsesConfiguredKnownHosts(t *testing.T) {
 	afHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", afHome)
-	t.Setenv("HOME", t.TempDir())
 	kh := filepath.Join(t.TempDir(), "my_known_hosts")
 
-	p := &sshProvisioner{
-		cfg:                 config.SSHConfig{Host: "h2.example.com", Port: 22, KnownHosts: kh},
-		hostKeyVerification: config.SSHHostKeyAcceptNew,
-	}
-	cb, err := p.hostKeyCallback()
-	require.NoError(t, err)
-	require.NoError(t, cb("h2.example.com:22", &net.TCPAddr{IP: net.IPv4(192, 0, 2, 9), Port: 22}, testSSHPublicKey(t)))
-
-	data, err := os.ReadFile(kh)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "h2.example.com")
-
-	_, statErr := os.Stat(filepath.Join(afHome, "ssh_known_hosts"))
-	assert.True(t, os.IsNotExist(statErr), "with ssh.known_hosts set, the af store must not be used")
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "h2.example.com", KnownHosts: kh}, config.SSHHostKeyAcceptNew)
+	assert.Contains(t, cmd, "UserKnownHostsFile='"+kh+"'")
+	assert.NotContains(t, cmd, sshKnownHostsFileName, "with ssh.known_hosts set, the af store must not be used")
 }
 
-// TestSSHInsecureAcceptsAnyKey: insecure mode performs no verification.
-func TestSSHInsecureAcceptsAnyKey(t *testing.T) {
-	p := &sshProvisioner{
-		cfg:                 config.SSHConfig{Host: "whatever"},
-		hostKeyVerification: config.SSHHostKeyInsecure,
-	}
-	cb, err := p.hostKeyCallback()
-	require.NoError(t, err)
-	assert.NoError(t, cb("whatever:22", &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 22}, testSSHPublicKey(t)))
+// insecure performs no verification and records nothing — the equivalent of the
+// old InsecureIgnoreHostKey.
+func TestSSHInsecurePostureVerifiesNothing(t *testing.T) {
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "whatever"}, config.SSHHostKeyInsecure)
+	assert.Contains(t, cmd, "StrictHostKeyChecking=no")
+	assert.Contains(t, cmd, "UserKnownHostsFile='"+os.DevNull+"'",
+		"insecure must not record anything either — /dev/null is the equivalent of ignoring the key")
 }
 
-// TestSSHStrictDefaultRequiresKnownHost: strict (the default posture) refuses an
-// unknown host — the existing behavior, unchanged. Points at an empty known_hosts
-// so the callback construction succeeds but verification finds nothing.
-func TestSSHStrictDefaultRequiresKnownHost(t *testing.T) {
+// The login user is PINNED, so an ssh_config `User` directive cannot silently
+// change who af connects as. That is the behaviour the old client had by virtue
+// of never reading ssh_config at all.
+func TestSSHLoginUserIsPinnedAgainstSSHConfig(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	kh := filepath.Join(t.TempDir(), "known_hosts")
-	require.NoError(t, os.WriteFile(kh, []byte{}, 0o600))
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com", User: "deploy"}, config.SSHHostKeyStrict)
+	assert.Contains(t, cmd, "User='deploy'")
 
-	p := &sshProvisioner{
-		cfg:                 config.SSHConfig{Host: "s.example.com", Port: 22, KnownHosts: kh},
-		hostKeyVerification: config.SSHHostKeyStrict,
-	}
-	cb, err := p.hostKeyCallback()
-	require.NoError(t, err)
-	assert.Error(t,
-		cb("s.example.com:22", &net.TCPAddr{IP: net.IPv4(203, 0, 113, 1), Port: 22}, testSSHPublicKey(t)),
-		"strict must refuse an unknown host (no accept-new)")
+	// With no ssh.user, the daemon's own account is pinned rather than left to
+	// ssh_config — again matching the old loginUser().
+	bare := sshCmdFor(t, config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict)
+	assert.Contains(t, bare, "-o User='")
+}
+
+// An identity file is offered, and the AGENT is still available — the old
+// authMethods offered both, so IdentitiesOnly must not appear.
+func TestSSHIdentityFileDoesNotDisableTheAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	key := filepath.Join(t.TempDir(), "id_ed25519")
+	cmd := sshCmdFor(t, config.SSHConfig{Host: "h.example.com", IdentityFile: key}, config.SSHHostKeyStrict)
+
+	assert.Contains(t, cmd, "-i '"+key+"'")
+	assert.NotContains(t, cmd, "IdentitiesOnly",
+		"the old client offered identity-file keys AND agent keys; disabling the agent would break setups")
+}
+
+// A provision must never block on a prompt: there is no human attached.
+func TestSSHCommandNeverPrompts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	assert.Contains(t, sshCmdFor(t, config.SSHConfig{Host: "h"}, config.SSHHostKeyStrict), "BatchMode=yes")
 }

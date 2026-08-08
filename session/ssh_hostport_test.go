@@ -46,10 +46,14 @@ func TestSSHAndHookResolveTheSameAddressIdentically(t *testing.T) {
 				&hookProvisionRecord{Host: tc.address, Port: tc.port})
 			require.NoError(t, hookErr)
 
-			// The ssh entry point, through its real provisioner.
-			sp := &sshProvisioner{cfg: config.SSHConfig{Host: tc.address, Port: tc.port}}
-			sshHost, sshPortStr, sshErr := sp.hostPort()
+			// The ssh entry point. Since #3052 that backend composes an ssh(1)
+			// command rather than dialling in-process, so the resolved address is
+			// asserted where it now lives — which is itself the convergence: there is
+			// no second resolver left to disagree.
+			t.Setenv("HOME", t.TempDir())
+			sshCmd, sshErr := sshCommandForConfig(config.SSHConfig{Host: tc.address, Port: tc.port}, config.SSHHostKeyInsecure, "")
 			require.NoError(t, sshErr)
+			sshHost := tc.wantHost
 
 			assert.Equal(t, tc.wantHost, hookHost)
 			assert.Equal(t, tc.wantPort, hookPort)
@@ -62,8 +66,9 @@ func TestSSHAndHookResolveTheSameAddressIdentically(t *testing.T) {
 			if wantSSHPort == 0 {
 				wantSSHPort = sshDefaultPort
 			}
-			assert.Equal(t, wantSSHPort, atoiForTest(t, sshPortStr),
-				"the two backends must not disagree about the port for the same input")
+			assert.Contains(t, sshCmd, "-p "+strconv.Itoa(wantSSHPort),
+				"the ssh backend must reach the same port the hook path resolved")
+			assert.Contains(t, sshCmd, "'"+sshHost+"'", "and the same host")
 		})
 	}
 }
@@ -79,8 +84,8 @@ func TestConflictingPortsAreRefusedByBothBackends(t *testing.T) {
 	assert.Contains(t, hookErr.Error(), "2222")
 	assert.Contains(t, hookErr.Error(), "3333", "the error must name BOTH values so it is obvious which to delete")
 
-	sp := &sshProvisioner{cfg: config.SSHConfig{Host: address, Port: port}}
-	_, _, sshErr := sp.hostPort()
+	t.Setenv("HOME", t.TempDir())
+	_, sshErr := sshCommandForConfig(config.SSHConfig{Host: address, Port: port}, config.SSHHostKeyInsecure, "")
 	require.Error(t, sshErr, "the ssh backend must refuse the same input, not silently prefer one")
 	assert.Contains(t, sshErr.Error(), "2222")
 	assert.Contains(t, sshErr.Error(), "3333")
@@ -99,13 +104,6 @@ func TestMalformedEmbeddedPortIsRejected(t *testing.T) {
 			assert.Contains(t, err.Error(), "port", "the error must name the port, not the address generally")
 		})
 	}
-}
-
-func atoiForTest(t *testing.T, s string) int {
-	t.Helper()
-	n, err := strconv.Atoi(s)
-	require.NoError(t, err)
-	return n
 }
 
 // Codex 3734417507 (P1): a cleanup handle persisted BEFORE conflicts were
@@ -127,23 +125,19 @@ func TestLegacyConflictingCleanupHandleCanStillReap(t *testing.T) {
 
 	sb, ok := backend.(*sshBackend)
 	require.True(t, ok)
-	host, port, err := sb.provisioner.hostPort()
-	require.NoError(t, err, "the restored provisioner must resolve cleanly, not carry the conflict forward")
-	assert.Equal(t, "10.0.0.7", host)
-	assert.Equal(t, "2222", port, "normalized with the precedence those configs were written against")
+	assert.Contains(t, sb.provisioner.sshCmd, "'10.0.0.7'",
+		"the restored transport must resolve cleanly, not carry the conflict forward")
+	assert.Contains(t, sb.provisioner.sshCmd, "-p 2222",
+		"normalized with the precedence those configs were written against")
 }
 
-// Codex 3734417514: the address is a pure configuration fact, so it must be
-// diagnosed before local prerequisites — otherwise a machine that also lacks a
-// readable known_hosts reports a key-file problem for what is really a bad
-// address, and the two backends describe the same input differently.
-func TestSSHDialReportsTheAddressConflictNotALocalKeyProblem(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // no keys, no known_hosts: prerequisites would fail too
-	p := &sshProvisioner{
-		cfg:                 config.SSHConfig{Host: "10.0.0.7:2222", Port: 3333},
-		hostKeyVerification: config.SSHHostKeyStrict,
-	}
-	err := p.dial()
+// Codex 3734417514, restated after #3052: the address is a pure configuration
+// fact, so it must be diagnosed before anything local. Composing the command is
+// now where that happens, and it fails on a conflict without touching the
+// filesystem or the network.
+func TestSSHAddressConflictIsDiagnosedBeforeAnythingLocal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no keys, no known_hosts: a local check would fail too
+	_, err := sshCommandForConfig(config.SSHConfig{Host: "10.0.0.7:2222", Port: 3333}, config.SSHHostKeyStrict, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "2222", "the ADDRESS conflict must win over any local prerequisite failure")
 	assert.Contains(t, err.Error(), "3333")
@@ -183,8 +177,6 @@ func TestLegacyServiceNamePortStillReaps(t *testing.T) {
 
 	sb, ok := backend.(*sshBackend)
 	require.True(t, ok)
-	host, port, err := sb.provisioner.hostPort()
-	require.NoError(t, err)
-	assert.Equal(t, "server.invalid", host)
-	assert.Equal(t, "22", port, "resolved through /etc/services, exactly as ssh.Dial did")
+	assert.Contains(t, sb.provisioner.sshCmd, "'server.invalid'")
+	assert.Contains(t, sb.provisioner.sshCmd, "-p 22", "resolved through /etc/services, exactly as ssh.Dial did")
 }

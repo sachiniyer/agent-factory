@@ -196,7 +196,7 @@ func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
 	// Bind and release a port so it is almost certainly free, then never listen.
 	free := freeLocalAddrForTest(t)
 	start := time.Now()
-	err := waitForSandboxTunnelWithin(free, 300*time.Millisecond, 50*time.Millisecond)
+	err := waitForSandboxTunnelWithin(string(BackendSandbox), free, 300*time.Millisecond, 50*time.Millisecond)
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Contains(t, err.Error(), "never started listening")
@@ -206,7 +206,7 @@ func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
 func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {
 	ln := listenLocalForTest(t)
 	defer func() { _ = ln.Close() }()
-	require.NoError(t, waitForSandboxTunnelWithin(ln.Addr().String(), 2*time.Second, 20*time.Millisecond))
+	require.NoError(t, waitForSandboxTunnelWithin(string(BackendSandbox), ln.Addr().String(), 2*time.Second, 20*time.Millisecond))
 }
 
 func freeLocalAddrForTest(t *testing.T) string {
@@ -257,7 +257,12 @@ func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 		"the kill must verify argv[0] before signalling, not trust a bare PID")
 	assert.Contains(t, script, "/remote/af-session/af",
 		"and must compare against THIS session's unique af path")
-	assert.Contains(t, script, "} && rm -rf", "a failed kill must stop the removal, not be discarded by `;`")
+	assert.Contains(t, script, ") && ( rm -rf",
+		"a failed kill must stop the removal — and the kill runs in a SUBSHELL, so its own `exit 0` "+
+			"when the process is already gone cannot terminate the script before the removal")
+	assert.NotContains(t, script, "rm -rf '/remote/af-session' && printf",
+		"the PROOF must not be chained to the removal: an answered rm failure has to emit the sentinel "+
+			"too, or reap can never latch a definite failure and retries it forever")
 	assert.Contains(t, script, "| tr 'a-z' 'A-Z'",
 		"the response must be COMPUTED remotely, so a wrapper echoing argv cannot forge it")
 	assert.NotContains(t, script, expect,
@@ -366,4 +371,32 @@ func TestRestoreRuntimeCleanupRejectsIncompleteSandboxHandle(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// The reap script must survive the identity kill's own `exit 0`.
+//
+// That kill exits 0 when the process is ALREADY GONE — the common case after a
+// clean shutdown — and the script used a `{ … }` group, which runs in the
+// current shell. The exit therefore terminated the whole remote script before
+// `rm -rf` or the confirmation ran, so the reap looked like "exited 0, never
+// confirmed": the session directory survived and the record was retained
+// forever. Caught by the ssh round-trip integration tests once backend=ssh
+// started routing through this reap (#3052).
+func TestSandboxReapCompletesWhenTheProcessIsAlreadyGone(t *testing.T) {
+	// A stub that RUNS the reap script in a real shell, so the group-vs-subshell
+	// semantics are exercised rather than asserted. `kill -0` on a pid that does
+	// not exist makes the identity script take its `exit 0` path.
+	ssh := stubSSH(t, `sh -c "${!#}"`)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "session-dir")
+	require.NoError(t, os.MkdirAll(marker, 0o755))
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: marker, remotePID: "999999"}
+	require.NoError(t, p.reap(),
+		"a reap whose process is already gone must still remove the directory and confirm it ran")
+	assert.True(t, p.reaped, "and it must latch, not be retried forever")
+
+	_, statErr := os.Stat(marker)
+	assert.True(t, os.IsNotExist(statErr),
+		"the session directory must actually be removed — the whole point of the reap")
 }

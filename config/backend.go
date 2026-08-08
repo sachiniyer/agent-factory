@@ -82,10 +82,11 @@ type SSHConfig struct {
 	// User is the ssh login user. Optional — empty means the daemon's own user
 	// (os/user.Current, else $USER).
 	//
-	// NOT an ssh_config lookup: the runtime connects with the Go
-	// golang.org/x/crypto/ssh client rather than the ssh binary, and never reads
-	// ~/.ssh/config — so no Match block, Host alias, or per-host User applies
-	// here. Every connection parameter af uses is a field of this struct.
+	// NOT an ssh_config lookup. The runtime runs the ssh binary (#3052), but with
+	// -F none, so neither ~/.ssh/config nor /etc/ssh/ssh_config is read — no Match
+	// block, Host alias, or per-host User applies here. Every connection parameter
+	// af uses is a field of this struct, which is the point: this backend's
+	// contract is that af enforces the posture in code.
 	User string `json:"user,omitempty" toml:"user,omitempty"`
 	// Port is the ssh port. Optional — 0 means the default (22).
 	Port int `json:"port,omitempty" toml:"port,omitempty"`
