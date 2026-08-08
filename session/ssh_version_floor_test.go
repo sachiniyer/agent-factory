@@ -232,3 +232,27 @@ func TestUnpinnedCleanupRecordDialsTheName(t *testing.T) {
 	assert.Equal(t, "'h.example.com'", fields[len(fields)-1])
 	assert.NotContains(t, sb.provisioner.sshCmd, "HostKeyAlias")
 }
+
+// A picker is a promise. ssh.identity_file is a local, side-effect-free fact, so
+// a repo whose key path is a typo must be told at CHOOSE time rather than being
+// offered a backend whose every create fails deterministically (#3092).
+func TestBackendUnusableReasonSSHValidatesTheIdentityFile(t *testing.T) {
+	repo := repoWithOriginForTest(t)
+	restore := SetLookPathForTest(func(name string) (string, error) { return "/usr/bin/" + name, nil })
+	defer restore()
+
+	missing := filepath.Join(t.TempDir(), "typo_id_ed25519")
+	err := BackendUnusableReason(BackendSSH,
+		&config.ResolvedConfig{SSH: &config.SSHConfig{Host: "h.example.com", IdentityFile: missing}}, repo)
+	require.Error(t, err, "the picker must not offer a backend whose every create fails on this path")
+	assert.Contains(t, err.Error(), missing)
+
+	// A readable key, and no key at all, both stay usable — so this moved only the
+	// case that was already broken.
+	good := filepath.Join(t.TempDir(), "id_ed25519")
+	require.NoError(t, os.WriteFile(good, []byte("k"), 0o600))
+	assert.NoError(t, BackendUnusableReason(BackendSSH,
+		&config.ResolvedConfig{SSH: &config.SSHConfig{Host: "h.example.com", IdentityFile: good}}, repo))
+	assert.NoError(t, BackendUnusableReason(BackendSSH,
+		&config.ResolvedConfig{SSH: &config.SSHConfig{Host: "h.example.com"}}, repo))
+}
