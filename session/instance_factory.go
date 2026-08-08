@@ -635,18 +635,16 @@ func offBoxAccountRefusal(kind BackendKind) string {
 	}
 }
 
-// refuseUnsupportedAccountAgent rejects an account on an agent whose launch af
-// rewrites before the boundary sees it.
+// refuseUnsupportedAccountAgent rejects a cross-agent override or an agent whose
+// launch/account contract af has not established. It deliberately does NOT judge
+// command shape here: program_overrides can be re-read before launch, and only
+// prepareCreateLaunch has the frozen resolved command plus af's generated-argument
+// declaration. That final admission names any undeclared arguments before the pane
+// starts (#3108).
 //
-// claude is the case today. The local launch appends --session-id and usually
-// --plugin-dir, and the boundary's command guard accepts only a bare,
-// argument-free invocation — so the pane exits 127 with a generic message. A
-// clear refusal at create time is strictly better than a session that starts and
-// dies for a reason nothing explains.
-//
-// This is deliberately an ALLOWLIST of agents known to work, not a denylist of
-// broken ones: an agent added later is unsupported until someone proves the
-// boundary accepts its launch, which fails in the safe direction (#3051, #3083).
+// This remains an ALLOWLIST, not a denylist: an agent added later is unsupported
+// until someone proves the boundary accepts its launch, which fails in the safe
+// direction (#3051, #3083).
 func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil

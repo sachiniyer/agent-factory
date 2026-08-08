@@ -27,10 +27,12 @@ import (
 // string — the plugin directory below contains a space (#3083).
 func TestAccountExecProtocol_CarriesTheGeneratedArgsDeclaration(t *testing.T) {
 	pluginDir := "/plugins/with a space"
+	trustedExecutable := "/opt/af detected/claude"
 	generated := []string{"--session-id", "abc-123", "--plugin-dir", pluginDir}
-	command := "claude --session-id abc-123 --plugin-dir " + shellquote.Quote(pluginDir)
+	command := shellquote.Quote(trustedExecutable) + " --session-id abc-123 --plugin-dir " + shellquote.Quote(pluginDir)
 
-	wrapped, err := WrapAccountCommand("/usr/local/bin/af", "claude", "work", generated, nil, command)
+	wrapped, err := WrapAccountCommand("/usr/local/bin/af", "claude", "work",
+		AccountLaunchProof{TrustedExecutable: trustedExecutable, GeneratedArgs: generated}, nil, command)
 	require.NoError(t, err)
 
 	// Split with this package's own parser — the same one the guard uses — rather
@@ -75,11 +77,11 @@ func TestAccountExecProtocol_CarriesTheGeneratedArgsDeclaration(t *testing.T) {
 // for the protocol itself, since every claim the boundary verifies rides on it.
 func TestAccountExecProtocol_RefusesAMiscountedInvocation(t *testing.T) {
 	for _, args := range [][]string{
-		{"claude", "0", "work"},                      // truncated before the generated count
-		{"claude", "0", "work", "2", "--only-one"},   // count exceeds the words present
-		{"claude", "0", "work", "-1", "cmd"},         // negative
-		{"claude", "0", "work", "0", "cmd", "extra"}, // an unaccounted argument
-		{"claude", "0", "work", "x", "cmd"},          // not a number
+		{"claude", "0", "work"},                        // truncated before proof fields
+		{"claude", "0", "work", "", "2", "--only-one"}, // count exceeds the words present
+		{"claude", "0", "work", "", "-1", "cmd"},       // negative
+		{"claude", "0", "work", "", "0", "cmd", "extra"},
+		{"claude", "0", "work", "", "x", "cmd"}, // not a number
 	} {
 		require.Error(t, execInvocation(args, true), "argv %v must be refused, not guessed at", args)
 	}
@@ -93,7 +95,7 @@ func TestAccountExecProtocol_RefusesAMiscountedInvocation(t *testing.T) {
 func TestAccountExecProtocol_RefusesAnOverflowingGeneratedCount(t *testing.T) {
 	for _, count := range []string{"9223372036854775807", "9223372036854775806", "4611686018427387904"} {
 		require.NotPanics(t, func() {
-			require.Error(t, execInvocation([]string{"claude", "0", "work", count, "claude"}, true),
+			require.Error(t, execInvocation([]string{"claude", "0", "work", "", count, "claude"}, true),
 				"generated count %s must be refused", count)
 		}, "a malformed count must return the generic refusal, never panic (count %s)", count)
 	}

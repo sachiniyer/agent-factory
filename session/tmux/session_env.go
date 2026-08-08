@@ -56,8 +56,8 @@ func (t *TmuxSession) SetAccountForAgent(agent, name string) {
 	t.accountAgent = agent
 }
 
-// SetLaunchProgram sets the pane command AND the declaration of which argument
-// words af appended to reach it, under ONE programMu hold (#3083 review).
+// SetLaunchProgram sets the pane command AND af's executable/argument proof
+// under ONE programMu hold (#3083 review, #3108).
 //
 // Paired because a reader between two independently-locked setters sees a torn
 // pair — the old command with the new declaration, or the reverse — and the
@@ -65,22 +65,25 @@ func (t *TmuxSession) SetAccountForAgent(agent, name string) {
 // words, so either half of that tear refuses the launch and the pane exits
 // immediately. The call site pairing them is not enough: it makes the two writes
 // adjacent, not atomic.
-func (t *TmuxSession) SetLaunchProgram(program string, generated []string) {
+func (t *TmuxSession) SetLaunchProgram(program string, proof sessionenv.AccountLaunchProof) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.program = program
-	t.generatedArgs = append([]string(nil), generated...)
+	t.generatedArgs = append([]string(nil), proof.GeneratedArgs...)
+	t.trustedExecutable = proof.TrustedExecutable
 }
 
 // launchSnapshot reads every field a launch needs in ONE hold, for the same
 // reason SetLaunchProgram writes them in one: Start used to read program through
 // its own lock and the declaration through another, so a rewrite landing between
 // them paired an old command with a new declaration.
-func (t *TmuxSession) launchSnapshot() (program string, generated, extras []string, account, accountAgent string) {
+func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string) {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
-	return t.program,
-		append([]string(nil), t.generatedArgs...),
+	return t.program, sessionenv.AccountLaunchProof{
+			TrustedExecutable: t.trustedExecutable,
+			GeneratedArgs:     append([]string(nil), t.generatedArgs...),
+		},
 		append([]string(nil), t.envPassthrough...),
 		t.account,
 		t.accountAgent
@@ -91,7 +94,7 @@ func (t *TmuxSession) launchSnapshot() (program string, generated, extras []stri
 // another, so a rewrite landing between them wrapped an old command with a new
 // declaration (#3083 review).
 func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	program, generated, extra, account, accountAgent := t.launchSnapshot()
+	program, proof, extra, account, accountAgent := t.launchSnapshot()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
@@ -117,7 +120,7 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
 		}
-		wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, generated, extra, program)
+		wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, proof, extra, program)
 	} else {
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
 	}

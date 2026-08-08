@@ -8,4 +8,8 @@ func WrapCommand(string, string, []string, string) (string, error) {
 	return "", fmt.Errorf("tmux session environments are unsupported on windows")
 }
 
+func WrapAccountCommand(string, string, string, AccountLaunchProof, []string, string) (string, error) {
+	return "", fmt.Errorf("tmux session environments are unsupported on windows")
+}
+
 func HandleInternalExec() {}
