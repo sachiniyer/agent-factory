@@ -110,8 +110,15 @@ func TestRefuseOffBoxAccount_AllowsDockerRefusesTheRest(t *testing.T) {
 			t.Errorf("%s must still refuse an account-scoped create", kind)
 			continue
 		}
-		if !strings.Contains(err.Error(), "cannot place a credential account") {
-			t.Errorf("%s refusal must say WHY (af cannot place the account there), got: %v", kind, err)
+		// The refusal must say WHY — but NOT "af cannot place it", which was false
+		// for ssh and is what #3103 corrected. Each kind's specific reason is
+		// asserted in account_offbox_refusal_test.go; here we only require that the
+		// message names the account, the backend, and a way forward.
+		if !strings.Contains(err.Error(), "work") || !strings.Contains(err.Error(), string(kind)) {
+			t.Errorf("%s refusal must name the account and the backend, got: %v", kind, err)
+		}
+		if !strings.Contains(err.Error(), "--account") {
+			t.Errorf("%s refusal must name the way out, got: %v", kind, err)
 		}
 	}
 	// Unscoped creates are untouched on every kind.

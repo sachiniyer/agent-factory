@@ -95,6 +95,14 @@ Account-scoped sessions require the local or docker backend, and tmux 3.2 or new
 refuses rather than falling back, because a fallback would run on the ambient
 account while reporting the one you asked for.
 
+ssh, sandbox and hook refuse by design, not because the work is pending. An
+account is a writable agent home, so the agent writes a refreshed token back into
+it. docker bind-MOUNTS the directory, so those writes land in your real account.
+Any off-box backend would need it COPIED, where teardown deletes the refresh —
+and if your provider rotates refresh tokens, that also invalidates the copy on
+this machine. A session on a host af does not control would be able to break the
+identity on the one it does, so af does not offer the choice.
+
 af never switches accounts on its own — not on a rate limit, not on a failure.
 A session runs as the account it was started with.`,
 }

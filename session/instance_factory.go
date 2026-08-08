@@ -539,30 +539,14 @@ func resolvedProgramMarker(opts InstanceOptions) string {
 }
 
 // refuseOffBoxAccount rejects an account-scoped session on a backend that cannot
-// yet carry the account.
+// carry the account. For ssh, sandbox and hook this is a DECISION, not a gap
+// (#3103) — see offBoxAccountRefusal for each backend's reason.
 //
 // It still gates on the backend being NOT local rather than on a list of remote
 // kinds, and #3082 did not weaken that: a backend added later is off-box until
 // someone proves otherwise, so the default for anything new remains refusal
 // rather than silent ambient credentials. What changed is that docker can now
 // PROVE it, so it is exempted by name.
-//
-// WHY DOCKER AND NOT THE OTHERS, decided per backend rather than defaulted
-// (#3082):
-//
-//   - docker CAN place the account, and already has the mechanism. An account is
-//     an agent HOME directory, and the runtime already bind-mounts host paths into
-//     the container — today it mounts the operator's AMBIENT credentials, which is
-//     precisely the wrong-identity failure this refusal was protecting against.
-//     Pointing that mount at the account's directory is the whole fix.
-//   - ssh could transfer one — the runtime already streams the af binary to the
-//     remote — but that means writing the operator's live credentials onto a
-//     machine whose filesystem, other users and backups af does not control, for a
-//     feature whose purpose is to NARROW where an identity may be used. That is a
-//     posture decision, not wiring, and it is not taken here.
-//   - sandbox and hook run the operator's own provisioner. Nothing in that contract
-//     promises a place to put an account, so refusing is the permanent answer
-//     rather than a temporary one.
 func refuseOffBoxAccount(opts InstanceOptions) error {
 	if strings.TrimSpace(opts.Account) == "" {
 		return nil
@@ -574,11 +558,67 @@ func refuseOffBoxAccount(opts InstanceOptions) error {
 	if kind == BackendLocal || kind.CarriesAccount() {
 		return nil
 	}
-	return fmt.Errorf(
-		"account %q cannot be used with the %s backend: af cannot place a credential account on that machine, "+
-			"and running there would use its ambient credentials while reporting the account you asked for; "+
-			"create this session on the local or docker backend, or omit --account",
-		opts.Account, kind)
+	return fmt.Errorf("account %q cannot be used with the %s backend: %s", opts.Account, kind, offBoxAccountRefusal(kind))
+}
+
+// offBoxAccountRefusal is WHY a given backend refuses an account, in the
+// operator's words.
+//
+// It is per backend because the reasons are genuinely different, and a merged
+// message was actively misleading (#3103). The old wording said af "cannot place
+// a credential account on that machine" for all of them — which is FALSE for ssh
+// and provably so: that runtime streams af's own binary to the remote, creates a
+// per-session directory and starts a process there. Placement was never the
+// obstacle. An operator who knows the ssh backend reads that and reasonably
+// concludes af simply has not wired it up.
+//
+// THE ACTUAL OBSTACLE FOR SSH IS THE ROUND TRIP. An account is a writable agent
+// HOME (sessionenv.Account.Dir becomes CODEX_HOME / CLAUDE_CONFIG_DIR), not a
+// credential file, and the agent writes REFRESHED AUTHENTICATION into it when a
+// token rotates. A copy's writes live on the remote and the teardown `rm -rf`
+// destroys them, so the account would present as writable while being read-only
+// in practice.
+//
+// And the worst case is not a stale credential, it is an INVALIDATED one. OAuth
+// refresh tokens are commonly single-use: presenting one returns a replacement
+// and kills the old. If that holds for a given provider, a remote refresh
+// invalidates the token the operator still holds LOCALLY while the replacement is
+// deleted with the session dir — so a session on a machine af does not control
+// breaks the identity on the machine it does. af cannot verify rotation behaviour
+// per provider, and that unverifiability is the argument: this is a risk af would
+// be taking on the operator's behalf without being able to bound it.
+//
+// Copying back before teardown does not rescue it. This codebase treats an
+// unknown teardown outcome as a NORMAL state rather than an edge —
+// ErrWorkspaceStateUnknown, the retained-record machinery, CleanupRetry's
+// retry-and-retire all exist because reaps legitimately do not finish — so a
+// credential-carrying teardown is a credential that legitimately does not come
+// home, silently. It would also widen the window in which live credentials sit on
+// the remote, which per-session placement exists to bound.
+//
+// sandbox and hook refuse for a different and simpler reason: af does not decide
+// the shape of the machine at all. Their commands and scripts are the operator's,
+// so there is no location af can prove is the account rather than somewhere that
+// merely looks like it.
+func offBoxAccountRefusal(kind BackendKind) string {
+	switch kind {
+	case BackendSSH:
+		return "af can put the account on that host, and deliberately does not: an account is a writable " +
+			"agent home, so a refreshed token would be written on the remote and destroyed with the session " +
+			"directory at teardown — and if your provider rotates refresh tokens, that would also invalidate " +
+			"the copy on this machine. Use the docker or local backend for account-scoped sessions, or omit " +
+			"--account to use the remote host's own credentials"
+	case BackendSandbox, BackendHook:
+		return "that backend provisions through your own command or scripts, so af has no location it can " +
+			"prove is the account rather than somewhere that merely resembles it; use the docker or local " +
+			"backend for account-scoped sessions, or omit --account to use that machine's own credentials"
+	default:
+		// A backend added later, refused by default. Naming it as unproven rather
+		// than as impossible keeps this honest for something nobody has assessed.
+		return "af has not established that it can carry a credential account onto that machine, and " +
+			"running there would use its ambient credentials while reporting the account you asked for; " +
+			"use the docker or local backend for account-scoped sessions, or omit --account"
+	}
 }
 
 // refuseUnsupportedAccountAgent rejects an account on an agent whose launch af

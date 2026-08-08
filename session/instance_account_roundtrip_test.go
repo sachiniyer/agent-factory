@@ -82,17 +82,21 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 	require.NoError(t, refuseOffBoxAccount(docker),
 		"docker can place the account, so an account-scoped create there must be allowed")
 
-	// The rest still cannot PLACE an account on the machine that runs the agent, so
-	// they must refuse rather than run on that host's ambient credentials.
+	// The rest must refuse rather than run on that host's own credentials — but
+	// each for ITS OWN reason (#3103). "af cannot place a credential account" was
+	// the blanket wording, and it was false for ssh: that runtime already streams
+	// af's binary to the remote and creates a per-session directory there. The
+	// per-kind reasons are asserted in account_offbox_refusal_test.go; this loop
+	// pins only that every one of them refuses and names itself and the way out.
 	for _, kind := range []BackendKind{BackendSSH, BackendSandbox, BackendHook} {
 		scoped := base
 		scoped.Backend = kind
 		err := refuseOffBoxAccount(scoped)
 		require.Error(t, err, "backend %s must refuse an account-scoped create", kind)
 		require.Contains(t, err.Error(), string(kind))
-		require.Contains(t, err.Error(), "ambient credentials")
-		require.Contains(t, err.Error(), "cannot place a credential account",
-			"the refusal must say af cannot PLACE the account there — the reason is now per-kind, not a blanket off-box rule")
+		require.Contains(t, err.Error(), "--account", "the refusal must name the way out")
+		require.NotContains(t, err.Error(), "cannot place a credential account",
+			"that blanket wording was false for ssh and invited the operator to read a decision as unfinished wiring")
 	}
 
 	// claude is ADMITTED now (#3083): af declares the arguments it appends to that

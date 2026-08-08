@@ -197,12 +197,25 @@ func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k]
 // CarriesAccount reports whether this kind's provisioner can place a registered
 // credential account on the machine that runs the agent (#3082).
 //
-// Only docker, and the reason is a mechanism rather than a preference: an account
-// is an agent HOME directory, and the docker runtime already bind-mounts host
-// paths into the container, so the account's directory can be mounted where the
-// in-container agent reads its home. ssh, sandbox and hook have no way to place a
-// directory they can prove is the account — see refuseOffBoxAccount for why that
-// is a decision and not a gap.
+// THIS IS A CLAIM ABOUT A PROVEN MECHANISM, NOT A CAPABILITY, and the difference
+// decides what a per-KIND answer may say (#3103).
+//
+// Only docker, because only docker has one: an account is an agent HOME
+// directory, the docker runtime already bind-mounts host paths into the
+// container, and a MOUNT is shared with the host — so the agent's writes,
+// including a refreshed token, land in the operator's real registry rather than
+// in a copy that teardown deletes.
+//
+// A COPY IS NOT A MOUNT, which is why ssh answers false even though it could
+// physically transfer one: its writes cannot come home. sandbox and hook answer
+// false because af does not decide the shape of those machines at all. See
+// offBoxAccountRefusal for each reason in full.
+//
+// Because a kind that answers FALSE promises nothing, a per-KIND answer is safe
+// here even for hook, whose modes differ from one another — the objection to a
+// blanket per-kind answer only bites for a kind claiming TRUE, where the kind
+// would have to determine the machine's shape in order to be making a promise it
+// can keep.
 //
 // Local is deliberately NOT listed: it needs no placing, applies the account
 // through the exec shim, and is handled by its own branch. A kind that answers
