@@ -354,6 +354,36 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		fmt.Fprintln(errOut, "It is still running the old binary, so this upgrade has not reached it yet.")
 		fmt.Fprintln(errOut, stopDaemonHint(daemonHealthFn()))
 		return
+	case restartPhaseShutdownUnknown:
+		// Neither "it is still running" nor "nothing is running" — say the true
+		// thing, which is that we do not know, and give a check rather than a
+		// remedy. Asserting either state here is what sends someone hunting a
+		// daemon that is not there, or waiting for one that is (#3097).
+		fmt.Fprintln(out, "Upgraded successfully!")
+		// Ask the OTHER source before settling for uncertainty. The shutdown check
+		// failing does not mean nothing knows: Health reads the pid file directly,
+		// so a socket it could not stat can still sit beside a verified live pid —
+		// and then the state IS known and the operator gets a real remedy, naming
+		// the pid. Reporting unknown there would downgrade a determined answer, which
+		// is the same collapse this whole change is about, one source over. It would
+		// also send them to `af daemon restart`, which re-enters the failing check.
+		// A daemon that ANSWERED the ping is the strongest evidence available, and
+		// it is independent of the pid file: PingErr is nil only when something
+		// responded on the control socket, and Health always attempts that ping. A
+		// transient stat error can leave the pid file unreadable — PIDVerified
+		// false — while the daemon is demonstrably alive, so checking the pid alone
+		// would report "unknown" about a daemon that just talked to us.
+		h := daemonHealthFn()
+		if h.PingErr == nil || h.PIDVerified {
+			fmt.Fprintf(errOut, "The running daemon could not be stopped: %v\n", restartErr)
+			fmt.Fprintln(errOut, "Its process is still verifiably alive, so it is still running the old binary.")
+			fmt.Fprintln(errOut, stopDaemonHint(h))
+			return
+		}
+		fmt.Fprintf(errOut, "Could not determine whether a daemon is running: %v\n", restartErr)
+		fmt.Fprintln(errOut, "No daemon was found and its process could not be verified either, so this upgrade may or may not have reached one.")
+		fmt.Fprintln(errOut, "Check with `af daemon status` before assuming either way.")
+		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.
 		fmt.Fprintln(out, "Upgraded successfully!")
