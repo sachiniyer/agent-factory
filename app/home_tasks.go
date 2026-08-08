@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -79,15 +80,28 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		return m.handleError(fmt.Errorf("failed to save task: %v", addErr))
 	}
 	// Refresh sidebar and task pane
+	// A reload failure is NOT nothing: the save committed, so the list on screen is
+	// now stale, and returning nil tells the user it is current. They then read a
+	// list missing the task they just created and reasonably conclude the save
+	// failed — so they create it again (#3095). Surfaced the way
+	// saveContentPaneState already surfaces the same reload.
+	var reloadErr error
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
 		m.store.SetTasks(tasks)
 		sp.SetTasks(tasks)
 		// Reflow so the new automation grows the rail's section (#1126).
 		m.relayout()
+	} else {
+		reloadErr = fmt.Errorf("the task was saved, but this list could not be reloaded, so it is showing the tasks from before — do not create it again: %w", err)
 	}
 	if addErr != nil {
-		return m.handleError(fmt.Errorf("task was saved, but the daemon could not refresh its schedules: %w", addErr))
+		return m.handleError(errors.Join(
+			fmt.Errorf("task was saved, but the daemon could not refresh its schedules: %w", addErr),
+			reloadErr))
+	}
+	if reloadErr != nil {
+		return m.handleError(reloadErr)
 	}
 	return nil
 }
