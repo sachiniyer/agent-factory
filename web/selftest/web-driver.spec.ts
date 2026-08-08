@@ -8743,12 +8743,12 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     const cdp = await ctx.newCDPSession(win);
     await cdp.send("Network.enable");
 
-    // Wait for BOTH startup Snapshots before manufacturing the outage. openTokenless
-    // proves the seed Snapshot rendered the rail, but the event socket's first-open
-    // resync is debounced separately. If that older request is still pending, it can
-    // sample the real deleted-only roster between tab-delete and tab-create, repaint
-    // the bar, and make the fused-reconnect assertion fail even though the reconnect
-    // Snapshot itself carries the intended same-name replacement (#3081).
+    // Wait for the startup resync CHAIN to be accepted before manufacturing the
+    // outage. openTokenless proves the seed Snapshot rendered the rail, but the event
+    // socket's first-open resync is debounced separately, and a crossing event can
+    // fence that response out and schedule another. If any older request is pending,
+    // it can sample the real deleted-only roster between tab-delete and tab-create,
+    // repaint the bar, and fail this fused-reconnect assertion (#3081).
     await openAfterInitialResync(win, () => openTokenless(win));
     await row(win, SESSION_ORDER).click();
     await expect(win.locator(".af-tabbar .af-tab")).toHaveCount(4, { timeout: 15_000 });

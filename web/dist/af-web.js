@@ -15279,6 +15279,7 @@ function startStream(tok) {
 }
 function stopStream() {
   resyncRequestGeneration += 1;
+  root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
@@ -15352,6 +15353,7 @@ function requestResync() {
         return;
       }
       applySessions(sessions);
+      root?.setAttribute("data-af-resync-settled", "");
     }).catch(() => {
     });
   }, 150);

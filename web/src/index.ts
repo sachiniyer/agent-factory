@@ -1700,6 +1700,7 @@ function stopStream(): void {
   // prevents a request that has not started; a response from the previous stream
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
+  root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
@@ -1826,6 +1827,12 @@ function requestResync(): void {
           return;
         }
         applySessions(sessions);
+        // A successful HTTP response is not necessarily authoritative: either fence
+        // above can discard it and schedule a replacement. Stamp the stable app root
+        // only after the winning response reaches the store, giving black-box clients
+        // an application-level settlement signal instead of a network-timing guess
+        // (#3081). stopStream clears it before a new stream owns the connection.
+        root?.setAttribute("data-af-resync-settled", "");
       })
       .catch(() => {
         // Transport/auth failure: the events stream owns reconnection; a later
