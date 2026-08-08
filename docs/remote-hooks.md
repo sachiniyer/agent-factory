@@ -6,7 +6,7 @@ Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-ex
 
 > **Transport:** the `af agent-server` serves **plain HTTP** (no TLS — af terminates none of its own). The URL must be `http://` (or `ws://`), and the bearer token travels over the connection, so your `launch_cmd` must make the agent-server reachable from the daemon over a private network or tunnel it controls (a container's published loopback port, an SSH forward, a tailnet address).
 
-> **⚠️ Breaking change (#2845): `launch_cmd`'s stdout is now the endpoint's alone.** stdout must carry the `{"url","token"}` JSON and **nothing else** — no tunnel logs, no progress lines. Anything else on it fails the provision with an error quoting the offending output. Only scripts that let another writer share stdout are affected, and the fix is one redirect. See [Migrating to an endpoint-only stdout](#migrating-to-an-endpoint-only-stdout).
+> **⚠️ Breaking change (#2845): `launch_cmd`'s stdout is now the endpoint's alone.** stdout must carry the `{"url","token"}` JSON and **nothing else** — no tunnel logs, no progress lines. Anything else on it fails the provision with an error reporting the violation (the offending output is redacted, not quoted verbatim). Only scripts that let another writer share stdout are affected, and the fix is one redirect. See [Migrating to an endpoint-only stdout](#migrating-to-an-endpoint-only-stdout).
 
 > **⚠️ Breaking change (#1592 Phase 4 PR7).** The old hook contract — `launch_cmd` returning a session id, plus `list_cmd`/`attach_cmd`/`terminal_cmd` scripts for enumeration, terminal proxying, and preview capture — has been **removed**. `launch_cmd` now returns an `af agent-server` endpoint, and the only other script is `delete_cmd`. A config that still sets `list_cmd`, `attach_cmd`, or `terminal_cmd` is **rejected** with an error pointing here. See [Migrating from the old contract](#migrating-from-the-old-contract) for a copy-pasteable recipe.
 
@@ -38,7 +38,7 @@ Same arguments as `launch_cmd` (`--name`, `--title`, `--repo`, and `--branch` on
 - `host_key` (**required**) — the machine's **public** host key, in `authorized_keys` form.
 - `user`, `port` — optional.
 
-Progress goes on **stderr**; anything else on stdout fails the provision with the offending line quoted, exactly as for `launch_cmd`.
+Progress goes on **stderr**; anything else on stdout fails the provision the same way, with the offending output redacted rather than quoted.
 
 #### Why `host_key` is required
 
@@ -169,11 +169,11 @@ These values are the `af agent-server` startup banner (`addr`/`token`). A legacy
 **`launch_cmd`'s stdout carries that JSON object and nothing else.** Not a progress line, not a tunnel's log, not a second JSON record — the whole stream, from the first byte to the last, is one endpoint object. Surrounding whitespace is fine (a trailing newline, an indent, a blank line); everything else is a contract violation and **fails the provision**:
 
 ```
-launch_cmd (./.agent-factory/hooks/launch.sh) printed something other than its endpoint on stdout: [INFO] forwarding 127.0.0.1:9000 -> pod/af-7
+launch_cmd (./.agent-factory/hooks/launch.sh) printed something other than its endpoint on stdout: [REDACTED]
 stdout carries the {"url","token"} endpoint JSON and nothing else. Redirect every other writer off it — start a tunnel as `mytunnel >/dev/null 2>&1 &`, or send it to a file — and write progress to stderr instead. See docs/remote-hooks.md
 ```
 
-The error quotes the first thing on stdout that was not the endpoint record, and the script's full output follows it, so you can see which line to move.
+The error reports the violation rather than quoting the offending stdout verbatim: only a complete JSON value keeps its structure (with `token` fields removed), and anything unparseable collapses to `[REDACTED]`. The script's full output is attached below the headline, redacted the same way.
 
 The object itself is checked against the schema above: a top-level object with `url` and `token` both non-empty, and **no field beyond** `url`, `token`, and the legacy `tls_fingerprint`. So a structured log that happens to carry `url` and `token` is never mistaken for an endpoint, and printing one instead of the record fails with the schema error rather than this one.
 
@@ -398,7 +398,7 @@ The endpoint `printf` is unchanged, and always is: it is the one thing stdout is
 | `echo "progress…"` | `echo "progress…" >&2` |
 | `some-cli provision` (chatty, output unused) | `some-cli provision >&2` — or `some-cli provision >/dev/null 2>&1` to drop it |
 
-Keep the endpoint `printf`/`echo` itself exactly as it is: it is the one thing stdout is for. If you miss a writer, af tells you which line it was — the error quotes it and names the redirect.
+Keep the endpoint `printf`/`echo` itself exactly as it is: it is the one thing stdout is for. If you miss a writer, af tells you the contract was violated and names the redirect.
 
 ## Migrating from the old contract
 

@@ -16,8 +16,8 @@ For the full protocol specification and a ready-to-use reference `launch.sh`, se
 
 `launch.sh`'s **stdout carries that `{url,token}` object and nothing else** — put
 progress on stderr, and redirect anything you background (`mytunnel >/dev/null
-2>&1 &`). Anything else on stdout fails the provision with an error quoting the
-line; see [stdout is the endpoint's,
+2>&1 &`). Anything else on stdout fails the provision (the offending output is
+redacted, not quoted verbatim); see [stdout is the endpoint's,
 exclusively](../../docs/remote-hooks.md#stdout-is-the-endpoints-exclusively).
 
 The old `list.sh` / `attach.sh` / `terminal.sh` are **gone**: enumeration, terminal
