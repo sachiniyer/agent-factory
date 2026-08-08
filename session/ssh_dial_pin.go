@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -191,8 +192,48 @@ func acceptNewStoreKnowsHost(cfg config.SSHConfig) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sshKnownHostsLookupTimeout)
 	defer cancel()
-	// -F searches, and exits non-zero when the host is absent.
-	return exec.CommandContext(ctx, bin, "-F", knownHostsLookupName(host, port), "-f", store).Run() == nil
+	// -F searches and exits non-zero when the host is absent — but a ZERO EXIT IS
+	// NOT THE ANSWER, which is the whole point of reading its output below.
+	out, err := exec.CommandContext(ctx, bin, "-F", knownHostsLookupName(host, port), "-f", store).Output()
+	if err != nil {
+		return false
+	}
+	return hasConcreteHostKey(out)
+}
+
+// hasConcreteHostKey reports whether `ssh-keygen -F` matched an actual host key
+// rather than only a marker line.
+//
+// EXIT STATUS ALONE IS WRONG HERE, and measured to be so. `ssh-keygen -F` exits 0
+// when the host matches a `@cert-authority` or `@revoked` line, and neither makes
+// an unrelated server key a CHANGED key — so accept-new still accepts it. Measured
+// against OpenSSH_9.6p1 and a real sshd presenting a raw host key, with a
+// known_hosts holding only a matching @cert-authority entry:
+//
+//	Warning: Permanently added '[pinned.invalid]:2299' (ED25519) to the list of known hosts.
+//	ACCEPTED_UNRELATED_RAW_KEY
+//
+// The key was accepted and appended. Trusting the exit status would therefore have
+// pinned exactly the case this check exists to exclude — a wrong machine accepted
+// silently — while looking like it had verified something.
+//
+// The output distinguishes them unambiguously (also measured): a comment line
+// starts with `#`, a marker line starts with `@cert-authority`/`@revoked`, and a
+// concrete entry starts with the host pattern (`[host]:port …`) or, in a hashed
+// store, with `|1|…`. So a line that is neither a comment nor a marker is a real
+// key.
+//
+// A @cert-authority line ALONGSIDE a concrete key still counts, which is correct:
+// the concrete key is what a mismatched machine would be measured against.
+func hasConcreteHostKey(keygenOutput []byte) bool {
+	for _, line := range strings.Split(string(keygenOutput), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "@") {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // sshKnownHostsLookupTimeout bounds the one `ssh-keygen -F`. It reads a local file,

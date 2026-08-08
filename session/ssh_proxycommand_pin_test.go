@@ -424,6 +424,15 @@ func TestPinningFollowsTheVerifyingPostureExactly(t *testing.T) {
 	require.NoError(t, os.WriteFile(empty, nil, 0o600))
 	emptyCfg := config.SSHConfig{Host: "127.0.0.1", Port: port, KnownHosts: empty}
 
+	// A store that MENTIONS the host but holds no concrete key. `ssh-keygen -F`
+	// exits 0 on it, so this case is what separates reading its output from
+	// trusting its exit status — and without it, a regression to the exit status
+	// passes every other case here.
+	markerOnly := filepath.Join(t.TempDir(), "marker_only_known_hosts")
+	require.NoError(t, os.WriteFile(markerOnly,
+		[]byte(fmt.Sprintf("@cert-authority [127.0.0.1]:%d %s\n", port, strings.TrimSpace(string(pub)))), 0o600))
+	markerCfg := config.SSHConfig{Host: "127.0.0.1", Port: port, KnownHosts: markerOnly}
+
 	cases := []struct {
 		name    string
 		cfg     config.SSHConfig
@@ -442,6 +451,10 @@ func TestPinningFollowsTheVerifyingPostureExactly(t *testing.T) {
 		// Once the host is known, accept-new refuses a CHANGED key, so a wrong pin is
 		// loud and pinning is sound again.
 		{"accept-new with the host known", seededCfg, config.SSHHostKeyAcceptNew, true},
+		// A @cert-authority line matches the host and makes `ssh-keygen -F` exit 0,
+		// but it does NOT make an unrelated raw key a CHANGED key — measured, accept-new
+		// accepted and appended one. So this must not pin.
+		{"accept-new with only a marker line", markerCfg, config.SSHHostKeyAcceptNew, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -468,6 +481,70 @@ func TestPinningFollowsTheVerifyingPostureExactly(t *testing.T) {
 			default:
 				t.Fatalf("unexpected StrictHostKeyChecking=%s; the pin rule must be extended to cover it", strictOpt)
 			}
+		})
+	}
+}
+
+// A MARKER IS NOT A KEY, and `ssh-keygen -F` exits 0 for both.
+//
+// `@cert-authority` and `@revoked` lines match a host, so a zero exit says "this
+// file mentions the host" — not "a wrong machine would be refused". Measured
+// against OpenSSH_9.6p1 and a real sshd presenting a raw host key, with a store
+// holding only a matching @cert-authority entry, accept-new ACCEPTED the unrelated
+// key and appended it. Trusting the exit status would therefore have pinned
+// precisely the silent case the check exists to exclude.
+//
+// The fixtures are built with real ssh-keygen output rather than hand-written
+// strings, so the parsing is checked against what the tool actually emits —
+// including the hashed form, where a concrete entry begins `|1|…` instead of with
+// the host pattern.
+func TestOnlyAConcreteHostKeyCountsAsKnown(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skipf("ssh-keygen unavailable: %v", err)
+	}
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "k")
+	out, genErr := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput()
+	require.NoError(t, genErr, "%s", out)
+	pubBytes, readErr := os.ReadFile(keyPath + ".pub")
+	require.NoError(t, readErr)
+	pub := strings.TrimSpace(string(pubBytes))
+	const host = "[h.example]:2222"
+
+	write := func(name string, lines ...string) string {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+		return path
+	}
+	hashed := write("hashed", host+" "+pub)
+	hashOut, hashErr := exec.Command("ssh-keygen", "-q", "-H", "-f", hashed).CombinedOutput()
+	require.NoError(t, hashErr, "%s", hashOut)
+	require.NoError(t, os.Remove(hashed+".old"))
+
+	for name, tc := range map[string]struct {
+		store string
+		want  bool
+	}{
+		"a plain key":               {write("plain", host+" "+pub), true},
+		"a hashed key":              {hashed, true},
+		"@cert-authority ONLY":      {write("ca", "@cert-authority "+host+" "+pub), false},
+		"@revoked ONLY":             {write("rev", "@revoked "+host+" "+pub), false},
+		"@cert-authority AND a key": {write("both", "@cert-authority "+host+" "+pub, host+" "+pub), true},
+		"a different host entirely": {write("other", "[nope.example]:2222 "+pub), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			keygen := exec.Command("ssh-keygen", "-F", host, "-f", tc.store)
+			stdout, runErr := keygen.Output()
+			if !tc.want && runErr != nil {
+				// A genuine miss: ssh-keygen exits non-zero and af declines to pin.
+				assert.False(t, hasConcreteHostKey(stdout))
+				return
+			}
+			require.NoError(t, runErr, "ssh-keygen -F should have MATCHED for %q", name)
+			assert.Equal(t, tc.want, hasConcreteHostKey(stdout),
+				"%s: ssh-keygen exited 0, but a zero exit only means the file MENTIONS the host. Only a "+
+					"concrete key makes a wrong machine's key a CHANGED key; a marker line leaves accept-new "+
+					"free to accept an unrelated key and append it (measured). Output was:\n%s", name, stdout)
 		})
 	}
 }
