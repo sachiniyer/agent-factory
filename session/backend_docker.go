@@ -219,11 +219,8 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// exact command with --program-resolved and must not reinterpret its enum.
 	resolvedProgram := config.ResolveProgram(&cfg.Config, spec.Program)
 	if spec.Account.Dir != "" {
-		resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
-		if resolvedAgent != spec.Account.Agent {
-			return ProvisionResult{}, fmt.Errorf(
-				"backend=docker: account %q is a %s account, but the resolved Docker program runs %s; refusing a container that would report one identity and use another",
-				spec.Account.Name, spec.Account.Agent, resolvedAgent)
+		if err := refuseAccountAgentDrift(spec.Account.Name, spec.Account.Agent, resolvedProgram); err != nil {
+			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", err)
 		}
 		// Reuse the local shim's authoritative validation for cloud modes and
 		// command-local identity assignments. The returned host environment is not

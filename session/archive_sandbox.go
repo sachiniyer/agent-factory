@@ -3,6 +3,8 @@ package session
 import (
 	"errors"
 	"fmt"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -222,6 +224,28 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	creds := i.sandboxCreds
 	i.mu.RUnlock()
+	// Refuse a drifted agent BEFORE anything is reaped or provisioned (#3082).
+	//
+	// The create path checks this; reprovision did not, so a restore or recovery
+	// after program_overrides changed would rebuild the container against the same
+	// account while running a different agent — the identity the account names
+	// would be reported, and another one spent. Same question, same helper: two
+	// places deciding "has the program changed?" separately is how they drift.
+	//
+	// Placed above the reap because a refusal must cost nothing: the old runtime is
+	// still live and still recoverable, and reaping first would destroy it for a
+	// create that is about to be refused anyway.
+	if strings.TrimSpace(i.Account) != "" {
+		resolved, cfgErr := resolveRepoConfig(i.Path)
+		if cfgErr != nil {
+			return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, cfgErr)
+		}
+		scopedAgent := sessionenv.AgentForCommand(i.Program)
+		if err := refuseAccountAgentDrift(i.Account, scopedAgent, config.ResolveProgram(&resolved.Config, i.Program)); err != nil {
+			return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+		}
+	}
+
 	// A failed archive/recovery can leave the old sandbox wiring live. Reap it
 	// before provisioning a replacement so bindProvisionResult never discards its
 	// only cleanup handle. An unknown outcome keeps the old wiring installed for a

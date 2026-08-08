@@ -180,3 +180,26 @@ func accountMountAndEnv(account sessionenv.Account) (mount []string, env []strin
 	env = append(env, "-e", configVar+"="+dockerAccountHome)
 	return mount, env, nil
 }
+
+// refuseAccountAgentDrift refuses when the RESOLVED program runs a different
+// agent than the account was scoped to (#3082, #3108).
+//
+// Shared by the create path and the reprovision path deliberately. Both have to
+// answer the same question — "has the program changed out from under this
+// account?" — and two call sites deciding it independently is how they drift
+// apart; #3044 is the precedent for what that costs.
+//
+// It compares the RESOLVED command's agent, never the configured program name.
+// program_overrides can map the `codex` key to another agent's command, so the
+// name says codex while the container runs opencode — and a session that reports
+// one identity while spending another is the failure this whole feature exists to
+// prevent, arriving through config rather than through a backend.
+func refuseAccountAgentDrift(accountName, scopedAgent, resolvedProgram string) error {
+	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
+	if resolvedAgent == scopedAgent {
+		return nil
+	}
+	return fmt.Errorf(
+		"account %q is a %s account, but the resolved program runs %s; refusing a session that would report one identity and use another",
+		accountName, scopedAgent, resolvedAgent)
+}
