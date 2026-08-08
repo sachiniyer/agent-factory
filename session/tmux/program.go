@@ -12,8 +12,22 @@ import "github.com/sachiniyer/agent-factory/internal/sessionenv"
 // is what first exposed this data race under `go test -race` (#1254).
 
 // SetProgram updates the program command before the session is started.
+// It CLEARS any generated-args declaration, because a declaration describes one
+// specific command and this replaces it (#3083 review). SwapAgent is the case that
+// makes this load-bearing rather than tidy: it installs a handoff target's program
+// and declares nothing, so a surviving declaration from the outgoing launch would
+// vouch for arguments af did not author for the replacement — and a target override
+// ending in the same instance-specific words would then be accepted, transferring
+// the account across a handoff that is supposed to fail closed.
+//
+// Clearing is the safe default for the same reason refuseUnreadable is a zero value
+// (#3087): permission has to be typed out. A caller that means to keep a
+// declaration says so with SetLaunchProgram, which sets both together.
 func (t *TmuxSession) SetProgram(program string) {
-	t.setProgramCmd(program)
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.program = program
+	t.generatedArgs = nil
 }
 
 // Program returns the command this session's pane runs — after SetProgram,

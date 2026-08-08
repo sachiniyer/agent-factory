@@ -137,3 +137,22 @@ func TestLaunchSnapshot_NeverTearsTheCommandFromItsDeclaration(t *testing.T) {
 	}
 	<-done
 }
+
+// The plain setter must not leave a previous launch's declaration behind (#3083
+// review). SwapAgent installs a handoff target's program and declares nothing, so
+// a surviving declaration would vouch for arguments af did not author for the
+// replacement — and a target ending in the same instance-specific words would be
+// accepted, carrying the account across a handoff meant to fail closed.
+func TestSetProgram_ClearsAPreviousDeclaration(t *testing.T) {
+	session := &TmuxSession{}
+	session.SetLaunchProgram("claude --session-id sid-1 --plugin-dir /p", []string{"--session-id", "sid-1", "--plugin-dir", "/p"})
+
+	// A handoff target that happens to end in the very same words.
+	session.SetProgram("other-agent --session-id sid-1 --plugin-dir /p")
+
+	program, generated, _, _ := session.launchSnapshot()
+	require.Equal(t, "other-agent --session-id sid-1 --plugin-dir /p", program)
+	require.Empty(t, generated,
+		"the outgoing launch's declaration survived into the replacement, so af would vouch for "+
+			"arguments it did not author for this command and the account would transfer across the handoff")
+}
