@@ -7,10 +7,15 @@ import "fmt"
 // spawned. Its fields are private so a caller cannot retarget a capture or swap
 // the checked command between the two halves.
 type CreateLaunchPlan struct {
-	instance            *Instance
-	launcher            Backend
-	prepared            bool
-	program             string
+	instance *Instance
+	launcher Backend
+	prepared bool
+	program  string
+	// base is the command before af's own rewrites, frozen WITH program so the
+	// launch can declare which words af appended (#3083). Frozen rather than
+	// re-resolved at launch: program_overrides could be re-read differently by
+	// then, and a declaration must describe the program actually installed.
+	base                string
 	workDir             string
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot

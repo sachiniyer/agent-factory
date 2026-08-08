@@ -18,6 +18,7 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	program = injectSystemPrompt(program)
 	plan := CreateLaunchPlan{
 		program:      program,
+		base:         resolved,
 		workDir:      workDir,
 		conversation: conversation,
 	}
