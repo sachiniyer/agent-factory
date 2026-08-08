@@ -71,18 +71,13 @@ echo 'to-stderr' >&2
 	assert.Contains(t, combined, "to-stderr")
 }
 
-// TestHookOutputSuffixKeepsDiagnosticsIntact guards the cost side of redaction.
-// This output is the only window onto a failed remote provision, so a redactor
-// that eats the surrounding text is a worse outcome than the leak it prevents.
-func TestHookOutputSuffixKeepsDiagnosticsIntact(t *testing.T) {
-	output := strings.Join([]string{
-		"provisioning vm i-0abc123",
-		`{"level":"error","msg":"quota exceeded","region":"us-east-1","resource_id":9223372036854775807}`,
-		"see https://example.invalid/docs for the quota request form",
-	}, "\n")
+// TestHookOutputSuffixKeepsParsedDiagnosticsIntact guards the precise half of
+// the closed-set policy: a complete JSON value keeps every non-token field.
+func TestHookOutputSuffixKeepsParsedDiagnosticsIntact(t *testing.T) {
+	output := `{"level":"error","msg":"quota exceeded","region":"us-east-1",` +
+		`"resource_id":9223372036854775807,"docs":"https://example.invalid/docs"}`
 
 	suffix := hookOutputSuffix([]byte(output))
-	assert.Contains(t, suffix, "provisioning vm i-0abc123")
 	assert.Contains(t, suffix, "quota exceeded")
 	assert.Contains(t, suffix, "9223372036854775807", "unrelated identifiers must stay byte-exact")
 	assert.Contains(t, suffix, "https://example.invalid/docs")

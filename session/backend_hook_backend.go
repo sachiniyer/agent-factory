@@ -419,14 +419,10 @@ func (p *hookProvisioner) cleanupData() *HookRuntimeCleanupData {
 	}
 }
 
-// hookOutputSuffix renders a hook script's combined output for an error
-// message, redacting JSON token fields, and says so explicitly when there was
-// no output.
-//
-// launch_cmd runs on the user's own infrastructure, so its output is the ONLY
-// window onto what went wrong out there — af has no other source. When a Mac
-// user's script died on `setsid: command not found`, that line was the entire
-// diagnosis, and everything af could usefully say was a quote of it (#1946).
+// hookOutputSuffix renders a hook script's combined output for an error message.
+// One complete JSON value can be reported with its token fields redacted
+// precisely. An unparseable payload is replaced wholesale because none of its
+// apparent field boundaries are trustworthy.
 //
 // Empty output gets named rather than left to inference: "launch_cmd failed:
 // exit status 1" with nothing after it reads like af truncated something. Saying
@@ -672,13 +668,9 @@ func parseHookEndpoint(stdout string) (*AgentServerEndpoint, bool, *hookStdoutVi
 	return nil, true, &hookStdoutViolation{offending: stdout[tail:]}
 }
 
-// hookStdoutExcerpt renders the non-endpoint stdout for the error's first line:
-// its first non-empty line, token-redacted and bounded. One concrete string is
-// what an operator greps their own script for.
-//
-// Redaction runs BEFORE the line split, so a pretty-printed record collapses to
-// one informative line rather than an excerpt reading `{`, and a token wrapped
-// across a break is still caught.
+// hookStdoutExcerpt renders a safe, bounded summary of non-endpoint stdout for
+// the error's first line. A complete JSON value is structurally sanitized; an
+// unparseable value collapses to the redaction marker before any line is chosen.
 func hookStdoutExcerpt(offending string) string {
 	if len(offending) > hookStdoutExcerptScanBytes {
 		offending = offending[:hookStdoutExcerptScanBytes]

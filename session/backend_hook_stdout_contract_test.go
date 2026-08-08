@@ -19,8 +19,8 @@ import (
 // deletes the question: the endpoint is a parse now, not a guess.
 //
 // This is a BREAKING change for a script whose tunnel shares stdout, so the
-// refusal has to be worth meeting at 2am — it names the stream, quotes what was
-// on it, and gives the redirect.
+// refusal has to be worth meeting at 2am — it names the stream, reports a safe
+// excerpt when the offending value parses, and gives the redirect.
 
 const contractEndpoint = `{"url":"http://10.0.0.7:8080","token":"secret"}`
 
@@ -31,55 +31,55 @@ func TestHookLaunchRefusesStdoutBeyondTheEndpoint(t *testing.T) {
 	tests := []struct {
 		name  string
 		lines []string
-		// quoted is the text the error's first line must show the operator.
-		quoted string
+		// excerpt is the safe text the error's first line must show the operator.
+		excerpt string
 	}{
 		{
-			name:   "prose before the endpoint",
-			lines:  []string{`tunnel forwarding`, contractEndpoint},
-			quoted: "tunnel forwarding",
+			name:    "prose before the endpoint",
+			lines:   []string{`tunnel forwarding`, contractEndpoint},
+			excerpt: hookOutputRedaction,
 		},
 		{
-			name:   "prose after the endpoint",
-			lines:  []string{contractEndpoint, `tunnel closed`},
-			quoted: "tunnel closed",
+			name:    "prose after the endpoint",
+			lines:   []string{contractEndpoint, `tunnel closed`},
+			excerpt: hookOutputRedaction,
 		},
 		{
-			name:   "bracketed log prefix",
-			lines:  []string{`[INFO] tunnel forwarding`, contractEndpoint},
-			quoted: "[INFO] tunnel forwarding",
+			name:    "bracketed log prefix",
+			lines:   []string{`[INFO] tunnel forwarding`, contractEndpoint},
+			excerpt: hookOutputRedaction,
 		},
 		{
-			name:   "log record before the endpoint",
-			lines:  []string{`{"level":"info","token":"logged-secret"}`, contractEndpoint},
-			quoted: `{"level":"info"`,
+			name:    "log record before the endpoint",
+			lines:   []string{`{"level":"info","token":"logged-secret"}`, contractEndpoint},
+			excerpt: `{"level":"info"`,
 		},
 		{
-			name:   "log record after the endpoint",
-			lines:  []string{contractEndpoint, `{"level":"info","token":"logged-secret"}`},
-			quoted: `{"level":"info"`,
+			name:    "log record after the endpoint",
+			lines:   []string{contractEndpoint, `{"level":"info","token":"logged-secret"}`},
+			excerpt: `{"level":"info"`,
 		},
 		{
-			name:   "a second endpoint-shaped object",
-			lines:  []string{contractEndpoint, `{"url":"http://wrong.invalid","token":"logged-secret"}`},
-			quoted: "http://wrong.invalid",
+			name:    "a second endpoint-shaped object",
+			lines:   []string{contractEndpoint, `{"url":"http://wrong.invalid","token":"logged-secret"}`},
+			excerpt: "http://wrong.invalid",
 		},
 		{
 			// The excerpt must survive a record that spans lines: quoting its first
 			// physical line would show the operator a bare `{`.
-			name:   "pretty-printed log record before the endpoint",
-			lines:  []string{`{`, `  "level": "info",`, `  "token": "logged-secret"`, `}`, contractEndpoint},
-			quoted: `{"level":"info"`,
+			name:    "pretty-printed log record before the endpoint",
+			lines:   []string{`{`, `  "level": "info",`, `  "token": "logged-secret"`, `}`, contractEndpoint},
+			excerpt: `{"level":"info"`,
 		},
 		{
-			name:   "balanced malformed line",
-			lines:  []string{`{config} loaded`, contractEndpoint},
-			quoted: "{config} loaded",
+			name:    "balanced malformed line",
+			lines:   []string{`{config} loaded`, contractEndpoint},
+			excerpt: hookOutputRedaction,
 		},
 		{
-			name:   "trailing text on the endpoint's own line",
-			lines:  []string{contractEndpoint + ` started`},
-			quoted: "started",
+			name:    "trailing text on the endpoint's own line",
+			lines:   []string{contractEndpoint + ` started`},
+			excerpt: hookOutputRedaction,
 		},
 	}
 
@@ -93,8 +93,8 @@ func TestHookLaunchRefusesStdoutBeyondTheEndpoint(t *testing.T) {
 			headline, _, _ := strings.Cut(err.Error(), "\n")
 			assert.Contains(t, headline, "printed something other than its endpoint on stdout",
 				"the refusal must say the contract was violated")
-			assert.Contains(t, headline, test.quoted,
-				"and quote what was on stdout that was not the endpoint record")
+			assert.Contains(t, headline, test.excerpt,
+				"and report the safe excerpt of what violated the stdout contract")
 			assert.Contains(t, err.Error(), ">/dev/null 2>&1", "and give the one-line remedy")
 			assert.Contains(t, err.Error(), "write progress to stderr", "and name the stream to move logging to")
 			assert.Contains(t, err.Error(), "docs/remote-hooks.md")
@@ -218,23 +218,24 @@ func TestHookLaunchRefusesEveryStructuralContinuation(t *testing.T) {
 	}
 }
 
-// The quote is what makes the error usable at 2am: it must be the offending text
-// verbatim, not a paraphrase.
-func TestHookLaunchRefusalQuotesTheOffendingStdoutVerbatim(t *testing.T) {
+// Unparseable stdout has no trustworthy token boundary, so neither the headline
+// nor the attached output may repeat it verbatim.
+func TestHookLaunchRefusalRedactsUnparseableStdout(t *testing.T) {
 	h := newHookState(t, `
 echo '[INFO] forwarding 127.0.0.1:9000 -> pod/af-7'
 echo '`+contractEndpoint+`'
 exit 0
-`, "")
+	`, "")
 	_, err := newHookProvisioner(h, "verbatim quote").provisionOrReap()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "[INFO] forwarding 127.0.0.1:9000 -> pod/af-7")
+	assert.NotContains(t, err.Error(), "[INFO] forwarding 127.0.0.1:9000 -> pod/af-7")
+	assert.Contains(t, err.Error(), hookOutputRedaction)
 	assert.Contains(t, err.Error(), "launch_cmd", "and name the hook that printed it")
 }
 
-// A flooding tunnel must not paste megabytes into the headline — the script's
-// full output is already attached below it.
-func TestHookLaunchRefusalBoundsTheQuotedLine(t *testing.T) {
+// A flooding tunnel must collapse to the same bounded marker as every other
+// unparseable payload.
+func TestHookLaunchRefusalBoundsUnparseableOutput(t *testing.T) {
 	h := newHookState(t, `
 echo '`+strings.Repeat("x", 4000)+`'
 echo '`+contractEndpoint+`'
@@ -244,8 +245,8 @@ exit 0
 	require.Error(t, err)
 
 	headline, _, _ := strings.Cut(err.Error(), "\n")
-	assert.Less(t, len(headline), 500, "the quoted line must be bounded")
-	assert.Contains(t, headline, "…", "and say it was truncated")
+	assert.Less(t, len(headline), 500, "the redacted headline must be bounded")
+	assert.Contains(t, headline, hookOutputRedaction)
 }
 
 // The two non-violation failures keep their own diagnoses: printing NOTHING on
