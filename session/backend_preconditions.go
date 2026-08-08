@@ -27,8 +27,9 @@ import (
 //
 //	local  — nothing; it is always usable.
 //	docker — docker.image set, the `docker` CLI on PATH, an `origin` to clone from.
-//	ssh    — ssh.host set, the `ssh` CLI on PATH, an `origin` to clone from. (Host
-//	         reachability is a network fact this must not dial for.)
+//	ssh    — ssh.host set, the `ssh` CLI on PATH, a readable ssh.identity_file if
+//	         one is configured, an `origin` to clone from. (Host reachability is a
+//	         network fact this must not dial for.)
 //	hook   — remote_hooks set AND valid AND its commands actually runnable.
 //
 // What is deliberately NOT checked, because it cannot be without doing the work:
@@ -129,6 +130,15 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 		// whose every provision fails. Same shape as the docker check above.
 		if _, err := lookPath("ssh"); err != nil {
 			return sshCLIMissingError(err)
+		}
+		// A picker is a promise, and ssh.identity_file is a LOCAL, side-effect-free
+		// fact — so a repo whose key path is a typo must not be told the backend is
+		// usable and then fail deterministically at create (#3092). Same validator
+		// the runtime runs, so choose time and create time cannot disagree.
+		if cfg != nil && cfg.SSH != nil {
+			if err := verifySSHIdentityFile(*cfg.SSH); err != nil {
+				return err
+			}
 		}
 		if originRemoteURL(repoRoot) == "" {
 			return missingOriginError(BackendSSH, repoRoot)
