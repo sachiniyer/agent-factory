@@ -122,8 +122,8 @@ func marshalConfigTOML(config *Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	durationValue := fmt.Sprintf("%dms", config.DaemonPollInterval)
-	if _, err := durationMilliseconds(durationValue); err != nil {
+	durationValue, representable := formatDurationMilliseconds(config.DaemonPollInterval)
+	if !representable {
 		return data, nil
 	}
 	integerForm := []byte(fmt.Sprintf("\n%s = %d\n", daemonPollIntervalKey, config.DaemonPollInterval))
@@ -132,4 +132,19 @@ func marshalConfigTOML(config *Config) ([]byte, error) {
 		return nil, fmt.Errorf("marshaled config does not contain exactly one %s field", daemonPollIntervalKey)
 	}
 	return bytes.Replace(data, integerForm, durationForm, 1), nil
+}
+
+func formatDurationMilliseconds(milliseconds int) (string, bool) {
+	duration := time.Duration(milliseconds) * time.Millisecond
+	if int64(duration/time.Millisecond) != int64(milliseconds) {
+		return "", false
+	}
+	switch {
+	case duration != 0 && duration%time.Hour == 0:
+		return fmt.Sprintf("%dh", duration/time.Hour), true
+	case duration != 0 && duration%time.Minute == 0:
+		return fmt.Sprintf("%dm", duration/time.Minute), true
+	default:
+		return duration.String(), true
+	}
 }

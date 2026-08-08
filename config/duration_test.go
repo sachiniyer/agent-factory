@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,6 +60,53 @@ func TestLoadDaemonPollIntervalTOMLForms(t *testing.T) {
 	})
 }
 
+func TestDurationNormalizationPreservesNestedConfig(t *testing.T) {
+	const fixture = `
+schema_version = 1
+default_program = "codex"
+daemon_poll_interval = %s
+session_env_passthrough = ["AF_TEST_ONE", "AF_TEST_TWO"]
+cors_allowed_origins = ["https://one.example", "https://two.example:8443"]
+limit_auto_resume = true
+
+[program_overrides]
+claude = "/opt/claude --model opus"
+codex = "/opt/codex --quiet"
+
+[theme]
+accent = "#abcdef"
+pane_border_preview = "#123456"
+
+[root_agents."/tmp/legacy-root"]
+program = "codex"
+
+[root_agent]
+enabled = true
+program = "amp"
+
+[limit_patterns]
+claude = "custom usage limit"
+
+[keys]
+quit = "Q"
+
+[docker]
+image = "example.invalid/agent:latest"
+
+[ssh]
+host = "builder.example"
+user = "agent"
+`
+	integerConfig, err := parseConfigTOML(
+		[]byte(fmt.Sprintf(fixture, "1800000")), "integer-form.toml")
+	require.NoError(t, err)
+	durationConfig, err := parseConfigTOML(
+		[]byte(fmt.Sprintf(fixture, `"30m"`)), "duration-form.toml")
+	require.NoError(t, err)
+
+	assert.Equal(t, snapshotConfig(integerConfig), snapshotConfig(durationConfig))
+}
+
 func TestLoadDaemonPollIntervalDurationFromLegacyJSON(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	configDir, err := GetConfigDir()
@@ -73,7 +121,7 @@ func TestLoadDaemonPollIntervalDurationFromLegacyJSON(t *testing.T) {
 	assert.Equal(t, 30*60*1000, cfg.DaemonPollInterval)
 	tomlData, err := os.ReadFile(filepath.Join(configDir, TomlConfigFileName))
 	require.NoError(t, err)
-	assert.Contains(t, string(tomlData), "daemon_poll_interval = '1800000ms'")
+	assert.Contains(t, string(tomlData), "daemon_poll_interval = '30m'")
 }
 
 func TestMaterializedConfigUsesDurationString(t *testing.T) {
@@ -86,5 +134,18 @@ func TestMaterializedConfigUsesDurationString(t *testing.T) {
 	assert.Equal(t, defaultDaemonPollInterval, cfg.DaemonPollInterval)
 	data, err := os.ReadFile(filepath.Join(home, TomlConfigFileName))
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "daemon_poll_interval = '1000ms'")
+	assert.Contains(t, string(data), "daemon_poll_interval = '1s'")
+}
+
+func TestMarshalConfigTOMLPreservesOversizedLegacyInteger(t *testing.T) {
+	if strconv.IntSize != 64 {
+		t.Skip("every positive 32-bit millisecond value fits in time.Duration")
+	}
+	cfg := DefaultConfig()
+	cfg.DaemonPollInterval = int(^uint64(0) >> 1)
+
+	data, err := marshalConfigTOML(cfg)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), fmt.Sprintf("daemon_poll_interval = %d", cfg.DaemonPollInterval))
+	assert.NotContains(t, string(data), "daemon_poll_interval = '")
 }

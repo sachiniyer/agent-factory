@@ -148,7 +148,7 @@ type renderRow struct {
 }
 
 func renderRows(r *Report, fixMode, verbose bool) []renderRow {
-	rows := make([]renderRow, 0, len(r.Checks)+len(r.Findings)+len(r.OK))
+	rows := make([]renderRow, 0, len(r.Checks))
 	for _, c := range r.Checks {
 		rows = append(rows, renderRow{
 			section:     c.Section,
