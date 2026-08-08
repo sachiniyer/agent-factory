@@ -178,6 +178,24 @@ func TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringOwnership(t *
 		"AF_SESSION/AF_HOME-marked helper survived after its tmux session vanished")
 }
 
+// TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringCapture
+// covers the marker-to-capture race. Ownership was proved while the session
+// existed, but losing the session before the destructive capture must not turn
+// the already captured process evidence into an empty set.
+func TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringCapture(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_vanished_during_capture"
+	home := t.TempDir()
+	marked := spawnMarkedSessionWithEscapee(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	require.NoError(t, CleanupSessions(vanishOnSecondPaneCaptureExecutor(t, name)))
+	require.False(t, proctree.AliveSame(marked),
+		"AF_SESSION/AF_HOME-marked helper survived after tmux vanished during process capture")
+}
+
 // A pane can launch a helper after the pre-marker process snapshot and before
 // marker lookup loses the session. The post-absence refresh must find that
 // newly marked process rather than treating the older snapshot as final.
@@ -340,6 +358,25 @@ func vanishOnMarkerExecutorWith(t *testing.T, name string, beforeKill func()) cm
 				}
 				out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
 				require.NoError(t, err, "kill session before marker lookup: %s", out)
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func vanishOnSecondPaneCaptureExecutor(t *testing.T, name string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					require.NoError(t, err, "kill session before second pane capture: %s", out)
+				}
 			}
 			return realExec.Output(command)
 		},

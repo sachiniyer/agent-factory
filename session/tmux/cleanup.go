@@ -613,8 +613,9 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// reap synchronously at the end because `af reset` is a short-lived CLI
 	// process — a goroutine would die with it before the sweep ran.
 	leakedBySession := make(map[string][]proctree.Process, len(matches))
+	captureErrBySession := make(map[string]error, len(matches))
 	for _, match := range matches {
-		leakedBySession[match] = SessionProcessTrees(cmdExec, match)
+		leakedBySession[match], captureErrBySession[match] = captureSessionProcessTrees(cmdExec, match)
 	}
 
 	// Only sessions that are actually gone get their captured trees reaped —
@@ -663,7 +664,27 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// Sweep concurrently: the grace waits overlap instead of serializing,
 	// and the whole reset still blocks until every sweep finishes.
 	var wg sync.WaitGroup
+	vanishedSweepErrs := make(chan error, len(killed))
 	for _, match := range killed {
+		captureErr := captureErrBySession[match]
+		if errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
+			wg.Add(1)
+			go func(match string, captureErr error) {
+				defer wg.Done()
+				// Ownership was proved immediately before this capture, but the
+				// session then vanished and took its pane ancestry with it. Re-check
+				// the pre-marker candidates by their immutable AF_SESSION/AF_HOME
+				// markers instead of collapsing the failed capture into "no leaks".
+				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
+					preMarkerCaptureErrs[match]); reapErr != nil {
+					vanishedSweepErrs <- fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
+						match, errors.Join(captureErr, reapErr))
+					return
+				}
+				log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
+			}(match, captureErr)
+			continue
+		}
 		leaked := leakedBySession[match]
 		if len(leaked) == 0 {
 			continue
@@ -677,7 +698,12 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		}(match, leaked)
 	}
 	wg.Wait()
-	return killErr
+	close(vanishedSweepErrs)
+	var vanishedSweepErr error
+	for sweepErr := range vanishedSweepErrs {
+		vanishedSweepErr = errors.Join(vanishedSweepErr, sweepErr)
+	}
+	return errors.Join(killErr, vanishedSweepErr)
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
