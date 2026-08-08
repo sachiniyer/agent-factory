@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // globalConfigTomlPath returns the absolute path of the canonical global
@@ -97,7 +99,7 @@ func saveConfigLocked(config *Config) error {
 
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	config.SchemaVersion = GlobalConfigSchemaVersion
-	data, err := marshalConfigTOML(config)
+	data, err := toml.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}

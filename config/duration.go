@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -69,8 +68,12 @@ func normalizeJSONDurationValues(data []byte) ([]byte, error) {
 	if !present {
 		return data, nil
 	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil, err
+	}
+	value, isString := decoded.(string)
+	if !isString {
 		return data, nil
 	}
 	milliseconds, err := durationMilliseconds(value)
@@ -111,40 +114,4 @@ func canonicalizeDurationScalar(raw string) (canonical, encoded string, err erro
 		return "", "", fmt.Errorf("expected a Go duration like \"1500ms\" or \"30m\", or a legacy integer number of milliseconds, got %q: %w", raw, parseErr)
 	}
 	return trimmed, encodeTOMLString(trimmed), nil
-}
-
-// marshalConfigTOML emits the preferred duration spelling for new or
-// whole-file config writes while keeping Config's public integer field intact.
-// If an unusually large legacy integer exceeds time.Duration's range, it stays
-// an integer so saving can never turn a loadable value into an unloadable one.
-func marshalConfigTOML(config *Config) ([]byte, error) {
-	data, err := toml.Marshal(config)
-	if err != nil {
-		return nil, err
-	}
-	durationValue, representable := formatDurationMilliseconds(config.DaemonPollInterval)
-	if !representable {
-		return data, nil
-	}
-	integerForm := []byte(fmt.Sprintf("\n%s = %d\n", daemonPollIntervalKey, config.DaemonPollInterval))
-	durationForm := []byte(fmt.Sprintf("\n%s = %s\n", daemonPollIntervalKey, encodeTOMLString(durationValue)))
-	if bytes.Count(data, integerForm) != 1 {
-		return nil, fmt.Errorf("marshaled config does not contain exactly one %s field", daemonPollIntervalKey)
-	}
-	return bytes.Replace(data, integerForm, durationForm, 1), nil
-}
-
-func formatDurationMilliseconds(milliseconds int) (string, bool) {
-	duration := time.Duration(milliseconds) * time.Millisecond
-	if int64(duration/time.Millisecond) != int64(milliseconds) {
-		return "", false
-	}
-	switch {
-	case duration != 0 && duration%time.Hour == 0:
-		return fmt.Sprintf("%dh", duration/time.Hour), true
-	case duration != 0 && duration%time.Minute == 0:
-		return fmt.Sprintf("%dm", duration/time.Minute), true
-	default:
-		return duration.String(), true
-	}
 }
