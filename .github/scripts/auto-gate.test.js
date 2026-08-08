@@ -105,6 +105,50 @@ test("an evaluated but blocked gate reports WAITING rather than NEVER_RAN", asyn
   assert.match(github.updatedChecks[0].output.title, /^WAITING:/);
 });
 
+test("a read-only fork token leaves the decision unreported without failing the gate", async () => {
+  const error = new Error("Resource not accessible by integration");
+  error.status = 403;
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns(), checkWriteError: error });
+  const warnings = [];
+  const core = { ...fakeCore(), warning: (message) => warnings.push(message) };
+
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext({ pull_request: { head: { repo: { fork: true } } } }),
+    core,
+    result: {
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      baseRefName: "master",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: author is not an allowed maintainer/app",
+    },
+  });
+
+  assert.equal(report.state, "read-only");
+  assert.equal(github.createdChecks.length, 0);
+  assert.match(warnings.join("\n"), /could not publish.*read-only token/i);
+
+  const baseGithub = fakeGateGithub({ checkRuns: happyCheckRuns(), checkWriteError: error });
+  await assert.rejects(
+    autoGate.reportDecision({
+      github: baseGithub,
+      context: fakeContext(),
+      core: fakeCore(),
+      result: {
+        prNumber: 1465,
+        headSha: HEAD_SHA,
+        baseRefName: "master",
+        isOpen: true,
+        shouldMerge: false,
+        summary: "BLOCKED: waiting",
+      },
+    }),
+    /Resource not accessible by integration/,
+  );
+});
+
 test("a PR cannot read another PR's decision when both share one head", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -135,8 +179,8 @@ test("a PR cannot read another PR's decision when both share one head", async ()
     core: fakeCore(),
   });
   assert.deepEqual(targets, [
-    { prNumber: "1465", headSha: HEAD_SHA, decisionKey: decisionKey(1465, HEAD_SHA) },
-    { prNumber: "2048", headSha: HEAD_SHA, decisionKey: decisionKey(2048, HEAD_SHA) },
+    { prNumber: 1465, headSha: HEAD_SHA, decisionKey: decisionKey(1465, HEAD_SHA) },
+    { prNumber: 2048, headSha: HEAD_SHA, decisionKey: decisionKey(2048, HEAD_SHA) },
   ]);
 
   await autoGate.reportDecision({
@@ -160,6 +204,24 @@ test("a PR cannot read another PR's decision when both share one head", async ()
     decisionName(2048, HEAD_SHA),
   );
   assert.equal(github.createdChecks[0].external_id, decisionExternalId(2048, HEAD_SHA));
+});
+
+test("the queued legacy evaluator keeps resolved PR numbers numeric", async () => {
+  const github = fakeGateGithub();
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    assert.equal(typeof variables.number, "number");
+    return graphql(query, variables);
+  };
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext({ sha: HEAD_SHA }),
+    core: fakeCore(),
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, true, result.reasons.join("\n"));
 });
 
 test("a queued evaluation cannot overwrite PASS after the PR merges", async () => {
@@ -691,6 +753,7 @@ function fakeGateGithub({
     { context: "Build", integration_id: ACTIONS_APP_ID },
   ],
   pullRequestsByNumber = {},
+  checkWriteError = null,
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -704,10 +767,16 @@ function fakeGateGithub({
     return { data: { sha: "merge-sha" } };
   };
   const createCheck = async function createCheck(options) {
+    if (checkWriteError) {
+      throw checkWriteError;
+    }
     github.createdChecks.push(options);
     return { data: options };
   };
   const updateCheck = async function updateCheck(options) {
+    if (checkWriteError) {
+      throw checkWriteError;
+    }
     github.updatedChecks.push(options);
     return { data: options };
   };

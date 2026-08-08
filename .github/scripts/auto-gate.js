@@ -189,25 +189,48 @@ async function reportDecision({ github, context, core, result, manual = false })
       summary: result.summary,
     },
   };
-  if (priorDecision) {
-    await github.rest.checks.update({
-      owner,
-      repo,
-      check_run_id: priorDecision.id,
-      ...decision,
-    });
-  } else {
-    await github.rest.checks.create({
-      owner,
-      repo,
-      head_sha: result.headSha,
-      name: identity.checkName,
-      external_id: identity.externalId,
-      ...decision,
-    });
+  try {
+    if (priorDecision) {
+      await github.rest.checks.update({
+        owner,
+        repo,
+        check_run_id: priorDecision.id,
+        ...decision,
+      });
+    } else {
+      await github.rest.checks.create({
+        owner,
+        repo,
+        head_sha: result.headSha,
+        name: identity.checkName,
+        external_id: identity.externalId,
+        ...decision,
+      });
+    }
+  } catch (error) {
+    // pull_request-family events from forks can receive a read-only GITHUB_TOKEN
+    // even though this workflow requests checks: write. Leave absence observable
+    // and recoverable by a base-repository workflow_dispatch; other write errors
+    // remain fatal so a repository permission regression cannot pass silently.
+    if (!isReadOnlyForkCheckError(error, context)) {
+      throw error;
+    }
+    core.warning(
+      `Auto Gate could not publish the decision for fork PR #${result.prNumber} with its ` +
+        "read-only token; run workflow_dispatch from the base repository to recover it.",
+    );
+    return { state: "read-only", priorDecision: Boolean(priorDecision) };
   }
   core.notice(`${title} for PR #${result.prNumber}.`);
   return { state, priorDecision: Boolean(priorDecision) };
+}
+
+function isReadOnlyForkCheckError(error, context) {
+  return (
+    error?.status === 403 &&
+    /Resource not accessible by integration/i.test(error.message || "") &&
+    context.payload.pull_request?.head?.repo?.fork === true
+  );
 }
 
 function decisionIdentity(prNumber, headSha) {
@@ -319,7 +342,7 @@ async function resolveTargets({ github, context, core, prNumber }) {
       continue;
     }
     targets.push({
-      prNumber: String(pr.number),
+      prNumber: Number(pr.number),
       headSha: pr.headRefOid,
       decisionKey: decisionIdentity(pr.number, pr.headRefOid).key,
     });
