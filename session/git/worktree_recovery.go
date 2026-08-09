@@ -235,6 +235,13 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	g.relocationRecovery = &normalized
 	switch normalized.State {
 	case RelocationRecoveryStalled, RelocationRecoveryCleanupStalled:
+		if normalized.IdentityKnown && normalized.AlternatePath != "" {
+			// A stalled operation can retain the same two identity-qualified
+			// candidates as an interrupted move. Resolve both under this lock;
+			// a vanished or replaced primary is not evidence that the known
+			// alternate disappeared with it.
+			return g.resolveCandidateRecordLocked(primary, normalized)
+		}
 		identity, err := boundedRelocationPathIdentity(primary)
 		if err != nil {
 			return RelocationClaim{}, errors.Join(fmt.Errorf(

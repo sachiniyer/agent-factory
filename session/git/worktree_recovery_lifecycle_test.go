@@ -27,6 +27,37 @@ func TestClaimRelocationSource_RecordedStallIsUnknown(t *testing.T) {
 	assert.Equal(t, RelocationRecoveryStalled, recovery.State)
 }
 
+func TestClaimRelocationSource_StalledPrimaryGoneSelectsKnownAlternate(t *testing.T) {
+	root := testguard.CanonicalTempDir(t)
+	primary := filepath.Join(root, "stalled-primary")
+	alternate := filepath.Join(root, "known-alternate")
+	require.NoError(t, os.Mkdir(alternate, 0o755))
+	identity, err := inspectRelocationPathIdentity(alternate)
+	require.NoError(t, err)
+
+	gw, err := NewGitWorktreeFromStorage(
+		filepath.Join(root, "repo"), primary, "fallback", "af/fallback", "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{
+		State:         RelocationRecoveryStalled,
+		AlternatePath: alternate,
+		IdentityKnown: true,
+		Device:        identity.device,
+		Inode:         identity.inode,
+		FileType:      identity.fileType,
+	}))
+
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err,
+		"a vanished stalled primary must not hide the identity-qualified alternate")
+	assert.Equal(t, alternate, claim.Path)
+	assert.Equal(t, primary, claim.AlternatePath)
+	assert.Equal(t, alternate, gw.GetWorktreePath())
+	require.NoError(t, gw.SettleRelocationClaim(claim))
+	assert.False(t, gw.HasUnresolvedRelocation())
+}
+
 func TestRelocate_AnsweredPartialFastMoveRepairsDestination(t *testing.T) {
 	gw, _, src := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
