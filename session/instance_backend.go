@@ -205,6 +205,20 @@ func (i *Instance) ArchiveTeardown(dest string) error {
 	return err
 }
 
+// ResolveWorktreeRelocationForRetry establishes which durable pathname still
+// names the exact worktree after an interrupted move. It performs only bounded,
+// read-only identity checks and retains both distinct handles until the later
+// relocation retry completes. Archive calls it before deriving the hook cwd and
+// rollback origin, while the session is still intact.
+func (i *Instance) ResolveWorktreeRelocationForRetry() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.gitWorktree == nil {
+		return fmt.Errorf("cannot resolve worktree relocation for %q: instance has no worktree", i.Title)
+	}
+	return i.gitWorktree.ResolveRelocationRecovery()
+}
+
 // ArchiveTeardownWithHook is ArchiveTeardown with one additional operator
 // callback at the only safe cleanup point: every pane has been confirmed dead,
 // but the worktree still occupies its live path. A callback failure is returned

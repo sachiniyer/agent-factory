@@ -137,14 +137,16 @@ func boundedRelocationPathIdentity(path string) (pathIdentity, error) {
 	}
 }
 
-// resolveRelocationRecovery selects the candidate that still names the exact
-// pre-move directory. A same-destination retry completes the interrupted git
-// registration repair instead of rejecting its own directory as a collision.
-// It returns completed=true when no further byte move is needed.
-func (g *GitWorktree) resolveRelocationRecovery(dest string) (completed bool, err error) {
+// ResolveRelocationRecovery selects the candidate that still names the exact
+// pre-move directory, without consuming the recovery record. Keeping the other
+// pathname as the alternate means any later retry failure remains persistable
+// and loadable. It is also safe to call before archive teardown: the operator
+// hook and rollback path can use the established source without moving bytes or
+// treating either stale candidate as destructive authority.
+func (g *GitWorktree) ResolveRelocationRecovery() error {
 	recovery, ok := g.GetRelocationRecovery()
 	if !ok {
-		return false, nil
+		return nil
 	}
 	expected := recovery.identity()
 	primary := g.worktreePath
@@ -157,7 +159,7 @@ func (g *GitWorktree) resolveRelocationRecovery(dest string) (completed bool, er
 		if errors.Is(primaryErr, context.DeadlineExceeded) {
 			g.markCleanupStalled()
 		}
-		return false, errors.Join(fmt.Errorf(
+		return errors.Join(fmt.Errorf(
 			"cannot resolve interrupted relocation: destination candidate %s could not be verified: %w",
 			primary, primaryErr,
 		), ErrRelocateStateUnknown)
@@ -167,19 +169,35 @@ func (g *GitWorktree) resolveRelocationRecovery(dest string) (completed bool, er
 			if errors.Is(alternateErr, context.DeadlineExceeded) {
 				g.markCleanupStalled()
 			}
-			return false, errors.Join(fmt.Errorf(
+			return errors.Join(fmt.Errorf(
 				"cannot resolve interrupted relocation: neither candidate could be established (%s: %v; %s: %v)",
 				primary, primaryErr, recovery.AlternatePath, alternateErr,
 			), ErrRelocateStateUnknown)
 		}
 		if !expected.same(alternateIdentity) {
-			return false, errors.Join(fmt.Errorf(
+			return errors.Join(fmt.Errorf(
 				"cannot resolve interrupted relocation: neither %s nor %s identifies the original worktree",
 				primary, recovery.AlternatePath,
 			), ErrRelocateStateUnknown)
 		}
 		g.setWorktreeLocation(recovery.AlternatePath)
+		g.relocationRecovery.AlternatePath = primary
 	}
+	return nil
+}
+
+// resolveRelocationRecovery establishes the live candidate, then completes an
+// interrupted move that already reached this retry's destination. It returns
+// completed=true when no further byte move is needed.
+func (g *GitWorktree) resolveRelocationRecovery(dest string) (completed bool, err error) {
+	if err := g.ResolveRelocationRecovery(); err != nil {
+		return false, err
+	}
+	recovery, ok := g.GetRelocationRecovery()
+	if !ok {
+		return false, nil
+	}
+	expected := recovery.identity()
 
 	if g.worktreePath != dest {
 		return false, nil

@@ -234,6 +234,18 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	if err != nil {
 		return "", session.InstanceData{}, err
 	}
+	// A prior bounded move may have left two durable pathname candidates. Resolve
+	// their captured directory identity before deriving any worktree-dependent
+	// context: the operator hook must run in the directory that actually holds
+	// the user's files, and a persist failure must roll back to that same origin.
+	// Resolution is bounded and read-only; failure leaves panes and the archive
+	// fence untouched.
+	if err := instance.ResolveWorktreeRelocationForRetry(); err != nil {
+		return "", session.InstanceData{}, fmt.Errorf(
+			"cannot retry archive of session %q until its interrupted worktree move is resolved: %w",
+			req.Title, err,
+		)
+	}
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).
 	origPath := instance.GetWorktreePath()
