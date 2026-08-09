@@ -71,6 +71,21 @@ func repoFromFlag() (*config.RepoContext, error) {
 	return repo, nil
 }
 
+// optionalCurrentRepo resolves the cwd's project when one exists. Only the
+// positively identified outside-Git condition means "no project context";
+// treating any other discovery failure as absence would silently widen scoped
+// reads and mutations to every project (#3134).
+func optionalCurrentRepo() (*config.RepoContext, error) {
+	repo, err := config.CurrentRepo()
+	if err == nil {
+		return repo, nil
+	}
+	if errors.Is(err, config.ErrNotGitRepository) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("resolve current repository: %w", err)
+}
+
 // resolveRepoID resolves a repo ID from flags, cwd, or returns "" for all-repo mode.
 //
 // This ALWAYS consults the cwd, including when --daemon-url is set. That looks
@@ -95,8 +110,11 @@ func resolveRepoID() (string, error) {
 		return repo.ID, nil
 	}
 	// Try cwd
-	repo, err := config.CurrentRepo()
+	repo, err := optionalCurrentRepo()
 	if err != nil {
+		return "", err
+	}
+	if repo == nil {
 		return "", nil // all-repo mode
 	}
 	return repo.ID, nil
@@ -139,8 +157,11 @@ func resolveRepoIDForLookup() (string, error) {
 	if apiclient.IsRemoteTarget() {
 		return "", nil // the client's cwd says nothing about the remote's repos
 	}
-	repo, err := config.CurrentRepo()
+	repo, err := optionalCurrentRepo()
 	if err != nil {
+		return "", err
+	}
+	if repo == nil {
 		return "", nil // all-repo mode, guarded by the ambiguity check
 	}
 	return repo.ID, nil

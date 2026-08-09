@@ -84,9 +84,9 @@ func resolveProjectScope(allFlag bool) (projectScope, error) {
 		}
 		return projectScope{Repo: repo}, nil
 	}
-	repo, err := config.CurrentRepo()
+	repo, err := optionalCurrentRepo()
 	if err != nil {
-		return projectScope{}, nil // rule 3: no project context
+		return projectScope{}, err
 	}
 	return projectScope{Repo: repo}, nil
 }

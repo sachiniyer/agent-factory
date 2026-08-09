@@ -118,6 +118,31 @@ func TestResolveMainRepoRoot_Public(t *testing.T) {
 	assert.Equal(t, mainDir, root)
 }
 
+// TestResolveMainRepoRootForcesStableGitDiagnostics pins the locale-independent
+// outside-repository classification. The resolver may parse Git's diagnostic to
+// distinguish ordinary absence from broken metadata, so the command must force
+// the language that parser expects (#3134 review).
+func TestResolveMainRepoRootForcesStableGitDiagnostics(t *testing.T) {
+	binDir := t.TempDir()
+	fakeGit := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(fakeGit, []byte(`#!/bin/sh
+if [ "$LC_ALL" = "C" ]; then
+	printf '%s\n' 'fatal: not a git repository (or any of the parent directories): .git' >&2
+else
+	printf '%s\n' 'fatal: Kein Git-Repository (oder irgendeines der Elternverzeichnisse): .git' >&2
+fi
+exit 128
+`), 0o755))
+	t.Setenv("PATH", binDir)
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Chdir(t.TempDir())
+
+	_, err := CurrentRepo()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotGitRepository,
+		"an ordinary outside-repository result must not become a fatal scope error under a translated locale")
+}
+
 func TestRepoIDFromRoot(t *testing.T) {
 	id := RepoIDFromRoot("/some/path")
 	assert.Len(t, id, 12) // 6 bytes = 12 hex chars

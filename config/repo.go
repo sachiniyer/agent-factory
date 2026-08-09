@@ -54,6 +54,10 @@ func ValidateRepoID(repoID string) error {
 func resolveMainRepoRoot(pathArgs ...string) (string, error) {
 	// Get the toplevel for the current location
 	topCmd := exec.Command("git", append(pathArgs, "rev-parse", "--show-toplevel")...)
+	// The outside-repository classification below parses Git's diagnostic. Force
+	// that one command to the locale the parser expects so a translated stderr
+	// cannot turn ordinary absence into a fatal scope-resolution error (#3134).
+	topCmd.Env = append(os.Environ(), "LC_ALL=C")
 	topOut, err := topCmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
