@@ -3,6 +3,7 @@ package git
 import (
 	"bytes"
 	"context"
+	"fmt"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -356,6 +357,42 @@ func TestRelocate_RetryUsesOriginalSourceWhenTimedOutMoveDidNothing(t *testing.T
 	assert.DirExists(t, src, "the first move did nothing")
 	assert.NoDirExists(t, dest)
 	require.NoError(t, gw.MoveWorktree(dest))
+	assert.False(t, gw.HasUnresolvedRelocation())
+	assert.NoDirExists(t, src)
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
+}
+
+func TestRelocate_RetryCanFallbackAfterSelectingOriginalSource(t *testing.T) {
+	gw, _, src := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	moveCalls := 0
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		moveCalls++
+		if moveCalls == 1 {
+			return context.DeadlineExceeded
+		}
+		return fmt.Errorf("cross-device fast move unavailable")
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	previousRepair := worktreeRepair
+	worktreeRepair = func(*GitWorktree, string) error { return nil }
+	t.Cleanup(func() { worktreeRepair = previousRepair })
+	previousSubmoduleRepair := worktreeRepairSubmodules
+	worktreeRepairSubmodules = func(*GitWorktree, string) error { return nil }
+	t.Cleanup(func() { worktreeRepairSubmodules = previousSubmoduleRepair })
+
+	require.ErrorIs(t, gw.MoveWorktree(dest), ErrRelocateStateUnknown)
+	assert.DirExists(t, src, "the interrupted fast move did nothing")
+
+	require.NoError(t, gw.MoveWorktree(dest),
+		"once identity selects the original source, the supported manual fallback must remain available")
 	assert.False(t, gw.HasUnresolvedRelocation())
 	assert.NoDirExists(t, src)
 	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))

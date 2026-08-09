@@ -201,6 +201,82 @@ func TestArchiveSessionResolvesInterruptedMoveBeforeOperatorHook(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
 }
 
+func TestArchiveSessionRevalidatesInterruptedMoveBeforeOperatorHook(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "retry-hook-swap")
+	dest, err := archivedWorktreePath(repoID, "retry-hook-swap")
+	require.NoError(t, err)
+
+	original, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	info, err := os.Stat(srcPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	interrupted, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, dest, "retry-hook-swap", original.GetBranchName(), original.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, interrupted.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		AlternatePath: srcPath,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	inst.SetGitWorktreeForTest(interrupted)
+
+	foreignMarker := filepath.Join(srcPath, "foreign-hook-ran")
+	writeOnArchiveCommand(t, `printf ran > "$AF_WORKTREE_PATH/foreign-hook-ran"`)
+	movedAside := srcPath + "-identity-owner"
+	originalTeardown := archiveTeardown
+	archiveTeardown = func(target *session.Instance, archiveDest string, beforeMove func() error) (error, error) {
+		require.NoError(t, os.Rename(srcPath, movedAside))
+		require.NoError(t, os.Mkdir(srcPath, 0o755))
+		return originalTeardown(target, archiveDest, beforeMove)
+	}
+	t.Cleanup(func() { archiveTeardown = originalTeardown })
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "retry-hook-swap", RepoID: repoID})
+	require.Error(t, err, "the replaced recovery pathname must stop the archive retry")
+	assert.NoFileExists(t, foreignMarker,
+		"the operator hook must not consume a pathname that stopped identifying the recovered worktree")
+	assert.FileExists(t, filepath.Join(movedAside, "dirty.txt"),
+		"the identity-owning directory must remain preserved")
+}
+
+func TestKillSessionRefusesInterruptedRelocationBeforeTombstone(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "kill-relocation")
+	dest, err := archivedWorktreePath(repoID, "kill-relocation")
+	require.NoError(t, err)
+
+	original, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	info, err := os.Stat(srcPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	interrupted, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, dest, "kill-relocation", original.GetBranchName(), original.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, interrupted.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		AlternatePath: srcPath,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	inst.SetGitWorktreeForTest(interrupted)
+	inst.SetStatusForTest(session.Lost)
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "kill-relocation", RepoID: repoID})
+	require.Error(t, err, "kill must refuse before committing terminal intent")
+	assert.False(t, inst.UserKilled(),
+		"an unresolved pathname must not become a permanent kill tombstone that cleanup can never finish")
+	assert.FileExists(t, filepath.Join(srcPath, "dirty.txt"),
+		"refusing kill admission must leave the user's worktree untouched")
+}
+
 func TestArchiveSessionHookFailureCommitsArchiveAndSurfacesWarning(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
