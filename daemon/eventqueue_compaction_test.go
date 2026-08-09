@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -56,5 +57,52 @@ func TestEventQueue_CompactionStopsBeforeQueueRenameWhenCursorBarrierFails(t *te
 	event, _, ok, err := reopened.peek()
 	if err != nil || !ok || event.Line != "pending" {
 		t.Fatalf("reopened head = %q ok=%v err=%v, want pending", event.Line, ok, err)
+	}
+}
+
+// TestEventQueue_CompactionCursorFenceCannotPersistOrphanTemp models a crash
+// immediately after the cursor-directory fence. The fence must run before the
+// compact temporary file is created, or that fsync also makes the temporary
+// directory entry durable and startup has no task-scoped way to reclaim it.
+func TestEventQueue_CompactionCursorFenceCannotPersistOrphanTemp(t *testing.T) {
+	previousThreshold := watcherQueueCompactBytes
+	watcherQueueCompactBytes = 1
+	t.Cleanup(func() { watcherQueueCompactBytes = previousThreshold })
+
+	dir := t.TempDir()
+	const taskID = "ab313302"
+	q := newEventQueue(dir, taskID)
+	for _, line := range []string{"delivered", "pending"} {
+		if err := q.enqueue(line); err != nil {
+			t.Fatalf("enqueue %q: %v", line, err)
+		}
+	}
+	_, cursor, ok, err := q.peek()
+	if err != nil || !ok {
+		t.Fatalf("peek: ok=%v err=%v", ok, err)
+	}
+
+	const simulatedCrash = "simulated crash after cursor-directory fence"
+	q.syncDirectory = func(dir string) error {
+		if err := syncEventQueueDirectory(dir); err != nil {
+			return err
+		}
+		panic(simulatedCrash)
+	}
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = q.advance(cursor)
+	}()
+	if recovered != simulatedCrash {
+		t.Fatalf("recovered panic = %v, want %q", recovered, simulatedCrash)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, taskID+".compact-*"))
+	if err != nil {
+		t.Fatalf("glob compact files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("cursor fence made abandoned compact files durable: %v", matches)
 	}
 }
