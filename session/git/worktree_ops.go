@@ -525,7 +525,10 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 		// (#1917): this recursive delete is the one local git command that
 		// genuinely stalls forever (hung mount, D-state process in the tree), and
 		// Cleanup runs inside the daemon's kills-in-flight guard.
-		if _, err := r.git("worktree", "remove", "-f", g.worktreePath); err != nil {
+		if _, err := r.destructive(
+			"remove worktree directory "+g.worktreePath,
+			"worktree", "remove", "-f", g.worktreePath,
+		); err != nil && !errors.Is(err, errRefusedDestructive) {
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", g.worktreePath, err)
 			// A failed `git worktree remove -f` may still have released the
 			// registration. Decide whether the directory is ours to delete

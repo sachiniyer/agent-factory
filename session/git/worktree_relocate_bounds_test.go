@@ -3,12 +3,10 @@ package git
 import (
 	"bytes"
 	"context"
-	"errors"
 	stdlog "log"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -154,17 +152,12 @@ func TestRelocate_DoesNotWedgeOnStalledGit(t *testing.T) {
 	}
 }
 
-// A deadline in the bounded git half of relocation is evidence that this
-// workspace's filesystem can stall. On the cross-device fallback, the copy is
-// already published and identity-validated before source cleanup; recursively
-// deleting that source is therefore optional reclamation, and entering its
-// unbounded walk after the deadline can wedge archive forever (#3135).
-//
-// The same evidence must also survive this relocation attempt. A later kill
-// calls GitWorktree.Cleanup with a fresh cleanupRun; without the worktree-level
-// latch it can enter another unbounded delete and destroy branch metadata as if
-// the earlier stall never happened.
-func TestRelocate_DeadlineRefusesCrossDeviceSourceDeletion(t *testing.T) {
+// The submodule probe is read-only, so a deadline there leaves the original
+// worktree intact. Starting git worktree move or the manual copy fallback after
+// that evidence of a stalled filesystem can only make the outcome less certain;
+// the cross-device path eventually enters an unbounded recursive source delete.
+// Stop at the first deadline and latch it for later Cleanup attempts (#3135).
+func TestRelocate_InspectionDeadlineStopsBeforeMoveFallback(t *testing.T) {
 	gw, _, src := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
 
@@ -175,51 +168,52 @@ func TestRelocate_DeadlineRefusesCrossDeviceSourceDeletion(t *testing.T) {
 	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
 
 	previousMove := worktreeMoveFast
+	moveAttempted := false
 	worktreeMoveFast = func(*GitWorktree, string, string) error {
-		return errors.New("forced fast-path failure")
+		moveAttempted = true
+		return nil
 	}
 	t.Cleanup(func() { worktreeMoveFast = previousMove })
 
-	previousRename := renamePath
-	renamePath = func(string, string) error { return syscall.EXDEV }
-	t.Cleanup(func() { renamePath = previousRename })
+	err := gw.MoveWorktree(dest)
 
-	previousRepair := worktreeRepair
-	worktreeRepair = func(*GitWorktree, string) error { return nil }
-	t.Cleanup(func() { worktreeRepair = previousRepair })
-	previousSubmoduleRepair := worktreeRepairSubmodules
-	worktreeRepairSubmodules = func(*GitWorktree, string) error { return nil }
-	t.Cleanup(func() { worktreeRepairSubmodules = previousSubmoduleRepair })
-
-	previousRemoveTree := removeDirectoryTree
-	sourceDeleteAttempted := false
-	removeDirectoryTree = func(parent *os.File, name, path string, directory *os.File, expected *copiedDirectory) error {
-		if filepath.Dir(path) == filepath.Dir(src) && strings.Contains(filepath.Base(path), ".af-source-") {
-			sourceDeleteAttempted = true
-		}
-		return previousRemoveTree(parent, name, path, directory, expected)
-	}
-	t.Cleanup(func() { removeDirectoryTree = previousRemoveTree })
-
-	var warnings bytes.Buffer
-	previousWarning := aflog.WarningLog
-	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
-	t.Cleanup(func() { aflog.WarningLog = previousWarning })
-
-	require.NoError(t, gw.MoveWorktree(dest),
-		"a verified destination with only refused source reclamation remains a completed relocation")
-	assert.False(t, sourceDeleteAttempted,
-		"no unbounded source-tree delete may start after a relocation deadline")
+	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.False(t, moveAttempted,
+		"no mutating relocation step may start after the read-only probe times out")
 	assert.True(t, gw.cleanupHasStalled(),
 		"the deadline must latch on the worktree so a later Cleanup also refuses destruction")
-	assert.DirExists(t, dest)
+	assert.DirExists(t, src, "the original worktree and its uncommitted data stay in place")
+	assert.NoDirExists(t, dest)
+}
 
-	retained, err := filepath.Glob(filepath.Join(filepath.Dir(src), ".af-source-*"))
-	require.NoError(t, err)
-	require.Len(t, retained, 1, "the secured source must remain available for later reclamation")
-	assert.FileExists(t, filepath.Join(retained[0], "dirty.txt"),
-		"the retained source still contains the user's uncommitted work")
-	assert.Contains(t, warnings.String(), "source cleanup was refused after a relocation deadline")
-	assert.NotContains(t, warnings.String(), "rm -rf",
-		"a stalled filesystem must not receive immediate destructive cleanup advice")
+// A timeout in git worktree move is even less safe to recover automatically:
+// git may have renamed bytes, changed registration, done both, or done neither.
+// The manual fallback must not perform another move or source deletion on top of
+// that unknown state.
+func TestRelocate_FastMoveDeadlineStopsBeforeManualFallback(t *testing.T) {
+	gw, _, _ := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error { return context.DeadlineExceeded }
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	previousRename := renamePath
+	fallbackAttempted := false
+	renamePath = func(string, string) error {
+		fallbackAttempted = true
+		return nil
+	}
+	t.Cleanup(func() { renamePath = previousRename })
+
+	err := gw.MoveWorktree(dest)
+
+	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.False(t, fallbackAttempted,
+		"the manual move must not run after git worktree move was cut off mid-operation")
+	assert.True(t, gw.cleanupHasStalled())
 }

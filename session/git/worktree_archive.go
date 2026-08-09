@@ -266,6 +266,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 		// worktree means the steps below are running against the same stalled
 		// filesystem and their own outcome is that much less certain.
 		noteDeadline(inspectErr)
+		if deadlineTripped {
+			return unknownIfCutOff(fmt.Errorf(
+				"refusing to continue relocating worktree %s after the submodule inspection timed out: %w",
+				src, inspectErr,
+			))
+		}
 		log.InfoLog.Printf(
 			"could not inspect worktree %s for submodules (%v); trying git worktree move",
 			src, inspectErr,
@@ -273,6 +279,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 	}
 	if !useFallback {
 		if err := noteDeadline(worktreeMoveFast(g, src, dest)); err != nil {
+			if deadlineTripped {
+				return unknownIfCutOff(fmt.Errorf(
+					"git worktree move was cut off for %s -> %s; refusing a second move against its unknown state: %w",
+					src, dest, err,
+				))
+			}
 			// The fallback is the designed recovery for cross-device moves and
 			// other fast-path limitations. Record why it was selected without
 			// reporting a failed archive; actual fallback/repair failures return
@@ -291,9 +303,8 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 		var sourceCleanupErr error
 		var sourceCleanupPath string
 		var sourceCleanupPathVerified bool
-		var sourceCleanupRefused bool
 		if !pathExists(dest) {
-			if mErr := moveDirCrossDeviceGuarded(src, dest, operation, g.cleanupHasStalled); mErr != nil {
+			if mErr := moveDirCrossDevice(src, dest, operation); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
 					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))
@@ -301,7 +312,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 				sourceCleanupErr = mErr
 				sourceCleanupPath = copiedErr.src
 				sourceCleanupPathVerified = copiedErr.cleanupPathVerified
-				sourceCleanupRefused = copiedErr.cleanupRefused
 			}
 		}
 		// The bytes are now at dest. Commit the new location to the worktree
@@ -345,14 +355,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 			// than useless: instance state may still point at src, so following it
 			// breaks recovery. Warn (so the leftover disk stays visible and
 			// reclaimable) and return nil.
-			if sourceCleanupRefused {
-				log.WarningLog.Printf(
-					"worktree copied and registered at %s, but source cleanup was refused after a relocation deadline; "+
-						"the verified source is retained at %s because an unbounded delete against a filesystem that already stalled could hang the daemon; "+
-						"restart the daemon before retrying cleanup: %v",
-					dest, sourceCleanupPath, sourceCleanupErr,
-				)
-			} else if sourceCleanupPathVerified {
+			if sourceCleanupPathVerified {
 				log.WarningLog.Printf(
 					"worktree copied and registered at %s, but failed to remove the leftover source directory %s; "+
 						"the worktree is valid and usable at %s — the leftover is only reclaimable disk, "+
@@ -409,18 +412,7 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // an unreadableSourceError BEFORE that error is wrapped: fmt.Errorf formats and
 // CACHES the inner error's text at construction, so stamping after the wrap
 // changes the struct and not the message the user sees (#3087 review).
-func moveDirCrossDevice(src, dest, operation string) error {
-	return moveDirCrossDeviceGuarded(src, dest, operation, nil)
-}
-
-// moveDirCrossDeviceGuarded is the production relocation path. sourceCleanupBlocked
-// reports whether a bounded operation against the source workspace has already
-// timed out. The copy and destination publication establish a complete operational
-// worktree at dest; recursively deleting the secured source afterward is optional
-// reclamation and must not enter an unbounded filesystem walk after that evidence
-// of a stall (#3135). The nil guard keeps direct copy-policy tests focused on the
-// move primitive itself.
-func moveDirCrossDeviceGuarded(src, dest, operation string, sourceCleanupBlocked func() bool) (returnErr error) {
+func moveDirCrossDevice(src, dest, operation string) (returnErr error) {
 	renameErr := renamePath(src, dest)
 	if renameErr == nil {
 		return nil
@@ -567,15 +559,6 @@ func moveDirCrossDeviceGuarded(src, dest, operation string, sourceCleanupBlocked
 		return restoreSource(commitErr)
 	}
 
-	if sourceCleanupBlocked != nil && sourceCleanupBlocked() {
-		return &copiedWorktreeSourceCleanupError{
-			src:                 quarantinePath,
-			dest:                dest,
-			err:                 errors.New("source cleanup was refused after a relocation deadline"),
-			cleanupPathVerified: true,
-			cleanupRefused:      true,
-		}
-	}
 	if err := removeDirectoryTree(sourceParent, quarantineName, quarantinePath, copied.source, &copied.root); err != nil {
 		var unverified *unverifiedCleanupPathError
 		cleanupPathVerified := !errors.As(err, &unverified)
@@ -598,13 +581,9 @@ type copiedWorktreeSourceCleanupError struct {
 	dest                string
 	err                 error
 	cleanupPathVerified bool
-	cleanupRefused      bool
 }
 
 func (e *copiedWorktreeSourceCleanupError) Error() string {
-	if e.cleanupRefused {
-		return fmt.Sprintf("copied worktree to %s but refused to remove original %s: %v", e.dest, e.src, e.err)
-	}
 	if !e.cleanupPathVerified {
 		return fmt.Sprintf("copied worktree to %s but could not determine the original source's current pathname near %s: %v", e.dest, e.src, e.err)
 	}
