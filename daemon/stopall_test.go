@@ -161,6 +161,10 @@ func TestAssertNoLiveDaemon_RefusesOrphanThroughSymlinkedParent(t *testing.T) {
 	origScan := scopedDaemonScanFn
 	t.Cleanup(func() { scopedDaemonScanFn = origScan })
 	scopedDaemonScanFn = func() ([]int, error) { return []int{pid}, nil }
+	// AssertNoLiveDaemon probes the control socket before the injected scan.
+	// Keep that probe inside this throwaway home so an ambient developer daemon
+	// cannot satisfy the assertion for an unrelated reason.
+	t.Setenv("AGENT_FACTORY_HOME", realHome)
 
 	err := AssertNoLiveDaemon(realHome)
 	if err == nil {
