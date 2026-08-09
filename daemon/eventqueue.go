@@ -486,16 +486,17 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 }
 
 // compactLocked rewrites the queue file to just its pending suffix, dropping
-// the delivered prefix: copy suffix → sync and close temp file → persist cursor
-// 0 → sync its directory entry → rename over the original → commit the matching
-// in-memory offset → sync the containing directory. Crash safety comes from both
-// halves of that publication: the cursor reset and compacted contents reach
-// stable storage before the queue rename, and the queue's new directory entry
-// does afterward. The cursor-before-rename ordering (#1537) separately ensures
-// no crash can leave the small compacted file beside a stale offset that points
-// mid-record. Every crash point therefore preserves the pending suffix; the
-// worst case redelivers an already-delivered prefix (at-least-once, never loss).
-// Callers hold q.mu.
+// the delivered prefix: persist cursor 0 → sync its directory entry → create,
+// copy, sync, and close the temp file → rename over the original → commit the
+// matching in-memory offset → sync the containing directory. Crash safety comes
+// from both halves of that publication: the cursor reset and compacted contents
+// reach stable storage before the queue rename, and the queue's new directory
+// entry does afterward. Creating the temp only after the cursor fence prevents
+// that fence from also making an abandoned compact-file name durable. The
+// cursor-before-rename ordering (#1537) separately ensures no crash can leave
+// the small compacted file beside a stale offset that points mid-record. Every
+// crash point therefore preserves the pending suffix; the worst case redelivers
+// an already-delivered prefix (at-least-once, never loss). Callers hold q.mu.
 func (q *eventQueue) compactLocked() error {
 	src, err := os.Open(q.path)
 	if err != nil {
@@ -504,6 +505,26 @@ func (q *eventQueue) compactLocked() error {
 	defer func() { _ = src.Close() }()
 	if _, err := src.Seek(q.offset, 0); err != nil {
 		return err
+	}
+	// Persist the post-compaction cursor (0) durably BEFORE the rename shrinks
+	// the file, closing the crash window that used to wedge the queue (#1537).
+	// The old ordering renamed first and left the caller to persist the cursor
+	// after, so a crash in between paired the small compacted file with a stale
+	// pre-compaction offset pointing mid-record. Cursor-before-rename makes every
+	// crash point consistent and record-aligned: before this write, old file +
+	// old offset; after it but before the rename, old file + cursor 0 (redelivers
+	// the delivered prefix); after the rename, compacted file + cursor 0.
+	if err := q.persistCursorValueLocked(0); err != nil {
+		return err
+	}
+	// AtomicWriteFile's directory sync is intentionally best-effort for its
+	// general callers. Compaction needs a stronger cross-file guarantee: cursor
+	// 0 must be durable before the shortened queue can become durable, or a
+	// crash could pair the new queue with the old nonzero cursor and skip events.
+	// Fence it before creating the compact temp so this sync cannot also persist
+	// an abandoned temp-file name if the daemon crashes before the queue rename.
+	if err := q.syncDirectory(filepath.Dir(q.curPath)); err != nil {
+		return fmt.Errorf("sync event-queue cursor directory before compaction: %w", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(q.path), q.taskID+".compact-*")
 	if err != nil {
@@ -522,26 +543,6 @@ func (q *eventQueue) compactLocked() error {
 	if err != nil {
 		_ = os.Remove(tmpName)
 		return err
-	}
-	// Persist the post-compaction cursor (0) durably BEFORE the rename shrinks
-	// the file, closing the crash window that used to wedge the queue (#1537).
-	// The old ordering renamed first and left the caller to persist the cursor
-	// after, so a crash in between paired the small compacted file with a stale
-	// pre-compaction offset pointing mid-record. Cursor-before-rename makes every
-	// crash point consistent and record-aligned: before this write, old file +
-	// old offset; after it but before the rename, old file + cursor 0 (redelivers
-	// the delivered prefix); after the rename, compacted file + cursor 0.
-	if err := q.persistCursorValueLocked(0); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	// AtomicWriteFile's directory sync is intentionally best-effort for its
-	// general callers. Compaction needs a stronger cross-file guarantee: cursor
-	// 0 must be durable before the shortened queue can become durable, or a
-	// crash could pair the new queue with the old nonzero cursor and skip events.
-	if err := q.syncDirectory(filepath.Dir(q.curPath)); err != nil {
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("sync event-queue cursor directory before compaction: %w", err)
 	}
 	if err := os.Rename(tmpName, q.path); err != nil {
 		_ = os.Remove(tmpName)
