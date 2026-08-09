@@ -47,9 +47,9 @@ func getWorktreeDirectoryForRepoWithConfig(cfg *config.Config, repoPath string) 
 
 // GitWorktree manages git worktree operations for a session
 type GitWorktree struct {
-	// cleanupStalled latches once ANY cleanup command has timed out against this
-	// workspace, and it is the reason this fact lives on the WORKTREE rather than
-	// on the per-attempt cleanupRun (#1917 round 6).
+	// cleanupStalled latches once ANY cleanup or relocation command has timed out
+	// against this workspace, and it is the reason this fact lives on the WORKTREE
+	// rather than on the per-attempt cleanupRun (#1917 round 6, #3135).
 	//
 	// "This filesystem is stalled" is a property of the workspace, not of one
 	// attempt. Stored per-run it died on every retry: a `git worktree remove` that

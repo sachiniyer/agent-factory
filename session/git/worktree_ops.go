@@ -867,11 +867,11 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 	return nil
 }
 
-// markCleanupStalled latches the workspace-level "a cleanup command timed out
-// here" fact (see GitWorktree.cleanupStalled).
+// markCleanupStalled latches the workspace-level "a cleanup or relocation
+// command timed out here" fact (see GitWorktree.cleanupStalled).
 func (g *GitWorktree) markCleanupStalled() { g.cleanupStalled.Store(true) }
 
-// cleanupHasStalled reports whether any cleanup attempt against this workspace has
-// ever tripped a deadline. Consulted by removeDir, which must never enter an
+// cleanupHasStalled reports whether any cleanup or relocation attempt against this
+// workspace has ever tripped a deadline. Destructive fallbacks must never enter an
 // unbounded delete on a filesystem that has already proven it can stall.
 func (g *GitWorktree) cleanupHasStalled() bool { return g.cleanupStalled.Load() }
