@@ -84,6 +84,27 @@ func TestRelocate_CrossDeviceRepairTimeoutRetainsDestinationIdentity(t *testing.
 		"the retained identity must describe the copied destination, whose inode differs from the source")
 }
 
+func TestRelocate_AnsweredRepairFailureRetainsDestinationIdentity(t *testing.T) {
+	gw, _, _ := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return true, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+	previousRepair := worktreeRepair
+	worktreeRepair = func(*GitWorktree, string) error { return errors.New("registration repair answered with an error") }
+	t.Cleanup(func() { worktreeRepair = previousRepair })
+
+	err := gw.MoveWorktree(dest)
+	require.ErrorIs(t, err, ErrRelocateStateUnknown,
+		"a restore caller must persist the new location even when repair answered instead of timing out")
+	recovery, ok := gw.GetRelocationRecovery()
+	require.True(t, ok, "the committed destination must remain a retryable recovery handle")
+	destinationIdentity, identityErr := inspectRelocationPathIdentity(dest)
+	require.NoError(t, identityErr)
+	assert.True(t, recovery.identity().same(destinationIdentity))
+}
+
 func TestRelocate_SubmoduleRepairTimeoutRetainsRecovery(t *testing.T) {
 	gw, _, _ := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
@@ -104,4 +125,13 @@ func TestRelocate_SubmoduleRepairTimeoutRetainsRecovery(t *testing.T) {
 	recovery, ok := gw.GetRelocationRecovery()
 	require.True(t, ok, "a successful main repair must not clear the later submodule-repair stall")
 	assert.Equal(t, RelocationRecoveryStalled, recovery.State)
+
+	submoduleRetryCalls := 0
+	worktreeRepairSubmodules = func(*GitWorktree, string) error {
+		submoduleRetryCalls++
+		return nil
+	}
+	require.NoError(t, gw.MoveWorktree(dest))
+	assert.Equal(t, 1, submoduleRetryCalls,
+		"a retry which recovers bytes at the destination must finish the interrupted submodule repair")
 }

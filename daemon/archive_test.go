@@ -750,6 +750,21 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	archivedPath := inst.GetWorktreePath()
+	gw, getErr := inst.GetGitWorktree()
+	require.NoError(t, getErr)
+	info, statErr := os.Stat(archivedPath)
+	require.NoError(t, statErr)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()),
+		"precondition: the unresolved archive identity is durable")
 
 	require.NoError(t, os.RemoveAll(repoPath), "simulate the origin repo being deleted")
 
@@ -758,6 +773,10 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	assert.Contains(t, err.Error(), "gone")
 	assert.True(t, exists(archivedPath), "the archived worktree must be left intact when the repo is gone")
 	assert.Equal(t, session.Archived, inst.GetStatus(), "a failed restore must leave the session Archived")
+	assert.Nil(t, recordFor(t, repoID, "worker").Worktree.RelocationRecovery,
+		"bounded identity resolution must clear the recovery guard so repo-gone archives remain disposable")
+	assert.NoError(t, inst.ValidateWorktreeDestructionAdmission(),
+		"the user must still be able to kill a repo-gone archive after its path identity is established")
 }
 
 // TestRestoreArchived_CollisionSuffixesPath: when the standard sibling location
