@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -15,6 +16,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
+
+func TestArchiveSession_PreflightStallIsPersistedBeforeReturn(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, source := registerArchivable(t, manager, repoID, repoPath, "preflight-stall")
+	t.Cleanup(sessiongit.SetRelocationIdentityErrorForTest(source, context.DeadlineExceeded))
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "preflight-stall", RepoID: repoID})
+	require.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown)
+
+	record := recordFor(t, repoID, "preflight-stall")
+	require.NotNil(t, record)
+	require.NotNil(t, record.Worktree.RelocationRecovery,
+		"the pre-fence return must persist the stall record before a daemon restart can discard it")
+	assert.Equal(t, sessiongit.RelocationRecoveryStalled, record.Worktree.RelocationRecovery.State)
+}
 
 // partialRelocateGitOnPath installs a `git` shim that reproduces the exact
 // restore shape this guards: the fast path refuses (as it does across

@@ -30,6 +30,21 @@ type RelocationClaim struct {
 	identity      pathIdentity
 }
 
+// SetRelocationIdentityErrorForTest makes identity inspection of one exact path
+// return err and returns a restore function. It exists for callers outside this
+// package which must prove that a lifecycle record created by a failed bounded
+// probe is persisted before control returns.
+func SetRelocationIdentityErrorForTest(path string, err error) func() {
+	previous := relocationPathIdentity
+	relocationPathIdentity = func(observed string) (pathIdentity, error) {
+		if observed == path {
+			return pathIdentity{}, err
+		}
+		return previous(observed)
+	}
+	return func() { relocationPathIdentity = previous }
+}
+
 func normalizeRecovery(recovery RelocationRecovery) RelocationRecovery {
 	if recovery.State == "" {
 		// Records written before the explicit lifecycle always represented two
