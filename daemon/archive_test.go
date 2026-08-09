@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -159,6 +160,45 @@ func TestArchiveSessionRunsOperatorHookAfterPaneTeardownBeforeMove(t *testing.T)
 	assert.FileExists(t, marker, "the configured operator hook must execute")
 	assert.NoDirExists(t, filepath.Join(archivedPath, "node_modules"),
 		"the hook must prune before the worktree bytes are moved")
+}
+
+func TestArchiveSessionResolvesInterruptedMoveBeforeOperatorHook(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "retry-hook")
+	dest, err := archivedWorktreePath(repoID, "retry-hook")
+	require.NoError(t, err)
+
+	original, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	info, err := os.Stat(srcPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+
+	interrupted, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, dest, "retry-hook", original.GetBranchName(), original.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, interrupted.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		AlternatePath: srcPath,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	inst.SetGitWorktreeForTest(interrupted)
+
+	marker := filepath.Join(t.TempDir(), "archive-hook-ran")
+	writeOnArchiveCommand(t, fmt.Sprintf(
+		`test "$PWD" = %q && test "$AF_WORKTREE_PATH" = %q && printf ran > %q`,
+		srcPath, srcPath, marker,
+	))
+
+	archivedPath, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "retry-hook", RepoID: repoID})
+	require.NoError(t, err)
+	assert.Equal(t, dest, archivedPath)
+	assert.FileExists(t, marker,
+		"the retry must establish the retained source before deriving the hook cwd and environment")
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
 }
 
 func TestArchiveSessionHookFailureCommitsArchiveAndSurfacesWarning(t *testing.T) {

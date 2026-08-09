@@ -361,6 +361,41 @@ func TestRelocate_RetryUsesOriginalSourceWhenTimedOutMoveDidNothing(t *testing.T
 	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
 }
 
+func TestRelocate_RetryKeepsCandidatesDistinctAfterSelectingAlternate(t *testing.T) {
+	gw, repo, src := archiveTestWorktree(t)
+	firstDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "first")
+	secondDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "second")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return context.DeadlineExceeded
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	require.ErrorIs(t, gw.MoveWorktree(firstDest), ErrRelocateStateUnknown)
+	assert.DirExists(t, src, "the interrupted move left the bytes at the alternate source")
+	require.NoError(t, os.MkdirAll(secondDest, 0o755))
+	require.Error(t, gw.MoveWorktree(secondDest), "the occupied retry destination must stop the move")
+
+	recovery, ok := gw.GetRelocationRecovery()
+	require.True(t, ok)
+	assert.Equal(t, src, gw.GetWorktreePath())
+	assert.Equal(t, firstDest, recovery.AlternatePath,
+		"selecting the alternate must retain the old primary as the other recovery handle")
+	assert.NotEqual(t, gw.GetWorktreePath(), recovery.AlternatePath)
+
+	reloaded, err := NewGitWorktreeFromStorage(
+		repo, gw.GetWorktreePath(), "arch", gw.GetBranchName(), gw.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, reloaded.RestoreRelocationRecovery(recovery),
+		"a retry failure must remain loadable after persistence and restart")
+}
+
 func TestRelocate_RetryRevalidatesDestinationBeforeRegistrationRepair(t *testing.T) {
 	gw, _, _ := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
