@@ -484,14 +484,15 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 }
 
 // compactLocked rewrites the queue file to just its pending suffix, dropping
-// the delivered prefix: copy suffix → temp file → persist cursor 0 → rename
-// over the original → reset the in-memory offset. Crash safety comes from the
-// cursor-before-rename ordering (#1537): the post-compaction cursor is 0, and
-// it is made durable BEFORE the rename shrinks the file, so no crash can leave
-// the small compacted file beside a stale offset that points mid-record. Every
-// crash point leaves a record-aligned (file, cursor) pair; the worst case
-// redelivers an already-delivered prefix (at-least-once, never loss). Callers
-// hold q.mu.
+// the delivered prefix: copy suffix → sync and close temp file → persist cursor
+// 0 → rename over the original → commit the matching in-memory offset → sync
+// the containing directory. Crash safety comes from both halves of that
+// publication: the compacted contents reach stable storage before rename, and
+// the directory entry does afterward. The cursor-before-rename ordering (#1537)
+// separately ensures no crash can leave the small compacted file beside a stale
+// offset that points mid-record. Every crash point therefore preserves the pending
+// suffix; the worst case redelivers an already-delivered prefix (at-least-once,
+// never loss). Callers hold q.mu.
 func (q *eventQueue) compactLocked() error {
 	src, err := os.Open(q.path)
 	if err != nil {
@@ -507,6 +508,11 @@ func (q *eventQueue) compactLocked() error {
 	}
 	tmpName := tmp.Name()
 	n, err := io.Copy(tmp, src)
+	if err == nil {
+		if syncErr := tmp.Sync(); syncErr != nil {
+			err = fmt.Errorf("sync compacted event queue: %w", syncErr)
+		}
+	}
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
@@ -536,7 +542,29 @@ func (q *eventQueue) compactLocked() error {
 		}
 		return err
 	}
+	// Rename is already visible, so commit the matching in-memory cursor before
+	// attempting the directory sync. If that sync fails, advance's optimization
+	// fallback persists q.offset again; it must write 0 beside the compacted file,
+	// never the pre-compaction offset that points into a different byte layout.
 	q.offset, q.size = 0, n
+	if err := syncEventQueueDirectory(filepath.Dir(q.path)); err != nil {
+		return fmt.Errorf("sync event-queue directory after compaction: %w", err)
+	}
+	return nil
+}
+
+func syncEventQueueDirectory(dir string) error {
+	handle, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	if err := handle.Sync(); err != nil {
+		_ = handle.Close()
+		return fmt.Errorf("fsync %s: %w", dir, err)
+	}
+	if err := handle.Close(); err != nil {
+		return fmt.Errorf("close %s after fsync: %w", dir, err)
+	}
 	return nil
 }
 
