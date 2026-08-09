@@ -333,17 +333,8 @@ func (g *GitWorktree) releaseRelocationClaimLocked(claim *RelocationClaim) {
 	}
 }
 
-func (g *GitWorktree) releaseRelocationClaim(claim RelocationClaim) {
-	if !claim.recoveryOwned {
-		return
-	}
-	g.relocationMu.Lock()
-	defer g.relocationMu.Unlock()
-	g.releaseRelocationClaimLocked(&claim)
-}
-
 // PreserveRelocationClaim rematerializes a durable record when an operation
-// which consumed one aborts before reaching any path use boundary. A claim made
+// which consumed one aborts before completing its path decision. A claim made
 // from an ordinary record-free path owns nothing and is intentionally a no-op.
 func (g *GitWorktree) PreserveRelocationClaim(claim RelocationClaim) {
 	if !claim.recoveryOwned {

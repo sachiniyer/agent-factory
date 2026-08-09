@@ -286,7 +286,28 @@ func (g *GitWorktree) RestoreWorktreeToWithClaim(dest string, claim RelocationCl
 // restore is reporting that the ARCHIVE holds a file af cannot read. The string
 // travels only into error messages (#3066).
 func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *RelocationClaim) error {
-	src := g.GetWorktreePath()
+	var sourceClaim RelocationClaim
+	var claimErr error
+	if requiredClaim == nil {
+		sourceClaim, claimErr = g.ClaimRelocationSource()
+	} else {
+		sourceClaim = *requiredClaim
+		claimErr = g.RevalidateRelocationClaim(sourceClaim)
+	}
+	if claimErr != nil {
+		return claimErr
+	}
+	claimSettled := false
+	defer func() {
+		if !claimSettled {
+			g.PreserveRelocationClaim(sourceClaim)
+		}
+	}()
+	finishRelocation := func() {
+		g.finishRelocationClaim(sourceClaim, dest)
+		claimSettled = true
+	}
+	src := sourceClaim.Path
 	if g.externalWorktree {
 		return fmt.Errorf("cannot relocate an in-place/external worktree at %s (it is user-owned)", src)
 	}
@@ -300,20 +321,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	// deadlineTripped latches when any bounded step was cut off rather than
 	// answering. It classifies later errors and prevents unbounded cleanup from
 	// treating the same workspace as healthy.
-	var sourceClaim RelocationClaim
-	var claimErr error
-	if requiredClaim == nil {
-		sourceClaim, claimErr = g.ClaimRelocationSource()
-	} else {
-		sourceClaim = *requiredClaim
-		claimErr = g.RevalidateRelocationClaim(sourceClaim)
-	}
-	if claimErr != nil {
-		return claimErr
-	}
-	defer func() { g.releaseRelocationClaim(sourceClaim) }()
-	src = sourceClaim.Path
-
 	deadlineTripped := false
 	noteDeadline := func(err error) error {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -374,7 +381,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
-		g.finishRelocationClaim(sourceClaim, dest)
+		finishRelocation()
 		return nil
 	}
 	if pathExists(dest) {
@@ -456,7 +463,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
-		g.finishRelocationClaim(sourceClaim, dest)
+		finishRelocation()
 		return nil
 	}
 	if useFallback {
@@ -536,12 +543,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				)
 			}
 		}
-		g.finishRelocationClaim(sourceClaim, dest)
+		finishRelocation()
 		return nil
 	}
 
 	// Fast path succeeded: git moved the bytes and updated the registration.
-	g.finishRelocationClaim(sourceClaim, dest)
+	finishRelocation()
 	return nil
 }
 
