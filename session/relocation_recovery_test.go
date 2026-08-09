@@ -9,7 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestInstanceData_ProjectsConsumedRelocationClaimUntilUse(t *testing.T) {
@@ -96,4 +98,35 @@ func TestInstanceData_RoundTripsInterruptedRelocationRecovery(t *testing.T) {
 	if *roundTrip != *data.Worktree.RelocationRecovery {
 		t.Fatalf("relocation recovery = %+v, want %+v", *roundTrip, *data.Worktree.RelocationRecovery)
 	}
+}
+
+func TestFromInstanceData_RelocationRecoveryLoadsRunningSessionInert(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_relocation_recovery_agent"
+	shellName := agentName + shellTmuxSuffix
+	data := deadInstanceData(t, Running, agentName, shellName)
+	data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
+		State: git.RelocationRecoveryStalled,
+	}
+
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	previousRestore := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previousRestore })
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.False(t, restored.Started(),
+		"an unresolved relocation identity must keep a running session inert on reload")
+	require.Equal(t, 0, newSessions,
+		"reload must not reconnect or respawn tmux against an unresolved worktree path")
+	require.NotNil(t, restored.ToInstanceData().Worktree.RelocationRecovery,
+		"the inert reload must retain the recovery record for a bounded retry")
 }
