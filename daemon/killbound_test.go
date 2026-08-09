@@ -30,24 +30,24 @@ func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
 		require.Equal(t, 2, killWatchdogTabCount(nil, data),
 			"only tmux-bearing tabs are torn down per-tab; a ghost names them by TmuxName")
 
-		// Pending handles are NOT budgeted on the ghost path: ghostTmuxNames collects
-		// data.TmuxName and data.Tabs only, so ghostCleanup never reaps them, and each
-		// one would buy ~54s of delay for work this path does not do.
+		// Pending handles are real teardown work on the ghost path: they can still
+		// own a live process in this worktree, so each distinct handle must buy the
+		// same bounded-kill budget as a live tab.
 		data.PendingTabCleanup = []session.TabCleanupData{{TabID: "t9", TmuxName: "af_x__stuck"}}
-		require.Equal(t, 2, killWatchdogTabCount(nil, data),
-			"a ghost budgets only what ghostCleanup actually tears down")
+		require.Equal(t, 3, killWatchdogTabCount(nil, data),
+			"a ghost budgets every tmux session ghostCleanup actually tears down")
 
 		// A post-#953 record stores the agent's tmux name in BOTH data.TmuxName and
 		// data.Tabs[0].TmuxName. ghostTmuxNames deduplicates them, so the budget must
 		// not count the agent twice — nine real sessions budgeted as ten postpones
 		// the wedge diagnostics by ~54s.
 		data.TmuxName = "af_x"
-		require.Equal(t, 2, killWatchdogTabCount(nil, data),
+		require.Equal(t, 3, killWatchdogTabCount(nil, data),
 			"the agent's name appears twice in the record but is ONE tmux session")
 
 		// A genuinely distinct session does add to it.
 		data.Tabs = append(data.Tabs, session.TabData{Name: "shell-3", TmuxName: "af_x__shell3"})
-		require.Equal(t, 3, killWatchdogTabCount(nil, data))
+		require.Equal(t, 4, killWatchdogTabCount(nil, data))
 	})
 }
 
