@@ -377,6 +377,10 @@ type cleanupRun struct {
 	unknown bool
 }
 
+// cleanupWorktreeStat is a seam for proving that a known-stalled workspace is
+// rejected before Cleanup touches its path. Production always uses os.Stat.
+var cleanupWorktreeStat = os.Stat
+
 // git runs one bounded local git command and RECORDS a tripped deadline. This is
 // the only place in the cleanup path that decides what a deadline means.
 func (r *cleanupRun) git(args ...string) (string, error) {
@@ -510,9 +514,17 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	if g.worktreePath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
 	}
+	if g.cleanupHasStalled() {
+		r.unknown = true
+		r.errs = append(r.errs, fmt.Errorf(
+			"refusing to inspect or clean up worktree %s: a previous cleanup or relocation command timed out against this workspace, so even probing its path could hang the daemon; leaving it in place for recovery after restart",
+			g.worktreePath,
+		))
+		return r.state(), errors.Join(r.errs...)
+	}
 
 	// Check if worktree path exists before attempting removal
-	if _, err := os.Stat(g.worktreePath); err == nil {
+	if _, err := cleanupWorktreeStat(g.worktreePath); err == nil {
 		// Reap any process still writing inside the tree BEFORE removing it
 		// (#2025). Both the git remove below and the os.RemoveAll fallback delete
 		// recursively and fail "directory not empty" only when a live writer keeps

@@ -191,15 +191,21 @@ func TestRelocate_InspectionDeadlineStopsBeforeMoveFallback(t *testing.T) {
 // The manual fallback must not perform another move or source deletion on top of
 // that unknown state.
 func TestRelocate_FastMoveDeadlineStopsBeforeManualFallback(t *testing.T) {
-	gw, _, _ := archiveTestWorktree(t)
+	gw, _, src := archiveTestWorktree(t)
 	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
 
 	previousInspect := worktreeContainsSubmodules
 	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
 	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
 
 	previousMove := worktreeMoveFast
-	worktreeMoveFast = func(*GitWorktree, string, string) error { return context.DeadlineExceeded }
+	worktreeMoveFast = func(_ *GitWorktree, src, dest string) error {
+		// Model git's partial-success shape: the directory rename commits, then
+		// registration work stalls until the command is cut off.
+		require.NoError(t, os.Rename(src, dest))
+		return context.DeadlineExceeded
+	}
 	t.Cleanup(func() { worktreeMoveFast = previousMove })
 
 	previousRename := renamePath
@@ -213,6 +219,11 @@ func TestRelocate_FastMoveDeadlineStopsBeforeManualFallback(t *testing.T) {
 	err := gw.MoveWorktree(dest)
 
 	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.Equal(t, dest, gw.GetWorktreePath(),
+		"a verified partial move must preserve the destination as the durable retry location")
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"),
+		"the destination contains the user's uncommitted work after the partial move")
+	assert.NoDirExists(t, src)
 	assert.False(t, fallbackAttempted,
 		"the manual move must not run after git worktree move was cut off mid-operation")
 	assert.True(t, gw.cleanupHasStalled())

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
@@ -83,6 +84,58 @@ var ErrRelocateStateUnknown = errors.New("the worktree relocation was cut off by
 var worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
 	_, err := g.runGitLocalCommand(g.repoPath, "worktree", "move", src, dest)
 	return err
+}
+
+// relocationReconcileTimeout bounds the read-only identity check made after a
+// timed-out `git worktree move`. The git deadline may have fired because the
+// filesystem itself is stalled, so this check cannot be allowed to wedge the
+// teardown it is trying to make recoverable.
+const relocationReconcileTimeout = 2 * time.Second
+
+func relocationPathIdentity(path string) (pathIdentity, error) {
+	parent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(path), "relocation parent")
+	if err != nil {
+		return pathIdentity{}, err
+	}
+	defer parent.Close()
+	identity, err := identityAt(parent, filepath.Base(path))
+	if err != nil {
+		return pathIdentity{}, fmt.Errorf("inspect relocation path %s: %w", path, err)
+	}
+	return identity, nil
+}
+
+// timedOutMoveReachedDestination verifies that candidate still names the exact
+// directory that was at the source before git started. Filesystem metadata I/O
+// cannot be cancelled in-process, so the probe runs behind a hard caller bound;
+// its buffered result lets a late completion exit without blocking. At worst a
+// genuinely uninterruptible filesystem leaves one read-only probe goroutine for
+// this already-failed relocation, while the daemon and session record survive.
+func timedOutMoveReachedDestination(candidate string, source pathIdentity) (bool, error) {
+	type result struct {
+		identity pathIdentity
+		err      error
+	}
+	resultC := make(chan result, 1)
+	go func() {
+		identity, err := relocationPathIdentity(candidate)
+		resultC <- result{identity: identity, err: err}
+	}()
+
+	timer := time.NewTimer(relocationReconcileTimeout)
+	defer timer.Stop()
+	select {
+	case observed := <-resultC:
+		if observed.err != nil {
+			return false, observed.err
+		}
+		if !source.same(observed.identity) {
+			return false, fmt.Errorf("relocation destination %s does not identify the source directory", candidate)
+		}
+		return true, nil
+	case <-timer.C:
+		return false, fmt.Errorf("timed out after %s while checking whether the worktree reached %s", relocationReconcileTimeout, candidate)
+	}
 }
 
 // worktreeContainsSubmodules identifies the worktree shape that `git worktree
@@ -278,12 +331,23 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string) error {
 		)
 	}
 	if !useFallback {
+		// Snapshot the directory git is about to move. If the command is cut off
+		// after its rename but before registration finishes, this identity lets us
+		// preserve the verified destination as the durable retry location.
+		sourceIdentity, identityErr := relocationPathIdentity(src)
+		if identityErr != nil {
+			return fmt.Errorf("refusing to relocate worktree without a stable source identity: %w", identityErr)
+		}
 		if err := noteDeadline(worktreeMoveFast(g, src, dest)); err != nil {
 			if deadlineTripped {
-				return unknownIfCutOff(fmt.Errorf(
+				reachedDestination, reconcileErr := timedOutMoveReachedDestination(dest, sourceIdentity)
+				if reachedDestination {
+					g.setWorktreeLocation(dest)
+				}
+				return unknownIfCutOff(errors.Join(fmt.Errorf(
 					"git worktree move was cut off for %s -> %s; refusing a second move against its unknown state: %w",
 					src, dest, err,
-				))
+				), reconcileErr))
 			}
 			// The fallback is the designed recovery for cross-device moves and
 			// other fast-path limitations. Record why it was selected without

@@ -26,6 +26,13 @@ func TestCleanup_PreviousRelocateStallRefusesInitialWorktreeRemoval(t *testing.T
 
 	gw, wt := worktreeForCleanup(t)
 	gw.markCleanupStalled()
+	previousStat := cleanupWorktreeStat
+	statAttempted := false
+	cleanupWorktreeStat = func(path string) (os.FileInfo, error) {
+		statAttempted = true
+		return previousStat(path)
+	}
+	t.Cleanup(func() { cleanupWorktreeStat = previousStat })
 	state, cleanupErr := gw.Cleanup()
 
 	issued, readErr := os.ReadFile(issuedPath)
@@ -35,6 +42,10 @@ func TestCleanup_PreviousRelocateStallRefusesInitialWorktreeRemoval(t *testing.T
 	if strings.Contains(string(issued), "worktree remove") {
 		t.Fatal("Cleanup issued its initial destructive worktree removal after relocation had already " +
 			"latched this workspace as stalled; later refusals would retain a record pointing at a deleted path")
+	}
+	if statAttempted {
+		t.Fatal("Cleanup probed a workspace path after relocation had already latched it as stalled; " +
+			"the same filesystem access can wedge before the destructive-command guard runs")
 	}
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("the latched workspace must be retained intact: %v", err)
