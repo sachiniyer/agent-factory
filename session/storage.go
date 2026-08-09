@@ -255,6 +255,17 @@ func (d InstanceData) ForStorage() InstanceData {
 	// instances.json row and be read back as fact by an older binary.
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
+	if d.Worktree.RelocationRecovery != nil {
+		// v1.0.228 predates relocation_recovery and ignores unknown JSON fields.
+		// Project the unresolved row through safety fields that version already
+		// understands: it loads inert, treats the checkout as user-owned, and
+		// cannot delete its branch. The recovery record carries the original
+		// values so current readers remove this rollback fence on load.
+		d.StartupStateUnknown = true
+		d.Worktree.ExternalWorktree = true
+		branchCreatedByUs := false
+		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
+	}
 	switch {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown
@@ -371,12 +382,15 @@ type GitWorktreeData struct {
 }
 
 type GitWorktreeRelocationRecoveryData struct {
-	State         git.RelocationRecoveryState `json:"state,omitempty"`
-	AlternatePath string                      `json:"alternate_path"`
-	IdentityKnown bool                        `json:"identity_known,omitempty"`
-	Device        uint64                      `json:"device"`
-	Inode         uint64                      `json:"inode"`
-	FileType      uint32                      `json:"file_type"`
+	State                       git.RelocationRecoveryState `json:"state,omitempty"`
+	AlternatePath               string                      `json:"alternate_path"`
+	IdentityKnown               bool                        `json:"identity_known,omitempty"`
+	Device                      uint64                      `json:"device"`
+	Inode                       uint64                      `json:"inode"`
+	FileType                    uint32                      `json:"file_type"`
+	OriginalExternalWorktree    *bool                       `json:"original_external_worktree,omitempty"`
+	OriginalBranchCreatedByUs   *bool                       `json:"original_branch_created_by_us,omitempty"`
+	OriginalStartupStateUnknown *bool                       `json:"original_startup_state_unknown,omitempty"`
 }
 
 // Storage handles saving and loading instances using the state interface.

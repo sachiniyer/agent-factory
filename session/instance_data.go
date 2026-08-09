@@ -132,6 +132,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
+		externalWorktree := i.gitWorktree.IsExternalWorktree()
+		startupStateUnknown := i.startupStateUnknown
 		worktreePath, recovery, hasRecovery := i.gitWorktree.RelocationSnapshot()
 		// ExternalWorktree is true for in-place sessions (`af sessions create
 		// --here`, which attach to the repo's own working tree) and for
@@ -146,17 +148,20 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			SessionName:       i.Title,
 			BranchName:        i.gitWorktree.GetBranchName(),
 			BaseCommitSHA:     i.gitWorktree.GetBaseCommitSHA(),
-			ExternalWorktree:  i.gitWorktree.IsExternalWorktree(),
+			ExternalWorktree:  externalWorktree,
 			BranchCreatedByUs: &branchCreatedByUs,
 		}
 		if hasRecovery {
 			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
-				State:         recovery.State,
-				AlternatePath: recovery.AlternatePath,
-				IdentityKnown: recovery.IdentityKnown,
-				Device:        recovery.Device,
-				Inode:         recovery.Inode,
-				FileType:      recovery.FileType,
+				State:                       recovery.State,
+				AlternatePath:               recovery.AlternatePath,
+				IdentityKnown:               recovery.IdentityKnown,
+				Device:                      recovery.Device,
+				Inode:                       recovery.Inode,
+				FileType:                    recovery.FileType,
+				OriginalExternalWorktree:    &externalWorktree,
+				OriginalBranchCreatedByUs:   &branchCreatedByUs,
+				OriginalStartupStateUnknown: &startupStateUnknown,
 			}
 		}
 	}
@@ -177,6 +182,21 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+		// ForStorage projects unresolved records through v1.0.228's existing
+		// fail-closed fields. A current reader must recover the exact original
+		// ownership and startup state; missing metadata is not a zero value and
+		// must never turn the rollback fence into deletion authority.
+		if recovery.OriginalExternalWorktree == nil ||
+			recovery.OriginalBranchCreatedByUs == nil ||
+			recovery.OriginalStartupStateUnknown == nil {
+			return nil, fmt.Errorf("failed to restore worktree relocation recovery: rollback safety metadata is missing")
+		}
+		data.Worktree.ExternalWorktree = *recovery.OriginalExternalWorktree
+		branchCreatedByUs := *recovery.OriginalBranchCreatedByUs
+		data.Worktree.BranchCreatedByUs = &branchCreatedByUs
+		data.StartupStateUnknown = *recovery.OriginalStartupStateUnknown
+	}
 	id := data.ID
 	if id == "" {
 		// Legacy records predate stable session identity. Materialized instances

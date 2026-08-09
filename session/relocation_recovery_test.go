@@ -29,7 +29,7 @@ type v10228InstanceData struct {
 	Program     string   `json:"program"`
 	BackendType string   `json:"backend_type,omitempty"`
 	// StartupStateUnknown is an existing v1.0.228 fail-closed load fence. The
-	// current writer must set it while recovery is unresolved so rollback cannot
+	// current writer sets it while recovery is unresolved so rollback cannot
 	// reconnect a runtime through a path the old reader cannot qualify.
 	StartupStateUnknown bool                  `json:"startup_state_unknown,omitempty"`
 	Worktree            v10228GitWorktreeData `json:"worktree"`
@@ -90,7 +90,7 @@ func TestInstanceData_LoadsV10228WorktreeWithoutInventingRecovery(t *testing.T) 
 	require.NotNil(t, explicitEmpty.Worktree.RelocationRecovery,
 		"an explicit empty record must not collapse into absence")
 	_, err = FromInstanceData(explicitEmpty)
-	require.ErrorContains(t, err, "move recovery alternate path is empty",
+	require.ErrorContains(t, err, "rollback safety metadata is missing",
 		"zero-valued recovery state must fail closed rather than authorize the path")
 }
 
@@ -136,6 +136,17 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 	require.NotNil(t, legacy.Worktree.BranchCreatedByUs)
 	require.False(t, *legacy.Worktree.BranchCreatedByUs,
 		"rollback must not authorize v1.0.228 to delete the branch")
+
+	var current InstanceData
+	require.NoError(t, json.Unmarshal(payload, &current))
+	restored, err := FromInstanceData(current)
+	require.NoError(t, err)
+	require.False(t, restored.StartupStateUnknown(),
+		"the current reader must remove the rollback-only inert fence")
+	require.False(t, restored.IsExternalWorktree(),
+		"the current reader must restore the actual linked-worktree ownership")
+	require.True(t, restored.gitWorktree.BranchCreatedByUs(),
+		"the current reader must restore the actual branch provenance")
 }
 
 func TestInstanceData_ProjectsConsumedRelocationClaimUntilUse(t *testing.T) {
@@ -180,6 +191,8 @@ func TestInstanceData_ProjectsConsumedRelocationClaimUntilUse(t *testing.T) {
 
 func TestInstanceData_RoundTripsInterruptedRelocationRecovery(t *testing.T) {
 	createdByUs := true
+	externalWorktree := false
+	startupStateUnknown := false
 	root := t.TempDir()
 	data := InstanceData{
 		ID:       "relocation-recovery",
@@ -193,12 +206,15 @@ func TestInstanceData_RoundTripsInterruptedRelocationRecovery(t *testing.T) {
 			BranchName:        "af/archived",
 			BranchCreatedByUs: &createdByUs,
 			RelocationRecovery: &GitWorktreeRelocationRecoveryData{
-				State:         git.RelocationRecoveryMoveUnknown,
-				AlternatePath: filepath.Join(root, "original-source"),
-				IdentityKnown: true,
-				Device:        17,
-				Inode:         23,
-				FileType:      0o040000,
+				State:                       git.RelocationRecoveryMoveUnknown,
+				AlternatePath:               filepath.Join(root, "original-source"),
+				IdentityKnown:               true,
+				Device:                      17,
+				Inode:                       23,
+				FileType:                    0o040000,
+				OriginalExternalWorktree:    &externalWorktree,
+				OriginalBranchCreatedByUs:   &createdByUs,
+				OriginalStartupStateUnknown: &startupStateUnknown,
 			},
 		},
 	}
@@ -219,9 +235,7 @@ func TestInstanceData_RoundTripsInterruptedRelocationRecovery(t *testing.T) {
 	if roundTrip == nil {
 		t.Fatal("interrupted relocation recovery handle was dropped across storage reload")
 	}
-	if *roundTrip != *data.Worktree.RelocationRecovery {
-		t.Fatalf("relocation recovery = %+v, want %+v", *roundTrip, *data.Worktree.RelocationRecovery)
-	}
+	require.Equal(t, data.Worktree.RelocationRecovery, roundTrip)
 }
 
 func TestFromInstanceData_RelocationRecoveryLoadsRunningSessionInert(t *testing.T) {
@@ -232,8 +246,17 @@ func TestFromInstanceData_RelocationRecoveryLoadsRunningSessionInert(t *testing.
 	const agentName = "af_relocation_recovery_agent"
 	shellName := agentName + shellTmuxSuffix
 	data := deadInstanceData(t, Running, agentName, shellName)
+	originalExternalWorktree := data.Worktree.ExternalWorktree
+	originalBranchCreatedByUs := false
+	if data.Worktree.BranchCreatedByUs != nil {
+		originalBranchCreatedByUs = *data.Worktree.BranchCreatedByUs
+	}
+	originalStartupStateUnknown := data.StartupStateUnknown
 	data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
-		State: git.RelocationRecoveryStalled,
+		State:                       git.RelocationRecoveryStalled,
+		OriginalExternalWorktree:    &originalExternalWorktree,
+		OriginalBranchCreatedByUs:   &originalBranchCreatedByUs,
+		OriginalStartupStateUnknown: &originalStartupStateUnknown,
 	}
 
 	var newSessions int
