@@ -362,6 +362,17 @@ type GitWorktreeData struct {
 	BaseCommitSHA     string `json:"base_commit_sha"`
 	ExternalWorktree  bool   `json:"external_worktree,omitempty"`
 	BranchCreatedByUs *bool  `json:"branch_created_by_us,omitempty"`
+	// RelocationRecovery retains the original source as a non-authoritative
+	// second handle when a bounded worktree move may have reached WorktreePath
+	// before it was killed. Cleanup refuses both until a retry resolves identity.
+	RelocationRecovery *GitWorktreeRelocationRecoveryData `json:"relocation_recovery,omitempty"`
+}
+
+type GitWorktreeRelocationRecoveryData struct {
+	AlternatePath string `json:"alternate_path"`
+	Device        uint64 `json:"device"`
+	Inode         uint64 `json:"inode"`
+	FileType      uint32 `json:"file_type"`
 }
 
 // Storage handles saving and loading instances using the state interface.

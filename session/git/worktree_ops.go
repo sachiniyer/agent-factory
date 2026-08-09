@@ -514,6 +514,14 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	if g.worktreePath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
 	}
+	if recovery, ok := g.GetRelocationRecovery(); ok {
+		r.unknown = true
+		r.errs = append(r.errs, fmt.Errorf(
+			"refusing to inspect or clean up worktree relocation candidates %s and %s: a timed-out move left their identity unresolved; retry the archive or restore before any destructive cleanup",
+			g.worktreePath, recovery.AlternatePath,
+		))
+		return r.state(), errors.Join(r.errs...)
+	}
 	if g.cleanupHasStalled() {
 		r.unknown = true
 		r.errs = append(r.errs, fmt.Errorf(

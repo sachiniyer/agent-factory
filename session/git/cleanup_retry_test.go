@@ -58,6 +58,38 @@ func TestCleanup_PreviousRelocateStallRefusesInitialWorktreeRemoval(t *testing.T
 	}
 }
 
+func TestCleanup_PersistedRelocationRecoveryRefusesPathProbe(t *testing.T) {
+	gw, _ := worktreeForCleanup(t)
+	primary := gw.GetWorktreePath()
+	if err := gw.RestoreRelocationRecovery(RelocationRecovery{
+		AlternatePath: primary + "-alternate",
+		Device:        1,
+		Inode:         2,
+		FileType:      3,
+	}); err != nil {
+		t.Fatalf("restore relocation recovery: %v", err)
+	}
+
+	previousStat := cleanupWorktreeStat
+	statAttempted := false
+	cleanupWorktreeStat = func(path string) (os.FileInfo, error) {
+		statAttempted = true
+		return previousStat(path)
+	}
+	t.Cleanup(func() { cleanupWorktreeStat = previousStat })
+
+	state, cleanupErr := gw.Cleanup()
+	if statAttempted {
+		t.Fatal("Cleanup probed an unresolved relocation candidate before establishing its identity")
+	}
+	if state != CleanupStateUnknown {
+		t.Fatalf("unresolved relocation cleanup state = %v, want unknown", state)
+	}
+	if cleanupErr == nil {
+		t.Fatal("unresolved relocation cleanup refusal must be reported")
+	}
+}
+
 // TestCleanup_RetryAfterStall_StillRefusesTheUnboundedDelete is #1917 round-6
 // finding (1): refusing once is not refusing.
 //

@@ -545,6 +545,12 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	}
 	var workDir string
 	if gw != nil {
+		if recovery, ok := gw.GetRelocationRecovery(); ok {
+			return fmt.Errorf(
+				"recover: session %q has an interrupted worktree relocation between %s and %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+				i.Title, gw.GetWorktreePath(), recovery.AlternatePath,
+			)
+		}
 		workDir = gw.GetWorktreePath()
 	}
 	if workDir == "" {

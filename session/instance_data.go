@@ -148,6 +148,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			ExternalWorktree:  i.gitWorktree.IsExternalWorktree(),
 			BranchCreatedByUs: &branchCreatedByUs,
 		}
+		if recovery, ok := i.gitWorktree.GetRelocationRecovery(); ok {
+			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
+				AlternatePath: recovery.AlternatePath,
+				Device:        recovery.Device,
+				Inode:         recovery.Inode,
+				FileType:      recovery.FileType,
+			}
+		}
 	}
 
 	// Only include PR info if it exists
@@ -312,6 +320,16 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to restore git worktree: %w", err)
+			}
+			if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+				if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
+					AlternatePath: recovery.AlternatePath,
+					Device:        recovery.Device,
+					Inode:         recovery.Inode,
+					FileType:      recovery.FileType,
+				}); err != nil {
+					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
+				}
 			}
 			instance.gitWorktree = gw
 		}

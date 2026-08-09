@@ -319,7 +319,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); its worktree is at %s — check that path before restarting the daemon: %w%s", req.Title, perr, instance.GetWorktreePath(), err, hookNote)
+			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w%s", req.Title, perr, worktreeRecoveryLocation(instance), err, hookNote)
 		}
 		return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w%s", req.Title, err, hookNote)
 	}
@@ -696,14 +696,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			return "", fmt.Errorf("cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w", req.Title, instance.GetWorktreePath(), err)
 		}
 		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
-			// The relocate was cut off by its deadline AFTER the bytes reached
-			// dest: the git layer commits the new location to the worktree object
-			// before repairing, precisely because the registration can be stale
-			// while the location is not. That new location only exists in memory,
-			// and this failure path returns without persisting — so a daemon
-			// restart would reload the session as Archived pointing at an archive
-			// path that is no longer there, and every later restore would fail the
-			// source-exists guard while the user's work sat at dest.
+			// The bounded move may have reached either pathname before it was
+			// killed. The git layer retains destination + source with the captured
+			// directory identity; neither is destructive authority until a retry
+			// resolves it. Persist both handles before returning.
 			//
 			// Persist first, then report — and take the error-returning persist,
 			// not the log-and-continue one. The whole point of this branch is that
@@ -711,11 +707,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			// (full or read-only disk) reproduces the exact stranding it exists to
 			// prevent. Reporting the relocate error alone would tell the operator
 			// their worktree is safely recorded when nothing recorded it.
-			restoredPath := instance.GetWorktreePath()
 			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-				return "", fmt.Errorf("restore of %q was cut off mid-relocate AND its new location %s could not be written to disk (%v); the worktree is there but nothing durable points at it — move it back or re-register it manually before restarting the daemon: %w", req.Title, restoredPath, perr, err)
+				return "", fmt.Errorf("restore of %q was cut off mid-relocate AND its recovery candidates could not be written to disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w", req.Title, perr, worktreeRecoveryLocation(instance), err)
 			}
-			return "", fmt.Errorf("restore of %q was cut off mid-relocate; its worktree is recorded at %s so it is not lost, but its git registration is unverified — check that path and retry: %w", req.Title, restoredPath, err)
+			return "", fmt.Errorf("restore of %q was cut off mid-relocate; both possible worktree locations are recorded (%s), destructive cleanup is blocked, and a retry will resolve the directory identity: %w", req.Title, worktreeRecoveryLocation(instance), err)
 		}
 		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
 	}
@@ -776,6 +771,13 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return worktreePath, nil
+}
+
+func worktreeRecoveryLocation(instance *session.Instance) string {
+	if primary, alternate, ok := instance.GetWorktreeRelocationCandidates(); ok {
+		return fmt.Sprintf("either %s or %s (identity unresolved)", primary, alternate)
+	}
+	return instance.GetWorktreePath()
 }
 
 // archiveExclusiveTabLock serializes a tab spawn against an archive/kill/restore
