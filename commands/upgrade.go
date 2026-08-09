@@ -117,6 +117,15 @@ than the running binary — which happens when you switch from the preview
 channel back to stable — the upgrade is a no-op with an explanation. Pass
 --allow-downgrade to install the older release anyway.
 
+A manual upgrade also refuses to install a build this machine has already rolled
+back, so this repair path does not silently reinstall the bytes the rollback just
+recovered from. Publishing a corrected build is the normal fix; pass
+--allow-rejected to install the rejected build anyway.
+
+The same refusal protects launch auto-update and the daemon's transactional
+upgrade. Neither unattended path can override it; only af upgrade offers
+--allow-rejected because a human is present to make that choice.
+
 af upgrade restarts the running daemon after the swap, and always has: the
 daemon keeps executing the old code until something restarts it, so a fix that
 does not reach it is not really installed. Live sessions survive — they run in

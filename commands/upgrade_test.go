@@ -470,6 +470,23 @@ func TestShouldUpgrade(t *testing.T) {
 	}
 }
 
+func TestUpgradeHelpExplainsRejectedCandidates(t *testing.T) {
+	help := strings.Join(strings.Fields(upgradeCmd.Long), " ")
+	for _, want := range []string{
+		"already rolled back",
+		"Publishing a corrected build is the normal fix",
+		"--allow-rejected",
+		"launch auto-update",
+		"daemon's transactional upgrade",
+		"Neither unattended path can override it",
+		"only af upgrade offers --allow-rejected",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("af upgrade long help is missing %q:\n%s", want, upgradeCmd.Long)
+		}
+	}
+}
+
 func makeTarGz(t *testing.T, files map[string][]byte) []byte {
 	t.Helper()
 
