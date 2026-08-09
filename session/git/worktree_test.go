@@ -50,33 +50,34 @@ func sandboxHome(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(tempHome, ".agent-factory"))
 }
 
-func TestGetWorktreeDirectoryForRepo(t *testing.T) {
+func TestGetWorktreeDirectoryForRepoWithConfig(t *testing.T) {
 	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 
-	worktreeDir, err := getWorktreeDirectoryForRepo(repoRoot)
+	cfg := config.DefaultConfig()
+	worktreeDir, err := getWorktreeDirectoryForRepoWithConfig(cfg, repoRoot)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Dir(repoRoot), worktreeDir)
 }
 
-func TestGetWorktreeDirectoryForRepoSubdirectory(t *testing.T) {
+func TestGetWorktreeDirectoryForRepoWithConfigSubdirectory(t *testing.T) {
 	sandboxHome(t)
 
 	repoRoot := createGitRepo(t)
 	cfg := config.DefaultConfig()
 	cfg.WorktreeRoot = config.WorktreeRootSubdirectory
-	require.NoError(t, config.SaveConfig(cfg))
 
-	worktreeDir, err := getWorktreeDirectoryForRepo(repoRoot)
+	worktreeDir, err := getWorktreeDirectoryForRepoWithConfig(cfg, repoRoot)
 	require.NoError(t, err)
 	configDir, err := config.GetConfigDir()
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(configDir, "worktrees"), worktreeDir)
 }
 
-func TestGetWorktreeDirectoryForRepo_RequiresRepoPath(t *testing.T) {
-	_, err := getWorktreeDirectoryForRepo("")
+func TestGetWorktreeDirectoryForRepoWithConfig_RequiresRepoPath(t *testing.T) {
+	cfg := config.DefaultConfig()
+	_, err := getWorktreeDirectoryForRepoWithConfig(cfg, "")
 	require.Error(t, err)
 }
 
@@ -747,7 +748,7 @@ func TestFindGitRepoRoot_ResolvesLinkedWorktree(t *testing.T) {
 		"findGitRepoRoot should resolve a linked worktree back to the main repo root")
 }
 
-func TestGetWorktreeDirectoryForRepo_FromLinkedWorktree(t *testing.T) {
+func TestGetWorktreeDirectoryForRepoWithConfig_FromLinkedWorktree(t *testing.T) {
 	sandboxHome(t)
 
 	// Create a main repo with an initial commit
@@ -766,9 +767,10 @@ func TestGetWorktreeDirectoryForRepo_FromLinkedWorktree(t *testing.T) {
 	out, err = addCmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	// getWorktreeDirectoryForRepo from the linked worktree should return
+	// getWorktreeDirectoryForRepoWithConfig from the linked worktree should return
 	// the parent of the main repo, not the parent of the linked worktree.
-	worktreeDir, err := getWorktreeDirectoryForRepo(linkedPath)
+	cfg := config.DefaultConfig()
+	worktreeDir, err := getWorktreeDirectoryForRepoWithConfig(cfg, linkedPath)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Dir(repoRoot), worktreeDir,
 		"new worktrees should be placed next to the main repo, not next to a linked worktree")

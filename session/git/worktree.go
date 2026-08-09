@@ -14,14 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-func getWorktreeDirectoryForRepo(repoPath string) (string, error) {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return "", err
-	}
-	return getWorktreeDirectoryForRepoWithConfig(cfg, repoPath)
-}
-
 // getWorktreeDirectoryForRepoWithConfig returns the parent directory for new
 // worktrees under the configured placement mode.
 func getWorktreeDirectoryForRepoWithConfig(cfg *config.Config, repoPath string) (string, error) {
