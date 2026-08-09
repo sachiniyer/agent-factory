@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 func TestInstanceData_RoundTripsInterruptedRelocationRecovery(t *testing.T) {
@@ -21,7 +23,9 @@ func TestInstanceData_RoundTripsInterruptedRelocationRecovery(t *testing.T) {
 			BranchName:        "af/archived",
 			BranchCreatedByUs: &createdByUs,
 			RelocationRecovery: &GitWorktreeRelocationRecoveryData{
+				State:         git.RelocationRecoveryMoveUnknown,
 				AlternatePath: filepath.Join(root, "original-source"),
+				IdentityKnown: true,
 				Device:        17,
 				Inode:         23,
 				FileType:      0o040000,

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -8,6 +9,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func makeArchiveSourceClaimable(t *testing.T, inst *Instance) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(inst.gitWorktree.GetWorktreePath(), 0755))
+}
 
 // TestArchiveTeardown_KeepsWebTabsDropsProcessTabs is the #1809 headline: a web
 // tab is pure metadata (a URL string, no tmux session, no process), so archive —
@@ -24,6 +30,7 @@ func TestArchiveTeardown_KeepsWebTabsDropsProcessTabs(t *testing.T) {
 	_, err = inst.AddProcessTab("sleep 300", "watcher")
 	require.NoError(t, err)
 	require.Equal(t, 3, inst.TabCount(), "agent + web + process")
+	makeArchiveSourceClaimable(t, inst)
 
 	// The mock worktree has no real git repo behind it, so the relocation errors;
 	// finalize (the tab reconciliation under test) runs regardless.
@@ -51,6 +58,7 @@ func TestArchiveTeardown_WebTabsSurvivePersistRoundTrip(t *testing.T) {
 	inst := startedMockInstance(t, "af_archive_web_persist")
 	_, err := inst.AddWebTab("http://localhost:4321", "livepreview")
 	require.NoError(t, err)
+	makeArchiveSourceClaimable(t, inst)
 
 	_ = inst.ArchiveTeardown(t.TempDir())
 
@@ -83,6 +91,7 @@ func TestArchiveTeardown_PreservesWebTabRelativeOrder(t *testing.T) {
 	require.NoError(t, err)
 	_, err = inst.AddWebTab("http://localhost:3002", "second")
 	require.NoError(t, err)
+	makeArchiveSourceClaimable(t, inst)
 
 	_ = inst.ArchiveTeardown(t.TempDir())
 
@@ -109,6 +118,7 @@ func TestArchiveTeardown_KeepsVSCodeTabs(t *testing.T) {
 	_, err = inst.AddProcessTab("sleep 300", "watcher")
 	require.NoError(t, err)
 	require.Equal(t, 3, inst.TabCount(), "agent + vscode + process")
+	makeArchiveSourceClaimable(t, inst)
 
 	// The mock worktree has no real git repo behind it, so the relocation errors;
 	// finalize (the tab reconciliation under test) runs regardless.
@@ -136,6 +146,7 @@ func TestArchiveTeardown_VSCodeTabsSurvivePersistRoundTrip(t *testing.T) {
 	inst := startedMockInstance(t, "af_archive_vscode_persist")
 	_, err := inst.AddVSCodeTab("editor")
 	require.NoError(t, err)
+	makeArchiveSourceClaimable(t, inst)
 
 	_ = inst.ArchiveTeardown(t.TempDir())
 
@@ -167,6 +178,7 @@ func TestArchiveTeardown_KeepsEveryTmuxlessKindTogether(t *testing.T) {
 	require.NoError(t, err)
 	_, err = inst.AddVSCodeTab("editor")
 	require.NoError(t, err)
+	makeArchiveSourceClaimable(t, inst)
 
 	_ = inst.ArchiveTeardown(t.TempDir())
 
@@ -203,6 +215,7 @@ func TestArchiveTeardown_AgentOnlyUnchanged(t *testing.T) {
 	inst := startedMockInstance(t, "af_archive_agent_only")
 	_, err := inst.AddProcessTab("sleep 300", "watcher")
 	require.NoError(t, err)
+	makeArchiveSourceClaimable(t, inst)
 
 	_ = inst.ArchiveTeardown(t.TempDir())
 

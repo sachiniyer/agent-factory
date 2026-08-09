@@ -547,6 +547,7 @@ func (teardownReleasePTY) finalize(i *Instance, closed []closedTab, _ *git.GitWo
 // loop.
 type teardownArchive struct {
 	dest       string
+	claim      *git.RelocationClaim
 	beforeMove func() error
 	hookErr    *error
 }
@@ -568,6 +569,14 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 	if gw == nil {
 		return stateKnown, fmt.Errorf("cannot archive %q: instance has no worktree to relocate", title)
 	}
+	if m.claim != nil {
+		// Resolution was a point-in-time assertion made before pane teardown.
+		// Revalidate it at the operator hook's use boundary; failure is a safety
+		// error, not a best-effort hook error, so the move below must not run.
+		if err := gw.RevalidateRelocationClaim(*m.claim); err != nil {
+			return stateUnknown, fmt.Errorf("archive %q: worktree identity changed before on-archive hook: %w", title, err)
+		}
+	}
 	if m.beforeMove != nil {
 		// Cleanup policy is deliberately best-effort. Record its failure for the
 		// daemon to surface after the archive commits, then always relocate the
@@ -588,7 +597,13 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 	// Every other outcome keeps the pre-#1917 contract: an ordinary move failure
 	// still reports stateKnown so the daemon's rollback to Lost (which requires
 	// finalize to have run) fires as before.
-	if err := gw.MoveWorktree(m.dest); err != nil {
+	var moveErr error
+	if m.claim != nil {
+		moveErr = gw.MoveWorktreeWithClaim(m.dest, *m.claim)
+	} else {
+		moveErr = gw.MoveWorktree(m.dest)
+	}
+	if err := moveErr; err != nil {
 		if errors.Is(err, git.ErrRelocateStateUnknown) {
 			return stateUnknown, fmt.Errorf("archive %q: %w", title, err)
 		}

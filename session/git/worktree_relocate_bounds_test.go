@@ -398,7 +398,7 @@ func TestRelocate_RetryCanFallbackAfterSelectingOriginalSource(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
 }
 
-func TestRelocate_RetryKeepsCandidatesDistinctAfterSelectingAlternate(t *testing.T) {
+func TestRelocate_RetryClearsRecoveryAfterSelectingAlternate(t *testing.T) {
 	gw, repo, src := archiveTestWorktree(t)
 	firstDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "first")
 	secondDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "second")
@@ -418,19 +418,16 @@ func TestRelocate_RetryKeepsCandidatesDistinctAfterSelectingAlternate(t *testing
 	require.NoError(t, os.MkdirAll(secondDest, 0o755))
 	require.Error(t, gw.MoveWorktree(secondDest), "the occupied retry destination must stop the move")
 
-	recovery, ok := gw.GetRelocationRecovery()
-	require.True(t, ok)
 	assert.Equal(t, src, gw.GetWorktreePath())
-	assert.Equal(t, firstDest, recovery.AlternatePath,
-		"selecting the alternate must retain the old primary as the other recovery handle")
-	assert.NotEqual(t, gw.GetWorktreePath(), recovery.AlternatePath)
+	assert.False(t, gw.HasUnresolvedRelocation(),
+		"selecting the source must consume the recovery record before the later destination refusal")
 
 	reloaded, err := NewGitWorktreeFromStorage(
 		repo, gw.GetWorktreePath(), "arch", gw.GetBranchName(), gw.GetBaseCommitSHA(), false, true,
 	)
 	require.NoError(t, err)
-	require.NoError(t, reloaded.RestoreRelocationRecovery(recovery),
-		"a retry failure must remain loadable after persistence and restart")
+	assert.Equal(t, src, reloaded.GetWorktreePath(),
+		"after resolution, the selected path alone must remain loadable across restart")
 }
 
 func TestRelocate_RetryRevalidatesDestinationBeforeRegistrationRepair(t *testing.T) {

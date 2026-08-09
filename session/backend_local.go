@@ -545,13 +545,19 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	}
 	var workDir string
 	if gw != nil {
-		if recovery, ok := gw.GetRelocationRecovery(); ok {
+		var recovery git.RelocationRecovery
+		var unresolved bool
+		workDir, recovery, unresolved = gw.RelocationSnapshot()
+		if unresolved {
+			location := workDir
+			if recovery.AlternatePath != "" {
+				location += " and " + recovery.AlternatePath
+			}
 			return fmt.Errorf(
-				"recover: session %q has an interrupted worktree relocation between %s and %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
-				i.Title, gw.GetWorktreePath(), recovery.AlternatePath,
+				"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",
+				i.Title, recovery.State, location,
 			)
 		}
-		workDir = gw.GetWorktreePath()
 	}
 	if workDir == "" {
 		return fmt.Errorf("recover: session %q has no worktree to re-spawn into", i.Title)
@@ -800,9 +806,19 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 
 // Kill is best-effort: each cleanup step runs independently and a failure in
 // one (e.g. a broken git worktree) only logs a warning rather than aborting
-// the rest. The in-memory pointers are cleared regardless so the daemon
-// caller can always proceed to remove the persisted record. See issue #478.
+// the rest once destructive admission succeeds. Unknown recovery state is
+// returned before pane teardown so the daemon retains the persisted handle.
+// See issue #478.
 func (b *LocalBackend) Kill(i *Instance) error {
+	if err := i.ValidateWorktreeDestructionAdmission(); err != nil {
+		return fmt.Errorf("kill refused before pane teardown: %w", err)
+	}
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil && gw.CleanupRetryPending() {
+		return fmt.Errorf("%w: kill cleanup previously stalled; refusing to repeat pane teardown or enter an unbounded delete in this daemon process — restart the daemon to retry from the persisted record", ErrWorkspaceStateUnknown)
+	}
 	// PR 2 of #930 gives an instance N tabs (agent + shell today), so Kill tears
 	// down each tab's session, not just the agent's. The kill mode kill-sessions
 	// every tab (waiting for each pane to exit before the worktree delete, #802),

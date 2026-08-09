@@ -229,10 +229,10 @@ func TestArchiveSessionRevalidatesInterruptedMoveBeforeOperatorHook(t *testing.T
 	writeOnArchiveCommand(t, `printf ran > "$AF_WORKTREE_PATH/foreign-hook-ran"`)
 	movedAside := srcPath + "-identity-owner"
 	originalTeardown := archiveTeardown
-	archiveTeardown = func(target *session.Instance, archiveDest string, beforeMove func() error) (error, error) {
+	archiveTeardown = func(target *session.Instance, archiveDest string, claim sessiongit.RelocationClaim, beforeMove func() error) (error, error) {
 		require.NoError(t, os.Rename(srcPath, movedAside))
 		require.NoError(t, os.Mkdir(srcPath, 0o755))
-		return originalTeardown(target, archiveDest, beforeMove)
+		return originalTeardown(target, archiveDest, claim, beforeMove)
 	}
 	t.Cleanup(func() { archiveTeardown = originalTeardown })
 
@@ -242,6 +242,9 @@ func TestArchiveSessionRevalidatesInterruptedMoveBeforeOperatorHook(t *testing.T
 		"the operator hook must not consume a pathname that stopped identifying the recovered worktree")
 	assert.FileExists(t, filepath.Join(movedAside, "dirty.txt"),
 		"the identity-owning directory must remain preserved")
+	recovery, ok := interrupted.GetRelocationRecovery()
+	require.True(t, ok, "a stale point-in-time claim must recreate durable recovery state before returning")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
 }
 
 func TestKillSessionRefusesInterruptedRelocationBeforeTombstone(t *testing.T) {

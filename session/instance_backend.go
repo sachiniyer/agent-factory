@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // currentBackend snapshots the instance's backend under i.mu (#2096). The
@@ -205,18 +206,42 @@ func (i *Instance) ArchiveTeardown(dest string) error {
 	return err
 }
 
-// ResolveWorktreeRelocationForRetry establishes which durable pathname still
-// names the exact worktree after an interrupted move. It performs only bounded,
-// read-only identity checks and retains both distinct handles until the later
-// relocation retry completes. Archive calls it before deriving the hook cwd and
-// rollback origin, while the session is still intact.
-func (i *Instance) ResolveWorktreeRelocationForRetry() error {
+// ClaimWorktreeRelocationForRetry atomically consumes any durable recovery record
+// and returns the point-in-time directory claim later archive steps must
+// revalidate. Resolution never leaves a settled record behind for another reader
+// to reinterpret.
+func (i *Instance) ClaimWorktreeRelocationForRetry() (git.RelocationClaim, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.gitWorktree == nil {
-		return fmt.Errorf("cannot resolve worktree relocation for %q: instance has no worktree", i.Title)
+		return git.RelocationClaim{}, fmt.Errorf("cannot resolve worktree relocation for %q: instance has no worktree", i.Title)
 	}
-	return i.gitWorktree.ResolveRelocationRecovery()
+	return i.gitWorktree.ClaimRelocationSource()
+}
+
+func (i *Instance) ResolveWorktreeRelocationForRetry() error {
+	_, err := i.ClaimWorktreeRelocationForRetry()
+	return err
+}
+
+// ValidateWorktreeDestructionAdmission is the pre-teardown guard. It is called
+// before kill intent is persisted and again at the local backend boundary, so a
+// recovery record can never be consulted only after panes were destroyed.
+func (i *Instance) ValidateWorktreeDestructionAdmission() error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return nil
+	}
+	path, recovery, unresolved := gw.RelocationSnapshot()
+	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled {
+		return nil
+	}
+	return fmt.Errorf(
+		"worktree recovery state %s is unresolved at %s; retry archive or restore before destructive cleanup",
+		recovery.State, path,
+	)
 }
 
 // ArchiveTeardownWithHook is ArchiveTeardown with one additional operator
@@ -224,7 +249,17 @@ func (i *Instance) ResolveWorktreeRelocationForRetry() error {
 // but the worktree still occupies its live path. A callback failure is returned
 // separately from the relocation result and never prevents the move.
 func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error) (hookErr, archiveErr error) {
-	mode := teardownArchive{dest: dest, beforeMove: beforeMove, hookErr: &hookErr}
+	claim, err := i.ClaimWorktreeRelocationForRetry()
+	if err != nil {
+		return nil, err
+	}
+	return i.ArchiveTeardownWithClaim(dest, claim, beforeMove)
+}
+
+// ArchiveTeardownWithClaim carries the source claim obtained before teardown to
+// the hook and move use boundaries. Each boundary revalidates it independently.
+func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationClaim, beforeMove func() error) (hookErr, archiveErr error) {
+	mode := teardownArchive{dest: dest, claim: &claim, beforeMove: beforeMove, hookErr: &hookErr}
 	archiveErr = i.teardownTabs(mode)
 	return hookErr, archiveErr
 }

@@ -3,9 +3,11 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"time"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
-	"time"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // InstanceData represents the serializable data of an Instance
@@ -362,17 +364,19 @@ type GitWorktreeData struct {
 	BaseCommitSHA     string `json:"base_commit_sha"`
 	ExternalWorktree  bool   `json:"external_worktree,omitempty"`
 	BranchCreatedByUs *bool  `json:"branch_created_by_us,omitempty"`
-	// RelocationRecovery retains the original source as a non-authoritative
-	// second handle when a bounded worktree move may have reached WorktreePath
-	// before it was killed. Cleanup refuses both until a retry resolves identity.
+	// RelocationRecovery qualifies WorktreePath whenever a bounded lifecycle step
+	// did not establish a safe outcome. Some states retain a second pathname;
+	// every state blocks consumers until its owning retry resolves it.
 	RelocationRecovery *GitWorktreeRelocationRecoveryData `json:"relocation_recovery,omitempty"`
 }
 
 type GitWorktreeRelocationRecoveryData struct {
-	AlternatePath string `json:"alternate_path"`
-	Device        uint64 `json:"device"`
-	Inode         uint64 `json:"inode"`
-	FileType      uint32 `json:"file_type"`
+	State         git.RelocationRecoveryState `json:"state,omitempty"`
+	AlternatePath string                      `json:"alternate_path"`
+	IdentityKnown bool                        `json:"identity_known,omitempty"`
+	Device        uint64                      `json:"device"`
+	Inode         uint64                      `json:"inode"`
+	FileType      uint32                      `json:"file_type"`
 }
 
 // Storage handles saving and loading instances using the state interface.

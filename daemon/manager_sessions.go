@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // errSessionNotFound classifies only a resolver's authoritative miss. Its text
@@ -87,8 +88,9 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	}
 	defer opLock.Unlock()
 
-	// From here the kill is COMMITTED: the tombstone below is durable and the
-	// teardown mutates the workspace. Every remaining step is individually
+	// From here the kill has exclusive admission. The tombstone below is its
+	// commit point; until that write succeeds, every guard leaves the session
+	// unchanged. Every later step is individually
 	// bounded (the instances flock, and the tmux/git subprocesses under
 	// instance.Kill), so this function terminates without needing to abandon work
 	// mid-flight. The watchdog only reports a stage — and stacks — if a step
@@ -101,6 +103,23 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	if m.currentInstanceReplaced(key, instance, targetID) {
 		log.InfoLog.Printf("kill of session %q skipped: current instance identity changed before teardown", req.Title)
 		return resolved, nil
+	}
+	// Admission belongs before the commit point and before AgentServer.Kill closes
+	// brokers or the local backend tears panes down. Cleanup's later backstop can
+	// retain a record, but it cannot undo teardown that already happened.
+	if instance != nil {
+		if admissionErr := instance.ValidateWorktreeDestructionAdmission(); admissionErr != nil {
+			return session.InstanceData{}, fmt.Errorf(
+				"kill of session %q was not started because its worktree relocation is unresolved; nothing was changed: %w",
+				req.Title, admissionErr,
+			)
+		}
+	} else if data != nil && data.Worktree.RelocationRecovery != nil &&
+		data.Worktree.RelocationRecovery.State != sessiongit.RelocationRecoveryCleanupStalled {
+		return session.InstanceData{}, fmt.Errorf(
+			"kill of ghost session %q was not started because its persisted worktree recovery state %q is unresolved; nothing was changed — retry archive or restore before destructive cleanup",
+			req.Title, data.Worktree.RelocationRecovery.State,
+		)
 	}
 
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the

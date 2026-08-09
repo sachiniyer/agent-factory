@@ -132,6 +132,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
+		worktreePath, recovery, hasRecovery := i.gitWorktree.RelocationSnapshot()
 		// ExternalWorktree is true for in-place sessions (`af sessions create
 		// --here`, which attach to the repo's own working tree) and for
 		// instances persisted by the pre-#930-PR-3 create-on-existing-worktree
@@ -141,16 +142,18 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// git/worktree_ops.go setupFromExistingBranch.)
 		data.Worktree = GitWorktreeData{
 			RepoPath:          i.gitWorktree.GetRepoPath(),
-			WorktreePath:      i.gitWorktree.GetWorktreePath(),
+			WorktreePath:      worktreePath,
 			SessionName:       i.Title,
 			BranchName:        i.gitWorktree.GetBranchName(),
 			BaseCommitSHA:     i.gitWorktree.GetBaseCommitSHA(),
 			ExternalWorktree:  i.gitWorktree.IsExternalWorktree(),
 			BranchCreatedByUs: &branchCreatedByUs,
 		}
-		if recovery, ok := i.gitWorktree.GetRelocationRecovery(); ok {
+		if hasRecovery {
 			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
+				State:         recovery.State,
 				AlternatePath: recovery.AlternatePath,
+				IdentityKnown: recovery.IdentityKnown,
 				Device:        recovery.Device,
 				Inode:         recovery.Inode,
 				FileType:      recovery.FileType,
@@ -323,7 +326,9 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			}
 			if recovery := data.Worktree.RelocationRecovery; recovery != nil {
 				if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
+					State:         recovery.State,
 					AlternatePath: recovery.AlternatePath,
+					IdentityKnown: recovery.IdentityKnown,
 					Device:        recovery.Device,
 					Inode:         recovery.Inode,
 					FileType:      recovery.FileType,

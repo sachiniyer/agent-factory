@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -47,31 +47,15 @@ func getWorktreeDirectoryForRepoWithConfig(cfg *config.Config, repoPath string) 
 
 // GitWorktree manages git worktree operations for a session
 type GitWorktree struct {
-	// cleanupStalled latches once ANY cleanup or relocation command has timed out
-	// against this workspace, and it is the reason this fact lives on the WORKTREE
-	// rather than on the per-attempt cleanupRun (#1917 round 6, #3135).
-	//
-	// "This filesystem is stalled" is a property of the workspace, not of one
-	// attempt. Stored per-run it died on every retry: a `git worktree remove` that
-	// times out AFTER deregistering the checkout but BEFORE deleting its files
-	// leaves the next attempt's fresh run with unknown=false, its `worktree list`
-	// then answers "not registered" (it was deregistered!), and the unbounded
-	// os.RemoveAll runs against the same stalled filesystem — re-entering the exact
-	// wedge this work exists to remove. Refusing once is not refusing.
-	//
-	// Latched for the daemon's lifetime, deliberately: os.RemoveAll takes no
-	// context, so entering it is a one-way door, and nothing we could ask about the
-	// path is cheaper than the stall itself. A daemon restart re-probes, which is
-	// the one moment there is genuinely new information (the mount may be back).
-	// atomic because the poll's diagnostics read this worktree without the op lock
-	// the cleanup holds.
-	cleanupStalled atomic.Bool
-
-	// relocationRecovery keeps BOTH names that may identify a worktree after a
-	// bounded `git worktree move` was killed before answering. worktreePath is
-	// the requested destination candidate; AlternatePath is the original source.
-	// Neither candidate may authorize cleanup until a later bounded identity
-	// probe finds the exact directory captured before the move.
+	// relocationMu makes the persisted recovery record and the pathname it
+	// qualifies one state transition. A reader can never observe the new path with
+	// the old record (or the cleared record with the old path).
+	relocationMu sync.Mutex
+	// relocationRecovery is the sole durable latch for a worktree operation whose
+	// filesystem outcome is not yet safe to consume. Its explicit State separates
+	// a read-only relocation stall, an ambiguous move, a stale point-in-time claim,
+	// and a cleanup retry. Absence therefore has exactly one meaning: no unresolved
+	// operation is known.
 	relocationRecovery *RelocationRecovery
 
 	// Path to the repository
@@ -124,7 +108,9 @@ type GitWorktree struct {
 // the move and therefore follows an on-filesystem rename to either candidate.
 // Exported so session storage can round-trip the recovery proof across restart.
 type RelocationRecovery struct {
+	State         RelocationRecoveryState
 	AlternatePath string
+	IdentityKnown bool
 	Device        uint64
 	Inode         uint64
 	FileType      uint32
@@ -133,47 +119,6 @@ type RelocationRecovery struct {
 func (r RelocationRecovery) identity() pathIdentity {
 	return pathIdentity{device: r.Device, inode: r.Inode, fileType: r.FileType}
 }
-
-// GetRelocationRecovery returns the durable alternate handle for an unresolved
-// move. The current GetWorktreePath is the primary candidate, not established
-// authority, while ok is true.
-func (g *GitWorktree) GetRelocationRecovery() (RelocationRecovery, bool) {
-	if g.relocationRecovery == nil {
-		return RelocationRecovery{}, false
-	}
-	return *g.relocationRecovery, true
-}
-
-// RestoreRelocationRecovery reinstates a persisted recovery handle. It performs
-// no filesystem I/O; the next lifecycle retry resolves the two candidates under
-// a bound, while Cleanup refuses them both.
-func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) error {
-	if recovery.AlternatePath == "" {
-		return fmt.Errorf("relocation recovery alternate path is empty")
-	}
-	if recovery.AlternatePath == g.worktreePath {
-		return fmt.Errorf("relocation recovery paths are identical: %s", g.worktreePath)
-	}
-	g.relocationRecovery = &recovery
-	return nil
-}
-
-// HasUnresolvedRelocation reports that GetWorktreePath is only one of two
-// possible locations. Runtime recovery and destructive cleanup must refuse
-// until a relocation retry resolves the identity.
-func (g *GitWorktree) HasUnresolvedRelocation() bool { return g.relocationRecovery != nil }
-
-func (g *GitWorktree) beginRelocationRecovery(destination, source string, identity pathIdentity) {
-	g.setWorktreeLocation(destination)
-	g.relocationRecovery = &RelocationRecovery{
-		AlternatePath: source,
-		Device:        identity.device,
-		Inode:         identity.inode,
-		FileType:      identity.fileType,
-	}
-}
-
-func (g *GitWorktree) clearRelocationRecovery() { g.relocationRecovery = nil }
 
 // SetHookEnvironment sets exact operator-approved names used by post-worktree
 // commands. Post-worktree commands never receive an agent's provider
@@ -446,6 +391,8 @@ func NewGitWorktreeInPlace(repoPath string) (*GitWorktree, string, error) {
 
 // GetWorktreePath returns the path to the worktree
 func (g *GitWorktree) GetWorktreePath() string {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
 	return g.worktreePath
 }
 

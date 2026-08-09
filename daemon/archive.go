@@ -240,7 +240,8 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// the user's files, and a persist failure must roll back to that same origin.
 	// Resolution is bounded and read-only; failure leaves panes and the archive
 	// fence untouched.
-	if err := instance.ResolveWorktreeRelocationForRetry(); err != nil {
+	relocationClaim, err := instance.ClaimWorktreeRelocationForRetry()
+	if err != nil {
 		return "", session.InstanceData{}, fmt.Errorf(
 			"cannot retry archive of session %q until its interrupted worktree move is resolved: %w",
 			req.Title, err,
@@ -248,7 +249,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	}
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).
-	origPath := instance.GetWorktreePath()
+	origPath := relocationClaim.Path
 
 	// Raise the archive fence through the chokepoint (#1195 Phase 2d): BeginArchive
 	// sets OpArchiving (I4) so the status poll skips this instance (and the
@@ -293,7 +294,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a
 	// separate MoveArchivedWorktree step relying on duplicated ordering prose).
-	hookErr, err := archiveTeardown(instance, dest, func() error {
+	hookErr, err := archiveTeardown(instance, dest, relocationClaim, func() error {
 		return runOnArchiveHook(onArchiveHookContext{
 			sessionID:   instance.ID,
 			title:       req.Title,
@@ -938,7 +939,7 @@ var archivePersist = (*Manager).persistInstanceErr
 // archiveTeardown is the physical teardown+hook+move ArchiveSession runs before
 // its durable commit. Indirected so race tests can install an editor in the
 // exact post-move window without weakening the production ordering.
-var archiveTeardown = (*session.Instance).ArchiveTeardownWithHook
+var archiveTeardown = (*session.Instance).ArchiveTeardownWithClaim
 
 // archivedWorktreePath returns the global archive location for a session's
 // relocated worktree: <AGENT_FACTORY_HOME>/archived/<repoID>/<safeTitle>/. The

@@ -511,22 +511,15 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	if g.repoPath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: repo path is empty")
 	}
-	if g.worktreePath == "" {
+	worktreePath, recovery, hasRecovery := g.RelocationSnapshot()
+	if worktreePath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
 	}
-	if recovery, ok := g.GetRelocationRecovery(); ok {
+	if hasRecovery {
 		r.unknown = true
 		r.errs = append(r.errs, fmt.Errorf(
-			"refusing to inspect or clean up worktree relocation candidates %s and %s: a timed-out move left their identity unresolved; retry the archive or restore before any destructive cleanup",
-			g.worktreePath, recovery.AlternatePath,
-		))
-		return r.state(), errors.Join(r.errs...)
-	}
-	if g.cleanupHasStalled() {
-		r.unknown = true
-		r.errs = append(r.errs, fmt.Errorf(
-			"refusing to inspect or clean up worktree %s: a previous cleanup or relocation command timed out against this workspace, so even probing its path could hang the daemon; leaving it in place for recovery after restart",
-			g.worktreePath,
+			"refusing to inspect or clean up worktree recovery state %s at %s (alternate %s): resolve relocation through archive/restore, or restart the daemon to retry a cleanup stall",
+			recovery.State, worktreePath, recovery.AlternatePath,
 		))
 		return r.state(), errors.Join(r.errs...)
 	}
@@ -889,12 +882,3 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 
 	return nil
 }
-
-// markCleanupStalled latches the workspace-level "a cleanup or relocation
-// command timed out here" fact (see GitWorktree.cleanupStalled).
-func (g *GitWorktree) markCleanupStalled() { g.cleanupStalled.Store(true) }
-
-// cleanupHasStalled reports whether any cleanup or relocation attempt against this
-// workspace has ever tripped a deadline. Destructive fallbacks must never enter an
-// unbounded delete on a filesystem that has already proven it can stall.
-func (g *GitWorktree) cleanupHasStalled() bool { return g.cleanupStalled.Load() }

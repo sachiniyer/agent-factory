@@ -111,13 +111,17 @@ func TestRecover_RefusesWorktreeAfterRelocationProbeTimeout(t *testing.T) {
 	moveErr := worktree.MoveWorktree(filepath.Join(t.TempDir(), "archive"))
 	require.ErrorIs(t, moveErr, context.DeadlineExceeded,
 		"the setup must trip the bounded pre-move probe")
-	_, hasRecovery := worktree.GetRelocationRecovery()
+	recovery, hasRecovery := worktree.GetRelocationRecovery()
 	require.True(t, hasRecovery,
 		"every latched relocation stall must materialize recovery state; absent cannot mean safe")
+	assert.Equal(t, sessiongit.RelocationRecoveryStalled, recovery.State)
+	storedRecovery := restored.ToInstanceData().Worktree.RelocationRecovery
+	require.NotNil(t, storedRecovery, "the stall latch must survive the daemon's durable snapshot")
+	assert.Equal(t, sessiongit.RelocationRecoveryStalled, storedRecovery.State)
 
 	err = restored.Recover()
 	require.Error(t, err, "Lost recovery must refuse a worktree whose filesystem already stalled")
-	assert.Contains(t, err.Error(), "timed out")
+	assert.Contains(t, err.Error(), "unresolved worktree recovery state")
 	assert.Equal(t, 0, newSessions, "the stalled worktree must be refused before any agent spawn")
 }
 

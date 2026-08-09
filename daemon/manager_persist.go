@@ -359,7 +359,9 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 	}
 	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
 		if recoveryErr := gw.RestoreRelocationRecovery(git.RelocationRecovery{
+			State:         recovery.State,
 			AlternatePath: recovery.AlternatePath,
+			IdentityKnown: recovery.IdentityKnown,
 			Device:        recovery.Device,
 			Inode:         recovery.Inode,
 			FileType:      recovery.FileType,

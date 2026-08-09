@@ -25,7 +25,7 @@ func TestCleanup_PreviousRelocateStallRefusesInitialWorktreeRemoval(t *testing.T
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	gw, wt := worktreeForCleanup(t)
-	gw.markCleanupStalled()
+	gw.markRelocationStalled(nil)
 	previousStat := cleanupWorktreeStat
 	statAttempted := false
 	cleanupWorktreeStat = func(path string) (os.FileInfo, error) {
