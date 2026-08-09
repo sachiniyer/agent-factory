@@ -20,16 +20,20 @@ import (
 // relocation_recovery field, so encoding/json must ignore that additive field
 // when a current record is read after a rollback.
 type v10228InstanceData struct {
-	ID          string                `json:"id,omitempty"`
-	Title       string                `json:"title"`
-	Path        string                `json:"path"`
-	Branch      string                `json:"branch"`
-	Status      Status                `json:"status"`
-	Liveness    Liveness              `json:"liveness,omitempty"`
-	Program     string                `json:"program"`
-	BackendType string                `json:"backend_type,omitempty"`
-	Worktree    v10228GitWorktreeData `json:"worktree"`
-	Tabs        []TabData             `json:"tabs,omitempty"`
+	ID          string   `json:"id,omitempty"`
+	Title       string   `json:"title"`
+	Path        string   `json:"path"`
+	Branch      string   `json:"branch"`
+	Status      Status   `json:"status"`
+	Liveness    Liveness `json:"liveness,omitempty"`
+	Program     string   `json:"program"`
+	BackendType string   `json:"backend_type,omitempty"`
+	// StartupStateUnknown is an existing v1.0.228 fail-closed load fence. The
+	// current writer must set it while recovery is unresolved so rollback cannot
+	// reconnect a runtime through a path the old reader cannot qualify.
+	StartupStateUnknown bool                  `json:"startup_state_unknown,omitempty"`
+	Worktree            v10228GitWorktreeData `json:"worktree"`
+	Tabs                []TabData             `json:"tabs,omitempty"`
 }
 
 type v10228GitWorktreeData struct {
@@ -125,8 +129,13 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 		"v1.0.228 used encoding/json without DisallowUnknownFields")
 	require.Equal(t, worktreePath, legacy.Worktree.WorktreePath)
 	require.Equal(t, "af/archived", legacy.Worktree.BranchName)
+	require.True(t, legacy.StartupStateUnknown,
+		"rollback must keep the session inert because v1.0.228 cannot qualify the recovery path")
+	require.True(t, legacy.Worktree.ExternalWorktree,
+		"rollback must make v1.0.228's destructive worktree cleanup a no-op")
 	require.NotNil(t, legacy.Worktree.BranchCreatedByUs)
-	require.True(t, *legacy.Worktree.BranchCreatedByUs)
+	require.False(t, *legacy.Worktree.BranchCreatedByUs,
+		"rollback must not authorize v1.0.228 to delete the branch")
 }
 
 func TestInstanceData_ProjectsConsumedRelocationClaimUntilUse(t *testing.T) {
