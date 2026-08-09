@@ -2534,6 +2534,14 @@ than the running binary — which happens when you switch from the preview
 channel back to stable — the upgrade is a no-op with an explanation. Pass
 --allow-downgrade to install the older release anyway.
 
+A manual upgrade also refuses a build this machine has already rolled back
+(that exact binary failed validation here before), so the repair command
+does not silently reinstall the bytes it just recovered from. Publish a
+corrected build, or pass --allow-rejected to install it anyway. The same
+refusal guards the launch auto-update and the daemon transactional upgrade,
+neither of which is overridable — only `af upgrade` is, because a human is
+on that path.
+
 af upgrade restarts the running daemon after the swap, and always has: the
 daemon keeps executing the old code until something restarts it, so a fix that
 does not reach it is not really installed. Live sessions survive — they run in
