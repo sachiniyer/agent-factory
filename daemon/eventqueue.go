@@ -487,14 +487,15 @@ func (q *eventQueue) removeDrainedFilesLocked() (bool, error) {
 
 // compactLocked rewrites the queue file to just its pending suffix, dropping
 // the delivered prefix: copy suffix → sync and close temp file → persist cursor
-// 0 → rename over the original → commit the matching in-memory offset → sync
-// the containing directory. Crash safety comes from both halves of that
-// publication: the compacted contents reach stable storage before rename, and
-// the directory entry does afterward. The cursor-before-rename ordering (#1537)
-// separately ensures no crash can leave the small compacted file beside a stale
-// offset that points mid-record. Every crash point therefore preserves the pending
-// suffix; the worst case redelivers an already-delivered prefix (at-least-once,
-// never loss). Callers hold q.mu.
+// 0 → sync its directory entry → rename over the original → commit the matching
+// in-memory offset → sync the containing directory. Crash safety comes from both
+// halves of that publication: the cursor reset and compacted contents reach
+// stable storage before the queue rename, and the queue's new directory entry
+// does afterward. The cursor-before-rename ordering (#1537) separately ensures
+// no crash can leave the small compacted file beside a stale offset that points
+// mid-record. Every crash point therefore preserves the pending suffix; the
+// worst case redelivers an already-delivered prefix (at-least-once, never loss).
+// Callers hold q.mu.
 func (q *eventQueue) compactLocked() error {
 	src, err := os.Open(q.path)
 	if err != nil {
@@ -533,6 +534,14 @@ func (q *eventQueue) compactLocked() error {
 	if err := q.persistCursorValueLocked(0); err != nil {
 		_ = os.Remove(tmpName)
 		return err
+	}
+	// AtomicWriteFile's directory sync is intentionally best-effort for its
+	// general callers. Compaction needs a stronger cross-file guarantee: cursor
+	// 0 must be durable before the shortened queue can become durable, or a
+	// crash could pair the new queue with the old nonzero cursor and skip events.
+	if err := q.syncDirectory(filepath.Dir(q.curPath)); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("sync event-queue cursor directory before compaction: %w", err)
 	}
 	if err := os.Rename(tmpName, q.path); err != nil {
 		_ = os.Remove(tmpName)
