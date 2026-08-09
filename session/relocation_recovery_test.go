@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -13,6 +14,120 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// v10228InstanceData is the persisted subset needed to pin the rollback wire
+// contract. v1.0.228's GitWorktreeData ended at BranchCreatedByUs: it had no
+// relocation_recovery field, so encoding/json must ignore that additive field
+// when a current record is read after a rollback.
+type v10228InstanceData struct {
+	ID          string                `json:"id,omitempty"`
+	Title       string                `json:"title"`
+	Path        string                `json:"path"`
+	Branch      string                `json:"branch"`
+	Status      Status                `json:"status"`
+	Liveness    Liveness              `json:"liveness,omitempty"`
+	Program     string                `json:"program"`
+	BackendType string                `json:"backend_type,omitempty"`
+	Worktree    v10228GitWorktreeData `json:"worktree"`
+	Tabs        []TabData             `json:"tabs,omitempty"`
+}
+
+type v10228GitWorktreeData struct {
+	RepoPath          string `json:"repo_path"`
+	WorktreePath      string `json:"worktree_path"`
+	SessionName       string `json:"session_name"`
+	BranchName        string `json:"branch_name"`
+	BaseCommitSHA     string `json:"base_commit_sha"`
+	ExternalWorktree  bool   `json:"external_worktree,omitempty"`
+	BranchCreatedByUs *bool  `json:"branch_created_by_us,omitempty"`
+}
+
+func TestInstanceData_LoadsV10228WorktreeWithoutInventingRecovery(t *testing.T) {
+	createdByUs := true
+	root := t.TempDir()
+	legacy := v10228InstanceData{
+		ID:       "v10228-recovery-compat",
+		Title:    "archived",
+		Path:     root,
+		Branch:   "af/archived",
+		Status:   Archived,
+		Liveness: LiveArchived,
+		Program:  "claude",
+		Worktree: v10228GitWorktreeData{
+			RepoPath:          filepath.Join(root, "repo"),
+			WorktreePath:      filepath.Join(root, "archive"),
+			SessionName:       "archived",
+			BranchName:        "af/archived",
+			BranchCreatedByUs: &createdByUs,
+		},
+	}
+
+	payload, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	var current InstanceData
+	require.NoError(t, json.Unmarshal(payload, &current))
+	require.Nil(t, current.Worktree.RelocationRecovery,
+		"a v1.0.228 record has no recovery field; absence must remain absence")
+
+	restored, err := FromInstanceData(current)
+	require.NoError(t, err)
+	require.Equal(t, legacy.Worktree.WorktreePath, restored.GetWorktreePath())
+	require.False(t, restored.gitWorktree.HasUnresolvedRelocation())
+
+	emptyPayload := strings.Replace(
+		string(payload),
+		`"branch_created_by_us":true`,
+		`"branch_created_by_us":true,"relocation_recovery":{}`,
+		1,
+	)
+	require.NotEqual(t, string(payload), emptyPayload, "fixture insertion must succeed")
+	var explicitEmpty InstanceData
+	require.NoError(t, json.Unmarshal([]byte(emptyPayload), &explicitEmpty))
+	require.NotNil(t, explicitEmpty.Worktree.RelocationRecovery,
+		"an explicit empty record must not collapse into absence")
+	_, err = FromInstanceData(explicitEmpty)
+	require.ErrorContains(t, err, "move recovery alternate path is empty",
+		"zero-valued recovery state must fail closed rather than authorize the path")
+}
+
+func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T) {
+	root := t.TempDir()
+	worktreePath := filepath.Join(root, "archive")
+	require.NoError(t, os.Mkdir(worktreePath, 0o755))
+	info, err := os.Stat(worktreePath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+
+	gw, err := git.NewGitWorktreeFromStorage(
+		filepath.Join(root, "repo"), worktreePath, "archived", "af/archived", "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State:         git.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	inst, err := NewInstance(InstanceOptions{Title: "archived", Path: root, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetStatusForTest(Archived)
+
+	payload, err := json.Marshal(inst.ToInstanceData().ForStorage())
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"relocation_recovery"`,
+		"precondition: the current writer must emit the additive recovery record")
+
+	var legacy v10228InstanceData
+	require.NoError(t, json.Unmarshal(payload, &legacy),
+		"v1.0.228 used encoding/json without DisallowUnknownFields")
+	require.Equal(t, worktreePath, legacy.Worktree.WorktreePath)
+	require.Equal(t, "af/archived", legacy.Worktree.BranchName)
+	require.NotNil(t, legacy.Worktree.BranchCreatedByUs)
+	require.True(t, *legacy.Worktree.BranchCreatedByUs)
+}
 
 func TestInstanceData_ProjectsConsumedRelocationClaimUntilUse(t *testing.T) {
 	root := t.TempDir()
