@@ -244,6 +244,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	worktreeReaped := false
+	restoredRelocationRecovery := false
 
 	// Pick backend based on persisted BackendType.
 	switch {
@@ -335,6 +336,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 				}); err != nil {
 					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 				}
+				restoredRelocationRecovery = true
 			}
 			instance.gitWorktree = gw
 		}
@@ -366,6 +368,15 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// would synthesize a fresh conventional tmux name and make the retry target a
 	// session that never belonged to this tombstone.
 	if worktreeReaped {
+		return instance, nil
+	}
+
+	// A relocation-recovery record says the persisted worktree path is not yet
+	// authoritative. Keep every such local session inert on reload: Start(false)
+	// would pass that path into tmux restore and could reconnect or respawn an
+	// agent in a stale or replaced directory. An explicit bounded archive/restore
+	// retry owns resolving the record before any runtime may use the path again.
+	if restoredRelocationRecovery {
 		return instance, nil
 	}
 

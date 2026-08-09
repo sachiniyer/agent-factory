@@ -458,11 +458,13 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		status := data.Status
 		pendingHandoff := data.PendingHandoffMission != ""
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
+		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
 		// A pending mission is a durable recovery obligation and therefore a
 		// retention claim, not generic transient UI state. OpReplacing composes to
 		// Loading, but dropping that row would erase the only handle to a live
 		// incoming runtime. The explicit marker outranks the lossy legacy status.
-		if (status == Loading || status == Deleting) && !pendingHandoff && !unknownRuntimeCleanup {
+		if (status == Loading || status == Deleting) && !pendingHandoff &&
+			!unknownRuntimeCleanup && !unresolvedRelocation {
 			continue
 		}
 		// The !Started() skip drops transient never-started junk (a create that
@@ -474,8 +476,9 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// the same repo is saved — would silently orphan the archived worktree.
 		// (Lost is unaffected: it loads started=true, so it already survives.)
 		//
-		// TOMBSTONED, startup-unknown, and runtime-cleanup-unknown instances are
-		// also kept (#1917/#2207). They are started=false and not Archived while
+		// TOMBSTONED, startup-unknown, runtime-cleanup-unknown, and unresolved
+		// worktree-relocation instances are also kept (#1917/#2207/#3135). They are
+		// started=false and not Archived while
 		// their workspace may still be live: teardown could not confirm the pane
 		// dead or finish a worktree removal, startup never established the runtime's
 		// identity, or an off-box teardown did not establish whether its sandbox was
@@ -485,7 +488,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
 		if !inst.Started() && status != Archived && !data.UserKilled &&
-			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup {
+			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup && !unresolvedRelocation {
 			continue
 		}
 		root := inst.GetRepoPath()
