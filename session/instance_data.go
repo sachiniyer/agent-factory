@@ -132,6 +132,9 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// Only include worktree data if gitWorktree is initialized
 	if i.gitWorktree != nil {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
+		externalWorktree := i.gitWorktree.IsExternalWorktree()
+		startupStateUnknown := i.startupStateUnknown
+		worktreePath, recovery, hasRecovery := i.gitWorktree.RelocationSnapshot()
 		// ExternalWorktree is true for in-place sessions (`af sessions create
 		// --here`, which attach to the repo's own working tree) and for
 		// instances persisted by the pre-#930-PR-3 create-on-existing-worktree
@@ -141,12 +144,25 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// git/worktree_ops.go setupFromExistingBranch.)
 		data.Worktree = GitWorktreeData{
 			RepoPath:          i.gitWorktree.GetRepoPath(),
-			WorktreePath:      i.gitWorktree.GetWorktreePath(),
+			WorktreePath:      worktreePath,
 			SessionName:       i.Title,
 			BranchName:        i.gitWorktree.GetBranchName(),
 			BaseCommitSHA:     i.gitWorktree.GetBaseCommitSHA(),
-			ExternalWorktree:  i.gitWorktree.IsExternalWorktree(),
+			ExternalWorktree:  externalWorktree,
 			BranchCreatedByUs: &branchCreatedByUs,
+		}
+		if hasRecovery {
+			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
+				State:                       recovery.State,
+				AlternatePath:               recovery.AlternatePath,
+				IdentityKnown:               recovery.IdentityKnown,
+				Device:                      recovery.Device,
+				Inode:                       recovery.Inode,
+				FileType:                    recovery.FileType,
+				OriginalExternalWorktree:    &externalWorktree,
+				OriginalBranchCreatedByUs:   &branchCreatedByUs,
+				OriginalStartupStateUnknown: &startupStateUnknown,
+			}
 		}
 	}
 
@@ -166,6 +182,21 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+		// ForStorage projects unresolved records through v1.0.228's existing
+		// fail-closed fields. A current reader must recover the exact original
+		// ownership and startup state; missing metadata is not a zero value and
+		// must never turn the rollback fence into deletion authority.
+		if recovery.OriginalExternalWorktree == nil ||
+			recovery.OriginalBranchCreatedByUs == nil ||
+			recovery.OriginalStartupStateUnknown == nil {
+			return nil, fmt.Errorf("failed to restore worktree relocation recovery: rollback safety metadata is missing")
+		}
+		data.Worktree.ExternalWorktree = *recovery.OriginalExternalWorktree
+		branchCreatedByUs := *recovery.OriginalBranchCreatedByUs
+		data.Worktree.BranchCreatedByUs = &branchCreatedByUs
+		data.StartupStateUnknown = *recovery.OriginalStartupStateUnknown
+	}
 	id := data.ID
 	if id == "" {
 		// Legacy records predate stable session identity. Materialized instances
@@ -233,6 +264,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	worktreeReaped := false
+	restoredRelocationRecovery := false
 
 	// Pick backend based on persisted BackendType.
 	switch {
@@ -313,6 +345,19 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to restore git worktree: %w", err)
 			}
+			if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+				if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
+					State:         recovery.State,
+					AlternatePath: recovery.AlternatePath,
+					IdentityKnown: recovery.IdentityKnown,
+					Device:        recovery.Device,
+					Inode:         recovery.Inode,
+					FileType:      recovery.FileType,
+				}); err != nil {
+					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
+				}
+				restoredRelocationRecovery = true
+			}
 			instance.gitWorktree = gw
 		}
 
@@ -343,6 +388,15 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// would synthesize a fresh conventional tmux name and make the retry target a
 	// session that never belonged to this tombstone.
 	if worktreeReaped {
+		return instance, nil
+	}
+
+	// A relocation-recovery record says the persisted worktree path is not yet
+	// authoritative. Keep every such local session inert on reload: Start(false)
+	// would pass that path into tmux restore and could reconnect or respawn an
+	// agent in a stale or replaced directory. An explicit bounded archive/restore
+	// retry owns resolving the record before any runtime may use the path again.
+	if restoredRelocationRecovery {
 		return instance, nil
 	}
 

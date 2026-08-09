@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // currentBackend snapshots the instance's backend under i.mu (#2096). The
@@ -205,13 +206,88 @@ func (i *Instance) ArchiveTeardown(dest string) error {
 	return err
 }
 
+// ClaimWorktreeRelocationForRetry atomically consumes any durable recovery record
+// and returns the point-in-time directory claim later archive steps must
+// revalidate. Resolution never leaves a settled record behind for another reader
+// to reinterpret.
+func (i *Instance) ClaimWorktreeRelocationForRetry() (git.RelocationClaim, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.gitWorktree == nil {
+		return git.RelocationClaim{}, fmt.Errorf("cannot resolve worktree relocation for %q: instance has no worktree", i.Title)
+	}
+	return i.gitWorktree.ClaimRelocationSource()
+}
+
+// PreserveWorktreeRelocationClaimForRetry returns ownership of a consumed
+// recovery claim when an earlier archive gate aborts before the worktree use
+// boundary. Claims made from record-free state are no-ops.
+func (i *Instance) PreserveWorktreeRelocationClaimForRetry(claim git.RelocationClaim) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil {
+		gw.PreserveRelocationClaim(claim)
+	}
+}
+
+// SettleWorktreeRelocationClaimForRetry establishes that a consumed recovery
+// claim still names the archived directory, then releases it atomically. This is
+// the non-relocating completion path used when the origin repo is gone.
+func (i *Instance) SettleWorktreeRelocationClaimForRetry(claim git.RelocationClaim) error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot settle worktree relocation for %q: instance has no worktree", i.Title)
+	}
+	return gw.SettleRelocationClaim(claim)
+}
+
+// ValidateWorktreeDestructionAdmission is the pre-teardown guard. It is called
+// before kill intent is persisted and again at the local backend boundary, so a
+// recovery record can never be consulted only after panes were destroyed.
+func (i *Instance) ValidateWorktreeDestructionAdmission() error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return nil
+	}
+	path, recovery, unresolved := gw.RelocationSnapshot()
+	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled {
+		return nil
+	}
+	return fmt.Errorf(
+		"worktree recovery state %s is unresolved at %s; retry archive or restore before destructive cleanup",
+		recovery.State, path,
+	)
+}
+
 // ArchiveTeardownWithHook is ArchiveTeardown with one additional operator
 // callback at the only safe cleanup point: every pane has been confirmed dead,
 // but the worktree still occupies its live path. A callback failure is returned
 // separately from the relocation result and never prevents the move.
 func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error) (hookErr, archiveErr error) {
-	mode := teardownArchive{dest: dest, beforeMove: beforeMove, hookErr: &hookErr}
+	claim, err := i.ClaimWorktreeRelocationForRetry()
+	if err != nil {
+		return nil, err
+	}
+	return i.ArchiveTeardownWithClaim(dest, claim, beforeMove)
+}
+
+// ArchiveTeardownWithClaim carries the source claim obtained before teardown to
+// the hook and move use boundaries. Each boundary revalidates it independently.
+func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationClaim, beforeMove func() error) (hookErr, archiveErr error) {
+	claimHandled := false
+	mode := teardownArchive{
+		dest: dest, claim: &claim, claimHandled: &claimHandled,
+		beforeMove: beforeMove, hookErr: &hookErr,
+	}
 	archiveErr = i.teardownTabs(mode)
+	if !claimHandled {
+		i.PreserveWorktreeRelocationClaimForRetry(claim)
+	}
 	return hookErr, archiveErr
 }
 
@@ -233,9 +309,21 @@ func (i *Instance) SetArchived() {
 // and re-registers it against the origin repo (#1028). Surfaces git.ErrRepoGone
 // when the repo has been deleted so the caller can leave the archive intact.
 func (i *Instance) RestoreArchivedWorktree(dest string) error {
+	claim, err := i.ClaimWorktreeRelocationForRetry()
+	if err != nil {
+		return err
+	}
+	return i.RestoreArchivedWorktreeWithClaim(dest, claim)
+}
+
+// RestoreArchivedWorktreeWithClaim carries recovery ownership obtained before
+// restore admission through to the relocation boundary, avoiding a second
+// reader between source resolution and use.
+func (i *Instance) RestoreArchivedWorktreeWithClaim(dest string, claim git.RelocationClaim) error {
 	i.mu.RLock()
 	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
 		i.mu.RUnlock()
+		i.PreserveWorktreeRelocationClaimForRetry(claim)
 		return err
 	}
 	gw := i.gitWorktree
@@ -243,7 +331,7 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
 	}
-	return gw.RestoreWorktreeTo(dest)
+	return gw.RestoreWorktreeToWithClaim(dest, claim)
 }
 
 // ArchivedBranchForReclaim reports the branch an archived session is holding

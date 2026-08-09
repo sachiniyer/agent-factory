@@ -2,6 +2,8 @@ package git
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -149,4 +151,338 @@ func TestRelocate_DoesNotWedgeOnStalledGit(t *testing.T) {
 		t.Fatal("relocateWorktreeTo hung on a stalled git (#1917): the session would stay " +
 			"wedged in Archiving/Restoring for the daemon's lifetime")
 	}
+}
+
+// The submodule probe is read-only, so a deadline there leaves the original
+// worktree intact. Starting git worktree move or the manual copy fallback after
+// that evidence of a stalled filesystem can only make the outcome less certain;
+// the cross-device path eventually enters an unbounded recursive source delete.
+// Stop at the first deadline and latch it for later Cleanup attempts (#3135).
+func TestRelocate_InspectionDeadlineStopsBeforeMoveFallback(t *testing.T) {
+	gw, _, src := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	moveAttempted := false
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		moveAttempted = true
+		return nil
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	err := gw.MoveWorktree(dest)
+
+	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.False(t, moveAttempted,
+		"no mutating relocation step may start after the read-only probe times out")
+	assert.True(t, gw.cleanupHasStalled(),
+		"the deadline must latch on the worktree so a later Cleanup also refuses destruction")
+	assert.DirExists(t, src, "the original worktree and its uncommitted data stay in place")
+	assert.NoDirExists(t, dest)
+}
+
+// The identity snapshot is metadata I/O against the same filesystem as the
+// worktree. If that mount stalls after the git submodule probe answered, a
+// synchronous open/fstat would wedge immediately before the bounded move.
+func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
+	gw, _, src := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousIdentity := relocationPathIdentity
+	sourceIdentity, err := previousIdentity(src)
+	require.NoError(t, err)
+	release := make(chan struct{})
+	probeDone := make(chan struct{})
+	relocationPathIdentity = func(path string) (pathIdentity, error) {
+		if path == src {
+			<-release
+			close(probeDone)
+			return sourceIdentity, nil
+		}
+		return previousIdentity(path)
+	}
+	t.Cleanup(func() {
+		close(release)
+		<-probeDone
+		relocationPathIdentity = previousIdentity
+	})
+	previousTimeout := relocationIdentityTimeout
+	relocationIdentityTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
+
+	done := make(chan error, 1)
+	go func() { done <- gw.MoveWorktree(dest) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.True(t, gw.cleanupHasStalled())
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("the pre-move source identity probe ignored the relocation bound")
+	}
+}
+
+// A timeout in git worktree move is even less safe to recover automatically:
+// git may have renamed bytes, changed registration, done both, or done neither.
+// The manual fallback must not perform another move or source deletion on top of
+// that unknown state.
+func TestRelocate_FastMoveDeadlineStopsBeforeManualFallback(t *testing.T) {
+	gw, _, src := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(_ *GitWorktree, src, dest string) error {
+		// Model git's partial-success shape: the directory rename commits, then
+		// registration work stalls until the command is cut off.
+		require.NoError(t, os.Rename(src, dest))
+		return context.DeadlineExceeded
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	previousRename := renamePath
+	fallbackAttempted := false
+	renamePath = func(string, string) error {
+		fallbackAttempted = true
+		return nil
+	}
+	t.Cleanup(func() { renamePath = previousRename })
+
+	err := gw.MoveWorktree(dest)
+
+	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.Equal(t, dest, gw.GetWorktreePath(),
+		"a verified partial move must preserve the destination as the durable retry location")
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"),
+		"the destination contains the user's uncommitted work after the partial move")
+	assert.NoDirExists(t, src)
+	assert.False(t, fallbackAttempted,
+		"the manual move must not run after git worktree move was cut off mid-operation")
+	assert.True(t, gw.cleanupHasStalled())
+}
+
+func TestRelocate_FastMoveDeadlineWithInconclusiveProbeRetainsDestination(t *testing.T) {
+	gw, _, src := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(_ *GitWorktree, src, dest string) error {
+		require.NoError(t, os.Rename(src, dest))
+		return context.DeadlineExceeded
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	previousIdentity := relocationPathIdentity
+	relocationPathIdentity = func(path string) (pathIdentity, error) {
+		if path == dest {
+			return pathIdentity{}, context.DeadlineExceeded
+		}
+		return previousIdentity(path)
+	}
+	t.Cleanup(func() { relocationPathIdentity = previousIdentity })
+
+	err := gw.MoveWorktree(dest)
+	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.Equal(t, dest, gw.GetWorktreePath(),
+		"the possible destination must remain a durable recovery candidate when verification cannot answer")
+	recovery, ok := gw.GetRelocationRecovery()
+	require.True(t, ok, "the alternate source handle must survive an inconclusive destination probe")
+	assert.Equal(t, src, recovery.AlternatePath)
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
+	assert.NoDirExists(t, src)
+}
+
+func TestRelocate_RetryCompletesTimedOutMoveAlreadyAtDestination(t *testing.T) {
+	gw, _, _ := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(_ *GitWorktree, src, dest string) error {
+		require.NoError(t, os.Rename(src, dest))
+		return context.DeadlineExceeded
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	require.ErrorIs(t, gw.MoveWorktree(dest), ErrRelocateStateUnknown)
+	require.NoError(t, gw.MoveWorktree(dest),
+		"a retry must repair and complete a move whose bytes already reached the requested destination")
+	assert.Equal(t, dest, gw.GetWorktreePath())
+	assert.False(t, gw.HasUnresolvedRelocation())
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
+}
+
+func TestRelocate_RetryUsesOriginalSourceWhenTimedOutMoveDidNothing(t *testing.T) {
+	gw, _, src := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	moveCalls := 0
+	worktreeMoveFast = func(g *GitWorktree, src, dest string) error {
+		moveCalls++
+		if moveCalls == 1 {
+			return context.DeadlineExceeded
+		}
+		return previousMove(g, src, dest)
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	require.ErrorIs(t, gw.MoveWorktree(dest), ErrRelocateStateUnknown)
+	assert.DirExists(t, src, "the first move did nothing")
+	assert.NoDirExists(t, dest)
+	require.NoError(t, gw.MoveWorktree(dest))
+	assert.False(t, gw.HasUnresolvedRelocation())
+	assert.NoDirExists(t, src)
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
+}
+
+func TestRelocate_RetryCanFallbackAfterSelectingOriginalSource(t *testing.T) {
+	gw, _, src := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	moveCalls := 0
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		moveCalls++
+		if moveCalls == 1 {
+			return context.DeadlineExceeded
+		}
+		return fmt.Errorf("cross-device fast move unavailable")
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	previousRepair := worktreeRepair
+	worktreeRepair = func(*GitWorktree, string) error { return nil }
+	t.Cleanup(func() { worktreeRepair = previousRepair })
+	previousSubmoduleRepair := worktreeRepairSubmodules
+	worktreeRepairSubmodules = func(*GitWorktree, string) error { return nil }
+	t.Cleanup(func() { worktreeRepairSubmodules = previousSubmoduleRepair })
+
+	require.ErrorIs(t, gw.MoveWorktree(dest), ErrRelocateStateUnknown)
+	assert.DirExists(t, src, "the interrupted fast move did nothing")
+
+	require.NoError(t, gw.MoveWorktree(dest),
+		"once identity selects the original source, the supported manual fallback must remain available")
+	assert.False(t, gw.HasUnresolvedRelocation())
+	assert.NoDirExists(t, src)
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
+}
+
+func TestRelocate_RetryReturnsClaimWhenLaterGateRefuses(t *testing.T) {
+	gw, repo, src := archiveTestWorktree(t)
+	firstDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "first")
+	secondDest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "second")
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return context.DeadlineExceeded
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+
+	require.ErrorIs(t, gw.MoveWorktree(firstDest), ErrRelocateStateUnknown)
+	assert.DirExists(t, src, "the interrupted move left the bytes at the alternate source")
+	require.NoError(t, os.MkdirAll(secondDest, 0o755))
+	require.Error(t, gw.MoveWorktree(secondDest), "the occupied retry destination must stop the move")
+
+	assert.Equal(t, src, gw.GetWorktreePath())
+	recovery, ok := gw.GetRelocationRecovery()
+	require.True(t, ok,
+		"a later gate refusal must return the consumed claim instead of making recovery disappear")
+	assert.Equal(t, RelocationRecoveryClaimStale, recovery.State)
+	sourceIdentity, identityErr := inspectRelocationPathIdentity(src)
+	require.NoError(t, identityErr)
+	assert.True(t, recovery.identity().same(sourceIdentity),
+		"the returned claim must still identify the conclusively selected source")
+
+	reloaded, err := NewGitWorktreeFromStorage(
+		repo, gw.GetWorktreePath(), "arch", gw.GetBranchName(), gw.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, reloaded.RestoreRelocationRecovery(recovery))
+	assert.Equal(t, src, reloaded.GetWorktreePath(),
+		"after a later gate refusal, the selected identity must remain loadable across restart")
+}
+
+func TestRelocate_RetryRevalidatesDestinationBeforeRegistrationRepair(t *testing.T) {
+	gw, _, _ := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+
+	previousInspect := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
+
+	previousMove := worktreeMoveFast
+	worktreeMoveFast = func(_ *GitWorktree, src, dest string) error {
+		require.NoError(t, os.Rename(src, dest))
+		return context.DeadlineExceeded
+	}
+	t.Cleanup(func() { worktreeMoveFast = previousMove })
+	require.ErrorIs(t, gw.MoveWorktree(dest), ErrRelocateStateUnknown)
+
+	previousIdentity := relocationPathIdentity
+	identityCalls := 0
+	movedAside := dest + "-moved-aside"
+	relocationPathIdentity = func(path string) (pathIdentity, error) {
+		identity, err := previousIdentity(path)
+		if path == dest && err == nil {
+			identityCalls++
+			if identityCalls == 1 {
+				require.NoError(t, os.Rename(dest, movedAside))
+				require.NoError(t, os.Mkdir(dest, 0o755))
+			}
+		}
+		return identity, err
+	}
+	t.Cleanup(func() { relocationPathIdentity = previousIdentity })
+
+	previousRepair := worktreeRepair
+	repairAttempted := false
+	worktreeRepair = func(*GitWorktree, string) error {
+		repairAttempted = true
+		return nil
+	}
+	t.Cleanup(func() { worktreeRepair = previousRepair })
+
+	err := gw.MoveWorktree(dest)
+	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.False(t, repairAttempted,
+		"registration repair must not consume a destination name that changed after candidate resolution")
+	assert.True(t, gw.HasUnresolvedRelocation(),
+		"both recovery handles must remain durable after destination revalidation fails")
+	assert.FileExists(t, filepath.Join(movedAside, "dirty.txt"))
 }

@@ -377,6 +377,10 @@ type cleanupRun struct {
 	unknown bool
 }
 
+// cleanupWorktreeStat is a seam for proving that a known-stalled workspace is
+// rejected before Cleanup touches its path. Production always uses os.Stat.
+var cleanupWorktreeStat = os.Stat
+
 // git runs one bounded local git command and RECORDS a tripped deadline. This is
 // the only place in the cleanup path that decides what a deadline means.
 func (r *cleanupRun) git(args ...string) (string, error) {
@@ -507,12 +511,21 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	if g.repoPath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: repo path is empty")
 	}
-	if g.worktreePath == "" {
+	worktreePath, recovery, hasRecovery := g.RelocationSnapshot()
+	if worktreePath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
+	}
+	if hasRecovery {
+		r.unknown = true
+		r.errs = append(r.errs, fmt.Errorf(
+			"refusing to inspect or clean up worktree recovery state %s at %s (alternate %s): resolve relocation through archive/restore, or restart the daemon to retry a cleanup stall",
+			recovery.State, worktreePath, recovery.AlternatePath,
+		))
+		return r.state(), errors.Join(r.errs...)
 	}
 
 	// Check if worktree path exists before attempting removal
-	if _, err := os.Stat(g.worktreePath); err == nil {
+	if _, err := cleanupWorktreeStat(g.worktreePath); err == nil {
 		// Reap any process still writing inside the tree BEFORE removing it
 		// (#2025). Both the git remove below and the os.RemoveAll fallback delete
 		// recursively and fail "directory not empty" only when a live writer keeps
@@ -525,7 +538,10 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 		// (#1917): this recursive delete is the one local git command that
 		// genuinely stalls forever (hung mount, D-state process in the tree), and
 		// Cleanup runs inside the daemon's kills-in-flight guard.
-		if _, err := r.git("worktree", "remove", "-f", g.worktreePath); err != nil {
+		if _, err := r.destructive(
+			"remove worktree directory "+g.worktreePath,
+			"worktree", "remove", "-f", g.worktreePath,
+		); err != nil && !errors.Is(err, errRefusedDestructive) {
 			log.ErrorLog.Printf("failed to remove worktree %s: %v", g.worktreePath, err)
 			// A failed `git worktree remove -f` may still have released the
 			// registration. Decide whether the directory is ours to delete
@@ -866,12 +882,3 @@ func CleanupWorktreesForRepo(repoRoot string) error {
 
 	return nil
 }
-
-// markCleanupStalled latches the workspace-level "a cleanup command timed out
-// here" fact (see GitWorktree.cleanupStalled).
-func (g *GitWorktree) markCleanupStalled() { g.cleanupStalled.Store(true) }
-
-// cleanupHasStalled reports whether any cleanup attempt against this workspace has
-// ever tripped a deadline. Consulted by removeDir, which must never enter an
-// unbounded delete on a filesystem that has already proven it can stall.
-func (g *GitWorktree) cleanupHasStalled() bool { return g.cleanupStalled.Load() }

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -15,6 +16,21 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
+
+func TestArchiveSession_PreflightStallIsPersistedBeforeReturn(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, source := registerArchivable(t, manager, repoID, repoPath, "preflight-stall")
+	t.Cleanup(sessiongit.SetRelocationIdentityErrorForTest(source, context.DeadlineExceeded))
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "preflight-stall", RepoID: repoID})
+	require.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown)
+
+	record := recordFor(t, repoID, "preflight-stall")
+	require.NotNil(t, record)
+	require.NotNil(t, record.Worktree.RelocationRecovery,
+		"the pre-fence return must persist the stall record before a daemon restart can discard it")
+	assert.Equal(t, sessiongit.RelocationRecoveryStalled, record.Worktree.RelocationRecovery.State)
+}
 
 // partialRelocateGitOnPath installs a `git` shim that reproduces the exact
 // restore shape this guards: the fast path refuses (as it does across
@@ -48,6 +64,45 @@ func partialRelocateGitOnPath(t *testing.T) (heal func()) {
 	return func() {
 		require.NoError(t, os.WriteFile(shim, []byte("#!/bin/sh\nexec "+realGit+" \"$@\"\n"), 0o755))
 	}
+}
+
+func answeredRepairErrorGitOnPath(t *testing.T) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "git")
+	script := "#!/bin/sh\n" +
+		"if [ \"$3\" = \"worktree\" ] && [ \"$4\" = \"repair\" ]; then echo 'simulated repair refusal' >&2; exit 7; fi\n" +
+		"if [ \"$3\" = \"worktree\" ] && [ \"$4\" = \"move\" ]; then echo 'simulated move refusal' >&2; exit 1; fi\n" +
+		"exec " + realGit + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRestoreArchived_AnsweredRepairFailurePersistsTheNewLocation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "repair-error")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "repair-error", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	expected, pathErr := sessiongit.RestoreWorktreePath(repoPath, "repair-error", inst.GetBranch())
+	require.NoError(t, pathErr)
+	answeredRepairErrorGitOnPath(t)
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "repair-error", RepoID: repoID})
+	require.Error(t, err)
+	require.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown)
+	assert.True(t, exists(expected), "the manual move committed the worktree at the restore destination")
+	assert.False(t, exists(archivedPath))
+	record := recordFor(t, repoID, "repair-error")
+	require.NotNil(t, record)
+	assert.Equal(t, expected, record.Worktree.WorktreePath)
+	assert.NotNil(t, record.Worktree.RelocationRecovery,
+		"the answered repair failure must remain retryable after restart")
 }
 
 // TestRestoreArchived_RelocateCutOffPersistsTheNewLocation is the restore half of

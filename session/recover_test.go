@@ -1,14 +1,17 @@
 package session
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/assert"
@@ -81,6 +84,45 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 	agentSpawn := spawns[0]
 	assert.Equal(t, 1, strings.Count(agentSpawn, "--plugin-dir"),
 		"resolved-program injection must appear exactly once in the spawn: %s", agentSpawn)
+}
+
+// A relocation probe that reaches its deadline latches the worktree as stalled
+// even though it has not yet created two pathname candidates. The Lost loop must
+// honor that latch before os.Stat or rebuild touches the same filesystem: those
+// unbounded calls can wedge the daemon's sole status/self-healing goroutine.
+func TestRecover_RefusesWorktreeAfterRelocationProbeTimeout(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_relocation_stall"
+	shellName := agentName + shellTmuxSuffix
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nexec sleep 300\n"), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(100 * time.Millisecond))
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	moveErr := worktree.MoveWorktree(filepath.Join(t.TempDir(), "archive"))
+	require.ErrorIs(t, moveErr, context.DeadlineExceeded,
+		"the setup must trip the bounded pre-move probe")
+	recovery, hasRecovery := worktree.GetRelocationRecovery()
+	require.True(t, hasRecovery,
+		"every latched relocation stall must materialize recovery state; absent cannot mean safe")
+	assert.Equal(t, sessiongit.RelocationRecoveryStalled, recovery.State)
+	storedRecovery := restored.ToInstanceData().Worktree.RelocationRecovery
+	require.NotNil(t, storedRecovery, "the stall latch must survive the daemon's durable snapshot")
+	assert.Equal(t, sessiongit.RelocationRecoveryStalled, storedRecovery.State)
+
+	err = restored.Recover()
+	require.Error(t, err, "Lost recovery must refuse a worktree whose filesystem already stalled")
+	assert.Contains(t, err.Error(), "unresolved worktree recovery state")
+	assert.Equal(t, 0, newSessions, "the stalled worktree must be refused before any agent spawn")
 }
 
 // TestRecover_RetryAfterFailureInjectsFlagsOnce: a failed first attempt (the

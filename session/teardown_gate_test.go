@@ -3,15 +3,65 @@ package session
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestArchiveTeardown_PaneAbortRestoresConsumedRecoveryClaim(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "worktree")
+	require.NoError(t, os.Mkdir(source, 0o755))
+	info, err := os.Stat(source)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	gw, err := git.NewGitWorktreeFromStorage(
+		root, source, "claim-abort", "af/claim-abort", "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State:         git.RelocationRecoveryMoveUnknown,
+		AlternatePath: filepath.Join(root, "old-candidate"),
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err)
+
+	previousClose := archiveCloseTab
+	archiveCloseTab = func(_ *tmux.TmuxSession, _, _ string) (teardownState, bool, error) {
+		// This read is the lock-order assertion. If ClaimRelocationSource retained
+		// relocationMu across pane teardown, the callback deadlocks here instead of
+		// eventually failing a generic 10-second tmux deadline.
+		path, _, _ := gw.RelocationSnapshot()
+		require.Equal(t, source, path)
+		return stateUnknown, false, fmt.Errorf("pane liveness is unknown")
+	}
+	t.Cleanup(func() { archiveCloseTab = previousClose })
+
+	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
+	inst.gitWorktree = gw
+	_, archiveErr := inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil)
+	require.ErrorIs(t, archiveErr, ErrPaneMayBeLive)
+	recovery, retained := gw.GetRelocationRecovery()
+	require.True(t, retained,
+		"a claim consumed from durable recovery must be rematerialized when pane teardown aborts before worktree use")
+	assert.True(t, recovery.IdentityKnown)
+	assert.Equal(t, filepath.Join(root, "old-candidate"), recovery.AlternatePath)
+}
 
 // The #1917 follow-up locks: bounding the teardown's tmux commands means they can
 // now answer "I don't know" instead of blocking forever — and an unknown must STOP

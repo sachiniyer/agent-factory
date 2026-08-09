@@ -253,12 +253,9 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	if err := archived.RenameArchived(newTitle, newDest, newBranch); err != nil {
 		if errors.Is(err, git.ErrRelocateStateUnknown) {
 			// Third caller of the bounded relocate, and the one with no rollback to
-			// fall back on. A deadline tripped after the bytes reached newDest, so
-			// the worktree object points there while the TITLE was never changed —
-			// RenameArchived returns before that step — and everything below
-			// (re-key, persist) is skipped. Without this, the durable row keeps
-			// pointing at the old, now-missing archive directory and a restart
-			// strands the worktree, exactly as archive and restore would have.
+			// fall back on. Preserve both possible pathnames plus their captured
+			// identity under the unchanged title. A later name-reuse retry resolves
+			// them and completes registration before the logical rename.
 			//
 			// Persist under the UNCHANGED title, which is what the on-disk row still
 			// keys on: the rename did not happen, only the location moved.
@@ -269,9 +266,9 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 			// on the same call below for why this is safe and why the repo start
 			// lock must not be taken here either.
 			if perr := persistInstanceData(repoID, archived.ToInstanceData()); perr != nil {
-				return nil, fmt.Errorf("cannot free the archived name %q for reuse, and its worktree's new location %s could not be recorded (%v); check that path before restarting the daemon: %w", oldTitle, archived.GetWorktreePath(), perr, err)
+				return nil, fmt.Errorf("cannot free the archived name %q for reuse, and its worktree recovery candidates could not be recorded (%v); recovery location: %s — inspect those path(s) before restarting the daemon: %w", oldTitle, perr, worktreeRecoveryLocation(archived), err)
 			}
-			return nil, fmt.Errorf("cannot free the archived name %q for reuse; its worktree was left at %s and recorded there, so it is not lost: %w", oldTitle, archived.GetWorktreePath(), err)
+			return nil, fmt.Errorf("cannot free the archived name %q for reuse; both possible worktree locations are recorded (%s), and retrying will resolve them: %w", oldTitle, worktreeRecoveryLocation(archived), err)
 		}
 		return nil, fmt.Errorf("cannot free the archived name %q for reuse: %w", oldTitle, err)
 	}

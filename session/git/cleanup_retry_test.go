@@ -1,12 +1,94 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// A relocation timeout latches on the GitWorktree even when a preservation
+// fallback establishes a usable destination. Cleanup receives a fresh run, so
+// its first destructive git command must consult that worktree-level fact too;
+// otherwise it can remove the relocated workspace and only then refuse prune and
+// branch deletion, retaining a record whose path no longer exists (#3135 review).
+func TestCleanup_PreviousRelocateStallRefusesInitialWorktreeRemoval(t *testing.T) {
+	dir := t.TempDir()
+	issuedPath := filepath.Join(dir, "issued")
+	script := "#!/bin/sh\necho \"$@\" >> \"" + issuedPath + "\"\nexit 0\n"
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	gw, wt := worktreeForCleanup(t)
+	gw.markRelocationStalled(nil)
+	previousStat := cleanupWorktreeStat
+	statAttempted := false
+	cleanupWorktreeStat = func(path string) (os.FileInfo, error) {
+		statAttempted = true
+		return previousStat(path)
+	}
+	t.Cleanup(func() { cleanupWorktreeStat = previousStat })
+	state, cleanupErr := gw.Cleanup()
+
+	issued, readErr := os.ReadFile(issuedPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read issued commands: %v", readErr)
+	}
+	if strings.Contains(string(issued), "worktree remove") {
+		t.Fatal("Cleanup issued its initial destructive worktree removal after relocation had already " +
+			"latched this workspace as stalled; later refusals would retain a record pointing at a deleted path")
+	}
+	if statAttempted {
+		t.Fatal("Cleanup probed a workspace path after relocation had already latched it as stalled; " +
+			"the same filesystem access can wedge before the destructive-command guard runs")
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("the latched workspace must be retained intact: %v", err)
+	}
+	if state != CleanupStateUnknown {
+		t.Fatalf("a refused cleanup must remain retryable: want CleanupStateUnknown, got %v", state)
+	}
+	if cleanupErr == nil {
+		t.Fatal("the refusal must be reported, not returned as cleanup success")
+	}
+}
+
+func TestCleanup_PersistedRelocationRecoveryRefusesPathProbe(t *testing.T) {
+	gw, _ := worktreeForCleanup(t)
+	primary := gw.GetWorktreePath()
+	if err := gw.RestoreRelocationRecovery(RelocationRecovery{
+		AlternatePath: primary + "-alternate",
+		Device:        1,
+		Inode:         2,
+		FileType:      3,
+	}); err != nil {
+		t.Fatalf("restore relocation recovery: %v", err)
+	}
+
+	previousStat := cleanupWorktreeStat
+	statAttempted := false
+	cleanupWorktreeStat = func(path string) (os.FileInfo, error) {
+		statAttempted = true
+		return previousStat(path)
+	}
+	t.Cleanup(func() { cleanupWorktreeStat = previousStat })
+
+	state, cleanupErr := gw.Cleanup()
+	if statAttempted {
+		t.Fatal("Cleanup probed an unresolved relocation candidate before establishing its identity")
+	}
+	if state != CleanupStateUnknown {
+		t.Fatalf("unresolved relocation cleanup state = %v, want unknown", state)
+	}
+	if cleanupErr == nil {
+		t.Fatal("unresolved relocation cleanup refusal must be reported")
+	}
+}
 
 // TestCleanup_RetryAfterStall_StillRefusesTheUnboundedDelete is #1917 round-6
 // finding (1): refusing once is not refusing.

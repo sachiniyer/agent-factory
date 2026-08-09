@@ -3,9 +3,11 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"time"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
-	"time"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // InstanceData represents the serializable data of an Instance
@@ -253,6 +255,17 @@ func (d InstanceData) ForStorage() InstanceData {
 	// instances.json row and be read back as fact by an older binary.
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
+	if d.Worktree.RelocationRecovery != nil {
+		// v1.0.228 predates relocation_recovery and ignores unknown JSON fields.
+		// Project the unresolved row through safety fields that version already
+		// understands: it loads inert, treats the checkout as user-owned, and
+		// cannot delete its branch. The recovery record carries the original
+		// values so current readers remove this rollback fence on load.
+		d.StartupStateUnknown = true
+		d.Worktree.ExternalWorktree = true
+		branchCreatedByUs := false
+		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
+	}
 	switch {
 	case lv == LiveArchived:
 		// Archived rows have already reaped their runtime, so retaining a teardown
@@ -362,6 +375,22 @@ type GitWorktreeData struct {
 	BaseCommitSHA     string `json:"base_commit_sha"`
 	ExternalWorktree  bool   `json:"external_worktree,omitempty"`
 	BranchCreatedByUs *bool  `json:"branch_created_by_us,omitempty"`
+	// RelocationRecovery qualifies WorktreePath whenever a bounded lifecycle step
+	// did not establish a safe outcome. Some states retain a second pathname;
+	// every state blocks consumers until its owning retry resolves it.
+	RelocationRecovery *GitWorktreeRelocationRecoveryData `json:"relocation_recovery,omitempty"`
+}
+
+type GitWorktreeRelocationRecoveryData struct {
+	State                       git.RelocationRecoveryState `json:"state,omitempty"`
+	AlternatePath               string                      `json:"alternate_path"`
+	IdentityKnown               bool                        `json:"identity_known,omitempty"`
+	Device                      uint64                      `json:"device"`
+	Inode                       uint64                      `json:"inode"`
+	FileType                    uint32                      `json:"file_type"`
+	OriginalExternalWorktree    *bool                       `json:"original_external_worktree,omitempty"`
+	OriginalBranchCreatedByUs   *bool                       `json:"original_branch_created_by_us,omitempty"`
+	OriginalStartupStateUnknown *bool                       `json:"original_startup_state_unknown,omitempty"`
 }
 
 // Storage handles saving and loading instances using the state interface.
@@ -443,11 +472,13 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		status := data.Status
 		pendingHandoff := data.PendingHandoffMission != ""
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
+		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
 		// A pending mission is a durable recovery obligation and therefore a
 		// retention claim, not generic transient UI state. OpReplacing composes to
 		// Loading, but dropping that row would erase the only handle to a live
 		// incoming runtime. The explicit marker outranks the lossy legacy status.
-		if (status == Loading || status == Deleting) && !pendingHandoff && !unknownRuntimeCleanup {
+		if (status == Loading || status == Deleting) && !pendingHandoff &&
+			!unknownRuntimeCleanup && !unresolvedRelocation {
 			continue
 		}
 		// The !Started() skip drops transient never-started junk (a create that
@@ -459,8 +490,9 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// the same repo is saved — would silently orphan the archived worktree.
 		// (Lost is unaffected: it loads started=true, so it already survives.)
 		//
-		// TOMBSTONED, startup-unknown, and runtime-cleanup-unknown instances are
-		// also kept (#1917/#2207). They are started=false and not Archived while
+		// TOMBSTONED, startup-unknown, runtime-cleanup-unknown, and unresolved
+		// worktree-relocation instances are also kept (#1917/#2207/#3135). They are
+		// started=false and not Archived while
 		// their workspace may still be live: teardown could not confirm the pane
 		// dead or finish a worktree removal, startup never established the runtime's
 		// identity, or an off-box teardown did not establish whether its sandbox was
@@ -470,7 +502,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
 		if !inst.Started() && status != Archived && !data.UserKilled &&
-			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup {
+			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup && !unresolvedRelocation {
 			continue
 		}
 		root := inst.GetRepoPath()

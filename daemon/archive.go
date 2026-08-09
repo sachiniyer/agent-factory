@@ -234,9 +234,33 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	if err != nil {
 		return "", session.InstanceData{}, err
 	}
+	// A prior bounded move may have left two durable pathname candidates. Resolve
+	// their captured directory identity before deriving any worktree-dependent
+	// context: the operator hook must run in the directory that actually holds
+	// the user's files, and a persist failure must roll back to that same origin.
+	// Resolution is bounded and read-only; failure leaves panes and the archive
+	// fence untouched.
+	relocationClaim, err := instance.ClaimWorktreeRelocationForRetry()
+	if err != nil {
+		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+			// Claim can create the first durable stall record. This return is before
+			// every later archive persist, so write it now; otherwise a daemon restart
+			// turns the newly recorded unknown back into an absent, destructive default.
+			if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+				return "", session.InstanceData{}, fmt.Errorf(
+					"cannot resolve archive source for session %q and could not persist its recovery record (%v); inspect %s before restarting the daemon: %w",
+					req.Title, persistErr, worktreeRecoveryLocation(instance), err,
+				)
+			}
+		}
+		return "", session.InstanceData{}, fmt.Errorf(
+			"cannot retry archive of session %q until its interrupted worktree move is resolved: %w",
+			req.Title, err,
+		)
+	}
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).
-	origPath := instance.GetWorktreePath()
+	origPath := relocationClaim.Path
 
 	// Raise the archive fence through the chokepoint (#1195 Phase 2d): BeginArchive
 	// sets OpArchiving (I4) so the status poll skips this instance (and the
@@ -248,6 +272,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// the op-lock guarantee this edge is legal; a rejection would surface here
 	// before any teardown.
 	if err := instance.Transition(session.BeginArchive()); err != nil {
+		instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: %w", req.Title, err)
 	}
 
@@ -273,6 +298,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
 	if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 		_ = instance.Transition(session.CancelArchive())
+		instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
 		m.persistInstance(repoID, instance)
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; no session teardown was started: %w", req.Title, err)
 	}
@@ -281,7 +307,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a
 	// separate MoveArchivedWorktree step relying on duplicated ordering prose).
-	hookErr, err := archiveTeardown(instance, dest, func() error {
+	hookErr, err := archiveTeardown(instance, dest, relocationClaim, func() error {
 		return runOnArchiveHook(onArchiveHookContext{
 			sessionID:   instance.ID,
 			title:       req.Title,
@@ -319,7 +345,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); its worktree is at %s — check that path before restarting the daemon: %w%s", req.Title, perr, instance.GetWorktreePath(), err, hookNote)
+			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w%s", req.Title, perr, worktreeRecoveryLocation(instance), err, hookNote)
 		}
 		return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w%s", req.Title, err, hookNote)
 	}
@@ -669,6 +695,18 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		return m.restoreRemoteSession(repoID, instance, req.Title)
 	}
 
+	// Resolve relocation ownership before reading repo-derived restore context.
+	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
+	if err != nil {
+		return "", err
+	}
+	claimTransferred := false
+	defer func() {
+		if !claimTransferred {
+			instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
+		}
+	}()
+
 	repoPath := instance.GetRepoPath()
 	if repoPath == "" {
 		return "", fmt.Errorf("cannot restore session %q: no repo path on record", req.Title)
@@ -677,6 +715,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// need the origin repo, so surface the actionable message (archive left
 	// intact) before either fails with a generic error.
 	if _, statErr := os.Stat(repoPath); statErr != nil {
+		if settleErr := m.settleRepoGoneRelocation(repoID, req.Title, repoPath, instance, relocationClaim); settleErr != nil {
+			return "", settleErr
+		}
+		claimTransferred = true
 		return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone; the archived worktree is intact at %s — recover it manually with git", req.Title, repoPath, instance.GetWorktreePath())
 	}
 	// Honor the configured worktree_root placement, exactly as session creation
@@ -691,19 +733,16 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Move the worktree back next to the repo. A repo-gone failure leaves the
 	// archive intact (the git layer guarantees this) and surfaces an actionable
 	// message; the instance stays Archived.
-	if err := instance.RestoreArchivedWorktree(dest); err != nil {
+	claimTransferred = true
+	if err := instance.RestoreArchivedWorktreeWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", fmt.Errorf("cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w", req.Title, instance.GetWorktreePath(), err)
 		}
 		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
-			// The relocate was cut off by its deadline AFTER the bytes reached
-			// dest: the git layer commits the new location to the worktree object
-			// before repairing, precisely because the registration can be stale
-			// while the location is not. That new location only exists in memory,
-			// and this failure path returns without persisting — so a daemon
-			// restart would reload the session as Archived pointing at an archive
-			// path that is no longer there, and every later restore would fail the
-			// source-exists guard while the user's work sat at dest.
+			// The bounded move may have reached either pathname before it was
+			// killed. The git layer retains destination + source with the captured
+			// directory identity; neither is destructive authority until a retry
+			// resolves it. Persist both handles before returning.
 			//
 			// Persist first, then report — and take the error-returning persist,
 			// not the log-and-continue one. The whole point of this branch is that
@@ -711,11 +750,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			// (full or read-only disk) reproduces the exact stranding it exists to
 			// prevent. Reporting the relocate error alone would tell the operator
 			// their worktree is safely recorded when nothing recorded it.
-			restoredPath := instance.GetWorktreePath()
 			if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-				return "", fmt.Errorf("restore of %q was cut off mid-relocate AND its new location %s could not be written to disk (%v); the worktree is there but nothing durable points at it — move it back or re-register it manually before restarting the daemon: %w", req.Title, restoredPath, perr, err)
+				return "", fmt.Errorf("restore of %q was cut off mid-relocate AND its recovery candidates could not be written to disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w", req.Title, perr, worktreeRecoveryLocation(instance), err)
 			}
-			return "", fmt.Errorf("restore of %q was cut off mid-relocate; its worktree is recorded at %s so it is not lost, but its git registration is unverified — check that path and retry: %w", req.Title, restoredPath, err)
+			return "", fmt.Errorf("restore of %q was cut off mid-relocate; both possible worktree locations are recorded (%s), destructive cleanup is blocked, and a retry will resolve the directory identity: %w", req.Title, worktreeRecoveryLocation(instance), err)
 		}
 		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
 	}
@@ -776,6 +814,16 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return worktreePath, nil
+}
+
+func worktreeRecoveryLocation(instance *session.Instance) string {
+	if primary, alternate, ok := instance.GetWorktreeRelocationCandidates(); ok {
+		if alternate != "" {
+			return fmt.Sprintf("either %s or %s (identity unresolved)", primary, alternate)
+		}
+		return fmt.Sprintf("%s (identity unresolved)", primary)
+	}
+	return instance.GetWorktreePath()
 }
 
 // archiveExclusiveTabLock serializes a tab spawn against an archive/kill/restore
@@ -924,7 +972,7 @@ var archivePersist = (*Manager).persistInstanceErr
 // archiveTeardown is the physical teardown+hook+move ArchiveSession runs before
 // its durable commit. Indirected so race tests can install an editor in the
 // exact post-move window without weakening the production ordering.
-var archiveTeardown = (*session.Instance).ArchiveTeardownWithHook
+var archiveTeardown = (*session.Instance).ArchiveTeardownWithClaim
 
 // archivedWorktreePath returns the global archive location for a session's
 // relocated worktree: <AGENT_FACTORY_HOME>/archived/<repoID>/<safeTitle>/. The

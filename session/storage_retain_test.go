@@ -2,9 +2,11 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // TestSaveInstances_KeepsUnknownRuntimeCleanupAlongsideStartedSibling makes an
@@ -228,6 +230,48 @@ func TestSaveInstances_KeepsStartupUnknownRowAlongsideStartedSibling(t *testing.
 		return
 	}
 	t.Fatal("the daemon checkpoint dropped an inert startup-unknown row and orphaned its workspace")
+}
+
+func TestSaveInstances_KeepsRelocationRecoveryAlongsideStartedSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := &Instance{Title: "alive", Path: repoPath, started: true, liveness: LiveRunning}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, filepath.Join(repoPath, "uncertain-wt"), "uncertain", "af/uncertain", "", false, true,
+	)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+	if err := gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State: sessiongit.RelocationRecoveryStalled,
+	}); err != nil {
+		t.Fatalf("RestoreRelocationRecovery: %v", err)
+	}
+	uncertain := &Instance{
+		Title: "uncertain", Path: repoPath, started: false, liveness: LiveRunning,
+		backend: &LocalBackend{}, gitWorktree: gw,
+	}
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, uncertain}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title != uncertain.Title {
+			continue
+		}
+		if row.Worktree.RelocationRecovery == nil {
+			t.Fatal("retained relocation-recovery row lost its recovery record")
+		}
+		return
+	}
+	t.Fatal("daemon checkpoint dropped the inert relocation-recovery row and orphaned its worktree")
 }
 
 func TestSaveInstances_KeepsPendingHandoffAlongsideStartedSibling(t *testing.T) {

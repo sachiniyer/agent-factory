@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -159,6 +160,124 @@ func TestArchiveSessionRunsOperatorHookAfterPaneTeardownBeforeMove(t *testing.T)
 	assert.FileExists(t, marker, "the configured operator hook must execute")
 	assert.NoDirExists(t, filepath.Join(archivedPath, "node_modules"),
 		"the hook must prune before the worktree bytes are moved")
+}
+
+func TestArchiveSessionResolvesInterruptedMoveBeforeOperatorHook(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "retry-hook")
+	dest, err := archivedWorktreePath(repoID, "retry-hook")
+	require.NoError(t, err)
+
+	original, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	info, err := os.Stat(srcPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+
+	interrupted, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, dest, "retry-hook", original.GetBranchName(), original.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, interrupted.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		AlternatePath: srcPath,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	inst.SetGitWorktreeForTest(interrupted)
+
+	marker := filepath.Join(t.TempDir(), "archive-hook-ran")
+	writeOnArchiveCommand(t, fmt.Sprintf(
+		`test "$PWD" = %q && test "$AF_WORKTREE_PATH" = %q && printf ran > %q`,
+		srcPath, srcPath, marker,
+	))
+
+	archivedPath, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "retry-hook", RepoID: repoID})
+	require.NoError(t, err)
+	assert.Equal(t, dest, archivedPath)
+	assert.FileExists(t, marker,
+		"the retry must establish the retained source before deriving the hook cwd and environment")
+	assert.FileExists(t, filepath.Join(dest, "dirty.txt"))
+}
+
+func TestArchiveSessionRevalidatesInterruptedMoveBeforeOperatorHook(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "retry-hook-swap")
+	dest, err := archivedWorktreePath(repoID, "retry-hook-swap")
+	require.NoError(t, err)
+
+	original, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	info, err := os.Stat(srcPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	interrupted, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, dest, "retry-hook-swap", original.GetBranchName(), original.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, interrupted.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		AlternatePath: srcPath,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	inst.SetGitWorktreeForTest(interrupted)
+
+	foreignMarker := filepath.Join(srcPath, "foreign-hook-ran")
+	writeOnArchiveCommand(t, `printf ran > "$AF_WORKTREE_PATH/foreign-hook-ran"`)
+	movedAside := srcPath + "-identity-owner"
+	originalTeardown := archiveTeardown
+	archiveTeardown = func(target *session.Instance, archiveDest string, claim sessiongit.RelocationClaim, beforeMove func() error) (error, error) {
+		require.NoError(t, os.Rename(srcPath, movedAside))
+		require.NoError(t, os.Mkdir(srcPath, 0o755))
+		return originalTeardown(target, archiveDest, claim, beforeMove)
+	}
+	t.Cleanup(func() { archiveTeardown = originalTeardown })
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "retry-hook-swap", RepoID: repoID})
+	require.Error(t, err, "the replaced recovery pathname must stop the archive retry")
+	assert.NoFileExists(t, foreignMarker,
+		"the operator hook must not consume a pathname that stopped identifying the recovered worktree")
+	assert.FileExists(t, filepath.Join(movedAside, "dirty.txt"),
+		"the identity-owning directory must remain preserved")
+	recovery, ok := interrupted.GetRelocationRecovery()
+	require.True(t, ok, "a stale point-in-time claim must recreate durable recovery state before returning")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+}
+
+func TestKillSessionRefusesInterruptedRelocationBeforeTombstone(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "kill-relocation")
+	dest, err := archivedWorktreePath(repoID, "kill-relocation")
+	require.NoError(t, err)
+
+	original, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	info, err := os.Stat(srcPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	interrupted, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, dest, "kill-relocation", original.GetBranchName(), original.GetBaseCommitSHA(), false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, interrupted.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		AlternatePath: srcPath,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	inst.SetGitWorktreeForTest(interrupted)
+	inst.SetStatusForTest(session.Lost)
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "kill-relocation", RepoID: repoID})
+	require.Error(t, err, "kill must refuse before committing terminal intent")
+	assert.False(t, inst.UserKilled(),
+		"an unresolved pathname must not become a permanent kill tombstone that cleanup can never finish")
+	assert.FileExists(t, filepath.Join(srcPath, "dirty.txt"),
+		"refusing kill admission must leave the user's worktree untouched")
 }
 
 func TestArchiveSessionHookFailureCommitsArchiveAndSurfacesWarning(t *testing.T) {
@@ -627,10 +746,25 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, getErr := inst.GetGitWorktree()
+	require.NoError(t, getErr)
 
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	archivedPath := inst.GetWorktreePath()
+	info, statErr := os.Stat(archivedPath)
+	require.NoError(t, statErr)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()),
+		"precondition: the unresolved archive identity is durable")
 
 	require.NoError(t, os.RemoveAll(repoPath), "simulate the origin repo being deleted")
 
@@ -639,6 +773,10 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	assert.Contains(t, err.Error(), "gone")
 	assert.True(t, exists(archivedPath), "the archived worktree must be left intact when the repo is gone")
 	assert.Equal(t, session.Archived, inst.GetStatus(), "a failed restore must leave the session Archived")
+	assert.Nil(t, recordFor(t, repoID, "worker").Worktree.RelocationRecovery,
+		"bounded identity resolution must clear the recovery guard so repo-gone archives remain disposable")
+	assert.NoError(t, inst.ValidateWorktreeDestructionAdmission(),
+		"the user must still be able to kill a repo-gone archive after its path identity is established")
 }
 
 // TestRestoreArchived_CollisionSuffixesPath: when the standard sibling location

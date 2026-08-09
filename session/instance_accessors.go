@@ -254,6 +254,23 @@ func (i *Instance) GetWorktreePath() string {
 	return gw.GetWorktreePath()
 }
 
+// GetWorktreeRelocationCandidates returns both durable pathnames retained after
+// a bounded worktree move ended without an answer. Neither path is authoritative
+// while ok is true; lifecycle retry resolves their captured identity.
+func (i *Instance) GetWorktreeRelocationCandidates() (primary, alternate string, ok bool) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return "", "", false
+	}
+	primary, recovery, ok := gw.RelocationSnapshot()
+	if !ok {
+		return "", "", false
+	}
+	return primary, recovery.AlternatePath, true
+}
+
 // GetBaseCommitSHA returns the recorded base commit SHA of the instance's
 // worktree, or "" when there is no worktree. Deliberately NOT gated on started
 // (unlike GetGitWorktree): the kill-confirmation's unmerged-work check must run

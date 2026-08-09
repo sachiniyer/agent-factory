@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/assert"
@@ -443,8 +444,8 @@ func TestArchiveSession_FinalVSCodeStopFailureRollsBack(t *testing.T) {
 	key := daemonInstanceKey(repoID, "late-editor")
 
 	origTeardown := archiveTeardown
-	archiveTeardown = func(target *session.Instance, dest string, beforeMove func() error) (error, error) {
-		hookErr, err := origTeardown(target, dest, beforeMove)
+	archiveTeardown = func(target *session.Instance, dest string, claim sessiongit.RelocationClaim, beforeMove func() error) (error, error) {
+		hookErr, err := origTeardown(target, dest, claim, beforeMove)
 		if err != nil {
 			return hookErr, err
 		}

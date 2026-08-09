@@ -357,6 +357,19 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 		log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", title, gwErr)
 		return git.CleanupSettled, nil
 	}
+	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+		if recoveryErr := gw.RestoreRelocationRecovery(git.RelocationRecovery{
+			State:         recovery.State,
+			AlternatePath: recovery.AlternatePath,
+			IdentityKnown: recovery.IdentityKnown,
+			Device:        recovery.Device,
+			Inode:         recovery.Inode,
+			FileType:      recovery.FileType,
+		}); recoveryErr != nil {
+			log.WarningLog.Printf("ghost session %q: invalid relocation recovery handle: %v", title, recoveryErr)
+			return git.CleanupStateUnknown, recoveryErr
+		}
+	}
 	state, cleanupErr := gw.Cleanup()
 	if cleanupErr != nil {
 		log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
