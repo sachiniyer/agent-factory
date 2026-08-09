@@ -248,12 +248,11 @@ func killWatchdogTabCount(instance *session.Instance, data *session.InstanceData
 		// Asked of the SAME function the ghost teardown iterates, rather than
 		// reconstructed from the same fields. ghostCleanup loops over
 		// ghostTmuxNames(data), which collects the session's own tmux session plus
-		// each tab's, DEDUPLICATES them, and does not reap PendingTabCleanup — and
-		// every one of those three properties has to hold here too. Rebuilding the
-		// set by hand got the last two wrong: pending handles bought ~54s apiece for
-		// work this path never does, and a post-#953 record stores the agent's name
-		// in both data.TmuxName and data.Tabs[0].TmuxName, so it was counted twice.
-		// Calling the real thing cannot drift from it.
+		// each live tab's and each pending-cleanup handle's, then DEDUPLICATES them.
+		// Every property has to hold here too: the watchdog must budget every tmux
+		// kill ghostCleanup will actually attempt, without double-charging a
+		// post-#953 agent name stored in both data.TmuxName and data.Tabs[0]. Calling
+		// the real enumerator keeps the budget from drifting from the teardown.
 		return len(ghostTmuxNames(data))
 	}
 	return 0

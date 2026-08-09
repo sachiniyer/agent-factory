@@ -365,16 +365,16 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 }
 
 // ghostTmuxNames returns the deduped, ordered set of tmux session names a ghost
-// record owns: the legacy agent-tab name (data.TmuxName) first, then each tab's
-// name in persisted order. Empty names are skipped. A post-#953 record repeats
-// the agent tab in BOTH data.TmuxName and data.Tabs, so the dedupe collapses that
-// to a single kill; a pre-#953 record has no Tabs and yields just data.TmuxName,
-// keeping the legacy path byte-identical.
+// record owns: the legacy agent-tab name (data.TmuxName) first, then each live
+// tab's name, then each pending-cleanup handle's name, all in persisted order.
+// Empty names are skipped. A post-#953 record repeats the agent tab in BOTH
+// data.TmuxName and data.Tabs, so the dedupe collapses that to a single kill; a
+// pre-#953 record has no Tabs and yields just data.TmuxName, keeping the legacy
+// path byte-identical.
 func ghostTmuxNames(data *session.InstanceData) []string {
-	// Pre-sized to len(data.Tabs), NOT len(data.Tabs)+1. The legacy name is
-	// already one of the tabs on any post-#953 record, so the +1 was slack in the
-	// common case, and the one add that can exceed this cap (a pre-#953 record,
-	// which has no Tabs at all) grows the slice itself.
+	// Pre-sized to len(data.Tabs), without allocation-size arithmetic. The legacy
+	// name is already one of the tabs on any post-#953 record, and the uncommon
+	// pending handles can grow the slice themselves.
 	//
 	// The arithmetic tripped CodeQL's go/allocation-size-overflow (high) on
 	// `len(...)+1` inside make(). That was a FALSE POSITIVE — data.Tabs is a
