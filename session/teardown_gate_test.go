@@ -19,9 +19,6 @@ import (
 )
 
 func TestArchiveTeardown_PaneAbortRestoresConsumedRecoveryClaim(t *testing.T) {
-	if testing.Short() {
-		t.Skip("costs one real 10s tmux deadline")
-	}
 	root := t.TempDir()
 	source := filepath.Join(root, "worktree")
 	require.NoError(t, os.Mkdir(source, 0o755))
@@ -44,7 +41,18 @@ func TestArchiveTeardown_PaneAbortRestoresConsumedRecoveryClaim(t *testing.T) {
 	claim, err := gw.ClaimRelocationSource()
 	require.NoError(t, err)
 
-	inst := instanceWithTmuxTab(t, wedgedTmuxSession("wedged-archive-claim"))
+	previousClose := archiveCloseTab
+	archiveCloseTab = func(_ *tmux.TmuxSession, _, _ string) (teardownState, bool, error) {
+		// This read is the lock-order assertion. If ClaimRelocationSource retained
+		// relocationMu across pane teardown, the callback deadlocks here instead of
+		// eventually failing a generic 10-second tmux deadline.
+		path, _, _ := gw.RelocationSnapshot()
+		require.Equal(t, source, path)
+		return stateUnknown, false, fmt.Errorf("pane liveness is unknown")
+	}
+	t.Cleanup(func() { archiveCloseTab = previousClose })
+
+	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
 	inst.gitWorktree = gw
 	_, archiveErr := inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil)
 	require.ErrorIs(t, archiveErr, ErrPaneMayBeLive)

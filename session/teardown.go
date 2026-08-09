@@ -546,10 +546,14 @@ func (teardownReleasePTY) finalize(i *Instance, closed []closedTab, _ *git.GitWo
 // owns the teardown window) so a failed move self-heals via the Lost-restore
 // loop.
 type teardownArchive struct {
-	dest       string
-	claim      *git.RelocationClaim
-	beforeMove func() error
-	hookErr    *error
+	dest  string
+	claim *git.RelocationClaim
+	// claimHandled flips at the worktree boundary. If pane teardown returns
+	// earlier, ArchiveTeardownWithClaim rematerializes any record this claim
+	// consumed instead of leaving absence to authorize a later recovery.
+	claimHandled *bool
+	beforeMove   func() error
+	hookErr      *error
 }
 
 // closeTab waits for the pane to exit before handleWorktree relocates the
@@ -561,8 +565,12 @@ type teardownArchive struct {
 // straight into moving a live agent's workspace out from under it. Archive is the
 // default reap action, so that ran far more often than the kill path did (#1917
 // review).
-func (teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+var archiveCloseTab = func(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
 	return closeTabForDestructiveTeardown(ts, "archive", title, tabName)
+}
+
+func (teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+	return archiveCloseTab(ts, title, tabName)
 }
 
 func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
@@ -570,6 +578,12 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 		return stateKnown, fmt.Errorf("cannot archive %q: instance has no worktree to relocate", title)
 	}
 	if m.claim != nil {
+		// This is the first path-use boundary for the consumed claim. Only transfer
+		// ownership here: an earlier return (including a vanished worktree handle)
+		// must leave ArchiveTeardownWithClaim responsible for rematerializing it.
+		if m.claimHandled != nil {
+			*m.claimHandled = true
+		}
 		// Resolution was a point-in-time assertion made before pane teardown.
 		// Revalidate it at the operator hook's use boundary; failure is a safety
 		// error, not a best-effort hook error, so the move below must not run.

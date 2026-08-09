@@ -28,6 +28,10 @@ type RelocationClaim struct {
 	Path          string
 	AlternatePath string
 	identity      pathIdentity
+	// recoveryOwned is true when producing this claim consumed a durable record.
+	// The owner must either reach a revalidated use boundary or rematerialize the
+	// claim if an earlier gate aborts the operation.
+	recoveryOwned bool
 }
 
 // SetRelocationIdentityErrorForTest makes identity inspection of one exact path
@@ -201,6 +205,9 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
 				g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
+				return RelocationClaim{}, errors.Join(fmt.Errorf(
+					"cannot claim worktree path %s: %w", primary, err,
+				), ErrRelocateStateUnknown)
 			}
 			return RelocationClaim{}, fmt.Errorf("cannot claim worktree path %s: %w", primary, err)
 		}
@@ -224,7 +231,10 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 			), ErrRelocateStateUnknown)
 		}
 		g.relocationRecovery = nil
-		return RelocationClaim{Path: primary, AlternatePath: normalized.AlternatePath, identity: identity}, nil
+		return RelocationClaim{
+			Path: primary, AlternatePath: normalized.AlternatePath,
+			identity: identity, recoveryOwned: true,
+		}, nil
 	case RelocationRecoveryMoveUnknown, RelocationRecoveryClaimStale:
 		return g.resolveCandidateRecordLocked(primary, normalized)
 	default:
@@ -239,7 +249,10 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 	primaryIdentity, primaryErr := boundedRelocationPathIdentity(primary)
 	if primaryErr == nil && expected.same(primaryIdentity) {
 		g.relocationRecovery = nil
-		return RelocationClaim{Path: primary, AlternatePath: recovery.AlternatePath, identity: expected}, nil
+		return RelocationClaim{
+			Path: primary, AlternatePath: recovery.AlternatePath,
+			identity: expected, recoveryOwned: true,
+		}, nil
 	}
 	if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
@@ -262,7 +275,27 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 	selected := recovery.AlternatePath
 	g.setWorktreeLocationLocked(selected)
 	g.relocationRecovery = nil
-	return RelocationClaim{Path: selected, AlternatePath: primary, identity: expected}, nil
+	return RelocationClaim{
+		Path: selected, AlternatePath: primary,
+		identity: expected, recoveryOwned: true,
+	}, nil
+}
+
+// PreserveRelocationClaim rematerializes a durable record when an operation
+// which consumed one aborts before reaching any path use boundary. A claim made
+// from an ordinary record-free path owns nothing and is intentionally a no-op.
+func (g *GitWorktree) PreserveRelocationClaim(claim RelocationClaim) {
+	if !claim.recoveryOwned {
+		return
+	}
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if g.relocationRecovery != nil {
+		// A use-boundary failure or a later deadline already installed more current
+		// recovery evidence. Never overwrite it with the earlier claim.
+		return
+	}
+	g.recordStaleClaimLocked(claim)
 }
 
 // RevalidateRelocationClaim checks a point-in-time claim immediately before a

@@ -219,9 +219,16 @@ func (i *Instance) ClaimWorktreeRelocationForRetry() (git.RelocationClaim, error
 	return i.gitWorktree.ClaimRelocationSource()
 }
 
-func (i *Instance) ResolveWorktreeRelocationForRetry() error {
-	_, err := i.ClaimWorktreeRelocationForRetry()
-	return err
+// PreserveWorktreeRelocationClaimForRetry returns ownership of a consumed
+// recovery claim when an earlier archive gate aborts before the worktree use
+// boundary. Claims made from record-free state are no-ops.
+func (i *Instance) PreserveWorktreeRelocationClaimForRetry(claim git.RelocationClaim) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil {
+		gw.PreserveRelocationClaim(claim)
+	}
 }
 
 // ValidateWorktreeDestructionAdmission is the pre-teardown guard. It is called
@@ -259,8 +266,15 @@ func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error)
 // ArchiveTeardownWithClaim carries the source claim obtained before teardown to
 // the hook and move use boundaries. Each boundary revalidates it independently.
 func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationClaim, beforeMove func() error) (hookErr, archiveErr error) {
-	mode := teardownArchive{dest: dest, claim: &claim, beforeMove: beforeMove, hookErr: &hookErr}
+	claimHandled := false
+	mode := teardownArchive{
+		dest: dest, claim: &claim, claimHandled: &claimHandled,
+		beforeMove: beforeMove, hookErr: &hookErr,
+	}
 	archiveErr = i.teardownTabs(mode)
+	if !claimHandled {
+		i.PreserveWorktreeRelocationClaimForRetry(claim)
+	}
 	return hookErr, archiveErr
 }
 

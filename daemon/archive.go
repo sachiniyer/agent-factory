@@ -242,6 +242,17 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// fence untouched.
 	relocationClaim, err := instance.ClaimWorktreeRelocationForRetry()
 	if err != nil {
+		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+			// Claim can create the first durable stall record. This return is before
+			// every later archive persist, so write it now; otherwise a daemon restart
+			// turns the newly recorded unknown back into an absent, destructive default.
+			if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+				return "", session.InstanceData{}, fmt.Errorf(
+					"cannot resolve archive source for session %q and could not persist its recovery record (%v); inspect %s before restarting the daemon: %w",
+					req.Title, persistErr, worktreeRecoveryLocation(instance), err,
+				)
+			}
+		}
 		return "", session.InstanceData{}, fmt.Errorf(
 			"cannot retry archive of session %q until its interrupted worktree move is resolved: %w",
 			req.Title, err,
@@ -261,6 +272,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// the op-lock guarantee this edge is legal; a rejection would surface here
 	// before any teardown.
 	if err := instance.Transition(session.BeginArchive()); err != nil {
+		instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: %w", req.Title, err)
 	}
 
@@ -286,6 +298,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
 	if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 		_ = instance.Transition(session.CancelArchive())
+		instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
 		m.persistInstance(repoID, instance)
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; no session teardown was started: %w", req.Title, err)
 	}
@@ -788,7 +801,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 
 func worktreeRecoveryLocation(instance *session.Instance) string {
 	if primary, alternate, ok := instance.GetWorktreeRelocationCandidates(); ok {
-		return fmt.Sprintf("either %s or %s (identity unresolved)", primary, alternate)
+		if alternate != "" {
+			return fmt.Sprintf("either %s or %s (identity unresolved)", primary, alternate)
+		}
+		return fmt.Sprintf("%s (identity unresolved)", primary)
 	}
 	return instance.GetWorktreePath()
 }

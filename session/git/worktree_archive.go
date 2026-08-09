@@ -137,15 +137,6 @@ func boundedRelocationPathIdentity(path string) (pathIdentity, error) {
 	}
 }
 
-// ResolveRelocationRecovery is the compatibility wrapper for callers which only
-// need to settle the persisted record. ClaimRelocationSource is the authoritative
-// API: resolution consumes the record and returns the ephemeral identity claim
-// later destructive users must revalidate.
-func (g *GitWorktree) ResolveRelocationRecovery() error {
-	_, err := g.ClaimRelocationSource()
-	return err
-}
-
 // worktreeContainsSubmodules identifies the worktree shape that `git worktree
 // move` explicitly does not support: a worktree with an INITIALIZED submodule.
 // Checking before the move keeps the manual move + repair path a deliberate
@@ -388,13 +379,29 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 					src, dest, err,
 				))
 			}
+			// An ANSWERED error can still arrive after git renamed the directory but
+			// failed while updating registration. Materialize the same two-candidate
+			// state as a timeout, resolve it immediately under the identity bound, and
+			// only then choose the manual repair path. Revalidating the now-missing src
+			// first would discard dest, which may already hold the user's work.
+			attemptedSource := src
+			g.beginRelocationRecovery(dest, attemptedSource, sourceClaim.identity)
+			resolvedClaim, resolveErr := g.ClaimRelocationSource()
+			if resolveErr != nil {
+				return errors.Join(fmt.Errorf(
+					"git worktree move answered with an error and its partial effect could not be resolved for %s -> %s: %w",
+					attemptedSource, dest, resolveErr,
+				), ErrRelocateStateUnknown)
+			}
+			sourceClaim = resolvedClaim
+			src = resolvedClaim.Path
 			// The fallback is the designed recovery for cross-device moves and
 			// other fast-path limitations. Record why it was selected without
 			// reporting a failed archive; actual fallback/repair failures return
 			// below and are surfaced by the caller.
 			log.InfoLog.Printf(
-				"git worktree move unavailable for %s -> %s (%v); using manual move + repair",
-				src, dest, err,
+				"git worktree move unavailable for %s -> %s (%v); resolved its partial effect at %s and is using manual move + repair",
+				attemptedSource, dest, err, src,
 			)
 			useFallback = true
 		}
@@ -405,14 +412,16 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := g.RevalidateRelocationClaim(sourceClaim); err != nil {
 			return err
 		}
-		// The fast path may have moved the directory before failing to update
-		// its config (rare). Only move bytes ourselves if the dir is still at
-		// src; either way, repair fixes the two-way registration.
+		// Candidate resolution above tells us whether the fast path already moved
+		// the bytes. Move only when the selected source is still distinct from dest;
+		// pathname existence alone cannot distinguish the worktree from a raced-in
+		// replacement.
 		var sourceCleanupErr error
 		var sourceCleanupPath string
 		var sourceCleanupPathVerified bool
-		if !pathExists(dest) {
-			if mErr := moveDirCrossDevice(src, dest, operation); mErr != nil {
+		movedIdentity := sourceClaim.identity
+		if src != dest {
+			if mErr := moveDirCrossDeviceRecordingIdentity(src, dest, operation, &movedIdentity); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
 					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))
@@ -421,6 +430,14 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				sourceCleanupPath = copiedErr.src
 				sourceCleanupPathVerified = copiedErr.cleanupPathVerified
 			}
+		}
+		alternate := sourceClaim.AlternatePath
+		if src != dest {
+			alternate = src
+		}
+		sourceClaim = RelocationClaim{
+			Path: dest, AlternatePath: alternate, identity: movedIdentity,
+			recoveryOwned: sourceClaim.recoveryOwned,
 		}
 		// The bytes are now at dest. Commit the new location to the worktree
 		// object IMMEDIATELY — before the repair below — so g.worktreePath always
@@ -438,6 +455,11 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 			return unknownIfCutOff(fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr))
 		}
 		if sErr := noteDeadline(worktreeRepairSubmodules(g, dest)); sErr != nil {
+			if deadlineTripped {
+				return unknownIfCutOff(fmt.Errorf(
+					"moved worktree to %s but submodule gitdir repair was cut off: %w", dest, sErr,
+				))
+			}
 			log.WarningLog.Printf(
 				"submodule gitdir repair failed after moving worktree to %s; "+
 					"run `%s` "+
@@ -523,7 +545,17 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // an unreadableSourceError BEFORE that error is wrapped: fmt.Errorf formats and
 // CACHES the inner error's text at construction, so stamping after the wrap
 // changes the struct and not the message the user sees (#3087 review).
-func moveDirCrossDevice(src, dest, operation string) (returnErr error) {
+func moveDirCrossDevice(src, dest, operation string) error {
+	return moveDirCrossDeviceRecordingIdentity(src, dest, operation, nil)
+}
+
+// moveDirCrossDeviceRecordingIdentity is the relocation path's variant. The
+// caller initializes committedIdentity with the claimed source identity. A
+// same-filesystem rename preserves it; a verified cross-device publication
+// replaces it with the copied root identity at the exact no-replace commit.
+func moveDirCrossDeviceRecordingIdentity(
+	src, dest, operation string, committedIdentity *pathIdentity,
+) (returnErr error) {
 	renameErr := renamePath(src, dest)
 	if renameErr == nil {
 		return nil
@@ -668,6 +700,9 @@ func moveDirCrossDevice(src, dest, operation string) (returnErr error) {
 			commitErr = errors.Join(commitErr, fmt.Errorf("failed to remove unverified destination %s: %w", dest, cleanupErr))
 		}
 		return restoreSource(commitErr)
+	}
+	if committedIdentity != nil {
+		*committedIdentity = copied.destinationIdentity
 	}
 
 	if err := removeDirectoryTree(sourceParent, quarantineName, quarantinePath, copied.source, &copied.root); err != nil {

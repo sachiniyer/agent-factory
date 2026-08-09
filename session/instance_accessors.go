@@ -264,11 +264,11 @@ func (i *Instance) GetWorktreeRelocationCandidates() (primary, alternate string,
 	if gw == nil {
 		return "", "", false
 	}
-	recovery, ok := gw.GetRelocationRecovery()
+	primary, recovery, ok := gw.RelocationSnapshot()
 	if !ok {
 		return "", "", false
 	}
-	return gw.GetWorktreePath(), recovery.AlternatePath, true
+	return primary, recovery.AlternatePath, true
 }
 
 // GetBaseCommitSHA returns the recorded base commit SHA of the instance's
