@@ -401,6 +401,20 @@ func ghostTmuxNames(data *session.InstanceData) []string {
 	for _, tab := range data.Tabs {
 		add(tab.TmuxName)
 	}
+	// PENDING CLEANUP HANDLES too. These are tabs whose removal from Tabs is
+	// already durable while their teardown was never confirmed (#2669), so they
+	// are the names MOST likely to still have a live process — and they were the
+	// only ones this did not enumerate. Omitting them meant kill deleted the
+	// worktree around a session it had never attempted to stop (#3137).
+	//
+	// The ghostBlind guard does not cover the gap. CheckWorktreeOccupants runs
+	// only when a tmux kill came back blind, so if every enumerated session dies
+	// cleanly the guard never runs at all, and an un-enumerated handle keeps
+	// writing into a directory git is deleting. Enumerating it is what makes the
+	// kill attempt happen, and a blind result there is what arms the guard.
+	for _, pending := range data.PendingTabCleanup {
+		add(pending.TmuxName)
+	}
 	return names
 }
 
