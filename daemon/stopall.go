@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
@@ -317,18 +318,17 @@ func verifyScopedDaemon(pid, uid int, wantHome string) daemonScope {
 // while naming the same directory: relative vs absolute (GetConfigDir does not
 // absolutize — #1873), or through a symlink (/tmp vs /private/tmp on macOS).
 //
-// EvalSymlinks is best-effort: it fails on a path that does not exist, which is
-// legitimate here (an AF home that has not been created yet), so a failure
-// falls back to the lexical form rather than failing the comparison.
+// ResolveForCompare resolves the deepest existing ancestor before re-joining a
+// missing remainder. That missing-leaf behavior is load-bearing here: an
+// orphan daemon can outlive its deleted AF home, and reset still has to prove
+// that the symlinked spelling in its environment identifies THIS home before
+// it may wipe anything.
 func canonicalDir(dir string) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
 	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved, nil
-	}
-	return filepath.Clean(abs), nil
+	return pathutil.ResolveForCompare(abs), nil
 }
 
 // processUID returns the uid owning pid. The second return is false when

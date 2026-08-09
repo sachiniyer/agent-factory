@@ -3,6 +3,8 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -115,6 +117,62 @@ func TestVerifyScopedDaemon_MatchesOnlyOurHome(t *testing.T) {
 	foreign := spawnFakeDaemonWithHome(t, otherHome)
 	if got := verifyScopedDaemon(foreign, uid, want); got != daemonForeign {
 		t.Errorf("daemon for a different AF home classified %v, want daemonForeign", got)
+	}
+}
+
+// TestAssertNoLiveDaemon_RefusesOrphanThroughSymlinkedParent exercises the
+// destructive reset barrier, not just path normalization in isolation. A
+// daemon keeps the spelling of AGENT_FACTORY_HOME from its startup environment;
+// after that home is deleted, a plain EvalSymlinks fallback cannot tell that a
+// symlinked spelling and the real spelling still name the same missing path.
+// Calling that daemon foreign lets reset proceed while its single writer is
+// alive over state reset is about to remove.
+func TestAssertNoLiveDaemon_RefusesOrphanThroughSymlinkedParent(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(base, "link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	realHome := filepath.Join(realRoot, "af-home")
+	if err := os.Mkdir(realHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkHome := filepath.Join(linkRoot, "af-home")
+	pid := spawnFakeDaemonWithHome(t, linkHome)
+
+	// Reproduce the orphan state: the process remains live, but the home it
+	// started against is gone before reset performs its final liveness proof.
+	if err := os.Remove(realHome); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := filepath.EvalSymlinks(linkHome); err == nil {
+		t.Fatal("sanity: EvalSymlinks unexpectedly resolved the deleted AF home")
+	}
+
+	origScan := scopedDaemonScanFn
+	t.Cleanup(func() { scopedDaemonScanFn = origScan })
+	scopedDaemonScanFn = func() ([]int, error) { return []int{pid}, nil }
+	// AssertNoLiveDaemon probes the control socket before the injected scan.
+	// Keep that probe inside this throwaway home so an ambient developer daemon
+	// cannot satisfy the assertion for an unrelated reason.
+	t.Setenv("AGENT_FACTORY_HOME", realHome)
+
+	err := AssertNoLiveDaemon(realHome)
+	if err == nil {
+		t.Fatalf("AssertNoLiveDaemon allowed reset while orphaned daemon pid %d was still live", pid)
+	}
+	want := "af daemon(s) still running for this AF home: " + strconv.Itoa(pid)
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("AssertNoLiveDaemon refusal = %q, want proven-home refusal containing %q", err, want)
 	}
 }
 
