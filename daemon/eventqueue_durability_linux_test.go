@@ -51,13 +51,14 @@ func TestEventQueue_CompactionPublishesDurably(t *testing.T) {
 	queueName := eventQueueDurabilityTaskID + ".jsonl"
 	for index, line := range lines {
 		isSync := strings.Contains(line, "fsync(") || strings.Contains(line, "fdatasync(")
-		if isSync && strings.Contains(line, compactName) {
+		syncSucceeded := isSync && strings.HasSuffix(strings.TrimSpace(line), "= 0")
+		if syncSucceeded && strings.Contains(line, compactName) {
 			tempSync = index
 		}
 		if strings.Contains(line, "rename") && strings.Contains(line, compactName) && strings.Contains(line, queueName) {
 			queueRename = index
 		}
-		if queueRename >= 0 && index > queueRename && isSync && strings.Contains(line, "<"+dir+">") {
+		if queueRename >= 0 && index > queueRename && syncSucceeded && strings.Contains(line, "<"+dir+">") {
 			directorySync = index
 			break
 		}
