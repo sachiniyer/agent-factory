@@ -182,6 +182,7 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `Snapshot` and `ImportRemoteHookSessions` return `{ "instances": [<session>…] }`;
 `ArchiveSession` returns `{ "ok": true, "archived_path": "…" }`;
 `RestoreArchived` returns `{ "ok": true, "worktree_path": "…" }`;
+`SendPrompt` returns `{ "ok": true, "status": "delivered" | "not-delivered" | "could-not-confirm" }`;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
@@ -231,7 +232,7 @@ Send a prompt into an existing session:
 curl --unix-socket ~/.agent-factory/daemon-http.sock \
   http://localhost/v1/SendPrompt \
   -d '{"title":"fix-auth","prompt":"run the tests and report failures"}'
-# {"data":{"ok":true},"error":null}
+# {"data":{"ok":true,"status":"delivered"},"error":null}
 ```
 
 List tasks (no body needed):
