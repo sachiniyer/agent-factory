@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -291,15 +292,32 @@ func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *we
 	defer cancel()
 	defer func() { _ = sub.Close() }()
 
+	readerDone := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); defer cancel(); readPTYClient(ctx, binding, conn) }()
+	go func() {
+		defer wg.Done()
+		err := readPTYClient(ctx, binding, conn)
+		readerDone <- err
+		cancel()
+	}()
 	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn) }()
 
 	writePTYStream(ctx, sub, conn)
 
 	cancel()
-	_ = conn.Close(websocket.StatusNormalClosure, "")
+	closeStatus := websocket.StatusNormalClosure
+	closeReason := ""
+	select {
+	case err := <-readerDone:
+		if err != nil {
+			log.WarningLog.Printf("PTY input delivery failed; closing web stream so the client can reconnect: %v", err)
+			closeStatus = websocket.StatusInternalError
+			closeReason = "PTY input delivery failed"
+		}
+	default:
+	}
+	_ = conn.Close(closeStatus, closeReason)
 	wg.Wait()
 }
 
@@ -406,29 +424,32 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 
 // readPTYClient handles client → server frames: INPUT and RESIZE are applied to
 // the agent-server (multi-writer, from any subscriber); a detach control frame or
-// any read error ends the connection.
-func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn) {
+// any read error ends the connection. A failed INPUT ends the stream with an
+// error so the client can reconnect rather than silently losing later keys.
+func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn) error {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
-			return
+			return nil
 		}
 		if msg.Binary {
 			// The binding re-resolves the tab per frame (#1738): for a ?tab_id=
 			// connection each keystroke/resize lands on wherever THAT tab now sits, so a
 			// mid-connection reorder/close can't misroute it. A tab that has since been
-			// closed no longer resolves — the op errors (ErrTabGone) and the frame is
-			// dropped rather than routed to whatever tab now holds the old ordinal.
+			// closed no longer resolves — the op errors (ErrTabGone) and this stream is
+			// closed rather than routing later keys to whatever tab now holds the ordinal.
 			switch msg.Frame.Op {
 			case agentproto.OpInput:
-				_ = binding.input(msg.Frame.Data)
+				if err := binding.input(msg.Frame.Data); err != nil {
+					return fmt.Errorf("apply PTY input: %w", err)
+				}
 			case agentproto.OpResize:
 				_ = binding.resize(msg.Frame.Rows, msg.Frame.Cols)
 			}
 			continue
 		}
 		if t, _ := agentproto.MessageTypeOf(msg.Text); t == agentproto.MsgDetach {
-			return
+			return nil
 		}
 	}
 }
