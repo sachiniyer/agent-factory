@@ -29,6 +29,7 @@ func TestProjectScopeResolversPropagateGitDiscoveryErrors(t *testing.T) {
 	previousDaemonURL := apiclient.FlagDaemonURL
 	apiclient.FlagDaemonURL = ""
 	t.Cleanup(func() { apiclient.FlagDaemonURL = previousDaemonURL })
+	t.Setenv("AF_DAEMON_URL", "")
 
 	tests := []struct {
 		name    string
