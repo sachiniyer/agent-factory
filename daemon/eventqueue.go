@@ -95,6 +95,7 @@ type eventQueue struct {
 	appendRecord   func(path string, rec []byte) (int, error)
 	appendBoundary func(path string, rec []byte) (int, error)
 	truncate       func(path string, size int64) error
+	syncDirectory  func(string) error
 
 	mu      sync.Mutex
 	offset  int64 // byte offset of the first undelivered event
@@ -136,6 +137,7 @@ func newEventQueue(dir, taskID string) *eventQueue {
 		appendRecord:   appendRecordToFile,
 		appendBoundary: appendRecordToFile,
 		truncate:       os.Truncate,
+		syncDirectory:  syncEventQueueDirectory,
 		now:            time.Now,
 	}
 	q.load()
@@ -547,7 +549,7 @@ func (q *eventQueue) compactLocked() error {
 	// fallback persists q.offset again; it must write 0 beside the compacted file,
 	// never the pre-compaction offset that points into a different byte layout.
 	q.offset, q.size = 0, n
-	if err := syncEventQueueDirectory(filepath.Dir(q.path)); err != nil {
+	if err := q.syncDirectory(filepath.Dir(q.path)); err != nil {
 		return fmt.Errorf("sync event-queue directory after compaction: %w", err)
 	}
 	return nil
