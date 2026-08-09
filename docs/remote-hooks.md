@@ -264,7 +264,7 @@ Because the session is driven through a real `af agent-server`, a remote-hook se
 
 - **Attach / input / resize** happen client-side over the agent-server's `ws://` PTY stream — there is no hook attach proxy or preview-capture loop anymore.
 - **Preview / liveness / prompt delivery** go over the same REST surface.
-- The agent-server drives the terminal surface, so a remote session gets its Agent tab with no per-config gating. **Adding or closing tabs is not supported** off-box: every `Add*Tab` path needs a daemon-side git worktree an off-box workspace does not have, so the tab list is fixed at the single agent tab.
+- The agent-server drives the terminal surface, so a remote session gets its Agent tab with no per-config gating. **Adding or closing tabs is not supported** off-box: the daemon refuses every tab kind on an off-box session, so the tab list is fixed at the single agent tab.
 
 ## Archive & restore
 
