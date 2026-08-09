@@ -21,9 +21,11 @@ const (
 	RelocationRecoveryCleanupStalled RelocationRecoveryState = "cleanup_stalled"
 )
 
-// RelocationClaim is an ephemeral assertion that Path named one exact directory
-// when recovery was resolved. It is deliberately not persisted: every consumer
-// must revalidate it immediately before using the pathname.
+// RelocationClaim is a point-in-time assertion that Path named one exact
+// directory when recovery was resolved. Every consumer must revalidate it
+// immediately before using the pathname. Claims which consume durable recovery
+// remain owned by GitWorktree until their use completes; snapshots project that
+// ownership back into durable recovery form.
 type RelocationClaim struct {
 	Path          string
 	AlternatePath string
@@ -32,6 +34,7 @@ type RelocationClaim struct {
 	// The owner must either reach a revalidated use boundary or rematerialize the
 	// claim if an earlier gate aborts the operation.
 	recoveryOwned bool
+	claimID       uint64
 }
 
 // SetRelocationIdentityErrorForTest makes identity inspection of one exact path
@@ -59,9 +62,9 @@ func normalizeRecovery(recovery RelocationRecovery) RelocationRecovery {
 	return recovery
 }
 
-// GetRelocationRecovery snapshots the recovery record under the same lock as
-// worktreePath. Absence means no unresolved operation is known; a deadline path
-// always materializes a record before returning.
+// GetRelocationRecovery snapshots durable recovery ownership under the same lock
+// as worktreePath. An active consumed claim is projected back into record form;
+// absence therefore means no unresolved operation is known.
 func (g *GitWorktree) GetRelocationRecovery() (RelocationRecovery, bool) {
 	_, recovery, ok := g.RelocationSnapshot()
 	return recovery, ok
@@ -74,10 +77,13 @@ func (g *GitWorktree) GetRelocationRecovery() (RelocationRecovery, bool) {
 func (g *GitWorktree) RelocationSnapshot() (string, RelocationRecovery, bool) {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
-	if g.relocationRecovery == nil {
-		return g.worktreePath, RelocationRecovery{}, false
+	if g.relocationRecovery != nil {
+		return g.worktreePath, *g.relocationRecovery, true
 	}
-	return g.worktreePath, *g.relocationRecovery, true
+	if g.activeRelocationClaim != nil {
+		return g.worktreePath, recoveryFromClaim(*g.activeRelocationClaim), true
+	}
+	return g.worktreePath, RelocationRecovery{}, false
 }
 
 // RestoreRelocationRecovery reinstates a persisted lifecycle record without
@@ -111,6 +117,9 @@ func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) err
 
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
+	if g.relocationRecovery != nil || g.activeRelocationClaim != nil {
+		return fmt.Errorf("cannot restore relocation recovery over an active lifecycle")
+	}
 	if recovery.AlternatePath != "" && recovery.AlternatePath == g.worktreePath {
 		return fmt.Errorf("relocation recovery paths are identical: %s", g.worktreePath)
 	}
@@ -119,6 +128,12 @@ func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) err
 }
 
 func (g *GitWorktree) HasUnresolvedRelocation() bool {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	return g.relocationRecovery != nil || g.activeRelocationClaim != nil
+}
+
+func (g *GitWorktree) hasRelocationRecoveryRecord() bool {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
 	return g.relocationRecovery != nil
@@ -133,6 +148,7 @@ func (g *GitWorktree) beginRelocationRecovery(destination, source string, identi
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
 	g.setWorktreeLocationLocked(destination)
+	g.activeRelocationClaim = nil
 	g.relocationRecovery = &RelocationRecovery{
 		State:         RelocationRecoveryMoveUnknown,
 		AlternatePath: source,
@@ -143,12 +159,6 @@ func (g *GitWorktree) beginRelocationRecovery(destination, source string, identi
 	}
 }
 
-func (g *GitWorktree) clearRelocationRecovery() {
-	g.relocationMu.Lock()
-	defer g.relocationMu.Unlock()
-	g.relocationRecovery = nil
-}
-
 func (g *GitWorktree) recordStall(state RelocationRecoveryState, claim *RelocationClaim) {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
@@ -157,6 +167,7 @@ func (g *GitWorktree) recordStall(state RelocationRecoveryState, claim *Relocati
 	if g.relocationRecovery != nil &&
 		g.relocationRecovery.State != RelocationRecoveryCleanupStalled &&
 		g.relocationRecovery.State != RelocationRecoveryStalled {
+		g.releaseRelocationClaimLocked(claim)
 		return
 	}
 	recovery := RelocationRecovery{State: state}
@@ -168,6 +179,7 @@ func (g *GitWorktree) recordStall(state RelocationRecoveryState, claim *Relocati
 		recovery.AlternatePath = claim.AlternatePath
 	}
 	g.relocationRecovery = &recovery
+	g.releaseRelocationClaimLocked(claim)
 }
 
 func (g *GitWorktree) markRelocationStalled(claim *RelocationClaim) {
@@ -194,6 +206,11 @@ func (g *GitWorktree) cleanupHasStalled() bool {
 func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
+	if g.activeRelocationClaim != nil {
+		return RelocationClaim{}, errors.Join(fmt.Errorf(
+			"worktree relocation claim for %s is already in use", g.activeRelocationClaim.Path,
+		), ErrRelocateStateUnknown)
+	}
 
 	primary := g.worktreePath
 	if primary == "" {
@@ -231,10 +248,10 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 			), ErrRelocateStateUnknown)
 		}
 		g.relocationRecovery = nil
-		return RelocationClaim{
+		return g.activateRelocationClaimLocked(RelocationClaim{
 			Path: primary, AlternatePath: normalized.AlternatePath,
-			identity: identity, recoveryOwned: true,
-		}, nil
+			identity: identity,
+		}), nil
 	case RelocationRecoveryMoveUnknown, RelocationRecoveryClaimStale:
 		return g.resolveCandidateRecordLocked(primary, normalized)
 	default:
@@ -249,10 +266,10 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 	primaryIdentity, primaryErr := boundedRelocationPathIdentity(primary)
 	if primaryErr == nil && expected.same(primaryIdentity) {
 		g.relocationRecovery = nil
-		return RelocationClaim{
+		return g.activateRelocationClaimLocked(RelocationClaim{
 			Path: primary, AlternatePath: recovery.AlternatePath,
-			identity: expected, recoveryOwned: true,
-		}, nil
+			identity: expected,
+		}), nil
 	}
 	if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
@@ -275,10 +292,54 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 	selected := recovery.AlternatePath
 	g.setWorktreeLocationLocked(selected)
 	g.relocationRecovery = nil
-	return RelocationClaim{
+	return g.activateRelocationClaimLocked(RelocationClaim{
 		Path: selected, AlternatePath: primary,
-		identity: expected, recoveryOwned: true,
-	}, nil
+		identity: expected,
+	}), nil
+}
+
+func (g *GitWorktree) activateRelocationClaimLocked(claim RelocationClaim) RelocationClaim {
+	g.nextRelocationClaimID++
+	claim.recoveryOwned = true
+	claim.claimID = g.nextRelocationClaimID
+	active := claim
+	g.activeRelocationClaim = &active
+	return claim
+}
+
+func recoveryFromClaim(claim RelocationClaim) RelocationRecovery {
+	alternate := claim.AlternatePath
+	if alternate == claim.Path {
+		alternate = ""
+	}
+	return RelocationRecovery{
+		State:         RelocationRecoveryClaimStale,
+		AlternatePath: alternate,
+		IdentityKnown: true,
+		Device:        claim.identity.device,
+		Inode:         claim.identity.inode,
+		FileType:      claim.identity.fileType,
+	}
+}
+
+func (g *GitWorktree) ownsRelocationClaimLocked(claim RelocationClaim) bool {
+	return claim.recoveryOwned && claim.claimID != 0 &&
+		g.activeRelocationClaim != nil && g.activeRelocationClaim.claimID == claim.claimID
+}
+
+func (g *GitWorktree) releaseRelocationClaimLocked(claim *RelocationClaim) {
+	if claim != nil && g.ownsRelocationClaimLocked(*claim) {
+		g.activeRelocationClaim = nil
+	}
+}
+
+func (g *GitWorktree) releaseRelocationClaim(claim RelocationClaim) {
+	if !claim.recoveryOwned {
+		return
+	}
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	g.releaseRelocationClaimLocked(&claim)
 }
 
 // PreserveRelocationClaim rematerializes a durable record when an operation
@@ -293,6 +354,7 @@ func (g *GitWorktree) PreserveRelocationClaim(claim RelocationClaim) {
 	if g.relocationRecovery != nil {
 		// A use-boundary failure or a later deadline already installed more current
 		// recovery evidence. Never overwrite it with the earlier claim.
+		g.releaseRelocationClaimLocked(&claim)
 		return
 	}
 	g.recordStaleClaimLocked(claim)
@@ -304,9 +366,29 @@ func (g *GitWorktree) PreserveRelocationClaim(claim RelocationClaim) {
 func (g *GitWorktree) RevalidateRelocationClaim(claim RelocationClaim) error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
+	return g.revalidateRelocationClaimLocked(claim, false)
+}
+
+// SettleRelocationClaim revalidates a consumed recovery claim and releases its
+// ownership in the same critical section. It is used when a caller has resolved
+// the archived directory but intentionally will not relocate it (for example,
+// because the origin repository is gone).
+func (g *GitWorktree) SettleRelocationClaim(claim RelocationClaim) error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	return g.revalidateRelocationClaimLocked(claim, true)
+}
+
+func (g *GitWorktree) revalidateRelocationClaimLocked(claim RelocationClaim, settle bool) error {
 	if g.relocationRecovery != nil {
 		return errors.Join(fmt.Errorf(
 			"worktree recovery state changed before claim for %s was consumed", claim.Path,
+		), ErrRelocateStateUnknown)
+	}
+	if claim.recoveryOwned && !g.ownsRelocationClaimLocked(claim) {
+		g.recordStaleClaimLocked(claim)
+		return errors.Join(fmt.Errorf(
+			"worktree relocation claim for %s is no longer the active owner", claim.Path,
 		), ErrRelocateStateUnknown)
 	}
 	if claim.Path == "" || g.worktreePath != claim.Path {
@@ -328,6 +410,9 @@ func (g *GitWorktree) RevalidateRelocationClaim(claim RelocationClaim) error {
 			"worktree path %s no longer identifies the directory selected during recovery", claim.Path,
 		), ErrRelocateStateUnknown)
 	}
+	if settle {
+		g.releaseRelocationClaimLocked(&claim)
+	}
 	return nil
 }
 
@@ -336,14 +421,22 @@ func (g *GitWorktree) recordStaleClaimLocked(claim RelocationClaim) {
 	if alternate == g.worktreePath {
 		alternate = ""
 	}
-	g.relocationRecovery = &RelocationRecovery{
-		State:         RelocationRecoveryClaimStale,
-		AlternatePath: alternate,
-		IdentityKnown: true,
-		Device:        claim.identity.device,
-		Inode:         claim.identity.inode,
-		FileType:      claim.identity.fileType,
-	}
+	recovery := recoveryFromClaim(claim)
+	recovery.AlternatePath = alternate
+	g.relocationRecovery = &recovery
+	g.releaseRelocationClaimLocked(&claim)
+}
+
+// finishRelocationClaim records the committed destination and releases a
+// consumed recovery claim atomically. A checkpoint sees either the old path plus
+// its active claim, or the new settled path; never the new path with stale
+// ownership or an absent claim at the old path.
+func (g *GitWorktree) finishRelocationClaim(claim RelocationClaim, dest string) {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	g.setWorktreeLocationLocked(dest)
+	g.relocationRecovery = nil
+	g.releaseRelocationClaimLocked(&claim)
 }
 
 func (g *GitWorktree) setWorktreeLocationLocked(dest string) {

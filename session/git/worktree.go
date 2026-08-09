@@ -51,12 +51,19 @@ type GitWorktree struct {
 	// qualifies one state transition. A reader can never observe the new path with
 	// the old record (or the cleared record with the old path).
 	relocationMu sync.Mutex
-	// relocationRecovery is the sole durable latch for a worktree operation whose
+	// relocationRecovery is the persisted latch for a worktree operation whose
 	// filesystem outcome is not yet safe to consume. Its explicit State separates
 	// a read-only relocation stall, an ambiguous move, a stale point-in-time claim,
-	// and a cleanup retry. Absence therefore has exactly one meaning: no unresolved
+	// and a cleanup retry. Once resolved, activeRelocationClaim carries the same
+	// ownership until use completes; only absence from both means no unresolved
 	// operation is known.
 	relocationRecovery *RelocationRecovery
+	// activeRelocationClaim keeps ownership visible after a durable record is
+	// resolved and consumed. It is not itself serialized; RelocationSnapshot
+	// projects it as a stale-claim record so a concurrent checkpoint can never
+	// turn an in-flight recovery into an absent, destructive default.
+	activeRelocationClaim *RelocationClaim
+	nextRelocationClaimID uint64
 
 	// Path to the repository
 	repoPath string

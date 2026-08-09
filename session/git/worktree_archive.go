@@ -240,10 +240,23 @@ func (g *GitWorktree) MoveWorktreeWithClaim(dest string, claim RelocationClaim) 
 // runs against wherever the repo now lives, so a repo that itself moved on disk
 // since archiving is handled.
 func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
-	if err := g.ensureRepoPresent(); err != nil {
+	claim, err := g.ClaimRelocationSource()
+	if err != nil {
 		return err
 	}
-	return g.relocateWorktreeTo(dest, "restore", nil)
+	return g.RestoreWorktreeToWithClaim(dest, claim)
+}
+
+// RestoreWorktreeToWithClaim is the recovery-aware restore entrypoint. The
+// caller resolved the archived source before deriving restore context, so carry
+// that same ownership through the repo check and relocation rather than reading
+// the lifecycle a second time.
+func (g *GitWorktree) RestoreWorktreeToWithClaim(dest string, claim RelocationClaim) error {
+	if err := g.ensureRepoPresent(); err != nil {
+		g.PreserveRelocationClaim(claim)
+		return err
+	}
+	return g.relocateWorktreeTo(dest, "restore", &claim)
 }
 
 // relocateWorktreeTo is the shared move engine behind MoveWorktree and
@@ -298,6 +311,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	if claimErr != nil {
 		return claimErr
 	}
+	defer func() { g.releaseRelocationClaim(sourceClaim) }()
 	src = sourceClaim.Path
 
 	deadlineTripped := false
@@ -314,25 +328,53 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	// tripped deadline OR happened while two relocation candidates remain. The
 	// latter must survive every retry error until one location is established.
 	unknownIfCutOff := func(err error) error {
-		if !deadlineTripped && !g.HasUnresolvedRelocation() {
+		if !deadlineTripped && !g.hasRelocationRecoveryRecord() {
 			return err
 		}
 		return errors.Join(err, ErrRelocateStateUnknown)
 	}
-
-	if src == dest {
-		// A timed-out fast move may already have put the bytes at this retry's
-		// destination. Resolution consumed its record; validate the claim again
-		// immediately before registration repair.
+	repairDestination := func() error {
+		// Resolution is a point-in-time claim. Revalidate immediately before each
+		// registration repair attempt, including a retry whose bytes were already
+		// established at dest.
 		if err := g.RevalidateRelocationClaim(sourceClaim); err != nil {
 			return err
 		}
 		if repairErr := noteDeadline(worktreeRepair(g, dest)); repairErr != nil {
+			if !deadlineTripped {
+				g.PreserveRelocationClaim(sourceClaim)
+			}
 			return unknownIfCutOff(fmt.Errorf(
-				"worktree bytes were recovered at %s but git registration repair did not complete: %w",
+				"worktree bytes were established at %s but git registration repair did not complete: %w",
 				dest, repairErr,
 			))
 		}
+		if submoduleErr := noteDeadline(worktreeRepairSubmodules(g, dest)); submoduleErr != nil {
+			if deadlineTripped {
+				return unknownIfCutOff(fmt.Errorf(
+					"moved worktree to %s but submodule gitdir repair was cut off: %w", dest, submoduleErr,
+				))
+			}
+			log.WarningLog.Printf(
+				"submodule gitdir repair failed after moving worktree to %s; "+
+					"run `%s` "+
+					"(or `%s`) "+
+					"to fix submodule status; continuing because the worktree move "+
+					"and registration repair already succeeded: %v",
+				dest,
+				shellsuggest.Command("git", "-C", dest, "submodule", "absorbgitdirs"),
+				shellsuggest.Command("git", "-C", dest, "submodule", "update", "--init", "--recursive"),
+				submoduleErr,
+			)
+		}
+		return nil
+	}
+
+	if src == dest {
+		if err := repairDestination(); err != nil {
+			return err
+		}
+		g.finishRelocationClaim(sourceClaim, dest)
 		return nil
 	}
 	if pathExists(dest) {
@@ -406,6 +448,17 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 			useFallback = true
 		}
 	}
+	if useFallback && src == dest {
+		// An answered fast-path error may have committed the rename before
+		// reporting a registration failure. Candidate resolution above selected
+		// dest, so only the unfinished repairs remain; do not manufacture an
+		// identical two-path recovery record or attempt a second move.
+		if err := repairDestination(); err != nil {
+			return err
+		}
+		g.finishRelocationClaim(sourceClaim, dest)
+		return nil
+	}
 	if useFallback {
 		// Source selection consumed the record. The fallback may proceed only if
 		// that point-in-time claim still names the same directory now.
@@ -431,46 +484,27 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				sourceCleanupPathVerified = copiedErr.cleanupPathVerified
 			}
 		}
-		alternate := sourceClaim.AlternatePath
-		if src != dest {
-			alternate = src
+		// The bytes are now at dest but registration repair is still outstanding.
+		// Materialize that exact destination identity before repair, then consume it
+		// into a new active claim. A checkpoint or error at every point therefore
+		// retains the only pathname which owns the user's files.
+		g.beginRelocationRecovery(dest, src, movedIdentity)
+		committedClaim, committedErr := g.ClaimRelocationSource()
+		if committedErr != nil {
+			return errors.Join(fmt.Errorf(
+				"moved worktree bytes to %s but could not claim the committed destination for registration repair: %w",
+				dest, committedErr,
+			), ErrRelocateStateUnknown)
 		}
-		sourceClaim = RelocationClaim{
-			Path: dest, AlternatePath: alternate, identity: movedIdentity,
-			recoveryOwned: sourceClaim.recoveryOwned,
-		}
-		// The bytes are now at dest. Commit the new location to the worktree
-		// object IMMEDIATELY — before the repair below — so g.worktreePath always
-		// points at where the files actually are. If repair then fails, the
-		// registration is stale but the location is not: returning here with
-		// worktreePath still at the now-removed src would strand the caller
-		// pointing at an empty path while the bytes live at dest, and the
-		// archive move-failure path (#1028 PR 3) marks the instance Lost and
-		// relies on a consistent worktree location.
-		g.setWorktreeLocation(dest)
-		if rErr := noteDeadline(worktreeRepair(g, dest)); rErr != nil {
+		sourceClaim = committedClaim
+		if rErr := repairDestination(); rErr != nil {
 			if sourceCleanupErr != nil {
-				return unknownIfCutOff(fmt.Errorf("copied worktree to %s but failed to remove original %s and failed to repair its git registration: %v: %w", dest, sourceCleanupPath, rErr, sourceCleanupErr))
-			}
-			return unknownIfCutOff(fmt.Errorf("moved worktree to %s but failed to repair its git registration: %w", dest, rErr))
-		}
-		if sErr := noteDeadline(worktreeRepairSubmodules(g, dest)); sErr != nil {
-			if deadlineTripped {
-				return unknownIfCutOff(fmt.Errorf(
-					"moved worktree to %s but submodule gitdir repair was cut off: %w", dest, sErr,
+				return errors.Join(rErr, fmt.Errorf(
+					"copied worktree to %s but failed to remove original %s: %w",
+					dest, sourceCleanupPath, sourceCleanupErr,
 				))
 			}
-			log.WarningLog.Printf(
-				"submodule gitdir repair failed after moving worktree to %s; "+
-					"run `%s` "+
-					"(or `%s`) "+
-					"to fix submodule status; continuing because the worktree move "+
-					"and registration repair already succeeded: %v",
-				dest,
-				shellsuggest.Command("git", "-C", dest, "submodule", "absorbgitdirs"),
-				shellsuggest.Command("git", "-C", dest, "submodule", "update", "--init", "--recursive"),
-				sErr,
-			)
+			return rErr
 		}
 		if sourceCleanupErr != nil {
 			// Copy AND git registration both succeeded: the worktree is valid,
@@ -502,21 +536,13 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				)
 			}
 		}
-		g.clearRelocationRecovery()
+		g.finishRelocationClaim(sourceClaim, dest)
 		return nil
 	}
 
 	// Fast path succeeded: git moved the bytes and updated the registration.
-	g.setWorktreeLocation(dest)
-	g.clearRelocationRecovery()
+	g.finishRelocationClaim(sourceClaim, dest)
 	return nil
-}
-
-// setWorktreeLocation records dest as the worktree's current on-disk location.
-func (g *GitWorktree) setWorktreeLocation(dest string) {
-	g.relocationMu.Lock()
-	defer g.relocationMu.Unlock()
-	g.setWorktreeLocationLocked(dest)
 }
 
 // ensureRepoPresent reports ErrRepoGone when the origin repo is missing or no

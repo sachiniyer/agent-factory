@@ -695,6 +695,18 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		return m.restoreRemoteSession(repoID, instance, req.Title)
 	}
 
+	// Resolve relocation ownership before reading repo-derived restore context.
+	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
+	if err != nil {
+		return "", err
+	}
+	claimTransferred := false
+	defer func() {
+		if !claimTransferred {
+			instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
+		}
+	}()
+
 	repoPath := instance.GetRepoPath()
 	if repoPath == "" {
 		return "", fmt.Errorf("cannot restore session %q: no repo path on record", req.Title)
@@ -703,6 +715,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// need the origin repo, so surface the actionable message (archive left
 	// intact) before either fails with a generic error.
 	if _, statErr := os.Stat(repoPath); statErr != nil {
+		if settleErr := m.settleRepoGoneRelocation(repoID, req.Title, repoPath, instance, relocationClaim); settleErr != nil {
+			return "", settleErr
+		}
+		claimTransferred = true
 		return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone; the archived worktree is intact at %s — recover it manually with git", req.Title, repoPath, instance.GetWorktreePath())
 	}
 	// Honor the configured worktree_root placement, exactly as session creation
@@ -717,7 +733,8 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Move the worktree back next to the repo. A repo-gone failure leaves the
 	// archive intact (the git layer guarantees this) and surfaces an actionable
 	// message; the instance stays Archived.
-	if err := instance.RestoreArchivedWorktree(dest); err != nil {
+	claimTransferred = true
+	if err := instance.RestoreArchivedWorktreeWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", fmt.Errorf("cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w", req.Title, instance.GetWorktreePath(), err)
 		}
