@@ -198,15 +198,21 @@ func TestRelocate_SourceIdentityProbeIsBounded(t *testing.T) {
 	t.Cleanup(func() { worktreeContainsSubmodules = previousInspect })
 
 	previousIdentity := relocationPathIdentity
+	sourceIdentity, err := previousIdentity(src)
+	require.NoError(t, err)
 	release := make(chan struct{})
+	probeDone := make(chan struct{})
 	relocationPathIdentity = func(path string) (pathIdentity, error) {
 		if path == src {
 			<-release
+			close(probeDone)
+			return sourceIdentity, nil
 		}
 		return previousIdentity(path)
 	}
 	t.Cleanup(func() {
 		close(release)
+		<-probeDone
 		relocationPathIdentity = previousIdentity
 	})
 	previousTimeout := relocationIdentityTimeout
