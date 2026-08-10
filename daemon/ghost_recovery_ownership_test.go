@@ -62,7 +62,7 @@ func TestGhostWorktreeRemovable_RestoresOwnershipBeforeRollbackFence(t *testing.
 	if restored.Worktree.BranchCreatedByUs == nil || !*restored.Worktree.BranchCreatedByUs {
 		t.Fatal("ghost recovery did not restore original branch provenance")
 	}
-	state, err, _ := ghostCleanupWorktree(data, "ghost")
+	state, err, _ := ghostCleanupWorktree(data, "ghost", nil)
 	if err != nil || state != git.CleanupSettled {
 		t.Fatalf("ghost cleanup did not retry the restored identity-qualified claim; state=%v err=%v", state, err)
 	}

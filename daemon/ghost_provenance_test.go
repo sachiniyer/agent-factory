@@ -61,7 +61,7 @@ func TestGhostCleanupWorktree_LegacyNilProvenance_PreservesUserBranch(t *testing
 			RepoPath: repo, WorktreePath: wt, SessionName: "legacy-ghost",
 			BranchName: "user-feature", ExternalWorktree: false, BranchCreatedByUs: nil,
 		},
-	}, "legacy-ghost")
+	}, "legacy-ghost", nil)
 
 	require.True(t, ghostBranchExists(repo, "user-feature"),
 		"#1953: ghost cleanup force-deleted the user's pre-existing branch from a legacy record with no provenance")
