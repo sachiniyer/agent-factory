@@ -493,6 +493,39 @@ func (g *GitWorktree) finishRelocationClaim(claim RelocationClaim, dest string, 
 	g.releaseRelocationClaimLocked(&claim)
 }
 
+// checkpointRelocationPublication makes the filesystem publication and its
+// durable in-memory ownership one snapshot boundary. Persistence takes the same
+// lock, so it can observe either the source claim before publish or the committed
+// destination, recovery identity, and archive report after publish — never the
+// published bytes with their retained-tree handle still caller-local.
+func (g *GitWorktree) checkpointRelocationPublication(
+	claim RelocationClaim,
+	dest, source string,
+	identity pathIdentity,
+	archiveReport *ArchiveReport,
+	publish func() error,
+) error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if err := publish(); err != nil {
+		return err
+	}
+	g.setWorktreeLocationLocked(dest)
+	if archiveReport != nil {
+		g.archiveReport = archiveReport.Clone()
+	}
+	g.relocationRecovery = &RelocationRecovery{
+		State:         RelocationRecoveryMoveUnknown,
+		AlternatePath: source,
+		IdentityKnown: true,
+		Device:        identity.device,
+		Inode:         identity.inode,
+		FileType:      identity.fileType,
+	}
+	g.releaseRelocationClaimLocked(&claim)
+	return nil
+}
+
 func (g *GitWorktree) setWorktreeLocationLocked(dest string) {
 	g.worktreePath = dest
 	g.worktreeDir = filepath.Dir(dest)
