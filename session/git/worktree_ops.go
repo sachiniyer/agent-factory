@@ -728,7 +728,13 @@ func reapWorktreeWriters(worktreePath string) {
 		// WARNING for doctor to reconcile, never a silently-swept process table.
 		return
 	}
-	seen := make(map[int]bool)
+	// The daemon can inherit a cwd inside a worktree when an af invocation
+	// auto-starts it there. Never use the scanning process as a tree root: even
+	// though proctree refuses to signal its own PID, its descendants include
+	// processes belonging to other sessions. Marking it seen also keeps it out of
+	// a tree reached through another matching ancestor, while deliberately leaving
+	// independently matching descendants eligible.
+	seen := map[int]bool{os.Getpid(): true}
 	var procs []proctree.Process
 	add := func(p proctree.Process) {
 		if !seen[p.PID] {
@@ -745,6 +751,17 @@ func reapWorktreeWriters(worktreePath string) {
 			continue
 		}
 		if !pathAtOrUnder(root, filepath.Clean(cwd)) {
+			continue
+		}
+		if proctree.IsTmuxServer(pid) {
+			// A tmux server is shared infrastructure whose cwd comes from the client
+			// that first started it. It is not owned by this worktree, and selecting
+			// its tree could terminate every tmux session on the server. Its children
+			// are not globally excluded: a pane process that independently matches
+			// the worktree remains eligible when its own pid is visited.
+			continue
+		}
+		if seen[pid] {
 			continue
 		}
 		// Take the whole subtree of the matching process: a child of a

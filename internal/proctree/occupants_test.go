@@ -172,7 +172,7 @@ func TestOccupantsOfDir_ReportsEachProcessOnce(t *testing.T) {
 // Driven through the real predicate rather than a stub: identification is from
 // the process's own argv, so a stub would test the stub.
 func TestIsTmuxServer_IdentifiesPositivelyFromArgv(t *testing.T) {
-	require.False(t, isTmuxServer(os.Getpid()),
+	require.False(t, IsTmuxServer(os.Getpid()),
 		"the test binary is not a tmux server and must not be excluded")
 
 	cmd := exec.Command("sleep", "300")
@@ -181,9 +181,9 @@ func TestIsTmuxServer_IdentifiesPositivelyFromArgv(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 	})
-	require.False(t, isTmuxServer(cmd.Process.Pid),
+	require.False(t, IsTmuxServer(cmd.Process.Pid),
 		"an ordinary process must stay a candidate: excluding on anything but a positive match would blind the gate")
 
 	// An unreadable/absent pid reports false rather than excluding silently.
-	require.False(t, isTmuxServer(-1))
+	require.False(t, IsTmuxServer(-1))
 }

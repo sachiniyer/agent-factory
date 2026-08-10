@@ -93,7 +93,7 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 		if !dirContains(root, filepath.Clean(cwd)) {
 			continue
 		}
-		if isTmuxServer(pid) {
+		if IsTmuxServer(pid) {
 			// The tmux SERVER is shared infrastructure, not a session's descendant:
 			// one server backs every session on the box and outlives all of them, and
 			// it inherits its cwd from whichever client first started it. If that was
@@ -173,13 +173,13 @@ func dirContains(root, p string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// isTmuxServer reports whether pid is a tmux server, POSITIVELY — from its own
+// IsTmuxServer reports whether pid is a tmux server, POSITIVELY — from its own
 // command line, not from anything it lacks.
 //
 // A server is `tmux` invoked without a client subcommand; an unreadable command
 // line reports false, so an unknown process is treated as an ordinary candidate
 // rather than quietly excluded.
-func isTmuxServer(pid int) bool {
+func IsTmuxServer(pid int) bool {
 	argv := Argv(pid)
 	if len(argv) == 0 {
 		return false
