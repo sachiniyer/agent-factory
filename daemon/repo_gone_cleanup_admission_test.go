@@ -108,7 +108,8 @@ func TestRestoreArchived_NonGitOriginCreatesCleanupIdentityBeforePathResolution(
 		"make the still-present origin pathname conclusively non-Git")
 
 	_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "non-git-origin", RepoID: repoID})
-	require.ErrorIs(t, err, sessiongit.ErrRepoGone)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "origin repo "+repoPath+" is gone")
 	assert.True(t, exists(archivedPath), "failed restore must leave the archive intact")
 	assert.Equal(t, session.Archived, inst.GetStatus())
 	recovery := recordFor(t, repoID, "non-git-origin").Worktree.RelocationRecovery
