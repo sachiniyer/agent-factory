@@ -207,7 +207,47 @@ func sshRecordPinnedMachine(cleanup *SSHRuntimeCleanupData, dialAddr string, dia
 	cleanup.DialEndpoint = net.JoinHostPort(dialAddr, strconv.Itoa(effective))
 	if effective == configuredPort {
 		// Only here can an older daemon, which appends the configured port itself,
-		// reach the same machine.
+		// reach the same machine — so it keeps a pin it reads correctly.
 		cleanup.DialAddress = dialAddr
+		return
 	}
+
+	// OTHERWISE, FENCE THE RECORD so an older reader REFUSES it rather than reaping
+	// with it. Leaving DialAddress empty is not enough and was the first attempt:
+	// that reader then sees an unpinned handle and dials the NAME, which behind a
+	// multi-backend VIP is the silent wrong-machine reap this whole issue is about —
+	// `rm -rf` succeeds having removed nothing, the tombstone is retired, and the
+	// real workspace leaks permanently. Writing DialAddress is no better: that reader
+	// appends the CONFIGURED port and can reach a different fleet member.
+	//
+	// Neither encoding can be read safely, so the record must not be read at all. A
+	// reader without DialEndpoint validates `RemotePID != "" && !positivePID(...)`
+	// and turns a failure into unavailableRuntimeCleanup — ErrWorkspaceStateUnknown,
+	// which RETAINS the record and retries. So RemotePID carries a deliberately
+	// non-numeric sentinel and the real pid moves to AgentPID, which that reader
+	// ignores. Retained-and-retried beats silently-wrong-and-retired; the same
+	// fail-closed shape docker's EngineID uses for a legacy tombstone.
+	//
+	// This daemon reads the pid through sshCleanupRemotePID and is unaffected.
+	cleanup.AgentPID = cleanup.RemotePID
+	cleanup.RemotePID = sshRollbackFencePID
+}
+
+// sshRollbackFencePID is the sentinel that makes a machine-pinned record
+// unreadable to a daemon predating #3122. It is deliberately non-numeric so
+// positivePID refuses it, and self-describing so a person reading the record or a
+// bug report sees why.
+const sshRollbackFencePID = "machine-pinned-see-3122"
+
+// sshCleanupRemotePID is the remote agent-server pid, from wherever this record
+// keeps it. AgentPID wins because its presence means RemotePID holds the rollback
+// fence rather than a pid.
+func sshCleanupRemotePID(d *SSHRuntimeCleanupData) string {
+	if d == nil {
+		return ""
+	}
+	if pid := strings.TrimSpace(d.AgentPID); pid != "" {
+		return pid
+	}
+	return d.RemotePID
 }

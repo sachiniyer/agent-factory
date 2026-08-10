@@ -83,7 +83,11 @@ type SSHRuntimeCleanupData struct {
 	// unpinned handle and dials by name, exactly as it did before any of this, which
 	// is safe. Both are written only when they agree, so a rollback keeps the pin it
 	// can read correctly. See sshPinnedCleanupTarget for the reading side.
-	DialEndpoint        string `json:"dial_endpoint,omitempty"`
+	DialEndpoint string `json:"dial_endpoint,omitempty"`
+	// AgentPID carries the remote agent-server's pid when the ROLLBACK FENCE below
+	// is engaged, because the fence works by making RemotePID unreadable to an older
+	// reader. Empty means RemotePID holds it, which is every other handle.
+	AgentPID            string `json:"agent_pid,omitempty"`
 	HostKeyVerification string `json:"host_key_verification,omitempty"`
 }
 
@@ -225,8 +229,9 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		if data.SSH == nil || strings.TrimSpace(data.SSH.Config.Host) == "" || strings.TrimSpace(data.SSH.SessionDir) == "" {
 			return nil, nil, fmt.Errorf("ssh cleanup handle is missing its host or remote session directory")
 		}
-		if data.SSH.RemotePID != "" && !positivePID(data.SSH.RemotePID) {
-			return nil, nil, fmt.Errorf("ssh cleanup handle has invalid remote pid %q", data.SSH.RemotePID)
+		remotePID := sshCleanupRemotePID(data.SSH)
+		if remotePID != "" && !positivePID(remotePID) {
+			return nil, nil, fmt.Errorf("ssh cleanup handle has invalid remote pid %q", remotePID)
 		}
 		cleanup := *data.SSH
 		// A handle persisted before #3044 may embed one port and carry another.
@@ -251,7 +256,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		}
 		p := newSSHSandboxProvisioner(ProvisionSpec{Title: title}, sshCmd, "", "")
 		p.sessionDir = data.SSH.SessionDir
-		p.remotePID = data.SSH.RemotePID
+		p.remotePID = remotePID
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently

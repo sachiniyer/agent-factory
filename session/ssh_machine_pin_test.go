@@ -260,26 +260,57 @@ func globalUnicastLocalAddr(t *testing.T) string {
 // the machine on a port it may not serve — or one where another shared-key ssh
 // service answers and a reap runs against the wrong host.
 func TestPinnedMachineIsRecordedSafelyForAnOlderDaemon(t *testing.T) {
-	t.Run("a different port writes no dial_address", func(t *testing.T) {
-		var c SSHRuntimeCleanupData
+	t.Run("a different port FENCES the record", func(t *testing.T) {
+		c := SSHRuntimeCleanupData{RemotePID: "4242"}
 		sshRecordPinnedMachine(&c, "10.0.0.9", 22, 2200)
 		assert.Equal(t, "10.0.0.9:22", c.DialEndpoint)
-		assert.Empty(t, c.DialAddress,
-			"a daemon without DialEndpoint would append the CONFIGURED port (2200) to this address and reach "+
-				"the wrong socket; seeing no pin at all it dials by name, which is what it did before #3122")
 
-		// And this daemon still reads the machine back.
+		// Neither encoding can be read safely by a daemon without DialEndpoint:
+		// an empty DialAddress makes it dial the NAME — the VIP — which is the silent
+		// wrong-machine reap this issue is about; writing DialAddress makes it append
+		// the CONFIGURED port and possibly reach a different fleet member. So the
+		// record is made unreadable to it instead.
+		assert.Equal(t, sshRollbackFencePID, c.RemotePID,
+			"an older reader validates RemotePID and turns a failure into ErrWorkspaceStateUnknown, which "+
+				"RETAINS and retries rather than reaping with a target it cannot interpret")
+		assert.False(t, positivePID(c.RemotePID), "the fence only works if the old validator refuses it")
+		assert.Equal(t, "4242", c.AgentPID, "and the real pid must survive for readers that understand it")
+
+		// This daemon is unaffected: it reads the machine and the pid back.
 		addr, port := sshPinnedCleanupTarget(&c)
 		assert.Equal(t, "10.0.0.9", addr)
 		assert.Equal(t, 22, port)
+		assert.Equal(t, "4242", sshCleanupRemotePID(&c))
+	})
+
+	t.Run("a fenced record still restores and reaps HERE", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		defer SetSSHRelayBinaryForTest("/opt/af/af")()
+
+		c := SSHRuntimeCleanupData{
+			Config:              config.SSHConfig{Host: "vip.example", Port: 2200},
+			SessionDir:          "/root/.af-sessions/x.AbCdEf",
+			RemotePID:           "4242",
+			HostKeyVerification: config.SSHHostKeyStrict,
+		}
+		sshRecordPinnedMachine(&c, "10.0.0.9", 22, 2200)
+
+		backend, _, err := restoreRuntimeCleanup("fenced", "ssh", &RuntimeCleanupData{SSH: &c})
+		require.NoError(t, err, "the fence must stop OLDER readers, not this one")
+		sb, ok := backend.(*sshBackend)
+		require.True(t, ok)
+		assert.Equal(t, "4242", sb.provisioner.remotePID, "the identity-checked kill still needs the real pid")
+		assert.Contains(t, proxyCommandValue(t, sb.provisioner.sshCmd), "ssh-relay '10.0.0.9' 22")
 	})
 
 	t.Run("a matching port writes both", func(t *testing.T) {
-		var c SSHRuntimeCleanupData
+		c := SSHRuntimeCleanupData{RemotePID: "4242"}
 		sshRecordPinnedMachine(&c, "10.0.0.9", 2200, 2200)
 		assert.Equal(t, "10.0.0.9:2200", c.DialEndpoint)
 		assert.Equal(t, "10.0.0.9", c.DialAddress,
 			"here an older daemon appends the same port and reaches the same machine, so it keeps a pin")
+		assert.Equal(t, "4242", c.RemotePID, "and needs no fence, so its pid stays where it has always been")
+		assert.Empty(t, c.AgentPID)
 	})
 
 	t.Run("an address pin with no port is unchanged", func(t *testing.T) {
