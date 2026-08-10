@@ -186,7 +186,15 @@ type InstanceData struct {
 	// Each entry carries the daemon's OWN refusal text rather than a client-invented
 	// one, because a user told "not supported" cannot tell a kind that could work
 	// from one that genuinely cannot.
-	TabKinds []TabKindAllowance `json:"tab_kinds,omitempty"`
+	// PendingTabs are rows restored from this record whose workspace did not
+	// survive and which have not been drained onto the roster yet. They are a
+	// SEPARATE field, not folded into Tabs, because Tabs has an ordering contract:
+	// index 0 is the agent. A recovery that fails before Launch leaves Tabs empty,
+	// so emitting a staged web tab there would put it in the agent's slot — clients
+	// would render it as the unclosable agent, and daemon mutations would report it
+	// missing because the row lives only in the staging area (#3062).
+	PendingTabs []TabData          `json:"pending_tabs,omitempty"`
+	TabKinds    []TabKindAllowance `json:"tab_kinds,omitempty"`
 	// TabRosterMutable is Capabilities.TabManagement projected: whether this
 	// session's tab ROSTER may be mutated (rename, reorder). It is a different
 	// question from either creating a kind or closing a tab, and it has a different

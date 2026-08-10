@@ -68,7 +68,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// from BackendType (#3060). Computed here, on the snapshot every surface
 		// reads, so the TUI, the web UI and the API all get the same answer.
 		data.TabKinds = tabKindAllowances(i.backend.Capabilities())
-		rosterMutable := i.backend.Capabilities().TabManagement
+		// NOT Capabilities.TabManagement any more. tabMutationTarget dropped that gate
+		// when the first off-box tab was admitted (#3062), so projecting it would tell
+		// clients to hide close/rename/reorder for tabs the daemon now accepts —
+		// the drift this projection exists to prevent, running backwards. Archived is
+		// the remaining refusal and is checked by its own path on both sides.
+		rosterMutable := true
 		data.TabRosterMutable = &rosterMutable
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
@@ -98,14 +103,13 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// each local tab's tmux session by its exact persisted name. An off-box
 	// session's fixed Agent tab has no daemon-side tmux, so it serializes with an
 	// empty TmuxName and is re-seeded when the AgentServer is launched.
-	// Staged-but-undrained tabs are part of the roster too. A sandbox recovery that
-	// fails BEFORE Launch leaves restored rows only in pendingMetadataTabs, and both
-	// failure paths then persist whatever ToInstanceData returned — so serializing
-	// only i.Tabs would write an empty roster and lose the tab permanently, which is
-	// the durability this restore exists to provide (#3062).
-	for _, td := range i.pendingMetadataTabs {
-		data.Tabs = append(data.Tabs, td)
-	}
+	// Staged-but-undrained rows are persisted in their OWN field. A sandbox recovery
+	// that fails BEFORE Launch leaves them only in pendingMetadataTabs, and both
+	// failure paths persist whatever this returns — so dropping them loses the tab
+	// permanently. Appending them to Tabs is equally wrong: Tabs reserves index 0
+	// for the agent, and a failed recovery leaves it empty, so a staged web tab
+	// would land in that slot (#3062).
+	data.PendingTabs = append(data.PendingTabs, i.pendingMetadataTabs...)
 	for _, tab := range i.Tabs {
 		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
 		if tab.tmux != nil {
@@ -293,7 +297,9 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		//
 		// STAGED, not appended: see pendingMetadataTabs. Writing into Tabs here would
 		// stop Launch seeding the agent tab and leave a web tab in index 0.
-		instance.pendingMetadataTabs = metadataTabsFrom(data)
+		// From both sources: rows that were on the roster when the record was written,
+		// and rows a previous recovery staged but never drained.
+		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
 		// intent. Rebuild only that teardown handle — no endpoint, tunnel, or live

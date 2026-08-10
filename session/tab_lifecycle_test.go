@@ -522,13 +522,62 @@ func TestToInstanceData_PersistsStagedTabsWhenRecoveryFailsBeforeLaunch(t *testi
 	// What the failure paths persist.
 	round := instance.ToInstanceData()
 
+	// In PendingTabs, NOT Tabs: Tabs reserves index 0 for the agent, and a failed
+	// recovery leaves it empty, so a staged row emitted there would take that slot.
 	var web *TabData
-	for i := range round.Tabs {
-		if round.Tabs[i].Kind == TabKindWeb {
-			web = &round.Tabs[i]
+	for i := range round.PendingTabs {
+		if round.PendingTabs[i].Kind == TabKindWeb {
+			web = &round.PendingTabs[i]
 		}
 	}
 	require.NotNil(t, web, "a staged tab must survive a recovery that failed before Launch")
 	require.Equal(t, "https://example.com/app", web.URL, "with its target, or it comes back empty")
 	require.Equal(t, "t1", web.ID, "and its stable id, so it is the same tab and not a new one")
+}
+
+// A browser canonicalises 127.1 and 2130706433 to 127.0.0.1 and takes the proxy
+// path, which then refuses them by Go's own predicate. Admitting one would create
+// a tab that is durable and permanently unusable (#3062).
+func TestRefuseTabKind_RejectsBrowserCanonicalLoopbackShorthands(t *testing.T) {
+	remote := Capabilities{Workspace: WorkspaceRemote}
+	for _, target := range []string{
+		"http://127.1:3000",
+		"http://2130706433:3000",
+		"http://0x7f000001:3000",
+	} {
+		require.Errorf(t, remote.RefuseTabKind(TabKindWeb, target),
+			"%s is loopback to a browser and must not be admitted off-box", target)
+	}
+	// A real external host is still admitted — the shape test must not swallow it.
+	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://example.com/app"))
+	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://a1.example.com:8443/app"),
+		"a hostname containing digits is still a hostname")
+}
+
+// Staged rows are persisted OUTSIDE the ordered Tabs list. A recovery that fails
+// before Launch leaves Tabs empty, so emitting a staged web tab there would put it
+// in the agent's index-0 slot — clients would render it as the unclosable agent,
+// and daemon mutations would report it missing (#3062).
+func TestToInstanceData_StagedRowsNeverOccupyTheAgentSlot(t *testing.T) {
+	data := InstanceData{
+		Title:       "off-box",
+		BackendType: "ssh",
+		Tabs: []TabData{
+			{ID: "t0", Name: "agent", Kind: TabKindAgent},
+			{ID: "t1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/app"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Empty(t, instance.Tabs, "premise: the pre-Launch state, nothing drained")
+
+	round := instance.ToInstanceData()
+	require.Empty(t, round.Tabs, "no row may occupy the agent slot while the roster is empty")
+	require.Len(t, round.PendingTabs, 1, "but the staged row is still persisted, or it is lost")
+	require.Equal(t, "https://example.com/app", round.PendingTabs[0].URL)
+
+	// And it survives a reload without being double-staged.
+	again, err := FromInstanceData(round)
+	require.NoError(t, err)
+	require.Len(t, again.pendingMetadataTabs, 1, "restaging must not duplicate the row")
 }

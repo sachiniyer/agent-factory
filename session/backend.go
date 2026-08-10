@@ -3,6 +3,9 @@ package session
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 )
 
 // WorkspaceKind describes where a backend's workspace physically lives, so
@@ -98,6 +101,15 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		// block.
 		if IsLoopbackWebTarget(target) {
 			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, so it would serve the daemon's own %s — see #3062", target, target)
+		}
+		// A host a BROWSER would canonicalise to loopback is refused too, even where
+		// Go does not read it as one. net.ParseIP rejects the shorthands 127.1 and
+		// 2130706433, so IsLoopbackWebTarget calls them external — but a browser
+		// resolves both to 127.0.0.1, picks the proxy path, and the proxy then
+		// refuses them by that same Go predicate. Admitting one would create a tab
+		// that is durable and permanently unusable, which is worse than refusing it.
+		if webTargetHostIsNumericShorthand(target) {
+			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a browser resolves that host to loopback, and a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace — see #3062", target)
 		}
 		// An EXTERNAL absolute URL is admitted. It is iframed directly and never
 		// touches the proxy, so the routing gap above is not a requirement it has;
@@ -300,4 +312,31 @@ type AgentSwapPlan struct {
 // capture API, but cannot retarget it after the outgoing runtime is stopped.
 func (p AgentSwapPlan) ConversationCapture() ConversationCaptureSnapshot {
 	return p.conversationCapture
+}
+
+// webTargetHostIsNumericShorthand reports whether a target's host is an all-numeric
+// form a browser may canonicalise to an IPv4 address that Go's net.ParseIP does not
+// accept — 127.1, 2130706433, 0x7f000001 and friends.
+//
+// It is deliberately a SHAPE test rather than an attempt to reimplement the
+// browser's parser. Getting that parser subtly wrong in the permissive direction
+// admits an unusable tab; refusing an all-numeric hostname costs nothing real,
+// because no external service is addressed that way.
+func webTargetHostIsNumericShorthand(target string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed == nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "" || net.ParseIP(host) != nil {
+		return false // a real IP literal; IsLoopbackWebTarget already classified it
+	}
+	for _, r := range host {
+		if r != '.' && (r < '0' || r > '9') && !(r >= 'a' && r <= 'f') && !(r >= 'A' && r <= 'F') && r != 'x' && r != 'X' {
+			return false // contains a letter no numeric form uses — a real hostname
+		}
+	}
+	// All characters come from the numeric/hex vocabulary. A hostname made only of
+	// those is not a service name anyone registers; it is a packed-IPv4 spelling.
+	return strings.ContainsAny(host, "0123456789")
 }
