@@ -203,6 +203,25 @@ func (i *Instance) ClearIdleEvidence() bool {
 	return changed
 }
 
+// markLoadRuntimeReplaced records that Start(false) created a replacement
+// process. The daemon loader consumes this after FromInstanceData returns so
+// the accompanying evidence clear is checkpointed before the row is installed.
+func (i *Instance) markLoadRuntimeReplaced() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.loadRuntimeReplaced = true
+}
+
+// ConsumeLoadRuntimeReplacement reports one load-time replacement exactly once.
+// It is process-local coordination, never a persisted fact about the session.
+func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	replaced := i.loadRuntimeReplaced
+	i.loadRuntimeReplaced = false
+	return replaced
+}
+
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.
 // It applies both directions because runtime replacement can clear or replace
 // the evidence, and the daemon snapshot is authoritative for all three fields.

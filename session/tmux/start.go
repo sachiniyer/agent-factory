@@ -494,7 +494,14 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// PR5/6), and interactive full-screen attach is a WS subscriber in the client
 	// (apiclient.AttachStream). All Restore still owes is a fresh status monitor,
 	// swapped under monitorMu because the daemon poll may be inside HasUpdated()
-	// reading the old pointer and mutating its fields right now (#1528).
-	t.setMonitor(newStatusMonitor())
+	// reading the old pointer and mutating its fields right now (#1528). A caller
+	// with a workDir is reattaching persisted state, so its first capture only
+	// establishes the monitor baseline; Start's inner Restore("") keeps the fresh
+	// process behavior where first output is an update.
+	monitor := newStatusMonitor()
+	if workDir != "" {
+		monitor = newReattachStatusMonitor()
+	}
+	t.setMonitor(monitor)
 	return RestoreReattached, nil
 }

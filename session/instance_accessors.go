@@ -455,6 +455,12 @@ func (i *Instance) SetStartedForTest(started bool) {
 	i.started = started
 }
 
+// MarkLoadRuntimeReplacedForTest seeds the loader settlement owed by a
+// confirmed Start(false) respawn. Production sets it only from LocalBackend.
+func (i *Instance) MarkLoadRuntimeReplacedForTest() {
+	i.markLoadRuntimeReplaced()
+}
+
 // SetPendingTabCleanupForTest seeds the unconfirmed tab-teardown handles a
 // previous daemon would have left behind (#2669). Test-only: the real flow
 // writes them from CloseTab's commit and reads them back through

@@ -15,6 +15,10 @@ import (
 type statusMonitor struct {
 	// Store hashes to save memory.
 	prevOutputHash []byte
+	// baselinePending makes the first successful capture after reattaching to an
+	// existing process establish state without claiming the pane changed. Fresh
+	// starts and respawns leave it false: their first output is genuinely new.
+	baselinePending bool
 	// dead is set once a capture-pane failure has been confirmed by
 	// ExistsOrUnknown() reporting the tmux session is gone. While true,
 	// HasUpdated short-circuits and emits no further logs so a stale
@@ -26,6 +30,10 @@ type statusMonitor struct {
 
 func newStatusMonitor() *statusMonitor {
 	return &statusMonitor{}
+}
+
+func newReattachStatusMonitor() *statusMonitor {
+	return &statusMonitor{baselinePending: true}
 }
 
 // hash hashes the string.
@@ -157,9 +165,11 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	// compare-and-store against prevOutputHash needs the lock.
 	newHash := mon.hash(content)
 	t.monitorMu.Lock()
-	changed := !bytes.Equal(newHash, mon.prevOutputHash)
-	if changed {
+	baseline := mon.baselinePending
+	changed := !baseline && !bytes.Equal(newHash, mon.prevOutputHash)
+	if baseline || changed {
 		mon.prevOutputHash = newHash
+		mon.baselinePending = false
 	}
 	t.monitorMu.Unlock()
 	return changed, hasPrompt, content

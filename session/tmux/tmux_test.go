@@ -495,12 +495,10 @@ func TestHasUpdatedSilentWhenSessionGone(t *testing.T) {
 	require.Equal(t, int32(1), hasSessionCalls.Load(), "no further has-session calls while dead")
 }
 
-// TestHasUpdatedRespawnResetsDead documents that a re-spawn via Restore
-// produces a fresh statusMonitor with dead cleared, so polling resumes
-// normally after the session comes back. This is the recovery path for
-// issue #489 — operators don't have to restart the daemon after a stale
-// instance is healed.
-func TestHasUpdatedRespawnResetsDead(t *testing.T) {
+// TestHasUpdatedRespawnResetsDead documents that a reattach via Restore
+// produces a fresh statusMonitor with dead cleared, so polling resumes after
+// the session comes back without reporting its baseline capture as pane churn.
+func TestHasUpdatedReattachResetsDeadAndBaselinesCapture(t *testing.T) {
 	var captureOK, sessionAlive atomic.Bool
 	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
 	_ = captureErrorLog(t)
@@ -516,9 +514,10 @@ func TestHasUpdatedRespawnResetsDead(t *testing.T) {
 	require.NotNil(t, session.monitor)
 	require.False(t, session.monitor.dead, "fresh monitor after Restore must not be dead")
 
-	// Polling resumes and produces a normal updated=true on first content.
+	// Polling resumes, but the first successful capture only establishes the
+	// replacement monitor's baseline. It is not evidence that the pane changed.
 	updated, _, _ := session.HasUpdated()
-	require.True(t, updated, "first capture after Restore should report updated")
+	require.False(t, updated, "first capture after reattach must only establish a baseline")
 }
 
 // TestHasUpdatedTransientErrorKeepsLogging covers the other branch of #489:

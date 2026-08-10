@@ -160,10 +160,10 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
+	loadRuntimeReplaced      bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
-	// an observer that decided from a captured pane learns
-	// its decision has been superseded by a newer transition before it applies it;
+	// an observer learns whether its captured-pane decision was superseded before it applies it;
 	// see state_epoch.go. Mutex-protected, in-memory only: it describes a window
 	// between an observation and its apply, and no such window survives a restart.
 	stateEpoch uint64

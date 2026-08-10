@@ -504,6 +504,8 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 		"a replacement process must not inherit the predecessor runtime's idle reason")
 	assert.True(t, churnAt.IsZero(),
 		"a replacement process must not inherit the predecessor runtime's pane-churn age")
+	assert.True(t, restored.ConsumeLoadRuntimeReplacement(),
+		"the daemon loader must be told to persist the replacement's evidence clear")
 }
 
 func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {
@@ -538,4 +540,6 @@ func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {
 		"a pure reattach must preserve the persisted runtime's idle evidence")
 	assert.Equal(t, churnAt, gotChurnAt,
 		"a pure reattach must preserve the persisted runtime's pane-churn age")
+	assert.False(t, restored.ConsumeLoadRuntimeReplacement(),
+		"a pure reattach must not request an evidence-clear settlement")
 }

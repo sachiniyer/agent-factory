@@ -297,6 +297,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// them; a confirmed respawn must not attribute them to its replacement.
 			i.ClearIdleEvidence()
 			resetAgentBrokerCaptures(i)
+			i.markLoadRuntimeReplaced()
 		}
 	} else {
 		i.mu.RLock()
