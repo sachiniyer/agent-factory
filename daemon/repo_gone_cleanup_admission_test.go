@@ -267,7 +267,8 @@ func TestKillSession_LiveCleanupSettlesDurablyBeforeTailFailure(t *testing.T) {
 	require.NoError(t, os.RemoveAll(repoPath))
 
 	_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "live-tail", RepoID: repoID})
-	require.ErrorIs(t, err, sessiongit.ErrRepoGone)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "origin repo "+repoPath+" is gone")
 	recovery := recordFor(t, repoID, "live-tail").Worktree.RelocationRecovery
 	require.NotNil(t, recovery)
 	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
