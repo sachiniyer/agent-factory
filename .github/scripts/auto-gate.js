@@ -249,32 +249,48 @@ function resolveAggregateHeads({ context, targets = [] }) {
 }
 
 async function beginAggregateDecision({ github, context, core, headSha }) {
-  const aggregate = await evaluateAggregateDecision({ github, context, headSha });
+  const sha = normalizeHeadSha(headSha);
+  if (!sha) {
+    throw new Error(`Invalid head SHA for Auto Gate aggregate invalidation: ${headSha}`);
+  }
   const decision = {
-    // Check runs that already completed cannot be reliably reopened across all
-    // GitHub implementations. A completed failure is still non-green and can be
-    // updated in place after the refresh, so it closes the stale-PASS window
-    // without depending on that state transition.
+    // Create a new failure before any API-dependent reads. If target resolution,
+    // association lookup, or evaluation fails, the newest fixed check is already
+    // non-green and the prior PASS cannot remain authoritative.
     status: "completed",
     conclusion: "failure",
     output: {
       title: "WAITING: refreshing every PR/head decision at this commit",
-      summary: formatAggregateSummary(aggregate.pullNumbers, [], true),
+      summary:
+        "This fixed-name check is commit-scoped. Auto Gate is refreshing every open " +
+        "master PR and exact (PR, head) decision at this commit.",
     },
   };
-  const write = await upsertAggregateCheck({
+  const write = await createAggregateCheck({
     github,
     context,
     core,
-    headSha: aggregate.headSha,
-    checkRuns: aggregate.checkRuns,
+    headSha: sha,
     decision,
   });
-  core.notice(`Marked the fixed Auto Gate aggregate non-green on ${aggregate.headSha}.`);
+  if (write.writeState === "read-only") {
+    return {
+      ok: false,
+      headSha: sha,
+      pullNumbers: [],
+      blockers: ["The event token cannot write the fixed aggregate"],
+      checkRuns: [],
+      summary: decision.output.summary,
+      ...write,
+      state: "read-only",
+    };
+  }
+  core.notice(`Marked the fixed Auto Gate aggregate non-green on ${sha}.`);
+  const aggregate = await evaluateAggregateDecision({ github, context, headSha: sha });
   return { ...aggregate, ...write, state: "pending" };
 }
 
-async function reportAggregateDecision({ github, context, core, headSha }) {
+async function reportAggregateDecision({ github, context, core, headSha, checkRunId }) {
   const aggregate = await evaluateAggregateDecision({ github, context, headSha });
   const decision = {
     status: "completed",
@@ -293,6 +309,7 @@ async function reportAggregateDecision({ github, context, core, headSha }) {
     headSha: aggregate.headSha,
     checkRuns: aggregate.checkRuns,
     decision,
+    checkRunId,
   });
   core.notice(`${aggregate.ok ? "PASS" : "BLOCKED"}: fixed Auto Gate aggregate on ${aggregate.headSha}.`);
   return { ...aggregate, ...write, state: aggregate.ok ? "pass" : "waiting" };
@@ -337,6 +354,7 @@ async function processAggregateHead({
     context,
     core,
     headSha: pending.headSha,
+    checkRunId: pending.checkRunId,
   });
   if (aggregate.writeState === "read-only" || !aggregate.ok || !mergeEnabled) {
     return { state: aggregate.state, pending, aggregate };
@@ -494,17 +512,27 @@ async function evaluateAggregateFresh({ github, context, core, headSha }) {
   };
 }
 
-async function upsertAggregateCheck({ github, context, core, headSha, checkRuns, decision }) {
+async function upsertAggregateCheck({
+  github,
+  context,
+  core,
+  headSha,
+  checkRuns,
+  decision,
+  checkRunId,
+}) {
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
-  const prior = checkRuns
-    .filter(
-      (run) =>
-        run.name === identity.checkName &&
-        run.external_id === identity.externalId &&
-        run.app?.id === GITHUB_ACTIONS_APP_ID,
-    )
-    .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+  const prior = checkRunId
+    ? { id: checkRunId }
+    : checkRuns
+        .filter(
+          (run) =>
+            run.name === identity.checkName &&
+            run.external_id === identity.externalId &&
+            run.app?.id === GITHUB_ACTIONS_APP_ID,
+        )
+        .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
   try {
     if (prior) {
       await github.rest.checks.update({
@@ -534,6 +562,31 @@ async function upsertAggregateCheck({ github, context, core, headSha, checkRuns,
     return { writeState: "read-only", priorAggregate: Boolean(prior) };
   }
   return { writeState: prior ? "updated" : "created", priorAggregate: Boolean(prior) };
+}
+
+async function createAggregateCheck({ github, context, core, headSha, decision }) {
+  const { owner, repo } = context.repo;
+  const identity = aggregateIdentity(headSha);
+  try {
+    const response = await github.rest.checks.create({
+      owner,
+      repo,
+      head_sha: headSha,
+      name: identity.checkName,
+      external_id: identity.externalId,
+      ...decision,
+    });
+    return { writeState: "created", priorAggregate: false, checkRunId: response.data.id };
+  } catch (error) {
+    if (!isReadOnlyForkCheckError(error, context)) {
+      throw error;
+    }
+    core.warning(
+      `Auto Gate could not invalidate the aggregate for fork head ${headSha} with its ` +
+        "read-only token; the writable pull_request_target run must handle it.",
+    );
+    return { writeState: "read-only", priorAggregate: false, checkRunId: null };
+  }
 }
 
 function aggregateIdentity(headSha) {

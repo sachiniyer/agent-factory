@@ -74,6 +74,20 @@ jobs:
               return;
             }
 
+            // Preserve heads carried by the webhook before any API-dependent
+            // resolution. If the resolver fails, apply-gate can still make a
+            // previously green aggregate non-green for every known head.
+            const payload = context.payload || {};
+            const knownEventHeads = [...new Set([
+              payload.pull_request?.head?.sha,
+              payload.check_suite?.head_sha,
+              payload.sha,
+              payload.before,
+              payload.after,
+            ]
+              .map((value) => String(value || "").toLowerCase())
+              .filter((value) => /^[0-9a-f]{40}$/.test(value)))].sort();
+
             try {
               const autoGate = require(helperPath);
               const rawPrNumber = process.env.PR_NUMBER.trim();
@@ -146,7 +160,10 @@ jobs:
               core.warning(error && error.stack ? error.stack : message);
               core.notice(summary);
               core.setOutput("targets", "[]");
-              core.setOutput("aggregate_heads", "[]");
+              core.setOutput(
+                "aggregate_heads",
+                JSON.stringify(knownEventHeads.map((headSha) => ({ head_sha: headSha }))),
+              );
               throw error;
             }
 
@@ -154,7 +171,8 @@ jobs:
     name: Apply aggregate gate
     needs: auto-gate
     if: >-
-      needs.auto-gate.result == 'success' &&
+      always() &&
+      needs.auto-gate.outputs.aggregate_heads != '' &&
       needs.auto-gate.outputs.aggregate_heads != '[]'
     runs-on: ubuntu-latest
     strategy:

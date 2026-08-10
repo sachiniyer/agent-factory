@@ -49,7 +49,11 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /catch \(error\)[\s\S]*?core\.setOutput\("targets", "\[\]"\);\s+core\.setOutput\("aggregate_heads", "\[\]"\);\s+throw error;/,
+    /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha[\s\S]*?catch \(error\)[\s\S]*?core\.setOutput\("targets", "\[\]"\);[\s\S]*?JSON\.stringify\(knownEventHeads\.map[\s\S]*?throw error;/,
+  );
+  assert.match(
+    workflow,
+    /if: >-\s+always\(\) &&\s+needs\.auto-gate\.outputs\.aggregate_heads != '' &&\s+needs\.auto-gate\.outputs\.aggregate_heads != '\[\]'/,
   );
   assert.match(workflow, /aggregate_heads: \$\{\{ steps\.evaluate\.outputs\.aggregate_heads \}\}/);
   assert.doesNotMatch(workflow, /^  (?:begin-aggregate|aggregate-gate|merge-gate):/m);
@@ -400,8 +404,8 @@ test("one shared-head transaction merges at most one PR before master changes", 
   assert.equal(transaction.mergedPrNumber, 1465);
   assert.equal(github.mergedWith.pull_number, 1465);
   assert.equal(transaction.invalidated.state, "pending");
-  assert.equal(github.updatedChecks.at(-1).conclusion, "failure");
-  assert.match(github.updatedChecks.at(-1).output.title, /WAITING: refreshing/);
+  assert.equal(github.createdChecks.at(-1).conclusion, "failure");
+  assert.match(github.createdChecks.at(-1).output.title, /WAITING: refreshing/);
 });
 
 test("a merge API error makes the published aggregate non-green before propagating", async () => {
@@ -420,8 +424,8 @@ test("a merge API error makes the published aggregate non-green before propagati
   );
 
   assert.equal(github.mergedWith, null);
-  assert.equal(github.updatedChecks.at(-1).conclusion, "failure");
-  assert.match(github.updatedChecks.at(-1).output.title, /WAITING: refreshing/);
+  assert.equal(github.createdChecks.at(-1).conclusion, "failure");
+  assert.match(github.createdChecks.at(-1).output.title, /WAITING: refreshing/);
 });
 
 test("a stale aggregate PASS is made non-green before decisions refresh", async () => {
@@ -450,12 +454,42 @@ test("a stale aggregate PASS is made non-green before decisions refresh", async 
     headSha: HEAD_SHA,
   });
 
-  assert.equal(github.createdChecks.length, 0);
-  assert.equal(github.updatedChecks.length, 1);
-  assert.equal(github.updatedChecks[0].check_run_id, 777);
-  assert.equal(github.updatedChecks[0].status, "completed");
-  assert.equal(github.updatedChecks[0].conclusion, "failure");
-  assert.match(github.updatedChecks[0].output.summary, /refreshing those decisions now/);
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.updatedChecks.length, 0);
+  assert.equal(github.createdChecks[0].status, "completed");
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.match(github.createdChecks[0].output.summary, /refreshing every open master PR/);
+});
+
+test("a resolver read failure cannot leave an earlier aggregate PASS authoritative", async () => {
+  const github = fakeGateGithub({
+    associationError: new Error("association lookup unavailable"),
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        id: 777,
+        name: "Auto Gate decision",
+        externalId: aggregateExternalId(HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  await assert.rejects(
+    autoGate.beginAggregateDecision({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+    }),
+    /association lookup unavailable/,
+  );
+
+  assert.equal(github.associationReads, 1);
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.createdChecks[0].name, "Auto Gate decision");
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.equal(github.updatedChecks.length, 0);
 });
 
 test("aggregate resolution reevaluates the previous head after synchronization", () => {
@@ -1131,6 +1165,7 @@ function fakeGateGithub({
   graphqlErrorsByNumber = {},
   mergeError = null,
   checkWriteError = null,
+  associationError = null,
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -1153,7 +1188,7 @@ function fakeGateGithub({
     }
     github.operations.push("check:create");
     github.createdChecks.push(options);
-    return { data: options };
+    return { data: { id: 20000 + github.createdChecks.length - 1, ...options } };
   };
   const updateCheck = async function updateCheck(options) {
     if (checkWriteError) {
@@ -1238,6 +1273,10 @@ function fakeGateGithub({
             ...created,
           })),
         ];
+      }
+      if (fn === listPullRequestsAssociatedWithCommit && associationError) {
+        github.associationReads += 1;
+        throw associationError;
       }
       if (fn === listPullRequestsAssociatedWithCommit && associatedPullRequestSnapshots) {
         const index = Math.min(github.associationReads, associatedPullRequestSnapshots.length - 1);
