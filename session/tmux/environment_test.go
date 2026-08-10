@@ -10,15 +10,16 @@ import (
 func TestCommandEnvironmentFromCommand(t *testing.T) {
 	workDir := filepath.Join(string(filepath.Separator), "launch")
 	tests := []struct {
-		name      string
-		command   string
-		key       string
-		want      CommandEnvOverride
-		wantDir   string
-		wantExe   string
-		wantAgent string
-		launch    string
-		wantErr   string
+		name       string
+		command    string
+		key        string
+		want       CommandEnvOverride
+		wantDir    string
+		wantExe    string
+		wantAgent  string
+		unknownDir bool
+		launch     string
+		wantErr    string
 	}{
 		{name: "leading assignment", command: "CODEX_HOME='/tmp/codex home' codex", key: "CODEX_HOME", want: CommandEnvOverride{Value: "/tmp/codex home", Present: true, Set: true, Literal: true}},
 		{name: "env assignment", command: "/usr/bin/env CODEX_HOME=/tmp/one codex", key: "CODEX_HOME", want: CommandEnvOverride{Value: "/tmp/one", Present: true, Set: true, Literal: true}},
@@ -31,9 +32,15 @@ func TestCommandEnvironmentFromCommand(t *testing.T) {
 		{name: "chdir separate", command: "env -C /tmp codex", key: "CODEX_HOME", wantDir: "/tmp"},
 		{name: "chdir attached", command: "env -Crelative codex", key: "CODEX_HOME", wantDir: filepath.Join(workDir, "relative")},
 		{name: "nested env cwd", command: "env -C /tmp env -C child CODEX_HOME=rel codex", key: "CODEX_HOME", want: CommandEnvOverride{Value: "rel", Present: true, Set: true, Literal: true}, wantDir: "/tmp/child"},
-		{name: "inherited", command: "ionice -c 3 codex", key: "CODEX_HOME"},
+		{name: "codex chdir separate", command: "codex -C /tmp", key: "CODEX_HOME", unknownDir: true},
+		{name: "codex chdir attached", command: "codex -C/tmp", key: "CODEX_HOME", unknownDir: true},
+		{name: "codex long chdir separate", command: "codex --cd /tmp", key: "CODEX_HOME", unknownDir: true},
+		{name: "codex long chdir attached", command: "codex --cd=/tmp", key: "CODEX_HOME", unknownDir: true},
+		{name: "codex option delimiter", command: "codex -- -C", key: "CODEX_HOME"},
+		{name: "inherited through wrapper", command: "ionice -c 3 codex", key: "CODEX_HOME", unknownDir: true},
+		{name: "shell cd is unmodeled", command: "cd /tmp && codex", key: "CODEX_HOME", wantExe: "codex", wantAgent: ProgramCodex, unknownDir: true},
 		{name: "opaque wrapper", command: "/opt/bin/my-agent-wrapper --ready", key: "CODEX_HOME", wantExe: "/opt/bin/my-agent-wrapper"},
-		{name: "agent behind wrapper", command: "ionice -c 3 /opt/bin/codex", key: "CODEX_HOME", wantExe: "/opt/bin/codex", wantAgent: ProgramCodex},
+		{name: "agent behind wrapper", command: "ionice -c 3 /opt/bin/codex", key: "CODEX_HOME", wantExe: "/opt/bin/codex", wantAgent: ProgramCodex, unknownDir: true},
 		{name: "dynamic value refused", command: "CODEX_HOME=$ALT_CODEX_HOME codex", key: "CODEX_HOME", wantErr: "uses shell expansion"},
 		{name: "dynamic chdir refused", command: "env -C $OTHER codex", key: "CODEX_HOME", wantErr: "unsupported env invocation"},
 		{name: "unknown env option refused", command: "env --future-option codex", key: "CODEX_HOME", wantErr: "unknown option"},
@@ -63,6 +70,7 @@ func TestCommandEnvironmentFromCommand(t *testing.T) {
 				wantDir = workDir
 			}
 			require.Equal(t, wantDir, got.WorkingDir)
+			require.Equal(t, !tc.unknownDir, got.WorkingDirKnown())
 		})
 	}
 }

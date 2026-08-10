@@ -17,10 +17,11 @@ import (
 
 func TestPrepareCreateLaunchResolvesCommandSpecificCodexHome(t *testing.T) {
 	tests := []struct {
-		name    string
-		command func(repoRoot string) string
-		want    func(repoRoot string) string
-		wantErr string
+		name           string
+		command        func(repoRoot string) string
+		want           func(repoRoot string) string
+		wantWorkingDir func(repoRoot string) string
+		wantErr        string
 	}{
 		{
 			name: "absolute CODEX_HOME",
@@ -40,6 +41,7 @@ func TestPrepareCreateLaunchResolvesCommandSpecificCodexHome(t *testing.T) {
 			want: func(repoRoot string) string {
 				return filepath.Join(repoRoot, "nested", "relative-store")
 			},
+			wantWorkingDir: func(repoRoot string) string { return filepath.Join(repoRoot, "nested") },
 		},
 		{
 			name:    "unset CODEX_HOME uses command HOME",
@@ -87,15 +89,20 @@ func TestPrepareCreateLaunchResolvesCommandSpecificCodexHome(t *testing.T) {
 			}
 			require.NoError(t, err)
 			expectedWorkDir := pathutil.ResolveForCompare(repoRoot)
+			expectedCodexWorkingDir := expectedWorkDir
+			if tc.wantWorkingDir != nil {
+				expectedCodexWorkingDir = pathutil.ResolveForCompare(tc.wantWorkingDir(repoRoot))
+			}
 			expectedCodexHome := pathutil.ResolveForCompare(tc.want(repoRoot))
 			require.Equal(t, expectedWorkDir, pathutil.ResolveForCompare(plan.workDir),
 				"the capture plan must be prepared only after provisioning fixes the launch cwd")
 			require.Equal(t, expectedCodexHome, pathutil.ResolveForCompare(plan.conversationCapture.codexHome))
+			require.Equal(t, expectedCodexWorkingDir, plan.conversationCapture.workingDir)
 			require.False(t, plan.conversationCapture.startedAt.IsZero(),
 				"the before-image must be taken during prepare, before launch")
 
-			writeCodexRolloutFile(t, expectedCodexHome,
-				"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+			writeCodexRolloutFileWithCwd(t, expectedCodexHome,
+				"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", expectedCodexWorkingDir)
 			conv, captureErr := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), time.Second)
 			require.NoError(t, captureErr)
 			require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID,
@@ -122,6 +129,60 @@ func TestPrepareCreateLaunchUsesProvisionedLinkedWorktreeCwd(t *testing.T) {
 	require.NotEqual(t, repoRoot, plan.workDir, "regular create must use its linked worktree, not the source repo")
 	require.Equal(t, inst.GetWorktreePath(), plan.workDir)
 	require.Equal(t, filepath.Join(plan.workDir, "relative-store"), plan.conversationCapture.codexHome)
+}
+
+func TestPrepareCreateLaunchDoesNotCorrelateUnmodeledShellCwd(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	repoRoot := initInPlaceRepo(t, "shell-cwd-create")
+	nested := filepath.Join(repoRoot, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: "cd " + nested + " && codex"}
+	require.NoError(t, config.SaveConfig(cfg))
+	inst, err := NewInstance(InstanceOptions{
+		Title: "shell-cwd-create", Path: repoRoot, Program: tmux.ProgramCodex, InPlace: true,
+	})
+	require.NoError(t, err)
+
+	plan, err := inst.PrepareCreateLaunch()
+	require.NoError(t, err)
+	require.Empty(t, plan.conversationCapture.workingDir,
+		"an unmodeled shell cd must retain exactly-one capture instead of filtering against a guessed cwd")
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", nested)
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
+}
+
+func TestPrepareCreateLaunchDoesNotCorrelateCodexCwdFlag(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	repoRoot := initInPlaceRepo(t, "codex-cwd-flag-create")
+	nested := filepath.Join(repoRoot, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: "codex -C nested"}
+	require.NoError(t, config.SaveConfig(cfg))
+	inst, err := NewInstance(InstanceOptions{
+		Title: "codex-cwd-flag-create", Path: repoRoot, Program: tmux.ProgramCodex, InPlace: true,
+	})
+	require.NoError(t, err)
+
+	plan, err := inst.PrepareCreateLaunch()
+	require.NoError(t, err)
+	require.Empty(t, plan.conversationCapture.workingDir,
+		"Codex -C changes the rollout cwd after the pane starts, so the launch cwd is not correlation evidence")
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", nested)
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
 }
 
 // #3108: account admission must judge the command the create will actually
@@ -261,7 +322,7 @@ func TestPreparedCreateLaunchSnapshotsBeforeAgentProcessStart(t *testing.T) {
 	pty.beforeStart = func(command *exec.Cmd) {
 		joined := strings.Join(command.Args, " ")
 		if strings.Contains(joined, "new-session") && strings.Contains(joined, "codex") {
-			writeCodexRolloutFile(t, codexHome, rollout)
+			writeCodexRolloutFileWithCwd(t, codexHome, rollout, repoRoot)
 		}
 	}
 	inst.SetTmuxSession(tmux.NewTmuxSessionWithDeps("ordered-create", tmux.ProgramCodex, pty, world.exec()))

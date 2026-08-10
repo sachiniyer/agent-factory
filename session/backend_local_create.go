@@ -50,19 +50,17 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	// to "", while a configured Codex command with unsupported env syntax must
 	// still fail closed instead of silently losing capture.
 	actualAgent := tmux.DetectAgentFromCommand(program)
-	if actualAgent != tmux.ProgramCodex {
-		if i.AgentProgram() != tmux.ProgramCodex {
-			return plan, nil
-		}
-		launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
-		if err != nil {
-			return CreateLaunchPlan{}, fmt.Errorf(
-				"cannot prepare Codex conversation capture for session %q: %w; use literal CODEX_HOME/HOME values and supported env options",
-				i.Title, err)
-		}
-		if launch.Agent != tmux.ProgramCodex {
-			return plan, nil
-		}
+	if actualAgent != tmux.ProgramCodex && i.AgentProgram() != tmux.ProgramCodex {
+		return plan, nil
+	}
+	launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
+	if err != nil {
+		return CreateLaunchPlan{}, fmt.Errorf(
+			"cannot prepare Codex conversation capture for session %q: %w; use literal CODEX_HOME/HOME values and supported env options",
+			i.Title, err)
+	}
+	if actualAgent != tmux.ProgramCodex && launch.Agent != tmux.ProgramCodex {
+		return plan, nil
 	}
 	codexHome, err := tmux.CodexHomeFromCommand(program, workDir)
 	if err != nil {
@@ -73,7 +71,11 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	if strings.TrimSpace(codexHome) == "" {
 		return CreateLaunchPlan{}, fmt.Errorf("cannot prepare Codex conversation capture for session %q: resolved store is empty", i.Title)
 	}
-	plan.conversationCapture = BeginConversationCaptureAtCodexHome(codexHome)
+	captureWorkingDir := ""
+	if launch.WorkingDirKnown() {
+		captureWorkingDir = launch.WorkingDir
+	}
+	plan.conversationCapture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, captureWorkingDir)
 	return plan, nil
 }
 
