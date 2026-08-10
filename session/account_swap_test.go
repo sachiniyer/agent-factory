@@ -54,6 +54,7 @@ func TestValidateAccountSwapRefusesConversationSelectors(t *testing.T) {
 		{"claude -r=old-chat", "-r=old-chat"},
 		{"claude --session-id old-chat", "--session-id old-chat"},
 		{"codex resume old-chat", "resume old-chat"},
+		{"codex --model gpt-5 resume old-chat", "resume old-chat"},
 		{"codex exec resume --last --model gpt-5", "resume --last"},
 	} {
 		t.Run(tc.program, func(t *testing.T) {
