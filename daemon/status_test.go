@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
@@ -117,7 +118,7 @@ func persistedStatus(t *testing.T, repoID, title string) session.Status {
 	return session.Status(0)
 }
 
-func persistedInstance(t *testing.T, repoID, title string) session.InstanceData {
+func persistedInstanceByTitle(t *testing.T, repoID, title string) session.InstanceData {
 	t.Helper()
 	raw, err := config.LoadRepoInstances(repoID)
 	if err != nil {
@@ -152,7 +153,7 @@ func TestRefreshStatusesPersistsFirstPostPromptChurnWhileRunning(t *testing.T) {
 
 	manager.refreshInstanceStatus(repoID, inst)
 
-	stored := persistedInstance(t, repoID, "prompt-churn")
+	stored := persistedInstanceByTitle(t, repoID, "prompt-churn")
 	if !stored.LastPaneChurnAt.After(attemptedAt) {
 		t.Fatalf("persisted churn = %v, want after prompt %v", stored.LastPaneChurnAt, attemptedAt)
 	}
