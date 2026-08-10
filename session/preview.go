@@ -28,41 +28,16 @@ type PreviewSnapshot struct {
 	LinesAboveKnown bool
 }
 
-// previewSnapshotWithModes attaches the terminal observation to a capture.
-//
-// scrollbackFloor is a history_size read taken BEFORE the content was captured, or
-// -1 when none was. It exists because the count read here is a SEPARATE tmux
-// command from the capture, so it does not necessarily describe the bytes returned:
-// a clear-history or a taller resize in between can report 0 while the captured
-// visible screen really did omit lines, and reporting that as complete recreates
-// the failure this whole change exists to prevent (#3169 review).
-//
-// So completeness takes the MAXIMUM of the two observations. A pane can gain
-// history between them harmlessly; what must never happen is a partial capture
-// becoming a measured zero. The asymmetry is deliberate and matches the stakes the
-// issue records: a false "partial" costs the reader one --full, while a false
-// "complete" cost them archived working sessions.
-func previewSnapshotWithModesBracketed(content string, ts *tmux.TmuxSession, scrollbackFloor int) PreviewSnapshot {
-	snapshot := previewSnapshotWithModes(content, ts)
-	if scrollbackFloor > snapshot.LinesAbove {
-		snapshot.LinesAbove = scrollbackFloor
-		snapshot.LinesAboveKnown = true
-	}
-	return snapshot
-}
-
-// scrollbackFloorBefore reads the pane's history size before a capture, returning
-// -1 when it cannot be established. Only worth taking for a VISIBLE capture: a full
-// capture omits nothing, so it needs no floor and pays no extra tmux command.
-func scrollbackFloorBefore(ts *tmux.TmuxSession, full bool) int {
-	if ts == nil || full {
-		return -1
-	}
-	state, err := ts.ReadTerminalState()
+// captureVisibleWithCount captures the visible screen and the lines above it in ONE
+// tmux command, so a completeness claim is bound to the bytes it describes (#3169
+// review). ts == nil (a remote sandbox) leaves the count unknown, which renders as
+// "not measured" rather than as "nothing above".
+func captureVisibleWithCount(ts *tmux.TmuxSession) (string, int, bool, error) {
+	content, size, err := ts.CaptureVisibleWithScrollback()
 	if err != nil {
-		return -1
+		return "", 0, false, err
 	}
-	return state.HistorySize
+	return content, size, true, nil
 }
 
 func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnapshot {
@@ -76,9 +51,10 @@ func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnaps
 	}
 	snapshot.Modes = state.Modes
 	snapshot.HasModes = true
-	// Free: this is the same display-message the modes came from (#3169).
-	snapshot.LinesAbove = state.HistorySize
-	snapshot.LinesAboveKnown = true
+	// Deliberately NOT setting LinesAbove from state.HistorySize. This
+	// display-message is a SEPARATE command from the capture, so its count does not
+	// describe the returned bytes — see CaptureVisibleWithScrollback, which is where
+	// a completeness claim can honestly come from (#3169 review).
 	return snapshot
 }
 
@@ -106,18 +82,20 @@ func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, erro
 		return PreviewSnapshot{}, nil
 	}
 
-	floor := scrollbackFloorBefore(ts, full)
-	var content string
-	var err error
-	if full {
-		content, err = ts.CapturePaneContentWithOptions("-", "-")
-	} else {
-		content, err = ts.CapturePaneContent()
+	if !full {
+		content, above, known, err := captureVisibleWithCount(ts)
+		if err != nil {
+			return PreviewSnapshot{}, err
+		}
+		snapshot := previewSnapshotWithModes(content, ts)
+		snapshot.LinesAbove, snapshot.LinesAboveKnown = above, known
+		return snapshot, nil
 	}
+	content, err := ts.CapturePaneContentWithOptions("-", "-")
 	if err != nil {
 		return PreviewSnapshot{}, err
 	}
-	return previewSnapshotWithModesBracketed(content, ts, floor), nil
+	return previewSnapshotWithModes(content, ts), nil
 }
 
 // PreviewTabFullHistory is PreviewTab's full-scrollback counterpart. It keeps
@@ -167,20 +145,20 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 		}
 		// Read the floor BEFORE the capture, so a clear-history afterwards cannot turn
 		// this partial capture into a measured zero (#3169 review).
-		floor := scrollbackFloorBefore(ts, full)
-		var (
-			content string
-			err     error
-		)
-		if full {
-			content, err = ts.CapturePaneContentWithOptions("-", "-")
-		} else {
-			content, err = ts.CapturePaneContent()
+		if !full {
+			content, above, known, err := captureVisibleWithCount(ts)
+			if err != nil {
+				return PreviewSnapshot{}, err
+			}
+			snapshot := previewSnapshotWithModes(content, ts)
+			snapshot.LinesAbove, snapshot.LinesAboveKnown = above, known
+			return snapshot, nil
 		}
+		content, err := ts.CapturePaneContentWithOptions("-", "-")
 		if err != nil {
 			return PreviewSnapshot{}, err
 		}
-		return previewSnapshotWithModesBracketed(content, ts, floor), nil
+		return previewSnapshotWithModes(content, ts), nil
 	}
 
 	// Backend preview methods re-enter i.mu, so the pinned agent target snapshots
@@ -191,7 +169,23 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 	if backend == nil {
 		return PreviewSnapshot{}, fmt.Errorf("session %q has no preview backend", i.Title)
 	}
-	floor := scrollbackFloorBefore(ts, full)
+	// A LOCAL visible capture goes through the atomic tmux command so its
+	// completeness claim describes the bytes returned (#3169 review).
+	// LocalBackend.Preview is exactly ts.CapturePaneContent() with the same flags, so
+	// the content is unchanged; what is added is the count, from the same invocation.
+	//
+	// ts == nil is an off-box sandbox, whose content arrives over REST and whose count
+	// nothing measures — so it stays unknown, which renders as "not measured". That is
+	// the honest answer, and it is why unknown is a real state rather than a default.
+	if !full && ts != nil {
+		content, above, known, err := captureVisibleWithCount(ts)
+		if err != nil {
+			return PreviewSnapshot{}, err
+		}
+		snapshot := previewSnapshotWithModes(content, ts)
+		snapshot.LinesAbove, snapshot.LinesAboveKnown = above, known
+		return snapshot, nil
+	}
 	var (
 		content string
 		err     error
@@ -204,7 +198,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 	if err != nil {
 		return PreviewSnapshot{}, err
 	}
-	return previewSnapshotWithModesBracketed(content, ts, floor), nil
+	return previewSnapshotWithModes(content, ts), nil
 }
 
 // previewByIDAsOrdinal is the compatibility bridge for a remote agent-server

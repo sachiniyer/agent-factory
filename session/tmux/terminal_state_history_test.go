@@ -3,7 +3,9 @@ package tmux
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -72,4 +74,43 @@ func fakeTerminalStateTmux(t *testing.T, fields string) *TmuxSession {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return NewTmuxSessionWithDeps("terminal-state-history", "sh", MakePtyFactory(), cmd.MakeExecutor())
+}
+
+// The ATOMIC capture, against REAL tmux (#3169 review). The count and the content
+// must come from one invocation, because a bracket around two separate reads still
+// reports an incomplete capture as complete: zero, history gained, history cleared,
+// zero — both endpoints agree and the returned content omitted lines anyway.
+//
+// Real tmux rather than a fake, because the property under test is that tmux runs
+// both commands in ONE command queue. A fake would only be asserting my own split.
+func TestCaptureVisibleWithScrollback_CountAndContentFromOneInvocation(t *testing.T) {
+	session := NewTmuxSession("af-atomic-"+t.Name()[:8], "sh -c 'i=1; while [ $i -le 200 ]; do echo atomic-$i; i=$((i+1)); done; exec sleep 60'")
+	require.NoError(t, session.Start(t.TempDir()))
+	t.Cleanup(func() { _, _ = session.Close() })
+
+	var content string
+	var above int
+	require.Eventually(t, func() bool {
+		var err error
+		content, above, err = session.CaptureVisibleWithScrollback()
+		return err == nil && above > 0
+	}, 10*time.Second, 200*time.Millisecond, "the pane must scroll and report its history in one call")
+
+	// Cross-check against tmux's own answers, so this is not just self-consistent.
+	state, err := session.ReadTerminalState()
+	require.NoError(t, err)
+	require.InDelta(t, state.HistorySize, above, 5,
+		"the atomic count must agree with tmux's own history_size")
+
+	full, err := session.CapturePaneContentWithOptions("-", "-")
+	require.NoError(t, err)
+	visibleLines := strings.Count(content, "\n")
+	fullLines := strings.Count(full, "\n")
+	require.Greater(t, fullLines, visibleLines,
+		"the full capture must be longer than the visible one, or this pane never scrolled")
+	require.InDelta(t, fullLines, above+visibleLines, 5,
+		"history_size + visible must account for the full capture — the arithmetic is what makes the "+
+			"count mean 'lines above the captured region'")
+	require.Contains(t, content, "atomic-200", "the visible screen holds the tail")
+	require.NotContains(t, content, "atomic-1\n", "and not the head, which is what the marker is for")
 }

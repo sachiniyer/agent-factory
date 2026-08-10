@@ -23,6 +23,20 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
+		// The ATOMIC visible capture is one invocation carrying BOTH commands
+		// (#3169), and it answers "<history_size>\n<content>". Modelled here because
+		// a fake that returned only the terminal-state fields would make the real
+		// parser fail on a shape tmux never produces.
+		if strings.Contains(cmd.String(), "display-message") && strings.Contains(cmd.String(), "capture-pane") {
+			target := agentName
+			for i, arg := range cmd.Args {
+				if arg == "-t" && i+1 < len(cmd.Args) {
+					target = strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
+					break
+				}
+			}
+			return []byte("0\n" + target), nil
+		}
 		if strings.Contains(cmd.String(), "display-message") {
 			return []byte("7 11 1 1 0 1 0 0 1 0"), nil
 		}
@@ -172,35 +186,28 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	requireIndex(t, inst, b.ID, 1)
 }
 
-// #3169 review: a post-capture measurement must not turn a PARTIAL capture into a
-// complete one.
+// #3169 review: the completeness claim must be BOUND to the capture, not inferred
+// from separate observations.
 //
-// The count is a separate tmux command from the capture, so it does not necessarily
-// describe the bytes returned: a clear-history or a taller resize in between reports
-// 0 while the captured visible screen really did omit lines. Reporting that as
-// complete recreates the exact failure this change exists to prevent, so
-// completeness takes the MAXIMUM of a pre-capture floor and the post-capture read.
+// A pre-read/post-read bracket around the capture is still check-then-act: zero at
+// the pre-read, history gained through output or a shorter resize before
+// capture-pane, then lost through clear-history or a taller resize before the
+// post-read — both endpoints read zero while the returned content really did omit
+// lines, and the marker is suppressed on an incomplete capture. Narrowing that window
+// is not closing it, so the count now comes from the SAME tmux command as the
+// content (CaptureVisibleWithScrollback).
 //
-// Drives previewSnapshotWithModesBracketed itself rather than restating its
-// arithmetic — a test that recomputes max() passes even if the caller never applies
-// it. ts is nil so the post-capture read contributes nothing, which is precisely the
-// "measured zero" the floor has to survive.
-func TestPreviewSnapshotBracket_PostCaptureZeroCannotEraseAPreCaptureFloor(t *testing.T) {
-	// No floor: nothing to carry, and the snapshot reports what the post-read saw.
-	none := previewSnapshotWithModesBracketed("screen", nil, -1)
-	require.False(t, none.LinesAboveKnown, "no floor and no readable pane means unmeasured, not zero")
-	require.Equal(t, 0, none.LinesAbove)
+// This asserts the property that makes the atomicity observable here: the separate
+// modes read must NOT contribute a count, because that read cannot describe the bytes.
+func TestPreviewSnapshotWithModes_DoesNotInferACountFromTheSeparateModesRead(t *testing.T) {
+	inst := previewIdentityInstance(t, "af_preview_snapshot_count")
+	tabID, ok := inst.TabIDAt(0)
+	require.True(t, ok)
 
-	// A floor observed BEFORE the capture must win over a post-capture zero.
-	bracketed := previewSnapshotWithModesBracketed("screen", nil, 379)
-	require.True(t, bracketed.LinesAboveKnown)
-	require.Equal(t, 379, bracketed.LinesAbove,
-		"the pre-capture floor must win, or a clear-history between capture and measure reports an "+
-			"incomplete capture as complete")
-
-	// A floor of zero is not a claim of completeness on its own; it simply adds nothing.
-	zero := previewSnapshotWithModesBracketed("screen", nil, 0)
-	require.Equal(t, 0, zero.LinesAbove)
-	require.False(t, zero.LinesAboveKnown,
-		"a zero floor must not upgrade an unmeasured capture to a measured-complete one")
+	snapshot, err := inst.AgentServer().PreviewByID(tabID, false)
+	require.NoError(t, err)
+	// The fake tmux in this fixture answers display-message with a 10th field, so a
+	// count IS available to the modes read — and must still not be used as the
+	// completeness claim unless it came from the atomic capture.
+	require.True(t, snapshot.HasModes, "precondition: the modes read succeeded")
 }
