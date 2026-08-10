@@ -1,14 +1,66 @@
 package session
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestInstanceData_PreservesArchiveReportJSON proves an incomplete archive's
+// report survives the same JSON round trip as the Archived session record. The
+// newline is load-bearing: paths must remain JSON-delimited rather than becoming
+// ambiguous lines in an in-tree report (#3066).
+func TestInstanceData_PreservesArchiveReportJSON(t *testing.T) {
+	const reportJSON = `{"archive_report":{"retained_trees":[{"path":"/worktrees/.af-source-0123456789abcdef0123456789abcdef","identity_known":true,"device":1,"inode":2,"file_type":16384,"skipped":[{"path":"private/locked\ncredential","reason":"permission_denied"}]}]}}`
+	var data InstanceData
+	require.NoError(t, json.Unmarshal([]byte(reportJSON), &data))
+
+	roundTrip, err := json.Marshal(data)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(roundTrip, &decoded))
+
+	report, ok := decoded["archive_report"].(map[string]any)
+	require.True(t, ok, "the durable session record discarded archive_report: %s", roundTrip)
+	trees, ok := report["retained_trees"].([]any)
+	require.True(t, ok)
+	require.Len(t, trees, 1)
+	tree := trees[0].(map[string]any)
+	skipped, ok := tree["skipped"].([]any)
+	require.True(t, ok)
+	require.Len(t, skipped, 1)
+	entry := skipped[0].(map[string]any)
+	assert.Equal(t, "private/locked\ncredential", entry["path"])
+	assert.Equal(t, "permission_denied", entry["reason"])
+}
+
+// TestFromInstanceData_ArchiveReportSurvivesReload exercises the actual session
+// reconstruction path used when restore happens in a later daemon process.
+func TestFromInstanceData_ArchiveReportSurvivesReload(t *testing.T) {
+	data := deadInstanceData(t, Archived, "af_report_agent", "af_report_shell")
+	data.ArchiveReport = &git.ArchiveReport{
+		RetainedTrees: []git.ArchiveRetainedTree{{
+			Path: "/worktrees/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
+			Device: 1, Inode: 2, FileType: 0o040000,
+			Skipped: []git.ArchiveSkippedEntry{{
+				Path: "private/locked\ncredential", Reason: git.ArchiveSkipPermissionDenied,
+			}},
+		}},
+	}
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	report := restored.GetArchiveReport()
+	require.Equal(t, data.ArchiveReport.Clone(), report)
+	require.Equal(t, data.ArchiveReport.Clone(), restored.ToInstanceData().ArchiveReport.Clone(),
+		"the report must remain durable after load and the next storage snapshot")
+}
 
 // TestFromInstanceData_ArchivedLoadsInert: an Archived record (#1028) loads
 // WITHOUT calling Start — no tmux is spawned or reconnected, the instance stays

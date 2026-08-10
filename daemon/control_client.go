@@ -521,10 +521,11 @@ func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
 func RestoreSession(req RestoreSessionRequest) (string, error) {
 	var resp RestoreSessionResponse
-	if err := callDaemon("RestoreSession", req, &resp); err != nil {
+	err := callDaemon("RestoreSession", req, &resp)
+	if err != nil && !isMutationCommitted(err) {
 		return "", err
 	}
-	return resp.WorktreePath, nil
+	return resp.WorktreePath, err
 }
 
 // DeleteProject asks the daemon to delete a project (#1735): archive its live

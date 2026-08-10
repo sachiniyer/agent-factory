@@ -77,6 +77,10 @@ func (g *GitWorktree) GetRelocationRecovery() (RelocationRecovery, bool) {
 func (g *GitWorktree) RelocationSnapshot() (string, RelocationRecovery, bool) {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
+	return g.relocationSnapshotLocked()
+}
+
+func (g *GitWorktree) relocationSnapshotLocked() (string, RelocationRecovery, bool) {
 	if g.relocationRecovery != nil {
 		return g.worktreePath, *g.relocationRecovery, true
 	}
@@ -84,6 +88,38 @@ func (g *GitWorktree) RelocationSnapshot() (string, RelocationRecovery, bool) {
 		return g.worktreePath, recoveryFromClaim(*g.activeRelocationClaim), true
 	}
 	return g.worktreePath, RelocationRecovery{}, false
+}
+
+// PersistenceSnapshot returns relocation ownership and archive completeness as
+// one state. A checkpoint cannot observe the committed archive path without the
+// report that explains its known-absent entries, or vice versa.
+func (g *GitWorktree) PersistenceSnapshot() (string, RelocationRecovery, bool, ArchiveReport) {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	path, recovery, hasRecovery := g.relocationSnapshotLocked()
+	return path, recovery, hasRecovery, g.archiveReport.Clone()
+}
+
+// RestoreArchiveReport reinstates the durable report when a session record is
+// loaded. The caller has not exposed the worktree to runtime use yet.
+func (g *GitWorktree) RestoreArchiveReport(report ArchiveReport) {
+	g.relocationMu.Lock()
+	g.archiveReport = report.Clone()
+	g.relocationMu.Unlock()
+}
+
+// GetArchiveReport returns a detached copy for user-facing archive/restore
+// reporting.
+func (g *GitWorktree) GetArchiveReport() ArchiveReport {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	return g.archiveReport.Clone()
+}
+
+func (g *GitWorktree) setArchiveReport(report ArchiveReport) {
+	g.relocationMu.Lock()
+	g.archiveReport = report.Clone()
+	g.relocationMu.Unlock()
 }
 
 // RestoreRelocationRecovery reinstates a persisted lifecycle record without
@@ -446,10 +482,13 @@ func (g *GitWorktree) recordStaleClaimLocked(claim RelocationClaim) {
 // consumed recovery claim atomically. A checkpoint sees either the old path plus
 // its active claim, or the new settled path; never the new path with stale
 // ownership or an absent claim at the old path.
-func (g *GitWorktree) finishRelocationClaim(claim RelocationClaim, dest string) {
+func (g *GitWorktree) finishRelocationClaim(claim RelocationClaim, dest string, archiveReport *ArchiveReport) {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
 	g.setWorktreeLocationLocked(dest)
+	if archiveReport != nil {
+		g.archiveReport = archiveReport.Clone()
+	}
 	g.relocationRecovery = nil
 	g.releaseRelocationClaimLocked(&claim)
 }

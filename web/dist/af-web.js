@@ -6294,7 +6294,10 @@ async function archiveSession(id, title, token2) {
   }
 }
 async function restoreSession(id, title, token2) {
-  await af("RestoreSession", { id, title, repo_id: "" }, token2);
+  const result = await af("RestoreSession", { id, title, repo_id: "" }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function resumeFromLimit(id, title, token2) {
   const result = await af("ResumeFromLimit", { id, title, repo_id: "" }, token2);

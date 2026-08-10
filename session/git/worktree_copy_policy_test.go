@@ -28,6 +28,14 @@ func TestUnreadablePolicy_ZeroValueRefuses(t *testing.T) {
 	require.Equal(t, refuseUnreadable, carrier.Policy)
 }
 
+func TestUnreadablePolicy_OnlyArchiveOptsIntoSkipping(t *testing.T) {
+	require.Equal(t, skipUnreadable, unreadablePolicyForOperation("archive"))
+	for _, operation := range []string{"move", "restore", "future-operation", ""} {
+		require.Equal(t, refuseUnreadable, unreadablePolicyForOperation(operation),
+			"%q must inherit refusal; a new operation cannot silently gain archive's exception", operation)
+	}
+}
+
 // An unreadable source is classified as its own error type, so the walker can
 // tell "this one file is locked" from "the copy is broken" — every other open
 // failure must keep aborting.

@@ -456,6 +456,31 @@ test("archiveSession surfaces a successful response's committed hook warning", a
   assert.equal(isMutationCommittedError(err), true);
 });
 
+test("restoreSession surfaces a successful response's durable archive warning", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({
+      data: {
+        ok: true,
+        worktree_path: "/worktrees/worker",
+        warning: 'restore completed with an incomplete archive: skipped "private/credential"',
+      },
+      error: null,
+    }),
+  });
+  const err = await restoreSession("id", "worker", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(err.status, 200);
+  assert.equal(err.code, "mutation_committed");
+  assert.match(err.message, /incomplete archive/);
+  assert.equal(isMutationCommittedError(err), true);
+});
+
 test("a 200 carrying an envelope error still surfaces the real message", async () => {
   stubFetchResponse({
     ok: true,

@@ -56,6 +56,10 @@ type GitWorktree struct {
 	// turn an in-flight recovery into an absent, destructive default.
 	activeRelocationClaim *RelocationClaim
 	nextRelocationClaimID uint64
+	// archiveReport is durable metadata for every archive copy that deliberately
+	// omitted unreadable files. It shares relocationMu with the
+	// worktree path so persistence cannot pair a report with the wrong location.
+	archiveReport ArchiveReport
 
 	// Path to the repository
 	repoPath string

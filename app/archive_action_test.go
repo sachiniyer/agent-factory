@@ -275,6 +275,26 @@ func TestRestoreInstanceCmd_CallsDaemon(t *testing.T) {
 	require.Equal(t, target, done.target)
 }
 
+func TestHandleInstanceRestored_CommittedReportStaysVisibleWithoutRollback(t *testing.T) {
+	h := newTestHome(t)
+	inst := archiveActionInstance(t, "worker", session.Archived)
+	inst.SetInFlightOpForTest(session.OpRestoring)
+	h.store.AddInstance(inst)
+	target := captureSessionActionTarget(inst, h.repoID)
+
+	model, _ := h.handleInstanceRestored(instanceRestoredMsg{
+		target: target, err: committedArchiveWarningTestError{},
+	})
+	h = model.(*home)
+
+	require.Equal(t, session.OpRestoring, inst.GetInFlightOp(),
+		"a committed restore warning must not roll the optimistic row back to Archived")
+	require.Contains(t, h.errBox.FullError(), "on-archive hook",
+		"the durable report must remain visible while snapshot reconciliation completes")
+	require.NotContains(t, h.errBox.FullError(), "failed to restore",
+		"a committed restore must not be mislabeled as a failed mutation")
+}
+
 func TestHandleInstanceRestored_LostRowMarksLive(t *testing.T) {
 	h := newTestHome(t)
 	inst := archiveActionInstance(t, "worker", session.Lost)

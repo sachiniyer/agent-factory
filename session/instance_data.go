@@ -134,7 +134,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
 		externalWorktree := i.gitWorktree.IsExternalWorktree()
 		startupStateUnknown := i.startupStateUnknown
-		worktreePath, recovery, hasRecovery := i.gitWorktree.RelocationSnapshot()
+		worktreePath, recovery, hasRecovery, archiveReport := i.gitWorktree.PersistenceSnapshot()
 		// ExternalWorktree is true for in-place sessions (`af sessions create
 		// --here`, which attach to the repo's own working tree) and for
 		// instances persisted by the pre-#930-PR-3 create-on-existing-worktree
@@ -163,6 +163,10 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 				OriginalBranchCreatedByUs:   &branchCreatedByUs,
 				OriginalStartupStateUnknown: &startupStateUnknown,
 			}
+		}
+		if !archiveReport.Empty() {
+			clone := archiveReport.Clone()
+			data.ArchiveReport = &clone
 		}
 	}
 
@@ -357,6 +361,9 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 				}
 				restoredRelocationRecovery = true
+			}
+			if data.ArchiveReport != nil {
+				gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 			}
 			instance.gitWorktree = gw
 		}

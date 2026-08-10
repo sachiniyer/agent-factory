@@ -96,6 +96,12 @@ func destinationCleanupManifest(root copiedDirectory) copiedDirectory {
 		queue = queue[1:]
 		job.destination.entries = make([]copiedEntry, 0, len(job.source.entries))
 		for _, entry := range job.source.entries {
+			// A known-absent entry describes the SOURCE and deliberately has no
+			// destination inode. Staging cleanup must not turn that state into a
+			// bogus zero-identity destination entry.
+			if entry.knownAbsent() {
+				continue
+			}
 			clone := copiedEntry{name: entry.name, source: entry.destination}
 			if entry.directory != nil {
 				clone.directory = &copiedDirectory{}
@@ -172,6 +178,19 @@ func validateCopiedDirectoryLevel(
 	}
 	expectedByName := make(map[string]copiedEntry, len(expected.entries))
 	for _, entry := range expected.entries {
+		if entry.state != copiedEntryPresent && entry.state != copiedEntryKnownAbsent {
+			return fmt.Errorf("unknown copied-entry state for %s", filepath.Join(path, entry.name))
+		}
+		if entry.knownAbsent() && entry.reason == "" {
+			return fmt.Errorf("known-absent entry has no reason at %s", filepath.Join(path, entry.name))
+		}
+		// Source validation still requires EVERY name, including a skipped one.
+		// Destination validation requires every PRESENT name and no others. This
+		// keeps both name-set checks exact while representing intentional absence
+		// instead of weakening either check (#3066).
+		if !source && entry.knownAbsent() {
+			continue
+		}
 		expectedByName[entry.name] = entry
 	}
 	if len(names) != len(expectedByName) {

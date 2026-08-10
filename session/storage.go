@@ -213,6 +213,10 @@ type InstanceData struct {
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
+	// ArchiveReport makes a deliberately incomplete archive discoverable across
+	// daemon restarts and at restore time. It lives beside the session record,
+	// never inside the copied tree where a user path could collide with it.
+	ArchiveReport *git.ArchiveReport `json:"archive_report,omitempty"`
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,

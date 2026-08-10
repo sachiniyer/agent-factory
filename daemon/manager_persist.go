@@ -370,6 +370,9 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 			return git.CleanupStateUnknown, recoveryErr
 		}
 	}
+	if data.ArchiveReport != nil {
+		gw.RestoreArchiveReport(data.ArchiveReport.Clone())
+	}
 	state, cleanupErr := gw.Cleanup()
 	if cleanupErr != nil {
 		log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)

@@ -705,11 +705,18 @@ applies to this one session and this one command; there is no global equivalent.
 		}
 
 		worktreePath, err := restoreSessionViaDaemon(daemon.RestoreSessionRequest{Title: args[0], RepoID: repoID, ForceReap: forceReap})
-		if err != nil {
+		warning := ""
+		if err != nil && apiclient.IsMutationCommitted(err) {
+			warning = err.Error()
+		} else if err != nil {
 			return jsonError(err)
 		}
 
-		return jsonOut(map[string]any{"ok": true, "title": args[0], "worktree_path": worktreePath})
+		result := map[string]any{"ok": true, "title": args[0], "worktree_path": worktreePath}
+		if warning != "" {
+			result["warning"] = warning
+		}
+		return jsonOut(result)
 	},
 }
 
