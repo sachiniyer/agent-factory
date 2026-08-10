@@ -24,8 +24,9 @@ make test-container GOTESTARGS="-race ./daemon/..."
 
 Runs `go test -count=1 ./...` inside the container. This is the **one
 sanctioned way to run the bare full suite on a shared box** — on the host,
-skip the daemon package (`go test $(go list ./... | grep -v '/daemon')`)
-or use this target.
+skip the `daemon` and `app` packages (`go test $(go list ./... | grep -vE '/(daemon|app)')`),
+which spawn real `af` daemons and drive real tmux next to live sessions, or
+use this target.
 
 What the harness does:
 
