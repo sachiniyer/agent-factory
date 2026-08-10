@@ -75,8 +75,8 @@ type Instance struct {
 	// goroutines (writers) and the main bubbletea loop (readers):
 	// started, liveness/inFlightOp, Tabs (and the agent tab's tmux session),
 	// gitWorktree, prInfo, diffStats.
-	mu                 sync.RWMutex
-	agentObservationMu sync.Mutex
+	mu               sync.RWMutex
+	agentObservation *agentObservationRuntime
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt

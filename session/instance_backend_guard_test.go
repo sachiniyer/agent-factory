@@ -20,8 +20,8 @@ import (
 //   - currentBackend / capabilitiesLocked — the synchronized accessors themselves.
 //   - SetBackend / bindProvisionResult / retainProvisionResultCleanup — the
 //     writers; all take i.mu.Lock.
-//   - AgentServer / reprovisionRemote / toInstanceDataLocked — read inside an
-//     i.mu section their callers established.
+//   - AgentServer / agentServerLocked / reprovisionRemote / toInstanceDataLocked —
+//     read inside an i.mu section they or their callers established.
 //   - PreviewTabSnapshotByID — snapshots the backend while its stable tab target
 //     is selected under i.mu, then performs the potentially blocking capture
 //     after releasing the lock.
@@ -34,6 +34,7 @@ var backendReadersUnderLock = map[string]bool{
 	"bindProvisionResult":          true,
 	"retainProvisionResultCleanup": true,
 	"AgentServer":                  true,
+	"agentServerLocked":            true,
 	"reprovisionRemote":            true,
 	"toInstanceDataLocked":         true,
 	"PreviewTabSnapshotByID":       true,

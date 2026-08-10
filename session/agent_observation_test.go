@@ -36,7 +36,7 @@ func TestPromptDeliveryWaitsForSnapshotAndFencesItsApply(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, err := inst.SnapshotAgent(inst.AgentServer())
+		_, _, err := inst.SnapshotAgent()
 		snapshotDone <- err
 	}()
 	<-backend.snapshotStarted
@@ -73,5 +73,55 @@ func TestPromptDeliveryWaitsForSnapshotAndFencesItsApply(t *testing.T) {
 	reason, _ := inst.IdleReasonSnapshot()
 	if reason != IdleReasonNoPaneChangeSinceDelivery {
 		t.Fatalf("reason = %q, want %q", reason, IdleReasonNoPaneChangeSinceDelivery)
+	}
+}
+
+func TestRuntimeReplacementDoesNotWaitForPredecessorSnapshot(t *testing.T) {
+	backend := &observationFenceBackend{
+		FakeBackend:     NewFakeBackend(),
+		snapshotStarted: make(chan struct{}),
+		releaseSnapshot: make(chan struct{}),
+	}
+	inst, err := NewInstance(InstanceOptions{Title: "replacement", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetBackend(backend)
+
+	snapshotDone := make(chan error, 1)
+	go func() {
+		_, _, err := inst.SnapshotAgent()
+		snapshotDone <- err
+	}()
+	<-backend.snapshotStarted
+
+	// Runtime replacement retires the predecessor's evidence. Delivery to the
+	// replacement must not wait for pane I/O that is still blocked in the old
+	// runtime; its eventual observation is rejected by the state-epoch fence.
+	oldEpoch := inst.StateEpoch()
+	inst.ClearIdleEvidence()
+	deliveryDone := make(chan error, 1)
+	go func() {
+		_, err := inst.SendPromptWithEvidence("continue", time.Now)
+		deliveryDone <- err
+	}()
+	select {
+	case err := <-deliveryDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(backend.releaseSnapshot)
+		<-snapshotDone
+		<-deliveryDone
+		t.Fatal("replacement delivery waited for the predecessor runtime's snapshot")
+	}
+
+	close(backend.releaseSnapshot)
+	if err := <-snapshotDone; err != nil {
+		t.Fatal(err)
+	}
+	if inst.RecordPaneChurnAtEpoch(time.Now(), oldEpoch) {
+		t.Fatal("predecessor snapshot crossed the runtime-replacement epoch fence")
 	}
 }

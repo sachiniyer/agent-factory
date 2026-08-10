@@ -104,15 +104,39 @@ func (i *Instance) RecordPromptAttempt(status PromptDeliveryStatus, attemptedAt 
 	if attemptedAt.IsZero() {
 		return false
 	}
-	if !status.Valid() {
-		status = PromptCouldNotConfirm
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.recordPromptAttemptLocked(status, attemptedAt)
+}
+
+// recordPromptAttemptForObservation commits only while runtime still owns the
+// delivery. A replacement can proceed without waiting for predecessor I/O; a
+// send that returns afterwards must not seed evidence onto the successor.
+func (i *Instance) recordPromptAttemptForObservation(
+	status PromptDeliveryStatus,
+	attemptedAt time.Time,
+	runtime *agentObservationRuntime,
+) bool {
+	if attemptedAt.IsZero() {
+		return false
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if i.agentObservation != runtime {
+		return false
+	}
+	return i.recordPromptAttemptLocked(status, attemptedAt)
+}
+
+// recordPromptAttemptLocked stores a prompt boundary. Caller holds i.mu.
+func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemptedAt time.Time) bool {
+	if !status.Valid() {
+		status = PromptCouldNotConfirm
+	}
 	if i.lastPromptAttemptAt.Equal(attemptedAt) && i.lastPromptDeliveryStatus == status {
 		return false
 	}
-	// The attempt and pane snapshots share agentObservationMu, while stateEpoch
+	// The attempt and pane snapshots share their runtime's observation lock, while stateEpoch
 	// fences the apply after Snapshot returns. Retire a churn timestamp applied by
 	// an observation that completed immediately before this attempt acquired that
 	// mutex: its capture predates delivery even if its apply timestamp does not.
@@ -157,14 +181,16 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 func (i *Instance) ClearIdleEvidence() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.lastPromptAttemptAt.IsZero() && i.lastPromptDeliveryStatus == "" && i.lastPaneChurnAt.IsZero() {
-		return false
-	}
+	changed := !i.lastPromptAttemptAt.IsZero() || i.lastPromptDeliveryStatus != "" || !i.lastPaneChurnAt.IsZero()
 	i.lastPromptAttemptAt = time.Time{}
 	i.lastPromptDeliveryStatus = ""
 	i.lastPaneChurnAt = time.Time{}
+	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
+	// serialization domain instead of making replacement delivery wait for it;
+	// the epoch bump below rejects that snapshot when it eventually returns.
+	i.agentObservation = nil
 	i.stateEpoch++
-	return true
+	return changed
 }
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.

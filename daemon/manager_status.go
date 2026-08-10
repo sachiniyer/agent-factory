@@ -328,7 +328,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		m.clearRemoteLoss(key)
 		return
 	}
-	obs, err := instance.SnapshotAgent(instance.AgentServer())
+	obs, _, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
 	if err != nil {
@@ -530,10 +530,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.clearRemoteLoss(key)
 		return
 	}
-	// Select the AgentServer only after capturing the epoch. A remote runtime swap
-	// replaces this handle; taking the handle first could pair the outgoing server
-	// with the incoming runtime's epoch and make a stale observation look current.
-	as := instance.AgentServer()
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	// The task run's own in-flight marker, captured beside the liveness it will be
@@ -545,7 +541,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
 	// usage-limit detector (#1146) without a second capture-pane.
-	obs, err := instance.SnapshotAgent(as)
+	// SnapshotAgent binds the server to its runtime-scoped observation lock after
+	// the epoch capture. A swap can therefore retire blocked predecessor I/O while
+	// this epoch still rejects its eventual result.
+	obs, as, err := instance.SnapshotAgent()
 	if err != nil {
 		// The observation probe failed. The local agent-server never errors here,
 		// so this is the REMOTE runtime's path (#1592 Phase 4): the REST call to

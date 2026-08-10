@@ -83,6 +83,13 @@ func (i *Instance) AgentServer() AgentServer {
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.agentServerLocked()
+}
+
+// agentServerLocked is AgentServer's cache constructor for callers that must
+// bind another runtime-owned value to the exact same server generation.
+// Caller holds i.mu for writing.
+func (i *Instance) agentServerLocked() AgentServer {
 	if i.agentSrv == nil {
 		switch {
 		case i.remoteClient != nil:
