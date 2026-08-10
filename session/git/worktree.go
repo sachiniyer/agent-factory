@@ -60,6 +60,10 @@ type GitWorktree struct {
 	// omitted unreadable files. It shares relocationMu with the
 	// worktree path so persistence cannot pair a report with the wrong location.
 	archiveReport ArchiveReport
+	// archiveWarningSuffix is the bounded user-facing summary derived whenever
+	// archiveReport changes. Live snapshots prepend only archive/restore and never
+	// clone or rescan the storage-only report.
+	archiveWarningSuffix string
 
 	// Path to the repository
 	repoPath string

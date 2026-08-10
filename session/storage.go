@@ -220,9 +220,13 @@ type InstanceData struct {
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live
-	// projections keep it in archiveReport until ForStorage publishes it.
+	// projections stage only the source below until ForStorage requests a clone.
 	ArchiveReport *git.ArchiveReport `json:"archive_report,omitempty"`
-	archiveReport *git.ArchiveReport
+	// archiveReportSource stages the live worktree, not its unbounded report.
+	// ForStorage asks it for one atomic path/recovery/report snapshot only when a
+	// durable write is actually requested; ordinary JSON projections ignore it.
+	archiveReportSource  *git.GitWorktree
+	archiveReportPending bool
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,
@@ -278,7 +282,8 @@ func (d InstanceData) ForClientRead() InstanceData {
 		d.ArchiveWarning = d.ArchiveReport.Warning(operation)
 	}
 	d.ArchiveReport = nil
-	d.archiveReport = nil
+	d.archiveReportSource = nil
+	d.archiveReportPending = false
 	return d
 }
 
@@ -286,6 +291,32 @@ func (d InstanceData) ForClientRead() InstanceData {
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.
 func (d InstanceData) ForStorage() InstanceData {
+	reportDetached := false
+	if d.archiveReportSource != nil {
+		path, recovery, hasRecovery, report := d.archiveReportSource.PersistenceSnapshot()
+		d.Worktree.WorktreePath = path
+		d.Worktree.RelocationRecovery = nil
+		if hasRecovery {
+			externalWorktree := d.Worktree.ExternalWorktree
+			branchCreatedByUs := cloneBoolPointer(d.Worktree.BranchCreatedByUs)
+			startupStateUnknown := d.StartupStateUnknown
+			d.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
+				State: recovery.State, AlternatePath: recovery.AlternatePath,
+				IdentityKnown: recovery.IdentityKnown, Device: recovery.Device,
+				Inode: recovery.Inode, FileType: recovery.FileType,
+				OriginalExternalWorktree:    &externalWorktree,
+				OriginalBranchCreatedByUs:   branchCreatedByUs,
+				OriginalStartupStateUnknown: &startupStateUnknown,
+			}
+		}
+		if report.Empty() {
+			d.ArchiveReport = nil
+		} else {
+			report.RollbackFence = archiveRollbackFence(d)
+			d.ArchiveReport = &report
+			reportDetached = true
+		}
+	}
 	lv := livenessFromData(d)
 	d.Status = composeStatus(lv, OpNone)
 	d.Liveness = lv
@@ -303,21 +334,16 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
-	if d.archiveReport != nil {
-		clone := d.archiveReport.Clone()
-		// A live projection holds the real current ownership values, so refresh
-		// the rollback metadata on every write. Recover may have rebuilt a missing
-		// worktree and changed branch ownership since the report was first stored.
-		clone.RollbackFence = archiveRollbackFence(d)
-		d.ArchiveReport = &clone
-	}
 	// The compatibility projection must capture original values before either it
 	// or the relocation fence below overwrites them. Older binaries ignore
 	// ArchiveReport, but the previous release understands the inert/ownership
 	// fields and relocation recovery. Together they refuse restore and explicit
 	// kill instead of publishing an incomplete tree or deleting the report's row.
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
-		report := d.ArchiveReport.Clone()
+		report := *d.ArchiveReport
+		if !reportDetached {
+			report = d.ArchiveReport.Clone()
+		}
 		if report.RollbackFence == nil {
 			report.RollbackFence = archiveRollbackFence(d)
 		}
@@ -362,7 +388,8 @@ func (d InstanceData) ForStorage() InstanceData {
 	// Never let the private staging pointer escape a storage projection. Loaded
 	// tombstones have only RuntimeCleanup set and therefore preserve it above.
 	d.runtimeCleanup = nil
-	d.archiveReport = nil
+	d.archiveReportSource = nil
+	d.archiveReportPending = false
 	return d
 }
 
@@ -627,7 +654,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		pendingHandoff := data.PendingHandoffMission != ""
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
 		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
-		archiveReportPending := data.archiveReport != nil && !data.archiveReport.Empty()
+		archiveReportPending := data.archiveReportPending
 		// A pending mission is a durable recovery obligation and therefore a
 		// retention claim, not generic transient UI state. OpReplacing composes to
 		// Loading, but dropping that row would erase the only handle to a live

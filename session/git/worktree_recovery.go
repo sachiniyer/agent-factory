@@ -100,11 +100,41 @@ func (g *GitWorktree) PersistenceSnapshot() (string, RelocationRecovery, bool, A
 	return path, recovery, hasRecovery, g.archiveReport.Clone()
 }
 
+// ProjectionSnapshot returns the live, bounded view of relocation and archive
+// state. The full report is deliberately absent: status/UI snapshots happen
+// continuously, while the lossless clone belongs only to PersistenceSnapshot.
+func (g *GitWorktree) ProjectionSnapshot(
+	operation string,
+) (string, RelocationRecovery, bool, bool, string) {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	path, recovery, hasRecovery := g.relocationSnapshotLocked()
+	hasArchiveReport := !g.archiveReport.Empty()
+	if !hasArchiveReport {
+		return path, recovery, hasRecovery, false, ""
+	}
+	// Production writers refresh the cache with every report mutation. The lazy
+	// fallback keeps zero-value/direct-literal GitWorktree fixtures correct too.
+	if g.archiveWarningSuffix == "" {
+		g.refreshArchiveWarningLocked()
+	}
+	return path, recovery, hasRecovery, true, operation + g.archiveWarningSuffix
+}
+
+func (g *GitWorktree) replaceArchiveReportLocked(report ArchiveReport) {
+	g.archiveReport = report.Clone()
+	g.refreshArchiveWarningLocked()
+}
+
+func (g *GitWorktree) refreshArchiveWarningLocked() {
+	g.archiveWarningSuffix = g.archiveReport.warningSuffix()
+}
+
 // RestoreArchiveReport reinstates the durable report when a session record is
 // loaded. The caller has not exposed the worktree to runtime use yet.
 func (g *GitWorktree) RestoreArchiveReport(report ArchiveReport) {
 	g.relocationMu.Lock()
-	g.archiveReport = report.Clone()
+	g.replaceArchiveReportLocked(report)
 	g.relocationMu.Unlock()
 }
 
@@ -118,7 +148,7 @@ func (g *GitWorktree) GetArchiveReport() ArchiveReport {
 
 func (g *GitWorktree) setArchiveReport(report ArchiveReport) {
 	g.relocationMu.Lock()
-	g.archiveReport = report.Clone()
+	g.replaceArchiveReportLocked(report)
 	g.relocationMu.Unlock()
 }
 
@@ -487,7 +517,7 @@ func (g *GitWorktree) finishRelocationClaim(claim RelocationClaim, dest string, 
 	defer g.relocationMu.Unlock()
 	g.setWorktreeLocationLocked(dest)
 	if archiveReport != nil {
-		g.archiveReport = archiveReport.Clone()
+		g.replaceArchiveReportLocked(*archiveReport)
 	}
 	g.relocationRecovery = nil
 	g.releaseRelocationClaimLocked(&claim)
@@ -512,7 +542,7 @@ func (g *GitWorktree) checkpointRelocationPublication(
 	}
 	g.setWorktreeLocationLocked(dest)
 	if archiveReport != nil {
-		g.archiveReport = archiveReport.Clone()
+		g.replaceArchiveReportLocked(*archiveReport)
 	}
 	g.relocationRecovery = &RelocationRecovery{
 		State:         RelocationRecoveryMoveUnknown,

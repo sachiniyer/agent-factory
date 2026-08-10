@@ -220,6 +220,17 @@ type archiveWarningEntry struct {
 // so a huge unreadable generated tree cannot turn a committed reply into a
 // multi-megabyte timeout.
 func (report ArchiveReport) Warning(operation string) string {
+	suffix := report.warningSuffix()
+	if suffix == "" {
+		return ""
+	}
+	return operation + suffix
+}
+
+// warningSuffix performs the report-sized scan once when ownership changes.
+// GitWorktree caches this bounded result so live snapshots only prepend their
+// operation label; standalone reports still get the same rendering via Warning.
+func (report ArchiveReport) warningSuffix() string {
 	if report.Empty() {
 		return ""
 	}
@@ -258,9 +269,9 @@ func (report ArchiveReport) Warning(operation string) string {
 		pathLabel = fmt.Sprintf("skipped paths (showing first %d of %d)", len(entries), totalEntries)
 	}
 	return fmt.Sprintf(
-		"%s completed with an incomplete archive: af skipped %d unreadable %s; "+
+		" completed with an incomplete archive: af skipped %d unreadable %s; "+
 			"complete original tree(s) were retained at %s; %s: %s",
-		operation, totalEntries, noun, strings.Join(treeDetails, ", "), pathLabel, strings.Join(details, ", "),
+		totalEntries, noun, strings.Join(treeDetails, ", "), pathLabel, strings.Join(details, ", "),
 	)
 }
 

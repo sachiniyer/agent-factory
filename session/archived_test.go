@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -79,6 +80,32 @@ func TestFromInstanceData_PreservesSnapshotArchiveWarning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data.ArchiveWarning, restored.ToInstanceData().ArchiveWarning,
 		"a thin client rebuilding a live snapshot must not discard its only archive-loss notice")
+}
+
+func TestToInstanceDataArchiveReportProjectionAllocationsAreBounded(t *testing.T) {
+	const skippedCount = 512
+	skipped := make([]git.ArchiveSkippedEntry, skippedCount)
+	for index := range skipped {
+		rawPath := []byte(fmt.Sprintf("private/credential-%04d-", index))
+		rawPath = append(rawPath, 0xff)
+		skipped[index] = git.ArchiveSkippedEntry{
+			Path: string(rawPath), PathBytes: rawPath, Reason: git.ArchiveSkipPermissionDenied,
+		}
+	}
+	data := deadInstanceData(t, Archived, "af_bounded_report_agent", "af_bounded_report_shell")
+	data.ArchiveReport = &git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{
+		Path: "/worktrees/.af-source-0123456789abcdef0123456789abcdef", Skipped: skipped,
+	}}}
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	var projection InstanceData
+	allocations := testing.AllocsPerRun(3, func() {
+		projection = restored.ToInstanceData()
+	})
+	require.NotEmpty(t, projection.ArchiveWarning)
+	require.Less(t, allocations, float64(128),
+		"a live snapshot must use bounded summary state instead of cloning every lossless report path")
 }
 
 func TestArchiveReportStorageProjectionFencesOlderReaders(t *testing.T) {

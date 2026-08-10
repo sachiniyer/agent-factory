@@ -135,7 +135,17 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
 		externalWorktree := i.gitWorktree.IsExternalWorktree()
 		startupStateUnknown := i.startupStateUnknown
-		worktreePath, recovery, hasRecovery, archiveReport := i.gitWorktree.PersistenceSnapshot()
+		operation := "restore"
+		if i.liveness == LiveArchived {
+			operation = "archive"
+		}
+		worktreePath, recovery, hasRecovery, hasArchiveReport, archiveWarning :=
+			i.gitWorktree.ProjectionSnapshot(operation)
+		data.archiveReportSource = i.gitWorktree
+		data.archiveReportPending = hasArchiveReport
+		if hasArchiveReport {
+			data.ArchiveWarning = archiveWarning
+		}
 		// ExternalWorktree is true for in-place sessions (`af sessions create
 		// --here`, which attach to the repo's own working tree) and for
 		// instances persisted by the pre-#930-PR-3 create-on-existing-worktree
@@ -164,15 +174,6 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 				OriginalBranchCreatedByUs:   &branchCreatedByUs,
 				OriginalStartupStateUnknown: &startupStateUnknown,
 			}
-		}
-		if !archiveReport.Empty() {
-			clone := archiveReport.Clone()
-			data.archiveReport = &clone
-			operation := "restore"
-			if i.liveness == LiveArchived {
-				operation = "archive"
-			}
-			data.ArchiveWarning = clone.Warning(operation)
 		}
 	}
 

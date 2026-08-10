@@ -94,6 +94,7 @@ func (g *GitWorktree) dropRetainedArchiveTree(removed ArchiveRetainedTree) {
 			g.archiveReport.RetainedTrees = append(
 				g.archiveReport.RetainedTrees[:index], g.archiveReport.RetainedTrees[index+1:]...,
 			)
+			g.refreshArchiveWarningLocked()
 			return
 		}
 	}
