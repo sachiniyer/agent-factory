@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -12,6 +13,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func newCleanupReadyGhost(t *testing.T, title string) (*Manager, string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	archive := filepath.Join(t.TempDir(), "archive")
+	require.NoError(t, os.Mkdir(archive, 0o755))
+	info, err := os.Stat(archive)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	originalExternal := false
+	originalBranchCreated := true
+	originalStartupUnknown := false
+	branchCreated := true
+	require.NoError(t, appendInstanceData(repo.ID, session.InstanceData{
+		ID: title + "-id", Title: title, Path: repoPath,
+		Status: session.Archived, Liveness: session.LiveArchived, BackendType: "local",
+		Worktree: session.GitWorktreeData{
+			RepoPath: repoPath, WorktreePath: archive, SessionName: title,
+			BranchName: "af/" + title, BranchCreatedByUs: &branchCreated,
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State: sessiongit.RelocationRecoveryCleanupReady, IdentityKnown: true,
+				Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: uint32(stat.Mode & syscall.S_IFMT),
+				OriginalExternalWorktree: &originalExternal, OriginalBranchCreatedByUs: &originalBranchCreated,
+				OriginalStartupStateUnknown: &originalStartupUnknown,
+			},
+		},
+	}))
+	require.NoError(t, os.RemoveAll(repoPath))
+	failLoadFor(t, title)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	return manager, repo.ID
+}
 
 func archivedInstanceWithRecoveryClaim(t *testing.T, title string) (*Manager, string, string, *session.Instance, string) {
 	t.Helper()
@@ -78,42 +116,35 @@ func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.
 }
 
 func TestKillSession_GhostCleanupReadyRevalidatesBeforeTombstone(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	repoPath := setupControlRepo(t)
-	repo, err := config.RepoFromPath(repoPath)
-	require.NoError(t, err)
-	archive := filepath.Join(t.TempDir(), "archive")
-	require.NoError(t, os.Mkdir(archive, 0o755))
-	info, err := os.Stat(archive)
-	require.NoError(t, err)
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok)
-	originalExternal := false
-	originalBranchCreated := true
-	originalStartupUnknown := false
-	branchCreated := true
-	require.NoError(t, appendInstanceData(repo.ID, session.InstanceData{
-		ID: "ghost-ready-id", Title: "ghost-ready", Path: repoPath,
-		Status: session.Archived, Liveness: session.LiveArchived, BackendType: "local",
-		Worktree: session.GitWorktreeData{
-			RepoPath: repoPath, WorktreePath: archive, SessionName: "ghost-ready",
-			BranchName: "af/ghost-ready", BranchCreatedByUs: &branchCreated,
-			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
-				State: sessiongit.RelocationRecoveryCleanupReady, IdentityKnown: true,
-				Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: uint32(stat.Mode & syscall.S_IFMT),
-				OriginalExternalWorktree: &originalExternal, OriginalBranchCreatedByUs: &originalBranchCreated,
-				OriginalStartupStateUnknown: &originalStartupUnknown,
-			},
-		},
-	}))
-	require.NoError(t, os.RemoveAll(repoPath))
-	failLoadFor(t, "ghost-ready")
-	manager, err := NewManager(config.DefaultConfig())
-	require.NoError(t, err)
+	manager, repoID := newCleanupReadyGhost(t, "ghost-ready")
 	cleanupCalls := stubGhostWorktree(t, sessiongit.CleanupSettled, nil)
 
-	_, err = manager.KillSession(KillSessionRequest{Title: "ghost-ready", RepoID: repo.ID})
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-ready", RepoID: repoID})
 	require.NoError(t, err)
 	assert.Equal(t, 1, *cleanupCalls, "an admitted cleanup-ready ghost must reach its claimed cleanup")
-	assert.Nil(t, recordFor(t, repo.ID, "ghost-ready"), "successful ghost cleanup must consume the durable row")
+	assert.Nil(t, recordFor(t, repoID, "ghost-ready"), "successful ghost cleanup must consume the durable row")
+}
+
+func TestKillSession_GhostCleanupTimeoutPersistsStallAndBlocksSameProcessRetry(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, "ghost-stall")
+	previousCleanup := ghostCleanupWorktree
+	cleanupCalls := 0
+	ghostCleanupWorktree = func(data *session.InstanceData, _ string) (sessiongit.CleanupState, error) {
+		cleanupCalls++
+		data.Worktree.RelocationRecovery.State = sessiongit.RelocationRecoveryCleanupStalled
+		return sessiongit.CleanupStateUnknown, context.DeadlineExceeded
+	}
+	t.Cleanup(func() { ghostCleanupWorktree = previousCleanup })
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-stall", RepoID: repoID})
+	require.Error(t, err)
+	record := recordFor(t, repoID, "ghost-stall")
+	require.NotNil(t, record)
+	assert.True(t, record.UserKilled)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupStalled, record.Worktree.RelocationRecovery.State,
+		"the temporary ghost handle's process-epoch stall must become durable")
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "ghost-stall", RepoID: repoID})
+	require.Error(t, err)
+	assert.Equal(t, 1, cleanupCalls, "a same-process retry must not launch another deletion worker")
 }

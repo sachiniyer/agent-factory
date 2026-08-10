@@ -80,6 +80,21 @@ func TestCleanupClaimedRepoGone_RefusesSamePathReplacementAtRecursiveDelete(t *t
 	}
 }
 
+func TestCleanupClaimedRepoGone_CommittedClaimSurvivesLateOriginReturn(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	previousProbe := repoGoneOriginProbe
+	repoGoneOriginProbe = func(string) error { return nil }
+	t.Cleanup(func() { repoGoneOriginProbe = previousProbe })
+
+	state, err := gw.CleanupClaimedRepoGone(claim)
+	if err != nil || state != CleanupSettled {
+		t.Fatalf("an origin return after kill admission must not strand the committed cleanup; state=%v err=%v", state, err)
+	}
+	if _, statErr := os.Stat(worktree); !os.IsNotExist(statErr) {
+		t.Fatalf("committed identity-qualified cleanup left the archive behind: %v", statErr)
+	}
+}
+
 func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T) {
 	gw, claim, worktree := repoGoneCleanupClaim(t)
 	previousRemove := repoGoneRemoveDirectory
