@@ -138,6 +138,53 @@ func TestAccountSwapForLimitRetainsEarlierAccountLimitEvidence(t *testing.T) {
 	}
 }
 
+func TestAccountSwapForLimit_RetainsObservationAfterSessionKill(t *testing.T) {
+	base := nowFunc()
+	manager, repoID, target, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	observer := registerStarted(t, manager, repoID, target.Path, "work-limited",
+		session.NewFakeBackend(), true, session.Running)
+	observer.Account = "work"
+	observer.SetLimitReached(base.Add(time.Hour))
+	if _, err := manager.KillSession(KillSessionRequest{Title: observer.Title, RepoID: repoID}); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+
+	restarted, err := NewManager(manager.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	swap, err := restarted.accountSwapForLimit(target, restarted.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swap != nil {
+		t.Fatalf("deleted session's known-limited account became eligible after restart: %#v", swap)
+	}
+}
+
+func TestAccountSwapForLimit_UsesHistoricalObservationAfterAgentHandoff(t *testing.T) {
+	base := nowFunc()
+	manager, repoID, target, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	observer := registerStarted(t, manager, repoID, target.Path, "handed-off",
+		session.NewFakeBackend(), true, session.Running)
+	observer.Account = "work"
+	observer.SetLimitReached(base.Add(time.Hour))
+	observer.ClearLimitReached()
+	observer.Program = tmux.ProgramCodex
+
+	swap, err := manager.accountSwapForLimit(target, manager.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swap != nil {
+		t.Fatalf("historical Claude limit evidence vanished after handoff to Codex: %#v", swap)
+	}
+}
+
 func TestResumeFromLimitPromotesPendingClaudeConversationBeforeClear(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
