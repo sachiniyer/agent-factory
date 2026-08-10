@@ -82,6 +82,19 @@ func archivedInstanceWithRecoveryClaim(t *testing.T, title string) (*Manager, st
 	return manager, repoID, repoPath, inst, archivedPath
 }
 
+type afterKillBackend struct {
+	session.Backend
+	afterKill func()
+}
+
+func (b *afterKillBackend) Kill(inst *session.Instance) error {
+	if err := b.Backend.Kill(inst); err != nil {
+		return err
+	}
+	b.afterKill()
+	return nil
+}
+
 func TestRestoreArchived_RepoDisappearsAfterGuardKeepsCleanupIdentity(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "late-gone")
 
@@ -247,4 +260,40 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 		return recordFor(t, repoID, "ghost-sync-success") == nil
 	}, 500*time.Millisecond, 5*time.Millisecond,
 		"definitive synchronous cleanup must keep retrying its editor/record tail")
+}
+
+func TestKillSession_LiveCleanupSettlesDurablyBeforeTailFailure(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "live-tail")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "live-tail", RepoID: repoID})
+	require.ErrorIs(t, err, sessiongit.ErrRepoGone)
+	recovery := recordFor(t, repoID, "live-tail").Worktree.RelocationRecovery
+	require.NotNil(t, recovery)
+	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+
+	key := daemonInstanceKey(repoID, "live-tail")
+	inst.SetBackend(&afterKillBackend{
+		Backend: &session.LocalBackend{},
+		afterKill: func() {
+			manager.vscode.mu.Lock()
+			require.True(t, manager.vscode.reserveReconcileLocked(key))
+			manager.vscode.mu.Unlock()
+		},
+	})
+	_, err = manager.KillSession(KillSessionRequest{Title: "live-tail", RepoID: repoID})
+	require.Error(t, err, "the injected second editor fence must retain the tombstoned row")
+	assert.False(t, exists(archivedPath), "descriptor cleanup must have completed before the tail failure")
+
+	retained := recordFor(t, repoID, "live-tail")
+	require.NotNil(t, retained)
+	assert.Nil(t, retained.Worktree.RelocationRecovery,
+		"the durable tombstone must record descriptor completion before a fallible tail step")
+
+	manager.vscode.releaseReconcile(key)
+	restarted, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	_, err = restarted.KillSession(KillSessionRequest{Title: "live-tail", RepoID: repoID})
+	require.NoError(t, err, "restart must finish the tombstone without reinterpreting the absent archive")
+	assert.Nil(t, recordFor(t, repoID, "live-tail"))
 }

@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,6 +219,56 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	if !retained || recovery.State != RelocationRecoveryCleanupReady || !recovery.IdentityKnown {
 		t.Fatalf("origin recheck deadline lost cleanup authorization; retained=%v recovery=%+v", retained, recovery)
 	}
+}
+
+func TestValidateRelocationCleanupAdmission_DeadlineCancelsOriginProbeProcess(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	repoPath := gw.GetRepoPath()
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("recreate origin pathname: %v", err)
+	}
+
+	binDir := t.TempDir()
+	pidPath := filepath.Join(binDir, "probe.pid")
+	gitPath := filepath.Join(binDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$$\" > %q\nexec /bin/sleep 60\n", pidPath)
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write blocking git probe: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	previousTimeout := relocationIdentityTimeout
+	relocationIdentityTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { relocationIdentityTimeout = previousTimeout })
+
+	err := gw.ValidateRelocationCleanupAdmission()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocking origin probe must hit its admission deadline: %v", err)
+	}
+	if !waitForFile(t, pidPath, 250*time.Millisecond) {
+		t.Fatal("blocking git probe never recorded its process id")
+	}
+	var pid int
+	rawPID, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read blocking git probe pid: %v", err)
+	}
+	if _, err := fmt.Sscanf(string(rawPID), "%d", &pid); err != nil {
+		t.Fatalf("parse blocking git probe pid %q: %v", rawPID, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("origin probe process %d survived after the admission deadline returned", pid)
 }
 
 func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testing.T) {
