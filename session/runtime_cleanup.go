@@ -69,7 +69,12 @@ type SSHRuntimeCleanupData struct {
 	// the current mechanism. An empty value — a record written before #3090, or
 	// between #3100 and this change, or one whose provision could not settle on an
 	// address — dials the name, exactly as it always did.
-	DialAddress         string `json:"dial_address,omitempty"`
+	DialAddress string `json:"dial_address,omitempty"`
+	// DialPort is the port the pinned MACHINE listens on, which behind an L4 load
+	// balancer is not the port its VIP is reached on (#3122). Zero means "the port
+	// in Config", which is every handle written before machine-pinning existed — so
+	// an older record replays exactly as it always did.
+	DialPort            int    `json:"dial_port,omitempty"`
 	HostKeyVerification string `json:"host_key_verification,omitempty"`
 }
 
@@ -230,7 +235,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// on. Reach THAT machine rather than re-resolving the name — see DialAddress.
 		// An empty one composes the ordinary name-based command, so a record from
 		// before any of this reaps exactly as it always did.
-		sshCmd, cmdErr := sshCommandPinnedTo(legacyCfg, data.SSH.HostKeyVerification, data.SSH.DialAddress)
+		sshCmd, cmdErr := sshCommandPinnedTo(legacyCfg, data.SSH.HostKeyVerification, data.SSH.DialAddress, data.SSH.DialPort)
 		if cmdErr != nil {
 			return nil, nil, fmt.Errorf("ssh cleanup handle has an unusable address: %w", cmdErr)
 		}
