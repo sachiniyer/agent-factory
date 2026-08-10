@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -147,4 +149,41 @@ func TestKillSession_GhostCleanupTimeoutPersistsStallAndBlocksSameProcessRetry(t
 	_, err = manager.KillSession(KillSessionRequest{Title: "ghost-stall", RepoID: repoID})
 	require.Error(t, err)
 	assert.Equal(t, 1, cleanupCalls, "a same-process retry must not launch another deletion worker")
+}
+
+func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, "ghost-late-success")
+	key := daemonInstanceKey(repoID, "ghost-late-success")
+	stableID := "ghost-late-success-id"
+	manager.markGhostCleanupStalled(key, stableID)
+
+	previousDelete := lateGhostDeleteSessionRecord
+	previousInterval := lateGhostCleanupRetryInterval
+	attempts := 0
+	retried := make(chan struct{})
+	lateGhostCleanupRetryInterval = 5 * time.Millisecond
+	lateGhostDeleteSessionRecord = func(_ *Manager, _, _, _ string, _ error) (bool, error) {
+		attempts++
+		if attempts == 1 {
+			return false, errors.New("transient instances lock failure")
+		}
+		close(retried)
+		return true, nil
+	}
+	t.Cleanup(func() {
+		lateGhostDeleteSessionRecord = previousDelete
+		lateGhostCleanupRetryInterval = previousInterval
+	})
+
+	lateResult := make(chan error, 1)
+	lateResult <- nil
+	manager.reconcileLateGhostCleanup(repoID, "ghost-late-success", key, stableID, lateResult)
+
+	select {
+	case <-retried:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatalf("late cleanup completion was discarded after one delete failure; attempts=%d", attempts)
+	}
+	assert.False(t, manager.ghostCleanupStallActive(key, stableID),
+		"a successful retry must release the process-epoch fence")
 }

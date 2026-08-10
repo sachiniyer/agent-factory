@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -515,6 +516,11 @@ func (m *Manager) persistGhostCleanupStall(repoID string, data *session.Instance
 	return persistInstanceData(repoID, *data)
 }
 
+var (
+	lateGhostDeleteSessionRecord  = (*Manager).deleteSessionRecord
+	lateGhostCleanupRetryInterval = 10 * time.Second
+)
+
 // reconcileLateGhostCleanup consumes the descriptor worker's definitive result.
 // The durable row remains the retry handle on any error; only a successful
 // identity-anchored delete plus the normal editor fence may remove it.
@@ -528,7 +534,7 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but its editor teardown is unconfirmed; retaining its stalled record: %v", title, err)
 			return
 		}
-		deleted, err := m.deleteSessionRecord(repoID, title, stableID, nil)
+		deleted, err := lateGhostDeleteSessionRecord(m, repoID, title, stableID, nil)
 		if err != nil {
 			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but its durable row could not be deleted: %v", title, err)
 			return

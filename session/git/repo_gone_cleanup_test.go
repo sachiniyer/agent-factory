@@ -222,6 +222,19 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	}
 }
 
+func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	repoPath := gw.GetRepoPath()
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("recreate origin pathname without git metadata: %v", err)
+	}
+
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("a non-Git origin is still conclusively repo-gone and must not strand cleanup: %v", err)
+	}
+}
+
 func TestCleanupClaimedRepoGone_AnsweredErrorPreservesCleanupAuthorization(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	previousRemove := repoGoneRemoveDirectory
