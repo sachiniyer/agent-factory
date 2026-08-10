@@ -57,3 +57,27 @@ func TestPostPromptChurnPersistFailureIsRetried(t *testing.T) {
 	require.True(t, rec.LastPaneChurnAt.After(attemptedAt),
 		"retried churn %v must be after prompt %v", rec.LastPaneChurnAt, attemptedAt)
 }
+
+func TestPollSettlementBookkeepingIsOrderedWithItsWrite(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "ordered-settlement", session.NewFakeBackend(), true, session.Ready)
+	lock := manager.startLockForRepo(repoID)
+
+	probed := false
+	heldAtRecord := false
+	prev := testHookPollBeforeSettlementRecord
+	t.Cleanup(func() { testHookPollBeforeSettlementRecord = prev })
+	testHookPollBeforeSettlementRecord = func() {
+		probed = true
+		if lock.TryLock() {
+			lock.Unlock()
+			return
+		}
+		heldAtRecord = true
+	}
+
+	manager.persistPollChange(repoID, inst, session.Running, time.Time{}, false)
+	require.True(t, probed, "poll never reached settlement bookkeeping")
+	require.True(t, heldAtRecord,
+		"settlement bookkeeping escaped the write ordering lock; an older success can erase a newer failed-write retry")
+}

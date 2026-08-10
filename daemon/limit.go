@@ -122,6 +122,11 @@ var testHookPollBeforePublish = func() {}
 // deterministically, with no goroutines or sleeps. No-op in production.
 var testHookPollBeforePersistLock = func() {}
 
+// testHookPollBeforeSettlementRecord runs after the poll's durable write and
+// before its settlement bookkeeping. Both must remain inside the repo start
+// lock: tests use this seam to pin that ordering without a scheduler race.
+var testHookPollBeforeSettlementRecord = func() {}
+
 // persistPollChange writes an instance's state to disk when the poll changed
 // something durable this tick (the #960 targeted writer): its LIVENESS
 // transitioned, OR — evaluated INDEPENDENTLY — its usage-limit reset time changed
@@ -205,6 +210,17 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
 	}
+	key := daemonInstanceKey(repoID, instance.Title)
+	testHookPollBeforeSettlementRecord()
+	switch {
+	case err == nil && durableChanged:
+		// Any successful whole-row checkpoint subsumes an older evidence write.
+		m.recordSettlementWrite(repoID, key, instance, nil)
+	case err != nil && idleEvidenceCheckpoint:
+		// The first post-prompt churn edge is one-shot in memory. Preserve the
+		// obligation after a failed write so a later poll can make it durable.
+		m.recordSettlementWrite(repoID, key, instance, err)
+	}
 	// Push the change onto the events plane (#1592 PR5): this is the single choke
 	// point every liveness/limit transition already flows through, so one publish
 	// here covers session.updated without threading it through each caller.
@@ -222,16 +238,6 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	testHookPollBeforePublish()
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
-	key := daemonInstanceKey(repoID, instance.Title)
-	switch {
-	case err == nil && durableChanged:
-		// Any successful whole-row checkpoint subsumes an older evidence write.
-		m.recordSettlementWrite(repoID, key, instance, nil)
-	case err != nil && idleEvidenceCheckpoint:
-		// The first post-prompt churn edge is one-shot in memory. Preserve the
-		// obligation after a failed write so a later poll can make it durable.
-		m.recordSettlementWrite(repoID, key, instance, err)
-	}
 	if err != nil {
 		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
 	}
@@ -660,18 +666,17 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	repoStartLock.Lock()
 	data := instance.ToInstanceData()
 	persistErr := persistInstanceData(repoID, data)
+	if persistErr == nil && settleErr != nil {
+		// This later whole-row write subsumes the earlier failed settlement. Retire
+		// it before releasing the same repo ordering lock, so no newer failed write
+		// can enroll and then be erased by this older success's bookkeeping.
+		m.clearOwedSettlement(repoID, instance)
+		settleErr = nil
+	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
 	if persistErr != nil {
 		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
-	} else if settleErr != nil {
-		// That write persisted the WHOLE row — the provenance the earlier settlement
-		// was carrying AND the resume that just landed — so the durability gap it
-		// described is closed. Retire the owed retry and the error with it: reporting
-		// a completed, fully durable resume as a failure would make a caller treat it
-		// as one.
-		m.clearOwedSettlement(repoID, instance)
-		settleErr = nil
 	}
 	if settleErr != nil {
 		// The resume itself landed — the prompt was delivered and the limit lifted —

@@ -943,12 +943,12 @@ func (m *Manager) persistAndPublishInstance(repoID string, instance *session.Ins
 }
 
 // persistAndPublishInstanceErr is persistAndPublishInstance with the write error
-// RETURNED rather than logged, for the caller whose durability gates correctness
-// rather than merely dating a checkpoint: the handoff settlement (#2781, see
-// persistHandoffSettlement). It is the persistInstanceErr/persistInstance pairing
-// one layer up, and the announcement stays unconditional either way — memory has
-// already changed, so every other client must converge on it whether or not disk
-// agreed yet.
+// RETURNED rather than logged, for callers whose durability gates correctness
+// rather than merely dating a checkpoint. Settlement writers that also maintain
+// retry bookkeeping use persistSettlement so that bookkeeping remains in the
+// same repo-ordered critical section as the write. The announcement stays
+// unconditional either way — memory has already changed, so every other client
+// must converge on it whether or not disk agreed yet.
 func (m *Manager) persistAndPublishInstanceErr(repoID string, instance *session.Instance) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()

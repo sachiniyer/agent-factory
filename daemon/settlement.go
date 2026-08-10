@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -40,10 +41,16 @@ type settleOwedEntry struct {
 // write lands. It announces like every other committed change (#2782) — memory
 // has already moved, whether or not disk agreed yet.
 func (m *Manager) persistSettlement(repoID, key string, instance *session.Instance) error {
-	// persistAndPublishInstanceErr goes through startLockForRepo, which takes m.mu
-	// — the #2106 lock contract, so the bookkeeping below happens after it returns.
-	err := m.persistAndPublishInstanceErr(repoID, instance)
+	// Bookkeeping belongs to the SAME repo-ordered critical section as the write.
+	// If it happened after unlock, an older successful checkpoint could resume
+	// late and erase the retry obligation from a newer failed settlement.
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
 	m.recordSettlementWrite(repoID, key, instance, err)
+	repoStartLock.Unlock()
 	if err != nil {
 		return fmt.Errorf(
 			"the settled state for %q could not be written to disk "+
@@ -54,7 +61,9 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 }
 
 // recordSettlementWrite keeps a failed whole-row write eligible for poll retry,
-// or retires an older obligation when a later whole-row write subsumes it.
+// or retires an older obligation when a later whole-row write subsumes it. Every
+// production caller invokes it before releasing the repo start lock that ordered
+// the corresponding write, so completion scheduling cannot invert those facts.
 func (m *Manager) recordSettlementWrite(repoID, key string, instance *session.Instance, err error) {
 	owedKey := stableSessionKey(repoID, instance)
 	m.mu.Lock()
