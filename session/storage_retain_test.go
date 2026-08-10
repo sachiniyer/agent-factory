@@ -67,6 +67,60 @@ func TestSaveInstances_KeepsUnknownRuntimeCleanupAlongsideStartedSibling(t *test
 	t.Fatal("daemon checkpoint dropped the unknown-cleanup row and orphaned its possible sandbox")
 }
 
+func TestSaveInstances_KeepsArchiveReportAcrossTransientRows(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := &Instance{Title: "alive", Path: repoPath, started: true, liveness: LiveRunning}
+	report := sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path: filepath.Join(repoPath, ".af-source-retained"),
+		Skipped: []sessiongit.ArchiveSkippedEntry{{
+			Path: "private/credential", Reason: sessiongit.ArchiveSkipPermissionDenied,
+		}},
+	}}}
+	makeReported := func(title string, started bool, liveness Liveness, op InFlightOp) *Instance {
+		worktree, err := sessiongit.NewGitWorktreeFromStorage(
+			repoPath, filepath.Join(repoPath, title+"-archive"), title, "af/"+title, "", false, true,
+		)
+		if err != nil {
+			t.Fatalf("NewGitWorktreeFromStorage(%s): %v", title, err)
+		}
+		worktree.RestoreArchiveReport(report)
+		return &Instance{
+			ID: title + "-id", Title: title, Path: repoPath, Program: "claude",
+			started: started, liveness: liveness, inFlightOp: op,
+			backend: &LocalBackend{}, gitWorktree: worktree,
+		}
+	}
+	deleting := makeReported("deleting-report", true, LiveRunning, OpArchiving)
+	notStarted := makeReported("not-started-report", false, LiveLost, OpNone)
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, deleting, notStarted}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	want := map[string]bool{deleting.Title: false, notStarted.Title: false}
+	for _, row := range readDisk(t, state, repoPath) {
+		if _, ok := want[row.Title]; !ok {
+			continue
+		}
+		if row.ArchiveReport == nil || row.ArchiveReport.Empty() {
+			t.Fatalf("retained row %q lost its archive report", row.Title)
+		}
+		want[row.Title] = true
+	}
+	for title, kept := range want {
+		if !kept {
+			t.Fatalf("daemon checkpoint dropped transient row %q while its archive report was the retained tree's only durable handle", title)
+		}
+	}
+}
+
 // TestSaveInstances_KeepsTombstonedRowAlongsideStartedSibling is #1917 round-5
 // finding (1): the retain is undone by a writer in another layer.
 //

@@ -1673,7 +1673,14 @@ name, then slot — the same order every tab verb uses. An id or name that does
 not resolve is an error, never a silent fall back to a slot: that would capture
 whatever tab had shifted into it.
 
---full returns the entire scrollback instead of the visible screen.
+--full returns the entire scrollback instead of the visible screen. The default
+capture is the VISIBLE SCREEN, so for a pane that has scrolled it omits whatever
+is above — the output says so ("partial" in the JSON, a note on stderr) and names
+how many lines were left out, because a partial capture that looks complete is how
+a working session gets read as a wedged one (#3169).
+
+--plain strips ANSI escape sequences from the captured content, for callers that
+parse it rather than render it.
 
 ```
 af sessions preview <title> [flags]
@@ -1684,6 +1691,7 @@ af sessions preview <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--full` |  | Capture the entire scrollback instead of the visible screen |
+| `--plain` |  | Strip ANSI escape sequences from the captured content |
 | `--tab` | `int` | Tab slot to capture, 0-based as the tab bar reads left to right (slot 0 is the agent tab) (default `0`) |
 | `--tab-id` | `string` | Stable id of the tab to capture (#1738); wins over --tab-name and --tab |
 | `--tab-name` | `string` | Name of the tab to capture, as reported by "af sessions get" (not the TUI's "Agent"/"Terminal" label); wins over --tab |
@@ -1780,8 +1788,10 @@ If the session does not exist, use --create to automatically create it first,
 or use 'af sessions create --name <title> --prompt <prompt>' instead.
 
 For one target, the JSON acknowledgement includes status: delivered,
-not-delivered, or could-not-confirm. This is the observation made by the
-existing bounded submit; the command adds no second confirmation wait.
+not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
+accepted the paste and Enter while a readable pane did not render exact content
+proof; could-not-confirm means the pane observer itself was unavailable. Neither
+status claims delivery, and the command adds no second confirmation wait.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -1792,9 +1802,9 @@ to broadcast across every repo. The reserved root session is excluded unless
 --include-root is given. Delivery is best-effort per session: unreachable (Lost,
 Dead) and Archived sessions are skipped and reported, and one failure never
 aborts the rest. The command prints a JSON summary whose delivery observations
-are delivered / not-delivered / could-not-confirm, alongside failed and skipped
-targets. It exits 0 even when some sessions fail, so scripts can inspect
-per-session results.
+are delivered / not-delivered / sent-unverified / could-not-confirm, alongside
+failed and skipped targets. It exits 0 even when some sessions fail, so scripts
+can inspect per-session results.
 
 ```
 af sessions send-prompt <title> <prompt> [flags]

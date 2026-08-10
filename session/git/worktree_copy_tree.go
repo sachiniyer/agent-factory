@@ -43,6 +43,7 @@ type copiedTreeIdentities struct {
 	destination               *os.File
 	destinationIdentity       pathIdentity
 	root                      copiedDirectory
+	skipped                   []ArchiveSkippedEntry
 }
 
 type copiedDirectory struct {
@@ -54,6 +55,8 @@ type copiedEntry struct {
 	source      pathIdentity
 	destination pathIdentity
 	directory   *copiedDirectory
+	state       copiedEntryState
+	reason      ArchiveSkipReason
 }
 
 type copiedDirectoryRoute struct {
@@ -152,6 +155,13 @@ func directoryRoutePath(rootPath string, components []copiedEntry) string {
 }
 
 func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
+	return copyTreeWithPolicy(src, dest, refuseUnreadable)
+}
+
+// copyTreeWithPolicy is the only permissive copier entrypoint. Its ordinary
+// wrapper above deliberately supplies REFUSE, so permission to omit a source
+// file can only arrive from the archive operation that names it explicitly.
+func copyTreeWithPolicy(src, dest string, policy unreadablePolicy) (*copiedTreeIdentities, error) {
 	source, sourceInfo, err := openDirectoryPath(src, "source")
 	if err != nil {
 		return nil, err
@@ -219,7 +229,7 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 		destinationIdentity:       destinationIdentity,
 	}
 
-	copied.root, err = copyDirectoryContents(source, destination, src, dest)
+	copied.root, err = copyDirectoryContents(source, destination, src, dest, policy, &copied.skipped)
 	if err != nil {
 		partialManifest := destinationCleanupManifest(copied.root)
 		cleanupErr := removeOpenedDirectory(destParent, destName, dest, destination, &partialManifest)
@@ -232,7 +242,12 @@ func copyTreeWithIdentities(src, dest string) (*copiedTreeIdentities, error) {
 	return copied, nil
 }
 
-func copyDirectoryContents(source, destination *os.File, sourcePath, destinationPath string) (copiedDirectory, error) {
+func copyDirectoryContents(
+	source, destination *os.File,
+	sourcePath, destinationPath string,
+	policy unreadablePolicy,
+	skipped *[]ArchiveSkippedEntry,
+) (copiedDirectory, error) {
 	root := copiedDirectory{}
 	// Source inode -> where its bytes first landed AND what inode they landed
 	// on. Scoped to one copy, so it can never name a path from another tree.
@@ -273,6 +288,8 @@ func copyDirectoryContents(source, destination *os.File, sourcePath, destination
 			relativeRoutePath(components),
 			links,
 			xattrs,
+			policy,
+			skipped,
 		)
 		if err == nil {
 			// The level is complete, and nothing is ever written directly into
@@ -309,6 +326,8 @@ func copyDirectoryLevel(
 	relativeDirectory string,
 	links map[pathIdentity]copiedFileLink,
 	xattrs *xattrDestination,
+	policy unreadablePolicy,
+	skipped *[]ArchiveSkippedEntry,
 ) error {
 	names, err := source.Readdirnames(-1)
 	if err != nil {
@@ -426,6 +445,23 @@ func copyDirectoryLevel(
 			}
 		default:
 			err = unsupportedSourceTypeError(childSourcePath, uint32(stat.Mode))
+		}
+		// A skipped file is still IN the manifest. Its source identity and reason
+		// are the evidence validateSource consumes; its state is the evidence
+		// validateDestination consumes. Omitting the entry is the attempt-1 bug:
+		// strict source name-set validation correctly rejected that tree (#3066).
+		var unreadable *unreadableSourceError
+		if policy == skipUnreadable && errors.As(err, &unreadable) {
+			entry = copiedEntry{
+				name:   name,
+				source: inspected,
+				state:  copiedEntryKnownAbsent,
+				reason: ArchiveSkipPermissionDenied,
+			}
+			*skipped = append(*skipped, newArchiveSkippedEntry(
+				filepath.Join(relativeDirectory, name), ArchiveSkipPermissionDenied,
+			))
+			err = nil
 		}
 		// A helper names its entry as soon as it has created the destination
 		// node and learned its identity, so record it even when the entry

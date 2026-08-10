@@ -213,6 +213,20 @@ type InstanceData struct {
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
+	// ArchiveWarning is the bounded live projection of an incomplete archive. It
+	// may ride snapshots and lifecycle events; the full report is storage-only so
+	// a large unreadable tree cannot turn every status response into megabytes.
+	ArchiveWarning string `json:"archive_warning,omitempty"`
+	// ArchiveReport makes a deliberately incomplete archive discoverable across
+	// daemon restarts and at restore time. It lives beside the session record,
+	// never inside the copied tree where a user path could collide with it. Live
+	// projections stage only the source below until ForStorage requests a clone.
+	ArchiveReport *git.ArchiveReport `json:"archive_report,omitempty"`
+	// archiveReportSource stages the live worktree, not its unbounded report.
+	// ForStorage asks it for one atomic path/recovery/report snapshot only when a
+	// durable write is actually requested; ordinary JSON projections ignore it.
+	archiveReportSource  *git.GitWorktree
+	archiveReportPending bool
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,
@@ -235,10 +249,83 @@ func (d InstanceData) UsesLocalTmux() bool {
 	return d.BackendType == "" || d.BackendType == "local"
 }
 
+// RestoreArchiveRollbackFence removes the previous-release safety projection
+// from a persisted row. FromInstanceData uses it before reconstructing an
+// Instance; storage-only cleanup paths use it before manually reconstructing a
+// GitWorktree. Keeping that decoding here prevents a current daemon from
+// mistaking its own old-reader fence for the session's real ownership.
+func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
+	if d.ArchiveReport == nil || d.ArchiveReport.RollbackFence == nil {
+		return d
+	}
+	fence := d.ArchiveReport.RollbackFence
+	d.StartupStateUnknown = fence.OriginalStartupStateUnknown
+	d.Worktree.ExternalWorktree = fence.OriginalExternalWorktree
+	d.Worktree.BranchCreatedByUs = cloneBoolPointer(fence.OriginalBranchCreatedByUs)
+	if fence.RelocationRecoveryProjected {
+		d.Worktree.RelocationRecovery = archiveRollbackRelocationRecovery(fence.OriginalRelocationRecovery)
+	}
+	return d
+}
+
+// ForClientRead converts a storage row into the same bounded shape emitted by a
+// live daemon snapshot. Disk fallback callers must not expose the complete
+// report or the compatibility-only ownership flags merely because the daemon is
+// unavailable.
+func (d InstanceData) ForClientRead() InstanceData {
+	d = d.RestoreArchiveRollbackFence()
+	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
+		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
+	}
+	d.ArchiveReport = nil
+	d.archiveReportSource = nil
+	d.archiveReportPending = false
+	return d
+}
+
+func archiveWarningOperation(liveness Liveness) string {
+	switch liveness {
+	case LiveArchived:
+		return "archive"
+	case LiveLost:
+		// A report can be installed before registration repair succeeds. Until
+		// recovery settles, neither archive nor restore is known to have completed.
+		return ""
+	default:
+		return "restore"
+	}
+}
+
 // ForStorage returns data suitable for instances.json. InstanceData is also the
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.
 func (d InstanceData) ForStorage() InstanceData {
+	reportDetached := false
+	if d.archiveReportSource != nil {
+		path, recovery, hasRecovery, report := d.archiveReportSource.PersistenceSnapshot()
+		d.Worktree.WorktreePath = path
+		d.Worktree.RelocationRecovery = nil
+		if hasRecovery {
+			externalWorktree := d.Worktree.ExternalWorktree
+			branchCreatedByUs := cloneBoolPointer(d.Worktree.BranchCreatedByUs)
+			startupStateUnknown := d.StartupStateUnknown
+			d.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
+				State: recovery.State, AlternatePath: recovery.AlternatePath,
+				IdentityKnown: recovery.IdentityKnown, Device: recovery.Device,
+				Inode: recovery.Inode, FileType: recovery.FileType,
+				OriginalExternalWorktree:    &externalWorktree,
+				OriginalBranchCreatedByUs:   branchCreatedByUs,
+				OriginalStartupStateUnknown: &startupStateUnknown,
+			}
+		}
+		if report.Empty() {
+			d.ArchiveReport = nil
+		} else {
+			report.RollbackFence = archiveRollbackFence(d)
+			d.ArchiveReport = &report
+			reportDetached = true
+		}
+	}
 	lv := livenessFromData(d)
 	d.Status = composeStatus(lv, OpNone)
 	d.Liveness = lv
@@ -255,6 +342,33 @@ func (d InstanceData) ForStorage() InstanceData {
 	// instances.json row and be read back as fact by an older binary.
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
+	d.ArchiveWarning = ""
+	// The compatibility projection must capture original values before either it
+	// or the relocation fence below overwrites them. Older binaries ignore
+	// ArchiveReport, but the previous release understands the inert/ownership
+	// fields and relocation recovery. Together they refuse restore and explicit
+	// kill instead of publishing an incomplete tree or deleting the report's row.
+	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
+		report := *d.ArchiveReport
+		if !reportDetached {
+			report = d.ArchiveReport.Clone()
+		}
+		if report.RollbackFence == nil {
+			report.RollbackFence = archiveRollbackFence(d)
+		}
+		d.ArchiveReport = &report
+		d.StartupStateUnknown = true
+		d.Worktree.ExternalWorktree = true
+		branchCreatedByUs := false
+		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
+		// v1.0.235 already understands relocation recovery and refuses an
+		// explicit kill while one is unresolved. Project a read-only stall through
+		// that admission path so rollback cannot turn ExternalWorktree's cleanup
+		// no-op into permission to delete the row which owns the retained trees.
+		// Current readers remove this synthetic latch from RollbackFence before
+		// reconstructing the worktree.
+		d.Worktree.RelocationRecovery = archiveReportKillFence(report)
+	}
 	if d.Worktree.RelocationRecovery != nil {
 		// v1.0.228 predates relocation_recovery and ignores unknown JSON fields.
 		// Project the unresolved row through safety fields that version already
@@ -283,7 +397,83 @@ func (d InstanceData) ForStorage() InstanceData {
 	// Never let the private staging pointer escape a storage projection. Loaded
 	// tombstones have only RuntimeCleanup set and therefore preserve it above.
 	d.runtimeCleanup = nil
+	d.archiveReportSource = nil
+	d.archiveReportPending = false
 	return d
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
+	fence := &git.ArchiveRollbackFence{
+		OriginalStartupStateUnknown: data.StartupStateUnknown,
+		OriginalExternalWorktree:    data.Worktree.ExternalWorktree,
+		OriginalBranchCreatedByUs:   cloneBoolPointer(data.Worktree.BranchCreatedByUs),
+		RelocationRecoveryProjected: true,
+	}
+	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+		fence.OriginalRelocationRecovery = &git.ArchiveRollbackRelocationRecovery{
+			State:                       recovery.State,
+			AlternatePath:               recovery.AlternatePath,
+			IdentityKnown:               recovery.IdentityKnown,
+			Device:                      recovery.Device,
+			Inode:                       recovery.Inode,
+			FileType:                    recovery.FileType,
+			OriginalExternalWorktree:    cloneBoolPointer(recovery.OriginalExternalWorktree),
+			OriginalBranchCreatedByUs:   cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
+			OriginalStartupStateUnknown: cloneBoolPointer(recovery.OriginalStartupStateUnknown),
+		}
+	}
+	return fence
+}
+
+func archiveRollbackRelocationRecovery(recovery *git.ArchiveRollbackRelocationRecovery) *GitWorktreeRelocationRecoveryData {
+	if recovery == nil {
+		return nil
+	}
+	return &GitWorktreeRelocationRecoveryData{
+		State:                       recovery.State,
+		AlternatePath:               recovery.AlternatePath,
+		IdentityKnown:               recovery.IdentityKnown,
+		Device:                      recovery.Device,
+		Inode:                       recovery.Inode,
+		FileType:                    recovery.FileType,
+		OriginalExternalWorktree:    cloneBoolPointer(recovery.OriginalExternalWorktree),
+		OriginalBranchCreatedByUs:   cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
+		OriginalStartupStateUnknown: cloneBoolPointer(recovery.OriginalStartupStateUnknown),
+	}
+}
+
+func archiveReportKillFence(report git.ArchiveReport) *GitWorktreeRelocationRecoveryData {
+	tree := report.RetainedTrees[0]
+	fence := report.RollbackFence
+	originalExternal := fence.OriginalExternalWorktree
+	originalBranch := cloneBoolPointer(fence.OriginalBranchCreatedByUs)
+	originalStartup := fence.OriginalStartupStateUnknown
+	return &GitWorktreeRelocationRecoveryData{
+		// A previous reader refuses explicit kill while any recovery record is
+		// unresolved, but its restore path consumes an identity-qualified
+		// AlternatePath as a worktree candidate. Retained trees can be snapshots
+		// from an older archive cycle, so never publish their pathname here. A
+		// claim-stale record with no alternate and the retained source's identity
+		// cannot match the cross-filesystem published archive and therefore makes
+		// both kill and restore fail closed. Current readers remove this synthetic
+		// record through RollbackFence before reconstructing the worktree.
+		State:                       git.RelocationRecoveryClaimStale,
+		IdentityKnown:               true,
+		Device:                      tree.Device,
+		Inode:                       tree.Inode,
+		FileType:                    tree.FileType,
+		OriginalExternalWorktree:    &originalExternal,
+		OriginalBranchCreatedByUs:   originalBranch,
+		OriginalStartupStateUnknown: &originalStartup,
+	}
 }
 
 // TabData is the serializable form of a session.Tab. The full list is persisted
@@ -451,8 +641,8 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 // Generic Loading/Deleting/non-started instances are skipped: their worktree is
 // not yet populated (Loading) or is mid-teardown (Deleting), so FromInstanceData
 // cannot restore them. Explicit durable retention markers override that legacy
-// projection; in particular, a pending handoff composes to Loading but names a
-// live replacement and the mission recovery still owes it.
+// projection; in particular, a pending handoff names a live replacement and a
+// staged archive report is the only durable handle to retained source trees.
 //
 // The targeted writers (appendInstanceData / persistInstanceData /
 // DeleteInstance) keep the disk current on every mutation; this full save is the
@@ -473,12 +663,13 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		pendingHandoff := data.PendingHandoffMission != ""
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
 		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
+		archiveReportPending := data.archiveReportPending
 		// A pending mission is a durable recovery obligation and therefore a
 		// retention claim, not generic transient UI state. OpReplacing composes to
 		// Loading, but dropping that row would erase the only handle to a live
 		// incoming runtime. The explicit marker outranks the lossy legacy status.
 		if (status == Loading || status == Deleting) && !pendingHandoff &&
-			!unknownRuntimeCleanup && !unresolvedRelocation {
+			!unknownRuntimeCleanup && !unresolvedRelocation && !archiveReportPending {
 			continue
 		}
 		// The !Started() skip drops transient never-started junk (a create that
@@ -502,7 +693,8 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
 		if !inst.Started() && status != Archived && !data.UserKilled &&
-			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup && !unresolvedRelocation {
+			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup && !unresolvedRelocation &&
+			!archiveReportPending {
 			continue
 		}
 		root := inst.GetRepoPath()

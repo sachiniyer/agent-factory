@@ -92,3 +92,62 @@ func TestRestoreArchived_SuccessfulRelocateReportsAFailedPersist(t *testing.T) {
 	assert.Equal(t, archivedPath, recordFor(t, repoID, "worker").Worktree.WorktreePath,
 		"premise: the failed write left the stale archive path on disk")
 }
+
+func TestRestoreArchived_PersistFailuresPreserveIncompleteArchiveReport(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		failOn int
+		status session.Status
+	}{
+		{name: "moved checkpoint", failOn: 1, status: session.Archived},
+		{name: "running settlement", failOn: 2, status: session.Running},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+			inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+			worktree, err := inst.GetGitWorktree()
+			require.NoError(t, err)
+
+			_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+			require.NoError(t, err)
+			worktree.RestoreArchiveReport(sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+				Path: "/repos/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
+				Device: 1, Inode: 2, FileType: 0o040000,
+				Skipped: []sessiongit.ArchiveSkippedEntry{{
+					Path: "private/credential", Reason: sessiongit.ArchiveSkipPermissionDenied,
+				}},
+			}}})
+			restored, pathErr := sessiongit.RestoreWorktreePath(repoPath, "worker", inst.GetBranch())
+			require.NoError(t, pathErr)
+
+			diskFull := errors.New("no space left on device")
+			var mu sync.Mutex
+			writes := 0
+			prev := testHookPersistInstanceData
+			t.Cleanup(func() { testHookPersistInstanceData = prev })
+			testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+				if data.Title != "worker" || data.Worktree.WorktreePath != restored {
+					return nil
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				writes++
+				if writes == tc.failOn {
+					return diskFull
+				}
+				return nil
+			}
+
+			gotPath, _, restoreErr := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+			require.Error(t, restoreErr)
+			require.True(t, isMutationCommitted(restoreErr),
+				"the worktree move landed and must not look safe to repeat: %v", restoreErr)
+			require.Equal(t, restored, gotPath)
+			require.ErrorContains(t, restoreErr, diskFull.Error())
+			require.ErrorContains(t, restoreErr, "incomplete archive")
+			require.ErrorContains(t, restoreErr, "/repos/.af-source-0123456789abcdef0123456789abcdef")
+			require.Equal(t, tc.status, inst.GetStatus())
+		})
+	}
+}

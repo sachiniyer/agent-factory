@@ -120,6 +120,10 @@ export interface SessionData {
   is_root?: boolean;
   /** Live, projection-only model diagnostic; never restored from instances.json. */
   model_change?: AgentModelChange;
+  /** Bounded warning for an archive whose complete retained report is storage-only.
+   *  It remains on restored rows so an automatic Lost recovery cannot make the
+   *  omitted files disappear from subsequent snapshots. */
+  archive_warning?: string;
   /** One-shot note on a re-created root agent that did not demonstrably come back
    *  on its prior conversation (#2629): "fresh" when its context is provably gone,
    *  "unknown" when the resolved command selects its own conversation so af cannot

@@ -327,7 +327,8 @@ var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, bool, erro
 // would never touch. Gating a record whose cleanup is a no-op can only retain it
 // forever (#2998 review).
 func ghostWorktreeRemovable(data *session.InstanceData) bool {
-	restored, err := data.RestoreRelocationRecoveryOriginals()
+	current := data.RestoreArchiveRollbackFence()
+	restored, err := current.RestoreRelocationRecoveryOriginals()
 	return err == nil && ghostRestoredWorktreeRemovable(&restored)
 }
 
@@ -350,7 +351,8 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 		recovery.State != git.RelocationRecoveryCleanupStalled {
 		return fmt.Errorf("persisted worktree recovery state %q is unresolved", recovery.State)
 	}
-	restored, err := data.RestoreRelocationRecoveryOriginals()
+	current := data.RestoreArchiveRollbackFence()
+	restored, err := current.RestoreRelocationRecoveryOriginals()
 	if err != nil {
 		return fmt.Errorf("restore cleanup ownership: %w", err)
 	}
@@ -392,7 +394,8 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 
 var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error, <-chan error) {
 	persisted := data
-	restored, restoreErr := data.RestoreRelocationRecoveryOriginals()
+	current := data.RestoreArchiveRollbackFence()
+	restored, restoreErr := current.RestoreRelocationRecoveryOriginals()
 	if restoreErr != nil {
 		return git.CleanupStateUnknown, fmt.Errorf("ghost recovery ownership is invalid: %w", restoreErr), nil
 	}
@@ -437,6 +440,9 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 			log.WarningLog.Printf("ghost session %q: invalid relocation recovery handle: %v", title, recoveryErr)
 			return git.CleanupStateUnknown, recoveryErr, nil
 		}
+	}
+	if data.ArchiveReport != nil {
+		gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 	}
 	_, normalized, unresolved := gw.RelocationSnapshot()
 	if unresolved && normalized.State == git.RelocationRecoveryCleanupReady {

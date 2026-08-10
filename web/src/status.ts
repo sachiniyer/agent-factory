@@ -273,10 +273,20 @@ export function rowTitle(s: SessionData): string {
   if (recreate) {
     title = `[${recreate}] ` + title;
   }
+  if (archiveWarningText(s) !== "") {
+    title = "[archive incomplete] " + title;
+  }
   if (s.model_change) {
     title = "[model changed] " + title;
   }
   return title;
+}
+
+/** The daemon-projected, bounded incomplete-archive notice. Keeping the trim in
+ * one helper means the rail badge and the persistent pane banner cannot disagree
+ * about whether a warning exists. */
+export function archiveWarningText(s: SessionData): string {
+  return s.archive_warning?.trim() ?? "";
 }
 
 /** Mirrors session.RootRecreateContext.Note (session/root_recreate.go): the short

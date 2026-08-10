@@ -24,6 +24,21 @@ func TestSnapshotReconcilesModelChangeWithoutLivenessChange(t *testing.T) {
 	require.Nil(t, inst.AgentModelChange())
 }
 
+func TestSnapshotReconcilesArchiveWarningWithoutLivenessChange(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "archive-warning")
+	data := inst.ToInstanceData()
+	data.ArchiveWarning = "complete source retained at /retained/source; incomplete archive"
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	require.Equal(t, data.ArchiveWarning, inst.ArchiveWarning())
+
+	data.ArchiveWarning = ""
+	require.True(t, h.updateInstanceFromSnapshot(inst, data),
+		"clearing a repaired archive warning is itself a visible change")
+	require.Empty(t, inst.ArchiveWarning())
+}
+
 // TestSnapshotReconcilesUserKilledTombstone pins the same-session half of the
 // durable precedence rule. Cold materialization already goes through
 // FromInstanceData; an open TUI instead mutates its existing row in place and

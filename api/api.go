@@ -329,6 +329,9 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 		if err := json.Unmarshal(raw, &data); err != nil {
 			return nil, fmt.Errorf("failed to parse sessions: %w", err)
 		}
+		for i := range data {
+			data[i] = data[i].ForClientRead()
+		}
 		// Single repo: the (repoID, title) key reduces to title order.
 		sort.Slice(data, func(i, j int) bool { return data[i].Title < data[j].Title })
 		return data, nil
@@ -355,6 +358,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 			continue
 		}
 		for _, inst := range instances {
+			inst = inst.ForClientRead()
 			// Build the same composite key the daemon sorts by:
 			// repoID + NUL + title (daemonInstanceKey). NUL sorts before any
 			// printable byte, so this is exactly the daemon's (repoID, title)
@@ -392,7 +396,8 @@ func diskWhoami(tmuxName string) (*session.InstanceData, error) {
 		}
 		for i := range instances {
 			if instances[i].TmuxName == tmuxName {
-				return &instances[i], nil
+				view := instances[i].ForClientRead()
+				return &view, nil
 			}
 		}
 	}
@@ -649,6 +654,7 @@ func init() {
 	sessionsPreviewCmd.Flags().StringVar(&previewTabNameFlag, "tab-name", "", "Name of the tab to capture, as reported by \"af sessions get\" (not the TUI's \"Agent\"/\"Terminal\" label); wins over --tab")
 	sessionsPreviewCmd.Flags().StringVar(&previewTabIDFlag, "tab-id", "", "Stable id of the tab to capture (#1738); wins over --tab-name and --tab")
 	sessionsPreviewCmd.Flags().BoolVar(&previewFullFlag, "full", false, "Capture the entire scrollback instead of the visible screen")
+	sessionsPreviewCmd.Flags().BoolVar(&previewPlainFlag, "plain", false, "Strip ANSI escape sequences from the captured content")
 
 	// --prompt is an ALIAS for the positional <prompt>, mirroring `sessions
 	// create --prompt` so the two sibling verbs take the same concept the same

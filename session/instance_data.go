@@ -48,6 +48,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		CurrentAgent:          i.currentAgentNameLocked(),
 		IsRoot:                IsReservedTitle(i.Title),
 		ModelChange:           agentModelChangeForLiveness(i.agentModelChange, i.liveness),
+		ArchiveWarning:        i.archiveWarning,
 		Height:                i.Height,
 		Width:                 i.Width,
 		CreatedAt:             i.CreatedAt,
@@ -134,7 +135,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
 		externalWorktree := i.gitWorktree.IsExternalWorktree()
 		startupStateUnknown := i.startupStateUnknown
-		worktreePath, recovery, hasRecovery := i.gitWorktree.RelocationSnapshot()
+		operation := archiveWarningOperation(i.liveness)
+		worktreePath, recovery, hasRecovery, hasArchiveReport, archiveWarning :=
+			i.gitWorktree.ProjectionSnapshot(operation)
+		data.archiveReportSource = i.gitWorktree
+		data.archiveReportPending = hasArchiveReport
+		if hasArchiveReport {
+			data.ArchiveWarning = archiveWarning
+		}
 		// ExternalWorktree is true for in-place sessions (`af sessions create
 		// --here`, which attach to the repo's own working tree) and for
 		// instances persisted by the pre-#930-PR-3 create-on-existing-worktree
@@ -205,6 +213,7 @@ func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, err
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	data = data.RestoreArchiveRollbackFence()
 	var err error
 	data, err = data.RestoreRelocationRecoveryOriginals()
 	if err != nil {
@@ -259,6 +268,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		taskRunActive:         data.TaskRunActive,
 		limitResetAt:          data.LimitResetAt,
 		agentModelChange:      agentModelChangeForLiveness(data.ModelChange, liveness),
+		archiveWarning:        data.ArchiveWarning,
 		Height:                data.Height,
 		Width:                 data.Width,
 		CreatedAt:             data.CreatedAt,
@@ -370,6 +380,9 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 				}
 				restoredRelocationRecovery = true
+			}
+			if data.ArchiveReport != nil {
+				gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 			}
 			instance.gitWorktree = gw
 		}

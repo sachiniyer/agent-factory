@@ -46,7 +46,7 @@ func TestPinnedSessionValidatesAHostCertificateOnANonDefaultPort(t *testing.T) {
 	knownHosts := lab.writeKnownHosts(t, "@cert-authority pinned.invalid "+lab.caPub)
 	cfg := lab.sshConfig(knownHosts)
 
-	pinnedCmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1")
+	pinnedCmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1", 0)
 	require.NoError(t, err)
 	out, err := runOverTransport(pinnedCmd, "echo CERT_ACCEPTED")
 	require.NoError(t, err, "a pinned session must still validate a host certificate.\nssh said:\n%s", out)
@@ -77,7 +77,7 @@ func TestPinnedSessionMatchesAPlainKnownHostsEntryOnANonDefaultPort(t *testing.T
 	entry := fmt.Sprintf("[pinned.invalid]:%d %s", lab.port, lab.hostPub)
 	cfg := lab.sshConfig(lab.writeKnownHosts(t, entry))
 
-	pinnedCmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1")
+	pinnedCmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1", 0)
 	require.NoError(t, err)
 	out, err := runOverTransport(pinnedCmd, "echo PLAIN_ENTRY_OK")
 	require.NoError(t, err, "ssh said:\n%s", out)
@@ -86,7 +86,7 @@ func TestPinnedSessionMatchesAPlainKnownHostsEntryOnANonDefaultPort(t *testing.T
 	// And the key is looked up under the NAME, not the pinned address: an entry for
 	// a different name must not satisfy it, however the socket got there.
 	wrong := lab.sshConfig(lab.writeKnownHosts(t, fmt.Sprintf("[other.invalid]:%d %s", lab.port, lab.hostPub)))
-	wrongCmd, err := sshCommandPinnedTo(wrong, config.SSHHostKeyStrict, "127.0.0.1")
+	wrongCmd, err := sshCommandPinnedTo(wrong, config.SSHHostKeyStrict, "127.0.0.1", 0)
 	require.NoError(t, err)
 	wrongOut, wrongErr := runOverTransport(wrongCmd, "echo SHOULD_NOT_HAPPEN")
 	require.Error(t, wrongErr, "ssh said:\n%s", wrongOut)
@@ -104,7 +104,7 @@ func TestPinnedSessionStreamsStdinAndSeesEOF(t *testing.T) {
 
 	cfg := lab.sshConfig(lab.writeKnownHosts(t,
 		fmt.Sprintf("[pinned.invalid]:%d %s", lab.port, lab.hostPub)))
-	pinnedCmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1")
+	pinnedCmd, err := sshCommandPinnedTo(cfg, config.SSHHostKeyStrict, "127.0.0.1", 0)
 	require.NoError(t, err)
 
 	// Big enough to cross many relay buffers, so a half-close bug shows up as a
@@ -128,7 +128,7 @@ func TestPinnedSessionStreamsStdinAndSeesEOF(t *testing.T) {
 // with no failing counterpart is untested.
 func hostKeyAliasPinnedCommand(t *testing.T, cfg config.SSHConfig, posture, dialAddr string) string {
 	t.Helper()
-	base, err := sshCommandPinnedTo(cfg, posture, "")
+	base, err := sshCommandPinnedTo(cfg, posture, "", 0)
 	require.NoError(t, err)
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	require.NoError(t, err)

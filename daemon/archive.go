@@ -344,9 +344,9 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w%s", req.Title, perr, worktreeRecoveryLocation(instance), err, hookNote)
+			return failedArchiveResult(instance, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w%s", req.Title, perr, worktreeRecoveryLocation(instance), err, hookNote))
 		}
-		return "", session.InstanceData{}, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w%s", req.Title, err, hookNote)
+		return failedArchiveResult(instance, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w%s", req.Title, err, hookNote))
 	}
 
 	// Success: worktree relocated, tmux down. Commit the inert Archived state
@@ -390,6 +390,12 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 	}()
 	if stopErr := m.stopVSCodeForInstance(vscodeKey, instance.ID); stopErr != nil {
+		if !instance.GetArchiveReport().Empty() {
+			return m.keepIncompleteArchiveCommitted(
+				repoID, archivedPath, instance, hookErr, true,
+				fmt.Errorf("final VS Code editor teardown was not confirmed: %w", stopErr),
+			)
+		}
 		log.ErrorLog.Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
 			// The worktree cannot be returned home. Keep and best-effort persist the
@@ -403,6 +409,12 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		return "", session.InstanceData{}, fmt.Errorf("could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w", req.Title, stopErr)
 	}
 	if perr := archivePersist(m, repoID, instance); perr != nil {
+		if !instance.GetArchiveReport().Empty() {
+			return m.keepIncompleteArchiveCommitted(
+				repoID, archivedPath, instance, hookErr, false,
+				fmt.Errorf("its durable state write failed: %w", perr),
+			)
+		}
 		log.ErrorLog.Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
 			// Could not move the worktree home: the committed archive is the
@@ -421,9 +433,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// order. Publishing after this method returns lets an immediate restore finish
 	// and publish before this older Archived projection (#2680 Codex review).
 	m.publishEvent(agentproto.EventSessionArchived, archived)
-	if hookErr != nil {
-		committedErr := &mutationCommittedError{err: fmt.Errorf(
-			"archive committed, but on-archive hook failed: %w", hookErr)}
+	if committedErr := archiveCommitWarning(instance, hookErr); committedErr != nil {
 		log.WarningLog.Printf("%v", committedErr)
 		return archivedPath, archived, committedErr
 	}
@@ -792,7 +802,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// covered: a later restore relocates off the occupied path rather than
 	// colliding with itself (RestoreWorktreePath's collision suffix).
 	if perr := commitRestore(); perr != nil {
-		return "", perr
+		return failedRestoredArchiveResult(instance, restoredPath, perr)
 	}
 
 	// Worktree is back in place. Re-spawn the agent and flip Running. On a
@@ -800,27 +810,17 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// the Lost-restore loop keeps retrying against the now-restored worktree.
 	if err := instance.RestoreFromArchive(); err != nil {
 		if perr := commitRestore(); perr != nil {
-			return "", fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err)
+			return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err))
 		}
-		return "", fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err)
+		return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err))
 	}
 
 	worktreePath := instance.GetWorktreePath()
 	if perr := commitRestore(); perr != nil {
-		return "", fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr)
+		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
 	}
 	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
-	return worktreePath, nil
-}
-
-func worktreeRecoveryLocation(instance *session.Instance) string {
-	if primary, alternate, ok := instance.GetWorktreeRelocationCandidates(); ok {
-		if alternate != "" {
-			return fmt.Sprintf("either %s or %s (identity unresolved)", primary, alternate)
-		}
-		return fmt.Sprintf("%s (identity unresolved)", primary)
-	}
-	return instance.GetWorktreePath()
+	return restoredArchiveResult(instance, worktreePath)
 }
 
 // archiveExclusiveTabLock serializes a tab spawn against an archive/kill/restore

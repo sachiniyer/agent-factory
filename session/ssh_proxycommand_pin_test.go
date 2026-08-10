@@ -134,7 +134,7 @@ func TestEveryTransportStepRidesTheOnePinnedCommand(t *testing.T) {
 	defer SetSSHRelayBinaryForTest("/opt/af/af")()
 
 	pinnedCmd, err := sshCommandPinnedTo(
-		config.SSHConfig{Host: "many.example.com", Port: 2222}, config.SSHHostKeyInsecure, "198.51.100.8")
+		config.SSHConfig{Host: "many.example.com", Port: 2222}, config.SSHHostKeyInsecure, "198.51.100.8", 0)
 	require.NoError(t, err)
 	p := newSSHSandboxProvisioner(ProvisionSpec{Title: "pinned"}, pinnedCmd, "", "")
 
@@ -163,7 +163,7 @@ func TestPinnedCommandKeepsTheNameAsSSHsDestination(t *testing.T) {
 	defer SetSSHRelayBinaryForTest("/opt/af/af")()
 
 	cmd, err := sshCommandPinnedTo(
-		config.SSHConfig{Host: "many.example.com", Port: 2222}, config.SSHHostKeyStrict, "198.51.100.8")
+		config.SSHConfig{Host: "many.example.com", Port: 2222}, config.SSHHostKeyStrict, "198.51.100.8", 0)
 	require.NoError(t, err)
 
 	fields := strings.Fields(cmd)
@@ -183,7 +183,7 @@ func TestPinnedCommandKeepsTheNameAsSSHsDestination(t *testing.T) {
 func TestUnpinnedCommandCarriesNoProxyCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com", Port: 2222}, config.SSHHostKeyStrict, "")
+	cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com", Port: 2222}, config.SSHHostKeyStrict, "", 0)
 	require.NoError(t, err)
 	// "-o ProxyCommand", not the bare word, for the reason
 	// TestSSHCommandOmitsThePost85HostKeyHelperOption records: t.TempDir() embeds
@@ -205,7 +205,7 @@ func TestPinnedProxyCommandSurvivesQuotingAndPercentExpansion(t *testing.T) {
 	// (which ssh percent-expands). Measured on OpenSSH_9.6p1: an unescaped `%d`
 	// aborts the connection with `vdollar_percent_expand: unknown key %d`.
 	defer SetSSHRelayBinaryForTest("/opt/af home/pct%dir/af")()
-	cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict, "198.51.100.8")
+	cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict, "198.51.100.8", 0)
 	require.NoError(t, err)
 
 	assert.Contains(t, cmd, "pct%%dir",
@@ -229,7 +229,7 @@ func TestPinnedProxyCommandCarriesAZonedIPv6Address(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	defer SetSSHRelayBinaryForTest("/opt/af/af")()
 
-	cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict, "fe80::1%eth0")
+	cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com"}, config.SSHHostKeyStrict, "fe80::1%eth0", 0)
 	require.NoError(t, err)
 	assert.Contains(t, proxyCommandValue(t, cmd), "'fe80::1%%eth0'",
 		"fe80::1 on eth0 is not fe80::1 on eth1, so the zone travels with the address — escaped, because "+

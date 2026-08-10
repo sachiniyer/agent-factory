@@ -10,7 +10,7 @@ import (
 
 func TestReadTerminalState(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf '7 11 1 1 0 1 0 0 1\\n'\n"
+	script := "#!/bin/sh\nprintf '7 11 1 1 0 1 0 0 1 0\\n'\n"
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}

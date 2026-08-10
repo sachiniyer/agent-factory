@@ -94,6 +94,40 @@ func TestCleanupClaimedRepoGone_CommittedClaimSurvivesLateOriginReturn(t *testin
 	}
 }
 
+func TestCleanupClaimedRepoGone_RemovesRetainedArchiveTreesBeforePrimary(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	retained := filepath.Join(filepath.Dir(worktree), ".af-source-0123456789abcdef0123456789abcdef")
+	if err := os.Mkdir(retained, 0o700); err != nil {
+		t.Fatalf("create retained archive tree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(retained, "private-work.txt"), []byte("retained user work"), 0o600); err != nil {
+		t.Fatalf("write retained archive tree: %v", err)
+	}
+	identity, err := inspectRelocationPathIdentity(retained)
+	if err != nil {
+		t.Fatalf("inspect retained archive tree: %v", err)
+	}
+	gw.RestoreArchiveReport(ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
+		newArchiveRetainedTree(retained, identity, []ArchiveSkippedEntry{
+			newArchiveSkippedEntry("private-work.txt", ArchiveSkipPermissionDenied),
+		}),
+	}})
+
+	state, err := gw.CleanupClaimedRepoGone(claim)
+	if err != nil || state != CleanupSettled {
+		t.Fatalf("cleanup with retained archive tree did not settle: state=%v err=%v", state, err)
+	}
+	if _, err := os.Stat(retained); !os.IsNotExist(err) {
+		t.Fatalf("cleanup orphaned a retained archive tree after removing its durable row: %v", err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left the primary archive behind: %v", err)
+	}
+	if report := gw.GetArchiveReport(); !report.Empty() {
+		t.Fatalf("cleanup retained a report after consuming all owned trees: %+v", report)
+	}
+}
+
 func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T) {
 	gw, claim, worktree := repoGoneCleanupClaim(t)
 	previousRemove := repoGoneRemoveDirectory

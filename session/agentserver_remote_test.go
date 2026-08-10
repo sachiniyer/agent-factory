@@ -118,6 +118,7 @@ func TestRemoteAgentServerCarriesPromptDeliveryStatus(t *testing.T) {
 	}{
 		{name: "delivered", wire: PromptDelivered, wanted: PromptDelivered},
 		{name: "not delivered", wire: PromptNotDelivered, wanted: PromptNotDelivered},
+		{name: "sent unverified", wire: PromptSentUnverified, wanted: PromptSentUnverified},
 		{name: "could not confirm", wire: PromptCouldNotConfirm, wanted: PromptCouldNotConfirm},
 		{name: "older server omitted status", wanted: PromptCouldNotConfirm},
 	} {

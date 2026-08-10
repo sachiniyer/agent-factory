@@ -14,6 +14,36 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// TestValidateCopiedDirectoryLevel_KnownAbsentIsStillExact pins both halves of
+// the manifest state: it accounts for the source name but not a destination
+// name, and neither side tolerates any different set (#3066).
+func TestValidateCopiedDirectoryLevel_KnownAbsentIsStillExact(t *testing.T) {
+	sourcePath, destinationPath := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sourcePath, "locked"), []byte("secret"), 0o600))
+	source, err := os.Open(sourcePath)
+	require.NoError(t, err)
+	defer source.Close()
+	destination, err := os.Open(destinationPath)
+	require.NoError(t, err)
+	defer destination.Close()
+
+	identity, err := identityAt(source, "locked")
+	require.NoError(t, err)
+	manifest := copiedDirectory{entries: []copiedEntry{{
+		name: "locked", source: identity, state: copiedEntryKnownAbsent,
+		reason: ArchiveSkipPermissionDenied,
+	}}}
+	require.NoError(t, validateCopiedDirectoryLevel(source, manifest, true, sourcePath))
+	require.NoError(t, validateCopiedDirectoryLevel(destination, manifest, false, destinationPath))
+
+	require.NoError(t, os.Remove(filepath.Join(sourcePath, "locked")))
+	require.ErrorContains(t, validateCopiedDirectoryLevel(source, manifest, true, sourcePath), "tree entry set changed",
+		"known-absent must not excuse an unexpected source disappearance")
+	require.NoError(t, os.WriteFile(filepath.Join(destinationPath, "locked"), nil, 0o600))
+	require.ErrorContains(t, validateCopiedDirectoryLevel(destination, manifest, false, destinationPath), "tree entry set changed",
+		"known-absent must require that the destination name is actually absent")
+}
+
 func TestCopiedDirectoryRoutesRetainLinearAncestry(t *testing.T) {
 	const depth = 128
 	manifest := copiedDirectory{}

@@ -20,6 +20,13 @@ func (committedArchiveWarningTestError) Error() string {
 }
 func (committedArchiveWarningTestError) MutationCommitted() bool { return true }
 
+type committedRestoreReportTestError struct{}
+
+func (committedRestoreReportTestError) Error() string {
+	return `restore completed with an incomplete archive: skipped "private/locked\ncredential"`
+}
+func (committedRestoreReportTestError) MutationCommitted() bool { return true }
+
 // TestSessionsArchive_SurfacesDaemonError: a daemon-side rejection (e.g. remote
 // or in-place session) is surfaced as a JSON error, not a silent success.
 func TestSessionsArchive_SurfacesDaemonError(t *testing.T) {
@@ -57,6 +64,25 @@ func TestSessionsArchiveReportsCommittedHookWarningAsSuccess(t *testing.T) {
 	assert.Equal(t, true, parsed["ok"])
 	assert.Equal(t, "/archive/worker", parsed["archived_path"])
 	assert.Contains(t, parsed["warning"], "on-archive hook")
+}
+
+func TestSessionsRestoreReportsIncompleteArchiveAsCommittedSuccess(t *testing.T) {
+	setupRepoForCmd(t)
+
+	prev := restoreSessionViaDaemon
+	restoreSessionViaDaemon = func(daemon.RestoreSessionRequest) (string, error) {
+		return "/worktrees/worker", committedRestoreReportTestError{}
+	}
+	defer func() { restoreSessionViaDaemon = prev }()
+
+	out, err := runCmdCaptureStdout(t, sessionsRestoreCmd, []string{"worker"})
+	require.NoError(t, err, "the restore already committed and must not be presented as retryable")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, true, parsed["ok"])
+	assert.Equal(t, "/worktrees/worker", parsed["worktree_path"])
+	assert.Contains(t, parsed["warning"], `"private/locked\ncredential"`)
 }
 
 // stubCurrentTmuxName swaps the tmux-name seam so `--self`/`whoami` tests can

@@ -505,6 +505,15 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	if g.externalWorktree {
 		return r.state(), nil
 	}
+	// Retained archive trees are owned only by archive_report. Consume them before
+	// the ordinary worktree and branch; on any refusal or failure, keep the session
+	// record so a retry still has the exact path + identity rather than orphaning a
+	// full duplicate after an explicit kill.
+	if err := g.cleanupRetainedArchiveTrees(); err != nil {
+		r.unknown = true
+		r.errs = append(r.errs, err)
+		return r.state(), errors.Join(r.errs...)
+	}
 
 	// Guard against empty paths that would cause git commands to fail or
 	// operate on unintended directories.
@@ -658,6 +667,14 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 
 	if err := g.RevalidateRelocationClaim(claim); err != nil {
 		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: %w", err), nil
+	}
+	// Current archives may carry complete retained source trees for files the
+	// published copy could not read. Their report is the only durable ownership
+	// handle, so consume them before the primary archive and before the daemon can
+	// delete the session row. This is the same ordering as ordinary Cleanup; a
+	// refusal preserves the relocation claim and therefore the whole transaction.
+	if err := g.cleanupRetainedArchiveTrees(); err != nil {
+		return CleanupStateUnknown, fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err), nil
 	}
 
 	if g.hooksCancel != nil {

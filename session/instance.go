@@ -153,6 +153,9 @@ type Instance struct {
 	// running agent-server. It is mutex-protected and deliberately omitted from
 	// durable restore state; see AgentModelChange and InstanceData.ForStorage.
 	agentModelChange *AgentModelChange
+	// archiveWarning retains a daemon snapshot's projection-only notice so thin
+	// client renderers do not drop incomplete-archive state during reconstruction.
+	archiveWarning string
 	// stateEpoch is the generation counter for the lifecycle state above — the two
 	// axes plus limitResetAt — bumped by every writer that actually changes one of
 	// them (#2135). It is how an observer that decided from a captured pane learns

@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // remoteTarget points the CLI read path at a remote daemon for the duration of a
@@ -143,6 +144,58 @@ func TestListSessions_DiskFallbackRepoScoped(t *testing.T) {
 	}
 	if want := []string{"a", "m", "z"}; !equalStrs(titlesOf(got), want) {
 		t.Fatalf("scoped disk fallback returned %v, want title-sorted %v", titlesOf(got), want)
+	}
+}
+
+func TestListSessions_DiskFallbackSanitizesArchiveStorageMetadata(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	stubSnapshot(t, daemonUnavailable)
+	branchCreatedByUs := true
+	stored := session.InstanceData{
+		Title: "incomplete", Status: session.Archived, Liveness: session.LiveArchived,
+		Worktree: session.GitWorktreeData{
+			RepoPath: "/repos/project", WorktreePath: "/archives/incomplete",
+			BranchName: "af/incomplete", BranchCreatedByUs: &branchCreatedByUs,
+		},
+		ArchiveReport: &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+			Path: "/repos/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
+			Device: 1, Inode: 2, FileType: 0o040000,
+			Skipped: []sessiongit.ArchiveSkippedEntry{{
+				Path: "private/locked\ncredential", Reason: sessiongit.ArchiveSkipPermissionDenied,
+			}},
+		}}},
+	}.ForStorage()
+	if stored.ArchiveReport == nil || !stored.StartupStateUnknown || !stored.Worktree.ExternalWorktree {
+		t.Fatal("precondition: fixture is not an old-reader-fenced storage projection")
+	}
+	raw, err := json.Marshal([]session.InstanceData{stored})
+	if err != nil {
+		t.Fatalf("marshal storage fixture: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-a", raw); err != nil {
+		t.Fatalf("save storage fixture: %v", err)
+	}
+
+	got, err := listSessions("repo-a")
+	if err != nil {
+		t.Fatalf("listSessions disk fallback: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(got))
+	}
+	view := got[0]
+	if view.ArchiveReport != nil {
+		t.Fatal("disk fallback exposed the unbounded storage-only archive report")
+	}
+	if !strings.Contains(view.ArchiveWarning, `"private/locked\ncredential"`) {
+		t.Fatalf("disk fallback warning = %q, want bounded skipped path", view.ArchiveWarning)
+	}
+	if view.StartupStateUnknown || view.Worktree.ExternalWorktree {
+		t.Fatalf("disk fallback exposed rollback-only flags: startup_unknown=%v external=%v",
+			view.StartupStateUnknown, view.Worktree.ExternalWorktree)
+	}
+	if view.Worktree.BranchCreatedByUs == nil || !*view.Worktree.BranchCreatedByUs {
+		t.Fatal("disk fallback did not restore the original branch ownership")
 	}
 }
 
