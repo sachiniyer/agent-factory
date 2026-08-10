@@ -152,8 +152,8 @@ func TestResumeFromLimitPromotesPendingClaudeConversationBeforeClear(t *testing.
 		t.Fatalf("committed Claude swap did not persist its replacement conversation: %+v", data.PendingAccountSwap)
 	}
 	want := data.PendingAccountSwap.ConversationID
-	if conv := inst.AgentConversation(); conv.HasID() {
-		t.Fatalf("fixture already promoted pending conversation: %+v", conv)
+	if conv := inst.AgentConversation(); conv.Agent != tmux.ProgramClaude || conv.ID != want {
+		t.Fatalf("failed delivery did not promote durable pending conversation: %+v, want Claude %s", conv, want)
 	}
 
 	backend.mu.Lock()

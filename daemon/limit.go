@@ -521,9 +521,16 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 
 	forceRespawn := false
 	if accountSwap != nil && !accountSwap.alreadySet {
-		if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
-			return resumeNotPerformed, err
+		if err := preflightAccountSwapCandidates(accountSwap, instance.ValidateAccountSwap); err != nil {
+			if !accountSwap.fallbackDue {
+				return resumeNotPerformed, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
+			}
+			log.WarningLog.Printf("no configured account can replace the limited identity for %q; its ordinary resume deadline is due, so retaining the current identity: %v", requestedTitle, err)
+			accountSwap.fellBack = true
+			accountSwap = nil
 		}
+	}
+	if accountSwap != nil && !accountSwap.alreadySet {
 		if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
 			return resumeNotPerformed, err
 		}

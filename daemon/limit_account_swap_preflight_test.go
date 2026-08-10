@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -8,6 +10,24 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+func TestPreflightAccountSwapCandidates_SkipsUnusableCandidate(t *testing.T) {
+	swap := &autoAccountSwap{to: "broken", candidates: []string{"broken", "work"}}
+	var tried []string
+	err := preflightAccountSwapCandidates(swap, func(candidate string) error {
+		tried = append(tried, candidate)
+		if candidate == "broken" {
+			return errors.New("missing credential boundary")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(tried, []string{"broken", "work"}) || swap.to != "work" {
+		t.Fatalf("preflight tried %q and selected %q, want [broken work] then work", tried, swap.to)
+	}
+}
 
 func TestResumeLimitedSessions_UnusableCandidatesFallBackWhenResetDue(t *testing.T) {
 	base := nowFunc()

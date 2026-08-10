@@ -186,7 +186,8 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		return
 	}
 	resetAt, hasReset := inst.LimitResetAt()
-	if !hasReset && retryInterval <= 0 && accountSwap == nil {
+	ordinarySchedulable := hasReset || retryInterval > 0
+	if !ordinarySchedulable && accountSwap == nil {
 		// No parseable reset time and no fallback interval: the session is
 		// surface-only. Return WITHOUT creating retry state so unschedulable
 		// parks never accumulate a map entry.
@@ -202,10 +203,11 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// is reset + grace (a reset already in the past yields a due in the past →
 	// resume promptly); with no reset time it is the fixed fallback interval
 	// measured from when the session was first seen parked. All in UTC.
-	due := st.parkedAt.Add(retryInterval)
+	ordinaryDue := st.parkedAt.Add(retryInterval)
 	if hasReset {
-		due = resetAt.Add(limitResumeGrace)
+		ordinaryDue = resetAt.Add(limitResumeGrace)
 	}
+	due := ordinaryDue
 	if accountSwap != nil {
 		due = now
 	}
@@ -254,10 +256,12 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		accountSwap, err = m.accountSwapForLimit(inst, cfg)
 		if err != nil {
 			log.WarningLog.Printf("account-swap recheck for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, err)
+		}
+		if accountSwap == nil && (!ordinarySchedulable || now.Before(ordinaryDue)) {
 			return
 		}
-		if accountSwap == nil {
-			return
+		if accountSwap != nil {
+			accountSwap.fallbackDue = ordinarySchedulable && !now.Before(ordinaryDue)
 		}
 	}
 
@@ -275,7 +279,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
 		return
 	}
-	if accountSwap != nil {
+	if accountSwap != nil && !accountSwap.fellBack {
 		log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) on %s account %q (attempt %d)", inst.Title, repoID, accountSwap.agent, accountSwap.to, attempts)
 	} else {
 		// State the trigger that was actually observed (#3240): with a parsed

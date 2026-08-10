@@ -1,6 +1,9 @@
 package quota
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestSelectAccountCandidate_LimitedAmbientSessionUsesConfiguredAccount(t *testing.T) {
 	got, ok := SelectAccountCandidate(AccountSelection{
@@ -31,5 +34,19 @@ func TestSelectAccountCandidate_ExplicitAccountPinIsNeverOverridden(t *testing.T
 	})
 	if ok || got != "" {
 		t.Fatalf("SelectAccountCandidate = (%q, %v), want explicit account pin preserved", got, ok)
+	}
+}
+
+func TestSelectAccountCandidates_PriorAutomaticSelectionThenConfiguredOrder(t *testing.T) {
+	got := SelectAccountCandidates(AccountSelection{
+		CurrentAccount:      "personal",
+		CurrentAutoSelected: true,
+		Candidates:          []string{"work", "personal", "work", "backup"},
+		Registered:          []string{"personal", "work", "backup"},
+		Limited:             []string{"backup"},
+	})
+	want := []string{"personal", "work"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SelectAccountCandidates = %q, want %q", got, want)
 	}
 }

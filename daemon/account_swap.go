@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,8 +21,11 @@ type autoAccountSwap struct {
 	previousAuto         bool
 	previousConversation session.AgentConversationData
 	to                   string
+	candidates           []string
 	agent                string
 	alreadySet           bool
+	fallbackDue          bool
+	fellBack             bool
 }
 
 // committedAccountSwap recognizes a replacement whose identity checkpoint
@@ -110,24 +114,50 @@ func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config
 	for account := range limitedSet {
 		limited = append(limited, account)
 	}
-	target, ok := quota.SelectAccountCandidate(quota.AccountSelection{
+	targets := quota.SelectAccountCandidates(quota.AccountSelection{
 		CurrentAccount:      current,
 		CurrentAutoSelected: currentAuto,
 		Candidates:          resolved.LimitAccountCandidates,
 		Registered:          registered,
 		Limited:             limited,
 	})
-	if !ok {
+	if len(targets) == 0 {
 		return nil, nil
 	}
+	target := targets[0]
 	return &autoAccountSwap{
 		from:            limitedAccount,
 		previousAccount: current,
 		previousAuto:    currentAuto,
 		to:              target,
+		candidates:      targets,
 		agent:           agent,
 		alreadySet:      currentAuto && current == target && current != limitedAccount,
 	}, nil
+}
+
+// preflightAccountSwapCandidates keeps candidate order but refuses to let one
+// unusable account starve later configured identities. Validation also freezes
+// the exact launch plan, so the selected candidate is written back to the swap
+// only after that preflight succeeds.
+func preflightAccountSwapCandidates(swap *autoAccountSwap, validate func(string) error) error {
+	if swap == nil || swap.alreadySet {
+		return nil
+	}
+	candidates := swap.candidates
+	if len(candidates) == 0 {
+		candidates = []string{swap.to}
+	}
+	var failures []error
+	for _, candidate := range candidates {
+		if err := validate(candidate); err != nil {
+			failures = append(failures, fmt.Errorf("account %q: %w", candidate, err))
+			continue
+		}
+		swap.to = candidate
+		return nil
+	}
+	return errors.Join(failures...)
 }
 
 func accountSwapIdentity(agent, account string) string {

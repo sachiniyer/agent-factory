@@ -12,12 +12,14 @@ type AccountSelection struct {
 	Limited             []string
 }
 
-// SelectAccountCandidate chooses the first explicitly configured, registered
-// account that is not currently observed at a usage limit.
-func SelectAccountCandidate(selection AccountSelection) (string, bool) {
+// SelectAccountCandidates returns the explicitly configured, registered
+// accounts that are not currently observed at a usage limit, in selection
+// order. A prior automatic selection stays first so an interrupted move is
+// finished before another identity is chosen.
+func SelectAccountCandidates(selection AccountSelection) []string {
 	current := strings.TrimSpace(selection.CurrentAccount)
 	if current != "" && !selection.CurrentAutoSelected {
-		return "", false
+		return nil
 	}
 
 	registered := make(map[string]struct{}, len(selection.Registered))
@@ -41,18 +43,38 @@ func SelectAccountCandidate(selection AccountSelection) (string, bool) {
 	// A prior attempt may have durably selected an account after stopping the
 	// limited runtime but failed before its replacement came up. Finish that
 	// already-declared move before choosing a second identity.
+	selected := make([]string, 0, len(selection.Candidates))
+	seen := make(map[string]struct{}, len(selection.Candidates))
+	appendEligible := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || !eligible(candidate) {
+			return
+		}
+		if _, exists := seen[candidate]; exists {
+			return
+		}
+		seen[candidate] = struct{}{}
+		selected = append(selected, candidate)
+	}
 	if current != "" && eligible(current) {
 		for _, candidate := range selection.Candidates {
 			if strings.TrimSpace(candidate) == current {
-				return current, true
+				appendEligible(current)
+				break
 			}
 		}
 	}
 	for _, candidate := range selection.Candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate != "" && eligible(candidate) {
-			return candidate, true
-		}
+		appendEligible(candidate)
 	}
-	return "", false
+	return selected
+}
+
+// SelectAccountCandidate chooses the first eligible account.
+func SelectAccountCandidate(selection AccountSelection) (string, bool) {
+	candidates := SelectAccountCandidates(selection)
+	if len(candidates) == 0 {
+		return "", false
+	}
+	return candidates[0], true
 }
