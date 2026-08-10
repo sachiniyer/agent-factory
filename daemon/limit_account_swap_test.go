@@ -93,6 +93,127 @@ func TestResumeLimitedSessions_AllConfiguredAccountsLimitedKeepsWaiting(t *testi
 	}
 }
 
+func TestAccountSwapForLimitRetainsEarlierAccountLimitEvidence(t *testing.T) {
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Time{})
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"work", "personal"} {
+		if _, err := agentaccount.Register(home, tmux.ProgramClaude, name); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work\", \"personal\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work", "personal"}
+
+	// Model two completed moves without involving transport: ambient -> work,
+	// then work -> personal. The work wall must remain evidence after its own
+	// replacement succeeds and clears the session's current limit liveness.
+	requireSwapSelection := func(from, to string) {
+		t.Helper()
+		if err := inst.BeginLimitResume(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := inst.SelectAccountAutomatically(from, to); err != nil {
+			t.Fatal(err)
+		}
+		inst.EndLimitResume()
+		if !inst.ClearPendingAccountSwap(from, to) {
+			t.Fatalf("clear pending %q -> %q", from, to)
+		}
+		inst.ClearLimitReached()
+	}
+	requireSwapSelection("", "work")
+	inst.SetLimitReached(time.Time{})
+	requireSwapSelection("work", "personal")
+	inst.SetLimitReached(time.Time{})
+
+	swap, err := manager.accountSwapForLimit(inst, manager.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swap != nil {
+		t.Fatalf("known-limited work account was selected again after moving to personal: %#v", swap)
+	}
+}
+
+func TestResumeFromLimitPromotesPendingClaudeConversationBeforeClear(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	backend.sendPromptErr = errors.New("hold the durable marker")
+
+	advance(time.Second)
+	manager.ResumeLimitedSessions()
+	data := inst.ToInstanceData()
+	if data.PendingAccountSwap == nil || data.PendingAccountSwap.ConversationID == "" {
+		t.Fatalf("committed Claude swap did not persist its replacement conversation: %+v", data.PendingAccountSwap)
+	}
+	want := data.PendingAccountSwap.ConversationID
+	if conv := inst.AgentConversation(); conv.HasID() {
+		t.Fatalf("fixture already promoted pending conversation: %+v", conv)
+	}
+
+	backend.mu.Lock()
+	backend.sendPromptErr = nil
+	backend.mu.Unlock()
+	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+		t.Fatal(err)
+	}
+	if conv := inst.AgentConversation(); conv.Agent != tmux.ProgramClaude || conv.ID != want {
+		t.Fatalf("settled replacement conversation = %+v, want Claude %s", conv, want)
+	}
+	if _, _, pending := inst.PendingAccountSwap(); pending {
+		t.Fatal("successful retry retained pending marker")
+	}
+}
+
+func TestResumeLimitedSessionsCapturesReplacementCodexConversation(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", false, "continue", base.Add(time.Hour))
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work"}
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	worktree := filepath.Join(t.TempDir(), "codex-worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "codex-branch", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+	backend.onRespawn = func(*session.Instance) {
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-08-10T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", worktree)
+	}
+
+	advance(time.Second)
+	manager.ResumeLimitedSessions()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if conv := inst.AgentConversation(); conv.Agent == tmux.ProgramCodex &&
+			conv.ID == "019f386f-7206-7fc2-803b-f7045e07a242" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("replacement Codex conversation was never captured: %+v", inst.AgentConversation())
+}
+
 func TestResumeLimitedSessions_ExplicitAccountPinIsNeverOverridden(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()

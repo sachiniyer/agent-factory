@@ -91,6 +91,19 @@ func TestValidateAccountSwapRefusesSiblingIdentityOverride(t *testing.T) {
 	require.ErrorContains(t, err, "overrides the account directory")
 }
 
+func TestValidateAccountSwapRefusesUnprovableSiblingIdentityOverride(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramCodex, "codex")
+	inst.Tabs = append(inst.Tabs, &Tab{
+		ID: "wrapped", Name: "wrapped", Kind: TabKindProcess,
+		tmux: tmux.NewTmuxSession("wrapped", `sh -c 'CODEX_HOME=/other codex'`),
+	})
+
+	err := inst.ValidateAccountSwap("work")
+	require.ErrorContains(t, err, `tab "wrapped"`)
+	require.ErrorContains(t, err, "cannot prove",
+		"an interpreter wrapper must not hide an identity assignment from the swap boundary")
+}
+
 func TestAutomaticAccountSwapFailsClosedForDocker(t *testing.T) {
 	inst := accountSwapTestInstance(tmux.ProgramClaude)
 	inst.SetBackend(&dockerBackend{})
