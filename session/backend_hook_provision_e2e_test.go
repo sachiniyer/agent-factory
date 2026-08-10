@@ -317,6 +317,9 @@ func TestProvisionedHostFailsFastRatherThanPrompting(t *testing.T) {
 // This composes exactly as provisionHost does, then actually connects.
 func TestProvisionedHostConnectsWithAnEmbeddedPort(t *testing.T) {
 	port, hostPubKey := throwawaySSHD(t)
+	hostStore := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", hostStore)
+	preservedKnownHosts := filepath.Join(t.TempDir(), "known_hosts")
 
 	// Drives the REAL provisionHost, so the assertion cannot be satisfied by
 	// restating its normalization: the seam captures whatever command
@@ -324,7 +327,16 @@ func TestProvisionedHostConnectsWithAnEmbeddedPort(t *testing.T) {
 	var composed string
 	prev := newHookSandboxProvisioner
 	newHookSandboxProvisioner = func(spec ProvisionSpec, sshCmd, afBin, program string) *sandboxProvisioner {
-		composed = sshCmd
+		// provisionHost is deliberately failed below, so its per-session pin is
+		// removed before this test makes the later connection. Preserve a test-owned
+		// copy while the provisioning seam still has access to it; relying on the
+		// production failure path to leak the file is not part of this E2E contract.
+		actualKnownHosts := filepath.Join(hostStore, "hook-hosts", Slugify("embedded port"), "known_hosts")
+		body, err := os.ReadFile(actualKnownHosts)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(preservedKnownHosts, body, 0o600))
+		composed = strings.Replace(sshCmd, actualKnownHosts, preservedKnownHosts, 1)
+		require.NotEqual(t, sshCmd, composed, "the captured command must use the test-owned pin")
 		sp := prev(spec, sshCmd, afBin, program)
 		// ABORT before any remote step runs. The provisioning pipeline's second
 		// step is configureGit, which executes `git config --global` — and the
