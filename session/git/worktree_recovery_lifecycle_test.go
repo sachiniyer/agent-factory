@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,126 @@ func TestClaimRelocationSource_StalledPrimaryGoneSelectsKnownAlternate(t *testin
 	assert.Equal(t, alternate, gw.GetWorktreePath())
 	require.NoError(t, gw.SettleRelocationClaim(claim))
 	assert.False(t, gw.HasUnresolvedRelocation())
+}
+
+func TestClaimRelocationSource_PrimaryTimeoutSelectsKnownAlternate(t *testing.T) {
+	root := testguard.CanonicalTempDir(t)
+	primary := filepath.Join(root, "timing-out-primary")
+	alternate := filepath.Join(root, "known-alternate")
+	require.NoError(t, os.Mkdir(alternate, 0o755))
+	identity, err := inspectRelocationPathIdentity(alternate)
+	require.NoError(t, err)
+
+	gw, err := NewGitWorktreeFromStorage(
+		filepath.Join(root, "repo"), primary, "fallback", "af/fallback", "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{
+		State:         RelocationRecoveryMoveUnknown,
+		AlternatePath: alternate,
+		IdentityKnown: true,
+		Device:        identity.device,
+		Inode:         identity.inode,
+		FileType:      identity.fileType,
+	}))
+
+	previousTimeout := relocationIdentityTimeout
+	relocationIdentityTimeout = 100 * time.Millisecond
+	previousIdentity := relocationPathIdentity
+	releasePrimary := make(chan struct{})
+	primaryDone := make(chan struct{})
+	alternateProbes := 0
+	relocationPathIdentity = func(path string) (pathIdentity, error) {
+		if path == primary {
+			<-releasePrimary
+			close(primaryDone)
+			return previousIdentity(path)
+		}
+		if path == alternate {
+			alternateProbes++
+		}
+		return previousIdentity(path)
+	}
+	t.Cleanup(func() {
+		close(releasePrimary)
+		<-primaryDone
+		relocationPathIdentity = previousIdentity
+		relocationIdentityTimeout = previousTimeout
+	})
+
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err,
+		"a primary timeout must not suppress the separately bounded alternate probe; alternate probes = %d",
+		alternateProbes)
+	assert.Equal(t, 1, alternateProbes)
+	assert.Equal(t, alternate, claim.Path)
+	assert.Equal(t, primary, claim.AlternatePath)
+	assert.Equal(t, alternate, gw.GetWorktreePath())
+	require.NoError(t, gw.SettleRelocationClaim(claim))
+	assert.False(t, gw.HasUnresolvedRelocation())
+}
+
+func TestClaimRelocationSource_PrimaryTimeoutPreservesUnprovenAlternate(t *testing.T) {
+	root := testguard.CanonicalTempDir(t)
+	primary := filepath.Join(root, "timing-out-primary")
+	alternate := filepath.Join(root, "replaced-alternate")
+	require.NoError(t, os.Mkdir(alternate, 0o755))
+	expected, err := inspectRelocationPathIdentity(alternate)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(alternate, alternate+"-captured"))
+	require.NoError(t, os.Mkdir(alternate, 0o755))
+	replacement, err := inspectRelocationPathIdentity(alternate)
+	require.NoError(t, err)
+	require.False(t, expected.same(replacement))
+
+	gw, err := NewGitWorktreeFromStorage(
+		filepath.Join(root, "repo"), primary, "fallback", "af/fallback", "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{
+		State:         RelocationRecoveryMoveUnknown,
+		AlternatePath: alternate,
+		IdentityKnown: true,
+		Device:        expected.device,
+		Inode:         expected.inode,
+		FileType:      expected.fileType,
+	}))
+
+	previousTimeout := relocationIdentityTimeout
+	relocationIdentityTimeout = 100 * time.Millisecond
+	previousIdentity := relocationPathIdentity
+	releasePrimary := make(chan struct{})
+	primaryDone := make(chan struct{})
+	alternateProbes := 0
+	relocationPathIdentity = func(path string) (pathIdentity, error) {
+		if path == primary {
+			<-releasePrimary
+			close(primaryDone)
+			return previousIdentity(path)
+		}
+		if path == alternate {
+			alternateProbes++
+		}
+		return previousIdentity(path)
+	}
+	t.Cleanup(func() {
+		close(releasePrimary)
+		<-primaryDone
+		relocationPathIdentity = previousIdentity
+		relocationIdentityTimeout = previousTimeout
+	})
+
+	_, err = gw.ClaimRelocationSource()
+	require.ErrorIs(t, err, ErrRelocateStateUnknown)
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"trying the alternate must not discard the primary probe failure when neither candidate is established")
+	assert.Equal(t, 1, alternateProbes,
+		"the alternate must be probed, but its pathname alone cannot establish identity")
+	path, recovery, ok := gw.RelocationSnapshot()
+	require.True(t, ok, "neither inconclusive candidate may clear the recovery fence")
+	assert.Equal(t, primary, path)
+	assert.Equal(t, alternate, recovery.AlternatePath)
+	assert.True(t, expected.same(recovery.identity()))
 }
 
 func TestRelocate_AnsweredPartialFastMoveRepairsDestination(t *testing.T) {

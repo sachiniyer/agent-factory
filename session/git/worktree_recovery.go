@@ -278,22 +278,39 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 			identity: expected,
 		}), nil
 	}
-	if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
-		return RelocationClaim{}, errors.Join(fmt.Errorf(
-			"cannot resolve interrupted relocation: candidate %s could not be verified: %w",
-			primary, primaryErr,
-		), ErrRelocateStateUnknown)
-	}
 	if recovery.AlternatePath == "" {
+		if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
+			return RelocationClaim{}, errors.Join(fmt.Errorf(
+				"cannot resolve stale relocation claim: candidate %s could not be verified and no identity-qualified alternate exists: %w",
+				primary, primaryErr,
+			), ErrRelocateStateUnknown)
+		}
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
 			"cannot resolve stale relocation claim: %s no longer identifies the original worktree", primary,
 		), ErrRelocateStateUnknown)
 	}
+	// A timeout or other non-answer from the primary establishes nothing about
+	// the alternate. Give the identity-qualified alternate its own bounded probe;
+	// only an exact match below may consume the durable recovery record.
 	alternateIdentity, alternateErr := boundedRelocationPathIdentity(recovery.AlternatePath)
 	if alternateErr != nil || !expected.same(alternateIdentity) {
+		primaryFailure := primaryErr
+		if primaryFailure == nil {
+			primaryFailure = errors.New("identity mismatch")
+		}
+		alternateFailure := alternateErr
+		if alternateFailure == nil {
+			alternateFailure = errors.New("identity mismatch")
+		}
+		if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
+			return RelocationClaim{}, errors.Join(fmt.Errorf(
+				"cannot resolve interrupted relocation: neither candidate was established (%s: %w; %s: %v)",
+				primary, primaryErr, recovery.AlternatePath, alternateFailure,
+			), ErrRelocateStateUnknown)
+		}
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
 			"cannot resolve interrupted relocation: neither candidate was established (%s: %v; %s: %v)",
-			primary, primaryErr, recovery.AlternatePath, alternateErr,
+			primary, primaryFailure, recovery.AlternatePath, alternateFailure,
 		), ErrRelocateStateUnknown)
 	}
 	selected := recovery.AlternatePath
