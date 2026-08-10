@@ -126,6 +126,22 @@ func cloneArchiveSkippedEntries(entries []ArchiveSkippedEntry) []ArchiveSkippedE
 // keeping one tree per copy preserves the old omissions as well as any new ones.
 type ArchiveReport struct {
 	RetainedTrees []ArchiveRetainedTree `json:"retained_trees"`
+	// RollbackFence carries the ownership flags that ForStorage projects through
+	// fields understood by the previous release. A pre-#3066 daemon ignores this
+	// report, but sees an inert startup-unknown, external worktree and therefore
+	// refuses to restore or delete the incomplete published copy. A current daemon
+	// reads these originals before reconstructing the worktree and removes the
+	// compatibility fence in memory.
+	RollbackFence *ArchiveRollbackFence `json:"rollback_fence,omitempty"`
+}
+
+// ArchiveRollbackFence preserves the values hidden by the old-reader safety
+// projection. BranchCreatedByUs remains a pointer because nil means ownership
+// was never established and must continue to fail closed after an upgrade.
+type ArchiveRollbackFence struct {
+	OriginalStartupStateUnknown bool  `json:"original_startup_state_unknown"`
+	OriginalExternalWorktree    bool  `json:"original_external_worktree"`
+	OriginalBranchCreatedByUs   *bool `json:"original_branch_created_by_us"`
 }
 
 // Empty reports whether every archive copy was complete.
@@ -139,6 +155,14 @@ func (report ArchiveReport) Clone() ArchiveReport {
 	clone := ArchiveReport{RetainedTrees: make([]ArchiveRetainedTree, len(report.RetainedTrees))}
 	for index := range report.RetainedTrees {
 		clone.RetainedTrees[index] = report.RetainedTrees[index].clone()
+	}
+	if report.RollbackFence != nil {
+		fence := *report.RollbackFence
+		if fence.OriginalBranchCreatedByUs != nil {
+			branchCreatedByUs := *fence.OriginalBranchCreatedByUs
+			fence.OriginalBranchCreatedByUs = &branchCreatedByUs
+		}
+		clone.RollbackFence = &fence
 	}
 	return clone
 }

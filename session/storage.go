@@ -213,10 +213,16 @@ type InstanceData struct {
 	// retention boundary.
 	RuntimeCleanup *RuntimeCleanupData `json:"runtime_cleanup,omitempty"`
 	runtimeCleanup *RuntimeCleanupData
+	// ArchiveWarning is the bounded live projection of an incomplete archive. It
+	// may ride snapshots and lifecycle events; the full report is storage-only so
+	// a large unreadable tree cannot turn every status response into megabytes.
+	ArchiveWarning string `json:"archive_warning,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
-	// never inside the copied tree where a user path could collide with it.
+	// never inside the copied tree where a user path could collide with it. Live
+	// projections keep it in archiveReport until ForStorage publishes it.
 	ArchiveReport *git.ArchiveReport `json:"archive_report,omitempty"`
+	archiveReport *git.ArchiveReport
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,
@@ -239,6 +245,22 @@ func (d InstanceData) UsesLocalTmux() bool {
 	return d.BackendType == "" || d.BackendType == "local"
 }
 
+// RestoreArchiveRollbackFence removes the previous-release safety projection
+// from a persisted row. FromInstanceData uses it before reconstructing an
+// Instance; storage-only cleanup paths use it before manually reconstructing a
+// GitWorktree. Keeping that decoding here prevents a current daemon from
+// mistaking its own old-reader fence for the session's real ownership.
+func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
+	if d.ArchiveReport == nil || d.ArchiveReport.RollbackFence == nil {
+		return d
+	}
+	fence := d.ArchiveReport.RollbackFence
+	d.StartupStateUnknown = fence.OriginalStartupStateUnknown
+	d.Worktree.ExternalWorktree = fence.OriginalExternalWorktree
+	d.Worktree.BranchCreatedByUs = cloneBoolPointer(fence.OriginalBranchCreatedByUs)
+	return d
+}
+
 // ForStorage returns data suitable for instances.json. InstanceData is also the
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.
@@ -259,6 +281,32 @@ func (d InstanceData) ForStorage() InstanceData {
 	// instances.json row and be read back as fact by an older binary.
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
+	d.ArchiveWarning = ""
+	if d.archiveReport != nil {
+		clone := d.archiveReport.Clone()
+		// A live projection holds the real current ownership values, so refresh
+		// the rollback metadata on every write. Recover may have rebuilt a missing
+		// worktree and changed branch ownership since the report was first stored.
+		clone.RollbackFence = archiveRollbackFence(d)
+		d.ArchiveReport = &clone
+	}
+	// The compatibility projection must capture original values before either it
+	// or the relocation fence below overwrites them. Older binaries ignore
+	// ArchiveReport, but understand these three fields and consequently load the
+	// archived checkout inert and user-owned. That makes restore fail closed
+	// instead of publishing an incomplete tree and erasing its retained-source
+	// pointer on the next write.
+	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
+		report := d.ArchiveReport.Clone()
+		if report.RollbackFence == nil {
+			report.RollbackFence = archiveRollbackFence(d)
+		}
+		d.ArchiveReport = &report
+		d.StartupStateUnknown = true
+		d.Worktree.ExternalWorktree = true
+		branchCreatedByUs := false
+		d.Worktree.BranchCreatedByUs = &branchCreatedByUs
+	}
 	if d.Worktree.RelocationRecovery != nil {
 		// v1.0.228 predates relocation_recovery and ignores unknown JSON fields.
 		// Project the unresolved row through safety fields that version already
@@ -287,7 +335,24 @@ func (d InstanceData) ForStorage() InstanceData {
 	// Never let the private staging pointer escape a storage projection. Loaded
 	// tombstones have only RuntimeCleanup set and therefore preserve it above.
 	d.runtimeCleanup = nil
+	d.archiveReport = nil
 	return d
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
+	return &git.ArchiveRollbackFence{
+		OriginalStartupStateUnknown: data.StartupStateUnknown,
+		OriginalExternalWorktree:    data.Worktree.ExternalWorktree,
+		OriginalBranchCreatedByUs:   cloneBoolPointer(data.Worktree.BranchCreatedByUs),
+	}
 }
 
 // TabData is the serializable form of a session.Tab. The full list is persisted

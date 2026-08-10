@@ -813,9 +813,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// the Lost-restore loop keeps retrying against the now-restored worktree.
 	if err := instance.RestoreFromArchive(); err != nil {
 		if perr := commitRestore(); perr != nil {
-			return "", fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err)
+			return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err))
 		}
-		return "", fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err)
+		return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err))
 	}
 
 	worktreePath := instance.GetWorktreePath()

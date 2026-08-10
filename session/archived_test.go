@@ -58,8 +58,62 @@ func TestFromInstanceData_ArchiveReportSurvivesReload(t *testing.T) {
 	require.NoError(t, err)
 	report := restored.GetArchiveReport()
 	require.Equal(t, data.ArchiveReport.Clone(), report)
-	require.Equal(t, data.ArchiveReport.Clone(), restored.ToInstanceData().ArchiveReport.Clone(),
-		"the report must remain durable after load and the next storage snapshot")
+	live := restored.ToInstanceData()
+	require.Nil(t, live.ArchiveReport, "the unbounded report must not ride live snapshots")
+	require.Contains(t, live.ArchiveWarning, `"private/locked\ncredential"`,
+		"live snapshots still need the bounded user-facing warning")
+	stored := live.ForStorage()
+	require.NotNil(t, stored.ArchiveReport)
+	require.Equal(t, data.ArchiveReport.RetainedTrees, stored.ArchiveReport.RetainedTrees,
+		"the complete report must remain durable after load and the next storage projection")
+}
+
+func TestArchiveReportStorageProjectionFencesOlderReaders(t *testing.T) {
+	branchCreatedByUs := true
+	data := deadInstanceData(t, Archived, "af_report_fence_agent", "af_report_fence_shell")
+	data.Worktree.ExternalWorktree = false
+	data.Worktree.BranchCreatedByUs = &branchCreatedByUs
+	data.ArchiveReport = &git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{
+		Path: "/worktrees/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
+		Device: 1, Inode: 2, FileType: 0o040000,
+		Skipped: []git.ArchiveSkippedEntry{{
+			Path: "private/credential", Reason: git.ArchiveSkipPermissionDenied,
+		}},
+	}}}
+
+	loaded, err := FromInstanceData(data)
+	require.NoError(t, err)
+	stored := loaded.ToInstanceData().ForStorage()
+	require.NotNil(t, stored.ArchiveReport)
+	require.NotNil(t, stored.ArchiveReport.RollbackFence)
+	assert.True(t, stored.StartupStateUnknown, "an older reader must load the row inert")
+	assert.True(t, stored.Worktree.ExternalWorktree, "an older reader must treat the incomplete copy as user-owned")
+	require.NotNil(t, stored.Worktree.BranchCreatedByUs)
+	assert.False(t, *stored.Worktree.BranchCreatedByUs, "an older reader must lack branch deletion authority")
+
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var legacyWire v10228InstanceData
+	require.NoError(t, json.Unmarshal(payload, &legacyWire),
+		"the supported rollback binary used encoding/json without DisallowUnknownFields")
+	legacyPayload, err := json.Marshal(legacyWire)
+	require.NoError(t, err)
+	var legacyView InstanceData
+	require.NoError(t, json.Unmarshal(legacyPayload, &legacyView))
+	require.Nil(t, legacyView.ArchiveReport, "the old-reader fixture must actually omit the new report")
+	legacy, err := FromInstanceData(legacyView)
+	require.NoError(t, err)
+	require.ErrorContains(t, legacy.ValidateRuntimeAction(RuntimeActionRestoreArchived), "unknown startup state",
+		"the old-reader projection must refuse to restore the incomplete published copy")
+	assert.True(t, legacy.IsExternalWorktree(), "old-reader cleanup must preserve the incomplete worktree")
+
+	current, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	assert.False(t, current.StartupStateUnknown(), "the current reader must remove the compatibility fence")
+	assert.False(t, current.IsExternalWorktree(), "the current reader must recover the real ownership")
+	require.NotNil(t, current.gitWorktree)
+	assert.True(t, current.gitWorktree.BranchCreatedByUs(), "the current reader must recover branch ownership")
+	assert.Equal(t, data.ArchiveReport.RetainedTrees, current.GetArchiveReport().RetainedTrees)
 }
 
 // TestFromInstanceData_ArchivedLoadsInert: an Archived record (#1028) loads

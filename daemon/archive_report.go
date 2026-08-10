@@ -33,12 +33,26 @@ func archiveCommittedWarning(instance *session.Instance, hookErr error, extra ..
 // restoredArchiveResult surfaces a report persisted weeks earlier without
 // turning the completed restore into a retryable failure. MutationOutcome is
 // the existing three-valued wire channel for "committed, with a warning".
-func restoredArchiveResult(instance *session.Instance, worktreePath string) (string, error) {
+func restoredArchiveResult(instance *session.Instance, worktreePath string, extra ...error) (string, error) {
+	warnings := append([]error(nil), extra...)
 	report := instance.GetArchiveReport()
-	if report.Empty() {
+	if !report.Empty() {
+		warnings = append(warnings, errors.New(report.Warning("restore")))
+	}
+	if len(warnings) == 0 {
 		return worktreePath, nil
 	}
-	return worktreePath, &mutationCommittedError{err: errors.New(report.Warning("restore"))}
+	return worktreePath, &mutationCommittedError{err: errors.Join(warnings...)}
+}
+
+// failedRestoredArchiveResult preserves the ordinary retryable failure for a
+// complete archive, but marks an incomplete restore committed: its worktree has
+// already moved and the Lost loop, not a second archived restore, owns recovery.
+func failedRestoredArchiveResult(instance *session.Instance, worktreePath string, failure error) (string, error) {
+	if instance.GetArchiveReport().Empty() {
+		return "", failure
+	}
+	return restoredArchiveResult(instance, worktreePath, failure)
 }
 
 // keepIncompleteArchiveCommitted is the no-data-loss alternative to archive's

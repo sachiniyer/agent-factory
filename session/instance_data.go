@@ -166,7 +166,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		}
 		if !archiveReport.Empty() {
 			clone := archiveReport.Clone()
-			data.ArchiveReport = &clone
+			data.archiveReport = &clone
+			operation := "restore"
+			if i.liveness == LiveArchived {
+				operation = "archive"
+			}
+			data.ArchiveWarning = clone.Warning(operation)
 		}
 	}
 
@@ -186,6 +191,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	data = data.RestoreArchiveRollbackFence()
 	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
 		// ForStorage projects unresolved records through v1.0.228's existing
 		// fail-closed fields. A current reader must recover the exact original
