@@ -356,6 +356,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				dest, repairErr,
 			))
 		}
+		// Registration repair is one pathname use; submodule repair is another.
+		// A same-uid process can replace dest while the first command runs, so its
+		// earlier identity proof cannot authorize this second command.
+		if err := g.RevalidateRelocationClaim(sourceClaim); err != nil {
+			return err
+		}
 		if submoduleErr := noteDeadline(worktreeRepairSubmodules(g, dest)); submoduleErr != nil {
 			if deadlineTripped {
 				return unknownIfCutOff(fmt.Errorf(
@@ -374,6 +380,14 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				submoduleErr,
 			)
 		}
+		// Settlement is the final identity boundary. Revalidate and release the
+		// consumed recovery claim together so a replacement installed during the
+		// submodule command remains unresolved rather than becoming the recorded
+		// worktree.
+		if err := g.SettleRelocationClaim(sourceClaim); err != nil {
+			return err
+		}
+		claimSettled = true
 		return nil
 	}
 
@@ -381,7 +395,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
-		finishRelocation()
 		return nil
 	}
 	if pathExists(dest) {
@@ -463,7 +476,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
-		finishRelocation()
 		return nil
 	}
 	if useFallback {
@@ -543,7 +555,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				)
 			}
 		}
-		finishRelocation()
 		return nil
 	}
 
