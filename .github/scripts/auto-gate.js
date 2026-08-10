@@ -248,7 +248,7 @@ function resolveAggregateHeads({ context, targets = [] }) {
   return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))].sort();
 }
 
-async function beginAggregateDecision({ github, context, core, headSha }) {
+async function invalidateAggregateDecision({ github, context, core, headSha }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for Auto Gate aggregate invalidation: ${headSha}`);
@@ -273,21 +273,41 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
     headSha: sha,
     decision,
   });
-  if (write.writeState === "read-only") {
-    return {
-      ok: false,
-      headSha: sha,
-      pullNumbers: [],
-      blockers: ["The event token cannot write the fixed aggregate"],
-      checkRuns: [],
-      summary: decision.output.summary,
-      ...write,
-      state: "read-only",
-    };
+  const state = write.writeState === "read-only" ? "read-only" : "pending";
+  if (state === "pending") {
+    core.notice(`Marked the fixed Auto Gate aggregate non-green on ${sha}.`);
   }
-  core.notice(`Marked the fixed Auto Gate aggregate non-green on ${sha}.`);
+  return {
+    ok: false,
+    headSha: sha,
+    pullNumbers: [],
+    blockers: ["The fixed aggregate is waiting for a fresh evaluation"],
+    checkRuns: [],
+    summary: decision.output.summary,
+    ...write,
+    state,
+  };
+}
+
+async function beginAggregateDecision({ github, context, core, headSha }) {
+  const invalidated = await invalidateAggregateDecision({
+    github,
+    context,
+    core,
+    headSha,
+  });
+  if (invalidated.writeState === "read-only") {
+    return invalidated;
+  }
+  const sha = invalidated.headSha;
   const aggregate = await evaluateAggregateDecision({ github, context, headSha: sha });
-  return { ...aggregate, ...write, state: "pending" };
+  return {
+    ...aggregate,
+    writeState: invalidated.writeState,
+    priorAggregate: invalidated.priorAggregate,
+    checkRunId: invalidated.checkRunId,
+    state: "pending",
+  };
 }
 
 async function reportAggregateDecision({ github, context, core, headSha, checkRunId }) {
@@ -388,7 +408,7 @@ async function processAggregateHead({
       const message = error && error.message ? error.message : String(error);
       let invalidated;
       try {
-        invalidated = await beginAggregateDecision({
+        invalidated = await invalidateAggregateDecision({
           github,
           context,
           core,
@@ -724,28 +744,45 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
   });
 
   core.notice(`Squash-merged PR #${prNumber}: ${response.data.sha}`);
-  const invalidated = await beginAggregateDecision({
-    github,
-    context,
-    core,
-    headSha: gate.headSha,
-  });
-  if (invalidated.writeState === "read-only") {
-    throw new Error(`Merged PR #${prNumber}, but could not invalidate aggregate ${gate.headSha}`);
+  const postMergeErrors = [];
+  let invalidated;
+  try {
+    invalidated = await invalidateAggregateDecision({
+      github,
+      context,
+      core,
+      headSha: gate.headSha,
+    });
+    if (invalidated.writeState === "read-only") {
+      throw new Error(`Could not invalidate aggregate ${gate.headSha}`);
+    }
+    core.notice(`Invalidated the pre-merge aggregate on ${gate.headSha}.`);
+  } catch (error) {
+    postMergeErrors.push(error);
   }
-  core.notice(`Invalidated the pre-merge aggregate on ${gate.headSha}.`);
 
   if (gate.docsChanged) {
-    await github.rest.actions.createWorkflowDispatch({
-      owner,
-      repo,
-      workflow_id: "docs.yml",
-      ref: "master",
-      inputs: {
-        deploy_docs: "true",
-      },
-    });
-    core.notice(`Dispatched Docs workflow for PR #${prNumber} docs-path merge.`);
+    try {
+      await github.rest.actions.createWorkflowDispatch({
+        owner,
+        repo,
+        workflow_id: "docs.yml",
+        ref: "master",
+        inputs: {
+          deploy_docs: "true",
+        },
+      });
+      core.notice(`Dispatched Docs workflow for PR #${prNumber} docs-path merge.`);
+    } catch (error) {
+      postMergeErrors.push(error);
+    }
+  }
+  if (postMergeErrors.length > 0) {
+    const detail = postMergeErrors.map((error) => error.message || String(error)).join("; ");
+    throw new AggregateError(
+      postMergeErrors,
+      `PR #${prNumber} merged, but post-merge operation(s) failed: ${detail}`,
+    );
   }
   return { mergeSha: response.data.sha, invalidated };
 }

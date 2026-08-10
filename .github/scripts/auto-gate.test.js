@@ -894,7 +894,11 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 });
 
 test("merge invalidates the old-head aggregate before dispatching docs", async () => {
-  const github = fakeGateGithub({ files: ["docs/auto-gate.md"] });
+  const github = fakeGateGithub({
+    files: ["docs/auto-gate.md"],
+    associationError: new Error("post-merge association lookup unavailable"),
+    associationErrorAtRead: 3,
+  });
 
   await autoGate.merge({
     github,
@@ -906,6 +910,27 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
   assert.deepEqual(github.operations, ["merge", "check:create", "docs:dispatch"]);
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");
   assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.equal(github.associationReads, 2, "invalidation after merge must be write-only");
+});
+
+test("a post-merge invalidation error cannot suppress the docs dispatch attempt", async () => {
+  const github = fakeGateGithub({
+    files: ["docs/auto-gate.md"],
+    checkWriteError: new Error("check write unavailable"),
+  });
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+    }),
+    /check write unavailable/,
+  );
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.ok(github.operations.includes("docs:dispatch"));
 });
 
 test("merge freshly refuses a shared head whose other PR is waiting", async () => {
@@ -1166,6 +1191,7 @@ function fakeGateGithub({
   mergeError = null,
   checkWriteError = null,
   associationError = null,
+  associationErrorAtRead = 1,
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -1274,14 +1300,19 @@ function fakeGateGithub({
           })),
         ];
       }
-      if (fn === listPullRequestsAssociatedWithCommit && associationError) {
+      if (fn === listPullRequestsAssociatedWithCommit) {
         github.associationReads += 1;
-        throw associationError;
-      }
-      if (fn === listPullRequestsAssociatedWithCommit && associatedPullRequestSnapshots) {
-        const index = Math.min(github.associationReads, associatedPullRequestSnapshots.length - 1);
-        github.associationReads += 1;
-        return associatedPullRequestSnapshots[index];
+        if (associationError && github.associationReads === associationErrorAtRead) {
+          throw associationError;
+        }
+        if (associatedPullRequestSnapshots) {
+          const index = Math.min(
+            github.associationReads - 1,
+            associatedPullRequestSnapshots.length - 1,
+          );
+          return associatedPullRequestSnapshots[index];
+        }
+        return associatedPullRequests;
       }
       if (fn === listReviewComments) {
         github.reviewCommentReads += 1;
