@@ -46,16 +46,22 @@ bypass because that non-session path updates the release commit directly.
 
 ## Event and merge ordering
 
-Each subscribed input event serializes one complete transaction for the
-affected commit: make the aggregate non-green, refresh every associated PR/head
-decision, republish the aggregate, then consider a merge. Keeping all four
-phases in one head-scoped concurrency lane prevents an older run from
-republishing stale PASS while a newer run is still evaluating. A head
+Each subscribed input event first creates a new non-green aggregate generation
+without waiting for the head's serialized lane. It then refreshes every
+associated PR/head decision, republishes its own generation, and considers a
+merge inside that lane. If a newer event invalidates the head while the older
+transaction is running, the older generation refuses to publish PASS; updating
+an older check run also cannot supersede the newer check-run generation. A head
 synchronization reevaluates both the new head and the previous head because the
 set of associated PRs changed for both commits. After a successful merge, the
 same transaction explicitly makes the old-head aggregate non-green; it does not
 depend on a `closed` event that GitHub may suppress for token-authenticated
 writes.
+
+GitHub suppresses `check_suite` recursion for suites created by Actions. The
+required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
+also subscribes to that workflow's terminal `workflow_run` event. This ensures
+their completed state is reevaluated without subscribing Auto Gate to itself.
 
 Repository-ruleset changes and mergeability changes caused only by `master`
 advancing have no GitHub event here. Use the same manual PR-number dispatch to

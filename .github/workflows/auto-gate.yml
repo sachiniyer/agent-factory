@@ -20,6 +20,12 @@ on:
   pull_request_target:
     types: [opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled]
   status:
+  # GitHub suppresses check_suite recursion for Actions-owned suites. The
+  # required Lint and Build checks both belong to PR Validation, so its terminal
+  # workflow_run is the non-recursive wakeup that republishes their final state.
+  workflow_run:
+    workflows: [PR Validation]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -43,8 +49,8 @@ jobs:
       targets: ${{ steps.evaluate.outputs.targets }}
       aggregate_heads: ${{ steps.evaluate.outputs.aggregate_heads }}
     # One resolver handles every subscribed input change. It does not branch on
-    # activity type: PR/review/comment events identify a PR, while check/status
-    # events identify every exact (PR, head) pair associated with their SHA.
+    # activity type: PR/review/comment events identify a PR, while check/status/
+    # workflow-run events identify every exact (PR, head) pair at their SHA.
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6
@@ -81,6 +87,7 @@ jobs:
             const knownEventHeads = [...new Set([
               payload.pull_request?.head?.sha,
               payload.check_suite?.head_sha,
+              payload.workflow_run?.head_sha,
               payload.sha,
               payload.before,
               payload.after,
@@ -167,8 +174,8 @@ jobs:
               throw error;
             }
 
-  apply-gate:
-    name: Apply aggregate gate
+  invalidate-gate:
+    name: Invalidate aggregate
     needs: auto-gate
     if: >-
       always() &&
@@ -179,9 +186,53 @@ jobs:
       fail-fast: false
       matrix:
         aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
-    # The entire head transaction owns one lane: mark the aggregate red,
-    # reevaluate every associated PR, republish it, and only then try a merge.
-    # Splitting those phases across jobs lets two runs interleave stale PASS.
+    # This write deliberately happens before the serialized lane. A newer event
+    # must turn the required check red while an older transaction is still
+    # running; generation fencing prevents that older run from overwriting it.
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Make the aggregate non-green immediately
+        uses: actions/github-script@v8
+        env:
+          HEAD_SHA: ${{ matrix.aggregate.head_sha }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            const autoGate = require(helperPath);
+            if (typeof autoGate.invalidateAggregateDecision !== "function") {
+              core.notice("Landing compatibility: fixed aggregate invalidation starts on master.");
+              return;
+            }
+            const invalidated = await autoGate.invalidateAggregateDecision({
+              github,
+              context,
+              core,
+              headSha: process.env.HEAD_SHA,
+            });
+            if (invalidated.writeState === "read-only") {
+              throw new Error(`Could not invalidate aggregate ${process.env.HEAD_SHA}.`);
+            }
+
+  apply-gate:
+    name: Apply aggregate gate
+    needs: [auto-gate, invalidate-gate]
+    if: >-
+      always() &&
+      needs.auto-gate.outputs.aggregate_heads != '' &&
+      needs.auto-gate.outputs.aggregate_heads != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
+    # Refresh/report/merge owns one lane. The preceding unqueued invalidation is
+    # a distinct generation; an older transaction refuses to overwrite it.
     concurrency:
       group: auto-gate-aggregate-${{ matrix.aggregate.head_sha }}
       cancel-in-progress: false

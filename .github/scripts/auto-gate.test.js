@@ -19,6 +19,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
     workflow,
     /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled\]/,
   );
+  assert.match(workflow, /workflow_run:\s+workflows: \[PR Validation\]\s+types: \[completed\]/);
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
   assert.match(
     workflow,
@@ -29,6 +30,10 @@ test("Auto Gate can be recovered manually by PR number", () => {
     /concurrency:\s+group: auto-gate-aggregate-\$\{\{ matrix\.aggregate\.head_sha \}\}\s+cancel-in-progress: false/,
   );
   assert.match(workflow, /strategy:\s+fail-fast: false\s+matrix:\s+aggregate:/);
+  assert.match(
+    workflow,
+    /invalidate-gate:[\s\S]*?await autoGate\.invalidateAggregateDecision\([\s\S]*?apply-gate:[\s\S]*?needs: \[auto-gate, invalidate-gate\]/,
+  );
   assert.match(workflow, /HEAD_SHA: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
   assert.match(workflow, /TARGETS_JSON: \$\{\{ needs\.auto-gate\.outputs\.targets \}\}/);
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
@@ -492,6 +497,44 @@ test("a resolver read failure cannot leave an earlier aggregate PASS authoritati
   assert.equal(github.updatedChecks.length, 0);
 });
 
+test("an older transaction cannot overwrite a newer invalidation generation", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  const older = await autoGate.beginAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+  const newer = await autoGate.invalidateAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+  const report = await autoGate.reportAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    checkRunId: older.checkRunId,
+  });
+
+  assert.equal(report.state, "superseded");
+  assert.equal(github.updatedChecks.length, 0);
+  assert.equal(newer.checkRunId, 10001);
+  assert.equal(github.createdChecks.at(-1).conclusion, "failure");
+});
+
 test("aggregate resolution reevaluates the previous head after synchronization", () => {
   const heads = autoGate.resolveAggregateHeads({
     context: fakeContext({
@@ -870,6 +913,27 @@ test("issue-comment events resolve their pull request number", async () => {
   assert.equal(result.shouldMerge, true);
 });
 
+test("PR Validation workflow completion resolves every PR at its head", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    pullRequestsByNumber: {
+      1465: { headRefOid: HEAD_SHA },
+      2048: { headRefOid: HEAD_SHA },
+    },
+  });
+
+  const targets = await autoGate.resolveTargets({
+    github,
+    context: { ...fakeContext({ workflow_run: { head_sha: HEAD_SHA } }), eventName: "workflow_run" },
+    core: fakeCore(),
+  });
+
+  assert.deepEqual(targets.map((target) => target.prNumber), [1465, 2048]);
+});
+
 test("the happy path squash-merges the exact evaluated head", async () => {
   const github = fakeGateGithub({
     checkRuns: [
@@ -1214,7 +1278,7 @@ function fakeGateGithub({
     }
     github.operations.push("check:create");
     github.createdChecks.push(options);
-    return { data: { id: 20000 + github.createdChecks.length - 1, ...options } };
+    return { data: { id: 10000 + github.createdChecks.length - 1, ...options } };
   };
   const updateCheck = async function updateCheck(options) {
     if (checkWriteError) {

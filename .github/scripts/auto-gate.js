@@ -241,6 +241,7 @@ function resolveAggregateHeads({ context, targets = [] }) {
     ...targets.map((target) => target.headSha),
     payload.pull_request?.head?.sha,
     payload.check_suite?.head_sha,
+    payload.workflow_run?.head_sha,
     payload.sha,
     payload.before,
     payload.after,
@@ -312,6 +313,35 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
 
 async function reportAggregateDecision({ github, context, core, headSha, checkRunId }) {
   const aggregate = await evaluateAggregateDecision({ github, context, headSha });
+  if (checkRunId) {
+    const identity = aggregateIdentity(aggregate.headSha);
+    const latestGeneration = newestCheckGeneration(
+      aggregate.checkRuns.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (latestGeneration?.id !== checkRunId) {
+      const blocker =
+        "A newer Auto Gate event invalidated this commit while the serialized refresh was running";
+      core.notice(`${blocker}; this older transaction will not publish PASS.`);
+      return {
+        ...aggregate,
+        ok: false,
+        blockers: [...aggregate.blockers, blocker],
+        summary: formatAggregateSummary(
+          aggregate.pullNumbers,
+          [...aggregate.blockers, blocker],
+          false,
+        ),
+        writeState: "superseded",
+        checkRunId,
+        state: "superseded",
+      };
+    }
+  }
   const decision = {
     status: "completed",
     conclusion: aggregate.ok ? "success" : "failure",
@@ -798,7 +828,7 @@ async function resolveTargets({ github, context, core, prNumber }) {
   } else if (payload.issue?.pull_request && payload.issue.number) {
     numbers.push(payload.issue.number);
   } else {
-    const sha = payload.check_suite?.head_sha || payload.sha;
+    const sha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
     if (sha) {
       const pulls = await listOpenMasterPullRequestsForHead({ github, context, headSha: sha });
       numbers.push(...pulls.map((pull) => pull.number));
@@ -807,7 +837,7 @@ async function resolveTargets({ github, context, core, prNumber }) {
     }
   }
 
-  const sourceSha = payload.check_suite?.head_sha || payload.sha;
+  const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
   for (const number of [...new Set(numbers.filter(Boolean))]) {
     const pr = await getPullRequest({ github, context, number });
@@ -1281,6 +1311,17 @@ function latestRunTime(run) {
   return parseTimestamp(run.completed_at || run.started_at || run.created_at) || 0;
 }
 
+function newestCheckGeneration(checkRuns) {
+  return [...checkRuns].sort((left, right) => {
+    const createdDifference =
+      (parseTimestamp(right.created_at) || 0) - (parseTimestamp(left.created_at) || 0);
+    if (createdDifference !== 0) {
+      return createdDifference;
+    }
+    return Number(right.id || 0) - Number(left.id || 0);
+  })[0];
+}
+
 function parseTimestamp(value) {
   const parsed = Date.parse(value || "");
   return Number.isFinite(parsed) ? parsed : null;
@@ -1325,6 +1366,7 @@ module.exports = {
   evaluate,
   evaluateAggregateDecision,
   evaluateAggregateFresh,
+  invalidateAggregateDecision,
   merge,
   processAggregateHead,
   reportAggregateDecision,
